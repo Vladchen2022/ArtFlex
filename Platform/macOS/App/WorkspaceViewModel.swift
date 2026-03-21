@@ -47,9 +47,9 @@ final class WorkspaceViewModel: ObservableObject {
     @Published private(set) var isBrushTipCanvasFocused = false
     @Published private(set) var brushTipUsesImportedPreviewFit = false
     @Published private(set) var isColorBlocksPanelFocused = false
-    @Published private(set) var lassoSamplingDebugPoints: [CanvasPoint] = []
-    @Published private(set) var samePathCommittedDebugShape: SelectionShape?
-    @Published private(set) var samePathPreviewDebugShape: SelectionShape?
+    private(set) var lassoSamplingDebugPoints: [CanvasPoint] = []
+    private(set) var samePathCommittedDebugShape: SelectionShape?
+    private(set) var samePathPreviewDebugShape: SelectionShape?
 
     private let bootstrap: AppBootstrap
     private var statusDismissTask: Task<Void, Never>?
@@ -58,6 +58,7 @@ final class WorkspaceViewModel: ObservableObject {
     private var layerThumbnailCache: [LayerID: CGImage] = [:]
     private var generatorStrokeSession = GeneratorStrokeSessionState()
     private var activeLassoRawPoints: [CanvasPoint] = []
+    private var activeLassoBounds: CanvasRect?
     private var lassoRefreshCounter = 0  // 套索拖动时的刷新节流计数器
     private var freeTransformUsesImplicitSelection = false
     private var implicitFreeTransformSelectionShape: SelectionShape?
@@ -1544,12 +1545,14 @@ final class WorkspaceViewModel: ObservableObject {
         }
         if kind == .lasso {
             activeLassoRawPoints = [start]
+            activeLassoBounds = CanvasRect(origin: start, size: .init(x: 0, y: 0))
             lassoSamplingDebugPoints = [start]
             lassoRefreshCounter = 0
             samePathCommittedDebugShape = nil
             samePathPreviewDebugShape = nil
         } else {
             activeLassoRawPoints = []
+            activeLassoBounds = nil
             lassoSamplingDebugPoints = []
             lassoRefreshCounter = 0
             samePathCommittedDebugShape = nil
@@ -1568,7 +1571,7 @@ final class WorkspaceViewModel: ObservableObject {
                 combineMode: combineMode
             )
         }
-        refreshLightweight()
+        refreshSelectionOverlayOnly()
     }
 
     func updateLinearGradientHover(to point: CanvasPoint) {
@@ -1910,21 +1913,25 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func updateSelection(to point: CanvasPoint, modifiers: NSEvent.ModifierFlags = []) {
-        let currentStart = workspace.selection.anchorPoint ?? point
-        let currentKind = workspace.selection.activeKind ?? .rectangle
+        let storeSelection = bootstrap.workspaceStore.state.selection
+        let currentStart = storeSelection.anchorPoint ?? point
+        let currentKind = storeSelection.activeKind ?? .rectangle
         var nextPreviewShape: SelectionShape?
         bootstrap.workspaceStore.updateSelection { selection in
             if currentKind == .lasso {
                 if activeLassoRawPoints.isEmpty {
                     activeLassoRawPoints = [currentStart]
+                    activeLassoBounds = CanvasRect(origin: currentStart, size: .init(x: 0, y: 0))
                 }
                 if Self.runSamplingTruthTest {
                     if activeLassoRawPoints.last != point {
                         activeLassoRawPoints.append(point)
+                        activeLassoBounds = expandedBounds(activeLassoBounds, including: point)
                     }
                 } else {
                     if activeLassoRawPoints.last != point {
                         activeLassoRawPoints.append(point)
+                        activeLassoBounds = expandedBounds(activeLassoBounds, including: point)
                     }
                 }
                 // lassoSamplingDebugPoints 只在 debug overlay 开启时才需要每帧更新
@@ -1934,14 +1941,16 @@ final class WorkspaceViewModel: ObservableObject {
                 if false {
                     lassoSamplingDebugPoints = activeLassoRawPoints
                 }
+                #if DEBUG
                 if activeLassoRawPoints.count == 2 || activeLassoRawPoints.count % 24 == 0 {
                     let firstPoint = activeLassoRawPoints.first ?? point
                     let lastPoint = activeLassoRawPoints.last ?? point
-                    let bounds = CanvasRect.bounding(points: activeLassoRawPoints)
+                    let bounds = activeLassoBounds ?? CanvasRect.bounding(points: activeLassoRawPoints)
                     let message = "[updateSelection] rawPointCount=\(self.activeLassoRawPoints.count) firstRaw=(\(firstPoint.x),\(firstPoint.y)) lastRaw=(\(lastPoint.x),\(lastPoint.y)) current=(\(point.x),\(point.y)) boundsOrigin=(\(bounds.origin.x),\(bounds.origin.y)) boundsSize=(\(bounds.size.x),\(bounds.size.y))"
                     selectionTraceLogger.debug("\(message, privacy: .public)")
                     emitSelectionTraceViewModel(message)
                 }
+                #endif
             }
             let previewShape = selectionPreviewShape(
                 kind: currentKind,
@@ -1949,7 +1958,8 @@ final class WorkspaceViewModel: ObservableObject {
                 currentPoint: point,
                 existingPoints: currentKind == .lasso ? activeLassoRawPoints : selection.inProgressShape?.pathPoints,
                 modifiers: modifiers,
-                combineMode: selection.activeCombineMode
+                combineMode: selection.activeCombineMode,
+                precomputedBounds: currentKind == .lasso ? activeLassoBounds : nil
             )
             selection.inProgressShape = previewShape
             nextPreviewShape = previewShape
@@ -1957,16 +1967,7 @@ final class WorkspaceViewModel: ObservableObject {
         if currentKind == .lasso {
             samePathPreviewDebugShape = nextPreviewShape
         }
-        // 套索拖动时节流：每 3 帧刷新一次 UI 即可保持视觉流畅
-        // 矩形/椭圆选区不节流，因为它们的路径计算量很小
-        if currentKind == .lasso {
-            lassoRefreshCounter += 1
-            if lassoRefreshCounter % 3 == 0 {
-                refreshLightweight()
-            }
-        } else {
-            refreshLightweight()
-        }
+        refreshSelectionOverlayOnly()
     }
 
     func commitSelection(at end: CanvasPoint, modifiers: NSEvent.ModifierFlags = []) {
@@ -1978,7 +1979,7 @@ final class WorkspaceViewModel: ObservableObject {
         if currentKind == .lasso {
             let lastRaw = activeLassoRawPoints.last ?? end
             let firstRaw = activeLassoRawPoints.first ?? end
-            let rawBounds = CanvasRect.bounding(points: activeLassoRawPoints)
+            let rawBounds = activeLassoBounds ?? CanvasRect.bounding(points: activeLassoRawPoints)
             let message = "[commitSelection:begin] kind=lasso end=(\(end.x),\(end.y)) rawPointCount=\(self.activeLassoRawPoints.count) firstRaw=(\(firstRaw.x),\(firstRaw.y)) lastRaw=(\(lastRaw.x),\(lastRaw.y)) rawBoundsOrigin=(\(rawBounds.origin.x),\(rawBounds.origin.y)) rawBoundsSize=(\(rawBounds.size.x),\(rawBounds.size.y))"
             selectionTraceLogger.debug("\(message, privacy: .public)")
             emitSelectionTraceViewModel(message)
@@ -2007,6 +2008,7 @@ final class WorkspaceViewModel: ObservableObject {
             samePathPreviewDebugShape = previewShape
             samePathCommittedDebugShape = committedShape
             activeLassoRawPoints = []
+            activeLassoBounds = nil
             refresh()
             return
         }
@@ -2027,6 +2029,7 @@ final class WorkspaceViewModel: ObservableObject {
         )
         guard !input.polygonShapes.isEmpty else {
             activeLassoRawPoints = []
+            activeLassoBounds = nil
             bootstrap.workspaceStore.updateSelection { selection in
                 if combineMode == .replace {
                     selection.committedShape = nil
@@ -2052,6 +2055,7 @@ final class WorkspaceViewModel: ObservableObject {
                 successMessage: successMessage
             )
             activeLassoRawPoints = []
+            activeLassoBounds = nil
             lassoSamplingDebugPoints = []
             samePathPreviewDebugShape = nil
             samePathCommittedDebugShape = nil
@@ -2086,6 +2090,7 @@ final class WorkspaceViewModel: ObservableObject {
                 selection.activeCombineMode = .replace
             }
             activeLassoRawPoints = []
+            activeLassoBounds = nil
             lassoSamplingDebugPoints = []
             samePathPreviewDebugShape = nil
             samePathCommittedDebugShape = nil
@@ -2154,6 +2159,7 @@ final class WorkspaceViewModel: ObservableObject {
                 selection.activeCombineMode = capturedCombineMode
             }
             activeLassoRawPoints = []
+            activeLassoBounds = nil
             lassoSamplingDebugPoints = []
             samePathPreviewDebugShape = nil
             samePathCommittedDebugShape = nil
@@ -2375,7 +2381,7 @@ final class WorkspaceViewModel: ObservableObject {
 
     private var selectionMoveBaseShape: SelectionShape?
     private var selectionMoveAccumulatedDelta = CanvasPoint(x: 0, y: 0)
-    @Published private(set) var selectionMovePreviewOffset = CanvasPoint(x: 0, y: 0)
+    private(set) var selectionMovePreviewOffset = CanvasPoint(x: 0, y: 0)
 
     func moveSelectionPreview(by deltaX: Double, deltaY: Double) {
         guard let base = selectionMoveBaseShape else { return }
@@ -2385,7 +2391,7 @@ final class WorkspaceViewModel: ObservableObject {
         let dy = selectionMoveAccumulatedDelta.y
         _ = base
         selectionMovePreviewOffset = CanvasPoint(x: dx, y: dy)
-        refreshLightweight()
+        refreshSelectionOverlayOnly()
     }
 
     func commitSelectionMove() {
@@ -3368,6 +3374,10 @@ final class WorkspaceViewModel: ObservableObject {
         syncSelectionOverlayProxy()
     }
 
+    private func refreshSelectionOverlayOnly() {
+        syncSelectionOverlayProxy()
+    }
+
     var metalContext: MetalDeviceContext {
         bootstrap.metalContext
     }
@@ -4102,7 +4112,8 @@ final class WorkspaceViewModel: ObservableObject {
         currentPoint: CanvasPoint,
         existingPoints: [CanvasPoint]?,
         modifiers: NSEvent.ModifierFlags,
-        combineMode: SelectionCombineMode
+        combineMode: SelectionCombineMode,
+        precomputedBounds: CanvasRect? = nil
     ) -> SelectionShape? {
         switch kind {
         case .lasso:
@@ -4116,7 +4127,7 @@ final class WorkspaceViewModel: ObservableObject {
             }
             return SelectionShape(
                 kind: .lasso,
-                bounds: CanvasRect.bounding(points: points),
+                bounds: precomputedBounds ?? CanvasRect.bounding(points: points),
                 pathPoints: points
             )
         case .rectangle, .ellipse:
@@ -4452,6 +4463,21 @@ final class WorkspaceViewModel: ObservableObject {
         CanvasPoint(
             x: (lhs.x + rhs.x) * 0.5,
             y: (lhs.y + rhs.y) * 0.5
+        )
+    }
+
+    private func expandedBounds(_ current: CanvasRect?, including point: CanvasPoint) -> CanvasRect {
+        guard let current else {
+            return CanvasRect(origin: point, size: .init(x: 0, y: 0))
+        }
+
+        let minX = min(current.minX, point.x)
+        let minY = min(current.minY, point.y)
+        let maxX = max(current.maxX, point.x)
+        let maxY = max(current.maxY, point.y)
+        return CanvasRect(
+            origin: .init(x: minX, y: minY),
+            size: .init(x: maxX - minX, y: maxY - minY)
         )
     }
 
@@ -5377,14 +5403,15 @@ final class WorkspaceViewModel: ObservableObject {
 
     // 选区变化时同步到 proxy（由 refreshLightweight 调用）
     private func syncSelectionOverlayProxy() {
-        let sel = workspace.selection
+        let state = bootstrap.workspaceStore.state
+        let sel = state.selection
         selectionOverlayProxy.displayShape = sel.displayShape
         selectionOverlayProxy.committedShape = sel.committedShape
         selectionOverlayProxy.inProgressShape = sel.inProgressShape
         selectionOverlayProxy.activeCombineMode = sel.activeCombineMode
         selectionOverlayProxy.isApplyingTransformCommit = isApplyingTransformCommit
         selectionOverlayProxy.isTransformingSelection = isTransformingSelection
-        selectionOverlayProxy.activeTool = workspace.toolSession.activeTool
+        selectionOverlayProxy.activeTool = state.toolSession.activeTool
         selectionOverlayProxy.transformPreviewOffset = transformPreviewOffset
         selectionOverlayProxy.selectionMovePreviewOffset = selectionMovePreviewOffset
         selectionOverlayProxy.hidesImplicitFreeTransformSelectionOverlay = hidesImplicitFreeTransformSelectionOverlay

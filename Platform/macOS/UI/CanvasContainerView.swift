@@ -115,7 +115,7 @@ struct CanvasContainerView: View {
                             viewModel.cancelCanvasToolInteraction()
                         },
                         onClearSelection: {
-                            if viewModel.workspace.selection.displayRect != nil {
+                            if viewModel.selectionOverlayProxy.displayShape != nil {
                                 viewModel.clearSelection()
                             }
                         },
@@ -844,8 +844,19 @@ private struct SelectionOverlay: View {
         let displayOffsetY = previewOffset.y * (presentation.documentDisplaySize.y / Double(canvasSize.height))
 
         if prefersVectorDisplay, let vectorShape = vectorDisplayShape(for: selectionShape) {
+            let selectionRect = vectorShape.bounds
+            let scaleX = presentation.documentDisplaySize.x / Double(canvasSize.width)
+            let scaleY = presentation.documentDisplaySize.y / Double(canvasSize.height)
+            let rectWidth = max(selectionRect.size.x * scaleX, 1)
+            let rectHeight = max(selectionRect.size.y * scaleY, 1)
+            let cachedVectorLassoPath = vectorShape.kind == .lasso
+                ? lassoPath(for: vectorShape, displayWidth: rectWidth, displayHeight: rectHeight)
+                : nil
             return AnyView(
-                vectorMaskOverlay(for: vectorShape)
+                vectorMaskOverlay(
+                    for: vectorShape,
+                    cachedLassoPath: cachedVectorLassoPath
+                )
                     .offset(x: displayOffsetX, y: displayOffsetY)
             )
         }
@@ -863,6 +874,9 @@ private struct SelectionOverlay: View {
         let rectHeight = max(selectionRect.size.y * scaleY, 1)
         let x = presentation.documentOrigin.x + (selectionRect.origin.x * scaleX)
         let y = presentation.documentOrigin.y + (selectionRect.origin.y * scaleY)
+        let cachedPreviewLassoPath = previewShape.kind == .lasso
+            ? lassoPath(for: previewShape, displayWidth: rectWidth, displayHeight: rectHeight)
+            : nil
 
         return AnyView(ZStack(alignment: .topLeading) {
             if showsDimMask {
@@ -878,7 +892,11 @@ private struct SelectionOverlay: View {
                             .mask {
                                 Rectangle()
                                     .overlay(alignment: .topLeading) {
-                                        selectionCutout(width: rectWidth, height: rectHeight)
+                                        selectionCutout(
+                                            width: rectWidth,
+                                            height: rectHeight,
+                                            cachedLassoPath: cachedPreviewLassoPath
+                                        )
                                             .blendMode(.destinationOut)
                                             .offset(x: selectionRect.origin.x * scaleX, y: selectionRect.origin.y * scaleY)
                                     }
@@ -894,14 +912,18 @@ private struct SelectionOverlay: View {
                 width: rectWidth,
                 height: rectHeight,
                 originX: x,
-                originY: y
+                originY: y,
+                cachedLassoPath: cachedPreviewLassoPath
             )
         }
         .allowsHitTesting(false))
     }
 
     @ViewBuilder
-    private func vectorMaskOverlay(for shape: SelectionShape) -> some View {
+    private func vectorMaskOverlay(
+        for shape: SelectionShape,
+        cachedLassoPath: Path?
+    ) -> some View {
         let selectionRect = shape.bounds
         let scaleX = presentation.documentDisplaySize.x / Double(canvasSize.width)
         let scaleY = presentation.documentDisplaySize.y / Double(canvasSize.height)
@@ -927,7 +949,8 @@ private struct SelectionOverlay: View {
                                         vectorSelectionCutout(
                                             for: shape,
                                             width: rectWidth,
-                                            height: rectHeight
+                                            height: rectHeight,
+                                            cachedLassoPath: cachedLassoPath
                                         )
                                             .blendMode(.destinationOut)
                                             .offset(
@@ -948,7 +971,8 @@ private struct SelectionOverlay: View {
                 width: rectWidth,
                 height: rectHeight,
                 originX: x,
-                originY: y
+                originY: y,
+                cachedLassoPath: cachedLassoPath
             )
         }
         .allowsHitTesting(false)
@@ -1012,7 +1036,11 @@ private struct SelectionOverlay: View {
     }
 
     @ViewBuilder
-    private func selectionCutout(width: Double, height: Double) -> some View {
+    private func selectionCutout(
+        width: Double,
+        height: Double,
+        cachedLassoPath: Path?
+    ) -> some View {
         let previewShape = selectionShape.translatedBy(x: previewOffset.x, y: previewOffset.y)
         switch selectionShape.kind {
         case .rectangle:
@@ -1022,7 +1050,7 @@ private struct SelectionOverlay: View {
             Ellipse()
                 .frame(width: width, height: height)
         case .lasso:
-            lassoPath(for: previewShape, displayWidth: width, displayHeight: height)
+            cachedLassoPath ?? lassoPath(for: previewShape, displayWidth: width, displayHeight: height)
         case .mask:
             EmptyView()
         case .composite:
@@ -1035,7 +1063,8 @@ private struct SelectionOverlay: View {
         width: Double,
         height: Double,
         originX: Double,
-        originY: Double
+        originY: Double,
+        cachedLassoPath: Path?
     ) -> some View {
         let previewShape = selectionShape.translatedBy(x: previewOffset.x, y: previewOffset.y)
         switch selectionShape.kind {
@@ -1049,7 +1078,7 @@ private struct SelectionOverlay: View {
                 .position(x: originX + (width / 2), y: originY + (height / 2))
         case .lasso:
             antsPathBorder(
-                lassoPath(for: previewShape, displayWidth: width, displayHeight: height)
+                cachedLassoPath ?? lassoPath(for: previewShape, displayWidth: width, displayHeight: height)
             )
                 .offset(x: originX, y: originY)
         case .mask:
@@ -1089,7 +1118,8 @@ private struct SelectionOverlay: View {
     private func vectorSelectionCutout(
         for shape: SelectionShape,
         width: Double,
-        height: Double
+        height: Double,
+        cachedLassoPath: Path?
     ) -> some View {
         switch shape.kind {
         case .rectangle:
@@ -1099,7 +1129,7 @@ private struct SelectionOverlay: View {
             Ellipse()
                 .frame(width: width, height: height)
         case .lasso:
-            lassoPath(for: shape, displayWidth: width, displayHeight: height)
+            cachedLassoPath ?? lassoPath(for: shape, displayWidth: width, displayHeight: height)
         case .composite:
             EmptyView()
         case .mask:
@@ -1113,7 +1143,8 @@ private struct SelectionOverlay: View {
         width: Double,
         height: Double,
         originX: Double,
-        originY: Double
+        originY: Double,
+        cachedLassoPath: Path?
     ) -> some View {
         switch shape.kind {
         case .rectangle:
@@ -1126,7 +1157,7 @@ private struct SelectionOverlay: View {
                 .position(x: originX + (width / 2), y: originY + (height / 2))
         case .lasso:
             antsPathBorder(
-                lassoPath(for: shape, displayWidth: width, displayHeight: height)
+                cachedLassoPath ?? lassoPath(for: shape, displayWidth: width, displayHeight: height)
             )
                 .offset(x: originX, y: originY)
         case .composite:

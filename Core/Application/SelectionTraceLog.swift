@@ -4,12 +4,15 @@ private let selectionTraceLogPath = "/Users/victorcloux/Desktop/ArtFlex/selectio
 private let selectionTraceQueue = DispatchQueue(label: "ArtFlex.SelectionTraceLog")
 
 func resetSelectionTraceLog() {
-    selectionTraceQueue.sync {
+#if DEBUG
+    _ = selectionTraceQueue.sync {
         FileManager.default.createFile(atPath: selectionTraceLogPath, contents: Data(), attributes: nil)
     }
+#endif
 }
 
 func appendSelectionTrace(_ message: String) {
+#if DEBUG
     selectionTraceQueue.async {
         let line = "SelectionTrace \(message)\n"
         let data = Data(line.utf8)
@@ -28,4 +31,5 @@ func appendSelectionTrace(_ message: String) {
             // Keep trace logging best-effort only.
         }
     }
+#endif
 }
