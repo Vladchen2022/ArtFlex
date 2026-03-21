@@ -135,42 +135,14 @@ struct CanvasContainerView: View {
                     )
                     .clipped()
 
-                if !viewModel.isApplyingTransformCommit,
-                   !(viewModel.workspace.toolSession.activeTool == .freeTransform && viewModel.isTransformingSelection),
-                   let committedShape = viewModel.workspace.selection.committedShape,
-                   let inProgressShape = viewModel.workspace.selection.inProgressShape,
-                   viewModel.workspace.selection.activeCombineMode != .replace {
-                    SelectionOverlay(
-                        selectionShape: committedShape,
-                        presentation: documentPresentation,
-                        canvasSize: viewModel.workspace.document.canvasSize,
-                        showsDimMask: false,
-                        previewOffset: .init(x: 0, y: 0),
-                        prefersVectorDisplay: true
-                    )
-                    SelectionOverlay(
-                        selectionShape: inProgressShape,
-                        presentation: documentPresentation,
-                        canvasSize: viewModel.workspace.document.canvasSize,
-                        showsDimMask: false,
-                        previewOffset: .init(x: 0, y: 0),
-                        prefersVectorDisplay: true
-                    )
-                } else if !viewModel.isApplyingTransformCommit,
-                          !(viewModel.workspace.toolSession.activeTool == .freeTransform && viewModel.isTransformingSelection),
-                          let selectionShape = viewModel.workspace.selection.displayShape,
-                          !viewModel.hidesImplicitFreeTransformSelectionOverlay {
-                    SelectionOverlay(
-                        selectionShape: selectionShape,
-                        presentation: documentPresentation,
-                        canvasSize: viewModel.workspace.document.canvasSize,
-                        showsDimMask: false,
-                        previewOffset: viewModel.isTransformingSelection
-                            ? viewModel.transformPreviewOffset
-                            : viewModel.selectionMovePreviewOffset,
-                        prefersVectorDisplay: selectionShape.kind != .mask || !selectionShape.components.isEmpty
-                    )
-                }
+                // SelectionOverlayHost は selectionOverlayProxy だけを購読する
+                // 選区ドラッグ中に MetalCanvasHost や他の overlay が再描画されない
+                SelectionOverlayHost(
+                    proxy: viewModel.selectionOverlayProxy,
+                    presentation: documentPresentation,
+                    canvasSize: viewModel.workspace.document.canvasSize
+                )
+                .allowsHitTesting(false)
 
                 if Self.showsSelectionDebugOverlay,
                    let previewShape = viewModel.samePathPreviewDebugShape {
@@ -357,6 +329,55 @@ private struct CanvasViewportHost<Content: View>: View {
             y: presentation.documentOrigin.y + (presentation.documentDisplaySize.y / 2)
         )
         content(presentation, documentPresentation, documentCenter)
+    }
+}
+
+// 選区 overlay 専用 View — selectionOverlayProxy だけを購読する
+// 選区ドラッグ中に MetalCanvasHost や他の overlay が再描画されない
+private struct SelectionOverlayHost: View {
+    @ObservedObject var proxy: WorkspaceViewModel.SelectionOverlayProxy
+    let presentation: CanvasPresentation
+    let canvasSize: CanvasSize
+
+    var body: some View {
+        let isTransforming = proxy.isTransformingSelection
+        let isFreeTransform = proxy.activeTool == .freeTransform
+        let isApplying = proxy.isApplyingTransformCommit
+
+        if !isApplying, !(isFreeTransform && isTransforming),
+           let committed = proxy.committedShape,
+           let inProgress = proxy.inProgressShape,
+           proxy.activeCombineMode != .replace {
+            SelectionOverlay(
+                selectionShape: committed,
+                presentation: presentation,
+                canvasSize: canvasSize,
+                showsDimMask: false,
+                previewOffset: .init(x: 0, y: 0),
+                prefersVectorDisplay: true
+            )
+            SelectionOverlay(
+                selectionShape: inProgress,
+                presentation: presentation,
+                canvasSize: canvasSize,
+                showsDimMask: false,
+                previewOffset: .init(x: 0, y: 0),
+                prefersVectorDisplay: true
+            )
+        } else if !isApplying, !(isFreeTransform && isTransforming),
+                  let shape = proxy.displayShape,
+                  !proxy.hidesImplicitFreeTransformSelectionOverlay {
+            SelectionOverlay(
+                selectionShape: shape,
+                presentation: presentation,
+                canvasSize: canvasSize,
+                showsDimMask: false,
+                previewOffset: isTransforming
+                    ? proxy.transformPreviewOffset
+                    : proxy.selectionMovePreviewOffset,
+                prefersVectorDisplay: shape.kind != .mask || !shape.components.isEmpty
+            )
+        }
     }
 }
 

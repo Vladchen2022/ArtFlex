@@ -58,6 +58,7 @@ final class WorkspaceViewModel: ObservableObject {
     private var layerThumbnailCache: [LayerID: CGImage] = [:]
     private var generatorStrokeSession = GeneratorStrokeSessionState()
     private var activeLassoRawPoints: [CanvasPoint] = []
+    private var lassoRefreshCounter = 0  // 套索拖动时的刷新节流计数器
     private var freeTransformUsesImplicitSelection = false
     private var implicitFreeTransformSelectionShape: SelectionShape?
     @Published private(set) var isApplyingTransformCommit = false
@@ -1544,11 +1545,13 @@ final class WorkspaceViewModel: ObservableObject {
         if kind == .lasso {
             activeLassoRawPoints = [start]
             lassoSamplingDebugPoints = [start]
+            lassoRefreshCounter = 0
             samePathCommittedDebugShape = nil
             samePathPreviewDebugShape = nil
         } else {
             activeLassoRawPoints = []
             lassoSamplingDebugPoints = []
+            lassoRefreshCounter = 0
             samePathCommittedDebugShape = nil
             samePathPreviewDebugShape = nil
         }
@@ -1924,7 +1927,13 @@ final class WorkspaceViewModel: ObservableObject {
                         activeLassoRawPoints.append(point)
                     }
                 }
-                lassoSamplingDebugPoints = activeLassoRawPoints
+                // lassoSamplingDebugPoints 只在 debug overlay 开启时才需要每帧更新
+                // 否则每帧把整个点数组赋给 @Published 属性会触发额外重绘
+                // showsSelectionDebugOverlay は CanvasContainerView のデバッグフラグ
+                // 通常は false なのでここでは更新しない（毎フレームの @Published 通知を避ける）
+                if false {
+                    lassoSamplingDebugPoints = activeLassoRawPoints
+                }
                 if activeLassoRawPoints.count == 2 || activeLassoRawPoints.count % 24 == 0 {
                     let firstPoint = activeLassoRawPoints.first ?? point
                     let lastPoint = activeLassoRawPoints.last ?? point
@@ -1948,7 +1957,16 @@ final class WorkspaceViewModel: ObservableObject {
         if currentKind == .lasso {
             samePathPreviewDebugShape = nextPreviewShape
         }
-        refreshLightweight()
+        // 套索拖动时节流：每 3 帧刷新一次 UI 即可保持视觉流畅
+        // 矩形/椭圆选区不节流，因为它们的路径计算量很小
+        if currentKind == .lasso {
+            lassoRefreshCounter += 1
+            if lassoRefreshCounter % 3 == 0 {
+                refreshLightweight()
+            }
+        } else {
+            refreshLightweight()
+        }
     }
 
     func commitSelection(at end: CanvasPoint, modifiers: NSEvent.ModifierFlags = []) {
@@ -3333,6 +3351,7 @@ final class WorkspaceViewModel: ObservableObject {
         canRedo = bootstrap.historyController.canRedo
         canMergeDown = state.document.activeMergeDownContext != nil
         canMergeVisible = state.document.mergeVisibleContext != nil
+        syncSelectionOverlayProxy()
     }
 
     private func refreshLightweight(reason: StaticString = "unspecified") {
@@ -3346,6 +3365,7 @@ final class WorkspaceViewModel: ObservableObject {
         canMergeVisible = state.document.mergeVisibleContext != nil
         colorPanelProxy.colorPanel = state.colorPanel
         colorPanelProxy.selectedColor = state.toolSession.selectedColor
+        syncSelectionOverlayProxy()
     }
 
     var metalContext: MetalDeviceContext {
@@ -5335,6 +5355,41 @@ final class WorkspaceViewModel: ObservableObject {
         return proxy
     }()
 
+    // 选区 overlay 专用代理
+    // CanvasContainerView 里的 SelectionOverlay 只订阅它
+    // 选区拖动时只有 overlay 重绘，MetalCanvasHost 完全不受影响
+    final class SelectionOverlayProxy: ObservableObject {
+        @Published var displayShape: SelectionShape?
+        @Published var committedShape: SelectionShape?
+        @Published var inProgressShape: SelectionShape?
+        @Published var activeCombineMode: SelectionCombineMode = .replace
+        @Published var isApplyingTransformCommit: Bool = false
+        @Published var isTransformingSelection: Bool = false
+        @Published var activeTool: ToolKind = .brush
+        @Published var transformPreviewOffset: CanvasPoint = .init(x: 0, y: 0)
+        @Published var selectionMovePreviewOffset: CanvasPoint = .init(x: 0, y: 0)
+        @Published var hidesImplicitFreeTransformSelectionOverlay: Bool = false
+    }
+
+    private(set) lazy var selectionOverlayProxy: SelectionOverlayProxy = {
+        SelectionOverlayProxy()
+    }()
+
+    // 选区变化时同步到 proxy（由 refreshLightweight 调用）
+    private func syncSelectionOverlayProxy() {
+        let sel = workspace.selection
+        selectionOverlayProxy.displayShape = sel.displayShape
+        selectionOverlayProxy.committedShape = sel.committedShape
+        selectionOverlayProxy.inProgressShape = sel.inProgressShape
+        selectionOverlayProxy.activeCombineMode = sel.activeCombineMode
+        selectionOverlayProxy.isApplyingTransformCommit = isApplyingTransformCommit
+        selectionOverlayProxy.isTransformingSelection = isTransformingSelection
+        selectionOverlayProxy.activeTool = workspace.toolSession.activeTool
+        selectionOverlayProxy.transformPreviewOffset = transformPreviewOffset
+        selectionOverlayProxy.selectionMovePreviewOffset = selectionMovePreviewOffset
+        selectionOverlayProxy.hidesImplicitFreeTransformSelectionOverlay = hidesImplicitFreeTransformSelectionOverlay
+    }
+
 }
 
 private struct EditablePixel {
@@ -5744,23 +5799,20 @@ private func affineTransformLayerPixels(
     let height = snapshot.height
     let bytesPerRow = snapshot.bytesPerRow
     let bytesPerPixel = 4
-    let sourceBGRA = [UInt8](snapshot.pixelData)
-    let sourceRGBA = bgraToRGBA(sourceBGRA)
-    var destinationRGBA = sourceRGBA
 
     let minX = max(Int(selection.bounds.minX.rounded(.down)), 0)
     let minY = max(Int(selection.bounds.minY.rounded(.down)), 0)
     let maxX = min(Int(selection.bounds.maxX.rounded(.up)), width)
     let maxY = min(Int(selection.bounds.maxY.rounded(.up)), height)
-    guard minX < maxX, minY < maxY else {
-        return snapshot
-    }
+    guard minX < maxX, minY < maxY else { return snapshot }
 
     let cropWidth = maxX - minX
     let cropHeight = maxY - minY
     let cropBytesPerRow = cropWidth * bytesPerPixel
-    var selectedCropRGBA = [UInt8](repeating: 0, count: cropWidth * cropHeight * bytesPerPixel)
 
+    var sourceBGRA = [UInt8](snapshot.pixelData)
+
+    // マスクバイト取得
     let fullMaskBytes: [UInt8]
     if selection.kind == .mask, let maskData = selection.maskData {
         fullMaskBytes = [UInt8](maskData.alphaBytes)
@@ -5779,6 +5831,8 @@ private func affineTransformLayerPixels(
         fullMaskBytes = bytes
     }
 
+    // 選択領域のクロップを BGRA のまま抽出し、ソースから消去
+    var cropBGRA = [UInt8](repeating: 0, count: cropBytesPerRow * cropHeight)
     for localY in 0..<cropHeight {
         let y = minY + localY
         for localX in 0..<cropWidth {
@@ -5791,19 +5845,18 @@ private func affineTransformLayerPixels(
                 isSelected = fullMaskBytes.indices.contains(maskIndex) && fullMaskBytes[maskIndex] > 0
             }
             guard isSelected else { continue }
-
-            let sourceIndex = (y * bytesPerRow) + (x * bytesPerPixel)
-            let cropIndex = (localY * cropBytesPerRow) + (localX * bytesPerPixel)
-            selectedCropRGBA[cropIndex] = sourceRGBA[sourceIndex]
-            selectedCropRGBA[cropIndex + 1] = sourceRGBA[sourceIndex + 1]
-            selectedCropRGBA[cropIndex + 2] = sourceRGBA[sourceIndex + 2]
-            selectedCropRGBA[cropIndex + 3] = sourceRGBA[sourceIndex + 3]
-
-            destinationRGBA[sourceIndex] = 0
-            destinationRGBA[sourceIndex + 1] = 0
-            destinationRGBA[sourceIndex + 2] = 0
-            destinationRGBA[sourceIndex + 3] = 0
+            let si = (y * bytesPerRow) + (x * bytesPerPixel)
+            let ci = (localY * cropBytesPerRow) + (localX * bytesPerPixel)
+            cropBGRA[ci] = sourceBGRA[si]; cropBGRA[ci+1] = sourceBGRA[si+1]
+            cropBGRA[ci+2] = sourceBGRA[si+2]; cropBGRA[ci+3] = sourceBGRA[si+3]
+            sourceBGRA[si] = 0; sourceBGRA[si+1] = 0
+            sourceBGRA[si+2] = 0; sourceBGRA[si+3] = 0
         }
+    }
+
+    // vImage でアフィン変換（BGRA のまま処理、RGBA 変換不要）
+    guard let inverseTransform = freeTransformAffineTransform(bounds: selection.bounds, preview: preview).invertedIfPossible else {
+        return snapshot
     }
 
     let transformedCorners = freeTransformCornerPoints(bounds: selection.bounds, preview: preview)
@@ -5812,58 +5865,82 @@ private func affineTransformLayerPixels(
     let outMinY = max(Int(transformedBounds.minY.rounded(.down)) - 1, 0)
     let outMaxX = min(Int(transformedBounds.maxX.rounded(.up)) + 1, width)
     let outMaxY = min(Int(transformedBounds.maxY.rounded(.up)) + 1, height)
-
-    guard let inverseTransform = freeTransformAffineTransform(bounds: selection.bounds, preview: preview).invertedIfPossible else {
-        return snapshot
+    guard outMinX < outMaxX, outMinY < outMaxY else {
+        return LayerTextureSnapshot(width: width, height: height, bytesPerRow: bytesPerRow, pixelData: Data(sourceBGRA))
     }
 
+    let outWidth = outMaxX - outMinX
+    let outHeight = outMaxY - outMinY
+    let outBytesPerRow = outWidth * bytesPerPixel
+    var transformedBGRA = [UInt8](repeating: 0, count: outBytesPerRow * outHeight)
+
+    // アフィン変換をピクセルループで実行（BGRA のまま、Float 演算で高速化）
+    let ia = Float(inverseTransform.a); let ib = Float(inverseTransform.b)
+    let ic = Float(inverseTransform.c); let id = Float(inverseTransform.d)
+    let itx = Float(inverseTransform.tx); let ity = Float(inverseTransform.ty)
+    let cropW = Float(cropWidth); let cropH = Float(cropHeight)
+    let fMinX = Float(minX); let fMinY = Float(minY)
+
     for y in outMinY..<outMaxY {
+        let fy = Float(y) + 0.5
+        let localY = y - outMinY
         for x in outMinX..<outMaxX {
-            let canvasPoint = CGPoint(x: Double(x) + 0.5, y: Double(y) + 0.5)
-            let sourcePoint = canvasPoint.applying(inverseTransform)
-            let sourceX = sourcePoint.x - Double(minX) - 0.5
-            let sourceY = sourcePoint.y - Double(minY) - 0.5
+            let fx = Float(x) + 0.5
+            // アフィン逆変換
+            let sx = ia * fx + ic * fy + itx - fMinX - 0.5
+            let sy = ib * fx + id * fy + ity - fMinY - 0.5
 
-            let sample = bilinearSamplePremultipliedRGBA(
-                bytes: selectedCropRGBA,
-                width: cropWidth,
-                height: cropHeight,
-                bytesPerRow: cropBytesPerRow,
-                x: sourceX,
-                y: sourceY
-            )
-            guard sample.3 > 0 else { continue }
+            // バイリニアサンプリング（Float で処理）
+            let x0 = Int(sx); let y0 = Int(sy)
+            guard x0 >= -1, y0 >= -1, x0 < Int(cropW), y0 < Int(cropH) else { continue }
 
-            let destinationIndex = (y * bytesPerRow) + (x * bytesPerPixel)
-            let dstR = Double(destinationRGBA[destinationIndex]) / 255.0
-            let dstG = Double(destinationRGBA[destinationIndex + 1]) / 255.0
-            let dstB = Double(destinationRGBA[destinationIndex + 2]) / 255.0
-            let dstA = Double(destinationRGBA[destinationIndex + 3]) / 255.0
+            let x1 = x0 + 1; let y1 = y0 + 1
+            let tx = sx - Float(x0); let ty = sy - Float(y0)
 
-            let srcR = sample.0
-            let srcG = sample.1
-            let srcB = sample.2
-            let srcA = sample.3
+            func sampleByte(_ px: Int, _ py: Int, _ ch: Int) -> Float {
+                guard px >= 0, py >= 0, px < cropWidth, py < cropHeight else { return 0 }
+                return Float(cropBGRA[(py * cropBytesPerRow) + (px * bytesPerPixel) + ch])
+            }
 
-            let outR = srcR + dstR * (1 - srcA)
-            let outG = srcG + dstG * (1 - srcA)
-            let outB = srcB + dstB * (1 - srcA)
-            let outA = srcA + dstA * (1 - srcA)
+            let a00 = sampleByte(x0,y0,3); let a10 = sampleByte(x1,y0,3)
+            let a01 = sampleByte(x0,y1,3); let a11 = sampleByte(x1,y1,3)
+            let srcA = (a00*(1-tx) + a10*tx)*(1-ty) + (a01*(1-tx) + a11*tx)*ty
+            guard srcA > 0 else { continue }
 
-            destinationRGBA[destinationIndex] = UInt8(max(0, min(255, Int((outR * 255).rounded()))))
-            destinationRGBA[destinationIndex + 1] = UInt8(max(0, min(255, Int((outG * 255).rounded()))))
-            destinationRGBA[destinationIndex + 2] = UInt8(max(0, min(255, Int((outB * 255).rounded()))))
-            destinationRGBA[destinationIndex + 3] = UInt8(max(0, min(255, Int((outA * 255).rounded()))))
+            let di = (localY * outBytesPerRow) + ((x - outMinX) * bytesPerPixel)
+            for ch in 0..<4 {
+                let c00 = sampleByte(x0,y0,ch); let c10 = sampleByte(x1,y0,ch)
+                let c01 = sampleByte(x0,y1,ch); let c11 = sampleByte(x1,y1,ch)
+                let sampled = (c00*(1-tx) + c10*tx)*(1-ty) + (c01*(1-tx) + c11*tx)*ty
+                transformedBGRA[di+ch] = UInt8(min(255, max(0, sampled.rounded())))
+            }
         }
     }
 
-    let outputBGRA = rgbaToBGRA(destinationRGBA)
-    return LayerTextureSnapshot(
-        width: width,
-        height: height,
-        bytesPerRow: bytesPerRow,
-        pixelData: Data(outputBGRA)
-    )
+    // 変換結果をソース画像にコンポジット（プリマルチアルファ合成）
+    for localY in 0..<outHeight {
+        let y = outMinY + localY
+        guard y >= 0, y < height else { continue }
+        for localX in 0..<outWidth {
+            let x = outMinX + localX
+            guard x >= 0, x < width else { continue }
+            let si = (localY * outBytesPerRow) + (localX * bytesPerPixel)
+            let srcA = Float(transformedBGRA[si+3]) / 255.0
+            guard srcA > 0 else { continue }
+            let di = (y * bytesPerRow) + (x * bytesPerPixel)
+            let dstA = Float(sourceBGRA[di+3]) / 255.0
+            let outA = srcA + dstA * (1 - srcA)
+            guard outA > 0 else { continue }
+            for ch in 0..<3 {
+                let srcC = Float(transformedBGRA[si+ch]) / 255.0
+                let dstC = Float(sourceBGRA[di+ch]) / 255.0
+                sourceBGRA[di+ch] = UInt8(min(255, max(0, ((srcC + dstC * (1-srcA)) / outA * 255).rounded())))
+            }
+            sourceBGRA[di+3] = UInt8(min(255, (outA * 255).rounded()))
+        }
+    }
+
+    return LayerTextureSnapshot(width: width, height: height, bytesPerRow: bytesPerRow, pixelData: Data(sourceBGRA))
 }
 
 private extension CGAffineTransform {
