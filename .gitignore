@@ -1,3 +1,14 @@
 .build/
 .swiftpm/
 DerivedData/
+
+# macOS
+.DS_Store
+
+# Logs
+*.log
+selection-trace.log
+
+# Swift / Xcode
+DerivedData/
+.build/
