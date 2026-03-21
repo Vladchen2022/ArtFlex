@@ -1,0 +1,60 @@
+import AppKit
+import SwiftUI
+
+struct WindowKeyboardBridge: NSViewRepresentable {
+    @ObservedObject var viewModel: WorkspaceViewModel
+
+    func makeNSView(context: Context) -> KeyboardBridgeView {
+        let view = KeyboardBridgeView()
+        view.keyDownHandler = { [weak viewModel] event in
+            viewModel?.handleKeyDown(event) ?? false
+        }
+        view.keyUpHandler = { [weak viewModel] event in
+            viewModel?.handleKeyUp(event) ?? false
+        }
+        return view
+    }
+
+    func updateNSView(_ nsView: KeyboardBridgeView, context: Context) {
+        nsView.keyDownHandler = { [weak viewModel] event in
+            viewModel?.handleKeyDown(event) ?? false
+        }
+        nsView.keyUpHandler = { [weak viewModel] event in
+            viewModel?.handleKeyUp(event) ?? false
+        }
+        nsView.activateIfNeeded()
+    }
+}
+
+final class KeyboardBridgeView: NSView {
+    var keyDownHandler: ((NSEvent) -> Bool)?
+    var keyUpHandler: ((NSEvent) -> Bool)?
+
+    override var acceptsFirstResponder: Bool { true }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        activateIfNeeded()
+    }
+
+    override func keyDown(with event: NSEvent) {
+        if keyDownHandler?(event) == true {
+            return
+        }
+        super.keyDown(with: event)
+    }
+
+    override func keyUp(with event: NSEvent) {
+        if keyUpHandler?(event) == true {
+            return
+        }
+        super.keyUp(with: event)
+    }
+
+    func activateIfNeeded() {
+        guard let window else { return }
+        if window.firstResponder !== self {
+            window.makeFirstResponder(self)
+        }
+    }
+}
