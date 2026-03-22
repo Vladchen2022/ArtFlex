@@ -101,12 +101,22 @@ struct MetalCanvasHost: NSViewRepresentable {
 
     func updateNSView(_ nsView: MTKView, context: Context) {
         let wasTransforming = context.coordinator.isTransformingSelection
+        let previousSnapshot = context.coordinator.sceneSnapshot
+        let previousActiveTool = context.coordinator.activeTool
+        let previousIsTransforming = context.coordinator.isTransformingSelection
+        let previousTransformPreview = context.coordinator.transformPreview
         context.coordinator.sceneSnapshot = sceneSnapshot
         context.coordinator.activeTool = activeTool
         context.coordinator.isTransformingSelection = isTransformingSelection
         context.coordinator.transformPreview = transformPreview
         context.coordinator.updatePreparedTransformSessionIfNeeded()
         if let view = nsView as? StrokeCaptureMTKView {
+            let previousCanvasSize = view.canvasSize
+            let previousViewportRotation = view.viewportRotationDegrees
+            let previousPanMode = view.isPanModeActive
+            let previousStrokeResetToken = view.strokeResetToken
+            let previousBrushSize = view.brushSize
+
             view.canvasSize = sceneSnapshot.renderSnapshot.document.canvasSize
             view.activeTool = activeTool
             view.viewportRotationDegrees = viewportRotationDegrees
@@ -127,6 +137,21 @@ struct MetalCanvasHost: NSViewRepresentable {
             if !wasTransforming && isTransformingSelection && activeTool == .freeTransform {
                 view.enableSetNeedsDisplay = false
                 view.isPaused = false
+            }
+
+            let requiresCanvasRedraw =
+                previousSnapshot != sceneSnapshot ||
+                previousActiveTool != activeTool ||
+                previousIsTransforming != isTransformingSelection ||
+                previousTransformPreview != transformPreview ||
+                previousCanvasSize != view.canvasSize ||
+                previousViewportRotation != viewportRotationDegrees ||
+                previousPanMode != isPanModeActive ||
+                previousStrokeResetToken != strokeResetToken
+
+            let brushSizeOnlyChanged = previousBrushSize != brushSize && !requiresCanvasRedraw
+            if brushSizeOnlyChanged {
+                return
             }
         }
         if nsView.isPaused {
@@ -199,6 +224,9 @@ final class StrokeCaptureMTKView: MTKView {
     var selectionInteractionMode: SelectionMouseDownAction = .idle
 
     private var lastSample: CanvasStrokeSample?
+    /// 入力スムージング用 EMA（指数移動平均）の現在位置。
+    /// 実際のカーソル位置を α で追従し、急な加速による起始直線を消す。
+    private var smoothedPosition: CanvasPoint?
     private var selectionMoveLastPoint: CanvasPoint?
     private var lastPanLocation: CGPoint?
     private var lastPressure: Float?
@@ -332,9 +360,11 @@ final class StrokeCaptureMTKView: MTKView {
 
         strokeDelegate?.strokeCaptureViewDidBeginStroke(self)
         beginContinuousStrokeRendering()
-        let sample = sample(from: event)
-        lastSample = sample
-        strokeDelegate?.strokeCaptureView(self, didProduce: [sample])
+        let rawSample = sample(from: event)
+        smoothedPosition = nil                    // 新しい筆触：スムージング状態リセット
+        let s = smoothed(rawSample)
+        lastSample = s
+        strokeDelegate?.strokeCaptureView(self, didProduce: [s])
         setNeedsDisplay(bounds)
     }
 
@@ -443,11 +473,11 @@ final class StrokeCaptureMTKView: MTKView {
             return
         }
 
-        let current = sample(from: event)
-        if let lastSample {
-            emitStrokeSamples(from: lastSample, to: current)
+        let current = smoothed(sample(from: event))
+        if let last = lastSample {
+            emitCoalescedStrokeSamples([last, current])
         } else {
-            strokeDelegate?.strokeCaptureView(self, didProduce: [current])
+            emitCoalescedStrokeSamples([current])
         }
         lastSample = current
         setNeedsDisplay(bounds)
@@ -544,15 +574,12 @@ final class StrokeCaptureMTKView: MTKView {
             return
         }
 
-        let current = sample(from: event)
-        if let lastSample {
-            emitStrokeSamples(from: lastSample, to: current)
-        } else {
-            strokeDelegate?.strokeCaptureView(self, didProduce: [current])
-        }
+        let current = smoothed(sample(from: event))
+        emitCoalescedStrokeSamples([current])
         strokeDelegate?.strokeCaptureViewDidEndStroke(self)
         endContinuousStrokeRendering()
         lastSample = nil
+        smoothedPosition = nil
         lastPressure = nil
         setNeedsDisplay(bounds)
     }
@@ -673,7 +700,17 @@ final class StrokeCaptureMTKView: MTKView {
         if rawPressure > 0 {
             let clamped = min(max(rawPressure, 0), 1)
             if let lastPressure {
-                normalizedPressure = (lastPressure * 0.9) + (clamped * 0.1)
+                let delta = abs(clamped - lastPressure)
+                let previousWeight: Float
+                switch delta {
+                case ..<0.04:
+                    previousWeight = 0.82
+                case ..<0.12:
+                    previousWeight = 0.58
+                default:
+                    previousWeight = 0.25
+                }
+                normalizedPressure = (lastPressure * previousWeight) + (clamped * (1 - previousWeight))
             } else {
                 normalizedPressure = clamped
             }
@@ -749,17 +786,44 @@ final class StrokeCaptureMTKView: MTKView {
         return events.map(sample(from:))
     }
 
-    private func emitStrokeSamples(from previous: CanvasStrokeSample, to current: CanvasStrokeSample) {
-        let dx = current.location.x - previous.location.x
-        let dy = current.location.y - previous.location.y
-        let distanceSquared = (dx * dx) + (dy * dy)
-        let pressureDelta = abs(current.pressure - previous.pressure)
+    /// 入力スムージング用 EMA。
+    /// α が小さいほど遅延が大きく滑らか、大きいほど即応する。
+    /// 0.5 = 適度な追従感（起始直線を消しつつ遅延は最小限）。
+    private let smoothingAlpha: Double = 0.5
 
-        if distanceSquared < 0.25, pressureDelta < 0.01 {
-            return
+    /// raw サンプルに EMA を適用して平滑化座標を返す。
+    /// 筆触開始時は smoothedPosition をリセットすること。
+    private func smoothed(_ raw: CanvasStrokeSample) -> CanvasStrokeSample {
+        let pos: CanvasPoint
+        if let prev = smoothedPosition {
+            pos = CanvasPoint(
+                x: prev.x + smoothingAlpha * (raw.location.x - prev.x),
+                y: prev.y + smoothingAlpha * (raw.location.y - prev.y)
+            )
+        } else {
+            pos = raw.location
         }
+        smoothedPosition = pos
+        return CanvasStrokeSample(location: pos, pressure: raw.pressure)
+    }
 
-        strokeDelegate?.strokeCaptureView(self, didProduce: [previous, current])
+    /// 把一批 coalesced samples 过滤重复点后发送给 delegate。
+    /// Renderer 侧的 look-ahead 缓冲负责管理渲染时机，这里只做去重，不做数量限制。
+    private func emitCoalescedStrokeSamples(_ samples: [CanvasStrokeSample]) {
+        guard !samples.isEmpty else { return }
+        // 去掉极近重复点：距离 < 0.5px 且压力变化 < 0.01 时跳过
+        var filtered: [CanvasStrokeSample] = [samples[0]]
+        for i in 1..<samples.count {
+            let prev = filtered[filtered.count - 1]
+            let curr = samples[i]
+            let dx = curr.location.x - prev.location.x
+            let dy = curr.location.y - prev.location.y
+            if dx * dx + dy * dy < 0.25, abs(curr.pressure - prev.pressure) < 0.01 {
+                continue
+            }
+            filtered.append(curr)
+        }
+        strokeDelegate?.strokeCaptureView(self, didProduce: filtered)
     }
 
     private func shouldUseEyedropperOverride(for event: NSEvent) -> Bool {
@@ -791,6 +855,7 @@ final class StrokeCaptureMTKView: MTKView {
 
     func resetInteractionState() {
         lastSample = nil
+        smoothedPosition = nil
         lastPanLocation = nil
         lastPressure = nil
         selectionInteractionMode = .idle

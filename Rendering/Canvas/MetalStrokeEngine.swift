@@ -11,6 +11,7 @@ final class MetalStrokeEngine: StrokeEngine {
     private let layerSurfaceStore: StageOneLayerSurfaceStore
     private let brushRenderer: StageOneBrushRenderer
     private var opacityCapSession: OpacityCapStrokeSession?
+    private var brushSamplingState: BrushStrokeSamplingState?
 
     init(
         metalContext: MetalDeviceContext,
@@ -25,6 +26,7 @@ final class MetalStrokeEngine: StrokeEngine {
         toolSession: ToolSessionState,
         layerID: LayerID
     ) {
+        brushSamplingState = nil
         guard
             (toolSession.activeTool == .brush || toolSession.activeTool == .eraser),
             toolSession.brush.buildMode == .opacityCap,
@@ -57,6 +59,7 @@ final class MetalStrokeEngine: StrokeEngine {
 
     func endStroke() {
         opacityCapSession = nil
+        brushSamplingState = nil
     }
 
     func applyStroke(_ stroke: StrokeDescriptor, to layerID: LayerID) {
@@ -83,7 +86,8 @@ final class MetalStrokeEngine: StrokeEngine {
                 brushRenderer.render(
                     stroke: stroke,
                     into: texture,
-                    commandQueue: metalContext.commandQueue
+                    commandQueue: metalContext.commandQueue,
+                    samplingState: &brushSamplingState
                 )
                 return
             }
@@ -92,7 +96,8 @@ final class MetalStrokeEngine: StrokeEngine {
                 stroke: stroke,
                 session: opacityCapSession.resources,
                 into: texture,
-                commandQueue: metalContext.commandQueue
+                commandQueue: metalContext.commandQueue,
+                samplingState: &brushSamplingState
             )
             return
         }
@@ -100,7 +105,8 @@ final class MetalStrokeEngine: StrokeEngine {
         brushRenderer.render(
             stroke: stroke,
             into: texture,
-            commandQueue: metalContext.commandQueue
+            commandQueue: metalContext.commandQueue,
+            samplingState: &brushSamplingState
         )
     }
 }

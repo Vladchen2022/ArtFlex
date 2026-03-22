@@ -12,6 +12,7 @@ struct StrokeDescriptor: Sendable, Equatable {
     var brush: BrushSettings
     var points: [StrokePoint]
     var selectionShape: SelectionShape?
+    var skipLeadingStamp: Bool = false
 }
 
 protocol StrokeEngine {

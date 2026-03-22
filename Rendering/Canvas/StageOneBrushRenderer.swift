@@ -39,6 +39,19 @@ private struct StampSample {
     var sizeMultiplier: Float
 }
 
+struct BrushStrokeSamplingState {
+    var distanceSinceLastSample: Double = 0
+    var lastSamplePoint: StrokePoint?
+    var nextSampleIndex: Int = 0
+    /// Look-ahead 输入缓冲：收到的原始输入点全部追加到这里。
+    /// 渲染时始终保留最后 1 个点作为 look-ahead（p3），
+    /// 确保每段 Catmull-Rom 的 p0..p3 全部是真实点，永远不需要幽灵外推。
+    /// 笔触结束（endStroke）时由外部调用 flush，把剩余点全部渲染完。
+    var pendingInputPoints: [StrokePoint] = []
+    /// 笔触是否已经结束（用于 flush 模式）
+    var isFlushing: Bool = false
+}
+
 struct OpacityCapSessionResources {
     let originalTexture: MTLTexture
     let alphaTexture: MTLTexture
@@ -615,9 +628,10 @@ final class StageOneBrushRenderer {
     func render(
         stroke: StrokeDescriptor,
         into texture: MTLTexture,
-        commandQueue: MTLCommandQueue
+        commandQueue: MTLCommandQueue,
+        samplingState: inout BrushStrokeSamplingState?
     ) {
-        let samples = interpolatedPoints(for: stroke)
+        let samples = interpolatedPoints(for: stroke, samplingState: &samplingState)
         guard
             !samples.isEmpty,
             let commandBuffer = commandQueue.makeCommandBuffer()
@@ -735,9 +749,10 @@ final class StageOneBrushRenderer {
         stroke: StrokeDescriptor,
         session: OpacityCapSessionResources,
         into texture: MTLTexture,
-        commandQueue: MTLCommandQueue
+        commandQueue: MTLCommandQueue,
+        samplingState: inout BrushStrokeSamplingState?
     ) {
-        let samples = interpolatedPoints(for: stroke)
+        let samples = interpolatedPoints(for: stroke, samplingState: &samplingState)
         guard
             !samples.isEmpty,
             let commandBuffer = commandQueue.makeCommandBuffer()
@@ -946,104 +961,294 @@ final class StageOneBrushRenderer {
         )
     }
 
-    private func interpolatedPoints(for stroke: StrokeDescriptor) -> [StampSample] {
-        guard let first = stroke.points.first else {
-            return []
+    // MARK: - Catmull-Rom 曲线插值核心
+    //
+    // Catmull-Rom 需要 4 个控制点 (p0, p1, p2, p3)，在 p1→p2 段上生成平滑曲线。
+    // alpha=0.5 => Centripetal Catmull-Rom，天然避免自交和尖角，是笔迹场景的最佳选择。
+    //
+    // 采用 look-ahead 缓冲：收到的点先存入 pendingInputPoints，
+    // 始终保留最后 1 个点作为 p3 look-ahead，保证每段的 p0..p3 全部是真实点。
+    // 笔触结束时（endStroke）触发 flush，把缓冲里最后一段也渲染完。
+
+    /// Centripetal Catmull-Rom 插值（alpha=0.5）
+    /// 在 p1→p2 段上按参数 t∈[0,1] 求点，返回插值后的位置和压力。
+    private func catmullRomPoint(
+        p0: StrokePoint, p1: StrokePoint, p2: StrokePoint, p3: StrokePoint,
+        t: Double
+    ) -> StrokePoint {
+        // Centripetal 参数化：每段的参数间距 = 欧氏距离^0.5
+        func knot(_ a: StrokePoint, _ b: StrokePoint) -> Double {
+            let dx = b.x - a.x, dy = b.y - a.y
+            let d = pow((dx * dx + dy * dy), 0.25) // pow(dist, 0.5*alpha), alpha=0.5
+            return max(d, 1e-4)
         }
+        let t0 = 0.0
+        let t1 = t0 + knot(p0, p1)
+        let t2 = t1 + knot(p1, p2)
+        let t3 = t2 + knot(p2, p3)
+        let tc  = t1 + t * (t2 - t1) // 当前参数（在 t1..t2 段内线性映射）
+
+        func blend(_ a: StrokePoint, _ b: StrokePoint, _ ta: Double, _ tb: Double, _ tv: Double) -> (x: Double, y: Double, p: Float) {
+            guard abs(tb - ta) > 1e-8 else { return (a.x, a.y, a.pressure) }
+            let f = (tv - ta) / (tb - ta)
+            return (
+                a.x + (b.x - a.x) * f,
+                a.y + (b.y - a.y) * f,
+                a.pressure + (b.pressure - a.pressure) * Float(f)
+            )
+        }
+
+        let a1 = blend(p0, p1, t0, t1, tc)
+        let a2 = blend(p1, p2, t1, t2, tc)
+        let a3 = blend(p2, p3, t2, t3, tc)
+
+        func blend2(_ a: (x: Double, y: Double, p: Float), _ b: (x: Double, y: Double, p: Float), _ ta: Double, _ tb: Double, _ tv: Double) -> (x: Double, y: Double, p: Float) {
+            guard abs(tb - ta) > 1e-8 else { return a }
+            let f = (tv - ta) / (tb - ta)
+            return (
+                a.x + (b.x - a.x) * f,
+                a.y + (b.y - a.y) * f,
+                a.p + (b.p - a.p) * Float(f)
+            )
+        }
+
+        let b1 = blend2(a1, a2, t0, t2, tc)
+        let b2 = blend2(a2, a3, t1, t3, tc)
+        let c  = blend2(b1, b2, t1, t2, tc)
+
+        return StrokePoint(x: c.x, y: c.y, pressure: c.p)
+    }
+
+    /// 把一段 Catmull-Rom 曲线（p1→p2）按 spacing 步长采样为 stamps，
+    /// 并把采到的点/角度/剩余距离写回 inout 参数。
+    private func sampleCatmullSegment(
+        p0: StrokePoint, p1: StrokePoint, p2: StrokePoint, p3: StrokePoint,
+        spacing: Double,
+        distanceSinceLastSample: inout Double,
+        lastSamplePoint: inout StrokePoint,
+        sampleIndex: inout Int,
+        baseAngle: Float,
+        stroke: StrokeDescriptor,
+        result: inout [StampSample]
+    ) {
+        // 用细分的方式估算曲线弧长，并在弧长上均匀放置 stamp
+        // 步骤：把曲线分成 subdivisions 段，每段视为直线，
+        // 然后在线性步长上走 spacing 距离放一个 stamp。
+        let subdivisions = 16  // 每两个控制点间的细分数，越大越精确，16 已经足够
+        var prevPoint = p1
+        for step in 1...subdivisions {
+            let t = Double(step) / Double(subdivisions)
+            let curPoint = catmullRomPoint(p0: p0, p1: p1, p2: p2, p3: p3, t: t)
+            let dx = curPoint.x - prevPoint.x
+            let dy = curPoint.y - prevPoint.y
+            let segLen = sqrt(dx * dx + dy * dy)
+            guard segLen > 1e-6 else { prevPoint = curPoint; continue }
+
+            let dirDeg = Float(atan2(dy, dx) * 180.0 / .pi)
+            let segAngleDeg = baseAngle + (stroke.brush.followsStrokeDirection ? dirDeg : 0)
+
+            var traveled = 0.0
+            while distanceSinceLastSample + (segLen - traveled) >= spacing {
+                let remaining = spacing - distanceSinceLastSample
+                traveled += remaining
+                let f = traveled / segLen
+                let stamped = StrokePoint(
+                    x: prevPoint.x + dx * f,
+                    y: prevPoint.y + dy * f,
+                    pressure: prevPoint.pressure + (curPoint.pressure - prevPoint.pressure) * Float(f)
+                )
+                result.append(
+                    makeStampSample(
+                        point: stamped,
+                        index: sampleIndex,
+                        segmentAngleDegrees: segAngleDeg,
+                        jitterDirectionDegrees: dirDeg,
+                        stroke: stroke
+                    )
+                )
+                sampleIndex += 1
+                lastSamplePoint = stamped
+                distanceSinceLastSample = 0
+            }
+            distanceSinceLastSample += max(segLen - traveled, 0)
+            prevPoint = curPoint
+        }
+    }
+
+    private func interpolatedPoints(
+        for stroke: StrokeDescriptor,
+        samplingState: inout BrushStrokeSamplingState?
+    ) -> [StampSample] {
+        // flush 時は points が空で来る（endStroke からの呼び出し）ので通過させる
+        let isFlushing = samplingState?.isFlushing ?? false
+        guard !stroke.points.isEmpty || isFlushing else { return [] }
 
         let baseAngle = stroke.brush.stampRotationDegrees
-        if stroke.points.count == 1 {
-            return [
-                StampSample(
-                    point: first,
-                    angleDegrees: baseAngle,
-                    jitterDirectionDegrees: 0,
-                    sizeMultiplier: 1
-                )
-            ]
-        }
-
-        let firstStrokeDirectionDegrees = strokeDirectionDegrees(
-            from: first,
-            to: stroke.points[1]
-        )
-
         let spacing = max(
             Double(stroke.brush.size) * Double(stroke.brush.spacingPercent) / 100.0,
             0.5
         )
-        var result: [StampSample] = [
-            makeStampSample(
-                point: first,
-                index: 0,
-                segmentAngleDegrees: baseAngle + (
-                    stroke.brush.followsStrokeDirection ? firstStrokeDirectionDegrees : 0
-                ),
-                jitterDirectionDegrees: firstStrokeDirectionDegrees,
-                stroke: stroke
-            )
-        ]
-        var sampleIndex = 1
 
-        for index in 1..<stroke.points.count {
-            let previous = stroke.points[index - 1]
-            let current = stroke.points[index]
-            let dx = current.x - previous.x
-            let dy = current.y - previous.y
-            let distance = sqrt((dx * dx) + (dy * dy))
-            let strokeDirectionDegrees = self.strokeDirectionDegrees(from: previous, to: current)
-            let segmentAngleDegrees = baseAngle + (
-                stroke.brush.followsStrokeDirection
-                    ? strokeDirectionDegrees
-                    : 0
-            )
-
-            if distance <= spacing {
-                result.append(
-                    makeStampSample(
-                        point: current,
-                        index: sampleIndex,
-                        segmentAngleDegrees: segmentAngleDegrees,
-                        jitterDirectionDegrees: strokeDirectionDegrees,
-                        stroke: stroke
-                    )
-                )
-                sampleIndex += 1
-                continue
-            }
-
-            let steps = Int(distance / spacing)
-            for step in 1...steps {
-                let t = Double(step) / Double(steps + 1)
-                let interpolatedPoint = StrokePoint(
-                        x: previous.x + (dx * t),
-                        y: previous.y + (dy * t),
-                        pressure: previous.pressure + ((current.pressure - previous.pressure) * Float(t))
-                    )
-                result.append(
-                    makeStampSample(
-                        point: interpolatedPoint,
-                        index: sampleIndex,
-                        segmentAngleDegrees: segmentAngleDegrees,
-                        jitterDirectionDegrees: strokeDirectionDegrees,
-                        stroke: stroke
-                    )
-                )
-                sampleIndex += 1
-            }
-            result.append(
-                makeStampSample(
-                    point: current,
-                    index: sampleIndex,
-                    segmentAngleDegrees: segmentAngleDegrees,
-                    jitterDirectionDegrees: strokeDirectionDegrees,
-                    stroke: stroke
-                )
-            )
-            sampleIndex += 1
+        // 初始化或重置 state
+        var state = samplingState ?? BrushStrokeSamplingState()
+        if !stroke.skipLeadingStamp {
+            // 全新笔触：完全重置
+            state = BrushStrokeSamplingState()
         }
 
-        return result
+        // 把本次收到的所有点追加进 look-ahead 缓冲。
+        // mouseDragged が lastSample を先頭に付けて送ってくるので、
+        // pendingInputPoints の末尾点と stroke.points[0] が同一点になる場合がある。
+        // その重複を除去してから追加する。
+        let incomingPoints = stroke.points
+        let dedupedIncoming: [StrokePoint]
+        if let tail = state.pendingInputPoints.last,
+           let head = incomingPoints.first,
+           abs(tail.x - head.x) < 0.001, abs(tail.y - head.y) < 0.001 {
+            dedupedIncoming = Array(incomingPoints.dropFirst())
+        } else {
+            dedupedIncoming = incomingPoints
+        }
+        state.pendingInputPoints.append(contentsOf: dedupedIncoming)
+
+        var result: [StampSample] = []
+
+        // 决定本次能渲染到哪里：
+        // 正常模式：留最后 1 个点作为 look-ahead（p3），只渲到倒数第 2 个
+        // flush 模式（endStroke）：全部渲染完
+        let renderableCount: Int
+        if state.isFlushing {
+            renderableCount = state.pendingInputPoints.count
+        } else if state.pendingInputPoints.count == 2 {
+            // 起笔阶段只有两个点时也要立即渲染首段，
+            // 否则普通绘制链在未显式 flush 的情况下会吞掉整段笔迹。
+            renderableCount = 2
+        } else {
+            renderableCount = max(state.pendingInputPoints.count - 1, 0)
+        }
+
+        guard renderableCount >= 2 else {
+            // 点还不够，等下一帧
+            // 单点单击（全程只有 1 个点）特殊处理
+            if state.isFlushing, let only = state.pendingInputPoints.first {
+                result.append(StampSample(
+                    point: only,
+                    angleDegrees: baseAngle,
+                    jitterDirectionDegrees: 0,
+                    sizeMultiplier: 1
+                ))
+                state.pendingInputPoints = []
+            }
+            samplingState = state
+            return stabilizedPressureSamples(result, stroke: stroke)
+        }
+
+        // 放起始 stamp（仅全新笔触且还没放过）
+        let pts = state.pendingInputPoints
+        if !stroke.skipLeadingStamp {
+            let firstDir = strokeDirectionDegrees(from: pts[0], to: pts[1])
+            result.append(makeStampSample(
+                point: pts[0],
+                index: state.nextSampleIndex,
+                segmentAngleDegrees: baseAngle + (stroke.brush.followsStrokeDirection ? firstDir : 0),
+                jitterDirectionDegrees: firstDir,
+                stroke: stroke
+            ))
+            state.nextSampleIndex += 1
+            state.distanceSinceLastSample = 0
+            state.lastSamplePoint = pts[0]
+        }
+
+        // 遍历每一段 p1→p2，用真实的 p0 和 p3 做 Catmull-Rom
+        // 渲染范围：index 1 ..< renderableCount（即 pts[0..renderableCount-1] 中的每一段）
+        for idx in 1..<renderableCount {
+            let p1 = pts[idx - 1]
+            let p2 = pts[idx]
+
+            // p0：前驱，idx>=2 时有真实点；idx==1 时用 p2 反向外推
+            // 注意：因为 look-ahead 保证了 p3 始终是真实点，
+            // 所以只有第一段（idx==1）可能缺 p0——用 p2 方向反推误差很小
+            let p0: StrokePoint = idx >= 2 ? pts[idx - 2] : StrokePoint(
+                x: p1.x - (p2.x - p1.x),
+                y: p1.y - (p2.y - p1.y),
+                pressure: p1.pressure
+            )
+
+            // p3：后继，look-ahead 保证 idx < renderableCount 时 pts[idx+1] 存在
+            // flush 模式下最后一段用外推
+            let p3: StrokePoint = idx + 1 < pts.count ? pts[idx + 1] : StrokePoint(
+                x: p2.x + (p2.x - p1.x),
+                y: p2.y + (p2.y - p1.y),
+                pressure: p2.pressure
+            )
+
+            var localLastSamplePoint: StrokePoint = state.lastSamplePoint ?? p1
+            sampleCatmullSegment(
+                p0: p0, p1: p1, p2: p2, p3: p3,
+                spacing: spacing,
+                distanceSinceLastSample: &state.distanceSinceLastSample,
+                lastSamplePoint: &localLastSamplePoint,
+                sampleIndex: &state.nextSampleIndex,
+                baseAngle: baseAngle,
+                stroke: stroke,
+                result: &result
+            )
+            state.lastSamplePoint = localLastSamplePoint
+        }
+
+        // 清理已渲染的点，只保留 look-ahead 尾部（1 个点，或 flush 后清空）
+        if state.isFlushing {
+            state.pendingInputPoints = []
+            state.isFlushing = false
+        } else {
+        // 保留最后 2 个点：
+        // suffix[-1] = look-ahead p3（下一帧第一段的后继）
+        // suffix[-2] = 下一帧第一段的 p0（真实前驱，不需要幽灵外推）
+        state.pendingInputPoints = Array(state.pendingInputPoints.suffix(2))
+        }
+
+        samplingState = state
+        return stabilizedPressureSamples(result, stroke: stroke)
+    }
+
+    private func stabilizedPressureSamples(
+        _ samples: [StampSample],
+        stroke: StrokeDescriptor
+    ) -> [StampSample] {
+        guard
+            samples.count >= 3,
+            stroke.tool == .brush || stroke.tool == .eraser
+        else {
+            return samples
+        }
+
+        let opacityWeight = min(max(stroke.brush.pressureOpacityAmount, 0), 1)
+        let sizeWeight = min(max(stroke.brush.pressureSizeAmount, 0), 1)
+        let smoothingStrength = max(opacityWeight * 0.7, sizeWeight * 0.45)
+        guard smoothingStrength > 0.0001 else {
+            return samples
+        }
+
+        let sideWeight = min(max(0.10 + (0.16 * smoothingStrength), 0), 0.24)
+        var stabilized = samples
+
+        for index in samples.indices {
+            let start = max(index - 1, samples.startIndex)
+            let end = min(index + 1, samples.index(before: samples.endIndex))
+            var weightedPressure = 0.0 as Float
+            var totalWeight = 0.0 as Float
+
+            for neighbor in start...end {
+                let weight: Float = neighbor == index ? (1 - (2 * sideWeight)) : sideWeight
+                weightedPressure += samples[neighbor].point.pressure * weight
+                totalWeight += weight
+            }
+
+            guard totalWeight > 0.0001 else { continue }
+            stabilized[index].point.pressure = min(max(weightedPressure / totalWeight, 0.01), 1)
+        }
+
+        return stabilized
     }
 
     private func makeStampSample(
