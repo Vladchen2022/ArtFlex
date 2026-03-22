@@ -13,6 +13,7 @@ struct AppBootstrap {
     let bucketFillEngine: BucketFillEngine
     let layerMergeController: LayerMergeController
     let textureSerializer: LayerTextureSerializer
+    let pngExporter: PNGExporter
     let exportController: ExportController
     let persistenceController: PersistenceController
     let historyController: HistoryController
@@ -42,6 +43,7 @@ struct AppBootstrap {
         self.linearGradientRenderer = LinearGradientRenderer(device: metalContext.device)
         self.sectorGradientRenderer = SectorGradientRenderer(device: metalContext.device)
         let pngExporter = PNGExporter()
+        self.pngExporter = pngExporter
         let textureSerializer = LayerTextureSerializer()
         self.textureSerializer = textureSerializer
         self.smudgeEngine = SmudgeEngine(serializer: textureSerializer)

@@ -10,6 +10,10 @@ struct ArtFlexApp: App {
         bootstrap: AppBootstrap()
     )
 
+    private var commandTargetViewModel: WorkspaceViewModel {
+        viewModel.ideationActiveBranchViewModel ?? viewModel
+    }
+
     var body: some Scene {
         WindowGroup {
             MainWindowView(viewModel: viewModel)
@@ -28,58 +32,58 @@ struct ArtFlexApp: App {
 
             CommandGroup(after: .newItem) {
                 Button("清除选区") {
-                    viewModel.clearSelection()
+                    commandTargetViewModel.clearSelection()
                 }
                 .keyboardShortcut("d")
-                .disabled(viewModel.isTransformingSelection)
+                .disabled(commandTargetViewModel.isTransformingSelection)
 
                 Button("删除选区内容") {
-                    viewModel.deleteSelectionContents()
+                    commandTargetViewModel.deleteSelectionContents()
                 }
                 .keyboardShortcut(.delete, modifiers: [])
-                .disabled(viewModel.isTransformingSelection)
+                .disabled(commandTargetViewModel.isTransformingSelection)
 
                 Button("向下合并") {
-                    viewModel.mergeActiveLayerDown()
+                    commandTargetViewModel.mergeActiveLayerDown()
                 }
-                .disabled(!viewModel.canMergeDown)
+                .disabled(!commandTargetViewModel.canMergeDown)
 
                 Button("合并可见") {
-                    viewModel.mergeVisibleLayers()
+                    commandTargetViewModel.mergeVisibleLayers()
                 }
-                .disabled(!viewModel.canMergeVisible)
+                .disabled(!commandTargetViewModel.canMergeVisible)
 
                 Button("应用变形") {
-                    viewModel.applySelectionTransform()
+                    commandTargetViewModel.applySelectionTransform()
                 }
 
                 Button("取消变形") {
-                    viewModel.cancelSelectionTransform()
+                    commandTargetViewModel.cancelSelectionTransform()
                 }
 
                 Button("填充选区内容") {
-                    viewModel.fillSelectionContents()
+                    commandTargetViewModel.fillSelectionContents()
                 }
                 .keyboardShortcut("f", modifiers: [.command, .shift])
-                .disabled(viewModel.isTransformingSelection)
+                .disabled(commandTargetViewModel.isTransformingSelection)
 
                 Button("填充套索内容") {
-                    viewModel.fillLassoContents()
+                    commandTargetViewModel.fillLassoContents()
                 }
-                .disabled(viewModel.isTransformingSelection)
+                .disabled(commandTargetViewModel.isTransformingSelection)
 
                 Button("擦除套索内容") {
-                    viewModel.eraseLassoContents()
+                    commandTargetViewModel.eraseLassoContents()
                 }
-                .disabled(viewModel.isTransformingSelection)
+                .disabled(commandTargetViewModel.isTransformingSelection)
 
                 Button("撤销") {
-                    viewModel.undo()
+                    commandTargetViewModel.undo()
                 }
                 .keyboardShortcut("z")
 
                 Button("重做") {
-                    viewModel.redo()
+                    commandTargetViewModel.redo()
                 }
                 .keyboardShortcut("Z", modifiers: [.command, .shift])
 
@@ -99,16 +103,16 @@ struct ArtFlexApp: App {
                 .keyboardShortcut("e")
 
                 Button("重置视图") {
-                    viewModel.resetViewport()
+                    commandTargetViewModel.resetViewport()
                 }
                 .keyboardShortcut("0", modifiers: [.command])
 
                 Button("放大") {
-                    viewModel.zoomIn()
+                    commandTargetViewModel.zoomIn()
                 }
 
                 Button("缩小") {
-                    viewModel.zoomOut()
+                    commandTargetViewModel.zoomOut()
                 }
             }
         }

@@ -1,34 +1,35 @@
 import SwiftUI
 
 struct MainToolbarView: View {
-    @ObservedObject var viewModel: WorkspaceViewModel
+    @ObservedObject var hostViewModel: WorkspaceViewModel
+    @ObservedObject var editingViewModel: WorkspaceViewModel
 
     var body: some View {
         HStack(spacing: 14) {
             toolbarIconButton("新建文件", systemImage: "doc.badge.plus") {
-                viewModel.presentNewCanvasSheet()
+                hostViewModel.presentNewCanvasSheet()
             }
 
             toolbarIconButton("打开", systemImage: "folder") {
-                viewModel.openProject()
+                hostViewModel.openProject()
             }
 
             toolbarIconButton("保存", systemImage: "square.and.arrow.down") {
-                viewModel.saveProject()
+                hostViewModel.saveProject()
             }
 
             toolbarIconButton("导出", systemImage: "square.and.arrow.up") {
-                viewModel.exportPNG()
+                hostViewModel.exportPNG()
             }
 
             divider
 
             compactSlider(
                 title: "大小",
-                valueText: "\(Int(viewModel.workspace.toolSession.brush.size))",
+                valueText: "\(Int(editingViewModel.workspace.toolSession.brush.size))",
                 value: Binding(
-                    get: { Double(viewModel.workspace.toolSession.brush.size) },
-                    set: { viewModel.setBrushSize(Float($0)) }
+                    get: { Double(editingViewModel.workspace.toolSession.brush.size) },
+                    set: { editingViewModel.setBrushSize(Float($0)) }
                 ),
                 range: 1...1000,
                 width: 110
@@ -36,10 +37,10 @@ struct MainToolbarView: View {
 
             compactSlider(
                 title: "不透明度",
-                valueText: "\(Int(viewModel.workspace.toolSession.brush.opacity * 100))%",
+                valueText: "\(Int(editingViewModel.workspace.toolSession.brush.opacity * 100))%",
                 value: Binding(
-                    get: { Double(viewModel.workspace.toolSession.brush.opacity) },
-                    set: { viewModel.setBrushOpacity(Float($0)) }
+                    get: { Double(editingViewModel.workspace.toolSession.brush.opacity) },
+                    set: { editingViewModel.setBrushOpacity(Float($0)) }
                 ),
                 range: 0...1,
                 width: 110
@@ -47,19 +48,19 @@ struct MainToolbarView: View {
 
             Spacer(minLength: 0)
 
-            Text(viewModel.workspace.document.metadata.name)
+            Text(hostViewModel.workspace.document.metadata.name)
                 .font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(Color.white.opacity(0.82))
                 .lineLimit(1)
 
             Circle()
-                .fill(viewModel.hasUnsavedChanges ? Color.red : Color.green)
+                .fill(hostViewModel.hasUnsavedChanges ? Color.red : Color.green)
                 .frame(width: 10, height: 10)
                 .overlay(
                     Circle()
                         .stroke(Color.white.opacity(0.18), lineWidth: 1)
                 )
-                .help(viewModel.hasUnsavedChanges ? "有未保存内容" : "已保存")
+                .help(hostViewModel.hasUnsavedChanges ? "有未保存内容" : "已保存")
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)

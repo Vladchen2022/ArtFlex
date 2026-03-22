@@ -53,6 +53,10 @@ final class HistoryController {
         redoStack.removeAll()
     }
 
+    func captureCurrentEntry() throws -> WorkspaceHistoryEntry {
+        try makeEntry()
+    }
+
     func undo() throws -> Bool {
         guard let previous = undoStack.popLast() else {
             return false
@@ -140,5 +144,27 @@ final class HistoryController {
 
             try serializer.restore(snapshot: layerSnapshot.texture, into: texture)
         }
+    }
+
+    func restoreExact(entry: WorkspaceHistoryEntry) throws {
+        workspaceStore.replaceState(entry.workspace)
+        layerSurfaceStore.reset()
+        layerSurfaceStore.prepareTextures(
+            for: entry.workspace.document,
+            metal: metalContext
+        )
+
+        for layerSnapshot in entry.layerSnapshots {
+            guard
+                let surfaceID = layerSurfaceStore.surfaceID(for: layerSnapshot.layerID),
+                let texture = layerSurfaceStore.texture(for: surfaceID)
+            else {
+                continue
+            }
+
+            try serializer.restore(snapshot: layerSnapshot.texture, into: texture)
+        }
+
+        resetHistory()
     }
 }

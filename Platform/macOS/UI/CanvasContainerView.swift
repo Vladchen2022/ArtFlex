@@ -8,6 +8,7 @@ private func emitSelectionTraceCanvas(_ message: String) {
 
 struct CanvasContainerView: View {
     @ObservedObject var viewModel: WorkspaceViewModel
+    var onCanvasInteraction: (() -> Void)? = nil
     @State private var panStartOffset: CanvasPoint?
     private static let showsSelectionDebugOverlay = false
 
@@ -43,27 +44,34 @@ struct CanvasContainerView: View {
                         isTransformingSelection: viewModel.isTransformingSelection,
                         transformPreview: viewModel.freeTransformPreview,
                         onStrokeBegan: {
+                            onCanvasInteraction?()
                             viewModel.beginStrokeIfNeeded()
                         },
                         onStrokeInput: { samples in
+                            onCanvasInteraction?()
                             viewModel.applyStroke(samples: samples)
                         },
                         onStrokeEnded: {
+                            onCanvasInteraction?()
                             viewModel.endStroke()
                         },
                         onEyedropperSample: { point in
+                            onCanvasInteraction?()
                             viewModel.sampleColor(at: point)
                         },
                         onBucketFill: { point in
+                            onCanvasInteraction?()
                             viewModel.fillAtPoint(point)
                         },
                         onCanvasClick: { point, modifiers, clickCount in
+                            onCanvasInteraction?()
                             viewModel.handleCanvasToolClick(at: point, modifiers: modifiers, clickCount: clickCount)
                         },
                         onCanvasHover: { point in
                             viewModel.updateCanvasToolHover(to: point)
                         },
                         onSelectionBegan: { point, modifiers in
+                            onCanvasInteraction?()
                             let kind: SelectionShapeKind =
                                 switch viewModel.workspace.toolSession.activeTool {
                                 case .ellipseSelection:
@@ -76,30 +84,39 @@ struct CanvasContainerView: View {
                             viewModel.beginSelection(kind: kind, at: point, modifiers: modifiers)
                         },
                         onSelectionChanged: { point, modifiers in
+                            onCanvasInteraction?()
                             viewModel.updateSelection(to: point, modifiers: modifiers)
                         },
                         onSelectionEnded: { point, modifiers in
+                            onCanvasInteraction?()
                             viewModel.commitSelection(at: point, modifiers: modifiers)
                         },
                         onSelectionMouseDown: { point, modifiers in
-                            viewModel.handleSelectionMouseDown(at: point, modifiers: modifiers)
+                            onCanvasInteraction?()
+                            return viewModel.handleSelectionMouseDown(at: point, modifiers: modifiers)
                         },
                         onMoveSelectionPreview: { deltaX, deltaY in
+                            onCanvasInteraction?()
                             viewModel.moveSelectionPreview(by: deltaX, deltaY: deltaY)
                         },
                         onCommitSelectionMove: {
+                            onCanvasInteraction?()
                             viewModel.commitSelectionMove()
                         },
                         onTransformBegan: { point, mode in
+                            onCanvasInteraction?()
                             viewModel.beginSelectionTransform(at: point, mode: mode)
                         },
                         onTransformChanged: { point in
+                            onCanvasInteraction?()
                             viewModel.updateSelectionTransform(to: point)
                         },
                         onTransformEnded: { point in
+                            onCanvasInteraction?()
                             viewModel.commitSelectionTransform(at: point)
                         },
                         onTransformOffsetChanged: { offset in
+                            onCanvasInteraction?()
                             viewModel.setTransformPreviewOffset(offset)
                         },
                         onCanvasRotationChanged: { angleDegrees in
@@ -120,9 +137,11 @@ struct CanvasContainerView: View {
                             }
                         },
                         onApplyTransform: {
+                            onCanvasInteraction?()
                             viewModel.applySelectionTransform()
                         },
                         onCancelTransform: {
+                            onCanvasInteraction?()
                             viewModel.cancelSelectionTransform()
                         },
                         onAdjustBrushSize: { delta in

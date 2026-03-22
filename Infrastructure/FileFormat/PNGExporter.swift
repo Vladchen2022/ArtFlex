@@ -14,6 +14,16 @@ final class PNGExporter {
         )
     }
 
+    func export(snapshot: LayerTextureSnapshot, to fileURL: URL) throws {
+        let outputBytes = makeFlattenedRGBABytes(snapshot: snapshot)
+        try writePNG(
+            rgbaBytes: outputBytes,
+            width: snapshot.width,
+            height: snapshot.height,
+            to: fileURL
+        )
+    }
+
     private func makeFlattenedRGBABytes(texture: MTLTexture) throws -> [UInt8] {
         let width = texture.width
         let height = texture.height
@@ -72,6 +82,43 @@ final class PNGExporter {
             for x in 0..<width {
                 let sourceIndex = (y * bytesPerRow) + (x * bytesPerPixel)
                 let destinationIndex = (y * bytesPerRow) + (x * bytesPerPixel)
+
+                let blue = Float(sourceBytes[sourceIndex]) / 255
+                let green = Float(sourceBytes[sourceIndex + 1]) / 255
+                let red = Float(sourceBytes[sourceIndex + 2]) / 255
+                let alpha = Float(sourceBytes[sourceIndex + 3]) / 255
+
+                let composited = LinearPremultipliedColor(
+                    red: LinearPremultipliedColor.srgbChannelToLinear(red),
+                    green: LinearPremultipliedColor.srgbChannelToLinear(green),
+                    blue: LinearPremultipliedColor.srgbChannelToLinear(blue),
+                    alpha: alpha
+                )
+                .composited(over: .white)
+                .srgbUnpremultipliedOverOpaqueBackground
+
+                outputBytes[destinationIndex] = UInt8(clamping: Int((composited.red * 255).rounded()))
+                outputBytes[destinationIndex + 1] = UInt8(clamping: Int((composited.green * 255).rounded()))
+                outputBytes[destinationIndex + 2] = UInt8(clamping: Int((composited.blue * 255).rounded()))
+                outputBytes[destinationIndex + 3] = 255
+            }
+        }
+
+        return outputBytes
+    }
+
+    private func makeFlattenedRGBABytes(snapshot: LayerTextureSnapshot) -> [UInt8] {
+        let width = snapshot.width
+        let height = snapshot.height
+        let bytesPerPixel = 4
+        let bytesPerRow = width * bytesPerPixel
+        let sourceBytes = [UInt8](snapshot.pixelData)
+        var outputBytes = [UInt8](repeating: 0, count: bytesPerRow * height)
+
+        for y in 0..<height {
+            for x in 0..<width {
+                let sourceIndex = (y * bytesPerRow) + (x * bytesPerPixel)
+                let destinationIndex = sourceIndex
 
                 let blue = Float(sourceBytes[sourceIndex]) / 255
                 let green = Float(sourceBytes[sourceIndex + 1]) / 255

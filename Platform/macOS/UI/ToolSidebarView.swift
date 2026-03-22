@@ -2,6 +2,7 @@ import SwiftUI
 
 struct ToolSidebarView: View {
     @ObservedObject var viewModel: WorkspaceViewModel
+    @ObservedObject var hostViewModel: WorkspaceViewModel
     @State private var showsRecorderPopover = false
     @State private var recorderExportFPS = 12.0
 
@@ -44,6 +45,7 @@ struct ToolSidebarView: View {
 
             Spacer()
 
+            ideationButton
             recorderButton
         }
         .padding(.top, 10)
@@ -51,6 +53,49 @@ struct ToolSidebarView: View {
         .frame(width: 136)
         .frame(maxHeight: .infinity)
         .background(Color(red: 0.13, green: 0.13, blue: 0.14))
+    }
+
+    private var ideationButton: some View {
+        Button {
+            if hostViewModel.ideationSession == nil {
+                hostViewModel.startIdeationSession()
+            } else {
+                hostViewModel.cancelIdeationSession()
+            }
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "square.grid.2x2")
+                    .font(.system(size: 11, weight: .semibold))
+                    .frame(width: 13)
+                    .foregroundStyle(Color.white.opacity(0.9))
+
+                Text("方案试探")
+                    .font(.system(size: 12, weight: .semibold))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.95)
+                    .foregroundStyle(Color.white.opacity(0.9))
+
+                Spacer(minLength: 4)
+
+                Circle()
+                    .fill(hostViewModel.ideationSession == nil ? Color.white.opacity(0.25) : Color.accentColor)
+                    .frame(width: 8, height: 8)
+                    .overlay(
+                        Circle()
+                            .stroke(Color.white.opacity(0.18), lineWidth: 1)
+                    )
+            }
+            .padding(.horizontal, 10)
+            .frame(width: 116, height: 34)
+            .background(
+                RoundedRectangle(cornerRadius: 9)
+                    .fill(hostViewModel.ideationSession == nil ? Color.white.opacity(0.08) : Color.accentColor.opacity(0.22))
+            )
+        }
+        .buttonStyle(.plain)
+        .help(hostViewModel.ideationSession == nil ? "方案试探" : "退出方案试探")
+        .padding(.top, 8)
+        .padding(.bottom, 4)
     }
 
     private var recorderButton: some View {
@@ -72,7 +117,7 @@ struct ToolSidebarView: View {
                 Spacer(minLength: 4)
 
                 Circle()
-                    .fill(viewModel.timelapseRecorder.isRecording ? Color.red : Color.green)
+                    .fill(hostViewModel.timelapseRecorder.isRecording ? Color.red : Color.green)
                     .frame(width: 8, height: 8)
                     .overlay(
                         Circle()
@@ -87,12 +132,12 @@ struct ToolSidebarView: View {
             )
         }
         .buttonStyle(.plain)
-        .help(viewModel.timelapseRecorder.isRecording ? "录像工具（录制中）" : "录像工具（未录制）")
+        .help(hostViewModel.timelapseRecorder.isRecording ? "录像工具（录制中）" : "录像工具（未录制）")
         .padding(.vertical, 8)
         .popover(isPresented: $showsRecorderPopover, arrowEdge: .leading) {
             RecorderSectionView(
-                viewModel: viewModel,
-                recorder: viewModel.timelapseRecorder,
+                viewModel: hostViewModel,
+                recorder: hostViewModel.timelapseRecorder,
                 exportFPS: $recorderExportFPS
             )
             .padding(12)

@@ -52,6 +52,11 @@ final class WorkspaceViewModel: ObservableObject {
     private(set) var samePathPreviewDebugShape: SelectionShape?
 
     private let bootstrap: AppBootstrap
+    var ideationBranchActivityHandler: (() -> Void)?
+    var ideationOperationHandler: ((IdeationCanvasOperation) -> Void)?
+    var ideationUndoHandler: (() -> Bool)?
+    var ideationRedoHandler: (() -> Bool)?
+    private var isApplyingMirroredIdeationOperation = false
     private var statusDismissTask: Task<Void, Never>?
     private var isAdjustingLayerOpacity = false
     private var transformState = TransformInteractionState()
@@ -63,10 +68,13 @@ final class WorkspaceViewModel: ObservableObject {
     private var freeTransformUsesImplicitSelection = false
     private var implicitFreeTransformSelectionShape: SelectionShape?
     @Published private(set) var isApplyingTransformCommit = false
+    @Published private(set) var canvasContentRevision: UInt64 = 0
+    @Published private(set) var ideationSession: IdeationSessionState?
     private var currentProjectURL: URL?
+    private var shouldResumeTimelapseAfterIdeation = false
     private let selectionTraceLogger = Logger(subsystem: "ArtFlex", category: "SelectionTrace")
     private var documentChangeRevision: UInt64 = 0
-    init(bootstrap: AppBootstrap) {
+    init(bootstrap: AppBootstrap, installsZoomKeyboardMonitor: Bool = true) {
         self.bootstrap = bootstrap
         resetSelectionTraceLog()
         Self.restorePersistedBrushLibraryIfAvailable(in: bootstrap)
@@ -86,7 +94,9 @@ final class WorkspaceViewModel: ObservableObject {
             toolGroupSurfaceTools[group.id] = state.toolSession.activeTool
         }
         syncTimelapseDocumentContext()
-        setupZoomKeyboardMonitor()
+        if installsZoomKeyboardMonitor {
+            setupZoomKeyboardMonitor()
+        }
     }
 
     // Cmd+= / Cmd+- 完全绕过菜单系统，直接本地拦截
@@ -111,6 +121,7 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func selectTool(_ tool: ToolKind) {
+        ideationBranchActivityHandler?()
         let previousTool = workspace.toolSession.activeTool
         if workspace.toolSession.activeTool != tool {
             resolveTransformSession(reason: .toolChange)
@@ -732,6 +743,7 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func setSelectedColor(_ color: RGBAColor) {
+        ideationBranchActivityHandler?()
         bootstrap.workspaceStore.updateToolSession { session in
             session.selectedColor = color
         }
@@ -984,6 +996,7 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func sampleColor(at point: CanvasPoint) {
+        ideationBranchActivityHandler?()
         do {
             let sampledColor = try bootstrap.eyedropperSampler.sampleVisibleColor(
                 at: point,
@@ -1013,6 +1026,7 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     private func applyBrushPreset(_ presetID: String, showFeedback: Bool) {
+        ideationBranchActivityHandler?()
         guard let preset = workspace.brushLibrary.preset(id: presetID) else {
             if showFeedback {
                 showStatus(.init(kind: .info, message: "未找到画笔预设"))
@@ -1098,6 +1112,7 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func fillAtPoint(_ point: CanvasPoint) {
+        ideationBranchActivityHandler?()
         guard let layerID = bootstrap.interactionController.activeEditableLayerID() else {
             showStatus(.init(kind: .info, message: "当前图层已锁定"))
             return
@@ -1116,6 +1131,7 @@ final class WorkspaceViewModel: ObservableObject {
             refresh()
             noteCanvasContentChanged()
             showStatus(.init(kind: .success, message: "已填充区域"))
+            relayIdeationOperation(.fillAtPoint(point))
         } catch {
             showStatus(.init(kind: .error, message: error.localizedDescription))
         }
@@ -1537,6 +1553,7 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func beginSelection(kind: SelectionShapeKind, at start: CanvasPoint, modifiers: NSEvent.ModifierFlags = []) {
+        ideationBranchActivityHandler?()
         let combineMode = selectionCombineMode(for: kind, modifiers: modifiers)
         if kind == .lasso {
             let message = "[beginSelection] kind=lasso start=(\(start.x),\(start.y)) combine=\(combineMode.rawValue)"
@@ -1572,6 +1589,7 @@ final class WorkspaceViewModel: ObservableObject {
             )
         }
         refreshSelectionOverlayOnly()
+        relayIdeationOperation(.beginSelection(kind: kind, start: start, modifiers: .init(flags: modifiers)))
     }
 
     func updateLinearGradientHover(to point: CanvasPoint) {
@@ -1709,6 +1727,7 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func handleCanvasToolClick(at point: CanvasPoint, modifiers: NSEvent.ModifierFlags = [], clickCount: Int = 1) {
+        ideationBranchActivityHandler?()
         switch workspace.toolSession.activeTool {
         case .straightLine:
             handleStraightLineClick(at: point)
@@ -1721,6 +1740,7 @@ final class WorkspaceViewModel: ObservableObject {
         default:
             break
         }
+        relayIdeationOperation(.handleCanvasToolClick(point: point, modifiers: .init(flags: modifiers), clickCount: clickCount))
     }
 
     func handleSectorGradientClick(at point: CanvasPoint) {
@@ -1913,6 +1933,7 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func updateSelection(to point: CanvasPoint, modifiers: NSEvent.ModifierFlags = []) {
+        ideationBranchActivityHandler?()
         let storeSelection = bootstrap.workspaceStore.state.selection
         let currentStart = storeSelection.anchorPoint ?? point
         let currentKind = storeSelection.activeKind ?? .rectangle
@@ -1968,9 +1989,11 @@ final class WorkspaceViewModel: ObservableObject {
             samePathPreviewDebugShape = nextPreviewShape
         }
         refreshSelectionOverlayOnly()
+        relayIdeationOperation(.updateSelection(point: point, modifiers: .init(flags: modifiers)))
     }
 
     func commitSelection(at end: CanvasPoint, modifiers: NSEvent.ModifierFlags = []) {
+        ideationBranchActivityHandler?()
         let storeSelection = bootstrap.workspaceStore.state.selection
         let currentStart = storeSelection.anchorPoint ?? end
         let currentKind = storeSelection.activeKind ?? .rectangle
@@ -2239,6 +2262,7 @@ final class WorkspaceViewModel: ObservableObject {
         samePathCommittedDebugShape = nil
 
         refresh()
+        relayIdeationOperation(.commitSelection(end: end, modifiers: .init(flags: modifiers)))
 
         if isGeneratorRegionSelectionArmed, nextCommittedShape != nil {
             isGeneratorRegionSelectionArmed = false
@@ -2384,6 +2408,7 @@ final class WorkspaceViewModel: ObservableObject {
     private(set) var selectionMovePreviewOffset = CanvasPoint(x: 0, y: 0)
 
     func moveSelectionPreview(by deltaX: Double, deltaY: Double) {
+        ideationBranchActivityHandler?()
         guard let base = selectionMoveBaseShape else { return }
         selectionMoveAccumulatedDelta.x += deltaX
         selectionMoveAccumulatedDelta.y += deltaY
@@ -2392,9 +2417,11 @@ final class WorkspaceViewModel: ObservableObject {
         _ = base
         selectionMovePreviewOffset = CanvasPoint(x: dx, y: dy)
         refreshSelectionOverlayOnly()
+        relayIdeationOperation(.moveSelectionPreview(deltaX: deltaX, deltaY: deltaY))
     }
 
     func commitSelectionMove() {
+        ideationBranchActivityHandler?()
         guard
             let base = selectionMoveBaseShape,
             selectionMoveAccumulatedDelta.x != 0 || selectionMoveAccumulatedDelta.y != 0
@@ -2414,6 +2441,7 @@ final class WorkspaceViewModel: ObservableObject {
             selection.committedShape = moved
         }
         refreshLightweight()
+        relayIdeationOperation(.commitSelectionMove)
     }
 
     func clearSelection() {
@@ -2449,6 +2477,7 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func beginSelectionTransform(at start: CanvasPoint, mode: FreeTransformInteractionMode) {
+        ideationBranchActivityHandler?()
         activateImplicitFreeTransformSelectionIfNeeded()
         guard effectiveTransformSelectionShape != nil else { return }
 
@@ -2460,9 +2489,11 @@ final class WorkspaceViewModel: ObservableObject {
         }
         setFreeTransformPreview(transformState.preview)
         isTransformingSelection = transformState.isActive
+        relayIdeationOperation(.beginSelectionTransform(start: start, mode: mode))
     }
 
     func updateSelectionTransform(to point: CanvasPoint) {
+        ideationBranchActivityHandler?()
         guard
             isTransformingSelection,
             let dragStartPoint = transformState.dragStartPoint
@@ -2512,10 +2543,12 @@ final class WorkspaceViewModel: ObservableObject {
             transformState.accumulatedOffset = nextPreview.translation
             setFreeTransformPreview(nextPreview)
         }
+        relayIdeationOperation(.updateSelectionTransform(point: point))
     }
 
     /// Coordinator가 GPU offset을 직접 계산한 경우 사용 (선택 없는 전체 레이어 이동)
     func setTransformPreviewOffset(_ offset: CanvasPoint) {
+        ideationBranchActivityHandler?()
         let nextPreview = FreeTransformPreview(
             translation: offset,
             scaleX: freeTransformPreview.scaleX,
@@ -2525,9 +2558,11 @@ final class WorkspaceViewModel: ObservableObject {
         transformState.preview = nextPreview
         transformState.accumulatedOffset = nextPreview.translation
         setFreeTransformPreview(nextPreview)
+        relayIdeationOperation(.setTransformPreviewOffset(offset))
     }
 
     func commitSelectionTransform(at end: CanvasPoint) {
+        ideationBranchActivityHandler?()
         guard
             isTransformingSelection,
             transformState.dragStartPoint != nil
@@ -2547,14 +2582,17 @@ final class WorkspaceViewModel: ObservableObject {
             }
             applySelectionTransform(clearSelectionAfterApply: freeTransformUsesImplicitSelection)
         }
+        relayIdeationOperation(.commitSelectionTransform(end: end))
     }
 
     func applySelectionTransform() {
+        ideationBranchActivityHandler?()
         if workspace.toolSession.activeTool == .freeTransform {
             applySelectionTransform(clearSelectionAfterApply: true)
         } else {
             applySelectionTransform(clearSelectionAfterApply: true)
         }
+        relayIdeationOperation(.applySelectionTransform)
     }
 
     private func applySelectionTransform(clearSelectionAfterApply: Bool) {
@@ -2717,7 +2755,9 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func cancelSelectionTransform() {
+        ideationBranchActivityHandler?()
         cancelSelectionTransform(clearSelectionAfterCancel: false)
+        relayIdeationOperation(.cancelSelectionTransform)
     }
 
     private func cancelSelectionTransform(clearSelectionAfterCancel: Bool) {
@@ -3387,6 +3427,7 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func applyStroke(samples: [CanvasStrokeSample]) {
+        ideationBranchActivityHandler?()
         guard let strokePayload = bootstrap.interactionController.makeStrokeDescriptor(samples: samples) else {
             return
         }
@@ -3401,9 +3442,11 @@ final class WorkspaceViewModel: ObservableObject {
             strokePayload.stroke,
             to: strokePayload.layerID
         )
+        relayIdeationOperation(.applyStroke(samples))
     }
 
     func beginStrokeIfNeeded() {
+        ideationBranchActivityHandler?()
         checkpointHistoryIfPossible()
         guard let layerID = bootstrap.interactionController.activeEditableLayerID() else {
             return
@@ -3418,15 +3461,26 @@ final class WorkspaceViewModel: ObservableObject {
             toolSession: workspace.toolSession,
             layerID: layerID
         )
+        relayIdeationOperation(.beginStroke)
     }
 
     func endStroke() {
+        ideationBranchActivityHandler?()
         bootstrap.strokeEngine.endStroke()
         generatorStrokeSession = .init()
         noteCanvasContentChanged()
+        relayIdeationOperation(.endStroke)
     }
 
     func undo() {
+        ideationBranchActivityHandler?()
+        if ideationUndoHandler?() == true {
+            return
+        }
+        performUndoLocally()
+    }
+
+    private func performUndoLocally() {
         if resolveTransformSession(reason: .historyNavigation) {
             return
         }
@@ -3445,6 +3499,14 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func redo() {
+        ideationBranchActivityHandler?()
+        if ideationRedoHandler?() == true {
+            return
+        }
+        performRedoLocally()
+    }
+
+    private func performRedoLocally() {
         if resolveTransformSession(reason: .historyNavigation) {
             return
         }
@@ -3477,6 +3539,102 @@ final class WorkspaceViewModel: ObservableObject {
             showStatus(.init(kind: .success, message: "已导出 PNG：\(url.lastPathComponent)"))
         } catch {
             showStatus(.init(kind: .error, message: error.localizedDescription))
+        }
+    }
+
+    var ideationActiveBranchViewModel: WorkspaceViewModel? {
+        ideationSession?.activeBranchViewModel
+    }
+
+    func startIdeationSession() {
+        guard ideationSession == nil else {
+            showStatus(.init(kind: .info, message: "方案试探已开启"))
+            return
+        }
+
+        do {
+            suspendTimelapseForIdeationIfNeeded()
+            let snapshot = try bootstrap.historyController.captureCurrentEntry()
+            ideationSession = try IdeationSessionState(
+                hostViewModel: self,
+                sourceSnapshot: snapshot,
+                metalContext: bootstrap.metalContext
+            )
+            showStatus(.init(kind: .success, message: "已进入方案试探"))
+        } catch {
+            resumeTimelapseAfterIdeationIfNeeded()
+            showStatus(.init(kind: .error, message: error.localizedDescription))
+        }
+    }
+
+    func cancelIdeationSession() {
+        ideationSession = nil
+        resumeTimelapseAfterIdeationIfNeeded()
+        showStatus(.init(kind: .info, message: "已退出方案试探"))
+    }
+
+    func applySelectedIdeationVariantToMainCanvas() {
+        guard let ideationSession else { return }
+
+        do {
+            let snapshot = try ideationSession.activeBranchViewModel.makeVisibleCompositeSnapshot()
+            let slotIndex = ideationSession.selectedBranchIndex + 1
+            try appendCompositeSnapshotAsNewLayer(
+                snapshot,
+                named: "方案试探 \(slotIndex)"
+            )
+            self.ideationSession = nil
+            resumeTimelapseAfterIdeationIfNeeded(recordCurrentCanvas: true)
+            showStatus(.init(kind: .success, message: "已将方案 \(slotIndex) 应用于主画布"))
+        } catch {
+            showStatus(.init(kind: .error, message: error.localizedDescription))
+        }
+    }
+
+    func exportIdeationVariantsToDisk() {
+        guard let ideationSession else { return }
+        let defaultDirectoryName = "\(workspace.document.metadata.name)-方案试探"
+
+        guard let directoryURL = bootstrap.filePanelService.presentDirectorySelectionPanel(
+            title: "选择草图导出文件夹",
+            prompt: "导出"
+        ) else {
+            showStatus(.init(kind: .info, message: "已取消导出草图"))
+            return
+        }
+        let boxedExporter = WorkspaceUncheckedBox(bootstrap.pngExporter)
+
+        showStatus(.init(kind: .info, message: "正在导出 4 个草图..."))
+
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                var snapshots: [(index: Int, snapshot: LayerTextureSnapshot)] = []
+                snapshots.reserveCapacity(ideationSession.branches.count)
+
+                for (index, branch) in ideationSession.branches.enumerated() {
+                    let snapshot = try await MainActor.run {
+                        try branch.viewModel.makeVisibleCompositeSnapshot()
+                    }
+                    snapshots.append((index, snapshot))
+                    await Task.yield()
+                }
+
+                try await withThrowingTaskGroup(of: Void.self) { group in
+                    for entry in snapshots {
+                        let outputURL = directoryURL
+                            .appendingPathComponent("\(defaultDirectoryName)-\(entry.index + 1).png")
+                        group.addTask(priority: .userInitiated) {
+                            try boxedExporter.value.export(snapshot: entry.snapshot, to: outputURL)
+                        }
+                    }
+                    try await group.waitForAll()
+                }
+
+                self.showStatus(.init(kind: .success, message: "已导出 4 个草图"))
+            } catch {
+                self.showStatus(.init(kind: .error, message: error.localizedDescription))
+            }
         }
     }
 
@@ -3862,6 +4020,105 @@ final class WorkspaceViewModel: ObservableObject {
         }
     }
 
+    func showIdeationSyncError(_ error: Error) {
+        showStatus(.init(kind: .error, message: "方案同步失败：\(error.localizedDescription)"))
+    }
+
+    func applyIdeationOperation(_ operation: IdeationCanvasOperation) {
+        let savedActivityHandler = ideationBranchActivityHandler
+        ideationBranchActivityHandler = nil
+        isApplyingMirroredIdeationOperation = true
+        defer {
+            isApplyingMirroredIdeationOperation = false
+            ideationBranchActivityHandler = savedActivityHandler
+        }
+
+        switch operation {
+        case .beginStroke:
+            beginStrokeIfNeeded()
+        case .applyStroke(let samples):
+            applyStroke(samples: samples)
+        case .endStroke:
+            endStroke()
+        case .fillAtPoint(let point):
+            fillAtPoint(point)
+        case .handleCanvasToolClick(let point, let modifiers, let clickCount):
+            handleCanvasToolClick(at: point, modifiers: modifiers.eventFlags, clickCount: clickCount)
+        case .beginSelection(let kind, let start, let modifiers):
+            beginSelection(kind: kind, at: start, modifiers: modifiers.eventFlags)
+        case .updateSelection(let point, let modifiers):
+            updateSelection(to: point, modifiers: modifiers.eventFlags)
+        case .commitSelection(let end, let modifiers):
+            commitSelection(at: end, modifiers: modifiers.eventFlags)
+        case .moveSelectionPreview(let deltaX, let deltaY):
+            moveSelectionPreview(by: deltaX, deltaY: deltaY)
+        case .commitSelectionMove:
+            commitSelectionMove()
+        case .beginSelectionTransform(let start, let mode):
+            beginSelectionTransform(at: start, mode: mode)
+        case .updateSelectionTransform(let point):
+            updateSelectionTransform(to: point)
+        case .commitSelectionTransform(let end):
+            commitSelectionTransform(at: end)
+        case .setTransformPreviewOffset(let offset):
+            setTransformPreviewOffset(offset)
+        case .applySelectionTransform:
+            applySelectionTransform()
+        case .cancelSelectionTransform:
+            cancelSelectionTransform()
+        }
+    }
+
+    func makeIdeationEditingContext() -> IdeationEditingContext {
+        IdeationEditingContext(
+            toolSession: workspace.toolSession,
+            colorPanel: workspace.colorPanel,
+            brushLibrary: workspace.brushLibrary,
+            generator: workspace.generator
+        )
+    }
+
+    func applyIdeationEditingContext(_ context: IdeationEditingContext) {
+        bootstrap.workspaceStore.updateToolSession { $0 = context.toolSession }
+        bootstrap.workspaceStore.updateColorPanel { $0 = context.colorPanel }
+        bootstrap.workspaceStore.updateBrushLibrary { $0 = context.brushLibrary }
+        bootstrap.workspaceStore.updateGenerator { $0 = context.generator }
+        refreshLightweight()
+    }
+
+    private func relayIdeationOperation(_ operation: IdeationCanvasOperation) {
+        guard !isApplyingMirroredIdeationOperation else { return }
+        ideationOperationHandler?(operation)
+    }
+
+    private func suspendTimelapseForIdeationIfNeeded() {
+        shouldResumeTimelapseAfterIdeation = timelapseRecorder.isRecording
+        guard shouldResumeTimelapseAfterIdeation else { return }
+        timelapseRecorder.stopRecording()
+    }
+
+    private func resumeTimelapseAfterIdeationIfNeeded(recordCurrentCanvas: Bool = false) {
+        guard shouldResumeTimelapseAfterIdeation else { return }
+        shouldResumeTimelapseAfterIdeation = false
+
+        syncTimelapseDocumentContext()
+        do {
+            _ = try timelapseRecorder.startRecording(
+                documentName: workspace.document.metadata.name,
+                documentFileURL: currentProjectURL
+            )
+            if recordCurrentCanvas {
+                timelapseRecorder.noteCanvasChanged(
+                    revision: documentChangeRevision,
+                    documentName: workspace.document.metadata.name,
+                    documentFileURL: currentProjectURL
+                )
+            }
+        } catch {
+            showStatus(.init(kind: .error, message: "恢复录像失败：\(error.localizedDescription)"))
+        }
+    }
+
     private static func normalizeLegacySelectionIfNeeded(in workspaceStore: WorkspaceStore) {
         let selection = workspaceStore.state.selection
         let hasLegacyCommittedSelection = selection.committedShape?.kind == .composite
@@ -3888,12 +4145,87 @@ final class WorkspaceViewModel: ObservableObject {
 
     private func noteCanvasContentChanged() {
         documentChangeRevision &+= 1
+        canvasContentRevision = documentChangeRevision
         syncTimelapseDocumentContext()
         timelapseRecorder.noteCanvasChanged(
             revision: documentChangeRevision,
             documentName: workspace.document.metadata.name,
             documentFileURL: currentProjectURL
         )
+    }
+
+    func captureWorkspaceSnapshot() throws -> WorkspaceHistoryEntry {
+        try bootstrap.historyController.captureCurrentEntry()
+    }
+
+    func restoreWorkspaceSnapshot(_ entry: WorkspaceHistoryEntry) throws {
+        try bootstrap.historyController.restoreExact(entry: entry)
+        refresh()
+    }
+
+    func makeVisibleCompositeSnapshot() throws -> LayerTextureSnapshot {
+        let visibleLayers = workspace.document.layers.filter(\.isVisible)
+        guard let firstLayer = visibleLayers.first,
+              let firstSurfaceID = bootstrap.layerSurfaceStore.surfaceID(for: firstLayer.id),
+              let firstTexture = bootstrap.layerSurfaceStore.texture(for: firstSurfaceID)
+        else {
+            throw CocoaError(.fileReadCorruptFile)
+        }
+
+        let textureEntries: [(texture: MTLTexture, opacity: Float, isVisible: Bool)] = visibleLayers.compactMap { layer in
+            guard
+                let surfaceID = bootstrap.layerSurfaceStore.surfaceID(for: layer.id),
+                let texture = bootstrap.layerSurfaceStore.texture(for: surfaceID)
+            else {
+                return nil
+            }
+
+            return (texture: texture, opacity: layer.opacity, isVisible: layer.isVisible)
+        }
+
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: firstTexture.pixelFormat,
+            width: firstTexture.width,
+            height: firstTexture.height,
+            mipmapped: false
+        )
+        descriptor.usage = [.shaderRead, .shaderWrite, .renderTarget]
+        descriptor.storageMode = .private
+
+        guard let targetTexture = bootstrap.metalContext.device.makeTexture(descriptor: descriptor) else {
+            throw CocoaError(.fileWriteUnknown)
+        }
+
+        try bootstrap.layerMergeController.mergeVisible(
+            layers: textureEntries,
+            into: targetTexture
+        )
+
+        return try bootstrap.textureSerializer.snapshot(texture: targetTexture)
+    }
+
+    func appendCompositeSnapshotAsNewLayer(
+        _ snapshot: LayerTextureSnapshot,
+        named layerName: String
+    ) throws {
+        checkpointHistoryIfPossible()
+        var createdLayerID: LayerID?
+        bootstrap.workspaceStore.updateDocument { document in
+            createdLayerID = document.addLayer(named: layerName).id
+        }
+        refresh()
+
+        guard
+            let createdLayerID,
+            let surfaceID = bootstrap.layerSurfaceStore.surfaceID(for: createdLayerID),
+            let texture = bootstrap.layerSurfaceStore.texture(for: surfaceID)
+        else {
+            throw CocoaError(.fileWriteUnknown)
+        }
+
+        try bootstrap.textureSerializer.restore(snapshot: snapshot, into: texture)
+        refresh()
+        noteCanvasContentChanged()
     }
 
     private func syncTimelapseDocumentContext() {
