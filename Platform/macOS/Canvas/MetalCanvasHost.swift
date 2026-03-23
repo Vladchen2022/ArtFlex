@@ -9,6 +9,7 @@ private func emitSelectionTraceHost(_ message: String) {
 
 struct MetalCanvasHost: NSViewRepresentable {
     let sceneSnapshot: CanvasSceneSnapshot
+    let transformSelectionShape: SelectionShape?
     let metalContext: MetalDeviceContext
     let layerSurfaceStore: StageOneLayerSurfaceStore
     let activeTool: ToolKind
@@ -49,6 +50,7 @@ struct MetalCanvasHost: NSViewRepresentable {
             metalContext: metalContext,
             layerSurfaceStore: layerSurfaceStore,
             activeTool: activeTool,
+            transformSelectionShape: transformSelectionShape,
             transformPreview: transformPreview,
             onCanvasRotationChanged: onCanvasRotationChanged,
             onStrokeBegan: onStrokeBegan,
@@ -106,6 +108,7 @@ struct MetalCanvasHost: NSViewRepresentable {
         let previousIsTransforming = context.coordinator.isTransformingSelection
         let previousTransformPreview = context.coordinator.transformPreview
         context.coordinator.sceneSnapshot = sceneSnapshot
+        context.coordinator.transformSelectionShape = transformSelectionShape
         context.coordinator.activeTool = activeTool
         context.coordinator.isTransformingSelection = isTransformingSelection
         context.coordinator.transformPreview = transformPreview
@@ -128,19 +131,22 @@ struct MetalCanvasHost: NSViewRepresentable {
             view.brushSize = brushSize
             view.transformPreviewDelegate = context.coordinator
 
-            // freeTransform 종료 시 연속 렌더링 중지
             if wasTransforming && !isTransformingSelection {
                 view.isPaused = true
                 view.enableSetNeedsDisplay = true
             }
-            // freeTransform 시작 시 연속 렌더링 시작
-            if !wasTransforming && isTransformingSelection && activeTool == .freeTransform {
-                view.enableSetNeedsDisplay = false
-                view.isPaused = false
-            }
+
+            let previousCanvasContentRevision = previousSnapshot?.renderSnapshot.canvasContentRevision
+            let previousViewportRevision = previousSnapshot?.renderSnapshot.viewportRevision
+            let previousSelectionRevision = previousSnapshot?.selectionRevision
+            let previousSelectionShape = previousSnapshot?.selectionShape
 
             let requiresCanvasRedraw =
-                previousSnapshot != sceneSnapshot ||
+                previousCanvasContentRevision != sceneSnapshot.renderSnapshot.canvasContentRevision ||
+                previousViewportRevision != sceneSnapshot.renderSnapshot.viewportRevision ||
+                previousSelectionRevision != sceneSnapshot.selectionRevision ||
+                previousSelectionShape?.kind != sceneSnapshot.selectionShape?.kind ||
+                previousSelectionShape?.bounds != sceneSnapshot.selectionShape?.bounds ||
                 previousActiveTool != activeTool ||
                 previousIsTransforming != isTransformingSelection ||
                 previousTransformPreview != transformPreview ||
@@ -585,6 +591,7 @@ final class StrokeCaptureMTKView: MTKView {
             strokeDelegate?.strokeCaptureView(self, didEndTransformAt: sample(from: event).location)
             // mouseUp: ViewModel에 현재 offset 동기화 (SwiftUI overlay 업데이트)
             strokeDelegate?.strokeCaptureViewDidSyncTransformOffset(self)
+            endContinuousTransformRendering()
             lastSample = nil
             lastPressure = nil
             return
@@ -622,6 +629,7 @@ final class StrokeCaptureMTKView: MTKView {
 
         // Enter：提交 freeTransform
         if (event.keyCode == 36 || event.keyCode == 76) && activeTool == .freeTransform {
+            endContinuousTransformRendering()
             strokeDelegate?.strokeCaptureViewDidRequestApplyTransform(self)
             return
         }
@@ -629,6 +637,7 @@ final class StrokeCaptureMTKView: MTKView {
         // ESC：取消 freeTransform 或其他工具
         if event.keyCode == 53 {
             if activeTool == .freeTransform {
+                endContinuousTransformRendering()
                 strokeDelegate?.strokeCaptureViewDidRequestCancelTransform(self)
                 return
             }
@@ -1139,16 +1148,12 @@ final class StrokeCaptureMTKView: MTKView {
 }
 
 final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDelegate {
-    fileprivate struct PreparedTransformSignature: Equatable {
-        let activeLayerSurfaceID: LayerSurfaceID
-        let selectionShape: SelectionShape
-    }
-
     private let metalContext: MetalDeviceContext
     private let layerSurfaceStore: StageOneLayerSurfaceStore
     private let canvasPresenter: StageOneCanvasPresenter
+    private let transformPreviewBuilder: TransformPreviewSessionBuilder
     var activeTool: ToolKind
-    private let transformPreviewBuilder = TransformPreviewSessionBuilder()
+    var transformSelectionShape: SelectionShape?
     private let onStrokeBegan: () -> Void
     private let onStrokeInput: ([CanvasStrokeSample]) -> Void
     private let onStrokeEnded: () -> Void
@@ -1179,7 +1184,7 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
     var isTransformingSelection = false
     fileprivate var transformPreviewSession: TransformPreviewSession?
     fileprivate var preparedTransformSession: TransformPreviewSession?
-    fileprivate var preparedTransformSignature: PreparedTransformSignature?
+    fileprivate var preparedTransformSignature: TransformPreviewPreparedSignature?
     fileprivate var transformPreviewStartPoint: CanvasPoint?
     fileprivate var transformPreviewDragBaseOffset = CanvasPoint(x: 0, y: 0)
     fileprivate var isPrepBuildingSession = false
@@ -1189,11 +1194,14 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
     fileprivate var freeTransformDragBase = CanvasPoint(x: 0, y: 0)
     var transformPreview = FreeTransformPreview.identity
     private let selectionTraceLogger = Logger(subsystem: "ArtFlex", category: "SelectionTrace")
+    private let transformLogger = Logger(subsystem: "ArtFlex", category: "Transform")
+    private var previewTimingFrameCounter = 0
 
     init(
         metalContext: MetalDeviceContext,
         layerSurfaceStore: StageOneLayerSurfaceStore,
         activeTool: ToolKind,
+        transformSelectionShape: SelectionShape?,
         transformPreview: FreeTransformPreview,
         onCanvasRotationChanged: @escaping (Double) -> Void,
         onStrokeBegan: @escaping () -> Void,
@@ -1224,7 +1232,9 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
         self.metalContext = metalContext
         self.layerSurfaceStore = layerSurfaceStore
         self.canvasPresenter = StageOneCanvasPresenter(device: metalContext.device)
+        self.transformPreviewBuilder = TransformPreviewSessionBuilder(device: metalContext.device)
         self.activeTool = activeTool
+        self.transformSelectionShape = transformSelectionShape
         self.transformPreview = transformPreview
         self.onCanvasRotationChanged = onCanvasRotationChanged
         self.onStrokeBegan = onStrokeBegan
@@ -1275,6 +1285,11 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
             let activeLayerSurfaceID = snapshot.activeLayerSurfaceID
             let hasActivePreview = isTransforming
 
+            let activeLayerOpacity = activeLayerSurfaceID.flatMap { surfaceID in
+                snapshot.layerSurfaces.first(where: { $0.surfaceID == surfaceID })?.opacity
+            } ?? 1
+            let previewEncodeStart = DispatchTime.now().uptimeNanoseconds
+
             let orderedVisibleLayers = snapshot.layerSurfaces.compactMap { surface -> (MTLTexture, Float)? in
                 guard surface.isVisible, let texture = layerSurfaceStore.texture(for: surface.surfaceID) else {
                     return nil
@@ -1282,14 +1297,11 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
 
                 if hasActivePreview, surface.surfaceID == activeLayerSurfaceID {
                     if let session = transformPreviewSession {
-                        if let workingTexture = session.workingTexture {
-                            // 选区变形：先画挖空后的底图，再单独叠加 preview
-                            return (workingTexture, surface.opacity)
+                        if session.mode == .selection, let baseTexture = session.baseTexture {
+                            return (baseTexture, surface.opacity)
                         }
-                        // 整层移动：由 encodePreview 单独绘制 preview
                         return nil
                     }
-                    // preview session 还没准备好时，继续显示原图层，避免首帧同步构建造成卡顿/闪空。
                     return (texture, surface.opacity)
                 }
                 return (texture, surface.opacity)
@@ -1307,15 +1319,15 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
 
                 if let session = transformPreviewSession {
                     canvasPresenter.encodePreview(
-                        texture: session.previewTexture,
-                        opacity: 1,
+                        texture: session.extractedTexture,
+                        opacity: activeLayerOpacity,
                         canvasSize: canvasSize,
-                        bounds: session.previewBounds,
+                        bounds: session.sourceBounds,
                         preview: transformPreview,
                         into: descriptor,
                         commandBuffer: commandBuffer
                     )
-                } else if snapshot.selectionShape == nil,
+                } else if transformSelectionShape == nil,
                           let texture = layerSurfaceStore.texture(for: surfaceID) {
                     let fullBounds = CanvasRect(
                         origin: .init(x: 0, y: 0),
@@ -1323,7 +1335,7 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
                     )
                     canvasPresenter.encodePreview(
                         texture: texture,
-                        opacity: snapshot.layerSurfaces.first(where: { $0.surfaceID == surfaceID })?.opacity ?? 1,
+                        opacity: activeLayerOpacity,
                         canvasSize: canvasSize,
                         bounds: fullBounds,
                         preview: transformPreview,
@@ -1331,19 +1343,18 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
                         commandBuffer: commandBuffer
                     )
                 }
-            } else if let previewSession = transformPreviewSession, !isTransforming {
-                // 기존 non-freeTransform 도구의 transform
-                descriptor.colorAttachments[0].loadAction = .load
-                descriptor.colorAttachments[0].storeAction = .store
-                canvasPresenter.encodePreview(
-                    texture: previewSession.previewTexture,
-                    opacity: 1,
-                    canvasSize: canvasSize,
-                    bounds: previewSession.previewBounds,
-                    preview: transformPreview,
-                    into: descriptor,
-                    commandBuffer: commandBuffer
-                )
+            }
+
+            if hasActivePreview {
+                previewTimingFrameCounter &+= 1
+                if previewTimingFrameCounter % 15 == 0 {
+                    let previewEncodeDurationMs = Double(DispatchTime.now().uptimeNanoseconds - previewEncodeStart) / 1_000_000
+                    transformLogger.debug(
+                        "[preview] encodeMs=\(previewEncodeDurationMs, privacy: .public) mode=\(String(describing: self.transformPreviewSession?.mode), privacy: .public)"
+                    )
+                }
+            } else {
+                previewTimingFrameCounter = 0
             }
         } else if let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: descriptor) {
             encoder.endEncoding()
@@ -1509,43 +1520,19 @@ extension MetalCanvasCoordinator: TransformPreviewDelegate {
     }
 
     func strokeCaptureView(_ view: StrokeCaptureMTKView, shouldBeginTransformAt point: CanvasPoint) -> Bool {
-        // 이미 활성 세션이 있는 경우: 연속 드래그
         if transformPreviewSession != nil {
             transformPreviewStartPoint = point
             return true
         }
 
-        // preparedSession 已准备好：直接进入拖动
-        if let prepared = preparedTransformSession {
+        if let prepared = preparedTransformSession,
+           preparedTransformSignature == currentPreparedTransformSignature() {
             transformPreviewSession = prepared
             transformPreviewStartPoint = point
             return true
         }
 
-        guard
-            let snapshot = sceneSnapshot,
-            let activeLayerSurfaceID = snapshot.activeLayerSurfaceID
-        else {
-            return false
-        }
-
-        let canvasSize = snapshot.renderSnapshot.document.canvasSize
-        let effectiveSelection: SelectionShape = snapshot.selectionShape ?? SelectionShape(
-            kind: .rectangle,
-            bounds: CanvasRect(
-                origin: .init(x: 0, y: 0),
-                size: .init(x: Double(canvasSize.width), y: Double(canvasSize.height))
-            ),
-            pathPoints: []
-        )
-
-        let signature = PreparedTransformSignature(
-            activeLayerSurfaceID: activeLayerSurfaceID,
-            selectionShape: effectiveSelection
-        )
-
-        // 不再在主线程同步 makeSession。让后台预热继续进行，本次拖动先记录起点即可。
-        if preparedTransformSignature != signature {
+        if preparedTransformSignature != currentPreparedTransformSignature() {
             preparedTransformSession = nil
             preparedTransformSignature = nil
         }
@@ -1581,9 +1568,8 @@ extension MetalCanvasCoordinator: TransformPreviewDelegate {
             return
         }
 
-        if transformPreviewSession != nil { return }
-
         guard activeTool == .freeTransform else {
+            transformPreviewSession = nil
             preparedTransformSession = nil
             preparedTransformSignature = nil
             return
@@ -1591,57 +1577,85 @@ extension MetalCanvasCoordinator: TransformPreviewDelegate {
 
         guard
             let snapshot = sceneSnapshot,
-            let activeLayerSurfaceID = snapshot.activeLayerSurfaceID
+            let activeLayerSurfaceID = snapshot.activeLayerSurfaceID,
+            let sourceTexture = layerSurfaceStore.texture(for: activeLayerSurfaceID)
         else {
+            transformPreviewSession = nil
             preparedTransformSession = nil
             preparedTransformSignature = nil
             return
         }
 
-        let canvasSize = snapshot.renderSnapshot.document.canvasSize
-        let effectiveSelection: SelectionShape = snapshot.selectionShape ?? SelectionShape(
-            kind: .rectangle,
-            bounds: CanvasRect(
-                origin: .init(x: 0, y: 0),
-                size: .init(x: Double(canvasSize.width), y: Double(canvasSize.height))
-            ),
-            pathPoints: []
-        )
+        guard let signature = currentPreparedTransformSignature() else {
+            transformPreviewSession = nil
+            preparedTransformSession = nil
+            preparedTransformSignature = nil
+            return
+        }
 
-        let signature = PreparedTransformSignature(
-            activeLayerSurfaceID: activeLayerSurfaceID,
-            selectionShape: effectiveSelection
-        )
+        if transformPreviewSession?.preparedSignature != signature {
+            transformPreviewSession = nil
+        }
 
+        if transformPreviewSession?.preparedSignature == signature {
+            preparedTransformSession = transformPreviewSession
+            preparedTransformSignature = signature
+            return
+        }
         if preparedTransformSignature == signature, preparedTransformSession != nil { return }
         if isPrepBuildingSession { return }
 
         isPrepBuildingSession = true
-        let capturedSnapshot = snapshot
-        let capturedSurfaceStore = UncheckedBox(layerSurfaceStore)
-        let capturedMetal = UncheckedBox(metalContext)
-        let capturedBuilder = UncheckedBox(transformPreviewBuilder)
+        let selectionShape = transformSelectionShape
+        let canvasSize = snapshot.renderSnapshot.document.canvasSize
+        let buildStart = DispatchTime.now().uptimeNanoseconds
 
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let session = try? capturedBuilder.value.makeSession(
-                sceneSnapshot: capturedSnapshot,
-                layerSurfaceStore: capturedSurfaceStore.value,
-                metal: capturedMetal.value,
-                selectionShape: effectiveSelection
+        transformPreviewBuilder.makeSession(
+            activeLayerSurfaceID: activeLayerSurfaceID,
+            sourceTexture: sourceTexture,
+            canvasSize: canvasSize,
+            selectionShape: selectionShape,
+            selectionRevision: snapshot.selectionRevision,
+            canvasContentRevision: snapshot.renderSnapshot.canvasContentRevision,
+            metal: metalContext
+        ) { [weak self] session in
+            guard let self else { return }
+            let buildDurationMs = Double(DispatchTime.now().uptimeNanoseconds - buildStart) / 1_000_000
+            self.transformLogger.debug(
+                "[session] buildMs=\(buildDurationMs, privacy: .public) success=\(session != nil, privacy: .public)"
             )
-            DispatchQueue.main.async {
-                guard let self, self.isTransformingSelection else { return }
+            guard self.isTransformingSelection, self.activeTool == .freeTransform else {
                 self.isPrepBuildingSession = false
-                self.preparedTransformSession = session
-                self.preparedTransformSignature = session == nil ? nil : signature
+                return
+            }
+            self.isPrepBuildingSession = false
+            self.preparedTransformSession = session
+            self.preparedTransformSignature = session?.preparedSignature
+            if self.transformPreviewSession == nil {
+                self.transformPreviewSession = session
             }
         }
     }
 
-}
+    private func currentPreparedTransformSignature() -> TransformPreviewPreparedSignature? {
+        guard
+            let snapshot = sceneSnapshot,
+            let activeLayerSurfaceID = snapshot.activeLayerSurfaceID,
+            let plan = TransformPreviewSessionBuilder.plan(
+                canvasSize: snapshot.renderSnapshot.document.canvasSize,
+                selectionShape: transformSelectionShape
+            )
+        else {
+            return nil
+        }
 
-/// non-Sendable 타입을 DispatchQueue 클로저에서 캡처하기 위한 래퍼
-private final class UncheckedBox<T>: @unchecked Sendable {
-    let value: T
-    init(_ value: T) { self.value = value }
+        return TransformPreviewPreparedSignature(
+            activeLayerSurfaceID: activeLayerSurfaceID,
+            mode: plan.mode,
+            canvasContentRevision: snapshot.renderSnapshot.canvasContentRevision,
+            selectionRevision: snapshot.selectionRevision,
+            sourceBounds: plan.sourceBounds
+        )
+    }
+
 }

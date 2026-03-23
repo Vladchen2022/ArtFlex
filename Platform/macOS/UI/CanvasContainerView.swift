@@ -34,6 +34,7 @@ struct CanvasContainerView: View {
 
                     MetalCanvasHost(
                         sceneSnapshot: viewModel.sceneSnapshot,
+                        transformSelectionShape: viewModel.effectiveTransformSelectionShape,
                         metalContext: viewModel.metalContext,
                         layerSurfaceStore: viewModel.layerSurfaceStore,
                         activeTool: viewModel.workspace.toolSession.activeTool,

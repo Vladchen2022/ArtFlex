@@ -22,4 +22,5 @@ struct CanvasSceneSnapshot: Sendable, Equatable {
     var layerSurfaces: [LayerSurfaceRecord]
     var activeLayerSurfaceID: LayerSurfaceID?
     var selectionShape: SelectionShape?
+    var selectionRevision: UInt64 = 0
 }

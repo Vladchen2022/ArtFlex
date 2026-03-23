@@ -67,6 +67,13 @@ final class StageOneLayerSurfaceStore {
         texturesBySurfaceID[surfaceID]
     }
 
+    func swapTexture(
+        for surfaceID: LayerSurfaceID,
+        with texture: MTLTexture
+    ) {
+        texturesBySurfaceID[surfaceID] = texture
+    }
+
     func surfaceID(for layerID: LayerID) -> LayerSurfaceID? {
         surfacesByLayerID[layerID]?.surfaceID
     }
@@ -134,20 +141,34 @@ final class StageOneLayerSurfaceStore {
         texturesBySurfaceID.removeAll()
     }
 
+    func makeTexture(
+        width: Int,
+        height: Int,
+        pixelFormat: MTLPixelFormat = .bgra8Unorm_srgb,
+        usage: MTLTextureUsage = [.shaderRead, .shaderWrite, .renderTarget],
+        storageMode: MTLStorageMode = .private,
+        metal: MetalDeviceContext
+    ) -> MTLTexture? {
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: pixelFormat,
+            width: width,
+            height: height,
+            mipmapped: false
+        )
+        descriptor.usage = usage
+        descriptor.storageMode = storageMode
+        return metal.device.makeTexture(descriptor: descriptor)
+    }
+
     private func makeTexture(
         for record: LayerSurfaceRecord,
         metal: MetalDeviceContext
     ) -> MTLTexture? {
-        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: .bgra8Unorm_srgb,
+        makeTexture(
             width: record.descriptor.width,
             height: record.descriptor.height,
-            mipmapped: false
+            metal: metal
         )
-        descriptor.usage = [.shaderRead, .shaderWrite, .renderTarget]
-        descriptor.storageMode = .private
-
-        return metal.device.makeTexture(descriptor: descriptor)
     }
 
     private func clearTexture(

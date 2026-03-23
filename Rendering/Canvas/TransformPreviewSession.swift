@@ -1,210 +1,279 @@
 import Foundation
 import Metal
 
+private final class TransformPreviewSessionBox: @unchecked Sendable {
+    let value: TransformPreviewSession?
+
+    init(_ value: TransformPreviewSession?) {
+        self.value = value
+    }
+}
+
+private final class TransformMaskTextureBox: @unchecked Sendable {
+    let texture: MTLTexture?
+
+    init(_ texture: MTLTexture?) {
+        self.texture = texture
+    }
+}
+
+enum TransformPreviewMode: Sendable, Equatable {
+    case wholeLayer
+    case selection
+}
+
+struct TransformPreviewPreparedSignature: Sendable, Equatable {
+    let activeLayerSurfaceID: LayerSurfaceID
+    let mode: TransformPreviewMode
+    let canvasContentRevision: UInt64
+    let selectionRevision: UInt64
+    let sourceBounds: CanvasRect
+}
+
 struct TransformPreviewSession {
     let activeLayerSurfaceID: LayerSurfaceID
-    let workingTexture: MTLTexture?
-    let previewTexture: MTLTexture
-    let selectionShape: SelectionShape
-    let previewBounds: CanvasRect
-    var offset: CanvasPoint
+    let mode: TransformPreviewMode
+    let sourceBounds: CanvasRect
+    let baseTexture: MTLTexture?
+    let extractedTexture: MTLTexture
+    let maskTexture: MTLTexture?
+    let preparedSignature: TransformPreviewPreparedSignature
+    let revision: UInt64
+}
+
+struct TransformPreviewPlan: Sendable, Equatable {
+    let mode: TransformPreviewMode
+    let sourceBounds: CanvasRect
+    let needsMaskTexture: Bool
 }
 
 final class TransformPreviewSessionBuilder {
-    private let serializer: LayerTextureSerializer
+    private let compositor: TransformGPUCompositor
 
-    init(serializer: LayerTextureSerializer = LayerTextureSerializer()) {
-        self.serializer = serializer
+    init(device: MTLDevice) {
+        self.compositor = TransformGPUCompositor(device: device)
     }
 
     func makeSession(
-        sceneSnapshot: CanvasSceneSnapshot,
-        layerSurfaceStore: StageOneLayerSurfaceStore,
+        activeLayerSurfaceID: LayerSurfaceID,
+        sourceTexture: MTLTexture,
+        canvasSize: CanvasSize,
+        selectionShape: SelectionShape?,
+        selectionRevision: UInt64,
+        canvasContentRevision: UInt64,
         metal: MetalDeviceContext,
-        selectionShape: SelectionShape
-    ) throws -> TransformPreviewSession? {
-        guard
-            let activeLayerSurfaceID = sceneSnapshot.activeLayerSurfaceID,
-            let activeTexture = layerSurfaceStore.texture(for: activeLayerSurfaceID)
-        else {
-            return nil
-        }
-
-        let clampedSelection = selectionShape.clamped(
-            to: CanvasSize(width: activeTexture.width, height: activeTexture.height)
-        )
-        guard !clampedSelection.isEmpty else {
-            return nil
-        }
-
-        let minX = max(Int(clampedSelection.bounds.minX.rounded(.down)), 0)
-        let minY = max(Int(clampedSelection.bounds.minY.rounded(.down)), 0)
-        let maxX = min(Int(clampedSelection.bounds.maxX.rounded(.up)), activeTexture.width)
-        let maxY = min(Int(clampedSelection.bounds.maxY.rounded(.up)), activeTexture.height)
-        guard minX < maxX, minY < maxY else {
-            return nil
-        }
-
-        let isWholeLayerMove =
-            clampedSelection.kind == .rectangle &&
-            minX == 0 &&
-            minY == 0 &&
-            maxX == activeTexture.width &&
-            maxY == activeTexture.height
-
-        if isWholeLayerMove {
-            return TransformPreviewSession(
-                activeLayerSurfaceID: activeLayerSurfaceID,
-                workingTexture: nil,
-                previewTexture: activeTexture,
-                selectionShape: clampedSelection,
-                previewBounds: CanvasRect(
-                    origin: .init(x: 0, y: 0),
-                    size: .init(x: Double(activeTexture.width), y: Double(activeTexture.height))
-                ),
-                offset: .init(x: 0, y: 0)
-            )
-        }
-
-        let bytesPerPixel = 4
-        let canvasWidth = activeTexture.width
-        let canvasHeight = activeTexture.height
-        let previewWidth = maxX - minX
-        let previewHeight = maxY - minY
-        let previewBytesPerRow = previewWidth * bytesPerPixel
-        let selectionSnapshot = try serializer.snapshot(
-            texture: activeTexture,
-            originX: minX,
-            originY: minY,
-            width: previewWidth,
-            height: previewHeight
-        )
-        let sourceBytes = [UInt8](selectionSnapshot.pixelData)
-        var workingRegionBytes = sourceBytes
-        var previewBytes = [UInt8](repeating: 0, count: previewBytesPerRow * previewHeight)
-
-        if clampedSelection.kind == .rectangle {
-            previewBytes = sourceBytes
-            for index in stride(from: 0, to: workingRegionBytes.count, by: bytesPerPixel) {
-                workingRegionBytes[index] = 0
-                workingRegionBytes[index + 1] = 0
-                workingRegionBytes[index + 2] = 0
-                workingRegionBytes[index + 3] = 0
+        completion: @escaping @MainActor (TransformPreviewSession?) -> Void
+    ) {
+        guard let plan = Self.plan(
+            canvasSize: canvasSize,
+            selectionShape: selectionShape
+        ) else {
+            Task { @MainActor in
+                completion(nil)
             }
-        } else if clampedSelection.kind == .mask, let maskData = clampedSelection.maskData {
-            let maskBytes = [UInt8](maskData.alphaBytes)
-            for localY in 0..<previewHeight {
-                for localX in 0..<previewWidth {
-                    let x = minX + localX
-                    let y = minY + localY
-                    let maskIndex = (y * maskData.canvasWidth) + x
-                    guard maskBytes.indices.contains(maskIndex), maskBytes[maskIndex] > 0 else { continue }
-
-                    let sourceIndex = (localY * selectionSnapshot.bytesPerRow) + (localX * bytesPerPixel)
-                    let previewIndex = (localY * previewBytesPerRow) + (localX * bytesPerPixel)
-
-                    previewBytes[previewIndex] = sourceBytes[sourceIndex]
-                    previewBytes[previewIndex + 1] = sourceBytes[sourceIndex + 1]
-                    previewBytes[previewIndex + 2] = sourceBytes[sourceIndex + 2]
-                    previewBytes[previewIndex + 3] = sourceBytes[sourceIndex + 3]
-
-                    workingRegionBytes[sourceIndex] = 0
-                    workingRegionBytes[sourceIndex + 1] = 0
-                    workingRegionBytes[sourceIndex + 2] = 0
-                    workingRegionBytes[sourceIndex + 3] = 0
-                }
-            }
-        } else {
-            for localY in 0..<previewHeight {
-                for localX in 0..<previewWidth {
-                    let x = minX + localX
-                    let y = minY + localY
-                    let point = CanvasPoint(x: Double(x) + 0.5, y: Double(y) + 0.5)
-                    guard clampedSelection.contains(point) else { continue }
-
-                    let sourceIndex = (localY * selectionSnapshot.bytesPerRow) + (localX * bytesPerPixel)
-                    let previewIndex = (localY * previewBytesPerRow) + (localX * bytesPerPixel)
-
-                    previewBytes[previewIndex] = sourceBytes[sourceIndex]
-                    previewBytes[previewIndex + 1] = sourceBytes[sourceIndex + 1]
-                    previewBytes[previewIndex + 2] = sourceBytes[sourceIndex + 2]
-                    previewBytes[previewIndex + 3] = sourceBytes[sourceIndex + 3]
-
-                    workingRegionBytes[sourceIndex] = 0
-                    workingRegionBytes[sourceIndex + 1] = 0
-                    workingRegionBytes[sourceIndex + 2] = 0
-                    workingRegionBytes[sourceIndex + 3] = 0
-                }
-            }
+            return
         }
 
-        guard
-            let workingTexture = makeTexture(
-                width: canvasWidth,
-                height: canvasHeight,
-                metal: metal
-            ),
-            let previewTexture = makeTexture(
-                width: previewWidth,
-                height: previewHeight,
-                metal: metal
-            )
-        else {
-            return nil
-        }
-
-        layerSurfaceStore.copyTexture(
-            from: activeTexture,
-            to: workingTexture,
-            metal: metal
-        )
-        try serializer.restore(
-            snapshot: LayerTextureSnapshot(
-                width: previewWidth,
-                height: previewHeight,
-                bytesPerRow: selectionSnapshot.bytesPerRow,
-                pixelData: Data(workingRegionBytes)
-            ),
-            into: workingTexture,
-            destinationX: minX,
-            destinationY: minY
-        )
-        try serializer.restore(
-            snapshot: LayerTextureSnapshot(
-                width: previewWidth,
-                height: previewHeight,
-                bytesPerRow: previewBytesPerRow,
-                pixelData: Data(previewBytes)
-            ),
-            into: previewTexture
-        )
-
-        return TransformPreviewSession(
+        let signature = TransformPreviewPreparedSignature(
             activeLayerSurfaceID: activeLayerSurfaceID,
-            workingTexture: workingTexture,
-            previewTexture: previewTexture,
-            selectionShape: clampedSelection,
-            previewBounds: CanvasRect(
-                origin: CanvasPoint(x: Double(minX), y: Double(minY)),
-                size: CanvasPoint(x: Double(previewWidth), y: Double(previewHeight))
-            ),
-            offset: .init(x: 0, y: 0)
+            mode: plan.mode,
+            canvasContentRevision: canvasContentRevision,
+            selectionRevision: selectionRevision,
+            sourceBounds: plan.sourceBounds
+        )
+
+        if plan.mode == .wholeLayer {
+            let session = TransformPreviewSession(
+                activeLayerSurfaceID: activeLayerSurfaceID,
+                mode: .wholeLayer,
+                sourceBounds: plan.sourceBounds,
+                baseTexture: nil,
+                extractedTexture: sourceTexture,
+                maskTexture: nil,
+                preparedSignature: signature,
+                revision: canvasContentRevision
+            )
+            let boxedSession = TransformPreviewSessionBox(session)
+            Task { @MainActor in
+                completion(boxedSession.value)
+            }
+            return
+        }
+
+        let maskTexture = Self.makeMaskTexture(
+            selectionShape: selectionShape,
+            sourceBounds: plan.sourceBounds,
+            device: metal.device
+        )
+        let boxedMaskTexture = TransformMaskTextureBox(maskTexture)
+
+        compositor.buildSelectionTextures(
+            sourceTexture: sourceTexture,
+            canvasSize: canvasSize,
+            sourceBounds: plan.sourceBounds,
+            maskTexture: boxedMaskTexture.texture,
+            metal: metal
+        ) { baseTexture, extractedTexture in
+            guard let extractedTexture else {
+                completion(nil)
+                return
+            }
+
+            let session = TransformPreviewSession(
+                activeLayerSurfaceID: activeLayerSurfaceID,
+                mode: .selection,
+                sourceBounds: plan.sourceBounds,
+                baseTexture: baseTexture,
+                extractedTexture: extractedTexture,
+                maskTexture: boxedMaskTexture.texture,
+                preparedSignature: signature,
+                revision: canvasContentRevision
+            )
+            let boxedSession = TransformPreviewSessionBox(session)
+            Task { @MainActor in
+                completion(boxedSession.value)
+            }
+        }
+    }
+
+    static func plan(
+        canvasSize: CanvasSize,
+        selectionShape: SelectionShape?
+    ) -> TransformPreviewPlan? {
+        let fullBounds = fullCanvasBounds(canvasSize: canvasSize)
+        guard let selectionShape else {
+            return TransformPreviewPlan(
+                mode: .wholeLayer,
+                sourceBounds: fullBounds,
+                needsMaskTexture: false
+            )
+        }
+
+        let clamped = selectionShape.clamped(to: canvasSize)
+        guard !clamped.isEmpty else {
+            return nil
+        }
+
+        let bounds = clamped.bounds.clamped(to: canvasSize).pixelAligned()
+        guard !bounds.isEmpty else {
+            return nil
+        }
+
+        let isWholeLayerRect =
+            clamped.kind == .rectangle &&
+            bounds.minX <= 0 &&
+            bounds.minY <= 0 &&
+            Int(bounds.maxX.rounded(.up)) >= canvasSize.width &&
+            Int(bounds.maxY.rounded(.up)) >= canvasSize.height
+
+        return TransformPreviewPlan(
+            mode: isWholeLayerRect ? .wholeLayer : .selection,
+            sourceBounds: isWholeLayerRect ? fullBounds : bounds,
+            needsMaskTexture: !isWholeLayerRect && clamped.kind != .rectangle
         )
     }
 
-    private func makeTexture(
-        width: Int,
-        height: Int,
-        metal: MetalDeviceContext
+    static func fullCanvasBounds(canvasSize: CanvasSize) -> CanvasRect {
+        CanvasRect(
+            origin: .init(x: 0, y: 0),
+            size: .init(x: Double(canvasSize.width), y: Double(canvasSize.height))
+        )
+    }
+
+    private static func makeMaskTexture(
+        selectionShape: SelectionShape?,
+        sourceBounds: CanvasRect,
+        device: MTLDevice
     ) -> MTLTexture? {
+        guard let selectionShape else { return nil }
+        guard selectionShape.kind != .rectangle else { return nil }
+
+        let width = max(Int(sourceBounds.size.x.rounded(.up)), 1)
+        let height = max(Int(sourceBounds.size.y.rounded(.up)), 1)
+        let maskBytes = localMaskBytes(
+            for: selectionShape,
+            sourceBounds: sourceBounds
+        )
+
         let descriptor = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: .bgra8Unorm_srgb,
+            pixelFormat: .r8Unorm,
             width: width,
             height: height,
             mipmapped: false
         )
-        descriptor.usage = [.shaderRead, .shaderWrite, .renderTarget]
-        descriptor.storageMode = .private
-        return metal.device.makeTexture(descriptor: descriptor)
+        descriptor.storageMode = .shared
+        descriptor.usage = [.shaderRead]
+
+        guard let texture = device.makeTexture(descriptor: descriptor) else {
+            return nil
+        }
+
+        maskBytes.withUnsafeBytes { rawBuffer in
+            if let baseAddress = rawBuffer.baseAddress {
+                texture.replace(
+                    region: MTLRegionMake2D(0, 0, width, height),
+                    mipmapLevel: 0,
+                    withBytes: baseAddress,
+                    bytesPerRow: width
+                )
+            }
+        }
+        return texture
+    }
+
+    static func localMaskBytes(
+        for selectionShape: SelectionShape,
+        sourceBounds: CanvasRect
+    ) -> [UInt8] {
+        let clampedBounds = sourceBounds.pixelAligned()
+        let width = max(Int(clampedBounds.size.x.rounded(.up)), 1)
+        let height = max(Int(clampedBounds.size.y.rounded(.up)), 1)
+
+        if let maskData = selectionShape.maskData {
+            let sourceBytes = [UInt8](maskData.alphaBytes)
+            var localBytes = [UInt8](repeating: 0, count: width * height)
+            let originX = max(Int(clampedBounds.minX.rounded(.down)), 0)
+            let originY = max(Int(clampedBounds.minY.rounded(.down)), 0)
+            for localY in 0..<height {
+                let canvasY = originY + localY
+                guard canvasY < maskData.canvasHeight else { continue }
+                for localX in 0..<width {
+                    let canvasX = originX + localX
+                    guard canvasX < maskData.canvasWidth else { continue }
+                    let sourceIndex = (canvasY * maskData.canvasWidth) + canvasX
+                    localBytes[(localY * width) + localX] = sourceBytes[sourceIndex]
+                }
+            }
+            return localBytes
+        }
+
+        var bytes = [UInt8](repeating: 0, count: width * height)
+        let originX = clampedBounds.minX
+        let originY = clampedBounds.minY
+        for localY in 0..<height {
+            for localX in 0..<width {
+                let point = CanvasPoint(
+                    x: originX + Double(localX) + 0.5,
+                    y: originY + Double(localY) + 0.5
+                )
+                if selectionShape.contains(point) {
+                    bytes[(localY * width) + localX] = 255
+                }
+            }
+        }
+        return bytes
+    }
+}
+
+private extension CanvasRect {
+    func pixelAligned() -> CanvasRect {
+        let minX = floor(self.minX)
+        let minY = floor(self.minY)
+        let maxX = ceil(self.maxX)
+        let maxY = ceil(self.maxY)
+        return CanvasRect(
+            origin: .init(x: minX, y: minY),
+            size: .init(x: max(maxX - minX, 0), y: max(maxY - minY, 0))
+        )
     }
 }

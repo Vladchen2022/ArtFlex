@@ -69,13 +69,19 @@ final class WorkspaceViewModel: ObservableObject {
     private var implicitFreeTransformSelectionShape: SelectionShape?
     @Published private(set) var isApplyingTransformCommit = false
     @Published private(set) var canvasContentRevision: UInt64 = 0
+    @Published private(set) var selectionRevision: UInt64 = 0
+    @Published private(set) var viewportRevision: UInt64 = 0
+    @Published private(set) var transformPreviewRevision: UInt64 = 0
     @Published private(set) var ideationSession: IdeationSessionState?
     private var currentProjectURL: URL?
     private var shouldResumeTimelapseAfterIdeation = false
     private let selectionTraceLogger = Logger(subsystem: "ArtFlex", category: "SelectionTrace")
     private let brushStrokeLogger = Logger(subsystem: "ArtFlex", category: "BrushStroke")
+    private let transformLogger = Logger(subsystem: "ArtFlex", category: "Transform")
     private var documentChangeRevision: UInt64 = 0
     private var strokePacketCount = 0
+    private lazy var transformPreviewSessionBuilder = TransformPreviewSessionBuilder(device: bootstrap.metalContext.device)
+    private lazy var transformGPUCompositor = TransformGPUCompositor(device: bootstrap.metalContext.device)
     init(bootstrap: AppBootstrap, installsZoomKeyboardMonitor: Bool = true) {
         self.bootstrap = bootstrap
         resetSelectionTraceLog()
@@ -90,7 +96,10 @@ final class WorkspaceViewModel: ObservableObject {
         self.workspace = state
         self.sceneSnapshot = WorkspaceViewModel.makeSceneSnapshot(
             workspace: state,
-            bootstrap: bootstrap
+            bootstrap: bootstrap,
+            canvasContentRevision: 0,
+            selectionRevision: 0,
+            viewportRevision: 0
         )
         if let group = ToolSidebarGroup.group(containing: state.toolSession.activeTool) {
             toolGroupSurfaceTools[group.id] = state.toolSession.activeTool
@@ -2614,6 +2623,8 @@ final class WorkspaceViewModel: ObservableObject {
         let pixelDeltaY = Int(preview.translation.y.rounded())
         let shouldClearSelection = clearSelectionAfterApply || freeTransformUsesImplicitSelection
         let capturedFreeTransformUsesImplicit = freeTransformUsesImplicitSelection
+        let canvasSize = workspace.document.canvasSize
+        let applyStart = DispatchTime.now().uptimeNanoseconds
 
         guard !preview.isIdentity else {
             transformState.reset()
@@ -2651,98 +2662,57 @@ final class WorkspaceViewModel: ObservableObject {
             return
         }
 
+        let historyCheckpointStart = DispatchTime.now().uptimeNanoseconds
         checkpointHistoryIfPossible()
+        let historyCheckpointDurationMs = Double(DispatchTime.now().uptimeNanoseconds - historyCheckpointStart) / 1_000_000
+        transformLogger.debug("[apply] historyCheckpointMs=\(historyCheckpointDurationMs, privacy: .public)")
         isApplyingTransformCommit = true
-
-        let boxedTexture = WorkspaceUncheckedBox(texture)
-        let boxedSerializer = WorkspaceUncheckedBox(bootstrap.textureSerializer)
         let capturedPreview = preview
+        let buildStart = DispatchTime.now().uptimeNanoseconds
 
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+        transformPreviewSessionBuilder.makeSession(
+            activeLayerSurfaceID: surfaceID,
+            sourceTexture: texture,
+            canvasSize: canvasSize,
+            selectionShape: selectionShape,
+            selectionRevision: selectionRevision,
+            canvasContentRevision: canvasContentRevision,
+            metal: bootstrap.metalContext
+        ) { [weak self] session in
             guard let self else { return }
 
-            guard let snapshot = try? boxedSerializer.value.snapshot(texture: boxedTexture.value) else {
-                DispatchQueue.main.async {
-                    self.isApplyingTransformCommit = false
-                    self.transformState.reset()
-                    self.setFreeTransformPreview(.identity)
-                    self.isTransformingSelection = false
-                    self.freeTransformUsesImplicitSelection = false
-                    self.implicitFreeTransformSelectionShape = nil
-                    self.refresh()
-                    self.showStatus(.init(kind: .error, message: "无法读取图层数据"))
-                }
+            let buildDurationMs = Double(DispatchTime.now().uptimeNanoseconds - buildStart) / 1_000_000
+            self.transformLogger.debug(
+                "[apply] sessionBuildMs=\(buildDurationMs, privacy: .public) success=\(session != nil, privacy: .public)"
+            )
+
+            guard let session else {
+                self.isApplyingTransformCommit = false
+                self.transformState.reset()
+                self.setFreeTransformPreview(.identity)
+                self.isTransformingSelection = false
+                self.freeTransformUsesImplicitSelection = false
+                self.implicitFreeTransformSelectionShape = nil
+                self.refresh()
+                self.showStatus(.init(kind: .error, message: "无法准备变形预览"))
                 return
             }
 
-            let canvasSize = CanvasSize(width: snapshot.width, height: snapshot.height)
-            let clampedBaseSelection = selectionShape.clamped(to: canvasSize)
-            let clampedSelection: SelectionShape
-            if abs(capturedPreview.scaleX - 1) < 0.0001,
-               abs(capturedPreview.scaleY - 1) < 0.0001,
-               abs(capturedPreview.rotationRadians) < 0.0001 {
-                clampedSelection = clampedBaseSelection
-            } else if clampedBaseSelection.kind == .rectangle || clampedBaseSelection.kind == .mask {
-                clampedSelection = clampedBaseSelection
-            } else {
-                let maskBytes = selectionMaskBytes(for: clampedBaseSelection, canvasSize: canvasSize)
-                clampedSelection = SelectionShape.mask(
-                    canvasWidth: canvasSize.width,
-                    canvasHeight: canvasSize.height,
-                    alphaBytes: maskBytes
-                )
-            }
+            let composeStart = DispatchTime.now().uptimeNanoseconds
+            self.transformGPUCompositor.composeTransformedTexture(
+                session: session,
+                preview: capturedPreview,
+                canvasSize: canvasSize,
+                metal: self.bootstrap.metalContext
+            ) { [weak self] targetTexture in
+                guard let self else { return }
 
-            let finalSnapshot: LayerTextureSnapshot
-            if abs(capturedPreview.scaleX - 1) < 0.0001,
-               abs(capturedPreview.scaleY - 1) < 0.0001,
-               abs(capturedPreview.rotationRadians) < 0.0001 {
-                finalSnapshot = shiftLayerPixels(
-                    snapshot: snapshot,
-                    selection: clampedSelection,
-                    dx: pixelDeltaX,
-                    dy: pixelDeltaY
+                let composeDurationMs = Double(DispatchTime.now().uptimeNanoseconds - composeStart) / 1_000_000
+                self.transformLogger.debug(
+                    "[apply] gpuComposeMs=\(composeDurationMs, privacy: .public) success=\(targetTexture != nil, privacy: .public)"
                 )
-            } else {
-                finalSnapshot = affineTransformLayerPixels(
-                    snapshot: snapshot,
-                    selection: clampedSelection,
-                    preview: capturedPreview
-                )
-            }
 
-            do {
-                try boxedSerializer.value.restore(snapshot: finalSnapshot, into: boxedTexture.value)
-                DispatchQueue.main.async {
-                    let nextImplicitSelection = capturedFreeTransformUsesImplicit && self.workspace.toolSession.activeTool == .freeTransform
-                        ? self.implicitFreeTransformSelectionShape(from: finalSnapshot)
-                        : nil
-                    self.isApplyingTransformCommit = false
-                    self.transformState.reset()
-                    self.setFreeTransformPreview(.identity)
-                    self.isTransformingSelection = false
-                    self.freeTransformUsesImplicitSelection = nextImplicitSelection != nil
-                    self.implicitFreeTransformSelectionShape = nextImplicitSelection
-
-                    self.bootstrap.workspaceStore.updateSelection { selection in
-                        if shouldClearSelection {
-                            selection.committedShape = nil
-                        } else if !capturedFreeTransformUsesImplicit {
-                            let moved = selection.committedShape?
-                                .translatedBy(x: Double(pixelDeltaX), y: Double(pixelDeltaY))
-                                .clamped(to: canvasSize)
-                            selection.committedShape = moved
-                        }
-                        selection.inProgressShape = nil
-                        selection.anchorPoint = nil
-                        selection.activeKind = nil
-                    }
-                    self.refresh()
-                    self.noteCanvasContentChanged()
-                    self.showStatus(.init(kind: .success, message: "已移动"))
-                }
-            } catch {
-                DispatchQueue.main.async {
+                guard let targetTexture else {
                     self.isApplyingTransformCommit = false
                     self.transformState.reset()
                     self.setFreeTransformPreview(.identity)
@@ -2750,8 +2720,48 @@ final class WorkspaceViewModel: ObservableObject {
                     self.freeTransformUsesImplicitSelection = false
                     self.implicitFreeTransformSelectionShape = nil
                     self.refresh()
-                    self.showStatus(.init(kind: .error, message: error.localizedDescription))
+                    self.showStatus(.init(kind: .error, message: "GPU 合成失败"))
+                    return
                 }
+
+                self.bootstrap.layerSurfaceStore.swapTexture(for: surfaceID, with: targetTexture)
+
+                self.isApplyingTransformCommit = false
+                self.transformState.reset()
+                self.setFreeTransformPreview(.identity)
+                self.isTransformingSelection = false
+                self.freeTransformUsesImplicitSelection = false
+                self.implicitFreeTransformSelectionShape = nil
+
+                self.bootstrap.workspaceStore.updateSelection { selection in
+                    if shouldClearSelection {
+                        selection.committedShape = nil
+                    } else if !capturedFreeTransformUsesImplicit,
+                              abs(capturedPreview.scaleX - 1) < 0.0001,
+                              abs(capturedPreview.scaleY - 1) < 0.0001,
+                              abs(capturedPreview.rotationRadians) < 0.0001 {
+                        selection.committedShape = selection.committedShape?
+                            .translatedBy(x: Double(pixelDeltaX), y: Double(pixelDeltaY))
+                            .clamped(to: canvasSize)
+                    }
+                    selection.inProgressShape = nil
+                    selection.anchorPoint = nil
+                    selection.activeKind = nil
+                }
+
+                self.refresh()
+                self.noteCanvasContentChanged()
+
+                let totalDurationMs = Double(DispatchTime.now().uptimeNanoseconds - applyStart) / 1_000_000
+                self.transformLogger.debug("[apply] totalMs=\(totalDurationMs, privacy: .public)")
+                self.showStatus(.init(
+                    kind: .success,
+                    message: (
+                        abs(capturedPreview.scaleX - 1) < 0.0001 &&
+                        abs(capturedPreview.scaleY - 1) < 0.0001 &&
+                        abs(capturedPreview.rotationRadians) < 0.0001
+                    ) ? "已移动" : "已应用变形"
+                ))
             }
         }
     }
@@ -2783,6 +2793,7 @@ final class WorkspaceViewModel: ObservableObject {
     private func setFreeTransformPreview(_ preview: FreeTransformPreview) {
         freeTransformPreview = preview
         transformPreviewOffset = preview.translation
+        transformPreviewRevision &+= 1
     }
 
     private func scaledPreview(
@@ -2928,47 +2939,18 @@ final class WorkspaceViewModel: ObservableObject {
 
     private func implicitFreeTransformSelectionShape(from state: WorkspaceState) -> SelectionShape? {
         guard
-            let layerID = bootstrap.interactionController.activeEditableLayerID(),
-            let surfaceID = bootstrap.layerSurfaceStore.surfaceID(for: layerID),
-            let texture = bootstrap.layerSurfaceStore.texture(for: surfaceID),
-            let snapshot = try? bootstrap.textureSerializer.snapshot(texture: texture)
+            bootstrap.interactionController.activeEditableLayerID() != nil
         else {
             return nil
         }
-
-        return implicitFreeTransformSelectionShape(from: snapshot)
-    }
-
-    private func implicitFreeTransformSelectionShape(from snapshot: LayerTextureSnapshot) -> SelectionShape? {
-        let width = snapshot.width
-        let height = snapshot.height
-        let bytes = [UInt8](snapshot.pixelData)
-        let bytesPerRow = snapshot.bytesPerRow
-        let bytesPerPixel = 4
-
-        var minX = width
-        var minY = height
-        var maxX = -1
-        var maxY = -1
-
-        for y in 0..<height {
-            for x in 0..<width {
-                let alphaIndex = (y * bytesPerRow) + (x * bytesPerPixel) + 3
-                guard bytes.indices.contains(alphaIndex), bytes[alphaIndex] > 0 else { continue }
-                minX = min(minX, x)
-                minY = min(minY, y)
-                maxX = max(maxX, x)
-                maxY = max(maxY, y)
-            }
-        }
-
-        guard maxX >= minX, maxY >= minY else { return nil }
-
         return SelectionShape(
             kind: .rectangle,
             bounds: CanvasRect(
-                origin: .init(x: Double(minX), y: Double(minY)),
-                size: .init(x: Double((maxX - minX) + 1), y: Double((maxY - minY) + 1))
+                origin: .init(x: 0, y: 0),
+                size: .init(
+                    x: Double(state.document.canvasSize.width),
+                    y: Double(state.document.canvasSize.height)
+                )
             ),
             pathPoints: []
         )
@@ -3382,6 +3364,12 @@ final class WorkspaceViewModel: ObservableObject {
     ) {
         Self.normalizeDisabledToolsIfNeeded(in: bootstrap.workspaceStore)
         let state = bootstrap.workspaceStore.state
+        if workspace.selection != state.selection {
+            selectionRevision &+= 1
+        }
+        if workspace.viewport != state.viewport {
+            viewportRevision &+= 1
+        }
         bootstrap.layerSurfaceStore.prepareTextures(
             for: state.document,
             metal: bootstrap.metalContext
@@ -3405,6 +3393,12 @@ final class WorkspaceViewModel: ObservableObject {
     private func refreshLightweight(reason: StaticString = "unspecified") {
         Self.normalizeDisabledToolsIfNeeded(in: bootstrap.workspaceStore)
         let state = bootstrap.workspaceStore.state
+        if workspace.selection != state.selection {
+            selectionRevision &+= 1
+        }
+        if workspace.viewport != state.viewport {
+            viewportRevision &+= 1
+        }
         workspace = state
         sceneSnapshot = currentSceneSnapshot(for: state)
         canUndo = bootstrap.historyController.canUndo
@@ -3781,7 +3775,10 @@ final class WorkspaceViewModel: ObservableObject {
 
     private static func makeSceneSnapshot(
         workspace: WorkspaceState,
-        bootstrap: AppBootstrap
+        bootstrap: AppBootstrap,
+        canvasContentRevision: UInt64,
+        selectionRevision: UInt64,
+        viewportRevision: UInt64
     ) -> CanvasSceneSnapshot {
         let surfaces = bootstrap.layerSurfaceStore.surfaceRecords(for: workspace.document)
         let activeSurface = surfaces.first { $0.layerID == workspace.document.activeLayerID }
@@ -3789,11 +3786,14 @@ final class WorkspaceViewModel: ObservableObject {
         return CanvasSceneSnapshot(
             renderSnapshot: CanvasRenderSnapshot(
                 document: workspace.document,
-                viewport: workspace.viewport
+                viewport: workspace.viewport,
+                canvasContentRevision: canvasContentRevision,
+                viewportRevision: viewportRevision
             ),
             layerSurfaces: surfaces,
             activeLayerSurfaceID: activeSurface?.surfaceID,
-            selectionShape: workspace.selection.committedShape
+            selectionShape: workspace.selection.committedShape,
+            selectionRevision: selectionRevision
         )
     }
 
@@ -3989,19 +3989,18 @@ final class WorkspaceViewModel: ObservableObject {
     private func currentSceneSnapshot(for state: WorkspaceState) -> CanvasSceneSnapshot {
         var snapshot = WorkspaceViewModel.makeSceneSnapshot(
             workspace: state,
-            bootstrap: bootstrap
+            bootstrap: bootstrap,
+            canvasContentRevision: canvasContentRevision,
+            selectionRevision: selectionRevision,
+            viewportRevision: viewportRevision
         )
         if state.toolSession.activeTool == .freeTransform {
-            if let committedSelection = snapshot.selectionShape {
-                let canvasSize = state.document.canvasSize
-                let maskBytes = selectionMaskBytes(for: committedSelection, canvasSize: canvasSize)
-                snapshot.selectionShape = SelectionShape.mask(
-                    canvasWidth: canvasSize.width,
-                    canvasHeight: canvasSize.height,
-                    alphaBytes: maskBytes
+            snapshot.selectionShape = effectiveTransformSelectionShape.map {
+                SelectionShape(
+                    kind: .rectangle,
+                    bounds: $0.bounds,
+                    pathPoints: []
                 )
-            } else if let implicitSelection = implicitFreeTransformSelectionShape {
-                snapshot.selectionShape = implicitSelection
             }
         }
         return snapshot
