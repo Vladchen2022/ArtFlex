@@ -73,7 +73,9 @@ final class WorkspaceViewModel: ObservableObject {
     private var currentProjectURL: URL?
     private var shouldResumeTimelapseAfterIdeation = false
     private let selectionTraceLogger = Logger(subsystem: "ArtFlex", category: "SelectionTrace")
+    private let brushStrokeLogger = Logger(subsystem: "ArtFlex", category: "BrushStroke")
     private var documentChangeRevision: UInt64 = 0
+    private var strokePacketCount = 0
     init(bootstrap: AppBootstrap, installsZoomKeyboardMonitor: Bool = true) {
         self.bootstrap = bootstrap
         resetSelectionTraceLog()
@@ -3428,25 +3430,36 @@ final class WorkspaceViewModel: ObservableObject {
 
     func applyStroke(samples: [CanvasStrokeSample]) {
         ideationBranchActivityHandler?()
-        guard let strokePayload = bootstrap.interactionController.makeStrokeDescriptor(samples: samples) else {
+        let packetIndex = strokePacketCount
+        let skipLeadingStamp = packetIndex > 0
+        guard let strokePayload = bootstrap.interactionController.makeStrokeDescriptor(
+            samples: samples,
+            skipLeadingStamp: skipLeadingStamp
+        ) else {
             return
         }
 
         if isGeneratorStrokeModeEnabled,
            strokePayload.stroke.tool == .brush,
            applyGeneratorStroke(samples: samples, layerID: strokePayload.layerID, baseStroke: strokePayload.stroke) {
+            strokePacketCount += 1
             return
         }
 
-        bootstrap.strokeEngine.applyStroke(
+        let emittedStampCount = bootstrap.strokeEngine.applyStroke(
             strokePayload.stroke,
             to: strokePayload.layerID
         )
+        brushStrokeLogger.debug(
+            "[packet] index=\(packetIndex, privacy: .public) skipLeadingStamp=\(skipLeadingStamp, privacy: .public) incomingPoints=\(samples.count, privacy: .public) emittedStamps=\(emittedStampCount, privacy: .public)"
+        )
+        strokePacketCount += 1
         relayIdeationOperation(.applyStroke(samples))
     }
 
     func beginStrokeIfNeeded() {
         ideationBranchActivityHandler?()
+        strokePacketCount = 0
         checkpointHistoryIfPossible()
         guard let layerID = bootstrap.interactionController.activeEditableLayerID() else {
             return
@@ -3467,6 +3480,7 @@ final class WorkspaceViewModel: ObservableObject {
     func endStroke() {
         ideationBranchActivityHandler?()
         bootstrap.strokeEngine.endStroke()
+        strokePacketCount = 0
         generatorStrokeSession = .init()
         noteCanvasContentChanged()
         relayIdeationOperation(.endStroke)

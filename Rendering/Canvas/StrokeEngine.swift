@@ -16,5 +16,6 @@ struct StrokeDescriptor: Sendable, Equatable {
 }
 
 protocol StrokeEngine {
-    func applyStroke(_ stroke: StrokeDescriptor, to layerID: LayerID)
+    @discardableResult
+    func applyStroke(_ stroke: StrokeDescriptor, to layerID: LayerID) -> Int
 }

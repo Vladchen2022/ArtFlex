@@ -12,7 +12,10 @@ final class CanvasInteractionController {
         self.workspaceStore = workspaceStore
     }
 
-    func makeStrokeDescriptor(samples: [CanvasStrokeSample]) -> (layerID: LayerID, stroke: StrokeDescriptor)? {
+    func makeStrokeDescriptor(
+        samples: [CanvasStrokeSample],
+        skipLeadingStamp: Bool = false
+    ) -> (layerID: LayerID, stroke: StrokeDescriptor)? {
         guard
             !samples.isEmpty,
             let activeLayer = workspaceStore.state.document.layers.first(where: {
@@ -35,7 +38,8 @@ final class CanvasInteractionController {
             points: samples.map {
                 StrokePoint(x: $0.location.x, y: $0.location.y, pressure: $0.pressure)
             },
-            selectionShape: workspaceStore.state.selection.committedShape
+            selectionShape: workspaceStore.state.selection.committedShape,
+            skipLeadingStamp: skipLeadingStamp
         )
 
         return (layerID: activeLayer.id, stroke: stroke)

@@ -473,13 +473,9 @@ final class StrokeCaptureMTKView: MTKView {
             return
         }
 
-        let current = smoothed(sample(from: event))
-        if let last = lastSample {
-            emitCoalescedStrokeSamples([last, current])
-        } else {
-            emitCoalescedStrokeSamples([current])
-        }
-        lastSample = current
+        let samples = brushSamples(from: event).map(smoothed)
+        emitCoalescedStrokeSamples(samples)
+        lastSample = samples.last
         setNeedsDisplay(bounds)
     }
 
@@ -786,14 +782,50 @@ final class StrokeCaptureMTKView: MTKView {
         return events.map(sample(from:))
     }
 
+    private func brushSamples(from event: NSEvent) -> [CanvasStrokeSample] {
+        guard activeTool == .brush || activeTool == .eraser || activeTool == .smudge else {
+            return [sample(from: event)]
+        }
+
+        var events: [NSEvent] = [event]
+        let mask = NSEvent.EventTypeMask.leftMouseDragged
+
+        while let queuedEvent = window?.nextEvent(
+            matching: mask,
+            until: Date.distantPast,
+            inMode: .eventTracking,
+            dequeue: true
+        ) {
+            events.append(queuedEvent)
+        }
+
+        if events.count == 1 {
+            while let queuedEvent = window?.nextEvent(
+                matching: mask,
+                until: Date.distantPast,
+                inMode: .default,
+                dequeue: true
+            ) {
+                events.append(queuedEvent)
+            }
+        }
+
+        return events.map(sample(from:))
+    }
+
     /// 入力スムージング用 EMA。
     /// α が小さいほど遅延が大きく滑らか、大きいほど即応する。
     /// 0.5 = 適度な追従感（起始直線を消しつつ遅延は最小限）。
-    private let smoothingAlpha: Double = 0.5
+    private let isBrushPositionSmoothingEnabled = false
+    private let smoothingAlpha: Double = 1.0
 
     /// raw サンプルに EMA を適用して平滑化座標を返す。
     /// 筆触開始時は smoothedPosition をリセットすること。
     private func smoothed(_ raw: CanvasStrokeSample) -> CanvasStrokeSample {
+        guard isBrushPositionSmoothingEnabled else {
+            smoothedPosition = raw.location
+            return raw
+        }
         let pos: CanvasPoint
         if let prev = smoothedPosition {
             pos = CanvasPoint(

@@ -32,7 +32,7 @@ private struct CompositeUniforms {
     var padding: SIMD4<Float> = .zero
 }
 
-private struct StampSample {
+struct StampSample: Equatable {
     var point: StrokePoint
     var angleDegrees: Float
     var jitterDirectionDegrees: Float
@@ -625,20 +625,21 @@ final class StageOneBrushRenderer {
 
     }
 
+    @discardableResult
     func render(
         stroke: StrokeDescriptor,
         into texture: MTLTexture,
         commandQueue: MTLCommandQueue,
         samplingState: inout BrushStrokeSamplingState?,
         completion: (() -> Void)? = nil
-    ) {
+    ) -> Int {
         let samples = interpolatedPoints(for: stroke, samplingState: &samplingState)
         guard
             !samples.isEmpty,
             let commandBuffer = commandQueue.makeCommandBuffer()
         else {
             completion?()
-            return
+            return 0
         }
 
         let passDescriptor = MTLRenderPassDescriptor()
@@ -648,7 +649,7 @@ final class StageOneBrushRenderer {
 
         guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: passDescriptor) else {
             completion?()
-            return
+            return 0
         }
 
         let pipelineState: MTLRenderPipelineState
@@ -676,7 +677,7 @@ final class StageOneBrushRenderer {
                     completion()
                 }
             }
-            return
+            return 0
         }
 
         let selectionMaskTexture = makeSelectionMaskTexture(
@@ -720,6 +721,7 @@ final class StageOneBrushRenderer {
             }
         }
         commandBuffer.commit()
+        return samples.count
     }
 
     func makeOpacityCapSession(
@@ -759,6 +761,7 @@ final class StageOneBrushRenderer {
         )
     }
 
+    @discardableResult
     func renderOpacityCap(
         stroke: StrokeDescriptor,
         session: OpacityCapSessionResources,
@@ -766,14 +769,14 @@ final class StageOneBrushRenderer {
         commandQueue: MTLCommandQueue,
         samplingState: inout BrushStrokeSamplingState?,
         completion: (() -> Void)? = nil
-    ) {
+    ) -> Int {
         let samples = interpolatedPoints(for: stroke, samplingState: &samplingState)
         guard
             !samples.isEmpty,
             let commandBuffer = commandQueue.makeCommandBuffer()
         else {
             completion?()
-            return
+            return 0
         }
 
         let selectionShape = stroke.selectionShape?.clamped(
@@ -856,6 +859,14 @@ final class StageOneBrushRenderer {
             }
         }
         commandBuffer.commit()
+        return samples.count
+    }
+
+    func debugInterpolatedStrokeSamples(
+        for stroke: StrokeDescriptor,
+        samplingState: inout BrushStrokeSamplingState?
+    ) -> [StampSample] {
+        interpolatedPoints(for: stroke, samplingState: &samplingState)
     }
 
     private func opacityCapDirtyRect(
@@ -1159,6 +1170,7 @@ final class StageOneBrushRenderer {
                     sizeMultiplier: 1
                 ))
                 state.pendingInputPoints = []
+                state.isFlushing = false
             }
             samplingState = state
             return stabilizedPressureSamples(result, stroke: stroke)
@@ -1166,7 +1178,11 @@ final class StageOneBrushRenderer {
 
         // 放起始 stamp（仅全新笔触且还没放过）
         let pts = state.pendingInputPoints
-        if !stroke.skipLeadingStamp {
+        let shouldEmitLeadingStamp =
+            state.nextSampleIndex == 0 &&
+            state.lastSamplePoint == nil &&
+            pts.count >= 2
+        if shouldEmitLeadingStamp {
             let firstDir = strokeDirectionDegrees(from: pts[0], to: pts[1])
             result.append(makeStampSample(
                 point: pts[0],
