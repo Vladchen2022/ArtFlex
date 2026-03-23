@@ -1,5 +1,6 @@
 import Foundation
 import Metal
+import os
 import simd
 
 private struct BrushVertex {
@@ -43,12 +44,9 @@ struct BrushStrokeSamplingState {
     var distanceSinceLastSample: Double = 0
     var lastSamplePoint: StrokePoint?
     var nextSampleIndex: Int = 0
-    /// Look-ahead 输入缓冲：收到的原始输入点全部追加到这里。
-    /// 渲染时始终保留最后 1 个点作为 look-ahead（p3），
-    /// 确保每段 Catmull-Rom 的 p0..p3 全部是真实点，永远不需要幽灵外推。
-    /// 笔触结束（endStroke）时由外部调用 flush，把剩余点全部渲染完。
     var pendingInputPoints: [StrokePoint] = []
-    /// 笔触是否已经结束（用于 flush 模式）
+    var nextSegmentIndexToCommit: Int = 0
+    var hasEmittedLeadingStamp = false
     var isFlushing: Bool = false
 }
 
@@ -60,6 +58,8 @@ struct OpacityCapSessionResources {
 private let customTipMaskResolution = 256
 
 final class StageOneBrushRenderer {
+    private let brushStrokeLogger = Logger(subsystem: "ArtFlex", category: "BrushStroke")
+    private let isBrushStampDebugLoggingEnabled = true
     private let device: MTLDevice
     private let brushPipelineState: MTLRenderPipelineState
     private let eraserPipelineState: MTLRenderPipelineState
@@ -1098,6 +1098,12 @@ final class StageOneBrushRenderer {
                         stroke: stroke
                     )
                 )
+                let loggedIndex = sampleIndex
+                if isBrushStampDebugLoggingEnabled, loggedIndex < 10 {
+                    brushStrokeLogger.debug(
+                        "[stamp] index=\(loggedIndex, privacy: .public) x=\(stamped.x, privacy: .public) y=\(stamped.y, privacy: .public) pressure=\(stamped.pressure, privacy: .public)"
+                    )
+                }
                 sampleIndex += 1
                 lastSamplePoint = stamped
                 distanceSinceLastSample = 0
@@ -1105,6 +1111,214 @@ final class StageOneBrushRenderer {
             distanceSinceLastSample += max(segLen - traveled, 0)
             prevPoint = curPoint
         }
+    }
+
+    private func hermitePoint(
+        start: StrokePoint,
+        end: StrokePoint,
+        startTangent: SIMD2<Double>,
+        endTangent: SIMD2<Double>,
+        t: Double
+    ) -> StrokePoint {
+        let tt = t * t
+        let ttt = tt * t
+        let h00 = (2 * ttt) - (3 * tt) + 1
+        let h10 = ttt - (2 * tt) + t
+        let h01 = (-2 * ttt) + (3 * tt)
+        let h11 = ttt - tt
+
+        return StrokePoint(
+            x: (h00 * start.x) + (h10 * startTangent.x) + (h01 * end.x) + (h11 * endTangent.x),
+            y: (h00 * start.y) + (h10 * startTangent.y) + (h01 * end.y) + (h11 * endTangent.y),
+            pressure: start.pressure + ((end.pressure - start.pressure) * Float(t))
+        )
+    }
+
+    private func sampleHermiteSegment(
+        start: StrokePoint,
+        end: StrokePoint,
+        startTangent: SIMD2<Double>,
+        endTangent: SIMD2<Double>,
+        spacing: Double,
+        distanceSinceLastSample: inout Double,
+        lastSamplePoint: inout StrokePoint,
+        sampleIndex: inout Int,
+        baseAngle: Float,
+        stroke: StrokeDescriptor,
+        result: inout [StampSample]
+    ) {
+        let subdivisions = 16
+        var prevPoint = start
+        for step in 1...subdivisions {
+            let t = Double(step) / Double(subdivisions)
+            let curPoint = hermitePoint(
+                start: start,
+                end: end,
+                startTangent: startTangent,
+                endTangent: endTangent,
+                t: t
+            )
+            let dx = curPoint.x - prevPoint.x
+            let dy = curPoint.y - prevPoint.y
+            let segLen = sqrt(dx * dx + dy * dy)
+            guard segLen > 1e-6 else { prevPoint = curPoint; continue }
+
+            let dirDeg = Float(atan2(dy, dx) * 180.0 / .pi)
+            let segAngleDeg = baseAngle + (stroke.brush.followsStrokeDirection ? dirDeg : 0)
+
+            var traveled = 0.0
+            while distanceSinceLastSample + (segLen - traveled) >= spacing {
+                let remaining = spacing - distanceSinceLastSample
+                traveled += remaining
+                let f = traveled / segLen
+                let stamped = StrokePoint(
+                    x: prevPoint.x + dx * f,
+                    y: prevPoint.y + dy * f,
+                    pressure: prevPoint.pressure + (curPoint.pressure - prevPoint.pressure) * Float(f)
+                )
+                result.append(
+                    makeStampSample(
+                        point: stamped,
+                        index: sampleIndex,
+                        segmentAngleDegrees: segAngleDeg,
+                        jitterDirectionDegrees: dirDeg,
+                        stroke: stroke
+                    )
+                )
+                let loggedIndex = sampleIndex
+                if isBrushStampDebugLoggingEnabled, loggedIndex < 10 {
+                    brushStrokeLogger.debug(
+                        "[stamp] index=\(loggedIndex, privacy: .public) x=\(stamped.x, privacy: .public) y=\(stamped.y, privacy: .public) pressure=\(stamped.pressure, privacy: .public)"
+                    )
+                }
+                sampleIndex += 1
+                lastSamplePoint = stamped
+                distanceSinceLastSample = 0
+            }
+            distanceSinceLastSample += max(segLen - traveled, 0)
+            prevPoint = curPoint
+        }
+    }
+
+    private func sampleStartSegment(
+        a: StrokePoint,
+        b: StrokePoint,
+        c: StrokePoint,
+        spacing: Double,
+        distanceSinceLastSample: inout Double,
+        lastSamplePoint: inout StrokePoint,
+        sampleIndex: inout Int,
+        baseAngle: Float,
+        stroke: StrokeDescriptor,
+        result: inout [StampSample]
+    ) {
+        let startTangent = SIMD2(
+            ((-3 * a.x) + (4 * b.x) - c.x) / 2,
+            ((-3 * a.y) + (4 * b.y) - c.y) / 2
+        )
+        let endTangent = SIMD2(
+            (c.x - a.x) / 2,
+            (c.y - a.y) / 2
+        )
+        sampleHermiteSegment(
+            start: a,
+            end: b,
+            startTangent: startTangent,
+            endTangent: endTangent,
+            spacing: spacing,
+            distanceSinceLastSample: &distanceSinceLastSample,
+            lastSamplePoint: &lastSamplePoint,
+            sampleIndex: &sampleIndex,
+            baseAngle: baseAngle,
+            stroke: stroke,
+            result: &result
+        )
+    }
+
+    private func sampleTailSegment(
+        a: StrokePoint,
+        b: StrokePoint,
+        c: StrokePoint,
+        spacing: Double,
+        distanceSinceLastSample: inout Double,
+        lastSamplePoint: inout StrokePoint,
+        sampleIndex: inout Int,
+        baseAngle: Float,
+        stroke: StrokeDescriptor,
+        result: inout [StampSample]
+    ) {
+        let startTangent = SIMD2(
+            (c.x - a.x) / 2,
+            (c.y - a.y) / 2
+        )
+        let endTangent = SIMD2(
+            ((3 * c.x) - (4 * b.x) + a.x) / 2,
+            ((3 * c.y) - (4 * b.y) + a.y) / 2
+        )
+        sampleHermiteSegment(
+            start: b,
+            end: c,
+            startTangent: startTangent,
+            endTangent: endTangent,
+            spacing: spacing,
+            distanceSinceLastSample: &distanceSinceLastSample,
+            lastSamplePoint: &lastSamplePoint,
+            sampleIndex: &sampleIndex,
+            baseAngle: baseAngle,
+            stroke: stroke,
+            result: &result
+        )
+    }
+
+    private func sampleLinearSegment(
+        start: StrokePoint,
+        end: StrokePoint,
+        spacing: Double,
+        distanceSinceLastSample: inout Double,
+        lastSamplePoint: inout StrokePoint,
+        sampleIndex: inout Int,
+        baseAngle: Float,
+        stroke: StrokeDescriptor,
+        result: inout [StampSample]
+    ) {
+        let dx = end.x - start.x
+        let dy = end.y - start.y
+        let segLen = sqrt(dx * dx + dy * dy)
+        guard segLen > 1e-6 else { return }
+
+        let dirDeg = Float(atan2(dy, dx) * 180.0 / .pi)
+        let segAngleDeg = baseAngle + (stroke.brush.followsStrokeDirection ? dirDeg : 0)
+
+        var traveled = 0.0
+        while distanceSinceLastSample + (segLen - traveled) >= spacing {
+            let remaining = spacing - distanceSinceLastSample
+            traveled += remaining
+            let f = traveled / segLen
+            let stamped = StrokePoint(
+                x: start.x + dx * f,
+                y: start.y + dy * f,
+                pressure: start.pressure + (end.pressure - start.pressure) * Float(f)
+            )
+            result.append(
+                makeStampSample(
+                    point: stamped,
+                    index: sampleIndex,
+                    segmentAngleDegrees: segAngleDeg,
+                    jitterDirectionDegrees: dirDeg,
+                    stroke: stroke
+                )
+            )
+            let loggedIndex = sampleIndex
+            if isBrushStampDebugLoggingEnabled, loggedIndex < 10 {
+                brushStrokeLogger.debug(
+                    "[stamp] index=\(loggedIndex, privacy: .public) x=\(stamped.x, privacy: .public) y=\(stamped.y, privacy: .public) pressure=\(stamped.pressure, privacy: .public)"
+                )
+            }
+            sampleIndex += 1
+            lastSamplePoint = stamped
+            distanceSinceLastSample = 0
+        }
+        distanceSinceLastSample += max(segLen - traveled, 0)
     }
 
     private func interpolatedPoints(
@@ -1121,10 +1335,8 @@ final class StageOneBrushRenderer {
             0.5
         )
 
-        // 初始化或重置 state
         var state = samplingState ?? BrushStrokeSamplingState()
         if !stroke.skipLeadingStamp {
-            // 全新笔触：完全重置
             state = BrushStrokeSamplingState()
         }
 
@@ -1144,44 +1356,8 @@ final class StageOneBrushRenderer {
         state.pendingInputPoints.append(contentsOf: dedupedIncoming)
 
         var result: [StampSample] = []
-
-        // 决定本次能渲染到哪里：
-        // 正常模式：留最后 1 个点作为 look-ahead（p3），只渲到倒数第 2 个
-        // flush 模式（endStroke）：全部渲染完
-        let renderableCount: Int
-        if state.isFlushing {
-            renderableCount = state.pendingInputPoints.count
-        } else if state.pendingInputPoints.count == 2 {
-            // 起笔阶段只有两个点时也要立即渲染首段，
-            // 否则普通绘制链在未显式 flush 的情况下会吞掉整段笔迹。
-            renderableCount = 2
-        } else {
-            renderableCount = max(state.pendingInputPoints.count - 1, 0)
-        }
-
-        guard renderableCount >= 2 else {
-            // 点还不够，等下一帧
-            // 单点单击（全程只有 1 个点）特殊处理
-            if state.isFlushing, let only = state.pendingInputPoints.first {
-                result.append(StampSample(
-                    point: only,
-                    angleDegrees: baseAngle,
-                    jitterDirectionDegrees: 0,
-                    sizeMultiplier: 1
-                ))
-                state.pendingInputPoints = []
-                state.isFlushing = false
-            }
-            samplingState = state
-            return stabilizedPressureSamples(result, stroke: stroke)
-        }
-
-        // 放起始 stamp（仅全新笔触且还没放过）
         let pts = state.pendingInputPoints
-        let shouldEmitLeadingStamp =
-            state.nextSampleIndex == 0 &&
-            state.lastSamplePoint == nil &&
-            pts.count >= 2
+        let shouldEmitLeadingStamp = !state.hasEmittedLeadingStamp && pts.count >= 2
         if shouldEmitLeadingStamp {
             let firstDir = strokeDirectionDegrees(from: pts[0], to: pts[1])
             result.append(makeStampSample(
@@ -1191,57 +1367,125 @@ final class StageOneBrushRenderer {
                 jitterDirectionDegrees: firstDir,
                 stroke: stroke
             ))
+            if isBrushStampDebugLoggingEnabled, state.nextSampleIndex < 10 {
+                brushStrokeLogger.debug(
+                    "[stamp] index=\(state.nextSampleIndex, privacy: .public) x=\(pts[0].x, privacy: .public) y=\(pts[0].y, privacy: .public) pressure=\(pts[0].pressure, privacy: .public)"
+                )
+            }
             state.nextSampleIndex += 1
-            state.distanceSinceLastSample = 0
+            state.distanceSinceLastSample = spacing * 0.5
             state.lastSamplePoint = pts[0]
+            state.hasEmittedLeadingStamp = true
         }
 
-        // 遍历每一段 p1→p2，用真实的 p0 和 p3 做 Catmull-Rom
-        // 渲染范围：index 1 ..< renderableCount（即 pts[0..renderableCount-1] 中的每一段）
-        for idx in 1..<renderableCount {
-            let p1 = pts[idx - 1]
-            let p2 = pts[idx]
+        if pts.count < 2 {
+            if state.isFlushing, let only = pts.first, !state.hasEmittedLeadingStamp {
+                result.append(StampSample(
+                    point: only,
+                    angleDegrees: baseAngle,
+                    jitterDirectionDegrees: 0,
+                    sizeMultiplier: 1
+                ))
+                if isBrushStampDebugLoggingEnabled, state.nextSampleIndex < 10 {
+                    brushStrokeLogger.debug(
+                        "[stamp] index=\(state.nextSampleIndex, privacy: .public) x=\(only.x, privacy: .public) y=\(only.y, privacy: .public) pressure=\(only.pressure, privacy: .public)"
+                    )
+                }
+                state.hasEmittedLeadingStamp = true
+                state.nextSampleIndex += 1
+            }
+            if state.isFlushing {
+                state = BrushStrokeSamplingState()
+            }
+            samplingState = state
+            return stabilizedPressureSamples(result, stroke: stroke)
+        }
 
-            // p0：前驱，idx>=2 时有真实点；idx==1 时用 p2 反向外推
-            // 注意：因为 look-ahead 保证了 p3 始终是真实点，
-            // 所以只有第一段（idx==1）可能缺 p0——用 p2 方向反推误差很小
-            let p0: StrokePoint = idx >= 2 ? pts[idx - 2] : StrokePoint(
-                x: p1.x - (p2.x - p1.x),
-                y: p1.y - (p2.y - p1.y),
-                pressure: p1.pressure
-            )
+        while state.nextSegmentIndexToCommit < pts.count - 1 {
+            let segmentIndex = state.nextSegmentIndexToCommit
 
-            // p3：后继，look-ahead 保证 idx < renderableCount 时 pts[idx+1] 存在
-            // flush 模式下最后一段用外推
-            let p3: StrokePoint = idx + 1 < pts.count ? pts[idx + 1] : StrokePoint(
-                x: p2.x + (p2.x - p1.x),
-                y: p2.y + (p2.y - p1.y),
-                pressure: p2.pressure
-            )
+            if !state.isFlushing {
+                if segmentIndex == 0 {
+                    guard pts.count >= 3 else { break }
+                } else {
+                    guard segmentIndex + 2 < pts.count else { break }
+                }
+            }
 
-            var localLastSamplePoint: StrokePoint = state.lastSamplePoint ?? p1
-            sampleCatmullSegment(
-                p0: p0, p1: p1, p2: p2, p3: p3,
-                spacing: spacing,
-                distanceSinceLastSample: &state.distanceSinceLastSample,
-                lastSamplePoint: &localLastSamplePoint,
-                sampleIndex: &state.nextSampleIndex,
-                baseAngle: baseAngle,
-                stroke: stroke,
-                result: &result
-            )
+            var localDistanceSinceLastSample = state.distanceSinceLastSample
+            var localSampleIndex = state.nextSampleIndex
+            var localLastSamplePoint: StrokePoint = state.lastSamplePoint ?? pts[segmentIndex]
+
+            if segmentIndex == 0 {
+                if pts.count >= 3 {
+                    sampleStartSegment(
+                        a: pts[0],
+                        b: pts[1],
+                        c: pts[2],
+                        spacing: spacing,
+                        distanceSinceLastSample: &localDistanceSinceLastSample,
+                        lastSamplePoint: &localLastSamplePoint,
+                        sampleIndex: &localSampleIndex,
+                        baseAngle: baseAngle,
+                        stroke: stroke,
+                        result: &result
+                    )
+                } else if state.isFlushing {
+                    sampleLinearSegment(
+                        start: pts[0],
+                        end: pts[1],
+                        spacing: spacing,
+                        distanceSinceLastSample: &localDistanceSinceLastSample,
+                        lastSamplePoint: &localLastSamplePoint,
+                        sampleIndex: &localSampleIndex,
+                        baseAngle: baseAngle,
+                        stroke: stroke,
+                        result: &result
+                    )
+                } else {
+                    break
+                }
+            } else if state.isFlushing && segmentIndex == pts.count - 2 {
+                sampleTailSegment(
+                    a: pts[segmentIndex - 1],
+                    b: pts[segmentIndex],
+                    c: pts[segmentIndex + 1],
+                    spacing: spacing,
+                    distanceSinceLastSample: &localDistanceSinceLastSample,
+                    lastSamplePoint: &localLastSamplePoint,
+                    sampleIndex: &localSampleIndex,
+                    baseAngle: baseAngle,
+                    stroke: stroke,
+                    result: &result
+                )
+            } else {
+                let p0 = pts[segmentIndex - 1]
+                let p1 = pts[segmentIndex]
+                let p2 = pts[segmentIndex + 1]
+                let p3 = pts[segmentIndex + 2]
+                sampleCatmullSegment(
+                    p0: p0,
+                    p1: p1,
+                    p2: p2,
+                    p3: p3,
+                    spacing: spacing,
+                    distanceSinceLastSample: &localDistanceSinceLastSample,
+                    lastSamplePoint: &localLastSamplePoint,
+                    sampleIndex: &localSampleIndex,
+                    baseAngle: baseAngle,
+                    stroke: stroke,
+                    result: &result
+                )
+            }
+
+            state.distanceSinceLastSample = localDistanceSinceLastSample
+            state.nextSampleIndex = localSampleIndex
             state.lastSamplePoint = localLastSamplePoint
+            state.nextSegmentIndexToCommit += 1
         }
 
-        // 清理已渲染的点，只保留 look-ahead 尾部（1 个点，或 flush 后清空）
         if state.isFlushing {
-            state.pendingInputPoints = []
-            state.isFlushing = false
-        } else {
-        // 保留最后 2 个点：
-        // suffix[-1] = look-ahead p3（下一帧第一段的后继）
-        // suffix[-2] = 下一帧第一段的 p0（真实前驱，不需要幽灵外推）
-        state.pendingInputPoints = Array(state.pendingInputPoints.suffix(2))
+            state = BrushStrokeSamplingState()
         }
 
         samplingState = state

@@ -208,6 +208,20 @@ protocol StrokeCaptureDelegate: AnyObject {
 }
 
 final class StrokeCaptureMTKView: MTKView {
+    private struct BrushInputDebugRecord {
+        var index: Int
+        var eventType: NSEvent.EventType
+        var eventSubtype: NSEvent.EventSubtype
+        var timestamp: TimeInterval
+        var location: CanvasPoint
+        var rawPressure: Float
+        var filteredPressure: Float
+        var dx: Double
+        var dy: Double
+        var dt: TimeInterval
+        var distanceFromPrevious: Double
+    }
+
     weak var strokeDelegate: StrokeCaptureDelegate?
     weak var transformPreviewDelegate: TransformPreviewDelegate?
     var canvasSize: CanvasSize = .stageOneDefault
@@ -230,12 +244,19 @@ final class StrokeCaptureMTKView: MTKView {
     private var selectionMoveLastPoint: CanvasPoint?
     private var lastPanLocation: CGPoint?
     private var lastPressure: Float?
+    private var strokePacketIndex = 0
+    private var strokeInputSampleCount = 0
+    private var isBrushStrokeActive = false
+    private var sawTabletAuxiliaryEvent = false
+    private var previousMouseCoalescingEnabled: Bool?
+    private var brushDebugRecords: [BrushInputDebugRecord] = []
     private let minimumTabletPressure: Float = 0.02
     private var trackingAreaRef: NSTrackingArea?
     private let cursorIndicatorLayer = CAShapeLayer()
     private var hoverLocation: CGPoint?
     private var activeModifierFlags: NSEvent.ModifierFlags = []
     private let selectionTraceLogger = Logger(subsystem: "ArtFlex", category: "SelectionTrace")
+    private let brushStrokeLogger = Logger(subsystem: "ArtFlex", category: "BrushStroke")
     private var canvasRotationBaseDegrees: Double?
     private var canvasRotationStartAngleDegrees: Double?
     private static let eyedropperCursor: NSCursor = {
@@ -250,6 +271,10 @@ final class StrokeCaptureMTKView: MTKView {
     }()
 
     override var acceptsFirstResponder: Bool { true }
+    private let debugDisableMouseCoalescingDuringStroke = true
+    private let debugForceConstantPressure = false
+    private let debugBypassStartupPressureSmoothing = false
+    private let debugLogFirstRawSamples = true
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
@@ -360,11 +385,15 @@ final class StrokeCaptureMTKView: MTKView {
 
         strokeDelegate?.strokeCaptureViewDidBeginStroke(self)
         beginContinuousStrokeRendering()
+        beginBrushStrokeDiagnostics()
+        strokePacketIndex = 0
+        strokeInputSampleCount = 0
         let rawSample = sample(from: event)
         smoothedPosition = nil                    // 新しい筆触：スムージング状態リセット
         let s = smoothed(rawSample)
         lastSample = s
         strokeDelegate?.strokeCaptureView(self, didProduce: [s])
+        strokePacketIndex += 1
         setNeedsDisplay(bounds)
     }
 
@@ -476,6 +505,9 @@ final class StrokeCaptureMTKView: MTKView {
         let samples = brushSamples(from: event).map(smoothed)
         emitCoalescedStrokeSamples(samples)
         lastSample = samples.last
+        if !samples.isEmpty {
+            strokePacketIndex += 1
+        }
         setNeedsDisplay(bounds)
     }
 
@@ -574,6 +606,9 @@ final class StrokeCaptureMTKView: MTKView {
         emitCoalescedStrokeSamples([current])
         strokeDelegate?.strokeCaptureViewDidEndStroke(self)
         endContinuousStrokeRendering()
+        endBrushStrokeDiagnostics()
+        strokePacketIndex = 0
+        strokeInputSampleCount = 0
         lastSample = nil
         smoothedPosition = nil
         lastPressure = nil
@@ -654,6 +689,28 @@ final class StrokeCaptureMTKView: MTKView {
         }
     }
 
+    override func tabletPoint(with event: NSEvent) {
+        activeModifierFlags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        hoverLocation = convert(event.locationInWindow, from: nil)
+        updateCursorIndicator()
+        updateCursorAppearance()
+        if handleAuxiliaryBrushInputEvent(event, source: "tabletPoint") {
+            return
+        }
+        super.tabletPoint(with: event)
+    }
+
+    override func pressureChange(with event: NSEvent) {
+        activeModifierFlags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        hoverLocation = convert(event.locationInWindow, from: nil)
+        updateCursorIndicator()
+        updateCursorAppearance()
+        if handleAuxiliaryBrushInputEvent(event, source: "pressureChange") {
+            return
+        }
+        super.pressureChange(with: event)
+    }
+
     override func mouseEntered(with event: NSEvent) {
         activeModifierFlags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         hoverLocation = convert(event.locationInWindow, from: nil)
@@ -695,7 +752,13 @@ final class StrokeCaptureMTKView: MTKView {
         let normalizedPressure: Float
         if rawPressure > 0 {
             let clamped = min(max(rawPressure, 0), 1)
-            if let lastPressure {
+            let shouldBypassPressureWarmup =
+                debugBypassStartupPressureSmoothing &&
+                isTabletLikeEvent(event) &&
+                strokeInputSampleCount < 6
+            if shouldBypassPressureWarmup {
+                normalizedPressure = clamped
+            } else if let lastPressure {
                 let delta = abs(clamped - lastPressure)
                 let previousWeight: Float
                 switch delta {
@@ -715,14 +778,21 @@ final class StrokeCaptureMTKView: MTKView {
         } else {
             normalizedPressure = 1
         }
-        lastPressure = normalizedPressure
+        let effectivePressure: Float = debugForceConstantPressure ? 1 : normalizedPressure
+        lastPressure = effectivePressure
 
         let sample = CanvasStrokeSample(
             location: CanvasPoint(
                 x: Double(normalizedX) * Double(canvasSize.width),
                 y: Double(1 - normalizedY) * Double(canvasSize.height)
             ),
-            pressure: normalizedPressure
+            pressure: effectivePressure
+        )
+        recordBrushInputDebugSample(
+            event: event,
+            rawPressure: rawPressure,
+            filteredPressure: effectivePressure,
+            sample: sample
         )
 
         if activeTool == .lassoSelection || activeTool == .lassoFill {
@@ -738,6 +808,128 @@ final class StrokeCaptureMTKView: MTKView {
         }
 
         return sample
+    }
+
+    private func isBrushLikeToolActive() -> Bool {
+        activeTool == .brush || activeTool == .eraser || activeTool == .smudge
+    }
+
+    private func isTabletLikeEvent(_ event: NSEvent) -> Bool {
+        event.type == .tabletPoint || event.type == .pressure || event.subtype == .tabletPoint
+    }
+
+    private func beginBrushStrokeDiagnostics() {
+        guard isBrushLikeToolActive() else { return }
+        isBrushStrokeActive = true
+        sawTabletAuxiliaryEvent = false
+        brushDebugRecords = []
+        if debugDisableMouseCoalescingDuringStroke {
+            previousMouseCoalescingEnabled = NSEvent.isMouseCoalescingEnabled
+            NSEvent.isMouseCoalescingEnabled = false
+            brushStrokeLogger.debug(
+                "[coalescing] begin previous=\(String(describing: self.previousMouseCoalescingEnabled), privacy: .public) current=\(NSEvent.isMouseCoalescingEnabled, privacy: .public)"
+            )
+        }
+    }
+
+    private func endBrushStrokeDiagnostics() {
+        guard isBrushStrokeActive else { return }
+
+        let firstSlice = Array(brushDebugRecords.prefix(8))
+        let middleSlice: [BrushInputDebugRecord]
+        if brushDebugRecords.count >= 16 {
+            let start = max((brushDebugRecords.count / 2) - 4, 0)
+            middleSlice = Array(brushDebugRecords[start..<min(start + 8, brushDebugRecords.count)])
+        } else if brushDebugRecords.count > 8 {
+            middleSlice = Array(brushDebugRecords.suffix(8))
+        } else {
+            middleSlice = firstSlice
+        }
+
+        func mean<T: BinaryFloatingPoint>(_ values: [T]) -> Double {
+            guard !values.isEmpty else { return 0 }
+            return values.reduce(0) { $0 + Double($1) } / Double(values.count)
+        }
+
+        if debugLogFirstRawSamples, !firstSlice.isEmpty {
+            let startMeanDT = mean(firstSlice.dropFirst().map(\.dt))
+            let startMeanDistance = mean(firstSlice.dropFirst().map(\.distanceFromPrevious))
+            let middleMeanDT = mean(middleSlice.dropFirst().map(\.dt))
+            let middleMeanDistance = mean(middleSlice.dropFirst().map(\.distanceFromPrevious))
+            brushStrokeLogger.debug(
+                "[inputSummary] startMeanDT=\(startMeanDT, privacy: .public) startMeanDistance=\(startMeanDistance, privacy: .public) middleMeanDT=\(middleMeanDT, privacy: .public) middleMeanDistance=\(middleMeanDistance, privacy: .public)"
+            )
+            if !sawTabletAuxiliaryEvent {
+                brushStrokeLogger.debug("[tablet] no tabletPoint/pressureChange events received during stroke")
+            }
+        }
+
+        if let previousMouseCoalescingEnabled {
+            NSEvent.isMouseCoalescingEnabled = previousMouseCoalescingEnabled
+            brushStrokeLogger.debug(
+                "[coalescing] end restored=\(previousMouseCoalescingEnabled, privacy: .public) current=\(NSEvent.isMouseCoalescingEnabled, privacy: .public)"
+            )
+        }
+
+        previousMouseCoalescingEnabled = nil
+        isBrushStrokeActive = false
+        sawTabletAuxiliaryEvent = false
+        brushDebugRecords = []
+    }
+
+    private func recordBrushInputDebugSample(
+        event: NSEvent,
+        rawPressure: Float,
+        filteredPressure: Float,
+        sample: CanvasStrokeSample
+    ) {
+        guard isBrushStrokeActive, isBrushLikeToolActive() else { return }
+
+        let previous = brushDebugRecords.last
+        let dx = previous.map { sample.location.x - $0.location.x } ?? 0
+        let dy = previous.map { sample.location.y - $0.location.y } ?? 0
+        let dt = previous.map { event.timestamp - $0.timestamp } ?? 0
+        let distance = previous.map { _ in sqrt((dx * dx) + (dy * dy)) } ?? 0
+
+        let record = BrushInputDebugRecord(
+            index: strokeInputSampleCount,
+            eventType: event.type,
+            eventSubtype: event.subtype,
+            timestamp: event.timestamp,
+            location: sample.location,
+            rawPressure: rawPressure,
+            filteredPressure: filteredPressure,
+            dx: dx,
+            dy: dy,
+            dt: dt,
+            distanceFromPrevious: distance
+        )
+        brushDebugRecords.append(record)
+
+        if debugLogFirstRawSamples, record.index < 8 {
+            brushStrokeLogger.debug(
+                "[rawSample] index=\(record.index, privacy: .public) type=\(String(describing: record.eventType), privacy: .public) subtype=\(String(describing: record.eventSubtype), privacy: .public) timestamp=\(record.timestamp, privacy: .public) x=\(record.location.x, privacy: .public) y=\(record.location.y, privacy: .public) rawPressure=\(record.rawPressure, privacy: .public) filteredPressure=\(record.filteredPressure, privacy: .public) dx=\(record.dx, privacy: .public) dy=\(record.dy, privacy: .public) dt=\(record.dt, privacy: .public) distance=\(record.distanceFromPrevious, privacy: .public) deviceID=n/a"
+            )
+        }
+
+        strokeInputSampleCount += 1
+    }
+
+    private func handleAuxiliaryBrushInputEvent(_ event: NSEvent, source: StaticString) -> Bool {
+        guard isBrushStrokeActive, isBrushLikeToolActive(), !isPanModeActive else {
+            return false
+        }
+
+        sawTabletAuxiliaryEvent = true
+        brushStrokeLogger.debug(
+            "[auxEvent] source=\(source, privacy: .public) type=\(String(describing: event.type), privacy: .public) subtype=\(String(describing: event.subtype), privacy: .public) timestamp=\(event.timestamp, privacy: .public) rawPressure=\(Float(event.pressure), privacy: .public) deviceID=n/a"
+        )
+        let sample = smoothed(sample(from: event))
+        emitCoalescedStrokeSamples([sample])
+        lastSample = sample
+        strokePacketIndex += 1
+        setNeedsDisplay(bounds)
+        return true
     }
     private func canvasRotationAngleDegrees(for location: CGPoint) -> Double {
         let center = CGPoint(x: bounds.midX, y: bounds.midY)
@@ -886,6 +1078,7 @@ final class StrokeCaptureMTKView: MTKView {
     }
 
     func resetInteractionState() {
+        endBrushStrokeDiagnostics()
         lastSample = nil
         smoothedPosition = nil
         lastPanLocation = nil

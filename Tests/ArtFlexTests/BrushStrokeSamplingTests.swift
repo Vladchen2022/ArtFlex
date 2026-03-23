@@ -4,7 +4,7 @@ import Testing
 
 struct BrushStrokeSamplingTests {
     @Test
-    func continuationPacketKeepsSamplingStateAndDoesNotDuplicateLeadingStamp() {
+    func startupSegmentWaitsForThirdPointAndDoesNotDuplicateLeadingStamp() {
         let device = MTLCreateSystemDefaultDevice()
         #expect(device != nil)
         guard let device else { return }
@@ -39,7 +39,6 @@ struct BrushStrokeSamplingTests {
             color: .black,
             brush: brush,
             points: [
-                StrokePoint(x: 0, y: 0, pressure: 1),
                 StrokePoint(x: 10, y: 0, pressure: 1)
             ],
             selectionShape: nil,
@@ -53,13 +52,14 @@ struct BrushStrokeSamplingTests {
         #expect(secondSamples.count == 1)
         #expect(secondSamples.first?.point == StrokePoint(x: 0, y: 0, pressure: 1))
         #expect(samplingState?.nextSampleIndex == 1)
+        #expect(samplingState?.nextSegmentIndexToCommit == 0)
+        #expect(samplingState?.hasEmittedLeadingStamp == true)
 
         let continuationPacket = StrokeDescriptor(
             tool: .brush,
             color: .black,
             brush: brush,
             points: [
-                StrokePoint(x: 10, y: 0, pressure: 1),
                 StrokePoint(x: 20, y: 0, pressure: 1)
             ],
             selectionShape: nil,
@@ -71,8 +71,8 @@ struct BrushStrokeSamplingTests {
         )
 
         #expect(continuationSamples.isEmpty)
-        #expect(samplingState?.nextSampleIndex == 1)
-        #expect(samplingState?.lastSamplePoint == StrokePoint(x: 0, y: 0, pressure: 1))
+        #expect(samplingState?.nextSegmentIndexToCommit == 1)
+        #expect(samplingState?.hasEmittedLeadingStamp == true)
     }
 
     @Test
