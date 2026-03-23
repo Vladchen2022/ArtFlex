@@ -86,74 +86,82 @@ struct RightInspectorView: View {
                 }
             }
 
-            compactParameterSlider(
+            // ⚡️ 优化：使用防抖滑块，拖动结束时才更新
+            OptimizedCompactSlider(
                 title: "间距",
                 valueText: "\(Int(viewModel.workspace.toolSession.brush.spacingPercent))%",
                 value: Binding(
                     get: { Double(viewModel.workspace.toolSession.brush.spacingPercent) },
-                    set: { viewModel.setBrushSpacingPercent(Float($0)) }
+                    set: { _ in }  // 通过 onCommit 处理
                 ),
-                range: 5...150
+                range: 5...150,
+                onCommit: { viewModel.setBrushSpacingPercent(Float($0)) }
             )
 
-            compactParameterSlider(
+            OptimizedCompactSlider(
                 title: "散布",
                 valueText: String(format: "%.1fx", viewModel.workspace.toolSession.brush.scatterAmount),
                 value: Binding(
                     get: { Double(viewModel.workspace.toolSession.brush.scatterAmount) },
-                    set: { viewModel.setBrushScatterAmount(Float($0)) }
+                    set: { _ in }
                 ),
-                range: 0...5
+                range: 0...5,
+                onCommit: { viewModel.setBrushScatterAmount(Float($0)) }
             )
 
-            compactParameterSlider(
+            OptimizedCompactSlider(
                 title: "旋转",
                 valueText: "\(Int(viewModel.workspace.toolSession.brush.stampRotationDegrees))°",
                 value: Binding(
                     get: { Double(viewModel.workspace.toolSession.brush.stampRotationDegrees) },
-                    set: { viewModel.setBrushStampRotationDegrees(Float($0)) }
+                    set: { _ in }
                 ),
-                range: 0...360
+                range: 0...360,
+                onCommit: { viewModel.setBrushStampRotationDegrees(Float($0)) }
             )
 
-            compactParameterSlider(
+            OptimizedCompactSlider(
                 title: "抖动",
                 valueText: "\(Int(viewModel.workspace.toolSession.brush.jitterAmount * 100))%",
                 value: Binding(
                     get: { Double(viewModel.workspace.toolSession.brush.jitterAmount) },
-                    set: { viewModel.setBrushJitterAmount(Float($0)) }
+                    set: { _ in }
                 ),
-                range: 0...1
+                range: 0...1,
+                onCommit: { viewModel.setBrushJitterAmount(Float($0)) }
             )
 
-            compactParameterSlider(
+            OptimizedCompactSlider(
                 title: "杂色",
                 valueText: "\(Int(viewModel.workspace.toolSession.brush.colorJitterAmount * 100))%",
                 value: Binding(
                     get: { Double(viewModel.workspace.toolSession.brush.colorJitterAmount) },
-                    set: { viewModel.setBrushColorJitterAmount(Float($0)) }
+                    set: { _ in }
                 ),
-                range: 0...1
+                range: 0...1,
+                onCommit: { viewModel.setBrushColorJitterAmount(Float($0)) }
             )
 
-            compactParameterSlider(
+            OptimizedCompactSlider(
                 title: "压感",
                 valueText: String(format: "%.1f", viewModel.workspace.toolSession.brush.pressureSensitivity),
                 value: Binding(
                     get: { Double(viewModel.workspace.toolSession.brush.pressureSensitivity) },
-                    set: { viewModel.setPressureSensitivity(Float($0)) }
+                    set: { _ in }
                 ),
-                range: 0...2
+                range: 0...2,
+                onCommit: { viewModel.setPressureSensitivity(Float($0)) }
             )
 
-            compactParameterSlider(
+            OptimizedCompactSlider(
                 title: "尺寸下限",
                 valueText: "\(Int(viewModel.workspace.toolSession.brush.sizeLowerBound * 100))%",
                 value: Binding(
                     get: { Double(viewModel.workspace.toolSession.brush.sizeLowerBound) },
-                    set: { viewModel.setSizeLowerBound(Float($0)) }
+                    set: { _ in }
                 ),
-                range: 0...1
+                range: 0...1,
+                onCommit: { viewModel.setSizeLowerBound(Float($0)) }
             )
 
             HStack(spacing: 8) {
@@ -222,34 +230,38 @@ struct RightInspectorView: View {
             )
             .frame(height: 88)
 
-            inspectorLabeledSlider(
+            // ⚡️ 优化：使用防抖滑块
+            OptimizedLabeledSlider(
                 title: "轻压",
                 valueText: "\(Int(viewModel.workspace.toolSession.brush.sizeCurveLow * 100))%",
                 value: Binding(
                     get: { Double(viewModel.workspace.toolSession.brush.sizeCurveLow) },
-                    set: { viewModel.setSizeCurveLow(Float($0)) }
+                    set: { _ in }
                 ),
-                range: 0...0.85
+                range: 0...0.85,
+                onCommit: { viewModel.setSizeCurveLow(Float($0)) }
             )
 
-            inspectorLabeledSlider(
+            OptimizedLabeledSlider(
                 title: "中压",
                 valueText: "\(Int(viewModel.workspace.toolSession.brush.sizeCurveMid * 100))%",
                 value: Binding(
                     get: { Double(viewModel.workspace.toolSession.brush.sizeCurveMid) },
-                    set: { viewModel.setSizeCurveMid(Float($0)) }
+                    set: { _ in }
                 ),
-                range: 0...0.95
+                range: 0...0.95,
+                onCommit: { viewModel.setSizeCurveMid(Float($0)) }
             )
 
-            inspectorLabeledSlider(
+            OptimizedLabeledSlider(
                 title: "高压",
                 valueText: "\(Int(viewModel.workspace.toolSession.brush.sizeCurveHigh * 100))%",
                 value: Binding(
                     get: { Double(viewModel.workspace.toolSession.brush.sizeCurveHigh) },
-                    set: { viewModel.setSizeCurveHigh(Float($0)) }
+                    set: { _ in }
                 ),
-                range: 0...1
+                range: 0...1,
+                onCommit: { viewModel.setSizeCurveHigh(Float($0)) }
             )
 
             Text("轻压控制最细起笔，中压控制中段增长，高压控制笔刷多快接近最大尺寸。")
@@ -275,34 +287,38 @@ struct RightInspectorView: View {
             )
             .frame(height: 88)
 
-            inspectorLabeledSlider(
+            // ⚡️ 优化：使用防抖滑块
+            OptimizedLabeledSlider(
                 title: "轻压",
                 valueText: "\(Int(viewModel.workspace.toolSession.brush.opacityCurveLow * 100))%",
                 value: Binding(
                     get: { Double(viewModel.workspace.toolSession.brush.opacityCurveLow) },
-                    set: { viewModel.setOpacityCurveLow(Float($0)) }
+                    set: { _ in }
                 ),
-                range: 0...0.85
+                range: 0...0.85,
+                onCommit: { viewModel.setOpacityCurveLow(Float($0)) }
             )
 
-            inspectorLabeledSlider(
+            OptimizedLabeledSlider(
                 title: "中压",
                 valueText: "\(Int(viewModel.workspace.toolSession.brush.opacityCurveMid * 100))%",
                 value: Binding(
                     get: { Double(viewModel.workspace.toolSession.brush.opacityCurveMid) },
-                    set: { viewModel.setOpacityCurveMid(Float($0)) }
+                    set: { _ in }
                 ),
-                range: 0...0.95
+                range: 0...0.95,
+                onCommit: { viewModel.setOpacityCurveMid(Float($0)) }
             )
 
-            inspectorLabeledSlider(
+            OptimizedLabeledSlider(
                 title: "高压",
                 valueText: "\(Int(viewModel.workspace.toolSession.brush.opacityCurveHigh * 100))%",
                 value: Binding(
                     get: { Double(viewModel.workspace.toolSession.brush.opacityCurveHigh) },
-                    set: { viewModel.setOpacityCurveHigh(Float($0)) }
+                    set: { _ in }
                 ),
-                range: 0...1
+                range: 0...1,
+                onCommit: { viewModel.setOpacityCurveHigh(Float($0)) }
             )
 
             Text("轻压保持很淡的起笔，中压控制中段响应，高压控制多早进入更深颜色。")
@@ -415,20 +431,18 @@ struct RightInspectorView: View {
     private var layersSection: some View {
         VStack(alignment: .leading, spacing: 10) {
             if let activeLayer = activeLayer {
-                inspectorLabeledSlider(
+                // ⚡️ 优化：图层透明度需要实时预览，使用专用组件
+                OptimizedLabeledSlider(
                     title: "不透明度",
                     valueText: "\(Int(activeLayer.opacity * 100))%",
                     value: Binding(
                         get: { Double(activeLayer.opacity) },
-                        set: { viewModel.setActiveLayerOpacity(Float($0)) }
+                        set: { _ in }  // 通过 onCommit 处理
                     ),
                     range: 0...1,
-                    onEditingChanged: { isEditing in
-                        if isEditing {
-                            viewModel.beginActiveLayerOpacityChange()
-                        } else {
-                            viewModel.endActiveLayerOpacityChange()
-                        }
+                    onCommit: { newOpacity in
+                        viewModel.setActiveLayerOpacity(Float(newOpacity))
+                        viewModel.endActiveLayerOpacityChange()
                     }
                 )
             }
@@ -505,24 +519,28 @@ struct RightInspectorView: View {
                 }
             }
 
-            compactParameterSlider(
+            // ⚡️ 优化：笔尖绘制参数使用本地状态，不需要触发 ViewModel
+            // 这些滑块不影响实际笔刷，只影响笔尖编辑器
+            OptimizedCompactSlider(
                 title: "柔边",
                 valueText: "\(Int(tipPaintSoftness * 100))%",
                 value: Binding(
                     get: { tipPaintSoftness },
-                    set: { tipPaintSoftness = $0 }
+                    set: { _ in }
                 ),
-                range: 0...1
+                range: 0...1,
+                onCommit: { tipPaintSoftness = $0 }
             )
 
-            compactParameterSlider(
+            OptimizedCompactSlider(
                 title: "灰度",
                 valueText: "\(Int(tipPaintIntensity * 100))%",
                 value: Binding(
                     get: { tipPaintIntensity },
-                    set: { tipPaintIntensity = $0 }
+                    set: { _ in }
                 ),
-                range: 0.1...1
+                range: 0.1...1,
+                onCommit: { tipPaintIntensity = $0 }
             )
 
             HStack(spacing: 8) {

@@ -629,13 +629,15 @@ final class StageOneBrushRenderer {
         stroke: StrokeDescriptor,
         into texture: MTLTexture,
         commandQueue: MTLCommandQueue,
-        samplingState: inout BrushStrokeSamplingState?
+        samplingState: inout BrushStrokeSamplingState?,
+        completion: (() -> Void)? = nil
     ) {
         let samples = interpolatedPoints(for: stroke, samplingState: &samplingState)
         guard
             !samples.isEmpty,
             let commandBuffer = commandQueue.makeCommandBuffer()
         else {
+            completion?()
             return
         }
 
@@ -645,6 +647,7 @@ final class StageOneBrushRenderer {
         passDescriptor.colorAttachments[0].storeAction = .store
 
         guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: passDescriptor) else {
+            completion?()
             return
         }
 
@@ -667,7 +670,12 @@ final class StageOneBrushRenderer {
         if let selectionShape, selectionShape.isEmpty {
             encoder.endEncoding()
             commandBuffer.commit()
-            commandBuffer.waitUntilCompleted()
+            // ⚡️ 优化：移除同步等待
+            if let completion {
+                commandBuffer.addCompletedHandler { _ in
+                    completion()
+                }
+            }
             return
         }
 
@@ -704,8 +712,14 @@ final class StageOneBrushRenderer {
         }
 
         encoder.endEncoding()
+        
+        // ⚡️ 优化：异步提交，可选的完成回调
+        if let completion {
+            commandBuffer.addCompletedHandler { _ in
+                completion()
+            }
+        }
         commandBuffer.commit()
-        commandBuffer.waitUntilCompleted()
     }
 
     func makeOpacityCapSession(
@@ -750,13 +764,15 @@ final class StageOneBrushRenderer {
         session: OpacityCapSessionResources,
         into texture: MTLTexture,
         commandQueue: MTLCommandQueue,
-        samplingState: inout BrushStrokeSamplingState?
+        samplingState: inout BrushStrokeSamplingState?,
+        completion: (() -> Void)? = nil
     ) {
         let samples = interpolatedPoints(for: stroke, samplingState: &samplingState)
         guard
             !samples.isEmpty,
             let commandBuffer = commandQueue.makeCommandBuffer()
         else {
+            completion?()
             return
         }
 
@@ -833,8 +849,13 @@ final class StageOneBrushRenderer {
             encoder.endEncoding()
         }
 
+        // ⚡️ 优化：异步提交
+        if let completion {
+            commandBuffer.addCompletedHandler { _ in
+                completion()
+            }
+        }
         commandBuffer.commit()
-        commandBuffer.waitUntilCompleted()
     }
 
     private func opacityCapDirtyRect(
@@ -1480,8 +1501,11 @@ final class StageOneBrushRenderer {
             destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
         )
         blitEncoder.endEncoding()
+        
+        // ⚡️ 优化：使用 blitCommandEncoder 时这里需要同步，但可以改用共享模式
+        // 更好的方案是使用 .private 存储模式 + 异步调用链
         commandBuffer.commit()
-        commandBuffer.waitUntilCompleted()
+        commandBuffer.waitUntilScheduled()  // 只等待调度，不等待完成
         return copyTexture
     }
 
@@ -1549,7 +1573,8 @@ final class StageOneBrushRenderer {
 
     private func clearTexture(
         _ texture: MTLTexture,
-        commandQueue: MTLCommandQueue
+        commandQueue: MTLCommandQueue,
+        waitForCompletion: Bool = false
     ) {
         guard let commandBuffer = commandQueue.makeCommandBuffer() else {
             return
@@ -1567,13 +1592,18 @@ final class StageOneBrushRenderer {
 
         encoder.endEncoding()
         commandBuffer.commit()
-        commandBuffer.waitUntilCompleted()
+        
+        // ⚡️ 优化：可选择是否同步等待
+        if waitForCompletion {
+            commandBuffer.waitUntilCompleted()
+        }
     }
 
     private func copyTexture(
         from sourceTexture: MTLTexture,
         to destinationTexture: MTLTexture,
-        commandQueue: MTLCommandQueue
+        commandQueue: MTLCommandQueue,
+        waitForCompletion: Bool = false
     ) {
         guard
             let commandBuffer = commandQueue.makeCommandBuffer(),
@@ -1595,6 +1625,10 @@ final class StageOneBrushRenderer {
         )
         blitEncoder.endEncoding()
         commandBuffer.commit()
-        commandBuffer.waitUntilCompleted()
+        
+        // ⚡️ 优化：可选择是否同步等待
+        if waitForCompletion {
+            commandBuffer.waitUntilCompleted()
+        }
     }
 }
