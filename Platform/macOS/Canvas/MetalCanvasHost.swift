@@ -47,6 +47,7 @@ struct MetalCanvasHost: NSViewRepresentable {
     let onGradientDragBegan: (CanvasPoint, NSEvent.ModifierFlags) -> Void
     let onGradientDragChanged: (CanvasPoint, NSEvent.ModifierFlags) -> Void
     let onGradientDragEnded: (CanvasPoint, NSEvent.ModifierFlags) -> Void
+    let onEnterGradientEditing: () -> Void
     let onCancelCanvasTool: () -> Void
     let onApplyGradientSession: () -> Void
     let onClearSelection: () -> Void
@@ -87,6 +88,7 @@ struct MetalCanvasHost: NSViewRepresentable {
             onGradientDragBegan: onGradientDragBegan,
             onGradientDragChanged: onGradientDragChanged,
             onGradientDragEnded: onGradientDragEnded,
+            onEnterGradientEditing: onEnterGradientEditing,
             onCancelCanvasTool: onCancelCanvasTool,
             onApplyGradientSession: onApplyGradientSession,
             onClearSelection: onClearSelection,
@@ -240,6 +242,7 @@ protocol StrokeCaptureDelegate: AnyObject {
     func strokeCaptureView(_ view: StrokeCaptureMTKView, didBeginGradientDragAt point: CanvasPoint, modifiers: NSEvent.ModifierFlags)
     func strokeCaptureView(_ view: StrokeCaptureMTKView, didChangeGradientDragAt point: CanvasPoint, modifiers: NSEvent.ModifierFlags)
     func strokeCaptureView(_ view: StrokeCaptureMTKView, didEndGradientDragAt point: CanvasPoint, modifiers: NSEvent.ModifierFlags)
+    func strokeCaptureViewDidRequestEnterGradientEditing(_ view: StrokeCaptureMTKView)
     func strokeCaptureViewDidRequestCanvasToolCancel(_ view: StrokeCaptureMTKView)
     func strokeCaptureViewDidRequestApplyGradientSession(_ view: StrokeCaptureMTKView)
     func strokeCaptureViewDidRequestClearSelection(_ view: StrokeCaptureMTKView)
@@ -313,6 +316,7 @@ final class StrokeCaptureMTKView: MTKView {
     private var pendingTransformInteractionMode: FreeTransformInteractionMode?
     private var activeFreeTransformDragPoint: CanvasPoint?
     private var activeFreeTransformDragMode: FreeTransformInteractionMode?
+    private var isGradientDragActive = false
     private var previousMouseCoalescingEnabled: Bool?
     private var brushDebugRecords: [BrushInputDebugRecord] = []
     private let minimumTabletPressure: Float = 0.02
@@ -415,6 +419,7 @@ final class StrokeCaptureMTKView: MTKView {
         }
 
         if activeTool == .linearGradient || activeTool == .sectorGradient {
+            isGradientDragActive = true
             strokeDelegate?.strokeCaptureView(
                 self,
                 didBeginGradientDragAt: sample(from: event).location,
@@ -684,6 +689,7 @@ final class StrokeCaptureMTKView: MTKView {
         }
 
         if activeTool == .linearGradient || activeTool == .sectorGradient {
+            isGradientDragActive = false
             strokeDelegate?.strokeCaptureView(
                 self,
                 didEndGradientDragAt: sample(from: event).location,
@@ -912,8 +918,13 @@ final class StrokeCaptureMTKView: MTKView {
     }
 
     override func flagsChanged(with event: NSEvent) {
+        let previousModifiers = activeModifierFlags
         activeModifierFlags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         updateCursorAppearance()
+        let shiftDidRise = !previousModifiers.contains(.shift) && activeModifierFlags.contains(.shift)
+        if shiftDidRise, !isGradientDragActive, (activeTool == .linearGradient || activeTool == .sectorGradient) {
+            strokeDelegate?.strokeCaptureViewDidRequestEnterGradientEditing(self)
+        }
         if activeTool == .freeTransform,
            let activePoint = activeFreeTransformDragPoint,
            case .scale = activeFreeTransformDragMode,
@@ -1271,6 +1282,7 @@ final class StrokeCaptureMTKView: MTKView {
         pendingTransformBeginPoint = nil
         pendingTransformLatestPoint = nil
         pendingTransformInteractionMode = nil
+        isGradientDragActive = false
         activeFreeTransformDragPoint = nil
         activeFreeTransformDragMode = nil
         isPaused = true
@@ -1359,6 +1371,7 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
     private let onGradientDragBegan: (CanvasPoint, NSEvent.ModifierFlags) -> Void
     private let onGradientDragChanged: (CanvasPoint, NSEvent.ModifierFlags) -> Void
     private let onGradientDragEnded: (CanvasPoint, NSEvent.ModifierFlags) -> Void
+    private let onEnterGradientEditing: () -> Void
     private let onCancelCanvasTool: () -> Void
     private let onApplyGradientSession: () -> Void
     private let onClearSelection: () -> Void
@@ -1433,6 +1446,7 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
         onGradientDragBegan: @escaping (CanvasPoint, NSEvent.ModifierFlags) -> Void,
         onGradientDragChanged: @escaping (CanvasPoint, NSEvent.ModifierFlags) -> Void,
         onGradientDragEnded: @escaping (CanvasPoint, NSEvent.ModifierFlags) -> Void,
+        onEnterGradientEditing: @escaping () -> Void,
         onCancelCanvasTool: @escaping () -> Void,
         onApplyGradientSession: @escaping () -> Void,
         onClearSelection: @escaping () -> Void,
@@ -1478,6 +1492,7 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
         self.onGradientDragBegan = onGradientDragBegan
         self.onGradientDragChanged = onGradientDragChanged
         self.onGradientDragEnded = onGradientDragEnded
+        self.onEnterGradientEditing = onEnterGradientEditing
         self.onCancelCanvasTool = onCancelCanvasTool
         self.onApplyGradientSession = onApplyGradientSession
         self.onClearSelection = onClearSelection
@@ -1697,6 +1712,10 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
         modifiers: NSEvent.ModifierFlags
     ) {
         onGradientDragEnded(point, modifiers)
+    }
+
+    func strokeCaptureViewDidRequestEnterGradientEditing(_ view: StrokeCaptureMTKView) {
+        onEnterGradientEditing()
     }
 
     func strokeCaptureView(_ view: StrokeCaptureMTKView, didBeginSelectionAt point: CanvasPoint, modifiers: NSEvent.ModifierFlags) {

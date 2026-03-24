@@ -146,6 +146,10 @@ struct CanvasContainerView: View {
                             onCanvasInteraction?()
                             viewModel.endGradientDrag(at: point, modifiers: modifiers)
                         },
+                        onEnterGradientEditing: {
+                            onCanvasInteraction?()
+                            viewModel.enterGradientEditingViaShift()
+                        },
                         onCancelCanvasTool: {
                             viewModel.cancelCanvasToolInteraction()
                         },
@@ -239,6 +243,7 @@ struct CanvasContainerView: View {
                 }
 
                 if viewModel.workspace.toolSession.activeTool == .linearGradient,
+                   viewModel.linearGradientState.isEditingSession,
                    let preview = viewModel.linearGradientState.preview {
                     LinearGradientToolOverlay(
                         preview: preview,
@@ -259,6 +264,7 @@ struct CanvasContainerView: View {
                 }
 
                 if viewModel.workspace.toolSession.activeTool == .sectorGradient,
+                   viewModel.sectorGradientState.isEditingSession,
                    let preview = viewModel.sectorGradientState.preview {
                     SectorGradientToolOverlay(
                         preview: preview,
@@ -317,7 +323,7 @@ struct CanvasContainerView: View {
                 }
 
                 if viewModel.workspace.toolSession.activeTool == .linearGradient,
-                   viewModel.linearGradientState.isActiveSession {
+                   (viewModel.linearGradientState.isEditingSession || viewModel.isApplyingGradientCommit) {
                     GradientToolHUD(
                         title: viewModel.isApplyingGradientCommit ? "应用中" : "直线渐变",
                         isApplying: viewModel.isApplyingGradientCommit,
@@ -332,7 +338,7 @@ struct CanvasContainerView: View {
                 }
 
                 if viewModel.workspace.toolSession.activeTool == .sectorGradient,
-                   viewModel.sectorGradientState.isActiveSession {
+                   (viewModel.sectorGradientState.isEditingSession || viewModel.isApplyingGradientCommit) {
                     GradientToolHUD(
                         title: viewModel.isApplyingGradientCommit ? "应用中" : "扇形渐变",
                         isApplying: viewModel.isApplyingGradientCommit,

@@ -26,7 +26,7 @@ struct GradientInteractionStateTests {
         viewModel.updateGradientDrag(to: .init(x: 140, y: 50))
         viewModel.endGradientDrag(at: .init(x: 140, y: 50))
 
-        #expect(viewModel.linearGradientState.phase == .editing)
+        #expect(viewModel.linearGradientState.phase == .pendingPreview)
         #expect(viewModel.linearGradientState.geometry != nil)
     }
 
@@ -53,8 +53,78 @@ struct GradientInteractionStateTests {
         viewModel.updateGradientDrag(to: .init(x: 260, y: 200))
         viewModel.endGradientDrag(at: .init(x: 260, y: 200))
 
-        #expect(viewModel.sectorGradientState.phase == .editing)
+        #expect(viewModel.sectorGradientState.phase == .pendingPreview)
         #expect(viewModel.sectorGradientState.geometry != nil)
         #expect(abs((viewModel.sectorGradientState.geometry?.sweepAngle ?? 0)) > 0.1)
+    }
+
+    @Test
+    func shiftPromotesPendingPreviewToEditing() {
+        let viewModel = WorkspaceViewModel(bootstrap: AppBootstrap(), installsZoomKeyboardMonitor: false)
+        viewModel.selectTool(.linearGradient)
+
+        viewModel.beginGradientDrag(at: .init(x: 50, y: 50))
+        viewModel.updateGradientDrag(to: .init(x: 140, y: 50))
+        viewModel.endGradientDrag(at: .init(x: 140, y: 50))
+        #expect(viewModel.linearGradientState.phase == .pendingPreview)
+        #expect(shouldShowGradientAnnotator(phase: viewModel.linearGradientState.phase) == false)
+
+        viewModel.enterGradientEditingViaShift()
+
+        #expect(viewModel.linearGradientState.phase == .editing)
+        #expect(shouldShowGradientAnnotator(phase: viewModel.linearGradientState.phase) == true)
+    }
+
+    @Test
+    func toolSwitchAutoAppliesPendingPreview() async throws {
+        let viewModel = WorkspaceViewModel(bootstrap: AppBootstrap(), installsZoomKeyboardMonitor: false)
+        viewModel.selectTool(.linearGradient)
+
+        viewModel.beginGradientDrag(at: .init(x: 40, y: 40))
+        viewModel.updateGradientDrag(to: .init(x: 120, y: 40))
+        viewModel.endGradientDrag(at: .init(x: 120, y: 40))
+        #expect(viewModel.linearGradientState.phase == .pendingPreview)
+
+        viewModel.selectTool(.brush)
+        #expect(viewModel.isApplyingGradientCommit == true)
+
+        for _ in 0..<100 {
+            if viewModel.workspace.toolSession.activeTool == .brush,
+               viewModel.linearGradientState.phase == .idle,
+               viewModel.isApplyingGradientCommit == false {
+                return
+            }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+
+        #expect(viewModel.workspace.toolSession.activeTool == .brush)
+        #expect(viewModel.linearGradientState.phase == .idle)
+        #expect(viewModel.isApplyingGradientCommit == false)
+    }
+
+    @Test
+    func startingNextGradientAutoAppliesAndReplaysDeferredBegin() async throws {
+        let viewModel = WorkspaceViewModel(bootstrap: AppBootstrap(), installsZoomKeyboardMonitor: false)
+        viewModel.selectTool(.linearGradient)
+
+        viewModel.beginGradientDrag(at: .init(x: 40, y: 40))
+        viewModel.updateGradientDrag(to: .init(x: 120, y: 40))
+        viewModel.endGradientDrag(at: .init(x: 120, y: 40))
+        #expect(viewModel.linearGradientState.phase == .pendingPreview)
+
+        let nextStart = CanvasPoint(x: 200, y: 220)
+        viewModel.beginGradientDrag(at: nextStart)
+        #expect(viewModel.isApplyingGradientCommit == true)
+
+        for _ in 0..<100 {
+            if viewModel.linearGradientState.phase == .drawingLeg1,
+               viewModel.linearGradientState.pointA == nextStart {
+                return
+            }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+
+        #expect(viewModel.linearGradientState.phase == .drawingLeg1)
+        #expect(viewModel.linearGradientState.pointA == nextStart)
     }
 }

@@ -28,6 +28,12 @@ enum IdeationCanvasOperation: Sendable {
     case beginStroke
     case applyStroke([CanvasStrokeSample])
     case endStroke
+    case beginGradientDrag(point: CanvasPoint, modifiers: CanvasModifierState)
+    case updateGradientDrag(point: CanvasPoint, modifiers: CanvasModifierState)
+    case endGradientDrag(point: CanvasPoint, modifiers: CanvasModifierState)
+    case enterGradientEditing
+    case applyGradientSession
+    case cancelGradientSession
     case fillAtPoint(CanvasPoint)
     case handleCanvasToolClick(point: CanvasPoint, modifiers: CanvasModifierState, clickCount: Int)
     case beginSelection(kind: SelectionShapeKind, start: CanvasPoint, modifiers: CanvasModifierState)

@@ -88,6 +88,7 @@ final class WorkspaceViewModel: ObservableObject {
     @Published private(set) var ideationSession: IdeationSessionState?
     private var currentProjectURL: URL?
     private var shouldResumeTimelapseAfterIdeation = false
+    private var deferredGradientAction: DeferredGradientAction?
     private let selectionTraceLogger = Logger(subsystem: "ArtFlex", category: "SelectionTrace")
     private let brushStrokeLogger = Logger(subsystem: "ArtFlex", category: "BrushStroke")
     private let transformLogger = Logger(subsystem: "ArtFlex", category: "Transform")
@@ -152,6 +153,18 @@ final class WorkspaceViewModel: ObservableObject {
 
     func selectTool(_ tool: ToolKind) {
         ideationBranchActivityHandler?()
+        if shouldAutoApplyGradientBeforeSelectingTool(tool) {
+            deferredGradientAction = .toolSwitch(tool)
+            transformLogger.debug("[gradient] autoApplyOnToolSwitch=true sessionState=\(self.gradientSessionStateDescription(), privacy: .public)")
+            transformLogger.debug("[gradient] deferredToolSwitch=true sessionTool=\(String(describing: self.activeGradientTool()), privacy: .public)")
+            guard !isApplyingGradientCommit else { return }
+            applyActiveGradientSession()
+            return
+        }
+        performToolSelection(tool)
+    }
+
+    private func performToolSelection(_ tool: ToolKind) {
         let previousTool = workspace.toolSession.activeTool
         if workspace.toolSession.activeTool != tool {
             resolveTransformSession(reason: .toolChange)
@@ -1631,6 +1644,129 @@ final class WorkspaceViewModel: ObservableObject {
         linearGradientState.hoverPoint = point
     }
 
+    private func activeGradientTool() -> ToolKind? {
+        switch workspace.toolSession.activeTool {
+        case .linearGradient, .sectorGradient:
+            return workspace.toolSession.activeTool
+        default:
+            return nil
+        }
+    }
+
+    private func gradientSessionStateDescription() -> String {
+        switch workspace.toolSession.activeTool {
+        case .linearGradient:
+            return String(describing: linearGradientState.phase)
+        case .sectorGradient:
+            return String(describing: sectorGradientState.phase)
+        default:
+            return "idle"
+        }
+    }
+
+    private func shouldAutoApplyGradientBeforeSelectingTool(_ tool: ToolKind) -> Bool {
+        guard tool != workspace.toolSession.activeTool else { return false }
+        switch workspace.toolSession.activeTool {
+        case .linearGradient:
+            return shouldAutoApplyGradientForToolSwitch(phase: linearGradientState.phase)
+        case .sectorGradient:
+            return shouldAutoApplyGradientForToolSwitch(phase: sectorGradientState.phase)
+        default:
+            return false
+        }
+    }
+
+    private func handleDeferredGradientActionIfNeeded() {
+        guard let deferredGradientAction else { return }
+        self.deferredGradientAction = nil
+        switch deferredGradientAction {
+        case .toolSwitch(let tool):
+            performToolSelection(tool)
+        case .gradientDrag(let drag):
+            performDeferredGradientDrag(drag)
+        }
+    }
+
+    private func performDeferredGradientDrag(_ drag: DeferredGradientDrag) {
+        bootstrap.workspaceStore.updateToolSession { session in
+            session.activeTool = drag.tool
+        }
+        switch drag.tool {
+        case .linearGradient, .sectorGradient:
+            break
+        default:
+            return
+        }
+        guard let firstPoint = drag.points.first else { return }
+        beginGradientDrag(at: firstPoint, modifiers: drag.modifiers)
+        if drag.points.count >= 2 {
+            let updatePoints = drag.didEnd ? Array(drag.points.dropFirst().dropLast()) : Array(drag.points.dropFirst())
+            for point in updatePoints {
+                updateGradientDrag(to: point, modifiers: drag.modifiers)
+            }
+            if drag.didEnd, let endPoint = drag.points.last {
+                endGradientDrag(at: endPoint, modifiers: drag.modifiers)
+            }
+        }
+    }
+
+    private func queueDeferredGradientDragPoint(
+        tool: ToolKind,
+        point: CanvasPoint,
+        modifiers: NSEvent.ModifierFlags,
+        didEnd: Bool
+    ) {
+        guard tool == .linearGradient || tool == .sectorGradient else { return }
+        if case .gradientDrag(var drag)? = deferredGradientAction, drag.tool == tool {
+            if drag.points.last != point {
+                drag.points.append(point)
+            }
+            drag.modifiers = modifiers
+            drag.didEnd = drag.didEnd || didEnd
+            deferredGradientAction = .gradientDrag(drag)
+            return
+        }
+        deferredGradientAction = .gradientDrag(
+            DeferredGradientDrag(
+                tool: tool,
+                points: [point],
+                modifiers: modifiers,
+                didEnd: didEnd
+            )
+        )
+    }
+
+    private func shouldAutoApplyGradientBeforeNewDrag(hitExistingEditorTarget: Bool) -> Bool {
+        guard !hitExistingEditorTarget else { return false }
+        switch workspace.toolSession.activeTool {
+        case .linearGradient:
+            return shouldAutoApplyGradientForToolSwitch(phase: linearGradientState.phase)
+        case .sectorGradient:
+            return shouldAutoApplyGradientForToolSwitch(phase: sectorGradientState.phase)
+        default:
+            return false
+        }
+    }
+
+    func enterGradientEditingViaShift() {
+        guard !isApplyingGradientCommit else { return }
+        switch workspace.toolSession.activeTool {
+        case .linearGradient:
+            guard linearGradientState.phase == .pendingPreview else { return }
+            linearGradientState.phase = .editing
+            transformLogger.debug("[gradient] enteredEditingViaShift=true sessionTool=linear")
+            transformLogger.debug("[gradient] sessionState=\(String(describing: self.linearGradientState.phase), privacy: .public)")
+        case .sectorGradient:
+            guard sectorGradientState.phase == .pendingPreview else { return }
+            sectorGradientState.phase = .editing
+            transformLogger.debug("[gradient] enteredEditingViaShift=true sessionTool=sector")
+            transformLogger.debug("[gradient] sessionState=\(String(describing: self.sectorGradientState.phase), privacy: .public)")
+        default:
+            break
+        }
+        relayIdeationOperation(.enterGradientEditing)
+    }
+
     func updateCanvasToolHover(to point: CanvasPoint) {
         switch workspace.toolSession.activeTool {
         case .straightLine:
@@ -1648,18 +1784,31 @@ final class WorkspaceViewModel: ObservableObject {
 
     func beginGradientDrag(at point: CanvasPoint, modifiers: NSEvent.ModifierFlags = []) {
         ideationBranchActivityHandler?()
+        if isApplyingGradientCommit {
+            if let tool = activeGradientTool() {
+                queueDeferredGradientDragPoint(tool: tool, point: point, modifiers: modifiers, didEnd: false)
+            }
+            return
+        }
         switch workspace.toolSession.activeTool {
         case .linearGradient:
-            beginLinearGradientDrag(at: point)
+            beginLinearGradientDrag(at: point, modifiers: modifiers)
         case .sectorGradient:
-            beginSectorGradientDrag(at: point)
+            beginSectorGradientDrag(at: point, modifiers: modifiers)
         default:
             break
         }
+        relayIdeationOperation(.beginGradientDrag(point: point, modifiers: .init(flags: modifiers)))
     }
 
     func updateGradientDrag(to point: CanvasPoint, modifiers: NSEvent.ModifierFlags = []) {
         ideationBranchActivityHandler?()
+        if isApplyingGradientCommit {
+            if let tool = activeGradientTool() {
+                queueDeferredGradientDragPoint(tool: tool, point: point, modifiers: modifiers, didEnd: false)
+            }
+            return
+        }
         switch workspace.toolSession.activeTool {
         case .linearGradient:
             updateLinearGradientDrag(to: point)
@@ -1668,10 +1817,17 @@ final class WorkspaceViewModel: ObservableObject {
         default:
             break
         }
+        relayIdeationOperation(.updateGradientDrag(point: point, modifiers: .init(flags: modifiers)))
     }
 
     func endGradientDrag(at point: CanvasPoint, modifiers: NSEvent.ModifierFlags = []) {
         ideationBranchActivityHandler?()
+        if isApplyingGradientCommit {
+            if let tool = activeGradientTool() {
+                queueDeferredGradientDragPoint(tool: tool, point: point, modifiers: modifiers, didEnd: true)
+            }
+            return
+        }
         switch workspace.toolSession.activeTool {
         case .linearGradient:
             endLinearGradientDrag(at: point)
@@ -1680,9 +1836,12 @@ final class WorkspaceViewModel: ObservableObject {
         default:
             break
         }
+        relayIdeationOperation(.endGradientDrag(point: point, modifiers: .init(flags: modifiers)))
     }
 
     func applyActiveGradientSession() {
+        guard !isApplyingGradientCommit else { return }
+        relayIdeationOperation(.applyGradientSession)
         switch workspace.toolSession.activeTool {
         case .linearGradient:
             guard let geometry = linearGradientState.geometry else {
@@ -1704,7 +1863,9 @@ final class WorkspaceViewModel: ObservableObject {
     func cancelLinearGradientInteraction() {
         guard workspace.toolSession.activeTool == .linearGradient else { return }
         guard linearGradientState.phase != .idle else { return }
+        deferredGradientAction = nil
         linearGradientState = .init()
+        relayIdeationOperation(.cancelGradientSession)
         showStatus(.init(kind: .info, message: "已取消直线渐变"))
     }
 
@@ -1723,7 +1884,8 @@ final class WorkspaceViewModel: ObservableObject {
         }
     }
 
-    private func beginLinearGradientDrag(at point: CanvasPoint) {
+    private func beginLinearGradientDrag(at point: CanvasPoint, modifiers: NSEvent.ModifierFlags) {
+        let hitExistingEditorTarget: Bool
         if let geometry = linearGradientState.geometry {
             if let handle = linearGradientHandleHitTest(geometry, point: point) {
                 linearGradientState.phase = .draggingHandle(handle)
@@ -1737,6 +1899,19 @@ final class WorkspaceViewModel: ObservableObject {
                 linearGradientState.dragReferenceGeometry = geometry
                 return
             }
+            hitExistingEditorTarget = linearGradientState.isEditingSession
+        } else {
+            hitExistingEditorTarget = false
+        }
+
+        if shouldAutoApplyGradientBeforeNewDrag(hitExistingEditorTarget: hitExistingEditorTarget) {
+            deferredGradientAction = .gradientDrag(
+                DeferredGradientDrag(tool: .linearGradient, points: [point], modifiers: modifiers, didEnd: false)
+            )
+            transformLogger.debug("[gradient] autoApplyOnNextGradient=true sessionTool=linear")
+            transformLogger.debug("[gradient] deferredGradientBegin=true sessionState=\(String(describing: self.linearGradientState.phase), privacy: .public)")
+            applyActiveGradientSession()
+            return
         }
 
         linearGradientState = LinearGradientInteractionState(
@@ -1798,7 +1973,7 @@ final class WorkspaceViewModel: ObservableObject {
             linearGradientState.pointA = CanvasPoint(x: reference.pointA.x + delta.x, y: reference.pointA.y + delta.y)
             linearGradientState.pointB = CanvasPoint(x: reference.pointB.x + delta.x, y: reference.pointB.y + delta.y)
             linearGradientState.pointC = CanvasPoint(x: reference.pointC.x + delta.x, y: reference.pointC.y + delta.y)
-        case .editing:
+        case .editing, .pendingPreview:
             break
         }
     }
@@ -1829,10 +2004,10 @@ final class WorkspaceViewModel: ObservableObject {
                 pointB: pointB,
                 canvasSize: workspace.document.canvasSize
             )
-            linearGradientState.phase = .editing
+            linearGradientState.phase = .pendingPreview
             linearGradientState.leg1CandidatePoint = nil
-            transformLogger.debug("[gradient] enteredEditing=true sessionTool=linear fallback=true")
-            showStatus(.init(kind: .info, message: "已进入直线渐变编辑"))
+            transformLogger.debug("[gradient] completedToPendingPreview=true sessionTool=linear")
+            transformLogger.debug("[gradient] sessionState=\(String(describing: self.linearGradientState.phase), privacy: .public)")
         case .drawingLeg2:
             guard let pointA = linearGradientState.pointA, let pointB = linearGradientState.pointB else {
                 linearGradientState = .init()
@@ -1844,13 +2019,15 @@ final class WorkspaceViewModel: ObservableObject {
                 canvasSize: workspace.document.canvasSize
             )
             linearGradientState.pointC = pointC
-            linearGradientState.phase = .editing
+            linearGradientState.phase = .pendingPreview
             linearGradientState.leg1CandidatePoint = nil
-            transformLogger.debug("[gradient] enteredEditing=true sessionTool=linear fallback=false")
-            showStatus(.init(kind: .info, message: "已进入直线渐变编辑"))
+            transformLogger.debug("[gradient] completedToPendingPreview=true sessionTool=linear")
+            transformLogger.debug("[gradient] sessionState=\(String(describing: self.linearGradientState.phase), privacy: .public)")
         case .draggingHandle, .movingWholeGradient:
             linearGradientState.phase = .editing
         case .editing:
+            break
+        case .pendingPreview:
             break
         }
     }
@@ -1899,7 +2076,9 @@ final class WorkspaceViewModel: ObservableObject {
     func cancelSectorGradientInteraction() {
         guard workspace.toolSession.activeTool == .sectorGradient else { return }
         guard sectorGradientState.phase != .idle else { return }
+        deferredGradientAction = nil
         sectorGradientState = .init()
+        relayIdeationOperation(.cancelGradientSession)
         showStatus(.init(kind: .info, message: "已取消扇形渐变"))
     }
 
@@ -1916,7 +2095,8 @@ final class WorkspaceViewModel: ObservableObject {
         relayIdeationOperation(.handleCanvasToolClick(point: point, modifiers: .init(flags: modifiers), clickCount: clickCount))
     }
 
-    private func beginSectorGradientDrag(at point: CanvasPoint) {
+    private func beginSectorGradientDrag(at point: CanvasPoint, modifiers: NSEvent.ModifierFlags) {
+        let hitExistingEditorTarget: Bool
         if let geometry = sectorGradientState.geometry {
             if let handle = sectorGradientHandleHitTest(geometry, point: point) {
                 sectorGradientState.phase = .draggingHandle(handle)
@@ -1930,6 +2110,19 @@ final class WorkspaceViewModel: ObservableObject {
                 sectorGradientState.dragReferenceGeometry = geometry
                 return
             }
+            hitExistingEditorTarget = sectorGradientState.isEditingSession
+        } else {
+            hitExistingEditorTarget = false
+        }
+
+        if shouldAutoApplyGradientBeforeNewDrag(hitExistingEditorTarget: hitExistingEditorTarget) {
+            deferredGradientAction = .gradientDrag(
+                DeferredGradientDrag(tool: .sectorGradient, points: [point], modifiers: modifiers, didEnd: false)
+            )
+            transformLogger.debug("[gradient] autoApplyOnNextGradient=true sessionTool=sector")
+            transformLogger.debug("[gradient] deferredGradientBegin=true sessionState=\(String(describing: self.sectorGradientState.phase), privacy: .public)")
+            applyActiveGradientSession()
+            return
         }
 
         sectorGradientState = SectorGradientInteractionState(
@@ -1992,7 +2185,7 @@ final class WorkspaceViewModel: ObservableObject {
             sectorGradientState.center = CanvasPoint(x: reference.center.x + delta.x, y: reference.center.y + delta.y)
             sectorGradientState.startPoint = CanvasPoint(x: reference.startPoint.x + delta.x, y: reference.startPoint.y + delta.y)
             sectorGradientState.endPoint = CanvasPoint(x: reference.endPoint.x + delta.x, y: reference.endPoint.y + delta.y)
-        case .editing:
+        case .editing, .pendingPreview:
             break
         }
     }
@@ -2019,23 +2212,25 @@ final class WorkspaceViewModel: ObservableObject {
             }
             sectorGradientState.startPoint = startPoint
             sectorGradientState.endPoint = defaultSectorGradientEndPoint(center: center, startPoint: startPoint)
-            sectorGradientState.phase = .editing
+            sectorGradientState.phase = .pendingPreview
             sectorGradientState.leg1CandidatePoint = nil
-            transformLogger.debug("[gradient] enteredEditing=true sessionTool=sector fallback=true")
-            showStatus(.init(kind: .info, message: "已进入扇形渐变编辑"))
+            transformLogger.debug("[gradient] completedToPendingPreview=true sessionTool=sector")
+            transformLogger.debug("[gradient] sessionState=\(String(describing: self.sectorGradientState.phase), privacy: .public)")
         case .drawingLeg2:
             guard let center = sectorGradientState.center, let startPoint = sectorGradientState.startPoint else {
                 sectorGradientState = .init()
                 return
             }
             sectorGradientState.endPoint = sectorGradientState.endPoint ?? defaultSectorGradientEndPoint(center: center, startPoint: startPoint)
-            sectorGradientState.phase = .editing
+            sectorGradientState.phase = .pendingPreview
             sectorGradientState.leg1CandidatePoint = nil
-            transformLogger.debug("[gradient] enteredEditing=true sessionTool=sector fallback=false")
-            showStatus(.init(kind: .info, message: "已进入扇形渐变编辑"))
+            transformLogger.debug("[gradient] completedToPendingPreview=true sessionTool=sector")
+            transformLogger.debug("[gradient] sessionState=\(String(describing: self.sectorGradientState.phase), privacy: .public)")
         case .draggingHandle, .movingWholeGradient:
             sectorGradientState.phase = .editing
         case .editing:
+            break
+        case .pendingPreview:
             break
         }
     }
@@ -3594,6 +3789,7 @@ final class WorkspaceViewModel: ObservableObject {
                 self.isApplyingGradientCommit = false
                 self.transformLogger.debug("[gradient] applyGpuMs=\(gpuMs, privacy: .public) sessionTool=linear")
                 self.showStatus(.init(kind: .success, message: "已应用直线渐变"))
+                self.handleDeferredGradientActionIfNeeded()
             }
         }
         commandBuffer.commit()
@@ -3712,6 +3908,7 @@ final class WorkspaceViewModel: ObservableObject {
                 self.isApplyingGradientCommit = false
                 self.transformLogger.debug("[gradient] applyGpuMs=\(gpuMs, privacy: .public) sessionTool=sector")
                 self.showStatus(.init(kind: .success, message: "已应用扇形渐变"))
+                self.handleDeferredGradientActionIfNeeded()
             }
         }
         commandBuffer.commit()
@@ -4574,6 +4771,18 @@ final class WorkspaceViewModel: ObservableObject {
             applyStroke(samples: samples)
         case .endStroke:
             endStroke()
+        case .beginGradientDrag(let point, let modifiers):
+            beginGradientDrag(at: point, modifiers: modifiers.eventFlags)
+        case .updateGradientDrag(let point, let modifiers):
+            updateGradientDrag(to: point, modifiers: modifiers.eventFlags)
+        case .endGradientDrag(let point, let modifiers):
+            endGradientDrag(at: point, modifiers: modifiers.eventFlags)
+        case .enterGradientEditing:
+            enterGradientEditingViaShift()
+        case .applyGradientSession:
+            applyActiveGradientSession()
+        case .cancelGradientSession:
+            cancelCanvasToolInteraction()
         case .fillAtPoint(let point):
             fillAtPoint(point)
         case .handleCanvasToolClick(let point, let modifiers, let clickCount):
@@ -6304,6 +6513,18 @@ private struct GeneratorStrokeSessionState {
     var fractureImpulse: Double = 0
     var fractureCountdown: Int = 0
     var random = GeneratorRandom()
+}
+
+private struct DeferredGradientDrag {
+    var tool: ToolKind
+    var points: [CanvasPoint]
+    var modifiers: NSEvent.ModifierFlags
+    var didEnd: Bool
+}
+
+private enum DeferredGradientAction {
+    case toolSwitch(ToolKind)
+    case gradientDrag(DeferredGradientDrag)
 }
 
 enum StraightLinePhase: Sendable {

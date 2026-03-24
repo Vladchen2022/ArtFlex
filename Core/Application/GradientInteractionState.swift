@@ -22,6 +22,7 @@ enum LinearGradientPhase: Sendable, Equatable {
     case idle
     case drawingLeg1
     case drawingLeg2
+    case pendingPreview
     case editing
     case draggingHandle(LinearGradientHandle)
     case movingWholeGradient
@@ -31,6 +32,7 @@ enum SectorGradientPhase: Sendable, Equatable {
     case idle
     case drawingLeg1
     case drawingLeg2
+    case pendingPreview
     case editing
     case draggingHandle(SectorGradientHandle)
     case movingWholeGradient
@@ -123,6 +125,10 @@ struct LinearGradientInteractionState: Sendable, Equatable {
             return false
         }
     }
+
+    var isPendingPreview: Bool {
+        phase == .pendingPreview
+    }
 }
 
 struct SectorGradientGeometry: Sendable, Equatable {
@@ -196,6 +202,10 @@ struct SectorGradientInteractionState: Sendable, Equatable {
         default:
             return false
         }
+    }
+
+    var isPendingPreview: Bool {
+        phase == .pendingPreview
     }
 }
 
@@ -283,6 +293,42 @@ func sectorGradientPreviewContains(_ geometry: SectorGradientGeometry, point: Ca
         return relative >= 0 && relative <= geometry.sweepAngle
     } else {
         return relative <= 0 && relative >= geometry.sweepAngle
+    }
+}
+
+func shouldShowGradientAnnotator(phase: LinearGradientPhase) -> Bool {
+    switch phase {
+    case .editing, .draggingHandle, .movingWholeGradient:
+        return true
+    default:
+        return false
+    }
+}
+
+func shouldShowGradientAnnotator(phase: SectorGradientPhase) -> Bool {
+    switch phase {
+    case .editing, .draggingHandle, .movingWholeGradient:
+        return true
+    default:
+        return false
+    }
+}
+
+func shouldAutoApplyGradientForToolSwitch(phase: LinearGradientPhase) -> Bool {
+    switch phase {
+    case .pendingPreview, .editing, .draggingHandle, .movingWholeGradient:
+        return true
+    default:
+        return false
+    }
+}
+
+func shouldAutoApplyGradientForToolSwitch(phase: SectorGradientPhase) -> Bool {
+    switch phase {
+    case .pendingPreview, .editing, .draggingHandle, .movingWholeGradient:
+        return true
+    default:
+        return false
     }
 }
 
