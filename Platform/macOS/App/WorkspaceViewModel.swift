@@ -1,6 +1,7 @@
 import AppKit
 import SwiftUI
 import os
+@preconcurrency import Metal
 
 private func emitSelectionTraceViewModel(_ message: String) {
     appendSelectionTrace(message)
@@ -4141,6 +4142,7 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func applyStroke(samples: [CanvasStrokeSample]) {
+        let applyStartNs = DispatchTime.now().uptimeNanoseconds
         ideationBranchActivityHandler?()
         let packetIndex = strokePacketCount
         let skipLeadingStamp = packetIndex > 0
@@ -4148,6 +4150,8 @@ final class WorkspaceViewModel: ObservableObject {
             samples: samples,
             skipLeadingStamp: skipLeadingStamp
         ) else {
+            let applyDurationMs = Double(DispatchTime.now().uptimeNanoseconds - applyStartNs) / 1_000_000
+            brushStrokeLogger.debug("[brush-feel] applyStrokeMainThreadMs=\(applyDurationMs, privacy: .public)")
             return
         }
 
@@ -4155,16 +4159,20 @@ final class WorkspaceViewModel: ObservableObject {
            strokePayload.stroke.tool == .brush,
            applyGeneratorStroke(samples: samples, layerID: strokePayload.layerID, baseStroke: strokePayload.stroke) {
             strokePacketCount += 1
+            let applyDurationMs = Double(DispatchTime.now().uptimeNanoseconds - applyStartNs) / 1_000_000
+            brushStrokeLogger.debug("[brush-feel] applyStrokeMainThreadMs=\(applyDurationMs, privacy: .public)")
             return
         }
 
-        let emittedStampCount = bootstrap.strokeEngine.applyStroke(
+        let livePathMetric = bootstrap.strokeEngine.applyStroke(
             strokePayload.stroke,
             to: strokePayload.layerID
         )
         brushStrokeLogger.debug(
-            "[packet] index=\(packetIndex, privacy: .public) skipLeadingStamp=\(skipLeadingStamp, privacy: .public) incomingPoints=\(samples.count, privacy: .public) emittedStamps=\(emittedStampCount, privacy: .public)"
+            "[packet] index=\(packetIndex, privacy: .public) skipLeadingStamp=\(skipLeadingStamp, privacy: .public) incomingPoints=\(samples.count, privacy: .public) livePathMetric=\(livePathMetric, privacy: .public)"
         )
+        let applyDurationMs = Double(DispatchTime.now().uptimeNanoseconds - applyStartNs) / 1_000_000
+        brushStrokeLogger.debug("[brush-feel] applyStrokeMainThreadMs=\(applyDurationMs, privacy: .public)")
         strokePacketCount += 1
         relayIdeationOperation(.applyStroke(samples))
     }
@@ -4172,7 +4180,7 @@ final class WorkspaceViewModel: ObservableObject {
     func beginStrokeIfNeeded() {
         ideationBranchActivityHandler?()
         strokePacketCount = 0
-        checkpointHistoryIfPossible()
+
         guard let layerID = bootstrap.interactionController.activeEditableLayerID() else {
             return
         }
@@ -4182,6 +4190,9 @@ final class WorkspaceViewModel: ObservableObject {
             showStatus(.init(kind: .info, message: "\(workspace.generator.kind.displayName) 的直接绘制还未接通"))
             return
         }
+
+        checkpointHistoryIfPossible()
+
         bootstrap.strokeEngine.beginStrokeIfNeeded(
             toolSession: workspace.toolSession,
             layerID: layerID
@@ -4196,6 +4207,14 @@ final class WorkspaceViewModel: ObservableObject {
         generatorStrokeSession = .init()
         noteCanvasContentChanged()
         relayIdeationOperation(.endStroke)
+    }
+
+    func flushPendingBrushWork(into commandBuffer: MTLCommandBuffer) {
+        _ = bootstrap.strokeEngine.flushPendingStrokePackets(into: commandBuffer)
+    }
+
+    var hasPendingBrushWork: Bool {
+        bootstrap.strokeEngine.hasPendingBrushWork
     }
 
     func undo() {

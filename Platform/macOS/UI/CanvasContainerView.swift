@@ -54,12 +54,14 @@ struct CanvasContainerView: View {
                             viewModel.beginStrokeIfNeeded()
                         },
                         onStrokeInput: { samples in
-                            onCanvasInteraction?()
                             viewModel.applyStroke(samples: samples)
                         },
                         onStrokeEnded: {
                             onCanvasInteraction?()
                             viewModel.endStroke()
+                        },
+                        onFlushPendingBrushWork: { commandBuffer in
+                            viewModel.flushPendingBrushWork(into: commandBuffer)
                         },
                         onEyedropperSample: { point in
                             onCanvasInteraction?()

@@ -633,95 +633,25 @@ final class StageOneBrushRenderer {
         samplingState: inout BrushStrokeSamplingState?,
         completion: (() -> Void)? = nil
     ) -> Int {
-        let samples = interpolatedPoints(for: stroke, samplingState: &samplingState)
-        guard
-            !samples.isEmpty,
-            let commandBuffer = commandQueue.makeCommandBuffer()
-        else {
+        guard let commandBuffer = commandQueue.makeCommandBuffer() else {
             completion?()
             return 0
         }
-
-        let passDescriptor = MTLRenderPassDescriptor()
-        passDescriptor.colorAttachments[0].texture = texture
-        passDescriptor.colorAttachments[0].loadAction = .load
-        passDescriptor.colorAttachments[0].storeAction = .store
-
-        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: passDescriptor) else {
-            completion?()
-            return 0
-        }
-
-        let pipelineState: MTLRenderPipelineState
-        switch stroke.tool {
-        case .eraser:
-            pipelineState = eraserPipelineState
-        case .smudge:
-            pipelineState = smudgePipelineState
-        default:
-            pipelineState = brushPipelineState
-        }
-
-        encoder.setRenderPipelineState(pipelineState)
-        encoder.setVertexBuffer(vertexBuffer, offset: 0, index: 0)
-
-        let selectionShape = stroke.selectionShape?.clamped(
-            to: CanvasSize(width: texture.width, height: texture.height)
+        let emitted = encodeStroke(
+            stroke: stroke,
+            into: texture,
+            commandQueue: commandQueue,
+            commandBuffer: commandBuffer,
+            samplingState: &samplingState
         )
-        if let selectionShape, selectionShape.isEmpty {
-            encoder.endEncoding()
-            commandBuffer.commit()
-            // ⚡️ 优化：移除同步等待
-            if let completion {
-                commandBuffer.addCompletedHandler { _ in
-                    completion()
-                }
-            }
-            return 0
-        }
 
-        let selectionMaskTexture = makeSelectionMaskTexture(
-            for: selectionShape,
-            canvasSize: CanvasSize(width: texture.width, height: texture.height)
-        )
-        encoder.setFragmentTexture(selectionMaskTexture, index: 0)
-        encoder.setFragmentTexture(
-            customTipTexture(for: stroke.brush.customTipMaskData) ?? defaultTipTexture,
-            index: 2
-        )
-        encoder.setFragmentSamplerState(tipSamplerState, index: 1)
-
-        if stroke.tool == .smudge {
-            let smudgeSourceTexture = makeSmudgeSourceTexture(
-                from: texture,
-                commandQueue: commandQueue
-            )
-            encoder.setFragmentTexture(smudgeSourceTexture, index: 1)
-        }
-
-        for sample in samples {
-            var uniforms = makeUniforms(
-                for: sample,
-                stroke: stroke,
-                texture: texture,
-                selectionShape: selectionShape
-            )
-
-            encoder.setVertexBytes(&uniforms, length: MemoryLayout<BrushUniforms>.stride, index: 1)
-            encoder.setFragmentBytes(&uniforms, length: MemoryLayout<BrushUniforms>.stride, index: 1)
-            encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
-        }
-
-        encoder.endEncoding()
-        
-        // ⚡️ 优化：异步提交，可选的完成回调
         if let completion {
             commandBuffer.addCompletedHandler { _ in
                 completion()
             }
         }
         commandBuffer.commit()
-        return samples.count
+        return emitted
     }
 
     func makeOpacityCapSession(
@@ -770,12 +700,117 @@ final class StageOneBrushRenderer {
         samplingState: inout BrushStrokeSamplingState?,
         completion: (() -> Void)? = nil
     ) -> Int {
-        let samples = interpolatedPoints(for: stroke, samplingState: &samplingState)
-        guard
-            !samples.isEmpty,
-            let commandBuffer = commandQueue.makeCommandBuffer()
-        else {
+        guard let commandBuffer = commandQueue.makeCommandBuffer() else {
             completion?()
+            return 0
+        }
+
+        let emitted = encodeOpacityCapStroke(
+            stroke: stroke,
+            session: session,
+            into: texture,
+            commandBuffer: commandBuffer,
+            samplingState: &samplingState
+        )
+
+        if let completion {
+            commandBuffer.addCompletedHandler { _ in
+                completion()
+            }
+        }
+        commandBuffer.commit()
+        return emitted
+    }
+
+    @discardableResult
+    func encodeStroke(
+        stroke: StrokeDescriptor,
+        into texture: MTLTexture,
+        commandQueue: MTLCommandQueue,
+        commandBuffer: MTLCommandBuffer,
+        samplingState: inout BrushStrokeSamplingState?
+    ) -> Int {
+        let samples = interpolatedPoints(for: stroke, samplingState: &samplingState)
+        guard !samples.isEmpty else {
+            return 0
+        }
+
+        let passDescriptor = MTLRenderPassDescriptor()
+        passDescriptor.colorAttachments[0].texture = texture
+        passDescriptor.colorAttachments[0].loadAction = .load
+        passDescriptor.colorAttachments[0].storeAction = .store
+
+        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: passDescriptor) else {
+            return 0
+        }
+
+        let pipelineState: MTLRenderPipelineState
+        switch stroke.tool {
+        case .eraser:
+            pipelineState = eraserPipelineState
+        case .smudge:
+            pipelineState = smudgePipelineState
+        default:
+            pipelineState = brushPipelineState
+        }
+
+        encoder.setRenderPipelineState(pipelineState)
+        encoder.setVertexBuffer(vertexBuffer, offset: 0, index: 0)
+
+        let selectionShape = stroke.selectionShape?.clamped(
+            to: CanvasSize(width: texture.width, height: texture.height)
+        )
+        if let selectionShape, selectionShape.isEmpty {
+            encoder.endEncoding()
+            return 0
+        }
+
+        let selectionMaskTexture = makeSelectionMaskTexture(
+            for: selectionShape,
+            canvasSize: CanvasSize(width: texture.width, height: texture.height)
+        )
+        encoder.setFragmentTexture(selectionMaskTexture, index: 0)
+        encoder.setFragmentTexture(
+            customTipTexture(for: stroke.brush.customTipMaskData) ?? defaultTipTexture,
+            index: 2
+        )
+        encoder.setFragmentSamplerState(tipSamplerState, index: 1)
+
+        if stroke.tool == .smudge {
+            let smudgeSourceTexture = makeSmudgeSourceTexture(
+                from: texture,
+                commandQueue: commandQueue
+            )
+            encoder.setFragmentTexture(smudgeSourceTexture, index: 1)
+        }
+
+        for sample in samples {
+            var uniforms = makeUniforms(
+                for: sample,
+                stroke: stroke,
+                texture: texture,
+                selectionShape: selectionShape
+            )
+
+            encoder.setVertexBytes(&uniforms, length: MemoryLayout<BrushUniforms>.stride, index: 1)
+            encoder.setFragmentBytes(&uniforms, length: MemoryLayout<BrushUniforms>.stride, index: 1)
+            encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+        }
+
+        encoder.endEncoding()
+        return samples.count
+    }
+
+    @discardableResult
+    func encodeOpacityCapStroke(
+        stroke: StrokeDescriptor,
+        session: OpacityCapSessionResources,
+        into texture: MTLTexture,
+        commandBuffer: MTLCommandBuffer,
+        samplingState: inout BrushStrokeSamplingState?
+    ) -> Int {
+        let samples = interpolatedPoints(for: stroke, samplingState: &samplingState)
+        guard !samples.isEmpty else {
             return 0
         }
 
@@ -852,13 +887,6 @@ final class StageOneBrushRenderer {
             encoder.endEncoding()
         }
 
-        // ⚡️ 优化：异步提交
-        if let completion {
-            commandBuffer.addCompletedHandler { _ in
-                completion()
-            }
-        }
-        commandBuffer.commit()
         return samples.count
     }
 
