@@ -34,7 +34,7 @@ struct CanvasContainerView: View {
 
                     MetalCanvasHost(
                         sceneSnapshot: viewModel.sceneSnapshot,
-                        transformSelectionShape: viewModel.effectiveTransformSelectionShape,
+                        transformSelectionShape: viewModel.transformPreparationSelectionShape,
                         metalContext: viewModel.metalContext,
                         layerSurfaceStore: viewModel.layerSurfaceStore,
                         activeTool: viewModel.workspace.toolSession.activeTool,
@@ -43,7 +43,12 @@ struct CanvasContainerView: View {
                         brushSize: viewModel.workspace.toolSession.brush.size,
                         isPanModeActive: viewModel.isPanModeActive,
                         isTransformingSelection: viewModel.isTransformingSelection,
+                        isFreeTransformDragging: viewModel.isFreeTransformDragging,
+                        activeFreeTransformInteractionMode: viewModel.activeFreeTransformInteractionMode,
                         transformPreview: viewModel.freeTransformPreview,
+                        linearGradientPreview: viewModel.linearGradientState.preview,
+                        sectorGradientPreview: viewModel.sectorGradientState.preview,
+                        gradientPreviewColor: viewModel.gradientPreviewColor,
                         onStrokeBegan: {
                             onCanvasInteraction?()
                             viewModel.beginStrokeIfNeeded()
@@ -104,17 +109,17 @@ struct CanvasContainerView: View {
                             onCanvasInteraction?()
                             viewModel.commitSelectionMove()
                         },
-                        onTransformBegan: { point, mode in
+                        onTransformBegan: { point, mode, modifiers in
                             onCanvasInteraction?()
-                            viewModel.beginSelectionTransform(at: point, mode: mode)
+                            viewModel.beginSelectionTransform(at: point, mode: mode, modifiers: modifiers)
                         },
-                        onTransformChanged: { point in
+                        onTransformChanged: { point, modifiers in
                             onCanvasInteraction?()
-                            viewModel.updateSelectionTransform(to: point)
+                            viewModel.updateSelectionTransform(to: point, modifiers: modifiers)
                         },
-                        onTransformEnded: { point in
+                        onTransformEnded: { point, modifiers in
                             onCanvasInteraction?()
-                            viewModel.commitSelectionTransform(at: point)
+                            viewModel.commitSelectionTransform(at: point, modifiers: modifiers)
                         },
                         onTransformOffsetChanged: { offset in
                             onCanvasInteraction?()
@@ -129,8 +134,24 @@ struct CanvasContainerView: View {
                         onToolShortcut: { key, modifiers in
                             _ = viewModel.handleToolShortcutKey(key, modifiers: modifiers)
                         },
+                        onGradientDragBegan: { point, modifiers in
+                            onCanvasInteraction?()
+                            viewModel.beginGradientDrag(at: point, modifiers: modifiers)
+                        },
+                        onGradientDragChanged: { point, modifiers in
+                            onCanvasInteraction?()
+                            viewModel.updateGradientDrag(to: point, modifiers: modifiers)
+                        },
+                        onGradientDragEnded: { point, modifiers in
+                            onCanvasInteraction?()
+                            viewModel.endGradientDrag(at: point, modifiers: modifiers)
+                        },
                         onCancelCanvasTool: {
                             viewModel.cancelCanvasToolInteraction()
+                        },
+                        onApplyGradientSession: {
+                            onCanvasInteraction?()
+                            viewModel.applyActiveGradientSession()
                         },
                         onClearSelection: {
                             if viewModel.selectionOverlayProxy.displayShape != nil {
@@ -200,10 +221,14 @@ struct CanvasContainerView: View {
                     .allowsHitTesting(false)
                 }
 
-                if !viewModel.isApplyingTransformCommit,
-                   viewModel.workspace.toolSession.activeTool == .freeTransform,
-                   viewModel.isTransformingSelection,
-                   let shape = viewModel.effectiveTransformSelectionShape {
+                if shouldShowFreeTransformHandles(
+                    activeTool: viewModel.workspace.toolSession.activeTool,
+                    isApplyingTransformCommit: viewModel.isApplyingTransformCommit,
+                    isTransformingSelection: viewModel.isTransformingSelection,
+                    isFreeTransformDragging: viewModel.isFreeTransformDragging,
+                    activeInteractionMode: viewModel.activeFreeTransformInteractionMode
+                ),
+                   let shape = viewModel.effectiveTransformInteractionShape {
                     FreeTransformHandlesOverlay(
                         bounds: shape.bounds,
                         preview: viewModel.freeTransformPreview,
@@ -289,6 +314,36 @@ struct CanvasContainerView: View {
                         x: geometry.size.width / 2,
                         y: 28
                     )
+                }
+
+                if viewModel.workspace.toolSession.activeTool == .linearGradient,
+                   viewModel.linearGradientState.isActiveSession {
+                    GradientToolHUD(
+                        title: viewModel.isApplyingGradientCommit ? "应用中" : "直线渐变",
+                        isApplying: viewModel.isApplyingGradientCommit,
+                        onApply: {
+                            viewModel.applyActiveGradientSession()
+                        },
+                        onCancel: {
+                            viewModel.cancelLinearGradientInteraction()
+                        }
+                    )
+                    .position(x: geometry.size.width / 2, y: 28)
+                }
+
+                if viewModel.workspace.toolSession.activeTool == .sectorGradient,
+                   viewModel.sectorGradientState.isActiveSession {
+                    GradientToolHUD(
+                        title: viewModel.isApplyingGradientCommit ? "应用中" : "扇形渐变",
+                        isApplying: viewModel.isApplyingGradientCommit,
+                        onApply: {
+                            viewModel.applyActiveGradientSession()
+                        },
+                        onCancel: {
+                            viewModel.cancelSectorGradientInteraction()
+                        }
+                    )
+                    .position(x: geometry.size.width / 2, y: 28)
                 }
 
                 if viewModel.isPanModeActive {
@@ -535,6 +590,61 @@ private struct FreeTransformHUD: View {
             .disabled(isApplying)
             .opacity(isApplying ? 0.5 : 1)
             .help("取消当前自由变形")
+        }
+        .padding(.horizontal, 12)
+        .frame(height: 32)
+        .background(
+            Capsule()
+                .fill(Color.black.opacity(0.55))
+        )
+    }
+}
+
+private struct GradientToolHUD: View {
+    let title: String
+    let isApplying: Bool
+    let onApply: () -> Void
+    let onCancel: () -> Void
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "sparkles")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(Color.white.opacity(0.82))
+
+            Text(title)
+                .font(.system(size: 12, weight: .semibold, design: .rounded))
+                .foregroundStyle(Color.white)
+
+            Button(action: onApply) {
+                Text("应用")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(Color.white)
+                    .padding(.horizontal, 8)
+                    .frame(height: 24)
+                    .background(
+                        RoundedRectangle(cornerRadius: 7)
+                            .fill(Color.white.opacity(0.12))
+                    )
+            }
+            .buttonStyle(.plain)
+            .disabled(isApplying)
+            .opacity(isApplying ? 0.5 : 1)
+
+            Button(action: onCancel) {
+                Text("取消")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(Color.white)
+                    .padding(.horizontal, 8)
+                    .frame(height: 24)
+                    .background(
+                        RoundedRectangle(cornerRadius: 7)
+                            .fill(Color.white.opacity(0.12))
+                    )
+            }
+            .buttonStyle(.plain)
+            .disabled(isApplying)
+            .opacity(isApplying ? 0.5 : 1)
         }
         .padding(.horizontal, 12)
         .frame(height: 32)

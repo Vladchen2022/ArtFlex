@@ -87,13 +87,14 @@ final class LinearGradientRenderer {
         }
     }
 
-    func render(
-        into texture: MTLTexture,
+    func encode(
+        into renderPassDescriptor: MTLRenderPassDescriptor,
+        commandBuffer: MTLCommandBuffer,
+        canvasSize: CanvasSize,
         pointA: CanvasPoint,
         pointB: CanvasPoint,
         pointC: CanvasPoint,
-        color: RGBAColor,
-        commandQueue: MTLCommandQueue
+        color: RGBAColor
     ) {
         let pointD = CanvasPoint(
             x: pointA.x + (pointC.x - pointB.x),
@@ -106,22 +107,11 @@ final class LinearGradientRenderer {
             .init(position: SIMD2(Float(pointC.x), Float(pointC.y)), gradientT: 1)
         ]
         var uniforms = LinearGradientUniforms(
-            canvasSize: SIMD2(Float(texture.width), Float(texture.height)),
+            canvasSize: SIMD2(Float(canvasSize.width), Float(canvasSize.height)),
             color: SIMD4(color.red, color.green, color.blue, color.alpha)
         )
 
-        guard
-            let commandBuffer = commandQueue.makeCommandBuffer()
-        else {
-            return
-        }
-
-        let descriptor = MTLRenderPassDescriptor()
-        descriptor.colorAttachments[0].texture = texture
-        descriptor.colorAttachments[0].loadAction = .load
-        descriptor.colorAttachments[0].storeAction = .store
-
-        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: descriptor) else {
+        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor) else {
             return
         }
 
@@ -131,7 +121,34 @@ final class LinearGradientRenderer {
         encoder.setFragmentBytes(&uniforms, length: MemoryLayout<LinearGradientUniforms>.stride, index: 1)
         encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: vertices.count)
         encoder.endEncoding()
+    }
+
+    func render(
+        into texture: MTLTexture,
+        pointA: CanvasPoint,
+        pointB: CanvasPoint,
+        pointC: CanvasPoint,
+        color: RGBAColor,
+        commandQueue: MTLCommandQueue
+    ) {
+        guard let commandBuffer = commandQueue.makeCommandBuffer() else {
+            return
+        }
+
+        let descriptor = MTLRenderPassDescriptor()
+        descriptor.colorAttachments[0].texture = texture
+        descriptor.colorAttachments[0].loadAction = .load
+        descriptor.colorAttachments[0].storeAction = .store
+
+        encode(
+            into: descriptor,
+            commandBuffer: commandBuffer,
+            canvasSize: .init(width: texture.width, height: texture.height),
+            pointA: pointA,
+            pointB: pointB,
+            pointC: pointC,
+            color: color
+        )
         commandBuffer.commit()
-        commandBuffer.waitUntilCompleted()
     }
 }

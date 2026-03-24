@@ -27,13 +27,14 @@ struct TransformPreviewPreparedSignature: Sendable, Equatable {
     let mode: TransformPreviewMode
     let canvasContentRevision: UInt64
     let selectionRevision: UInt64
-    let sourceBounds: CanvasRect
+    let operationBounds: CanvasRect
 }
 
 struct TransformPreviewSession {
     let activeLayerSurfaceID: LayerSurfaceID
     let mode: TransformPreviewMode
-    let sourceBounds: CanvasRect
+    let operationBounds: CanvasRect
+    let interactionBounds: CanvasRect?
     let baseTexture: MTLTexture?
     let extractedTexture: MTLTexture
     let maskTexture: MTLTexture?
@@ -43,7 +44,8 @@ struct TransformPreviewSession {
 
 struct TransformPreviewPlan: Sendable, Equatable {
     let mode: TransformPreviewMode
-    let sourceBounds: CanvasRect
+    let operationBounds: CanvasRect
+    let interactionBounds: CanvasRect?
     let needsMaskTexture: Bool
 }
 
@@ -59,6 +61,7 @@ final class TransformPreviewSessionBuilder {
         sourceTexture: MTLTexture,
         canvasSize: CanvasSize,
         selectionShape: SelectionShape?,
+        interactionBounds: CanvasRect?,
         selectionRevision: UInt64,
         canvasContentRevision: UInt64,
         metal: MetalDeviceContext,
@@ -66,7 +69,8 @@ final class TransformPreviewSessionBuilder {
     ) {
         guard let plan = Self.plan(
             canvasSize: canvasSize,
-            selectionShape: selectionShape
+            selectionShape: selectionShape,
+            interactionBounds: interactionBounds
         ) else {
             Task { @MainActor in
                 completion(nil)
@@ -79,14 +83,15 @@ final class TransformPreviewSessionBuilder {
             mode: plan.mode,
             canvasContentRevision: canvasContentRevision,
             selectionRevision: selectionRevision,
-            sourceBounds: plan.sourceBounds
+            operationBounds: plan.operationBounds
         )
 
         if plan.mode == .wholeLayer {
             let session = TransformPreviewSession(
                 activeLayerSurfaceID: activeLayerSurfaceID,
                 mode: .wholeLayer,
-                sourceBounds: plan.sourceBounds,
+                operationBounds: plan.operationBounds,
+                interactionBounds: plan.interactionBounds,
                 baseTexture: nil,
                 extractedTexture: sourceTexture,
                 maskTexture: nil,
@@ -102,7 +107,7 @@ final class TransformPreviewSessionBuilder {
 
         let maskTexture = Self.makeMaskTexture(
             selectionShape: selectionShape,
-            sourceBounds: plan.sourceBounds,
+            sourceBounds: plan.operationBounds,
             device: metal.device
         )
         let boxedMaskTexture = TransformMaskTextureBox(maskTexture)
@@ -110,7 +115,7 @@ final class TransformPreviewSessionBuilder {
         compositor.buildSelectionTextures(
             sourceTexture: sourceTexture,
             canvasSize: canvasSize,
-            sourceBounds: plan.sourceBounds,
+            sourceBounds: plan.operationBounds,
             maskTexture: boxedMaskTexture.texture,
             metal: metal
         ) { baseTexture, extractedTexture in
@@ -122,7 +127,8 @@ final class TransformPreviewSessionBuilder {
             let session = TransformPreviewSession(
                 activeLayerSurfaceID: activeLayerSurfaceID,
                 mode: .selection,
-                sourceBounds: plan.sourceBounds,
+                operationBounds: plan.operationBounds,
+                interactionBounds: plan.interactionBounds,
                 baseTexture: baseTexture,
                 extractedTexture: extractedTexture,
                 maskTexture: boxedMaskTexture.texture,
@@ -138,13 +144,15 @@ final class TransformPreviewSessionBuilder {
 
     static func plan(
         canvasSize: CanvasSize,
-        selectionShape: SelectionShape?
+        selectionShape: SelectionShape?,
+        interactionBounds: CanvasRect? = nil
     ) -> TransformPreviewPlan? {
         let fullBounds = fullCanvasBounds(canvasSize: canvasSize)
         guard let selectionShape else {
             return TransformPreviewPlan(
                 mode: .wholeLayer,
-                sourceBounds: fullBounds,
+                operationBounds: fullBounds,
+                interactionBounds: interactionBounds,
                 needsMaskTexture: false
             )
         }
@@ -168,7 +176,8 @@ final class TransformPreviewSessionBuilder {
 
         return TransformPreviewPlan(
             mode: isWholeLayerRect ? .wholeLayer : .selection,
-            sourceBounds: isWholeLayerRect ? fullBounds : bounds,
+            operationBounds: isWholeLayerRect ? fullBounds : bounds,
+            interactionBounds: isWholeLayerRect ? interactionBounds : bounds,
             needsMaskTexture: !isWholeLayerRect && clamped.kind != .rectangle
         )
     }

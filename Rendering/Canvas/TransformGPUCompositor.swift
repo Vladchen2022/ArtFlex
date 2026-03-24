@@ -317,7 +317,7 @@ final class TransformGPUCompositor {
             texture: session.extractedTexture,
             opacity: 1,
             canvasSize: canvasSize,
-            bounds: session.sourceBounds,
+            bounds: session.operationBounds,
             preview: preview,
             into: overlayPass,
             commandBuffer: commandBuffer

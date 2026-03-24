@@ -39,6 +39,155 @@ enum FreeTransformInteractionMode: Sendable, Equatable {
     case rotate
 }
 
+func freeTransformTranslatedPreview(
+    dragStartPoint: CanvasPoint,
+    currentPoint: CanvasPoint,
+    startPreview: FreeTransformPreview
+) -> FreeTransformPreview {
+    let delta = CanvasPoint(
+        x: currentPoint.x - dragStartPoint.x,
+        y: currentPoint.y - dragStartPoint.y
+    )
+    return FreeTransformPreview(
+        translation: CanvasPoint(
+            x: startPreview.translation.x + delta.x,
+            y: startPreview.translation.y + delta.y
+        ),
+        scaleX: startPreview.scaleX,
+        scaleY: startPreview.scaleY,
+        rotationRadians: startPreview.rotationRadians
+    )
+}
+
+func freeTransformScaleAnchorPoint(for handle: FreeTransformHandle, bounds: CanvasRect) -> CanvasPoint {
+    let minX = bounds.minX
+    let minY = bounds.minY
+    let maxX = bounds.maxX
+    let maxY = bounds.maxY
+    let midX = (minX + maxX) / 2
+    let midY = (minY + maxY) / 2
+
+    switch handle {
+    case .topLeft:
+        return .init(x: maxX, y: maxY)
+    case .top:
+        return .init(x: midX, y: maxY)
+    case .topRight:
+        return .init(x: minX, y: maxY)
+    case .right:
+        return .init(x: minX, y: midY)
+    case .bottomRight:
+        return .init(x: minX, y: minY)
+    case .bottom:
+        return .init(x: midX, y: minY)
+    case .bottomLeft:
+        return .init(x: maxX, y: minY)
+    case .left:
+        return .init(x: maxX, y: midY)
+    case .rotation:
+        return .init(x: midX, y: midY)
+    }
+}
+
+func freeTransformScaledPreview(
+    bounds: CanvasRect,
+    handle: FreeTransformHandle,
+    dragStartPoint: CanvasPoint,
+    currentPoint: CanvasPoint,
+    startPreview: FreeTransformPreview,
+    uniformScale: Bool
+) -> FreeTransformPreview {
+    let startAffine = freeTransformAffineTransform(bounds: bounds, preview: startPreview)
+    let inverted = startAffine.inverted()
+    let startLocal = CGPoint(x: dragStartPoint.x, y: dragStartPoint.y).applying(inverted)
+    let currentLocal = CGPoint(x: currentPoint.x, y: currentPoint.y).applying(inverted)
+    let anchorLocal = freeTransformScaleAnchorPoint(for: handle, bounds: bounds)
+    let affectsX = [
+        FreeTransformHandle.topLeft, .left, .bottomLeft, .topRight, .right, .bottomRight
+    ].contains(handle)
+    let affectsY = [
+        FreeTransformHandle.topLeft, .top, .topRight, .bottomLeft, .bottom, .bottomRight
+    ].contains(handle)
+
+    var xRatio: Double?
+    if affectsX {
+        let startDistance = startLocal.x - anchorLocal.x
+        let currentDistance = currentLocal.x - anchorLocal.x
+        if abs(startDistance) > 0.0001 {
+            xRatio = max(abs(currentDistance / startDistance), 0.05)
+        }
+    }
+
+    var yRatio: Double?
+    if affectsY {
+        let startDistance = startLocal.y - anchorLocal.y
+        let currentDistance = currentLocal.y - anchorLocal.y
+        if abs(startDistance) > 0.0001 {
+            yRatio = max(abs(currentDistance / startDistance), 0.05)
+        }
+    }
+
+    var nextScaleX = startPreview.scaleX
+    var nextScaleY = startPreview.scaleY
+
+    if uniformScale {
+        let uniformRatio: Double?
+        if let xRatio, let yRatio {
+            uniformRatio = abs(xRatio - 1) >= abs(yRatio - 1) ? xRatio : yRatio
+        } else {
+            uniformRatio = xRatio ?? yRatio
+        }
+
+        if let uniformRatio {
+            nextScaleX = max(startPreview.scaleX * uniformRatio, 0.05)
+            nextScaleY = max(startPreview.scaleY * uniformRatio, 0.05)
+        }
+    } else {
+        if let xRatio {
+            nextScaleX = max(startPreview.scaleX * xRatio, 0.05)
+        }
+        if let yRatio {
+            nextScaleY = max(startPreview.scaleY * yRatio, 0.05)
+        }
+    }
+
+    let anchorWorld = CGPoint(x: anchorLocal.x, y: anchorLocal.y).applying(startAffine)
+    let center = CGPoint(
+        x: bounds.origin.x + (bounds.size.x / 2),
+        y: bounds.origin.y + (bounds.size.y / 2)
+    )
+    let relativeAnchor = CGPoint(x: anchorLocal.x - center.x, y: anchorLocal.y - center.y)
+    let rotatedScaledAnchor = relativeAnchor
+        .applying(CGAffineTransform(scaleX: nextScaleX, y: nextScaleY))
+        .applying(CGAffineTransform(rotationAngle: startPreview.rotationRadians))
+    let nextTranslation = CanvasPoint(
+        x: anchorWorld.x - center.x - rotatedScaledAnchor.x,
+        y: anchorWorld.y - center.y - rotatedScaledAnchor.y
+    )
+
+    return FreeTransformPreview(
+        translation: nextTranslation,
+        scaleX: nextScaleX,
+        scaleY: nextScaleY,
+        rotationRadians: startPreview.rotationRadians
+    )
+}
+
+func shouldShowFreeTransformHandles(
+    activeTool: ToolKind,
+    isApplyingTransformCommit: Bool,
+    isTransformingSelection: Bool,
+    isFreeTransformDragging: Bool,
+    activeInteractionMode: FreeTransformInteractionMode?
+) -> Bool {
+    guard !isApplyingTransformCommit else { return false }
+    guard activeTool == .freeTransform, isTransformingSelection else { return false }
+    if isFreeTransformDragging, activeInteractionMode == .move {
+        return false
+    }
+    return true
+}
+
 struct FreeTransformPreview: Sendable, Equatable {
     var translation: CanvasPoint = .init(x: 0, y: 0)
     var scaleX: Double = 1
@@ -169,6 +318,42 @@ func freeTransformContains(
         previous = current
     }
     return inside
+}
+
+func freeTransformInteractionMode(
+    point: CanvasPoint,
+    bounds: CanvasRect?,
+    preview: FreeTransformPreview,
+    handleRadius: Double,
+    rotationHandleDistance: Double
+) -> FreeTransformInteractionMode {
+    guard let bounds else {
+        return .move
+    }
+
+    let handlePoints = freeTransformHandlePoints(
+        bounds: bounds,
+        preview: preview,
+        rotationHandleDistance: rotationHandleDistance
+    )
+
+    if let rotationPoint = handlePoints[.rotation],
+       hypot(rotationPoint.x - point.x, rotationPoint.y - point.y) <= handleRadius {
+        return .rotate
+    }
+
+    for handle in FreeTransformHandle.allCases where handle != .rotation {
+        if let handlePoint = handlePoints[handle],
+           hypot(handlePoint.x - point.x, handlePoint.y - point.y) <= handleRadius {
+            return .scale(handle)
+        }
+    }
+
+    if freeTransformContains(point: point, bounds: bounds, preview: preview) {
+        return .move
+    }
+
+    return .move
 }
 
 struct TransformInteractionState: Sendable, Equatable {

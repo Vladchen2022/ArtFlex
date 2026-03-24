@@ -6,21 +6,27 @@ struct TransformPreviewSessionTests {
     @Test
     func noSelectionUsesWholeLayerPlan() {
         let canvasSize = CanvasSize(width: 640, height: 480)
+        let contentBounds = CanvasRect(
+            origin: .init(x: 100, y: 120),
+            size: .init(x: 140, y: 90)
+        )
 
         let plan = TransformPreviewSessionBuilder.plan(
             canvasSize: canvasSize,
-            selectionShape: nil
+            selectionShape: nil,
+            interactionBounds: contentBounds
         )
 
         #expect(plan != nil)
         #expect(plan?.mode == .wholeLayer)
         #expect(plan?.needsMaskTexture == false)
         #expect(
-            plan?.sourceBounds == CanvasRect(
+            plan?.operationBounds == CanvasRect(
                 origin: .init(x: 0, y: 0),
                 size: .init(x: 640, y: 480)
             )
         )
+        #expect(plan?.interactionBounds == contentBounds)
     }
 
     @Test
@@ -43,7 +49,8 @@ struct TransformPreviewSessionTests {
         #expect(plan != nil)
         #expect(plan?.mode == .wholeLayer)
         #expect(plan?.needsMaskTexture == false)
-        #expect(plan?.sourceBounds == selection.bounds)
+        #expect(plan?.operationBounds == selection.bounds)
+        #expect(plan?.interactionBounds == nil)
     }
 
     @Test
@@ -72,7 +79,13 @@ struct TransformPreviewSessionTests {
         #expect(plan?.mode == .selection)
         #expect(plan?.needsMaskTexture == true)
         #expect(
-            plan?.sourceBounds == CanvasRect(
+            plan?.operationBounds == CanvasRect(
+                origin: .init(x: 20, y: 40),
+                size: .init(x: 80, y: 90)
+            )
+        )
+        #expect(
+            plan?.interactionBounds == CanvasRect(
                 origin: .init(x: 20, y: 40),
                 size: .init(x: 80, y: 90)
             )

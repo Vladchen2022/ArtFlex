@@ -136,30 +136,6 @@ final class SectorGradientRenderer {
         color: RGBAColor,
         commandQueue: MTLCommandQueue
     ) {
-        guard radius > 0.5 else { return }
-
-        let minX = max(Float(center.x - radius), 0)
-        let minY = max(Float(center.y - radius), 0)
-        let maxX = min(Float(center.x + radius), Float(texture.width))
-        let maxY = min(Float(center.y + radius), Float(texture.height))
-
-        let vertices: [SectorGradientVertex] = [
-            .init(position: SIMD2(minX, minY)),
-            .init(position: SIMD2(maxX, minY)),
-            .init(position: SIMD2(minX, maxY)),
-            .init(position: SIMD2(maxX, maxY))
-        ]
-
-        var uniforms = SectorGradientUniforms(
-            canvasSize: SIMD2(Float(texture.width), Float(texture.height)),
-            center: SIMD2(Float(center.x), Float(center.y)),
-            radius: Float(radius),
-            startAngle: Float(startAngle),
-            sweepAngle: Float(sweepAngle),
-            isFullCircle: isFullCircle ? 1 : 0,
-            color: SIMD4(color.red, color.green, color.blue, color.alpha)
-        )
-
         guard let commandBuffer = commandQueue.makeCommandBuffer() else {
             return
         }
@@ -169,7 +145,56 @@ final class SectorGradientRenderer {
         descriptor.colorAttachments[0].loadAction = .load
         descriptor.colorAttachments[0].storeAction = .store
 
-        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: descriptor) else {
+        encode(
+            into: descriptor,
+            commandBuffer: commandBuffer,
+            canvasSize: .init(width: texture.width, height: texture.height),
+            center: center,
+            radius: radius,
+            startAngle: startAngle,
+            sweepAngle: sweepAngle,
+            isFullCircle: isFullCircle,
+            color: color
+        )
+        commandBuffer.commit()
+    }
+
+    func encode(
+        into renderPassDescriptor: MTLRenderPassDescriptor,
+        commandBuffer: MTLCommandBuffer,
+        canvasSize: CanvasSize,
+        center: CanvasPoint,
+        radius: Double,
+        startAngle: Double,
+        sweepAngle: Double,
+        isFullCircle: Bool,
+        color: RGBAColor
+    ) {
+        guard radius > 0.5 else { return }
+
+        let minX = max(Float(center.x - radius), 0)
+        let minY = max(Float(center.y - radius), 0)
+        let maxX = min(Float(center.x + radius), Float(canvasSize.width))
+        let maxY = min(Float(center.y + radius), Float(canvasSize.height))
+
+        let vertices: [SectorGradientVertex] = [
+            .init(position: SIMD2(minX, minY)),
+            .init(position: SIMD2(maxX, minY)),
+            .init(position: SIMD2(minX, maxY)),
+            .init(position: SIMD2(maxX, maxY))
+        ]
+
+        var uniforms = SectorGradientUniforms(
+            canvasSize: SIMD2(Float(canvasSize.width), Float(canvasSize.height)),
+            center: SIMD2(Float(center.x), Float(center.y)),
+            radius: Float(radius),
+            startAngle: Float(startAngle),
+            sweepAngle: Float(sweepAngle),
+            isFullCircle: isFullCircle ? 1 : 0,
+            color: SIMD4(color.red, color.green, color.blue, color.alpha)
+        )
+
+        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor) else {
             return
         }
 
@@ -179,7 +204,5 @@ final class SectorGradientRenderer {
         encoder.setFragmentBytes(&uniforms, length: MemoryLayout<SectorGradientUniforms>.stride, index: 1)
         encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: vertices.count)
         encoder.endEncoding()
-        commandBuffer.commit()
-        commandBuffer.waitUntilCompleted()
     }
 }

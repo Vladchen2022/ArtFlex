@@ -18,7 +18,12 @@ struct MetalCanvasHost: NSViewRepresentable {
     let brushSize: Float
     let isPanModeActive: Bool
     let isTransformingSelection: Bool
+    let isFreeTransformDragging: Bool
+    let activeFreeTransformInteractionMode: FreeTransformInteractionMode?
     let transformPreview: FreeTransformPreview
+    let linearGradientPreview: LinearGradientPreview?
+    let sectorGradientPreview: SectorGradientPreview?
+    let gradientPreviewColor: RGBAColor
     let onStrokeBegan: () -> Void
     let onStrokeInput: ([CanvasStrokeSample]) -> Void
     let onStrokeEnded: () -> Void
@@ -32,14 +37,18 @@ struct MetalCanvasHost: NSViewRepresentable {
     let onSelectionMouseDown: (CanvasPoint, NSEvent.ModifierFlags) -> SelectionMouseDownAction
     let onMoveSelectionPreview: (Double, Double) -> Void
     let onCommitSelectionMove: () -> Void
-    let onTransformBegan: (CanvasPoint, FreeTransformInteractionMode) -> Void
-    let onTransformChanged: (CanvasPoint) -> Void
-    let onTransformEnded: (CanvasPoint) -> Void
+    let onTransformBegan: (CanvasPoint, FreeTransformInteractionMode, NSEvent.ModifierFlags) -> Void
+    let onTransformChanged: (CanvasPoint, NSEvent.ModifierFlags) -> Void
+    let onTransformEnded: (CanvasPoint, NSEvent.ModifierFlags) -> Void
     let onTransformOffsetChanged: (CanvasPoint) -> Void
     let onCanvasRotationChanged: (Double) -> Void
     let onPanModeChanged: (Bool) -> Void
     let onToolShortcut: (String, NSEvent.ModifierFlags) -> Void
+    let onGradientDragBegan: (CanvasPoint, NSEvent.ModifierFlags) -> Void
+    let onGradientDragChanged: (CanvasPoint, NSEvent.ModifierFlags) -> Void
+    let onGradientDragEnded: (CanvasPoint, NSEvent.ModifierFlags) -> Void
     let onCancelCanvasTool: () -> Void
+    let onApplyGradientSession: () -> Void
     let onClearSelection: () -> Void
     let onApplyTransform: () -> Void
     let onCancelTransform: () -> Void
@@ -52,6 +61,9 @@ struct MetalCanvasHost: NSViewRepresentable {
             activeTool: activeTool,
             transformSelectionShape: transformSelectionShape,
             transformPreview: transformPreview,
+            linearGradientPreview: linearGradientPreview,
+            sectorGradientPreview: sectorGradientPreview,
+            gradientPreviewColor: gradientPreviewColor,
             onCanvasRotationChanged: onCanvasRotationChanged,
             onStrokeBegan: onStrokeBegan,
             onStrokeInput: onStrokeInput,
@@ -72,7 +84,11 @@ struct MetalCanvasHost: NSViewRepresentable {
             onTransformOffsetChanged: onTransformOffsetChanged,
             onPanModeChanged: onPanModeChanged,
             onToolShortcut: onToolShortcut,
+            onGradientDragBegan: onGradientDragBegan,
+            onGradientDragChanged: onGradientDragChanged,
+            onGradientDragEnded: onGradientDragEnded,
             onCancelCanvasTool: onCancelCanvasTool,
+            onApplyGradientSession: onApplyGradientSession,
             onClearSelection: onClearSelection,
             onApplyTransform: onApplyTransform,
             onCancelTransform: onCancelTransform,
@@ -111,7 +127,12 @@ struct MetalCanvasHost: NSViewRepresentable {
         context.coordinator.transformSelectionShape = transformSelectionShape
         context.coordinator.activeTool = activeTool
         context.coordinator.isTransformingSelection = isTransformingSelection
+        context.coordinator.isFreeTransformDragging = isFreeTransformDragging
+        context.coordinator.activeFreeTransformInteractionMode = activeFreeTransformInteractionMode
         context.coordinator.transformPreview = transformPreview
+        context.coordinator.linearGradientPreview = linearGradientPreview
+        context.coordinator.sectorGradientPreview = sectorGradientPreview
+        context.coordinator.gradientPreviewColor = gradientPreviewColor
         context.coordinator.updatePreparedTransformSessionIfNeeded()
         if let view = nsView as? StrokeCaptureMTKView {
             let previousCanvasSize = view.canvasSize
@@ -140,6 +161,9 @@ struct MetalCanvasHost: NSViewRepresentable {
             let previousViewportRevision = previousSnapshot?.renderSnapshot.viewportRevision
             let previousSelectionRevision = previousSnapshot?.selectionRevision
             let previousSelectionShape = previousSnapshot?.selectionShape
+            let previousLinearGradientPreview = context.coordinator.previousLinearGradientPreview
+            let previousSectorGradientPreview = context.coordinator.previousSectorGradientPreview
+            let previousGradientPreviewColor = context.coordinator.previousGradientPreviewColor
 
             let requiresCanvasRedraw =
                 previousCanvasContentRevision != sceneSnapshot.renderSnapshot.canvasContentRevision ||
@@ -150,10 +174,17 @@ struct MetalCanvasHost: NSViewRepresentable {
                 previousActiveTool != activeTool ||
                 previousIsTransforming != isTransformingSelection ||
                 previousTransformPreview != transformPreview ||
+                previousLinearGradientPreview != linearGradientPreview ||
+                previousSectorGradientPreview != sectorGradientPreview ||
+                previousGradientPreviewColor != gradientPreviewColor ||
                 previousCanvasSize != view.canvasSize ||
                 previousViewportRotation != viewportRotationDegrees ||
                 previousPanMode != isPanModeActive ||
                 previousStrokeResetToken != strokeResetToken
+
+            context.coordinator.previousLinearGradientPreview = linearGradientPreview
+            context.coordinator.previousSectorGradientPreview = sectorGradientPreview
+            context.coordinator.previousGradientPreviewColor = gradientPreviewColor
 
             let brushSizeOnlyChanged = previousBrushSize != brushSize && !requiresCanvasRedraw
             if brushSizeOnlyChanged {
@@ -184,6 +215,7 @@ enum SelectionMouseDownAction {
     case idle           // 只清除选区，不做其他事
 }
 
+@MainActor
 protocol StrokeCaptureDelegate: AnyObject {
     func strokeCaptureViewDidBeginStroke(_ view: StrokeCaptureMTKView)
     func strokeCaptureView(_ view: StrokeCaptureMTKView, didProduce samples: [CanvasStrokeSample])
@@ -198,19 +230,41 @@ protocol StrokeCaptureDelegate: AnyObject {
     func strokeCaptureView(_ view: StrokeCaptureMTKView, selectionToolMouseDownAt point: CanvasPoint, modifiers: NSEvent.ModifierFlags) -> SelectionMouseDownAction
     func strokeCaptureView(_ view: StrokeCaptureMTKView, didMoveSelectionPreviewBy deltaX: Double, deltaY: Double)
     func strokeCaptureViewDidCommitSelectionMove(_ view: StrokeCaptureMTKView)
-    func strokeCaptureView(_ view: StrokeCaptureMTKView, didBeginTransformAt point: CanvasPoint, mode: FreeTransformInteractionMode)
-    func strokeCaptureView(_ view: StrokeCaptureMTKView, didChangeTransformAt point: CanvasPoint)
-    func strokeCaptureView(_ view: StrokeCaptureMTKView, didEndTransformAt point: CanvasPoint)
+    func strokeCaptureView(_ view: StrokeCaptureMTKView, didBeginTransformAt point: CanvasPoint, mode: FreeTransformInteractionMode, modifiers: NSEvent.ModifierFlags)
+    func strokeCaptureView(_ view: StrokeCaptureMTKView, didChangeTransformAt point: CanvasPoint, modifiers: NSEvent.ModifierFlags)
+    func strokeCaptureView(_ view: StrokeCaptureMTKView, didEndTransformAt point: CanvasPoint, modifiers: NSEvent.ModifierFlags)
     func strokeCaptureView(_ view: StrokeCaptureMTKView, didRotateCanvasTo angleDegrees: Double)
     func strokeCaptureView(_ view: StrokeCaptureMTKView, didPanBy deltaX: Double, deltaY: Double)
     func strokeCaptureView(_ view: StrokeCaptureMTKView, didChangePanMode isActive: Bool)
     func strokeCaptureView(_ view: StrokeCaptureMTKView, didRequestToolShortcutKey key: String, modifiers: NSEvent.ModifierFlags)
+    func strokeCaptureView(_ view: StrokeCaptureMTKView, didBeginGradientDragAt point: CanvasPoint, modifiers: NSEvent.ModifierFlags)
+    func strokeCaptureView(_ view: StrokeCaptureMTKView, didChangeGradientDragAt point: CanvasPoint, modifiers: NSEvent.ModifierFlags)
+    func strokeCaptureView(_ view: StrokeCaptureMTKView, didEndGradientDragAt point: CanvasPoint, modifiers: NSEvent.ModifierFlags)
     func strokeCaptureViewDidRequestCanvasToolCancel(_ view: StrokeCaptureMTKView)
+    func strokeCaptureViewDidRequestApplyGradientSession(_ view: StrokeCaptureMTKView)
     func strokeCaptureViewDidRequestClearSelection(_ view: StrokeCaptureMTKView)
     func strokeCaptureViewDidRequestApplyTransform(_ view: StrokeCaptureMTKView)
     func strokeCaptureViewDidRequestCancelTransform(_ view: StrokeCaptureMTKView)
     func strokeCaptureViewDidSyncTransformOffset(_ view: StrokeCaptureMTKView)
     func strokeCaptureView(_ view: StrokeCaptureMTKView, didRequestBrushSizeAdjustment delta: Float)
+}
+
+func freeTransformCanStartImmediately(
+    signature: TransformPreviewPreparedSignature?,
+    hasPreparedSession: Bool
+) -> Bool {
+    if hasPreparedSession {
+        return true
+    }
+    return signature?.mode == .wholeLayer
+}
+
+func freeTransformShouldSkipSessionRebuild(
+    isTransformingSelection: Bool,
+    isFreeTransformDragging: Bool,
+    activeInteractionMode: FreeTransformInteractionMode?
+) -> Bool {
+    isTransformingSelection && isFreeTransformDragging && activeInteractionMode == .move
 }
 
 final class StrokeCaptureMTKView: MTKView {
@@ -254,6 +308,11 @@ final class StrokeCaptureMTKView: MTKView {
     private var strokeInputSampleCount = 0
     private var isBrushStrokeActive = false
     private var sawTabletAuxiliaryEvent = false
+    private var pendingTransformBeginPoint: CanvasPoint?
+    private var pendingTransformLatestPoint: CanvasPoint?
+    private var pendingTransformInteractionMode: FreeTransformInteractionMode?
+    private var activeFreeTransformDragPoint: CanvasPoint?
+    private var activeFreeTransformDragMode: FreeTransformInteractionMode?
     private var previousMouseCoalescingEnabled: Bool?
     private var brushDebugRecords: [BrushInputDebugRecord] = []
     private let minimumTabletPressure: Float = 0.02
@@ -263,6 +322,7 @@ final class StrokeCaptureMTKView: MTKView {
     private var activeModifierFlags: NSEvent.ModifierFlags = []
     private let selectionTraceLogger = Logger(subsystem: "ArtFlex", category: "SelectionTrace")
     private let brushStrokeLogger = Logger(subsystem: "ArtFlex", category: "BrushStroke")
+    private let transformStrokeLogger = Logger(subsystem: "ArtFlex", category: "TransformStroke")
     private var canvasRotationBaseDegrees: Double?
     private var canvasRotationStartAngleDegrees: Double?
     private static let eyedropperCursor: NSCursor = {
@@ -354,7 +414,18 @@ final class StrokeCaptureMTKView: MTKView {
             return
         }
 
-        if activeTool == .straightLine || activeTool == .linearGradient || activeTool == .sectorGradient {
+        if activeTool == .linearGradient || activeTool == .sectorGradient {
+            strokeDelegate?.strokeCaptureView(
+                self,
+                didBeginGradientDragAt: sample(from: event).location,
+                modifiers: event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            )
+            beginContinuousStrokeRendering()
+            setNeedsDisplay(bounds)
+            return
+        }
+
+        if activeTool == .straightLine {
             setNeedsDisplay(bounds)
             return
         }
@@ -362,14 +433,24 @@ final class StrokeCaptureMTKView: MTKView {
         if activeTool == .freeTransform {
             let point = sample(from: event).location
             let mode = transformPreviewDelegate?.freeTransformInteractionMode(for: point, in: self) ?? .move
-            beginContinuousTransformRendering()
-            strokeDelegate?.strokeCaptureView(self, didBeginTransformAt: point, mode: mode)
-            // shouldBeginTransformAt이 성공하면 내부에서 startPoint가 설정됨
-            // 실패해도 delegate에게 startPoint 기록을 요청
             let sessionStarted = transformPreviewDelegate?.strokeCaptureView(self, shouldBeginTransformAt: point) ?? false
-            if !sessionStarted {
-                // preparedSession 미준비 — delegate에 fallback startPoint 설정 요청
-                transformPreviewDelegate?.strokeCaptureViewSetFallbackStartPoint(self, point: point)
+            transformStrokeLogger.debug(
+                "[transform] sessionReadyAtDragStart=\(sessionStarted, privacy: .public)"
+            )
+            if sessionStarted {
+                beginContinuousTransformRendering()
+                activeFreeTransformDragPoint = point
+                activeFreeTransformDragMode = mode
+                strokeDelegate?.strokeCaptureView(
+                    self,
+                    didBeginTransformAt: point,
+                    mode: mode,
+                    modifiers: activeModifierFlags
+                )
+            } else {
+                pendingTransformBeginPoint = point
+                pendingTransformLatestPoint = point
+                pendingTransformInteractionMode = mode
             }
             return
         }
@@ -444,7 +525,17 @@ final class StrokeCaptureMTKView: MTKView {
             return
         }
 
-        if activeTool == .straightLine || activeTool == .linearGradient || activeTool == .sectorGradient {
+        if activeTool == .linearGradient || activeTool == .sectorGradient {
+            strokeDelegate?.strokeCaptureView(
+                self,
+                didChangeGradientDragAt: sample(from: event).location,
+                modifiers: event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            )
+            setNeedsDisplay(bounds)
+            return
+        }
+
+        if activeTool == .straightLine {
             strokeDelegate?.strokeCaptureView(self, didHoverCanvasAt: sample(from: event).location)
             setNeedsDisplay(bounds)
             return
@@ -494,7 +585,47 @@ final class StrokeCaptureMTKView: MTKView {
 
         if activeTool == .freeTransform {
             let point = sample(from: event).location
-            strokeDelegate?.strokeCaptureView(self, didChangeTransformAt: point)
+            if let pendingStart = pendingTransformBeginPoint {
+                pendingTransformLatestPoint = point
+                let sessionStarted = transformPreviewDelegate?.strokeCaptureView(
+                    self,
+                    shouldBeginTransformAt: pendingStart
+                ) ?? false
+                if sessionStarted {
+                    let pendingMode = pendingTransformInteractionMode ?? .move
+                    transformStrokeLogger.debug("[transform] startedWithPendingBegin=true")
+                    pendingTransformBeginPoint = nil
+                    pendingTransformLatestPoint = nil
+                    pendingTransformInteractionMode = nil
+                    beginContinuousTransformRendering()
+                    activeFreeTransformDragPoint = point
+                    activeFreeTransformDragMode = pendingMode
+                    strokeDelegate?.strokeCaptureView(
+                        self,
+                        didBeginTransformAt: pendingStart,
+                        mode: pendingMode,
+                        modifiers: activeModifierFlags
+                    )
+                    strokeDelegate?.strokeCaptureView(
+                        self,
+                        didChangeTransformAt: point,
+                        modifiers: activeModifierFlags
+                    )
+                    transformPreviewDelegate?.strokeCaptureView(self, didUpdateTransformPreviewTo: point)
+                }
+                setNeedsDisplay(bounds)
+                return
+            }
+
+            activeFreeTransformDragPoint = point
+            if activeFreeTransformDragMode == nil {
+                activeFreeTransformDragMode = pendingTransformInteractionMode ?? .move
+            }
+            strokeDelegate?.strokeCaptureView(
+                self,
+                didChangeTransformAt: point,
+                modifiers: activeModifierFlags
+            )
             transformPreviewDelegate?.strokeCaptureView(self, didUpdateTransformPreviewTo: point)
             setNeedsDisplay(bounds)
             return
@@ -552,7 +683,20 @@ final class StrokeCaptureMTKView: MTKView {
             return
         }
 
-        if activeTool == .straightLine || activeTool == .linearGradient || activeTool == .sectorGradient {
+        if activeTool == .linearGradient || activeTool == .sectorGradient {
+            strokeDelegate?.strokeCaptureView(
+                self,
+                didEndGradientDragAt: sample(from: event).location,
+                modifiers: event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            )
+            endContinuousStrokeRendering()
+            lastSample = nil
+            lastPressure = nil
+            setNeedsDisplay(bounds)
+            return
+        }
+
+        if activeTool == .straightLine {
             strokeDelegate?.strokeCaptureView(
                 self,
                 didClickCanvasAt: sample(from: event).location,
@@ -587,10 +731,24 @@ final class StrokeCaptureMTKView: MTKView {
         }
 
         if activeTool == .freeTransform {
-            transformPreviewDelegate?.strokeCaptureViewDidCancelTransformPreview(self)
-            strokeDelegate?.strokeCaptureView(self, didEndTransformAt: sample(from: event).location)
-            // mouseUp: ViewModel에 현재 offset 동기화 (SwiftUI overlay 업데이트)
-            strokeDelegate?.strokeCaptureViewDidSyncTransformOffset(self)
+            let point = sample(from: event).location
+            if pendingTransformBeginPoint != nil {
+                pendingTransformBeginPoint = nil
+                pendingTransformLatestPoint = nil
+                pendingTransformInteractionMode = nil
+                transformPreviewDelegate?.strokeCaptureViewDidCancelTransformPreview(self)
+            } else {
+                transformPreviewDelegate?.strokeCaptureViewDidCancelTransformPreview(self)
+                strokeDelegate?.strokeCaptureView(
+                    self,
+                    didEndTransformAt: point,
+                    modifiers: activeModifierFlags
+                )
+                // mouseUp: ViewModel에 현재 offset 동기화 (SwiftUI overlay 업데이트)
+                strokeDelegate?.strokeCaptureViewDidSyncTransformOffset(self)
+            }
+            activeFreeTransformDragPoint = nil
+            activeFreeTransformDragMode = nil
             endContinuousTransformRendering()
             lastSample = nil
             lastPressure = nil
@@ -631,6 +789,12 @@ final class StrokeCaptureMTKView: MTKView {
         if (event.keyCode == 36 || event.keyCode == 76) && activeTool == .freeTransform {
             endContinuousTransformRendering()
             strokeDelegate?.strokeCaptureViewDidRequestApplyTransform(self)
+            return
+        }
+
+        if (event.keyCode == 36 || event.keyCode == 76) &&
+            (activeTool == .linearGradient || activeTool == .sectorGradient) {
+            strokeDelegate?.strokeCaptureViewDidRequestApplyGradientSession(self)
             return
         }
 
@@ -692,7 +856,7 @@ final class StrokeCaptureMTKView: MTKView {
         hoverLocation = convert(event.locationInWindow, from: nil)
         updateCursorIndicator()
         updateCursorAppearance()
-        if activeTool == .straightLine || activeTool == .linearGradient || activeTool == .sectorGradient || activeTool == .polygonSelection {
+        if activeTool == .straightLine || activeTool == .polygonSelection {
             strokeDelegate?.strokeCaptureView(self, didHoverCanvasAt: sample(from: event).location)
             setNeedsDisplay(bounds)
         }
@@ -750,6 +914,16 @@ final class StrokeCaptureMTKView: MTKView {
     override func flagsChanged(with event: NSEvent) {
         activeModifierFlags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         updateCursorAppearance()
+        if activeTool == .freeTransform,
+           let activePoint = activeFreeTransformDragPoint,
+           case .scale = activeFreeTransformDragMode,
+           pendingTransformBeginPoint == nil {
+            strokeDelegate?.strokeCaptureView(
+                self,
+                didChangeTransformAt: activePoint,
+                modifiers: activeModifierFlags
+            )
+        }
         super.flagsChanged(with: event)
     }
 
@@ -1094,6 +1268,11 @@ final class StrokeCaptureMTKView: MTKView {
         lastPressure = nil
         selectionInteractionMode = .idle
         selectionMoveLastPoint = nil
+        pendingTransformBeginPoint = nil
+        pendingTransformLatestPoint = nil
+        pendingTransformInteractionMode = nil
+        activeFreeTransformDragPoint = nil
+        activeFreeTransformDragMode = nil
         isPaused = true
         enableSetNeedsDisplay = true
         setNeedsDisplay(bounds)
@@ -1147,11 +1326,14 @@ final class StrokeCaptureMTKView: MTKView {
 
 }
 
+@MainActor
 final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDelegate {
     private let metalContext: MetalDeviceContext
     private let layerSurfaceStore: StageOneLayerSurfaceStore
     private let canvasPresenter: StageOneCanvasPresenter
     private let transformPreviewBuilder: TransformPreviewSessionBuilder
+    private let linearGradientRenderer: LinearGradientRenderer
+    private let sectorGradientRenderer: SectorGradientRenderer
     var activeTool: ToolKind
     var transformSelectionShape: SelectionShape?
     private let onStrokeBegan: () -> Void
@@ -1167,14 +1349,18 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
     private let onSelectionMouseDown: (CanvasPoint, NSEvent.ModifierFlags) -> SelectionMouseDownAction
     private let onMoveSelectionPreview: (Double, Double) -> Void
     private let onCommitSelectionMove: () -> Void
-    private let onTransformBegan: (CanvasPoint, FreeTransformInteractionMode) -> Void
-    private let onTransformChanged: (CanvasPoint) -> Void
-    private let onTransformEnded: (CanvasPoint) -> Void
+    private let onTransformBegan: (CanvasPoint, FreeTransformInteractionMode, NSEvent.ModifierFlags) -> Void
+    private let onTransformChanged: (CanvasPoint, NSEvent.ModifierFlags) -> Void
+    private let onTransformEnded: (CanvasPoint, NSEvent.ModifierFlags) -> Void
     private let onTransformOffsetChanged: (CanvasPoint) -> Void
     private let onCanvasRotationChanged: (Double) -> Void
     private let onPanModeChanged: (Bool) -> Void
     private let onToolShortcut: (String, NSEvent.ModifierFlags) -> Void
+    private let onGradientDragBegan: (CanvasPoint, NSEvent.ModifierFlags) -> Void
+    private let onGradientDragChanged: (CanvasPoint, NSEvent.ModifierFlags) -> Void
+    private let onGradientDragEnded: (CanvasPoint, NSEvent.ModifierFlags) -> Void
     private let onCancelCanvasTool: () -> Void
+    private let onApplyGradientSession: () -> Void
     private let onClearSelection: () -> Void
     private let onApplyTransform: () -> Void
     private let onCancelTransform: () -> Void
@@ -1182,6 +1368,8 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
 
     var sceneSnapshot: CanvasSceneSnapshot?
     var isTransformingSelection = false
+    var isFreeTransformDragging = false
+    var activeFreeTransformInteractionMode: FreeTransformInteractionMode?
     fileprivate var transformPreviewSession: TransformPreviewSession?
     fileprivate var preparedTransformSession: TransformPreviewSession?
     fileprivate var preparedTransformSignature: TransformPreviewPreparedSignature?
@@ -1192,10 +1380,26 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
     fileprivate var freeTransformDragOffset = CanvasPoint(x: 0, y: 0)
     fileprivate var freeTransformDragStart: CanvasPoint? = nil
     fileprivate var freeTransformDragBase = CanvasPoint(x: 0, y: 0)
+    fileprivate var liveTransformPreview: FreeTransformPreview?
+    fileprivate var liveTransformMode: FreeTransformInteractionMode?
+    fileprivate var liveTransformDragStartPoint: CanvasPoint?
+    fileprivate var liveTransformStartPreview = FreeTransformPreview.identity
+    fileprivate var isLiveTransformDragging = false
+    var linearGradientPreview: LinearGradientPreview?
+    var sectorGradientPreview: SectorGradientPreview?
+    var gradientPreviewColor: RGBAColor = .black
+    var previousLinearGradientPreview: LinearGradientPreview?
+    var previousSectorGradientPreview: SectorGradientPreview?
+    var previousGradientPreviewColor: RGBAColor = .black
     var transformPreview = FreeTransformPreview.identity
     private let selectionTraceLogger = Logger(subsystem: "ArtFlex", category: "SelectionTrace")
     private let transformLogger = Logger(subsystem: "ArtFlex", category: "Transform")
     private var previewTimingFrameCounter = 0
+    private var didLogNoRebuildDuringActiveMove = false
+    private var lastIdlePreparedAvailability: Bool?
+    private var lastLoggedWholeLayerCanScaleRotate: Bool?
+    private var lastLoggedWholeLayerUsesInteractionBoundsForHitTesting: Bool?
+    private var liveMoveLogCount = 0
 
     init(
         metalContext: MetalDeviceContext,
@@ -1203,6 +1407,9 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
         activeTool: ToolKind,
         transformSelectionShape: SelectionShape?,
         transformPreview: FreeTransformPreview,
+        linearGradientPreview: LinearGradientPreview?,
+        sectorGradientPreview: SectorGradientPreview?,
+        gradientPreviewColor: RGBAColor,
         onCanvasRotationChanged: @escaping (Double) -> Void,
         onStrokeBegan: @escaping () -> Void,
         onStrokeInput: @escaping ([CanvasStrokeSample]) -> Void,
@@ -1217,13 +1424,17 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
         onSelectionMouseDown: @escaping (CanvasPoint, NSEvent.ModifierFlags) -> SelectionMouseDownAction,
         onMoveSelectionPreview: @escaping (Double, Double) -> Void,
         onCommitSelectionMove: @escaping () -> Void,
-        onTransformBegan: @escaping (CanvasPoint, FreeTransformInteractionMode) -> Void,
-        onTransformChanged: @escaping (CanvasPoint) -> Void,
-        onTransformEnded: @escaping (CanvasPoint) -> Void,
+        onTransformBegan: @escaping (CanvasPoint, FreeTransformInteractionMode, NSEvent.ModifierFlags) -> Void,
+        onTransformChanged: @escaping (CanvasPoint, NSEvent.ModifierFlags) -> Void,
+        onTransformEnded: @escaping (CanvasPoint, NSEvent.ModifierFlags) -> Void,
         onTransformOffsetChanged: @escaping (CanvasPoint) -> Void,
         onPanModeChanged: @escaping (Bool) -> Void,
         onToolShortcut: @escaping (String, NSEvent.ModifierFlags) -> Void,
+        onGradientDragBegan: @escaping (CanvasPoint, NSEvent.ModifierFlags) -> Void,
+        onGradientDragChanged: @escaping (CanvasPoint, NSEvent.ModifierFlags) -> Void,
+        onGradientDragEnded: @escaping (CanvasPoint, NSEvent.ModifierFlags) -> Void,
         onCancelCanvasTool: @escaping () -> Void,
+        onApplyGradientSession: @escaping () -> Void,
         onClearSelection: @escaping () -> Void,
         onApplyTransform: @escaping () -> Void,
         onCancelTransform: @escaping () -> Void,
@@ -1233,9 +1444,17 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
         self.layerSurfaceStore = layerSurfaceStore
         self.canvasPresenter = StageOneCanvasPresenter(device: metalContext.device)
         self.transformPreviewBuilder = TransformPreviewSessionBuilder(device: metalContext.device)
+        self.linearGradientRenderer = LinearGradientRenderer(device: metalContext.device)
+        self.sectorGradientRenderer = SectorGradientRenderer(device: metalContext.device)
         self.activeTool = activeTool
         self.transformSelectionShape = transformSelectionShape
         self.transformPreview = transformPreview
+        self.linearGradientPreview = linearGradientPreview
+        self.sectorGradientPreview = sectorGradientPreview
+        self.gradientPreviewColor = gradientPreviewColor
+        self.previousLinearGradientPreview = linearGradientPreview
+        self.previousSectorGradientPreview = sectorGradientPreview
+        self.previousGradientPreviewColor = gradientPreviewColor
         self.onCanvasRotationChanged = onCanvasRotationChanged
         self.onStrokeBegan = onStrokeBegan
         self.onStrokeInput = onStrokeInput
@@ -1256,7 +1475,11 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
         self.onTransformOffsetChanged = onTransformOffsetChanged
         self.onPanModeChanged = onPanModeChanged
         self.onToolShortcut = onToolShortcut
+        self.onGradientDragBegan = onGradientDragBegan
+        self.onGradientDragChanged = onGradientDragChanged
+        self.onGradientDragEnded = onGradientDragEnded
         self.onCancelCanvasTool = onCancelCanvasTool
+        self.onApplyGradientSession = onApplyGradientSession
         self.onClearSelection = onClearSelection
         self.onApplyTransform = onApplyTransform
         self.onCancelTransform = onCancelTransform
@@ -1282,15 +1505,19 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
 
             let canvasSize = snapshot.renderSnapshot.document.canvasSize
             let isTransforming = isTransformingSelection && activeTool == .freeTransform
+            let effectivePreview = liveTransformPreview ?? transformPreview
             let activeLayerSurfaceID = snapshot.activeLayerSurfaceID
             let hasActivePreview = isTransforming
+            let hasLinearGradientPreview = activeTool == .linearGradient && linearGradientPreview?.geometry != nil
+            let hasSectorGradientPreview = activeTool == .sectorGradient && sectorGradientPreview?.geometry != nil
+            let hasGradientPreview = hasLinearGradientPreview || hasSectorGradientPreview
 
             let activeLayerOpacity = activeLayerSurfaceID.flatMap { surfaceID in
                 snapshot.layerSurfaces.first(where: { $0.surfaceID == surfaceID })?.opacity
             } ?? 1
             let previewEncodeStart = DispatchTime.now().uptimeNanoseconds
 
-            let orderedVisibleLayers = snapshot.layerSurfaces.compactMap { surface -> (MTLTexture, Float)? in
+            let orderedVisibleLayers = snapshot.layerSurfaces.compactMap { surface -> (LayerSurfaceID, MTLTexture, Float)? in
                 guard surface.isVisible, let texture = layerSurfaceStore.texture(for: surface.surfaceID) else {
                     return nil
                 }
@@ -1298,20 +1525,67 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
                 if hasActivePreview, surface.surfaceID == activeLayerSurfaceID {
                     if let session = transformPreviewSession {
                         if session.mode == .selection, let baseTexture = session.baseTexture {
-                            return (baseTexture, surface.opacity)
+                            return (surface.surfaceID, baseTexture, surface.opacity)
                         }
                         return nil
                     }
-                    return (texture, surface.opacity)
+                    return (surface.surfaceID, texture, surface.opacity)
                 }
-                return (texture, surface.opacity)
+                return (surface.surfaceID, texture, surface.opacity)
             }
 
-            canvasPresenter.encode(
-                layerTextures: orderedVisibleLayers,
-                into: descriptor,
-                commandBuffer: commandBuffer
-            )
+            if hasGradientPreview, let activeLayerSurfaceID {
+                let lowerLayers = Array(orderedVisibleLayers.prefix { $0.0 != activeLayerSurfaceID }) +
+                    orderedVisibleLayers.filter { $0.0 == activeLayerSurfaceID }
+                canvasPresenter.encode(
+                    layerTextures: lowerLayers.map { ($0.1, $0.2) },
+                    into: descriptor,
+                    commandBuffer: commandBuffer
+                )
+
+                descriptor.colorAttachments[0].loadAction = .load
+                descriptor.colorAttachments[0].storeAction = .store
+                if hasLinearGradientPreview, let geometry = linearGradientPreview?.geometry {
+                    linearGradientRenderer.encode(
+                        into: descriptor,
+                        commandBuffer: commandBuffer,
+                        canvasSize: canvasSize,
+                        pointA: geometry.pointA,
+                        pointB: geometry.pointB,
+                        pointC: geometry.pointC,
+                        color: gradientPreviewColor
+                    )
+                } else if hasSectorGradientPreview, let geometry = sectorGradientPreview?.geometry {
+                    sectorGradientRenderer.encode(
+                        into: descriptor,
+                        commandBuffer: commandBuffer,
+                        canvasSize: canvasSize,
+                        center: geometry.center,
+                        radius: geometry.radius,
+                        startAngle: geometry.startAngle,
+                        sweepAngle: geometry.sweepAngle,
+                        isFullCircle: geometry.isFullCircle,
+                        color: gradientPreviewColor
+                    )
+                }
+
+                let upperLayers = Array(orderedVisibleLayers.drop { $0.0 != activeLayerSurfaceID }.dropFirst())
+                if !upperLayers.isEmpty {
+                    descriptor.colorAttachments[0].loadAction = .load
+                    descriptor.colorAttachments[0].storeAction = .store
+                    canvasPresenter.encode(
+                        layerTextures: upperLayers.map { ($0.1, $0.2) },
+                        into: descriptor,
+                        commandBuffer: commandBuffer
+                    )
+                }
+            } else {
+                canvasPresenter.encode(
+                    layerTextures: orderedVisibleLayers.map { ($0.1, $0.2) },
+                    into: descriptor,
+                    commandBuffer: commandBuffer
+                )
+            }
 
             if hasActivePreview, let surfaceID = activeLayerSurfaceID {
                 descriptor.colorAttachments[0].loadAction = .load
@@ -1322,12 +1596,12 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
                         texture: session.extractedTexture,
                         opacity: activeLayerOpacity,
                         canvasSize: canvasSize,
-                        bounds: session.sourceBounds,
-                        preview: transformPreview,
+                        bounds: session.operationBounds,
+                        preview: effectivePreview,
                         into: descriptor,
                         commandBuffer: commandBuffer
                     )
-                } else if transformSelectionShape == nil,
+                } else if currentPreparedTransformSignature()?.mode == .wholeLayer,
                           let texture = layerSurfaceStore.texture(for: surfaceID) {
                     let fullBounds = CanvasRect(
                         origin: .init(x: 0, y: 0),
@@ -1338,20 +1612,24 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
                         opacity: activeLayerOpacity,
                         canvasSize: canvasSize,
                         bounds: fullBounds,
-                        preview: transformPreview,
+                        preview: effectivePreview,
                         into: descriptor,
                         commandBuffer: commandBuffer
                     )
                 }
             }
 
-            if hasActivePreview {
+            if hasActivePreview || hasGradientPreview {
                 previewTimingFrameCounter &+= 1
                 if previewTimingFrameCounter % 15 == 0 {
                     let previewEncodeDurationMs = Double(DispatchTime.now().uptimeNanoseconds - previewEncodeStart) / 1_000_000
-                    transformLogger.debug(
-                        "[preview] encodeMs=\(previewEncodeDurationMs, privacy: .public) mode=\(String(describing: self.transformPreviewSession?.mode), privacy: .public)"
-                    )
+                    if hasGradientPreview {
+                        transformLogger.debug("[gradient] previewEncodeMs=\(previewEncodeDurationMs, privacy: .public) sessionTool=\(hasLinearGradientPreview ? "linear" : "sector", privacy: .public)")
+                    } else {
+                        transformLogger.debug(
+                            "[preview] encodeMs=\(previewEncodeDurationMs, privacy: .public) mode=\(String(describing: self.transformPreviewSession?.mode), privacy: .public)"
+                        )
+                    }
                 }
             } else {
                 previewTimingFrameCounter = 0
@@ -1397,6 +1675,30 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
         onCanvasHover(point)
     }
 
+    func strokeCaptureView(
+        _ view: StrokeCaptureMTKView,
+        didBeginGradientDragAt point: CanvasPoint,
+        modifiers: NSEvent.ModifierFlags
+    ) {
+        onGradientDragBegan(point, modifiers)
+    }
+
+    func strokeCaptureView(
+        _ view: StrokeCaptureMTKView,
+        didChangeGradientDragAt point: CanvasPoint,
+        modifiers: NSEvent.ModifierFlags
+    ) {
+        onGradientDragChanged(point, modifiers)
+    }
+
+    func strokeCaptureView(
+        _ view: StrokeCaptureMTKView,
+        didEndGradientDragAt point: CanvasPoint,
+        modifiers: NSEvent.ModifierFlags
+    ) {
+        onGradientDragEnded(point, modifiers)
+    }
+
     func strokeCaptureView(_ view: StrokeCaptureMTKView, didBeginSelectionAt point: CanvasPoint, modifiers: NSEvent.ModifierFlags) {
         let message = "[coordinator.didBeginSelectionAt] point=(\(point.x),\(point.y)) modifiers=\(modifiers.rawValue)"
         selectionTraceLogger.debug("\(message, privacy: .public)")
@@ -1435,16 +1737,63 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
         onCommitSelectionMove()
     }
 
-    func strokeCaptureView(_ view: StrokeCaptureMTKView, didBeginTransformAt point: CanvasPoint, mode: FreeTransformInteractionMode) {
-        onTransformBegan(point, mode)
+    func strokeCaptureView(
+        _ view: StrokeCaptureMTKView,
+        didBeginTransformAt point: CanvasPoint,
+        mode: FreeTransformInteractionMode,
+        modifiers: NSEvent.ModifierFlags
+    ) {
+        if mode == .move {
+            isLiveTransformDragging = true
+            liveTransformMode = mode
+            liveTransformDragStartPoint = point
+            liveTransformStartPreview = transformPreview
+            liveTransformPreview = transformPreview
+            liveMoveLogCount = 0
+            transformLogger.debug("[transform] liveMoveUsesCoordinatorPreview=true")
+        } else {
+            clearLiveTransformState()
+        }
+        onTransformBegan(point, mode, modifiers)
     }
 
-    func strokeCaptureView(_ view: StrokeCaptureMTKView, didChangeTransformAt point: CanvasPoint) {
-        onTransformChanged(point)
+    func strokeCaptureView(
+        _ view: StrokeCaptureMTKView,
+        didChangeTransformAt point: CanvasPoint,
+        modifiers: NSEvent.ModifierFlags
+    ) {
+        if isLiveTransformDragging,
+           liveTransformMode == .move,
+           let dragStart = liveTransformDragStartPoint {
+            let nextPreview = freeTransformTranslatedPreview(
+                dragStartPoint: dragStart,
+                currentPoint: point,
+                startPreview: liveTransformStartPreview
+            )
+            liveTransformPreview = nextPreview
+            if liveMoveLogCount < 10 {
+                transformLogger.debug(
+                    "[transform] moveTranslation x=\(nextPreview.translation.x, privacy: .public) y=\(nextPreview.translation.y, privacy: .public)"
+                )
+                liveMoveLogCount += 1
+            }
+            view.setNeedsDisplay(view.bounds)
+            return
+        }
+        onTransformChanged(point, modifiers)
     }
 
-    func strokeCaptureView(_ view: StrokeCaptureMTKView, didEndTransformAt point: CanvasPoint) {
-        onTransformEnded(point)
+    func strokeCaptureView(
+        _ view: StrokeCaptureMTKView,
+        didEndTransformAt point: CanvasPoint,
+        modifiers: NSEvent.ModifierFlags
+    ) {
+        if isLiveTransformDragging, liveTransformMode == .move {
+            onTransformChanged(point, modifiers)
+            clearLiveTransformState()
+            view.setNeedsDisplay(view.bounds)
+        }
+        onTransformEnded(point, modifiers)
     }
 
     func strokeCaptureView(_ view: StrokeCaptureMTKView, didRotateCanvasTo angleDegrees: Double) {
@@ -1463,6 +1812,10 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
         onCancelCanvasTool()
     }
 
+    func strokeCaptureViewDidRequestApplyGradientSession(_ view: StrokeCaptureMTKView) {
+        onApplyGradientSession()
+    }
+
     func strokeCaptureViewDidRequestClearSelection(_ view: StrokeCaptureMTKView) {
         onClearSelection()
     }
@@ -1474,6 +1827,7 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
     func strokeCaptureViewDidRequestCancelTransform(_ view: StrokeCaptureMTKView) {
         freeTransformDragOffset = .init(x: 0, y: 0)
         freeTransformDragBase = .init(x: 0, y: 0)
+        clearLiveTransformState()
         onCancelTransform()
     }
 
@@ -1489,39 +1843,36 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
 @MainActor
 extension MetalCanvasCoordinator: TransformPreviewDelegate {
     func freeTransformInteractionMode(for point: CanvasPoint, in view: StrokeCaptureMTKView) -> FreeTransformInteractionMode {
-        guard let selectionBounds = sceneSnapshot?.selectionShape?.bounds else {
-            return .move
-        }
-
         let handleCanvasRadius = max(Double(14) * Double(view.canvasSize.width) / max(view.bounds.width, 1), 12)
-        let handlePoints = freeTransformHandlePoints(
-            bounds: selectionBounds,
-            preview: transformPreview,
-            rotationHandleDistance: handleCanvasRadius * 3.4
-        )
-
-        if let rotationPoint = handlePoints[.rotation],
-           hypot(rotationPoint.x - point.x, rotationPoint.y - point.y) <= handleCanvasRadius {
-            return .rotate
-        }
-
-        for handle in FreeTransformHandle.allCases where handle != .rotation {
-            if let handlePoint = handlePoints[handle],
-               hypot(handlePoint.x - point.x, handlePoint.y - point.y) <= handleCanvasRadius {
-                return .scale(handle)
+        let selectionBounds = sceneSnapshot?.selectionShape?.bounds
+        if currentPreparedTransformSignature()?.mode == .wholeLayer {
+            let canScaleRotate = selectionBounds != nil
+            if lastLoggedWholeLayerCanScaleRotate != canScaleRotate {
+                lastLoggedWholeLayerCanScaleRotate = canScaleRotate
+                transformLogger.debug("[transform] wholeLayerCanScaleRotate=\(canScaleRotate, privacy: .public)")
+            }
+            let usesInteractionBounds = selectionBounds != nil
+            if lastLoggedWholeLayerUsesInteractionBoundsForHitTesting != usesInteractionBounds {
+                lastLoggedWholeLayerUsesInteractionBoundsForHitTesting = usesInteractionBounds
+                transformLogger.debug(
+                    "[transform] wholeLayerUsesInteractionBoundsForHitTesting=\(usesInteractionBounds, privacy: .public)"
+                )
             }
         }
 
-        if freeTransformContains(point: point, bounds: selectionBounds, preview: transformPreview) {
-            return .move
-        }
-
-        return .move
+        return ArtFlex.freeTransformInteractionMode(
+            point: point,
+            bounds: selectionBounds,
+            preview: transformPreview,
+            handleRadius: handleCanvasRadius,
+            rotationHandleDistance: handleCanvasRadius * 3.4
+        )
     }
 
     func strokeCaptureView(_ view: StrokeCaptureMTKView, shouldBeginTransformAt point: CanvasPoint) -> Bool {
         if transformPreviewSession != nil {
             transformPreviewStartPoint = point
+            transformLogger.debug("[transform] dragStartUsesPreparedSession=true")
             return true
         }
 
@@ -1529,15 +1880,25 @@ extension MetalCanvasCoordinator: TransformPreviewDelegate {
            preparedTransformSignature == currentPreparedTransformSignature() {
             transformPreviewSession = prepared
             transformPreviewStartPoint = point
+            transformLogger.debug("[transform] dragStartUsesPreparedSession=true")
             return true
         }
 
-        if preparedTransformSignature != currentPreparedTransformSignature() {
+        let signature = currentPreparedTransformSignature()
+        if preparedTransformSignature != signature {
             preparedTransformSession = nil
             preparedTransformSignature = nil
         }
-        transformPreviewStartPoint = point
+        if freeTransformCanStartImmediately(
+            signature: signature,
+            hasPreparedSession: preparedTransformSession != nil
+        ) {
+            transformPreviewStartPoint = point
+            transformLogger.debug("[transform] dragStartUsesPreparedSession=false")
+            return true
+        }
         updatePreparedTransformSessionIfNeeded()
+        transformLogger.debug("[transform] dragStartUsesPreparedSession=false")
         return false
     }
 
@@ -1562,18 +1923,32 @@ extension MetalCanvasCoordinator: TransformPreviewDelegate {
             transformPreviewSession = nil
             transformPreviewStartPoint = nil
             transformPreviewDragBaseOffset = .init(x: 0, y: 0)
-            preparedTransformSession = nil
-            preparedTransformSignature = nil
-            isPrepBuildingSession = false
-            return
         }
 
         guard activeTool == .freeTransform else {
             transformPreviewSession = nil
+            transformPreviewStartPoint = nil
+            transformPreviewDragBaseOffset = .init(x: 0, y: 0)
             preparedTransformSession = nil
             preparedTransformSignature = nil
+            isPrepBuildingSession = false
+            didLogNoRebuildDuringActiveMove = false
+            lastIdlePreparedAvailability = nil
             return
         }
+
+        if freeTransformShouldSkipSessionRebuild(
+            isTransformingSelection: isTransformingSelection,
+            isFreeTransformDragging: isFreeTransformDragging,
+            activeInteractionMode: activeFreeTransformInteractionMode
+        ) {
+            if !didLogNoRebuildDuringActiveMove {
+                transformLogger.debug("[transform] rebuiltSessionDuringActiveMove=false")
+                didLogNoRebuildDuringActiveMove = true
+            }
+            return
+        }
+        didLogNoRebuildDuringActiveMove = false
 
         guard
             let snapshot = sceneSnapshot,
@@ -1583,6 +1958,8 @@ extension MetalCanvasCoordinator: TransformPreviewDelegate {
             transformPreviewSession = nil
             preparedTransformSession = nil
             preparedTransformSignature = nil
+            isPrepBuildingSession = false
+            logIdlePreparedAvailability(false)
             return
         }
 
@@ -1590,6 +1967,8 @@ extension MetalCanvasCoordinator: TransformPreviewDelegate {
             transformPreviewSession = nil
             preparedTransformSession = nil
             preparedTransformSignature = nil
+            isPrepBuildingSession = false
+            logIdlePreparedAvailability(false)
             return
         }
 
@@ -1600,9 +1979,13 @@ extension MetalCanvasCoordinator: TransformPreviewDelegate {
         if transformPreviewSession?.preparedSignature == signature {
             preparedTransformSession = transformPreviewSession
             preparedTransformSignature = signature
+            logIdlePreparedAvailability(true)
             return
         }
-        if preparedTransformSignature == signature, preparedTransformSession != nil { return }
+        if preparedTransformSignature == signature, preparedTransformSession != nil {
+            logIdlePreparedAvailability(true)
+            return
+        }
         if isPrepBuildingSession { return }
 
         isPrepBuildingSession = true
@@ -1615,6 +1998,7 @@ extension MetalCanvasCoordinator: TransformPreviewDelegate {
             sourceTexture: sourceTexture,
             canvasSize: canvasSize,
             selectionShape: selectionShape,
+            interactionBounds: snapshot.selectionShape?.bounds,
             selectionRevision: snapshot.selectionRevision,
             canvasContentRevision: snapshot.renderSnapshot.canvasContentRevision,
             metal: metalContext
@@ -1624,16 +2008,23 @@ extension MetalCanvasCoordinator: TransformPreviewDelegate {
             self.transformLogger.debug(
                 "[session] buildMs=\(buildDurationMs, privacy: .public) success=\(session != nil, privacy: .public)"
             )
-            guard self.isTransformingSelection, self.activeTool == .freeTransform else {
+            guard self.activeTool == .freeTransform else {
                 self.isPrepBuildingSession = false
+                self.logIdlePreparedAvailability(self.preparedTransformSession != nil)
                 return
             }
             self.isPrepBuildingSession = false
+            let latestSignature = self.currentPreparedTransformSignature()
+            guard session?.preparedSignature == latestSignature || session == nil else {
+                self.logIdlePreparedAvailability(self.preparedTransformSession != nil)
+                return
+            }
             self.preparedTransformSession = session
             self.preparedTransformSignature = session?.preparedSignature
-            if self.transformPreviewSession == nil {
+            if self.isTransformingSelection, self.transformPreviewSession == nil {
                 self.transformPreviewSession = session
             }
+            self.logIdlePreparedAvailability(session != nil)
         }
     }
 
@@ -1643,7 +2034,8 @@ extension MetalCanvasCoordinator: TransformPreviewDelegate {
             let activeLayerSurfaceID = snapshot.activeLayerSurfaceID,
             let plan = TransformPreviewSessionBuilder.plan(
                 canvasSize: snapshot.renderSnapshot.document.canvasSize,
-                selectionShape: transformSelectionShape
+                selectionShape: transformSelectionShape,
+                interactionBounds: snapshot.selectionShape?.bounds
             )
         else {
             return nil
@@ -1654,8 +2046,24 @@ extension MetalCanvasCoordinator: TransformPreviewDelegate {
             mode: plan.mode,
             canvasContentRevision: snapshot.renderSnapshot.canvasContentRevision,
             selectionRevision: snapshot.selectionRevision,
-            sourceBounds: plan.sourceBounds
+            operationBounds: plan.operationBounds
         )
+    }
+
+    private func clearLiveTransformState() {
+        isLiveTransformDragging = false
+        liveTransformMode = nil
+        liveTransformDragStartPoint = nil
+        liveTransformStartPreview = .identity
+        liveTransformPreview = nil
+        liveMoveLogCount = 0
+    }
+
+    private func logIdlePreparedAvailability(_ available: Bool) {
+        guard !isTransformingSelection else { return }
+        guard lastIdlePreparedAvailability != available else { return }
+        lastIdlePreparedAvailability = available
+        transformLogger.debug("[transform] idlePreparedAvailable=\(available, privacy: .public)")
     }
 
 }
