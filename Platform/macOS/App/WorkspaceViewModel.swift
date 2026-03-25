@@ -102,7 +102,9 @@ final class WorkspaceViewModel: ObservableObject {
     private var wholeLayerInteractionBoundsTask: Task<WholeLayerInteractionBoundsCacheEntry?, Never>?
     private var lastLoggedWholeLayerOverlayUsesInteractionBounds: Bool?
     private lazy var transformPreviewSessionBuilder = TransformPreviewSessionBuilder(device: bootstrap.metalContext.device)
-    private lazy var transformGPUCompositor = TransformGPUCompositor(device: bootstrap.metalContext.device)
+    private lazy var transformGPUCompositorResult: Result<TransformGPUCompositor, Error> = Result {
+        try TransformGPUCompositor(device: bootstrap.metalContext.device)
+    }
     init(bootstrap: AppBootstrap, installsZoomKeyboardMonitor: Bool = true) {
         self.bootstrap = bootstrap
         resetSelectionTraceLog()
@@ -1438,6 +1440,7 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func setActiveLayerOpacity(_ opacity: Float) {
+        _ = flushBrushEditingBoundary(reason: "setActiveLayerOpacity")
         let activeLayerID = workspace.document.activeLayerID
         bootstrap.workspaceStore.updateDocument { document in
             document.setLayerOpacity(activeLayerID, opacity: opacity)
@@ -3201,8 +3204,27 @@ final class WorkspaceViewModel: ObservableObject {
                 return
             }
 
+            let compositor: TransformGPUCompositor
+            do {
+                compositor = try self.transformGPUCompositorResult.get()
+            } catch {
+                self.isApplyingTransformCommit = false
+                self.transformState.reset()
+                self.isFreeTransformDragging = false
+                self.activeFreeTransformInteractionMode = nil
+                self.freeTransformMoveLogCount = 0
+                self.transformLogger.debug("[transform] overlayHiddenDuringMove=false")
+                self.setFreeTransformPreview(.identity)
+                self.isTransformingSelection = false
+                self.freeTransformUsesImplicitSelection = false
+                self.implicitFreeTransformSelectionShape = nil
+                self.refresh()
+                self.showStatus(.init(kind: .error, message: error.localizedDescription))
+                return
+            }
+
             let composeStart = DispatchTime.now().uptimeNanoseconds
-            self.transformGPUCompositor.composeTransformedTexture(
+            compositor.composeTransformedTexture(
                 session: session,
                 preview: capturedPreview,
                 canvasSize: canvasSize,
@@ -3479,11 +3501,15 @@ final class WorkspaceViewModel: ObservableObject {
             let texture: MTLTexture
             init(_ texture: MTLTexture) { self.texture = texture }
         }
+        final class SerializerBox: @unchecked Sendable {
+            let serializer: LayerTextureSerializer
+            init(_ serializer: LayerTextureSerializer) { self.serializer = serializer }
+        }
 
         let textureBox = TextureBox(texture)
+        let serializerBox = SerializerBox(bootstrap.textureSerializer)
         let task = Task.detached(priority: .utility) { () -> WholeLayerInteractionBoundsCacheEntry? in
-            let serializer = LayerTextureSerializer()
-            guard let snapshot = try? serializer.snapshot(texture: textureBox.texture) else {
+            guard let snapshot = try? serializerBox.serializer.snapshot(texture: textureBox.texture) else {
                 return nil
             }
             return Self.wholeLayerInteractionBounds(from: snapshot)
@@ -4183,6 +4209,11 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func beginStrokeIfNeeded() {
+        let startNs = DispatchTime.now().uptimeNanoseconds
+        defer {
+            let ms = Double(DispatchTime.now().uptimeNanoseconds - startNs) / 1_000_000
+            PerformanceAuditStore.shared.recordDuration("WorkspaceViewModel.beginStrokeIfNeeded", ms: ms)
+        }
         ideationBranchActivityHandler?()
         strokePacketCount = 0
 
@@ -4230,6 +4261,11 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func opportunisticallyDrainBrushCommits(hadLiveBrushWorkThisFrame: Bool) {
+        let startNs = DispatchTime.now().uptimeNanoseconds
+        defer {
+            let ms = Double(DispatchTime.now().uptimeNanoseconds - startNs) / 1_000_000
+            PerformanceAuditStore.shared.recordDuration("WorkspaceViewModel.opportunisticallyDrainBrushCommits", ms: ms)
+        }
         guard bootstrap.strokeEngine.hasPendingBrushCommitJobs else {
             return
         }
@@ -4239,8 +4275,8 @@ final class WorkspaceViewModel: ObservableObject {
                 hadLiveBrushWorkThisFrame: hadLiveBrushWorkThisFrame,
                 maxJobs: 1,
                 maxCpuMs: 0.75
-            ) { [self] in
-                try bootstrap.historyController.captureCheckpoint()
+            ) { [self] job in
+                try captureBrushCommitCheckpoint(for: job)
                 hasUnsavedChanges = true
             }
 
@@ -4254,6 +4290,11 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func undo() {
+        let startNs = DispatchTime.now().uptimeNanoseconds
+        defer {
+            let ms = Double(DispatchTime.now().uptimeNanoseconds - startNs) / 1_000_000
+            PerformanceAuditStore.shared.recordDuration("WorkspaceViewModel.undo", ms: ms)
+        }
         ideationBranchActivityHandler?()
         _ = drainPendingBrushCommitsIfNeeded(resetLiveSession: true)
         if ideationUndoHandler?() == true {
@@ -4281,6 +4322,11 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func redo() {
+        let startNs = DispatchTime.now().uptimeNanoseconds
+        defer {
+            let ms = Double(DispatchTime.now().uptimeNanoseconds - startNs) / 1_000_000
+            PerformanceAuditStore.shared.recordDuration("WorkspaceViewModel.redo", ms: ms)
+        }
         ideationBranchActivityHandler?()
         _ = drainPendingBrushCommitsIfNeeded(resetLiveSession: true)
         if ideationRedoHandler?() == true {
@@ -4316,13 +4362,18 @@ final class WorkspaceViewModel: ObservableObject {
         }
 
         do {
-            try bootstrap.exportController.exportPNG(
-                request: ExportRequest(fileURL: url)
-            )
+            try exportPNG(to: url)
             showStatus(.init(kind: .success, message: "已导出 PNG：\(url.lastPathComponent)"))
         } catch {
             showStatus(.init(kind: .error, message: error.localizedDescription))
         }
+    }
+
+    func exportPNG(to fileURL: URL) throws {
+        _ = flushBrushEditingBoundary(reason: "exportPNG")
+        try bootstrap.exportController.exportPNG(
+            request: ExportRequest(fileURL: fileURL)
+        )
     }
 
     var ideationActiveBranchViewModel: WorkspaceViewModel? {
@@ -4336,6 +4387,7 @@ final class WorkspaceViewModel: ObservableObject {
         }
 
         do {
+            _ = flushBrushEditingBoundary(reason: "startIdeationSession")
             suspendTimelapseForIdeationIfNeeded()
             let snapshot = try bootstrap.historyController.captureCurrentEntry()
             ideationSession = try IdeationSessionState(
@@ -4469,7 +4521,6 @@ final class WorkspaceViewModel: ObservableObject {
                 metal: bootstrap.metalContext
             )
 
-            let serializer = LayerTextureSerializer()
             for layerSnapshot in result.layerSnapshots {
                 guard
                     let surfaceID = bootstrap.layerSurfaceStore.surfaceID(for: layerSnapshot.layerID),
@@ -4478,8 +4529,11 @@ final class WorkspaceViewModel: ObservableObject {
                     continue
                 }
 
-                try serializer.restore(snapshot: layerSnapshot.texture, into: texture)
+                try bootstrap.textureSerializer.restore(snapshot: layerSnapshot.texture, into: texture)
             }
+            bootstrap.textureSerializer.purgeStagingTextures(
+                exceeding: bootstrap.workspaceStore.state.document.canvasSize
+            )
 
             bootstrap.historyController.resetHistory()
             currentProjectURL = url
@@ -4498,15 +4552,43 @@ final class WorkspaceViewModel: ObservableObject {
         canvasSize: CanvasSize,
         resolutionDPI: Int
     ) {
+        createNewCanvas(
+            name: name,
+            canvasSize: canvasSize,
+            resolutionDPI: resolutionDPI,
+            decisionOverride: nil
+        )
+    }
+
+    func createNewCanvasDiscardingUnsavedChanges(
+        name: String = "未命名",
+        canvasSize: CanvasSize,
+        resolutionDPI: Int
+    ) {
+        createNewCanvas(
+            name: name,
+            canvasSize: canvasSize,
+            resolutionDPI: resolutionDPI,
+            decisionOverride: .discard
+        )
+    }
+
+    private func createNewCanvas(
+        name: String,
+        canvasSize: CanvasSize,
+        resolutionDPI: Int,
+        decisionOverride: NewCanvasCreationDecision?
+    ) {
         resolveTransformSession(reason: .documentOpen)
         timelapseRecorder.stopRecording()
 
-        switch confirmNewCanvasCreationIfNeeded() {
+        switch decisionOverride ?? confirmNewCanvasCreationIfNeeded() {
         case .cancel:
             return
         case .save:
             guard saveProject() else { return }
         case .discard:
+            _ = flushBrushEditingBoundary(reason: "createNewCanvas.discard")
             break
         }
 
@@ -4540,6 +4622,7 @@ final class WorkspaceViewModel: ObservableObject {
             for: newWorkspace.document,
             metal: bootstrap.metalContext
         )
+        bootstrap.textureSerializer.purgeStagingTextures(exceeding: newWorkspace.document.canvasSize)
         bootstrap.historyController.resetHistory()
 
         currentProjectURL = nil
@@ -4935,7 +5018,7 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     private func checkpointHistoryIfPossible() {
-        _ = drainPendingBrushCommitsIfNeeded(resetLiveSession: true)
+        _ = flushBrushEditingBoundary(reason: "checkpointHistoryIfPossible")
         do {
             try bootstrap.historyController.captureCheckpoint()
             hasUnsavedChanges = true
@@ -4959,14 +5042,20 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func captureWorkspaceSnapshot() throws -> WorkspaceHistoryEntry {
-        _ = drainPendingBrushCommitsIfNeeded(resetLiveSession: true)
+        _ = flushBrushEditingBoundary(reason: "captureWorkspaceSnapshot")
         return try bootstrap.historyController.captureCurrentEntry()
     }
 
     func restoreWorkspaceSnapshot(_ entry: WorkspaceHistoryEntry) throws {
-        _ = drainPendingBrushCommitsIfNeeded(resetLiveSession: true)
+        _ = flushBrushEditingBoundary(reason: "restoreWorkspaceSnapshot")
         try bootstrap.historyController.restoreExact(entry: entry)
         refresh()
+    }
+
+    @discardableResult
+    func flushBrushEditingBoundary(reason: String) -> Bool {
+        _ = reason
+        return drainPendingBrushCommitsIfNeeded(resetLiveSession: true)
     }
 
     private func drainPendingBrushCommitsIfNeeded(resetLiveSession: Bool) -> Bool {
@@ -4974,8 +5063,8 @@ final class WorkspaceViewModel: ObservableObject {
 
         if hadPendingCommits {
             do {
-                try bootstrap.strokeEngine.drainPendingBrushCommitJobs { [self] in
-                    try bootstrap.historyController.captureCheckpoint()
+                try bootstrap.strokeEngine.drainPendingBrushCommitJobs { [self] job in
+                    try captureBrushCommitCheckpoint(for: job)
                     hasUnsavedChanges = true
                 }
                 canUndo = bootstrap.historyController.canUndo
@@ -4996,6 +5085,10 @@ final class WorkspaceViewModel: ObservableObject {
 
     private func isBrushLikeTool(_ tool: ToolKind) -> Bool {
         tool == .brush || tool == .eraser || tool == .smudge
+    }
+
+    private func captureBrushCommitCheckpoint(for _: BrushCommitJob) throws {
+        try bootstrap.historyController.captureCheckpoint()
     }
 
     func makeVisibleCompositeSnapshot() throws -> LayerTextureSnapshot {

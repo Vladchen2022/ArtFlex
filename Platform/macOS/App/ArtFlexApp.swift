@@ -6,9 +6,18 @@ struct ArtFlexApp: App {
     @NSApplicationDelegateAdaptor(ArtFlexApplicationDelegate.self)
     private var appDelegate
 
-    @StateObject private var viewModel = WorkspaceViewModel(
-        bootstrap: AppBootstrap()
-    )
+    @StateObject private var viewModel: WorkspaceViewModel
+
+    init() {
+        do {
+            let bootstrap = try AppBootstrap()
+            _viewModel = StateObject(
+                wrappedValue: WorkspaceViewModel(bootstrap: bootstrap)
+            )
+        } catch {
+            fatalError("Failed to initialize ArtFlex: \(error.localizedDescription)")
+        }
+    }
 
     private var commandTargetViewModel: WorkspaceViewModel {
         viewModel.ideationActiveBranchViewModel ?? viewModel

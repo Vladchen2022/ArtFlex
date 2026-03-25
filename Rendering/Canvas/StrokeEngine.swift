@@ -44,14 +44,14 @@ protocol StrokeEngine {
 
     func displayTexture(for layerID: LayerID) -> MTLTexture?
 
-    func drainPendingBrushCommitJobs(beforeEachCommit: () throws -> Void) throws
+    func drainPendingBrushCommitJobs(beforeEachCommit: (BrushCommitJob) throws -> Void) throws
 
     @discardableResult
     func opportunisticDrainPendingBrushCommitJobs(
         hadLiveBrushWorkThisFrame: Bool,
         maxJobs: Int,
         maxCpuMs: Double,
-        beforeEachCommit: () throws -> Void
+        beforeEachCommit: (BrushCommitJob) throws -> Void
     ) throws -> BrushCommitDrainResult
 
     func resetBrushPipelineState()

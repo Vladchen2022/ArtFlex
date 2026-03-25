@@ -4,7 +4,7 @@ import Testing
 
 struct MetalStrokeEngineQueueTests {
     @Test
-    func brushPacketsEnqueueAndFlushFromFrameCommandBuffer() {
+    func brushPacketsEnqueueAndFlushFromFrameCommandBuffer() throws {
         guard
             let metalContext = MetalDeviceContext(),
             let commandBuffer = metalContext.commandQueue.makeCommandBuffer()
@@ -18,7 +18,7 @@ struct MetalStrokeEngineQueueTests {
         surfaceStore.prepareTextures(for: document, metal: metalContext)
         let layerID = document.activeLayerID
 
-        let engine = MetalStrokeEngine(
+        let engine = try MetalStrokeEngine(
             metalContext: metalContext,
             layerSurfaceStore: surfaceStore
         )
@@ -54,7 +54,7 @@ struct MetalStrokeEngineQueueTests {
     }
 
     @Test
-    func endStrokeFlushesPendingTailWithinFlushPass() {
+    func endStrokeFlushesPendingTailWithinFlushPass() throws {
         guard
             let metalContext = MetalDeviceContext(),
             let commandBuffer = metalContext.commandQueue.makeCommandBuffer()
@@ -68,7 +68,7 @@ struct MetalStrokeEngineQueueTests {
         surfaceStore.prepareTextures(for: document, metal: metalContext)
         let layerID = document.activeLayerID
 
-        let engine = MetalStrokeEngine(
+        let engine = try MetalStrokeEngine(
             metalContext: metalContext,
             layerSurfaceStore: surfaceStore
         )
@@ -115,7 +115,7 @@ struct MetalStrokeEngineQueueTests {
         surfaceStore.prepareTextures(for: document, metal: metalContext)
         let layerID = document.activeLayerID
 
-        let engine = MetalStrokeEngine(
+        let engine = try MetalStrokeEngine(
             metalContext: metalContext,
             layerSurfaceStore: surfaceStore
         )
@@ -147,7 +147,7 @@ struct MetalStrokeEngineQueueTests {
         #expect(engine.hasPendingBrushCommitJobs)
 
         var checkpointCount = 0
-        try engine.drainPendingBrushCommitJobs {
+        try engine.drainPendingBrushCommitJobs { _ in
             checkpointCount += 1
         }
 
@@ -170,7 +170,7 @@ struct MetalStrokeEngineQueueTests {
         surfaceStore.prepareTextures(for: document, metal: metalContext)
         let layerID = document.activeLayerID
 
-        let engine = MetalStrokeEngine(
+        let engine = try MetalStrokeEngine(
             metalContext: metalContext,
             layerSurfaceStore: surfaceStore
         )
@@ -205,7 +205,7 @@ struct MetalStrokeEngineQueueTests {
             hadLiveBrushWorkThisFrame: false,
             maxJobs: 1,
             maxCpuMs: 0.75
-        ) {}
+        ) { _ in }
 
         #expect(interactiveDrain.drainedJobs == 0)
         #expect(interactiveDrain.skippedForInteractiveFrame)

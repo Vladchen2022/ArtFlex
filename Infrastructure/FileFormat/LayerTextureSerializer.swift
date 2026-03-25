@@ -1,10 +1,4 @@
 import Foundation
-import Foundation
-import Foundation
-import Foundation
-import Foundation
-import Foundation
-import Foundation
 import Metal
 
 struct LayerTextureSnapshot: Codable, Sendable, Equatable {
@@ -14,7 +8,193 @@ struct LayerTextureSnapshot: Codable, Sendable, Equatable {
     var pixelData: Data
 }
 
+private struct LayerSerializerStagingKey: Hashable {
+    var width: Int
+    var height: Int
+    var pixelFormatRawValue: UInt
+
+    init(width: Int, height: Int, pixelFormat: MTLPixelFormat) {
+        self.width = width
+        self.height = height
+        self.pixelFormatRawValue = pixelFormat.rawValue
+    }
+}
+
+struct LayerSerializerStagingPoolSnapshot: Sendable, Equatable {
+    var cachedTextureCount: Int
+    var residentBytes: Int
+}
+
+private final class LayerSerializerStagingPool {
+    private let device: MTLDevice
+    private let lock = NSLock()
+    private var availableTextures: [LayerSerializerStagingKey: [MTLTexture]] = [:]
+    private var residentBytes = 0
+    private var maxRetainedBytes: Int
+
+    init(device: MTLDevice, maxRetainedBytes: Int) {
+        self.device = device
+        self.maxRetainedBytes = max(0, maxRetainedBytes)
+    }
+
+    func checkout(
+        width: Int,
+        height: Int,
+        pixelFormat: MTLPixelFormat
+    ) -> MTLTexture? {
+        let key = LayerSerializerStagingKey(
+            width: width,
+            height: height,
+            pixelFormat: pixelFormat
+        )
+
+        lock.lock()
+        if var cachedTextures = availableTextures[key], let texture = cachedTextures.popLast() {
+            residentBytes -= estimatedRetainedBytes(for: texture)
+            if cachedTextures.isEmpty {
+                availableTextures.removeValue(forKey: key)
+            } else {
+                availableTextures[key] = cachedTextures
+            }
+            lock.unlock()
+            return texture
+        }
+        lock.unlock()
+
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: pixelFormat,
+            width: width,
+            height: height,
+            mipmapped: false
+        )
+        descriptor.storageMode = .shared
+        descriptor.usage = [.shaderRead, .shaderWrite]
+        return device.makeTexture(descriptor: descriptor)
+    }
+
+    func checkin(_ texture: MTLTexture) {
+        let key = LayerSerializerStagingKey(
+            width: texture.width,
+            height: texture.height,
+            pixelFormat: texture.pixelFormat
+        )
+
+        lock.lock()
+        availableTextures[key, default: []].append(texture)
+        residentBytes += estimatedRetainedBytes(for: texture)
+        trimLocked(toMaxResidentBytes: maxRetainedBytes)
+        lock.unlock()
+    }
+
+    func trim(toMaxResidentBytes maxBytes: Int) {
+        lock.lock()
+        maxRetainedBytes = max(0, maxBytes)
+        trimLocked(toMaxResidentBytes: maxRetainedBytes)
+        lock.unlock()
+    }
+
+    func purgeTextures(exceeding canvasSize: CanvasSize) {
+        lock.lock()
+        let keysToRemove = availableTextures.keys.filter { key in
+            key.width > canvasSize.width || key.height > canvasSize.height
+        }
+        for key in keysToRemove {
+            removeTextures(for: key)
+        }
+        trimLocked(toMaxResidentBytes: maxRetainedBytes)
+        lock.unlock()
+    }
+
+    func purgeAll() {
+        lock.lock()
+        availableTextures.removeAll()
+        residentBytes = 0
+        lock.unlock()
+    }
+
+    func debugSnapshot() -> LayerSerializerStagingPoolSnapshot {
+        lock.lock()
+        let snapshot = LayerSerializerStagingPoolSnapshot(
+            cachedTextureCount: availableTextures.values.reduce(0) { $0 + $1.count },
+            residentBytes: residentBytes
+        )
+        lock.unlock()
+        return snapshot
+    }
+
+    private func trimLocked(toMaxResidentBytes maxBytes: Int) {
+        guard residentBytes > maxBytes else { return }
+
+        let oversizedKeys = availableTextures.keys
+            .sorted { lhs, rhs in
+                estimatedRetainedBytes(for: lhs) > estimatedRetainedBytes(for: rhs)
+            }
+
+        for key in oversizedKeys {
+            guard residentBytes > maxBytes else { break }
+            removeTextures(for: key)
+        }
+    }
+
+    private func removeTextures(for key: LayerSerializerStagingKey) {
+        guard let removedTextures = availableTextures.removeValue(forKey: key) else {
+            return
+        }
+        for texture in removedTextures {
+            residentBytes -= estimatedRetainedBytes(for: texture)
+        }
+        residentBytes = max(0, residentBytes)
+    }
+
+    private func estimatedRetainedBytes(for key: LayerSerializerStagingKey) -> Int {
+        estimatedRetainedBytes(
+            width: key.width,
+            height: key.height,
+            pixelFormat: MTLPixelFormat(rawValue: key.pixelFormatRawValue) ?? .bgra8Unorm_srgb
+        )
+    }
+
+    private func estimatedRetainedBytes(for texture: MTLTexture) -> Int {
+        estimatedRetainedBytes(
+            width: texture.width,
+            height: texture.height,
+            pixelFormat: texture.pixelFormat
+        )
+    }
+
+    private func estimatedRetainedBytes(
+        width: Int,
+        height: Int,
+        pixelFormat: MTLPixelFormat
+    ) -> Int {
+        let bytesPerPixel: Int
+        switch pixelFormat {
+        case .r8Unorm:
+            bytesPerPixel = 1
+        case .bgra8Unorm, .bgra8Unorm_srgb:
+            bytesPerPixel = 4
+        default:
+            bytesPerPixel = 4
+        }
+        return width * height * bytesPerPixel
+    }
+}
+
 final class LayerTextureSerializer {
+    private let metalContext: MetalDeviceContext
+    private let stagingPool: LayerSerializerStagingPool
+
+    init(
+        metalContext: MetalDeviceContext,
+        stagingPoolMaxResidentBytes: Int = 64 * 1024 * 1024
+    ) {
+        self.metalContext = metalContext
+        self.stagingPool = LayerSerializerStagingPool(
+            device: metalContext.device,
+            maxRetainedBytes: stagingPoolMaxResidentBytes
+        )
+    }
+
     func snapshot(texture: MTLTexture) throws -> LayerTextureSnapshot {
         try snapshot(
             texture: texture,
@@ -32,6 +212,12 @@ final class LayerTextureSerializer {
         width: Int,
         height: Int
     ) throws -> LayerTextureSnapshot {
+        let startedAt = DispatchTime.now().uptimeNanoseconds
+        defer {
+            let ms = Double(DispatchTime.now().uptimeNanoseconds - startedAt) / 1_000_000
+            PerformanceAuditStore.shared.recordDuration("LayerTextureSerializer.snapshot", ms: ms)
+        }
+
         guard
             originX >= 0, originY >= 0,
             width > 0, height > 0,
@@ -46,14 +232,20 @@ final class LayerTextureSerializer {
         let region = MTLRegionMake2D(originX, originY, width, height)
 
         guard
-            let stagingTexture = makeStagingTexture(
+            let stagingTexture = stagingPool.checkout(
                 width: width,
                 height: height,
-                device: texture.device,
                 pixelFormat: texture.pixelFormat
-            ),
-            let commandQueue = texture.device.makeCommandQueue(),
-            let commandBuffer = commandQueue.makeCommandBuffer(),
+            )
+        else {
+            throw CocoaError(.fileWriteUnknown)
+        }
+        defer {
+            stagingPool.checkin(stagingTexture)
+        }
+
+        guard
+            let commandBuffer = metalContext.commandQueue.makeCommandBuffer(),
             let blitEncoder = commandBuffer.makeBlitCommandEncoder()
         else {
             throw CocoaError(.fileWriteUnknown)
@@ -108,6 +300,12 @@ final class LayerTextureSerializer {
         destinationX: Int,
         destinationY: Int
     ) throws {
+        let startedAt = DispatchTime.now().uptimeNanoseconds
+        defer {
+            let ms = Double(DispatchTime.now().uptimeNanoseconds - startedAt) / 1_000_000
+            PerformanceAuditStore.shared.recordDuration("LayerTextureSerializer.restore", ms: ms)
+        }
+
         guard
             destinationX >= 0, destinationY >= 0,
             destinationX + snapshot.width <= texture.width,
@@ -118,14 +316,20 @@ final class LayerTextureSerializer {
 
         let region = MTLRegionMake2D(0, 0, snapshot.width, snapshot.height)
         guard
-            let stagingTexture = makeStagingTexture(
+            let stagingTexture = stagingPool.checkout(
                 width: snapshot.width,
                 height: snapshot.height,
-                device: texture.device,
                 pixelFormat: texture.pixelFormat
-            ),
-            let commandQueue = texture.device.makeCommandQueue(),
-            let commandBuffer = commandQueue.makeCommandBuffer(),
+            )
+        else {
+            throw CocoaError(.fileReadCorruptFile)
+        }
+        defer {
+            stagingPool.checkin(stagingTexture)
+        }
+
+        guard
+            let commandBuffer = metalContext.commandQueue.makeCommandBuffer(),
             let blitEncoder = commandBuffer.makeBlitCommandEncoder()
         else {
             throw CocoaError(.fileReadCorruptFile)
@@ -159,6 +363,12 @@ final class LayerTextureSerializer {
     }
 
     func samplePixel(texture: MTLTexture, x: Int, y: Int) throws -> RGBAColor {
+        let startedAt = DispatchTime.now().uptimeNanoseconds
+        defer {
+            let ms = Double(DispatchTime.now().uptimeNanoseconds - startedAt) / 1_000_000
+            PerformanceAuditStore.shared.recordDuration("LayerTextureSerializer.samplePixel", ms: ms)
+        }
+
         guard
             x >= 0, y >= 0,
             x < texture.width, y < texture.height
@@ -168,14 +378,20 @@ final class LayerTextureSerializer {
 
         let region = MTLRegionMake2D(x, y, 1, 1)
         guard
-            let stagingTexture = makeStagingTexture(
+            let stagingTexture = stagingPool.checkout(
                 width: 1,
                 height: 1,
-                device: texture.device,
                 pixelFormat: texture.pixelFormat
-            ),
-            let commandQueue = texture.device.makeCommandQueue(),
-            let commandBuffer = commandQueue.makeCommandBuffer(),
+            )
+        else {
+            throw CocoaError(.fileReadUnknown)
+        }
+        defer {
+            stagingPool.checkin(stagingTexture)
+        }
+
+        guard
+            let commandBuffer = metalContext.commandQueue.makeCommandBuffer(),
             let blitEncoder = commandBuffer.makeBlitCommandEncoder()
         else {
             throw CocoaError(.fileReadUnknown)
@@ -212,20 +428,19 @@ final class LayerTextureSerializer {
         )
     }
 
-    private func makeStagingTexture(
-        width: Int,
-        height: Int,
-        device: MTLDevice,
-        pixelFormat: MTLPixelFormat
-    ) -> MTLTexture? {
-        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: pixelFormat,
-            width: width,
-            height: height,
-            mipmapped: false
-        )
-        descriptor.storageMode = .shared
-        descriptor.usage = [.shaderRead, .shaderWrite]
-        return device.makeTexture(descriptor: descriptor)
+    func trimStagingPool(toMaxResidentBytes maxBytes: Int) {
+        stagingPool.trim(toMaxResidentBytes: maxBytes)
+    }
+
+    func purgeStagingTextures(exceeding canvasSize: CanvasSize) {
+        stagingPool.purgeTextures(exceeding: canvasSize)
+    }
+
+    func purgeAllStagingTextures() {
+        stagingPool.purgeAll()
+    }
+
+    func stagingPoolDebugSnapshot() -> LayerSerializerStagingPoolSnapshot {
+        stagingPool.debugSnapshot()
     }
 }

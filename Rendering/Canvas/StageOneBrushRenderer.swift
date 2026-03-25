@@ -57,6 +57,32 @@ struct OpacityCapSessionResources {
 
 private let customTipMaskResolution = 256
 
+enum StageOneBrushRendererInitializationError: LocalizedError {
+    case shaderLibrary(Error)
+    case missingFunction(String)
+    case pipelineState(String, Error)
+    case vertexBufferCreation
+    case samplerCreation
+    case defaultTipTextureCreation
+
+    var errorDescription: String? {
+        switch self {
+        case .shaderLibrary(let error):
+            return "Failed to compile StageOneBrushRenderer shader library: \(error.localizedDescription)"
+        case .missingFunction(let name):
+            return "Missing StageOneBrushRenderer shader function: \(name)"
+        case .pipelineState(let name, let error):
+            return "Failed to create StageOneBrushRenderer pipeline (\(name)): \(error.localizedDescription)"
+        case .vertexBufferCreation:
+            return "Failed to create StageOneBrushRenderer vertex buffer."
+        case .samplerCreation:
+            return "Failed to create StageOneBrushRenderer sampler state."
+        case .defaultTipTextureCreation:
+            return "Failed to create StageOneBrushRenderer default tip texture."
+        }
+    }
+}
+
 final class StageOneBrushRenderer {
     private let brushStrokeLogger = Logger(subsystem: "ArtFlex", category: "BrushStroke")
     private let isBrushStampDebugLoggingEnabled = true
@@ -76,7 +102,7 @@ final class StageOneBrushRenderer {
     private var cachedCustomTipData: Data?
     private var cachedCustomTipTexture: MTLTexture?
 
-    init(device: MTLDevice) {
+    init(device: MTLDevice) throws {
         self.device = device
         let source = """
         #include <metal_stdlib>
@@ -514,9 +540,18 @@ final class StageOneBrushRenderer {
         }
         """
 
-        let library = try! device.makeLibrary(source: source, options: nil)
-        let vertexFunction = library.makeFunction(name: "stageOneBrushVertex")!
-        let fragmentFunction = library.makeFunction(name: "stageOneBrushFragment")!
+        let library: MTLLibrary
+        do {
+            library = try device.makeLibrary(source: source, options: nil)
+        } catch {
+            throw StageOneBrushRendererInitializationError.shaderLibrary(error)
+        }
+        guard
+            let vertexFunction = library.makeFunction(name: "stageOneBrushVertex"),
+            let fragmentFunction = library.makeFunction(name: "stageOneBrushFragment")
+        else {
+            throw StageOneBrushRendererInitializationError.missingFunction("stageOneBrushVertex/stageOneBrushFragment")
+        }
 
         let brushDescriptor = MTLRenderPipelineDescriptor()
         brushDescriptor.vertexFunction = vertexFunction
@@ -531,7 +566,11 @@ final class StageOneBrushRenderer {
         attachment.sourceAlphaBlendFactor = .one
         attachment.destinationRGBBlendFactor = .oneMinusSourceAlpha
         attachment.destinationAlphaBlendFactor = .oneMinusSourceAlpha
-        self.brushPipelineState = try! device.makeRenderPipelineState(descriptor: brushDescriptor)
+        do {
+            self.brushPipelineState = try device.makeRenderPipelineState(descriptor: brushDescriptor)
+        } catch {
+            throw StageOneBrushRendererInitializationError.pipelineState("brush", error)
+        }
 
         let eraserDescriptor = MTLRenderPipelineDescriptor()
         eraserDescriptor.vertexFunction = vertexFunction
@@ -546,11 +585,18 @@ final class StageOneBrushRenderer {
         eraserAttachment.sourceAlphaBlendFactor = .zero
         eraserAttachment.destinationRGBBlendFactor = .oneMinusSourceAlpha
         eraserAttachment.destinationAlphaBlendFactor = .oneMinusSourceAlpha
-        self.eraserPipelineState = try! device.makeRenderPipelineState(descriptor: eraserDescriptor)
+        do {
+            self.eraserPipelineState = try device.makeRenderPipelineState(descriptor: eraserDescriptor)
+        } catch {
+            throw StageOneBrushRendererInitializationError.pipelineState("eraser", error)
+        }
 
         let smudgeDescriptor = MTLRenderPipelineDescriptor()
         smudgeDescriptor.vertexFunction = vertexFunction
-        smudgeDescriptor.fragmentFunction = library.makeFunction(name: "stageOneSmudgeFragment")
+        guard let smudgeFunction = library.makeFunction(name: "stageOneSmudgeFragment") else {
+            throw StageOneBrushRendererInitializationError.missingFunction("stageOneSmudgeFragment")
+        }
+        smudgeDescriptor.fragmentFunction = smudgeFunction
         smudgeDescriptor.colorAttachments[0].pixelFormat = .bgra8Unorm_srgb
 
         let smudgeAttachment = smudgeDescriptor.colorAttachments[0]!
@@ -561,11 +607,18 @@ final class StageOneBrushRenderer {
         smudgeAttachment.sourceAlphaBlendFactor = .one
         smudgeAttachment.destinationRGBBlendFactor = .oneMinusSourceAlpha
         smudgeAttachment.destinationAlphaBlendFactor = .oneMinusSourceAlpha
-        self.smudgePipelineState = try! device.makeRenderPipelineState(descriptor: smudgeDescriptor)
+        do {
+            self.smudgePipelineState = try device.makeRenderPipelineState(descriptor: smudgeDescriptor)
+        } catch {
+            throw StageOneBrushRendererInitializationError.pipelineState("smudge", error)
+        }
 
         let opacityCapMaskDescriptor = MTLRenderPipelineDescriptor()
         opacityCapMaskDescriptor.vertexFunction = vertexFunction
-        opacityCapMaskDescriptor.fragmentFunction = library.makeFunction(name: "stageOneOpacityCapMaskFragment")
+        guard let opacityCapMaskFunction = library.makeFunction(name: "stageOneOpacityCapMaskFragment") else {
+            throw StageOneBrushRendererInitializationError.missingFunction("stageOneOpacityCapMaskFragment")
+        }
+        opacityCapMaskDescriptor.fragmentFunction = opacityCapMaskFunction
         opacityCapMaskDescriptor.colorAttachments[0].pixelFormat = .r8Unorm
 
         let opacityCapMaskAttachment = opacityCapMaskDescriptor.colorAttachments[0]!
@@ -576,14 +629,28 @@ final class StageOneBrushRenderer {
         opacityCapMaskAttachment.sourceAlphaBlendFactor = .one
         opacityCapMaskAttachment.destinationRGBBlendFactor = .one
         opacityCapMaskAttachment.destinationAlphaBlendFactor = .one
-        self.opacityCapMaskPipelineState = try! device.makeRenderPipelineState(descriptor: opacityCapMaskDescriptor)
+        do {
+            self.opacityCapMaskPipelineState = try device.makeRenderPipelineState(descriptor: opacityCapMaskDescriptor)
+        } catch {
+            throw StageOneBrushRendererInitializationError.pipelineState("opacityCapMask", error)
+        }
 
         let opacityCapCompositeDescriptor = MTLRenderPipelineDescriptor()
-        opacityCapCompositeDescriptor.vertexFunction = library.makeFunction(name: "stageOneCompositeVertex")
-        opacityCapCompositeDescriptor.fragmentFunction = library.makeFunction(name: "stageOneOpacityCapCompositeFragment")
+        guard
+            let compositeVertexFunction = library.makeFunction(name: "stageOneCompositeVertex"),
+            let opacityCapCompositeFunction = library.makeFunction(name: "stageOneOpacityCapCompositeFragment")
+        else {
+            throw StageOneBrushRendererInitializationError.missingFunction("stageOneCompositeVertex/stageOneOpacityCapCompositeFragment")
+        }
+        opacityCapCompositeDescriptor.vertexFunction = compositeVertexFunction
+        opacityCapCompositeDescriptor.fragmentFunction = opacityCapCompositeFunction
         opacityCapCompositeDescriptor.colorAttachments[0].pixelFormat = .bgra8Unorm_srgb
         opacityCapCompositeDescriptor.colorAttachments[0].isBlendingEnabled = false
-        self.opacityCapCompositePipelineState = try! device.makeRenderPipelineState(descriptor: opacityCapCompositeDescriptor)
+        do {
+            self.opacityCapCompositePipelineState = try device.makeRenderPipelineState(descriptor: opacityCapCompositeDescriptor)
+        } catch {
+            throw StageOneBrushRendererInitializationError.pipelineState("opacityCapComposite", error)
+        }
 
         let vertices = [
             BrushVertex(position: SIMD2(-1, -1)),
@@ -592,18 +659,27 @@ final class StageOneBrushRenderer {
             BrushVertex(position: SIMD2(1, 1))
         ]
 
-        self.vertexBuffer = device.makeBuffer(
+        guard let vertexBuffer = device.makeBuffer(
             bytes: vertices,
             length: MemoryLayout<BrushVertex>.stride * vertices.count
-        )!
+        ) else {
+            throw StageOneBrushRendererInitializationError.vertexBufferCreation
+        }
+        self.vertexBuffer = vertexBuffer
 
         let samplerDescriptor = MTLSamplerDescriptor()
         samplerDescriptor.minFilter = .nearest
         samplerDescriptor.magFilter = .nearest
         samplerDescriptor.sAddressMode = .clampToEdge
         samplerDescriptor.tAddressMode = .clampToEdge
-        self.compositeSamplerState = device.makeSamplerState(descriptor: samplerDescriptor)!
-        self.tipSamplerState = device.makeSamplerState(descriptor: samplerDescriptor)!
+        guard
+            let compositeSamplerState = device.makeSamplerState(descriptor: samplerDescriptor),
+            let tipSamplerState = device.makeSamplerState(descriptor: samplerDescriptor)
+        else {
+            throw StageOneBrushRendererInitializationError.samplerCreation
+        }
+        self.compositeSamplerState = compositeSamplerState
+        self.tipSamplerState = tipSamplerState
 
         let defaultTipDescriptor = MTLTextureDescriptor.texture2DDescriptor(
             pixelFormat: .r8Unorm,
@@ -613,7 +689,9 @@ final class StageOneBrushRenderer {
         )
         defaultTipDescriptor.usage = .shaderRead
         defaultTipDescriptor.storageMode = .shared
-        let defaultTipTexture = device.makeTexture(descriptor: defaultTipDescriptor)!
+        guard let defaultTipTexture = device.makeTexture(descriptor: defaultTipDescriptor) else {
+            throw StageOneBrushRendererInitializationError.defaultTipTextureCreation
+        }
         var fullAlpha: UInt8 = 255
         defaultTipTexture.replace(
             region: MTLRegionMake2D(0, 0, 1, 1),
@@ -658,6 +736,11 @@ final class StageOneBrushRenderer {
         for texture: MTLTexture,
         commandQueue: MTLCommandQueue
     ) -> OpacityCapSessionResources? {
+        let startNs = DispatchTime.now().uptimeNanoseconds
+        defer {
+            let ms = Double(DispatchTime.now().uptimeNanoseconds - startNs) / 1_000_000
+            PerformanceAuditStore.shared.recordDuration("StageOneBrushRenderer.makeOpacityCapSession", ms: ms)
+        }
         let originalDescriptor = MTLTextureDescriptor.texture2DDescriptor(
             pixelFormat: texture.pixelFormat,
             width: texture.width,
@@ -1373,15 +1456,19 @@ final class StageOneBrushRenderer {
         // pendingInputPoints の末尾点と stroke.points[0] が同一点になる場合がある。
         // その重複を除去してから追加する。
         let incomingPoints = stroke.points
-        let dedupedIncoming: [StrokePoint]
+        var incomingStartIndex = incomingPoints.startIndex
         if let tail = state.pendingInputPoints.last,
            let head = incomingPoints.first,
            abs(tail.x - head.x) < 0.001, abs(tail.y - head.y) < 0.001 {
-            dedupedIncoming = Array(incomingPoints.dropFirst())
-        } else {
-            dedupedIncoming = incomingPoints
+            incomingStartIndex = incomingPoints.index(after: incomingStartIndex)
         }
-        state.pendingInputPoints.append(contentsOf: dedupedIncoming)
+        if incomingStartIndex < incomingPoints.endIndex {
+            state.pendingInputPoints.append(contentsOf: incomingPoints[incomingStartIndex...])
+        }
+        PerformanceAuditStore.shared.recordInt(
+            "StageOneBrushRenderer.pendingInputPoints.count",
+            value: state.pendingInputPoints.count
+        )
 
         var result: [StampSample] = []
         let pts = state.pendingInputPoints
@@ -1511,6 +1598,8 @@ final class StageOneBrushRenderer {
             state.lastSamplePoint = localLastSamplePoint
             state.nextSegmentIndexToCommit += 1
         }
+
+        trimPendingInputPoints(&state)
 
         if state.isFlushing {
             state = BrushStrokeSamplingState()
@@ -1760,14 +1849,19 @@ final class StageOneBrushRenderer {
         from texture: MTLTexture,
         commandQueue: MTLCommandQueue
     ) -> MTLTexture? {
+        let startNs = DispatchTime.now().uptimeNanoseconds
+        defer {
+            let ms = Double(DispatchTime.now().uptimeNanoseconds - startNs) / 1_000_000
+            PerformanceAuditStore.shared.recordDuration("StageOneBrushRenderer.makeSmudgeSourceTexture", ms: ms)
+        }
         let descriptor = MTLTextureDescriptor.texture2DDescriptor(
             pixelFormat: texture.pixelFormat,
             width: texture.width,
             height: texture.height,
             mipmapped: false
         )
-        descriptor.storageMode = .shared
-        descriptor.usage = [.shaderRead, .shaderWrite]
+        descriptor.storageMode = .private
+        descriptor.usage = [.shaderRead]
 
         guard
             let copyTexture = device.makeTexture(descriptor: descriptor),
@@ -1789,12 +1883,26 @@ final class StageOneBrushRenderer {
             destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
         )
         blitEncoder.endEncoding()
-        
-        // ⚡️ 优化：使用 blitCommandEncoder 时这里需要同步，但可以改用共享模式
-        // 更好的方案是使用 .private 存储模式 + 异步调用链
         commandBuffer.commit()
-        commandBuffer.waitUntilScheduled()  // 只等待调度，不等待完成
         return copyTexture
+    }
+
+    private func trimPendingInputPoints(_ state: inout BrushStrokeSamplingState) {
+        guard !state.isFlushing else {
+            return
+        }
+        let retainStartIndex = max(state.nextSegmentIndexToCommit - 1, 0)
+        let maxPendingInputPoints = 64
+        var trimCount = retainStartIndex
+        if state.pendingInputPoints.count - trimCount > maxPendingInputPoints {
+            let overflow = state.pendingInputPoints.count - trimCount - maxPendingInputPoints
+            trimCount += overflow
+        }
+        guard trimCount > 0 else {
+            return
+        }
+        state.pendingInputPoints.removeFirst(trimCount)
+        state.nextSegmentIndexToCommit = max(0, state.nextSegmentIndexToCommit - trimCount)
     }
 
     private func customTipTexture(for data: Data?) -> MTLTexture? {

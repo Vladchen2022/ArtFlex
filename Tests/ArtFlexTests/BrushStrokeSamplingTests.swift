@@ -4,12 +4,12 @@ import Testing
 
 struct BrushStrokeSamplingTests {
     @Test
-    func startupSegmentWaitsForThirdPointAndDoesNotDuplicateLeadingStamp() {
+    func startupSegmentWaitsForThirdPointAndDoesNotDuplicateLeadingStamp() throws {
         let device = MTLCreateSystemDefaultDevice()
         #expect(device != nil)
         guard let device else { return }
 
-        let renderer = StageOneBrushRenderer(device: device)
+        let renderer = try StageOneBrushRenderer(device: device)
         var samplingState: BrushStrokeSamplingState?
         var brush = BrushSettings.stageOneDefault
         brush.size = 100
@@ -76,12 +76,12 @@ struct BrushStrokeSamplingTests {
     }
 
     @Test
-    func flushEmitsTailForSinglePointClickStroke() {
+    func flushEmitsTailForSinglePointClickStroke() throws {
         let device = MTLCreateSystemDefaultDevice()
         #expect(device != nil)
         guard let device else { return }
 
-        let renderer = StageOneBrushRenderer(device: device)
+        let renderer = try StageOneBrushRenderer(device: device)
         var samplingState: BrushStrokeSamplingState?
         let brush = BrushSettings.stageOneDefault
         let point = StrokePoint(x: 42, y: 84, pressure: 1)

@@ -83,34 +83,50 @@ final class StageOneLayerSurfaceStore {
             let sourceSurfaceID = surfaceID(for: sourceLayerID),
             let destinationSurfaceID = surfaceID(for: destinationLayerID),
             let sourceTexture = texture(for: sourceSurfaceID),
-            let destinationTexture = texture(for: destinationSurfaceID),
-            let commandBuffer = metal.commandQueue.makeCommandBuffer(),
-            let blitEncoder = commandBuffer.makeBlitCommandEncoder()
+            let destinationTexture = texture(for: destinationSurfaceID)
         else {
             return
         }
 
-        let size = MTLSize(width: sourceTexture.width, height: sourceTexture.height, depth: 1)
-        blitEncoder.copy(
+        copyTexture(
             from: sourceTexture,
-            sourceSlice: 0,
-            sourceLevel: 0,
-            sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
-            sourceSize: size,
             to: destinationTexture,
-            destinationSlice: 0,
-            destinationLevel: 0,
-            destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
+            metal: metal,
+            waitUntilCompleted: true
         )
-        blitEncoder.endEncoding()
-        commandBuffer.commit()
-        commandBuffer.waitUntilCompleted()
     }
 
     func copyTexture(
         from sourceTexture: MTLTexture,
         to destinationTexture: MTLTexture,
         metal: MetalDeviceContext
+    ) {
+        copyTexture(
+            from: sourceTexture,
+            to: destinationTexture,
+            metal: metal,
+            waitUntilCompleted: true
+        )
+    }
+
+    func copyTextureAsync(
+        from sourceTexture: MTLTexture,
+        to destinationTexture: MTLTexture,
+        metal: MetalDeviceContext
+    ) {
+        copyTexture(
+            from: sourceTexture,
+            to: destinationTexture,
+            metal: metal,
+            waitUntilCompleted: false
+        )
+    }
+
+    private func copyTexture(
+        from sourceTexture: MTLTexture,
+        to destinationTexture: MTLTexture,
+        metal: MetalDeviceContext,
+        waitUntilCompleted: Bool
     ) {
         guard
             let commandBuffer = metal.commandQueue.makeCommandBuffer(),
@@ -133,7 +149,9 @@ final class StageOneLayerSurfaceStore {
         )
         blitEncoder.endEncoding()
         commandBuffer.commit()
-        commandBuffer.waitUntilCompleted()
+        if waitUntilCompleted {
+            commandBuffer.waitUntilCompleted()
+        }
     }
 
     func reset() {

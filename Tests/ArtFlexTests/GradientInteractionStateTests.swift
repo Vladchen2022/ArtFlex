@@ -4,8 +4,8 @@ import Testing
 @MainActor
 struct GradientInteractionStateTests {
     @Test
-    func linearGradientLatchMovesFromLeg1ToLeg2() {
-        let viewModel = WorkspaceViewModel(bootstrap: AppBootstrap(), installsZoomKeyboardMonitor: false)
+    func linearGradientLatchMovesFromLeg1ToLeg2() throws {
+        let viewModel = WorkspaceViewModel(bootstrap: try AppBootstrap(), installsZoomKeyboardMonitor: false)
         viewModel.selectTool(.linearGradient)
 
         viewModel.beginGradientDrag(at: .init(x: 100, y: 100))
@@ -18,8 +18,8 @@ struct GradientInteractionStateTests {
     }
 
     @Test
-    func linearGradientReleaseWithoutLatchFallsBackToEditing() {
-        let viewModel = WorkspaceViewModel(bootstrap: AppBootstrap(), installsZoomKeyboardMonitor: false)
+    func linearGradientReleaseWithoutLatchFallsBackToEditing() throws {
+        let viewModel = WorkspaceViewModel(bootstrap: try AppBootstrap(), installsZoomKeyboardMonitor: false)
         viewModel.selectTool(.linearGradient)
 
         viewModel.beginGradientDrag(at: .init(x: 50, y: 50))
@@ -31,8 +31,8 @@ struct GradientInteractionStateTests {
     }
 
     @Test
-    func sectorGradientLatchMovesFromLeg1ToLeg2() {
-        let viewModel = WorkspaceViewModel(bootstrap: AppBootstrap(), installsZoomKeyboardMonitor: false)
+    func sectorGradientLatchMovesFromLeg1ToLeg2() throws {
+        let viewModel = WorkspaceViewModel(bootstrap: try AppBootstrap(), installsZoomKeyboardMonitor: false)
         viewModel.selectTool(.sectorGradient)
 
         viewModel.beginGradientDrag(at: .init(x: 200, y: 200))
@@ -45,8 +45,8 @@ struct GradientInteractionStateTests {
     }
 
     @Test
-    func sectorGradientReleaseWithoutLatchFallsBackToEditing() {
-        let viewModel = WorkspaceViewModel(bootstrap: AppBootstrap(), installsZoomKeyboardMonitor: false)
+    func sectorGradientReleaseWithoutLatchFallsBackToEditing() throws {
+        let viewModel = WorkspaceViewModel(bootstrap: try AppBootstrap(), installsZoomKeyboardMonitor: false)
         viewModel.selectTool(.sectorGradient)
 
         viewModel.beginGradientDrag(at: .init(x: 200, y: 200))
@@ -59,8 +59,8 @@ struct GradientInteractionStateTests {
     }
 
     @Test
-    func shiftPromotesPendingPreviewToEditing() {
-        let viewModel = WorkspaceViewModel(bootstrap: AppBootstrap(), installsZoomKeyboardMonitor: false)
+    func shiftPromotesPendingPreviewToEditing() throws {
+        let viewModel = WorkspaceViewModel(bootstrap: try AppBootstrap(), installsZoomKeyboardMonitor: false)
         viewModel.selectTool(.linearGradient)
 
         viewModel.beginGradientDrag(at: .init(x: 50, y: 50))
@@ -77,7 +77,7 @@ struct GradientInteractionStateTests {
 
     @Test
     func toolSwitchAutoAppliesPendingPreview() async throws {
-        let viewModel = WorkspaceViewModel(bootstrap: AppBootstrap(), installsZoomKeyboardMonitor: false)
+        let viewModel = WorkspaceViewModel(bootstrap: try AppBootstrap(), installsZoomKeyboardMonitor: false)
         viewModel.selectTool(.linearGradient)
 
         viewModel.beginGradientDrag(at: .init(x: 40, y: 40))
@@ -104,7 +104,7 @@ struct GradientInteractionStateTests {
 
     @Test
     func startingNextGradientAutoAppliesAndReplaysDeferredBegin() async throws {
-        let viewModel = WorkspaceViewModel(bootstrap: AppBootstrap(), installsZoomKeyboardMonitor: false)
+        let viewModel = WorkspaceViewModel(bootstrap: try AppBootstrap(), installsZoomKeyboardMonitor: false)
         viewModel.selectTool(.linearGradient)
 
         viewModel.beginGradientDrag(at: .init(x: 40, y: 40))

@@ -1755,7 +1755,8 @@ final class StrokeCaptureMTKView: MTKView {
 final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDelegate {
     private let metalContext: MetalDeviceContext
     private let layerSurfaceStore: StageOneLayerSurfaceStore
-    private let canvasPresenter: StageOneCanvasPresenter
+    private let canvasPresenter: StageOneCanvasPresenter?
+    private let canvasPresenterInitializationError: Error?
     private let transformPreviewBuilder: TransformPreviewSessionBuilder
     private let linearGradientRenderer: LinearGradientRenderer
     private let sectorGradientRenderer: SectorGradientRenderer
@@ -1830,6 +1831,7 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
     private var lastLoggedWholeLayerCanScaleRotate: Bool?
     private var lastLoggedWholeLayerUsesInteractionBoundsForHitTesting: Bool?
     private var liveMoveLogCount = 0
+    private var hasScheduledInteractiveBrushCommitDrain = false
 
     init(
         metalContext: MetalDeviceContext,
@@ -1876,7 +1878,13 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
     ) {
         self.metalContext = metalContext
         self.layerSurfaceStore = layerSurfaceStore
-        self.canvasPresenter = StageOneCanvasPresenter(device: metalContext.device)
+        do {
+            self.canvasPresenter = try StageOneCanvasPresenter(device: metalContext.device)
+            self.canvasPresenterInitializationError = nil
+        } catch {
+            self.canvasPresenter = nil
+            self.canvasPresenterInitializationError = error
+        }
         self.transformPreviewBuilder = TransformPreviewSessionBuilder(device: metalContext.device)
         self.linearGradientRenderer = LinearGradientRenderer(device: metalContext.device)
         self.sectorGradientRenderer = SectorGradientRenderer(device: metalContext.device)
@@ -1947,6 +1955,16 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
         let hadLiveBrushWorkThisFrame =
             flushedInputBatchCount > 0 ||
             (liveFlushMetrics?.flushedPacketCount ?? 0) > 0
+
+        guard let canvasPresenter else {
+            if let canvasPresenterInitializationError {
+                brushFeelLogger.error("Canvas presenter unavailable: \(canvasPresenterInitializationError.localizedDescription, privacy: .public)")
+            }
+            commandBuffer.present(drawable)
+            commandBuffer.commit()
+            scheduleInteractiveBrushCommitDrain(hadLiveBrushWorkThisFrame: hadLiveBrushWorkThisFrame)
+            return
+        }
 
         if let snapshot = sceneSnapshot {
             descriptor.colorAttachments[0].loadAction = .clear
@@ -2098,12 +2116,24 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
             encoder.endEncoding()
         }
 
-        onDrainPendingBrushCommitsInteractively(hadLiveBrushWorkThisFrame)
         commandBuffer.present(drawable)
         commandBuffer.commit()
+        scheduleInteractiveBrushCommitDrain(hadLiveBrushWorkThisFrame: hadLiveBrushWorkThisFrame)
         if let strokeView = view as? StrokeCaptureMTKView, strokeView.isBrushLikeStrokeActive {
             let drawFrameMs = Double(DispatchTime.now().uptimeNanoseconds - drawStartNs) / 1_000_000
             brushFeelLogger.debug("[brush-feel] drawFrameMs=\(drawFrameMs, privacy: .public)")
+        }
+    }
+
+    private func scheduleInteractiveBrushCommitDrain(hadLiveBrushWorkThisFrame: Bool) {
+        guard !hasScheduledInteractiveBrushCommitDrain else {
+            return
+        }
+        hasScheduledInteractiveBrushCommitDrain = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.hasScheduledInteractiveBrushCommitDrain = false
+            self.onDrainPendingBrushCommitsInteractively(hadLiveBrushWorkThisFrame)
         }
     }
 

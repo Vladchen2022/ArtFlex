@@ -50,10 +50,17 @@ struct TransformPreviewPlan: Sendable, Equatable {
 }
 
 final class TransformPreviewSessionBuilder {
-    private let compositor: TransformGPUCompositor
+    private let compositor: TransformGPUCompositor?
+    private let initializationError: Error?
 
     init(device: MTLDevice) {
-        self.compositor = TransformGPUCompositor(device: device)
+        do {
+            self.compositor = try TransformGPUCompositor(device: device)
+            self.initializationError = nil
+        } catch {
+            self.compositor = nil
+            self.initializationError = error
+        }
     }
 
     func makeSession(
@@ -67,6 +74,14 @@ final class TransformPreviewSessionBuilder {
         metal: MetalDeviceContext,
         completion: @escaping @MainActor (TransformPreviewSession?) -> Void
     ) {
+        guard let compositor else {
+            let boxedSession = TransformPreviewSessionBox(nil)
+            let _ = initializationError
+            Task { @MainActor in
+                completion(boxedSession.value)
+            }
+            return
+        }
         guard let plan = Self.plan(
             canvasSize: canvasSize,
             selectionShape: selectionShape,

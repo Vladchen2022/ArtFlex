@@ -2,6 +2,26 @@ import Foundation
 import Metal
 import simd
 
+enum StageOneCanvasPresenterInitializationError: LocalizedError {
+    case shaderLibrary(Error)
+    case missingFunction(String)
+    case pipelineState(Error)
+    case samplerStateCreation
+
+    var errorDescription: String? {
+        switch self {
+        case .shaderLibrary(let error):
+            return "Failed to compile StageOneCanvasPresenter shader library: \(error.localizedDescription)"
+        case .missingFunction(let name):
+            return "Missing StageOneCanvasPresenter shader function: \(name)"
+        case .pipelineState(let error):
+            return "Failed to create StageOneCanvasPresenter pipeline: \(error.localizedDescription)"
+        case .samplerStateCreation:
+            return "Failed to create StageOneCanvasPresenter sampler state."
+        }
+    }
+}
+
 private struct CanvasPresenterVertex {
     var position: SIMD2<Float>
     var texCoord: SIMD2<Float>
@@ -16,7 +36,7 @@ final class StageOneCanvasPresenter {
     private let pipelineState: MTLRenderPipelineState
     private let samplerState: MTLSamplerState
 
-    init(device: MTLDevice) {
+    init(device: MTLDevice) throws {
         let source = """
         #include <metal_stdlib>
         using namespace metal;
@@ -57,10 +77,21 @@ final class StageOneCanvasPresenter {
         }
         """
 
-        let library = try! device.makeLibrary(source: source, options: nil)
+        let library: MTLLibrary
+        do {
+            library = try device.makeLibrary(source: source, options: nil)
+        } catch {
+            throw StageOneCanvasPresenterInitializationError.shaderLibrary(error)
+        }
         let descriptor = MTLRenderPipelineDescriptor()
-        descriptor.vertexFunction = library.makeFunction(name: "canvasPresenterVertex")
-        descriptor.fragmentFunction = library.makeFunction(name: "canvasPresenterFragment")
+        guard
+            let vertexFunction = library.makeFunction(name: "canvasPresenterVertex"),
+            let fragmentFunction = library.makeFunction(name: "canvasPresenterFragment")
+        else {
+            throw StageOneCanvasPresenterInitializationError.missingFunction("canvasPresenterVertex/canvasPresenterFragment")
+        }
+        descriptor.vertexFunction = vertexFunction
+        descriptor.fragmentFunction = fragmentFunction
         descriptor.colorAttachments[0].pixelFormat = .bgra8Unorm_srgb
         let attachment = descriptor.colorAttachments[0]!
         attachment.isBlendingEnabled = true
@@ -70,14 +101,21 @@ final class StageOneCanvasPresenter {
         attachment.sourceAlphaBlendFactor = .one
         attachment.destinationRGBBlendFactor = .oneMinusSourceAlpha
         attachment.destinationAlphaBlendFactor = .oneMinusSourceAlpha
-        pipelineState = try! device.makeRenderPipelineState(descriptor: descriptor)
+        do {
+            pipelineState = try device.makeRenderPipelineState(descriptor: descriptor)
+        } catch {
+            throw StageOneCanvasPresenterInitializationError.pipelineState(error)
+        }
 
         let samplerDescriptor = MTLSamplerDescriptor()
         samplerDescriptor.minFilter = .linear
         samplerDescriptor.magFilter = .linear
         samplerDescriptor.sAddressMode = .clampToEdge
         samplerDescriptor.tAddressMode = .clampToEdge
-        samplerState = device.makeSamplerState(descriptor: samplerDescriptor)!
+        guard let samplerState = device.makeSamplerState(descriptor: samplerDescriptor) else {
+            throw StageOneCanvasPresenterInitializationError.samplerStateCreation
+        }
+        self.samplerState = samplerState
     }
 
     func encode(

@@ -37,6 +37,29 @@ private struct TransformPunchOutUniforms {
     var _padding: SIMD3<UInt32> = .zero
 }
 
+enum TransformGPUCompositorInitializationError: LocalizedError {
+    case shaderLibrary(Error)
+    case missingFunction(String)
+    case pipelineState(String, Error)
+    case samplerStateCreation
+    case canvasPresenter(Error)
+
+    var errorDescription: String? {
+        switch self {
+        case .shaderLibrary(let error):
+            return "Failed to compile TransformGPUCompositor shader library: \(error.localizedDescription)"
+        case .missingFunction(let name):
+            return "Missing TransformGPUCompositor shader function: \(name)"
+        case .pipelineState(let name, let error):
+            return "Failed to create TransformGPUCompositor pipeline (\(name)): \(error.localizedDescription)"
+        case .samplerStateCreation:
+            return "Failed to create TransformGPUCompositor sampler state."
+        case .canvasPresenter(let error):
+            return "Failed to initialize TransformGPUCompositor presenter: \(error.localizedDescription)"
+        }
+    }
+}
+
 final class TransformGPUCompositor {
     private let device: MTLDevice
     private let extractPipelineState: MTLRenderPipelineState
@@ -44,7 +67,7 @@ final class TransformGPUCompositor {
     private let samplerState: MTLSamplerState
     private let canvasPresenter: StageOneCanvasPresenter
 
-    init(device: MTLDevice) {
+    init(device: MTLDevice) throws {
         self.device = device
         let source = """
         #include <metal_stdlib>
@@ -118,30 +141,59 @@ final class TransformGPUCompositor {
         }
         """
 
-        let library = try! device.makeLibrary(source: source, options: nil)
+        let library: MTLLibrary
+        do {
+            library = try device.makeLibrary(source: source, options: nil)
+        } catch {
+            throw TransformGPUCompositorInitializationError.shaderLibrary(error)
+        }
 
         let extractDescriptor = MTLRenderPipelineDescriptor()
-        extractDescriptor.vertexFunction = library.makeFunction(name: "transformQuadVertex")
-        extractDescriptor.fragmentFunction = library.makeFunction(name: "transformExtractFragment")
+        guard
+            let transformQuadVertex = library.makeFunction(name: "transformQuadVertex"),
+            let transformExtractFragment = library.makeFunction(name: "transformExtractFragment")
+        else {
+            throw TransformGPUCompositorInitializationError.missingFunction("transformQuadVertex/transformExtractFragment")
+        }
+        extractDescriptor.vertexFunction = transformQuadVertex
+        extractDescriptor.fragmentFunction = transformExtractFragment
         extractDescriptor.colorAttachments[0].pixelFormat = .bgra8Unorm_srgb
         extractDescriptor.colorAttachments[0].isBlendingEnabled = false
-        extractPipelineState = try! device.makeRenderPipelineState(descriptor: extractDescriptor)
+        do {
+            extractPipelineState = try device.makeRenderPipelineState(descriptor: extractDescriptor)
+        } catch {
+            throw TransformGPUCompositorInitializationError.pipelineState("extract", error)
+        }
 
         let punchOutDescriptor = MTLRenderPipelineDescriptor()
-        punchOutDescriptor.vertexFunction = library.makeFunction(name: "transformQuadVertex")
-        punchOutDescriptor.fragmentFunction = library.makeFunction(name: "transformPunchOutFragment")
+        guard let transformPunchOutFragment = library.makeFunction(name: "transformPunchOutFragment") else {
+            throw TransformGPUCompositorInitializationError.missingFunction("transformPunchOutFragment")
+        }
+        punchOutDescriptor.vertexFunction = transformQuadVertex
+        punchOutDescriptor.fragmentFunction = transformPunchOutFragment
         punchOutDescriptor.colorAttachments[0].pixelFormat = .bgra8Unorm_srgb
         punchOutDescriptor.colorAttachments[0].isBlendingEnabled = false
-        punchOutPipelineState = try! device.makeRenderPipelineState(descriptor: punchOutDescriptor)
+        do {
+            punchOutPipelineState = try device.makeRenderPipelineState(descriptor: punchOutDescriptor)
+        } catch {
+            throw TransformGPUCompositorInitializationError.pipelineState("punchOut", error)
+        }
 
         let samplerDescriptor = MTLSamplerDescriptor()
         samplerDescriptor.minFilter = .linear
         samplerDescriptor.magFilter = .linear
         samplerDescriptor.sAddressMode = .clampToEdge
         samplerDescriptor.tAddressMode = .clampToEdge
-        samplerState = device.makeSamplerState(descriptor: samplerDescriptor)!
+        guard let samplerState = device.makeSamplerState(descriptor: samplerDescriptor) else {
+            throw TransformGPUCompositorInitializationError.samplerStateCreation
+        }
+        self.samplerState = samplerState
 
-        canvasPresenter = StageOneCanvasPresenter(device: device)
+        do {
+            canvasPresenter = try StageOneCanvasPresenter(device: device)
+        } catch {
+            throw TransformGPUCompositorInitializationError.canvasPresenter(error)
+        }
     }
 
     func buildSelectionTextures(

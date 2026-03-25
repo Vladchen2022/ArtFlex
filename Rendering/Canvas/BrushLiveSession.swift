@@ -56,20 +56,33 @@ struct BrushLiveSession {
 
 final class BrushCommitQueue {
     private var jobs: [BrushCommitJob] = []
+    private var headIndex = 0
 
-    var isEmpty: Bool { jobs.isEmpty }
-    var count: Int { jobs.count }
+    var isEmpty: Bool { count == 0 }
+    var count: Int { jobs.count - headIndex }
 
     func enqueue(_ job: BrushCommitJob) {
         jobs.append(job)
     }
 
     func dequeue() -> BrushCommitJob? {
-        guard !jobs.isEmpty else { return nil }
-        return jobs.removeFirst()
+        guard headIndex < jobs.count else { return nil }
+        let job = jobs[headIndex]
+        headIndex += 1
+        compactStorageIfNeeded()
+        return job
     }
 
     func removeAll() {
-        jobs.removeAll()
+        jobs.removeAll(keepingCapacity: true)
+        headIndex = 0
+    }
+
+    private func compactStorageIfNeeded() {
+        guard headIndex > 32, headIndex * 2 >= jobs.count else {
+            return
+        }
+        jobs.removeFirst(headIndex)
+        headIndex = 0
     }
 }

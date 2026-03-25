@@ -22,10 +22,10 @@ final class MetalStrokeEngine: StrokeEngine {
     init(
         metalContext: MetalDeviceContext,
         layerSurfaceStore: StageOneLayerSurfaceStore
-    ) {
+    ) throws {
         self.metalContext = metalContext
         self.layerSurfaceStore = layerSurfaceStore
-        self.brushRenderer = StageOneBrushRenderer(device: metalContext.device)
+        self.brushRenderer = try StageOneBrushRenderer(device: metalContext.device)
     }
 
     func beginStrokeIfNeeded(
@@ -116,6 +116,11 @@ final class MetalStrokeEngine: StrokeEngine {
 
     @discardableResult
     func flushPendingStrokePackets(into commandBuffer: MTLCommandBuffer) -> BrushFlushMetrics? {
+        let startNs = DispatchTime.now().uptimeNanoseconds
+        defer {
+            let ms = Double(DispatchTime.now().uptimeNanoseconds - startNs) / 1_000_000
+            PerformanceAuditStore.shared.recordDuration("MetalStrokeEngine.flushPendingStrokePackets", ms: ms)
+        }
         guard var session = liveSession, !session.liveEvents.isEmpty else {
             return nil
         }
@@ -169,6 +174,10 @@ final class MetalStrokeEngine: StrokeEngine {
                 }
 
                 session.currentStrokePackets.append(stroke)
+                PerformanceAuditStore.shared.recordInt(
+                    "MetalStrokeEngine.currentStrokePackets.count",
+                    value: session.currentStrokePackets.count
+                )
                 flushedPacketCount += 1
                 if let strokeBeganAtUptimeNs = session.strokeBeganAtUptimeNs {
                     let beginToFirstLiveEncodeMs = Double(flushStartNs - strokeBeganAtUptimeNs) / 1_000_000
@@ -226,6 +235,14 @@ final class MetalStrokeEngine: StrokeEngine {
                         commitRevision: nextCommitRevision
                     )
                 )
+                PerformanceAuditStore.shared.recordInt(
+                    "MetalStrokeEngine.stroke.packetCount",
+                    value: session.currentStrokePackets.count
+                )
+                PerformanceAuditStore.shared.recordInt(
+                    "MetalStrokeEngine.commitQueue.depth",
+                    value: commitQueue.count
+                )
                 session.currentStrokePackets = []
                 logger.debug("[brush-live] commitQueueDepth=\(self.commitQueue.count, privacy: .public)")
             }
@@ -270,7 +287,7 @@ final class MetalStrokeEngine: StrokeEngine {
         return liveSession?.workingTexture
     }
 
-    func drainPendingBrushCommitJobs(beforeEachCommit: () throws -> Void) throws {
+    func drainPendingBrushCommitJobs(beforeEachCommit: (BrushCommitJob) throws -> Void) throws {
         _ = try drainPendingBrushCommitJobs(
             mode: .forced,
             hadLiveBrushWorkThisFrame: false,
@@ -283,7 +300,7 @@ final class MetalStrokeEngine: StrokeEngine {
         hadLiveBrushWorkThisFrame: Bool,
         maxJobs: Int,
         maxCpuMs: Double,
-        beforeEachCommit: () throws -> Void
+        beforeEachCommit: (BrushCommitJob) throws -> Void
     ) throws -> BrushCommitDrainResult {
         try drainPendingBrushCommitJobs(
             mode: .interactiveBudget(maxJobs: maxJobs, maxCpuMs: maxCpuMs),
@@ -298,6 +315,11 @@ final class MetalStrokeEngine: StrokeEngine {
     }
 
     private func ensureLiveSession(for layerID: LayerID, now: UInt64) -> LiveSessionReuseState? {
+        let startNs = DispatchTime.now().uptimeNanoseconds
+        defer {
+            let ms = Double(DispatchTime.now().uptimeNanoseconds - startNs) / 1_000_000
+            PerformanceAuditStore.shared.recordDuration("MetalStrokeEngine.ensureLiveSession", ms: ms)
+        }
         if let liveSession,
            liveSession.layerID == layerID,
            let sourceSurfaceID = layerSurfaceStore.surfaceID(for: layerID),
@@ -324,7 +346,7 @@ final class MetalStrokeEngine: StrokeEngine {
             return nil
         }
 
-        layerSurfaceStore.copyTexture(
+        layerSurfaceStore.copyTextureAsync(
             from: sourceTexture,
             to: workingTexture,
             metal: metalContext
@@ -343,7 +365,7 @@ final class MetalStrokeEngine: StrokeEngine {
     private func drainPendingBrushCommitJobs(
         mode: BrushCommitDrainMode,
         hadLiveBrushWorkThisFrame: Bool,
-        beforeEachCommit: () throws -> Void
+        beforeEachCommit: (BrushCommitJob) throws -> Void
     ) throws -> BrushCommitDrainResult {
         let now = DispatchTime.now().uptimeNanoseconds
         updateInteractiveState(now: now)
@@ -379,6 +401,10 @@ final class MetalStrokeEngine: StrokeEngine {
         logger.debug("[brush-live] warmIdleHit=\(warmIdleHit, privacy: .public)")
         logger.debug("[brush-live] commitQueueDepth=\(self.commitQueue.count, privacy: .public)")
         logger.debug("[brush-live] commitDrainSkippedForInteractiveFrame=\(shouldSkipForInteractiveFrame, privacy: .public)")
+        PerformanceAuditStore.shared.recordInt(
+            "MetalStrokeEngine.commitQueue.depth",
+            value: commitQueue.count
+        )
 
         guard !shouldSkipForInteractiveFrame, maxJobs > 0 else {
             return BrushCommitDrainResult(
@@ -392,7 +418,7 @@ final class MetalStrokeEngine: StrokeEngine {
         var drainedJobs = 0
 
         while drainedJobs < maxJobs, let job = commitQueue.dequeue() {
-            try beforeEachCommit()
+            try beforeEachCommit(job)
             try commit(job: job)
             if liveSession?.layerID == job.layerID {
                 liveSession?.committedRevision = job.commitRevision
@@ -426,6 +452,11 @@ final class MetalStrokeEngine: StrokeEngine {
     }
 
     private func commit(job: BrushCommitJob) throws {
+        let startNs = DispatchTime.now().uptimeNanoseconds
+        defer {
+            let ms = Double(DispatchTime.now().uptimeNanoseconds - startNs) / 1_000_000
+            PerformanceAuditStore.shared.recordDuration("MetalStrokeEngine.commit(job:)", ms: ms)
+        }
         guard
             let surfaceID = layerSurfaceStore.surfaceID(for: job.layerID),
             let texture = layerSurfaceStore.texture(for: surfaceID),

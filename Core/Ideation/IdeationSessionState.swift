@@ -73,7 +73,7 @@ final class IdeationSessionState: ObservableObject {
         for index in 0..<4 {
             let store = WorkspaceStore(state: sourceSnapshot.workspace)
             let surfaceStore = StageOneLayerSurfaceStore()
-            let bootstrap = AppBootstrap(
+            let bootstrap = try AppBootstrap(
                 workspaceStore: store,
                 metalContext: metalContext,
                 layerSurfaceStore: surfaceStore
