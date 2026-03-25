@@ -25,6 +25,10 @@ struct PerformanceAuditSnapshot: Sendable {
     func maxInt(_ key: String) -> Int? {
         integerSamples[key]?.max()
     }
+
+    func ints(for key: String) -> [Int] {
+        integerSamples[key] ?? []
+    }
 }
 
 final class PerformanceAuditStore: @unchecked Sendable {

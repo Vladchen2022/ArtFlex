@@ -715,12 +715,14 @@ final class StageOneBrushRenderer {
             completion?()
             return 0
         }
+        var reusableSmudgeSourceTexture: MTLTexture?
         let emitted = encodeStroke(
             stroke: stroke,
             into: texture,
             commandQueue: commandQueue,
             commandBuffer: commandBuffer,
-            samplingState: &samplingState
+            samplingState: &samplingState,
+            reusableSmudgeSourceTexture: &reusableSmudgeSourceTexture
         )
 
         if let completion {
@@ -813,6 +815,26 @@ final class StageOneBrushRenderer {
         commandBuffer: MTLCommandBuffer,
         samplingState: inout BrushStrokeSamplingState?
     ) -> Int {
+        var reusableSmudgeSourceTexture: MTLTexture?
+        return encodeStroke(
+            stroke: stroke,
+            into: texture,
+            commandQueue: commandQueue,
+            commandBuffer: commandBuffer,
+            samplingState: &samplingState,
+            reusableSmudgeSourceTexture: &reusableSmudgeSourceTexture
+        )
+    }
+
+    @discardableResult
+    func encodeStroke(
+        stroke: StrokeDescriptor,
+        into texture: MTLTexture,
+        commandQueue: MTLCommandQueue,
+        commandBuffer: MTLCommandBuffer,
+        samplingState: inout BrushStrokeSamplingState?,
+        reusableSmudgeSourceTexture: inout MTLTexture?
+    ) -> Int {
         let samples = interpolatedPoints(for: stroke, samplingState: &samplingState)
         guard !samples.isEmpty else {
             return 0
@@ -862,6 +884,7 @@ final class StageOneBrushRenderer {
         if stroke.tool == .smudge {
             let smudgeSourceTexture = makeSmudgeSourceTexture(
                 from: texture,
+                reusableTexture: &reusableSmudgeSourceTexture,
                 commandQueue: commandQueue
             )
             encoder.setFragmentTexture(smudgeSourceTexture, index: 1)
@@ -1847,6 +1870,7 @@ final class StageOneBrushRenderer {
 
     private func makeSmudgeSourceTexture(
         from texture: MTLTexture,
+        reusableTexture: inout MTLTexture?,
         commandQueue: MTLCommandQueue
     ) -> MTLTexture? {
         let startNs = DispatchTime.now().uptimeNanoseconds
@@ -1854,17 +1878,39 @@ final class StageOneBrushRenderer {
             let ms = Double(DispatchTime.now().uptimeNanoseconds - startNs) / 1_000_000
             PerformanceAuditStore.shared.recordDuration("StageOneBrushRenderer.makeSmudgeSourceTexture", ms: ms)
         }
-        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: texture.pixelFormat,
-            width: texture.width,
-            height: texture.height,
-            mipmapped: false
+        let copyTexture: MTLTexture
+        if let existingTexture = reusableTexture,
+           existingTexture.width == texture.width,
+           existingTexture.height == texture.height,
+           existingTexture.pixelFormat == texture.pixelFormat {
+            copyTexture = existingTexture
+        } else {
+            let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+                pixelFormat: texture.pixelFormat,
+                width: texture.width,
+                height: texture.height,
+                mipmapped: false
+            )
+            descriptor.storageMode = .private
+            descriptor.usage = [.shaderRead]
+
+            guard let allocatedTexture = device.makeTexture(descriptor: descriptor) else {
+                return nil
+            }
+            reusableTexture = allocatedTexture
+            copyTexture = allocatedTexture
+            PerformanceAuditStore.shared.recordInt(
+                "StageOneBrushRenderer.smudgeSourceTexture.allocations",
+                value: 1
+            )
+        }
+
+        PerformanceAuditStore.shared.recordInt(
+            "StageOneBrushRenderer.smudgeSourceTexture.copyCalls",
+            value: 1
         )
-        descriptor.storageMode = .private
-        descriptor.usage = [.shaderRead]
 
         guard
-            let copyTexture = device.makeTexture(descriptor: descriptor),
             let commandBuffer = commandQueue.makeCommandBuffer(),
             let blitEncoder = commandBuffer.makeBlitCommandEncoder()
         else {

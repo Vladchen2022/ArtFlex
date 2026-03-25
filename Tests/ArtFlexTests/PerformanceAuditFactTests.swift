@@ -3,6 +3,10 @@ import Metal
 import Testing
 @testable import ArtFlex
 
+private final class CompletionDurationBox: @unchecked Sendable {
+    var value = 0.0
+}
+
 struct PerformanceAuditFactTests {
     @Test
     @MainActor
@@ -44,6 +48,10 @@ struct PerformanceAuditFactTests {
         print("[audit-memory] smudge8192.peakBytes=\(smudge8192Metrics.peakBytes)")
         print("[audit-timing] StageOneBrushRenderer.makeSmudgeSourceTexture.4096=\(String(format: "%.3f", smudge4096Metrics.makeSmudgeSourceTextureMs))ms")
         print("[audit-timing] StageOneBrushRenderer.makeSmudgeSourceTexture.8192=\(String(format: "%.3f", smudge8192Metrics.makeSmudgeSourceTextureMs))ms")
+        print("[audit-timing] MetalStrokeEngine.smudgeStrokeWallTime.4096=\(String(format: "%.3f", smudge4096Metrics.strokeWallMs))ms")
+        print("[audit-timing] MetalStrokeEngine.smudgeStrokeWallTime.8192=\(String(format: "%.3f", smudge8192Metrics.strokeWallMs))ms")
+        print("[audit-timing] MetalStrokeEngine.smudgeFlushCommandBufferCompletion.4096=\(String(format: "%.3f", smudge4096Metrics.commandBufferCompletionMs))ms")
+        print("[audit-timing] MetalStrokeEngine.smudgeFlushCommandBufferCompletion.8192=\(String(format: "%.3f", smudge8192Metrics.commandBufferCompletionMs))ms")
     }
 }
 
@@ -188,7 +196,14 @@ private func measureBrushPeakMemoryBytes(canvasSize: CanvasSize) throws -> UInt6
 }
 
 @MainActor
-private func measureSmudgeMetrics(canvasSize: CanvasSize) throws -> (peakBytes: UInt64, makeSmudgeSourceTextureMs: Double) {
+private func measureSmudgeMetrics(
+    canvasSize: CanvasSize
+) throws -> (
+    peakBytes: UInt64,
+    makeSmudgeSourceTextureMs: Double,
+    strokeWallMs: Double,
+    commandBufferCompletionMs: Double
+) {
     guard let metalContext = MetalDeviceContext() else {
         throw AuditHarnessError.metalUnavailable
     }
@@ -211,7 +226,11 @@ private func measureSmudgeMetrics(canvasSize: CanvasSize) throws -> (peakBytes: 
     var peakBytes = currentPhysFootprintBytes()
     PerformanceAuditStore.shared.reset()
 
+    var strokeDurationsMs: [Double] = []
+    var commandBufferCompletionDurationsMs: [Double] = []
+
     for strokeIndex in 0..<10 {
+        let strokeStartNs = DispatchTime.now().uptimeNanoseconds
         engine.beginStrokeIfNeeded(toolSession: session, layerID: layerID)
         peakBytes = max(peakBytes, currentPhysFootprintBytes())
         for packetIndex in 0..<6 {
@@ -231,20 +250,32 @@ private func measureSmudgeMetrics(canvasSize: CanvasSize) throws -> (peakBytes: 
                 ),
                 to: layerID
             )
-            try flushPendingStrokePackets(engine: engine, metalContext: metalContext)
+            try flushPendingStrokePackets(
+                engine: engine,
+                metalContext: metalContext,
+                completionDurationsMs: &commandBufferCompletionDurationsMs
+            )
             peakBytes = max(peakBytes, currentPhysFootprintBytes())
         }
         engine.endStroke()
-        try flushPendingStrokePackets(engine: engine, metalContext: metalContext)
+        try flushPendingStrokePackets(
+            engine: engine,
+            metalContext: metalContext,
+            completionDurationsMs: &commandBufferCompletionDurationsMs
+        )
         peakBytes = max(peakBytes, currentPhysFootprintBytes())
         try engine.drainPendingBrushCommitJobs { _ in }
         peakBytes = max(peakBytes, currentPhysFootprintBytes())
+        let strokeDurationMs = Double(DispatchTime.now().uptimeNanoseconds - strokeStartNs) / 1_000_000
+        strokeDurationsMs.append(strokeDurationMs)
     }
 
     let audit = PerformanceAuditStore.shared.snapshot()
     return (
         peakBytes: peakBytes,
-        makeSmudgeSourceTextureMs: audit.averageDuration("StageOneBrushRenderer.makeSmudgeSourceTexture") ?? 0
+        makeSmudgeSourceTextureMs: audit.averageDuration("StageOneBrushRenderer.makeSmudgeSourceTexture") ?? 0,
+        strokeWallMs: average(strokeDurationsMs),
+        commandBufferCompletionMs: average(commandBufferCompletionDurationsMs)
     )
 }
 
@@ -266,13 +297,37 @@ private func flushPendingStrokePackets(
     engine: MetalStrokeEngine,
     metalContext: MetalDeviceContext
 ) throws {
+    var ignoredDurations: [Double] = []
+    try flushPendingStrokePackets(
+        engine: engine,
+        metalContext: metalContext,
+        completionDurationsMs: &ignoredDurations
+    )
+}
+
+private func flushPendingStrokePackets(
+    engine: MetalStrokeEngine,
+    metalContext: MetalDeviceContext,
+    completionDurationsMs: inout [Double]
+) throws {
     guard let commandBuffer = metalContext.commandQueue.makeCommandBuffer() else {
         throw AuditHarnessError.commandBufferUnavailable
     }
 
     _ = engine.flushPendingStrokePackets(into: commandBuffer)
+    let commitStartNs = DispatchTime.now().uptimeNanoseconds
+    let completionDurationBox = CompletionDurationBox()
+    commandBuffer.addCompletedHandler { _ in
+        completionDurationBox.value = Double(DispatchTime.now().uptimeNanoseconds - commitStartNs) / 1_000_000
+    }
     commandBuffer.commit()
     commandBuffer.waitUntilCompleted()
+    completionDurationsMs.append(completionDurationBox.value)
+}
+
+private func average(_ values: [Double]) -> Double {
+    guard !values.isEmpty else { return 0 }
+    return values.reduce(0, +) / Double(values.count)
 }
 
 private func makeWorkspaceState(canvasSize: CanvasSize) -> WorkspaceState {
