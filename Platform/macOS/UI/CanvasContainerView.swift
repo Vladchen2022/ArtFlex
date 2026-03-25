@@ -63,6 +63,14 @@ struct CanvasContainerView: View {
                         onFlushPendingBrushWork: { commandBuffer in
                             viewModel.flushPendingBrushWork(into: commandBuffer)
                         },
+                        onDrainPendingBrushCommitsInteractively: { hadLiveBrushWorkThisFrame in
+                            viewModel.opportunisticallyDrainBrushCommits(
+                                hadLiveBrushWorkThisFrame: hadLiveBrushWorkThisFrame
+                            )
+                        },
+                        resolveBrushDisplayTexture: { layerID in
+                            viewModel.brushDisplayTexture(for: layerID)
+                        },
                         onEyedropperSample: { point in
                             onCanvasInteraction?()
                             viewModel.sampleColor(at: point)

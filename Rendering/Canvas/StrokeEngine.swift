@@ -25,11 +25,34 @@ struct BrushFlushMetrics: Sendable, Equatable {
 }
 
 protocol StrokeEngine {
+    func beginStrokeIfNeeded(
+        toolSession: ToolSessionState,
+        layerID: LayerID
+    )
+
     @discardableResult
     func applyStroke(_ stroke: StrokeDescriptor, to layerID: LayerID) -> Int
 
+    func endStroke()
+
     var hasPendingBrushWork: Bool { get }
+
+    var hasPendingBrushCommitJobs: Bool { get }
 
     @discardableResult
     func flushPendingStrokePackets(into commandBuffer: MTLCommandBuffer) -> BrushFlushMetrics?
+
+    func displayTexture(for layerID: LayerID) -> MTLTexture?
+
+    func drainPendingBrushCommitJobs(beforeEachCommit: () throws -> Void) throws
+
+    @discardableResult
+    func opportunisticDrainPendingBrushCommitJobs(
+        hadLiveBrushWorkThisFrame: Bool,
+        maxJobs: Int,
+        maxCpuMs: Double,
+        beforeEachCommit: () throws -> Void
+    ) throws -> BrushCommitDrainResult
+
+    func resetBrushPipelineState()
 }

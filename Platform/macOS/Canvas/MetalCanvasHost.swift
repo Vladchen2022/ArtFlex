@@ -27,7 +27,9 @@ struct MetalCanvasHost: NSViewRepresentable {
     let onStrokeBegan: () -> Void
     let onStrokeInput: ([CanvasStrokeSample]) -> Void
     let onStrokeEnded: () -> Void
-    let onFlushPendingBrushWork: (MTLCommandBuffer) -> Void
+    let onFlushPendingBrushWork: (MTLCommandBuffer) -> BrushFlushMetrics?
+    let onDrainPendingBrushCommitsInteractively: (Bool) -> Void
+    let resolveBrushDisplayTexture: (LayerID) -> MTLTexture?
     let onEyedropperSample: (CanvasPoint) -> Void
     let onBucketFill: (CanvasPoint) -> Void
     let onCanvasClick: (CanvasPoint, NSEvent.ModifierFlags, Int) -> Void
@@ -72,6 +74,8 @@ struct MetalCanvasHost: NSViewRepresentable {
             onStrokeInput: onStrokeInput,
             onStrokeEnded: onStrokeEnded,
             onFlushPendingBrushWork: onFlushPendingBrushWork,
+            onDrainPendingBrushCommitsInteractively: onDrainPendingBrushCommitsInteractively,
+            resolveBrushDisplayTexture: resolveBrushDisplayTexture,
             onEyedropperSample: onEyedropperSample,
             onBucketFill: onBucketFill,
             onCanvasClick: onCanvasClick,
@@ -309,6 +313,99 @@ struct PendingBrushInputQueue {
     }
 }
 
+enum BrushCursorMode: Equatable {
+    case arrow
+    case crosshair
+    case eyedropper
+}
+
+enum BrushSizePreviewState: Equatable {
+    case local
+    case model
+    case synced
+}
+
+func resolveBrushSizePreview(
+    displayBrushSize: Float,
+    modelBrushSize: Float,
+    isAdjustingBrushSizePreview: Bool,
+    previewExpiresAtNs: UInt64,
+    nowUptimeNs: UInt64
+) -> (displayBrushSize: Float, isAdjustingBrushSizePreview: Bool, previewExpiresAtNs: UInt64, state: BrushSizePreviewState) {
+    guard isAdjustingBrushSizePreview else {
+        return (
+            displayBrushSize: modelBrushSize,
+            isAdjustingBrushSizePreview: false,
+            previewExpiresAtNs: 0,
+            state: .model
+        )
+    }
+
+    let modelCaughtUp = abs(displayBrushSize - modelBrushSize) < 0.01
+    let previewExpired = nowUptimeNs >= previewExpiresAtNs
+    if modelCaughtUp || previewExpired {
+        return (
+            displayBrushSize: modelBrushSize,
+            isAdjustingBrushSizePreview: false,
+            previewExpiresAtNs: 0,
+            state: modelCaughtUp ? .synced : .model
+        )
+    }
+
+    return (
+        displayBrushSize: displayBrushSize,
+        isAdjustingBrushSizePreview: true,
+        previewExpiresAtNs: previewExpiresAtNs,
+        state: .local
+    )
+}
+
+func preferredBrushCursorMode(
+    activeTool: ToolKind,
+    isEyedropperCursorActive: Bool,
+    hasHoverLocation: Bool
+) -> BrushCursorMode? {
+    guard hasHoverLocation else { return nil }
+    if isEyedropperCursorActive {
+        return .eyedropper
+    }
+    if activeTool == .brush || activeTool == .eraser || activeTool == .smudge {
+        return .crosshair
+    }
+    return .arrow
+}
+
+func shouldShowBrushOutlineIndicator(
+    activeTool: ToolKind,
+    hasHoverLocation: Bool,
+    isAdjustingBrushSizePreview: Bool,
+    isBrushOutlineForcedVisible: Bool,
+    suppressesBrushOutline: Bool,
+    isBrushStrokeActive: Bool,
+    showsBrushOutlineDuringStroke: Bool,
+    hasContinuousStrokeGrace: Bool
+) -> Bool {
+    guard (activeTool == .brush || activeTool == .eraser || activeTool == .smudge), hasHoverLocation else {
+        return false
+    }
+    if isAdjustingBrushSizePreview { return true }
+    if isBrushOutlineForcedVisible { return true }
+    if suppressesBrushOutline { return false }
+    if isBrushStrokeActive && !showsBrushOutlineDuringStroke { return false }
+    if hasContinuousStrokeGrace { return false }
+    return true
+}
+
+func shouldShowBrushTipIndicator(
+    activeTool: ToolKind,
+    hasHoverLocation: Bool
+) -> Bool {
+    guard activeTool == .brush || activeTool == .eraser || activeTool == .smudge else {
+        return false
+    }
+    return hasHoverLocation
+}
+
 func freeTransformCanStartImmediately(
     signature: TransformPreviewPreparedSignature?,
     hasPreparedSession: Bool
@@ -361,9 +458,23 @@ final class StrokeCaptureMTKView: MTKView {
     var strokeResetToken = 0
     var brushSize: Float = 24 {
         didSet {
-            if isBrushLikeToolActive() {
-                revealBrushOutlineForSizeAdjustment()
+            let now = DispatchTime.now().uptimeNanoseconds
+            let resolvedPreview = resolveBrushSizePreview(
+                displayBrushSize: displayBrushSize,
+                modelBrushSize: brushSize,
+                isAdjustingBrushSizePreview: isAdjustingBrushSizePreview,
+                previewExpiresAtNs: brushSizePreviewExpiresAtNs,
+                nowUptimeNs: now
+            )
+            displayBrushSize = resolvedPreview.displayBrushSize
+            if isAdjustingBrushSizePreview && !resolvedPreview.isAdjustingBrushSizePreview {
+                cancelBrushSizePreviewSettle()
             }
+            isAdjustingBrushSizePreview = resolvedPreview.isAdjustingBrushSizePreview
+            brushSizePreviewExpiresAtNs = resolvedPreview.previewExpiresAtNs
+            brushStrokeLogger.debug("[brush-size] previewState=\(String(describing: resolvedPreview.state), privacy: .public)")
+            brushStrokeLogger.debug("[brush-size] displayBrushSize=\(self.displayBrushSize, privacy: .public)")
+            brushStrokeLogger.debug("[brush-size] modelBrushSize=\(self.brushSize, privacy: .public)")
             updateCursorIndicator()
         }
     }
@@ -398,6 +509,10 @@ final class StrokeCaptureMTKView: MTKView {
     private var pendingBrushInputQueue = PendingBrushInputQueue()
     private var continuousStrokeRenderGraceWorkItem: DispatchWorkItem?
     private var brushOutlineRevealWorkItem: DispatchWorkItem?
+    private var brushSizePreviewSettleWorkItem: DispatchWorkItem?
+    private var displayBrushSize: Float = 24
+    private var isAdjustingBrushSizePreview = false
+    private var brushSizePreviewExpiresAtNs: UInt64 = 0
     private var isBrushOutlineForcedVisible = false
     private var suppressesBrushOutline = false
     private let selectionTraceLogger = Logger(subsystem: "ArtFlex", category: "SelectionTrace")
@@ -423,7 +538,7 @@ final class StrokeCaptureMTKView: MTKView {
     private let debugLogFirstRawSamples = true
     private let strokeRenderGraceDelay: TimeInterval = 0.15
     private let brushOutlineIdleRevealDelay: TimeInterval = 0.10
-    private let brushOutlineSizeAdjustmentRevealDelay: TimeInterval = 0.35
+    private let brushSizePreviewSettleDelay: TimeInterval = 0.16
     private let showsBrushOutlineDuringStroke = false
 
     var isBrushLikeStrokeActive: Bool {
@@ -446,6 +561,7 @@ final class StrokeCaptureMTKView: MTKView {
             cursorTipLayer.actions = makeCursorIndicatorDisabledActions()
             layer?.addSublayer(cursorTipLayer)
         }
+        displayBrushSize = brushSize
         window?.acceptsMouseMovedEvents = true
         window?.makeFirstResponder(self)
         updateCursorAppearance()
@@ -471,6 +587,9 @@ final class StrokeCaptureMTKView: MTKView {
         activeModifierFlags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         window?.makeFirstResponder(self)
         if isBrushLikeToolActive() {
+            cancelBrushSizePreviewSettle()
+            isAdjustingBrushSizePreview = false
+            brushSizePreviewExpiresAtNs = 0
             suppressBrushOutlineForActiveInput()
         }
         hoverLocation = convert(event.locationInWindow, from: nil)
@@ -938,13 +1057,13 @@ final class StrokeCaptureMTKView: MTKView {
         }
 
         if event.charactersIgnoringModifiers == "[" {
-            revealBrushOutlineForSizeAdjustment()
+            previewAdjustBrushSize(by: -1)
             strokeDelegate?.strokeCaptureView(self, didRequestBrushSizeAdjustment: -1)
             return
         }
 
         if event.charactersIgnoringModifiers == "]" {
-            revealBrushOutlineForSizeAdjustment()
+            previewAdjustBrushSize(by: 1)
             strokeDelegate?.strokeCaptureView(self, didRequestBrushSizeAdjustment: 1)
             return
         }
@@ -1011,6 +1130,9 @@ final class StrokeCaptureMTKView: MTKView {
 
     override func mouseExited(with event: NSEvent) {
         cancelBrushOutlineReveal()
+        cancelBrushSizePreviewSettle()
+        isAdjustingBrushSizePreview = false
+        brushSizePreviewExpiresAtNs = 0
         isBrushOutlineForcedVisible = false
         suppressesBrushOutline = false
         hoverLocation = nil
@@ -1342,9 +1464,10 @@ final class StrokeCaptureMTKView: MTKView {
         pendingBrushInputQueue.enqueue(.end)
     }
 
-    func flushPendingBrushInputQueue() {
+    @discardableResult
+    func flushPendingBrushInputQueue() -> Int {
         let batches = pendingBrushInputQueue.flush()
-        guard !batches.isEmpty else { return }
+        guard !batches.isEmpty else { return 0 }
         let flushStartNs = DispatchTime.now().uptimeNanoseconds
         let oldestEnqueueNs = batches.first?.enqueuedAt ?? flushStartNs
         var flushedSampleBatchCount = 0
@@ -1367,6 +1490,7 @@ final class StrokeCaptureMTKView: MTKView {
         let enqueueToFlushMs = Double(flushStartNs - oldestEnqueueNs) / 1_000_000
         brushStrokeLogger.debug("[brush-feel] flushPacketsThisFrame=\(flushedSampleBatchCount, privacy: .public)")
         brushStrokeLogger.debug("[brush-feel] enqueueToFlushMs=\(enqueueToFlushMs, privacy: .public)")
+        return flushedSampleBatchCount
     }
 
     private func shouldUseEyedropperOverride(for event: NSEvent) -> Bool {
@@ -1410,6 +1534,9 @@ final class StrokeCaptureMTKView: MTKView {
         continuousStrokeRenderGraceWorkItem?.cancel()
         continuousStrokeRenderGraceWorkItem = nil
         cancelBrushOutlineReveal()
+        cancelBrushSizePreviewSettle()
+        isAdjustingBrushSizePreview = false
+        brushSizePreviewExpiresAtNs = 0
         isBrushOutlineForcedVisible = false
         suppressesBrushOutline = false
         endBrushStrokeDiagnostics()
@@ -1466,7 +1593,7 @@ final class StrokeCaptureMTKView: MTKView {
 
         cursorIndicatorLayer.isHidden = !showBrushOutline
         if showBrushOutline {
-            let diameter = max(CGFloat(brushSize) * (bounds.width / CGFloat(max(canvasSize.width, 1))), 2)
+            let diameter = max(CGFloat(displayBrushSize) * (bounds.width / CGFloat(max(canvasSize.width, 1))), 2)
             cursorIndicatorLayer.path = CGPath(
                 ellipseIn: CGRect(
                     x: hoverLocation.x - (diameter / 2),
@@ -1481,20 +1608,27 @@ final class StrokeCaptureMTKView: MTKView {
         brushStrokeLogger.debug("[brush-feel] cursorIndicatorUpdateMs=\(updateDurationMs, privacy: .public)")
         brushStrokeLogger.debug("[brush-feel] cursorImplicitAnimationDisabled=true")
         brushStrokeLogger.debug("[brush-feel] cursorTipEnabled=\(showBrushTip, privacy: .public)")
+        brushStrokeLogger.debug("[brush-size] outlineShownForSizePreview=\(self.isAdjustingBrushSizePreview && showBrushOutline, privacy: .public)")
     }
 
     private var shouldShowBrushOutline: Bool {
-        guard isBrushLikeToolActive(), hoverLocation != nil else { return false }
-        if isBrushOutlineForcedVisible { return true }
-        if suppressesBrushOutline { return false }
-        if isBrushStrokeActive && !showsBrushOutlineDuringStroke { return false }
-        if continuousStrokeRenderGraceWorkItem != nil { return false }
-        return true
+        shouldShowBrushOutlineIndicator(
+            activeTool: activeTool,
+            hasHoverLocation: hoverLocation != nil,
+            isAdjustingBrushSizePreview: isAdjustingBrushSizePreview,
+            isBrushOutlineForcedVisible: isBrushOutlineForcedVisible,
+            suppressesBrushOutline: suppressesBrushOutline,
+            isBrushStrokeActive: isBrushStrokeActive,
+            showsBrushOutlineDuringStroke: showsBrushOutlineDuringStroke,
+            hasContinuousStrokeGrace: continuousStrokeRenderGraceWorkItem != nil
+        )
     }
 
     private var shouldShowBrushTip: Bool {
-        guard isBrushLikeToolActive() else { return false }
-        return hoverLocation != nil
+        shouldShowBrushTipIndicator(
+            activeTool: activeTool,
+            hasHoverLocation: hoverLocation != nil
+        )
     }
 
     private var isEyedropperCursorActive: Bool {
@@ -1511,12 +1645,19 @@ final class StrokeCaptureMTKView: MTKView {
     }
 
     private func updateCursorAppearance() {
-        guard hoverLocation != nil else { return }
-        if isEyedropperCursorActive {
+        guard let cursorMode = preferredBrushCursorMode(
+            activeTool: activeTool,
+            isEyedropperCursorActive: isEyedropperCursorActive,
+            hasHoverLocation: hoverLocation != nil
+        ) else {
+            return
+        }
+        switch cursorMode {
+        case .eyedropper:
             Self.eyedropperCursor.set()
-        } else if isBrushLikeToolActive() {
+        case .crosshair:
             NSCursor.crosshair.set()
-        } else {
+        case .arrow:
             NSCursor.arrow.set()
         }
     }
@@ -1524,6 +1665,11 @@ final class StrokeCaptureMTKView: MTKView {
     private func cancelBrushOutlineReveal() {
         brushOutlineRevealWorkItem?.cancel()
         brushOutlineRevealWorkItem = nil
+    }
+
+    private func cancelBrushSizePreviewSettle() {
+        brushSizePreviewSettleWorkItem?.cancel()
+        brushSizePreviewSettleWorkItem = nil
     }
 
     private func suppressBrushOutlineForActiveInput() {
@@ -1548,22 +1694,59 @@ final class StrokeCaptureMTKView: MTKView {
         DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
     }
 
-    private func revealBrushOutlineForSizeAdjustment() {
-        guard isBrushLikeToolActive() else { return }
-        cancelBrushOutlineReveal()
-        suppressesBrushOutline = false
-        isBrushOutlineForcedVisible = true
-        updateCursorIndicator()
+    private func scheduleBrushSizePreviewSettle() {
+        cancelBrushSizePreviewSettle()
         let workItem = DispatchWorkItem { [weak self] in
             guard let self else { return }
+            let now = DispatchTime.now().uptimeNanoseconds
+            guard now >= self.brushSizePreviewExpiresAtNs else {
+                self.scheduleBrushSizePreviewSettle()
+                return
+            }
+            self.isAdjustingBrushSizePreview = false
             self.isBrushOutlineForcedVisible = false
             if !self.isBrushStrokeActive, self.continuousStrokeRenderGraceWorkItem == nil {
                 self.suppressesBrushOutline = false
             }
             self.updateCursorIndicator()
         }
-        brushOutlineRevealWorkItem = workItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + brushOutlineSizeAdjustmentRevealDelay, execute: workItem)
+        brushSizePreviewSettleWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + brushSizePreviewSettleDelay, execute: workItem)
+    }
+
+    private func forceBrushOutlineForSizePreview() {
+        guard isBrushLikeToolActive() else { return }
+        cancelBrushOutlineReveal()
+        suppressesBrushOutline = false
+        isBrushOutlineForcedVisible = true
+        updateCursorIndicator()
+    }
+
+    func previewAdjustBrushSize(by delta: Float) {
+        guard isBrushLikeToolActive() else { return }
+        let currentSize = isAdjustingBrushSizePreview ? displayBrushSize : brushSize
+        let direction: Float = delta == 0 ? 0 : (delta > 0 ? 1 : -1)
+        let step = brushSizeShortcutStep(for: currentSize)
+        displayBrushSize = max(1, currentSize + (direction * step))
+        isAdjustingBrushSizePreview = true
+        brushSizePreviewExpiresAtNs = DispatchTime.now().uptimeNanoseconds + UInt64(brushSizePreviewSettleDelay * 1_000_000_000)
+        forceBrushOutlineForSizePreview()
+        updateCursorIndicator()
+        updateCursorAppearance()
+        scheduleBrushSizePreviewSettle()
+        brushStrokeLogger.debug("[brush-size] localPreviewApplied=true")
+        brushStrokeLogger.debug("[brush-size] displayBrushSize=\(self.displayBrushSize, privacy: .public)")
+        brushStrokeLogger.debug("[brush-size] modelBrushSize=\(self.brushSize, privacy: .public)")
+        brushStrokeLogger.debug("[brush-size] previewState=local")
+    }
+
+    private func brushSizeShortcutStep(for size: Float) -> Float {
+        if size <= 10 { return 1 }
+        if size <= 50 { return 5 }
+        if size <= 100 { return 10 }
+        if size <= 200 { return 25 }
+        if size <= 300 { return 50 }
+        return 100
     }
 
 }
@@ -1581,7 +1764,9 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
     private let onStrokeBegan: () -> Void
     private let onStrokeInput: ([CanvasStrokeSample]) -> Void
     private let onStrokeEnded: () -> Void
-    private let onFlushPendingBrushWork: (MTLCommandBuffer) -> Void
+    private let onFlushPendingBrushWork: (MTLCommandBuffer) -> BrushFlushMetrics?
+    private let onDrainPendingBrushCommitsInteractively: (Bool) -> Void
+    private let resolveBrushDisplayTexture: (LayerID) -> MTLTexture?
     private let onEyedropperSample: (CanvasPoint) -> Void
     private let onBucketFill: (CanvasPoint) -> Void
     private let onCanvasClick: (CanvasPoint, NSEvent.ModifierFlags, Int) -> Void
@@ -1659,7 +1844,9 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
         onStrokeBegan: @escaping () -> Void,
         onStrokeInput: @escaping ([CanvasStrokeSample]) -> Void,
         onStrokeEnded: @escaping () -> Void,
-        onFlushPendingBrushWork: @escaping (MTLCommandBuffer) -> Void,
+        onFlushPendingBrushWork: @escaping (MTLCommandBuffer) -> BrushFlushMetrics?,
+        onDrainPendingBrushCommitsInteractively: @escaping (Bool) -> Void,
+        resolveBrushDisplayTexture: @escaping (LayerID) -> MTLTexture?,
         onEyedropperSample: @escaping (CanvasPoint) -> Void,
         onBucketFill: @escaping (CanvasPoint) -> Void,
         onCanvasClick: @escaping (CanvasPoint, NSEvent.ModifierFlags, Int) -> Void,
@@ -1707,6 +1894,8 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
         self.onStrokeInput = onStrokeInput
         self.onStrokeEnded = onStrokeEnded
         self.onFlushPendingBrushWork = onFlushPendingBrushWork
+        self.onDrainPendingBrushCommitsInteractively = onDrainPendingBrushCommitsInteractively
+        self.resolveBrushDisplayTexture = resolveBrushDisplayTexture
         self.onEyedropperSample = onEyedropperSample
         self.onBucketFill = onBucketFill
         self.onCanvasClick = onCanvasClick
@@ -1748,10 +1937,16 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
             return
         }
 
+        let flushedInputBatchCount: Int
         if let strokeView = view as? StrokeCaptureMTKView {
-            strokeView.flushPendingBrushInputQueue()
+            flushedInputBatchCount = strokeView.flushPendingBrushInputQueue()
+        } else {
+            flushedInputBatchCount = 0
         }
-        onFlushPendingBrushWork(commandBuffer)
+        let liveFlushMetrics = onFlushPendingBrushWork(commandBuffer)
+        let hadLiveBrushWorkThisFrame =
+            flushedInputBatchCount > 0 ||
+            (liveFlushMetrics?.flushedPacketCount ?? 0) > 0
 
         if let snapshot = sceneSnapshot {
             descriptor.colorAttachments[0].loadAction = .clear
@@ -1762,6 +1957,8 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
             let isTransforming = isTransformingSelection && activeTool == .freeTransform
             let effectivePreview = liveTransformPreview ?? transformPreview
             let activeLayerSurfaceID = snapshot.activeLayerSurfaceID
+            let activeLayerID = snapshot.renderSnapshot.document.activeLayerID
+            let activeBrushDisplayTexture = resolveBrushDisplayTexture(activeLayerID)
             let hasActivePreview = isTransforming
             let hasLinearGradientPreview = activeTool == .linearGradient && linearGradientPreview?.geometry != nil
             let hasSectorGradientPreview = activeTool == .sectorGradient && sectorGradientPreview?.geometry != nil
@@ -1773,7 +1970,14 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
             let previewEncodeStart = DispatchTime.now().uptimeNanoseconds
 
             let orderedVisibleLayers = snapshot.layerSurfaces.compactMap { surface -> (LayerSurfaceID, MTLTexture, Float)? in
-                guard surface.isVisible, let texture = layerSurfaceStore.texture(for: surface.surfaceID) else {
+                let resolvedTexture: MTLTexture?
+                if surface.surfaceID == activeLayerSurfaceID, let activeBrushDisplayTexture {
+                    resolvedTexture = activeBrushDisplayTexture
+                } else {
+                    resolvedTexture = layerSurfaceStore.texture(for: surface.surfaceID)
+                }
+
+                guard surface.isVisible, let texture = resolvedTexture else {
                     return nil
                 }
 
@@ -1790,8 +1994,9 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
             }
 
             if hasGradientPreview, let activeLayerSurfaceID {
-                let lowerLayers = Array(orderedVisibleLayers.prefix { $0.0 != activeLayerSurfaceID }) +
-                    orderedVisibleLayers.filter { $0.0 == activeLayerSurfaceID }
+                let lowerPrefix = Array(orderedVisibleLayers.prefix { $0.0 != activeLayerSurfaceID })
+                let activeLayerEntries = orderedVisibleLayers.filter { $0.0 == activeLayerSurfaceID }
+                let lowerLayers = lowerPrefix + activeLayerEntries
                 canvasPresenter.encode(
                     layerTextures: lowerLayers.map { ($0.1, $0.2) },
                     into: descriptor,
@@ -1893,6 +2098,7 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
             encoder.endEncoding()
         }
 
+        onDrainPendingBrushCommitsInteractively(hadLiveBrushWorkThisFrame)
         commandBuffer.present(drawable)
         commandBuffer.commit()
         if let strokeView = view as? StrokeCaptureMTKView, strokeView.isBrushLikeStrokeActive {

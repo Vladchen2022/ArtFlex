@@ -162,6 +162,10 @@ final class WorkspaceViewModel: ObservableObject {
             applyActiveGradientSession()
             return
         }
+        let currentTool = workspace.toolSession.activeTool
+        if isBrushLikeTool(currentTool) && !isBrushLikeTool(tool) {
+            _ = drainPendingBrushCommitsIfNeeded(resetLiveSession: true)
+        }
         performToolSelection(tool)
     }
 
@@ -1406,6 +1410,7 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func selectLayer(_ layerID: LayerID) {
+        _ = drainPendingBrushCommitsIfNeeded(resetLiveSession: true)
         if workspace.document.activeLayerID != layerID {
             resolveTransformSession(reason: .layerChange)
         }
@@ -4191,7 +4196,9 @@ final class WorkspaceViewModel: ObservableObject {
             return
         }
 
-        checkpointHistoryIfPossible()
+        if !isBrushLikeTool(workspace.toolSession.activeTool) {
+            checkpointHistoryIfPossible()
+        }
 
         bootstrap.strokeEngine.beginStrokeIfNeeded(
             toolSession: workspace.toolSession,
@@ -4209,16 +4216,46 @@ final class WorkspaceViewModel: ObservableObject {
         relayIdeationOperation(.endStroke)
     }
 
-    func flushPendingBrushWork(into commandBuffer: MTLCommandBuffer) {
-        _ = bootstrap.strokeEngine.flushPendingStrokePackets(into: commandBuffer)
+    @discardableResult
+    func flushPendingBrushWork(into commandBuffer: MTLCommandBuffer) -> BrushFlushMetrics? {
+        bootstrap.strokeEngine.flushPendingStrokePackets(into: commandBuffer)
     }
 
     var hasPendingBrushWork: Bool {
         bootstrap.strokeEngine.hasPendingBrushWork
     }
 
+    func brushDisplayTexture(for layerID: LayerID) -> MTLTexture? {
+        bootstrap.strokeEngine.displayTexture(for: layerID)
+    }
+
+    func opportunisticallyDrainBrushCommits(hadLiveBrushWorkThisFrame: Bool) {
+        guard bootstrap.strokeEngine.hasPendingBrushCommitJobs else {
+            return
+        }
+
+        do {
+            let result = try bootstrap.strokeEngine.opportunisticDrainPendingBrushCommitJobs(
+                hadLiveBrushWorkThisFrame: hadLiveBrushWorkThisFrame,
+                maxJobs: 1,
+                maxCpuMs: 0.75
+            ) { [self] in
+                try bootstrap.historyController.captureCheckpoint()
+                hasUnsavedChanges = true
+            }
+
+            if result.drainedJobs > 0 {
+                canUndo = bootstrap.historyController.canUndo
+                canRedo = bootstrap.historyController.canRedo
+            }
+        } catch {
+            showStatus(.init(kind: .error, message: error.localizedDescription))
+        }
+    }
+
     func undo() {
         ideationBranchActivityHandler?()
+        _ = drainPendingBrushCommitsIfNeeded(resetLiveSession: true)
         if ideationUndoHandler?() == true {
             return
         }
@@ -4245,6 +4282,7 @@ final class WorkspaceViewModel: ObservableObject {
 
     func redo() {
         ideationBranchActivityHandler?()
+        _ = drainPendingBrushCommitsIfNeeded(resetLiveSession: true)
         if ideationRedoHandler?() == true {
             return
         }
@@ -4385,6 +4423,7 @@ final class WorkspaceViewModel: ObservableObject {
 
     @discardableResult
     func saveProject() -> Bool {
+        _ = drainPendingBrushCommitsIfNeeded(resetLiveSession: false)
         let documentName = workspace.document.metadata.name
         let url: URL
         if let existingURL = currentProjectURL {
@@ -4412,6 +4451,7 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func openProject() {
+        _ = drainPendingBrushCommitsIfNeeded(resetLiveSession: true)
         resolveTransformSession(reason: .documentOpen)
         timelapseRecorder.stopRecording()
         guard let url = bootstrap.filePanelService.presentProjectOpenPanel() else {
@@ -4895,6 +4935,7 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     private func checkpointHistoryIfPossible() {
+        _ = drainPendingBrushCommitsIfNeeded(resetLiveSession: true)
         do {
             try bootstrap.historyController.captureCheckpoint()
             hasUnsavedChanges = true
@@ -4906,6 +4947,7 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     private func noteCanvasContentChanged() {
+        hasUnsavedChanges = true
         documentChangeRevision &+= 1
         canvasContentRevision = documentChangeRevision
         syncTimelapseDocumentContext()
@@ -4917,12 +4959,43 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func captureWorkspaceSnapshot() throws -> WorkspaceHistoryEntry {
-        try bootstrap.historyController.captureCurrentEntry()
+        _ = drainPendingBrushCommitsIfNeeded(resetLiveSession: true)
+        return try bootstrap.historyController.captureCurrentEntry()
     }
 
     func restoreWorkspaceSnapshot(_ entry: WorkspaceHistoryEntry) throws {
+        _ = drainPendingBrushCommitsIfNeeded(resetLiveSession: true)
         try bootstrap.historyController.restoreExact(entry: entry)
         refresh()
+    }
+
+    private func drainPendingBrushCommitsIfNeeded(resetLiveSession: Bool) -> Bool {
+        let hadPendingCommits = bootstrap.strokeEngine.hasPendingBrushCommitJobs
+
+        if hadPendingCommits {
+            do {
+                try bootstrap.strokeEngine.drainPendingBrushCommitJobs { [self] in
+                    try bootstrap.historyController.captureCheckpoint()
+                    hasUnsavedChanges = true
+                }
+                canUndo = bootstrap.historyController.canUndo
+                canRedo = bootstrap.historyController.canRedo
+                refresh()
+            } catch {
+                showStatus(.init(kind: .error, message: error.localizedDescription))
+                return false
+            }
+        }
+
+        if resetLiveSession {
+            bootstrap.strokeEngine.resetBrushPipelineState()
+        }
+
+        return hadPendingCommits
+    }
+
+    private func isBrushLikeTool(_ tool: ToolKind) -> Bool {
+        tool == .brush || tool == .eraser || tool == .smudge
     }
 
     func makeVisibleCompositeSnapshot() throws -> LayerTextureSnapshot {
