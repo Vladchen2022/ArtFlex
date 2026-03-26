@@ -56,6 +56,9 @@ struct HistoryEligibilityAuditContext: Sendable {
 }
 
 final class HistoryController {
+    static let defaultMaxEntries = 24
+    static let defaultMaxResidentBytes = 768 * 1024 * 1024
+
     private let workspaceStore: WorkspaceStore
     private let layerSurfaceStore: StageOneLayerSurfaceStore
     private let serializer: LayerTextureSerializer
@@ -76,8 +79,8 @@ final class HistoryController {
         layerSurfaceStore: StageOneLayerSurfaceStore,
         serializer: LayerTextureSerializer,
         metalContext: MetalDeviceContext,
-        maxEntries: Int = 8,
-        maxResidentBytes: Int = 512 * 1024 * 1024
+        maxEntries: Int = HistoryController.defaultMaxEntries,
+        maxResidentBytes: Int = HistoryController.defaultMaxResidentBytes
     ) {
         self.workspaceStore = workspaceStore
         self.layerSurfaceStore = layerSurfaceStore

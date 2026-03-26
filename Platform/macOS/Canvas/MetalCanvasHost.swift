@@ -143,13 +143,48 @@ struct MetalCanvasHost: NSViewRepresentable {
         context.coordinator.linearGradientPreview = linearGradientPreview
         context.coordinator.sectorGradientPreview = sectorGradientPreview
         context.coordinator.gradientPreviewColor = gradientPreviewColor
-        context.coordinator.updatePreparedTransformSessionIfNeeded()
         if let view = nsView as? StrokeCaptureMTKView {
             let previousCanvasSize = view.canvasSize
             let previousViewportRotation = view.viewportRotationDegrees
             let previousPanMode = view.isPanModeActive
             let previousStrokeResetToken = view.strokeResetToken
             let previousBrushSize = view.brushSize
+            let previousCanvasContentRevision = previousSnapshot?.renderSnapshot.canvasContentRevision
+            let previousViewportRevision = previousSnapshot?.renderSnapshot.viewportRevision
+            let previousSelectionRevision = previousSnapshot?.selectionRevision
+            let previousSelectionShape = previousSnapshot?.selectionShape
+            let previousLinearGradientPreview = context.coordinator.previousLinearGradientPreview
+            let previousSectorGradientPreview = context.coordinator.previousSectorGradientPreview
+            let previousGradientPreviewColor = context.coordinator.previousGradientPreviewColor
+
+            let nonBrushStateChanged =
+                previousCanvasContentRevision != sceneSnapshot.renderSnapshot.canvasContentRevision ||
+                previousViewportRevision != sceneSnapshot.renderSnapshot.viewportRevision ||
+                previousSelectionRevision != sceneSnapshot.selectionRevision ||
+                previousSelectionShape?.kind != sceneSnapshot.selectionShape?.kind ||
+                previousSelectionShape?.bounds != sceneSnapshot.selectionShape?.bounds ||
+                previousActiveTool != activeTool ||
+                previousIsTransforming != isTransformingSelection ||
+                previousTransformPreview != transformPreview ||
+                previousLinearGradientPreview != linearGradientPreview ||
+                previousSectorGradientPreview != sectorGradientPreview ||
+                previousGradientPreviewColor != gradientPreviewColor ||
+                previousCanvasSize != sceneSnapshot.renderSnapshot.document.canvasSize ||
+                previousViewportRotation != viewportRotationDegrees ||
+                previousPanMode != isPanModeActive ||
+                previousStrokeResetToken != strokeResetToken
+
+            view.transformPreviewDelegate = context.coordinator
+
+            if previousBrushSize != brushSize && !nonBrushStateChanged {
+                view.brushSize = brushSize
+                let updateDurationMs = Double(DispatchTime.now().uptimeNanoseconds - updateStartNs) / 1_000_000
+                brushFeelLogger.debug("[brush-size] updateNSViewFastPath=true")
+                brushFeelLogger.debug("[brush-size] updateNSViewFastPathMs=\(updateDurationMs, privacy: .public)")
+                return
+            }
+
+            context.coordinator.updatePreparedTransformSessionIfNeeded()
 
             view.canvasSize = sceneSnapshot.renderSnapshot.document.canvasSize
             view.activeTool = activeTool
@@ -160,20 +195,11 @@ struct MetalCanvasHost: NSViewRepresentable {
                 view.resetInteractionState()
             }
             view.brushSize = brushSize
-            view.transformPreviewDelegate = context.coordinator
 
             if wasTransforming && !isTransformingSelection {
                 view.isPaused = true
                 view.enableSetNeedsDisplay = true
             }
-
-            let previousCanvasContentRevision = previousSnapshot?.renderSnapshot.canvasContentRevision
-            let previousViewportRevision = previousSnapshot?.renderSnapshot.viewportRevision
-            let previousSelectionRevision = previousSnapshot?.selectionRevision
-            let previousSelectionShape = previousSnapshot?.selectionShape
-            let previousLinearGradientPreview = context.coordinator.previousLinearGradientPreview
-            let previousSectorGradientPreview = context.coordinator.previousSectorGradientPreview
-            let previousGradientPreviewColor = context.coordinator.previousGradientPreviewColor
 
             let requiresCanvasRedraw =
                 previousCanvasContentRevision != sceneSnapshot.renderSnapshot.canvasContentRevision ||

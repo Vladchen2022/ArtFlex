@@ -1,9 +1,56 @@
 # DECISIONS
 
-最后更新：2026-03-20
+最后更新：2026-03-26
 
 本文件记录：**当前代码和产品层已经确认的关键决策。**  
 如果后续改动与这些点冲突，应先重新讨论，而不是直接改代码。
+
+## 0. 当前阶段与红线
+
+### 0.1 performance closure audit 已完成
+
+已确认：
+
+- performance closure audit 已完成
+- 基线文档位于 [performance-closure-audit.md](/Users/victorcloux/Desktop/ArtFlex/Docs/performance-closure-audit.md)
+- performance 主线先收口，不再默认继续扩大
+
+### 0.2 本轮性能主线与小范围 UX/perf follow-up 到此结束
+
+已确认：
+
+- 本轮性能主线与小范围 UX/perf follow-up 到此结束
+- 后续优先级切换到新功能开发
+- 没有新的 P0 / P1 回归，不准重开这一轮性能项目
+
+### 0.3 history policy 以后按真实产品场景定，不按 8192 基准定
+
+已确认：
+
+- 当前产品真实上限不是 `8192 px` 级别工作流
+- 后续 history retention policy 以“最大画布不超过 `3000 px`、典型用户 `16G` 内存”的真实场景为准
+- 当前默认策略已经调整到：
+  - `maxEntries = 24`
+  - `maxResidentBytes = 768 MiB`
+
+### 0.4 `selection.fill / lasso.fill` 当前接受为 deferred known limitation
+
+已确认：
+
+- `selection.fill / lasso.fill` 仍慢，但因当前不是高频刚需工具，暂时接受为 deferred known limitation
+- 当前不再继续围绕它做优化
+- 如果未来必须重开，只允许先检查 [mutateSelectionPixels(...)](/Users/victorcloux/Desktop/ArtFlex/Platform/macOS/App/WorkspaceViewModel.swift#L5389)
+- 不允许借这个问题重开新的大范围性能项目
+
+### 0.5 dirty history 仍然是试点，不是通用 partial history
+
+已确认：
+
+- dirty history pilot 当前只覆盖定点路径
+- 不重开通用 partial history
+- 不改 dirty restore fail-closed 语义
+- 不引入 `full reset + partial snapshots` fallback
+- 不动 `trim / restore` 主模型
 
 ## 1. 总体架构
 
@@ -56,13 +103,17 @@
   - `generator`
   - `viewport`
 
-### 2.2 当前撤销步数不设上限
+### 2.2 当前撤销保留策略使用有限预算，不再是不设上限
 
 当前代码中：
 
-- `HistoryController.maxEntries == nil`
+- [HistoryController.defaultMaxEntries](/Users/victorcloux/Desktop/ArtFlex/Core/Application/HistoryController.swift#L59) = `24`
+- [HistoryController.defaultMaxResidentBytes](/Users/victorcloux/Desktop/ArtFlex/Core/Application/HistoryController.swift#L60) = `768 MiB`
 
-仍然是有效决策。
+仍然保留的决策：
+
+- 不改 `trim` 语义
+- 预算裁剪时至少保留最新 entry
 
 ## 3. 选区与自由变形
 
@@ -288,8 +339,8 @@
 
 已确认：
 
-- [CURRENT_STATUS.md](/Users/victorcloux/Desktop/ArtFlex/CURRENT_STATUS.md) 是历史文档，不能再视为唯一最新状态
 - 当前继续开发时，应优先参考：
-  - [STATUS.md](/Users/victorcloux/Desktop/ArtFlex/STATUS.md)
+  - [HANDOFF.md](/Users/victorcloux/Desktop/ArtFlex/HANDOFF.md)
   - [CURRENT_TASK.md](/Users/victorcloux/Desktop/ArtFlex/CURRENT_TASK.md)
-  - [XCODE_NOTES.md](/Users/victorcloux/Desktop/ArtFlex/XCODE_NOTES.md)
+  - [CURRENT_STATUS.md](/Users/victorcloux/Desktop/ArtFlex/CURRENT_STATUS.md)
+- 当前线程默认不再从性能优化开始，而是先进入新功能定义与实现

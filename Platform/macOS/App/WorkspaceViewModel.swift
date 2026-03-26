@@ -5269,6 +5269,7 @@ final class WorkspaceViewModel: ObservableObject {
         historyOperationKind: String,
         successMessage: String
     ) -> Bool {
+        let totalStartNs = DispatchTime.now().uptimeNanoseconds
         guard let layerID = bootstrap.interactionController.activeEditableLayerID() else {
             showStatus(.init(kind: .info, message: "当前图层已锁定"))
             return false
@@ -5289,20 +5290,19 @@ final class WorkspaceViewModel: ObservableObject {
         pixelOperationCaptureMode = .inPlaceChangedLayers([layerID])
 #endif
 
+        let historyCheckpointStartNs = DispatchTime.now().uptimeNanoseconds
         checkpointHistoryIfPossible(
             operationKind: historyOperationKind,
             candidateChangedLayerIDs: [layerID],
             additionalOperationKinds: ["applyPixelOperation"],
             captureMode: pixelOperationCaptureMode
         )
+        let historyCheckpointMs = Double(DispatchTime.now().uptimeNanoseconds - historyCheckpointStartNs) / 1_000_000
+        PerformanceAuditStore.shared.recordDuration("WorkspaceViewModel.applyPixelOperation.historyCheckpoint", ms: historyCheckpointMs)
 
         do {
             let clampedSelection = selectionShape.clamped(
                 to: CanvasSize(width: texture.width, height: texture.height)
-            )
-            let selectionMask = selectionMaskBytes(
-                for: clampedSelection,
-                canvasSize: CanvasSize(width: texture.width, height: texture.height)
             )
             let minX = max(Int(clampedSelection.bounds.minX.rounded(.down)), 0)
             let minY = max(Int(clampedSelection.bounds.minY.rounded(.down)), 0)
@@ -5314,6 +5314,19 @@ final class WorkspaceViewModel: ObservableObject {
                 return false
             }
 
+            let maskPreparationStartNs = DispatchTime.now().uptimeNanoseconds
+            let selectionMaskRegion = selectionMaskRegion(
+                for: clampedSelection,
+                canvasSize: CanvasSize(width: texture.width, height: texture.height),
+                originX: minX,
+                originY: minY,
+                width: maxX - minX,
+                height: maxY - minY
+            )
+            let maskPreparationMs = Double(DispatchTime.now().uptimeNanoseconds - maskPreparationStartNs) / 1_000_000
+            PerformanceAuditStore.shared.recordDuration("WorkspaceViewModel.applyPixelOperation.maskPreparation", ms: maskPreparationMs)
+
+            let snapshotStartNs = DispatchTime.now().uptimeNanoseconds
             let snapshot = try bootstrap.textureSerializer.snapshot(
                 texture: texture,
                 originX: minX,
@@ -5321,30 +5334,23 @@ final class WorkspaceViewModel: ObservableObject {
                 width: maxX - minX,
                 height: maxY - minY
             )
+            let snapshotMs = Double(DispatchTime.now().uptimeNanoseconds - snapshotStartNs) / 1_000_000
+            PerformanceAuditStore.shared.recordDuration("WorkspaceViewModel.applyPixelOperation.snapshot", ms: snapshotMs)
             var bytes = [UInt8](snapshot.pixelData)
             let bytesPerPixel = 4
 
+            let mutateStartNs = DispatchTime.now().uptimeNanoseconds
             mutateSelectionPixels(
                 bytes: &bytes,
                 bytesPerRow: snapshot.bytesPerRow,
                 bytesPerPixel: bytesPerPixel,
-                selectionMaskBytes: selectionMask,
-                selectionCanvasWidth: texture.width,
-                originX: minX,
-                originY: minY,
+                selectionMaskRegion: selectionMaskRegion,
                 width: snapshot.width,
-                height: snapshot.height
-            ) { pixel in
-                switch operation {
-                case .clear:
-                    pixel.blue = 0
-                    pixel.green = 0
-                    pixel.red = 0
-                    pixel.alpha = 0
-                case .fill(let fillPixel):
-                    pixel = fillPixel
-                }
-            }
+                height: snapshot.height,
+                operation: operation
+            )
+            let mutateMs = Double(DispatchTime.now().uptimeNanoseconds - mutateStartNs) / 1_000_000
+            PerformanceAuditStore.shared.recordDuration("WorkspaceViewModel.applyPixelOperation.pixelMutation", ms: mutateMs)
 
             let updatedSnapshot = LayerTextureSnapshot(
                 width: snapshot.width,
@@ -5352,15 +5358,23 @@ final class WorkspaceViewModel: ObservableObject {
                 bytesPerRow: snapshot.bytesPerRow,
                 pixelData: Data(bytes)
             )
+            let restoreStartNs = DispatchTime.now().uptimeNanoseconds
             try bootstrap.textureSerializer.restore(
                 snapshot: updatedSnapshot,
                 into: texture,
                 destinationX: minX,
                 destinationY: minY
             )
+            let restoreMs = Double(DispatchTime.now().uptimeNanoseconds - restoreStartNs) / 1_000_000
+            PerformanceAuditStore.shared.recordDuration("WorkspaceViewModel.applyPixelOperation.restore", ms: restoreMs)
+            let uiConfirmStartNs = DispatchTime.now().uptimeNanoseconds
             refresh()
             noteCanvasContentChanged()
             showStatus(.init(kind: .success, message: successMessage))
+            let uiConfirmMs = Double(DispatchTime.now().uptimeNanoseconds - uiConfirmStartNs) / 1_000_000
+            PerformanceAuditStore.shared.recordDuration("WorkspaceViewModel.applyPixelOperation.uiConfirm", ms: uiConfirmMs)
+            let totalMs = Double(DispatchTime.now().uptimeNanoseconds - totalStartNs) / 1_000_000
+            PerformanceAuditStore.shared.recordDuration("WorkspaceViewModel.applyPixelOperation.total", ms: totalMs)
             return true
         } catch {
             showStatus(.init(kind: .error, message: error.localizedDescription))
@@ -5376,34 +5390,44 @@ final class WorkspaceViewModel: ObservableObject {
         bytes: inout [UInt8],
         bytesPerRow: Int,
         bytesPerPixel: Int,
-        selectionMaskBytes: [UInt8],
-        selectionCanvasWidth: Int,
-        originX: Int,
-        originY: Int,
+        selectionMaskRegion: SelectionMaskRegion,
         width: Int,
         height: Int,
-        mutate: (inout EditablePixel) -> Void
+        operation: SelectionPixelOperation
     ) {
-        for localY in 0..<height {
-            for localX in 0..<width {
-                let globalX = originX + localX
-                let globalY = originY + localY
-                let selectionIndex = (globalY * selectionCanvasWidth) + globalX
-                guard selectionMaskBytes.indices.contains(selectionIndex),
-                      selectionMaskBytes[selectionIndex] > 0 else { continue }
+        guard
+            width == selectionMaskRegion.width,
+            height == selectionMaskRegion.height
+        else {
+            return
+        }
 
-                let index = (localY * bytesPerRow) + (localX * bytesPerPixel)
-                var pixel = EditablePixel(
-                    blue: bytes[index],
-                    green: bytes[index + 1],
-                    red: bytes[index + 2],
-                    alpha: bytes[index + 3]
-                )
-                mutate(&pixel)
-                bytes[index] = pixel.blue
-                bytes[index + 1] = pixel.green
-                bytes[index + 2] = pixel.red
-                bytes[index + 3] = pixel.alpha
+        switch operation {
+        case .clear:
+            for localY in 0..<height {
+                let maskRow = localY * selectionMaskRegion.width
+                let byteRow = localY * bytesPerRow
+                for localX in 0..<width {
+                    guard selectionMaskRegion.alphaBytes[maskRow + localX] > 0 else { continue }
+                    let index = byteRow + (localX * bytesPerPixel)
+                    bytes[index] = 0
+                    bytes[index + 1] = 0
+                    bytes[index + 2] = 0
+                    bytes[index + 3] = 0
+                }
+            }
+        case .fill(let fillPixel):
+            for localY in 0..<height {
+                let maskRow = localY * selectionMaskRegion.width
+                let byteRow = localY * bytesPerRow
+                for localX in 0..<width {
+                    guard selectionMaskRegion.alphaBytes[maskRow + localX] > 0 else { continue }
+                    let index = byteRow + (localX * bytesPerPixel)
+                    bytes[index] = fillPixel.blue
+                    bytes[index + 1] = fillPixel.green
+                    bytes[index + 2] = fillPixel.red
+                    bytes[index + 3] = fillPixel.alpha
+                }
             }
         }
     }
@@ -6005,6 +6029,189 @@ final class WorkspaceViewModel: ObservableObject {
         )
     }
 
+    nonisolated private func selectionMaskRegion(
+        for shape: SelectionShape?,
+        canvasSize: CanvasSize,
+        originX: Int,
+        originY: Int,
+        width: Int,
+        height: Int
+    ) -> SelectionMaskRegion {
+        guard width > 0, height > 0 else {
+            return SelectionMaskRegion(originX: originX, originY: originY, width: 0, height: 0, alphaBytes: [])
+        }
+
+        guard let shape else {
+            return SelectionMaskRegion(
+                originX: originX,
+                originY: originY,
+                width: width,
+                height: height,
+                alphaBytes: [UInt8](repeating: 0, count: width * height)
+            )
+        }
+
+        if let maskData = shape.maskData,
+           maskData.canvasWidth == canvasSize.width,
+           maskData.canvasHeight == canvasSize.height {
+            return SelectionMaskRegion(
+                originX: originX,
+                originY: originY,
+                width: width,
+                height: height,
+                alphaBytes: maskRegionBytes(
+                    from: maskData.alphaBytes,
+                    canvasWidth: canvasSize.width,
+                    originX: originX,
+                    originY: originY,
+                    width: width,
+                    height: height
+                )
+            )
+        }
+
+        let polygonShapes: [SelectionPolygonShape]
+        switch shape.kind {
+        case .lasso:
+            guard shape.pathPoints.count >= 3 else {
+                return SelectionMaskRegion(
+                    originX: originX,
+                    originY: originY,
+                    width: width,
+                    height: height,
+                    alphaBytes: [UInt8](repeating: 0, count: width * height)
+                )
+            }
+            polygonShapes = [[shape.pathPoints.map { CGPoint(x: $0.x, y: $0.y) }]]
+        case .rectangle, .ellipse:
+            polygonShapes = [selectionOutlinePoints(for: shape.kind, bounds: shape.bounds)]
+        case .mask:
+            if shape.components.count == 1,
+               let component = shape.components.first,
+               component.operation == .add {
+                return selectionMaskRegion(
+                    for: component.shape,
+                    canvasSize: canvasSize,
+                    originX: originX,
+                    originY: originY,
+                    width: width,
+                    height: height
+                )
+            }
+            if shape.pathPoints.count >= 3 {
+                polygonShapes = [[shape.pathPoints.map { CGPoint(x: $0.x, y: $0.y) }]]
+            } else {
+                return SelectionMaskRegion(
+                    originX: originX,
+                    originY: originY,
+                    width: width,
+                    height: height,
+                    alphaBytes: [UInt8](repeating: 0, count: width * height)
+                )
+            }
+        case .composite:
+            let fullMask = selectionMaskBytes(for: shape, canvasSize: canvasSize)
+            return SelectionMaskRegion(
+                originX: originX,
+                originY: originY,
+                width: width,
+                height: height,
+                alphaBytes: maskRegionBytes(
+                    from: fullMask,
+                    canvasWidth: canvasSize.width,
+                    originX: originX,
+                    originY: originY,
+                    width: width,
+                    height: height
+                )
+            )
+        }
+
+        return SelectionMaskRegion(
+            originX: originX,
+            originY: originY,
+            width: width,
+            height: height,
+            alphaBytes: rasterizedSelectionMaskRegionBytes(
+                polygonShapes: polygonShapes,
+                originX: originX,
+                originY: originY,
+                width: width,
+                height: height
+            )
+        )
+    }
+
+    nonisolated private func maskRegionBytes(
+        from alphaBytes: Data,
+        canvasWidth: Int,
+        originX: Int,
+        originY: Int,
+        width: Int,
+        height: Int
+    ) -> [UInt8] {
+        var result = [UInt8](repeating: 0, count: width * height)
+        guard !result.isEmpty else { return result }
+
+        result.withUnsafeMutableBufferPointer { destinationBuffer in
+            alphaBytes.withUnsafeBytes { sourceRawBuffer in
+                guard
+                    let destinationBase = destinationBuffer.baseAddress,
+                    let sourceBase = sourceRawBuffer.baseAddress?.assumingMemoryBound(to: UInt8.self)
+                else {
+                    return
+                }
+
+                for row in 0..<height {
+                    let sourceOffset = ((originY + row) * canvasWidth) + originX
+                    let destinationOffset = row * width
+                    UnsafeMutableRawPointer(destinationBase.advanced(by: destinationOffset))
+                        .copyMemory(
+                            from: UnsafeRawPointer(sourceBase.advanced(by: sourceOffset)),
+                            byteCount: width
+                        )
+                }
+            }
+        }
+
+        return result
+    }
+
+    nonisolated private func maskRegionBytes(
+        from alphaBytes: [UInt8],
+        canvasWidth: Int,
+        originX: Int,
+        originY: Int,
+        width: Int,
+        height: Int
+    ) -> [UInt8] {
+        var result = [UInt8](repeating: 0, count: width * height)
+        guard !result.isEmpty else { return result }
+
+        result.withUnsafeMutableBufferPointer { destinationBuffer in
+            alphaBytes.withUnsafeBufferPointer { sourceBuffer in
+                guard
+                    let destinationBase = destinationBuffer.baseAddress,
+                    let sourceBase = sourceBuffer.baseAddress
+                else {
+                    return
+                }
+
+                for row in 0..<height {
+                    let sourceOffset = ((originY + row) * canvasWidth) + originX
+                    let destinationOffset = row * width
+                    UnsafeMutableRawPointer(destinationBase.advanced(by: destinationOffset))
+                        .copyMemory(
+                            from: UnsafeRawPointer(sourceBase.advanced(by: sourceOffset)),
+                            byteCount: width
+                        )
+                }
+            }
+        }
+
+        return result
+    }
+
     nonisolated private func applyIncomingMask(
         to result: inout [UInt8],
         incomingBytes: [UInt8],
@@ -6104,6 +6311,81 @@ final class WorkspaceViewModel: ObservableObject {
             let sourceRow = localY * width
             for localX in 0..<width {
                 result[destinationRow + localX + minX] = localBytes[sourceRow + localX]
+            }
+        }
+
+        return result
+    }
+
+    nonisolated private func rasterizedSelectionMaskRegionBytes(
+        polygonShapes: [SelectionPolygonShape],
+        originX: Int,
+        originY: Int,
+        width: Int,
+        height: Int
+    ) -> [UInt8] {
+        var result = [UInt8](repeating: 0, count: width * height)
+        guard !polygonShapes.isEmpty, width > 0, height > 0 else { return result }
+
+        let padding = 1
+        let paddedWidth = width + (padding * 2)
+        let paddedHeight = height + (padding * 2)
+        let bytesPerRow = paddedWidth
+        let colorSpace = CGColorSpaceCreateDeviceGray()
+        var paddedBytes = [UInt8](repeating: 0, count: paddedWidth * paddedHeight)
+
+        guard let context = CGContext(
+            data: &paddedBytes,
+            width: paddedWidth,
+            height: paddedHeight,
+            bitsPerComponent: 8,
+            bytesPerRow: bytesPerRow,
+            space: colorSpace,
+            bitmapInfo: CGImageAlphaInfo.none.rawValue
+        ) else {
+            return result
+        }
+
+        context.translateBy(
+            x: Double(-originX + padding),
+            y: Double(originY - padding + paddedHeight)
+        )
+        context.scaleBy(x: 1, y: -1)
+        context.setShouldAntialias(true)
+        context.setAllowsAntialiasing(true)
+
+        for polygonShape in polygonShapes {
+            for polygon in polygonShape {
+                guard polygon.count >= 3 else { continue }
+                let path = CGMutablePath()
+                path.addLines(between: polygon)
+                path.closeSubpath()
+
+                context.addPath(path)
+                context.setBlendMode(.normal)
+                context.setFillColor(gray: 1, alpha: 1)
+                context.fillPath()
+            }
+        }
+
+        result.withUnsafeMutableBufferPointer { destinationBuffer in
+            paddedBytes.withUnsafeBufferPointer { sourceBuffer in
+                guard
+                    let destinationBase = destinationBuffer.baseAddress,
+                    let sourceBase = sourceBuffer.baseAddress
+                else {
+                    return
+                }
+
+                for localY in 0..<height {
+                    let destinationOffset = localY * width
+                    let sourceOffset = ((localY + padding) * paddedWidth) + padding
+                    UnsafeMutableRawPointer(destinationBase.advanced(by: destinationOffset))
+                        .copyMemory(
+                            from: UnsafeRawPointer(sourceBase.advanced(by: sourceOffset)),
+                            byteCount: width
+                        )
+                }
             }
         }
 
@@ -6773,6 +7055,14 @@ private struct EditablePixel {
     var green: UInt8
     var red: UInt8
     var alpha: UInt8
+}
+
+private struct SelectionMaskRegion {
+    var originX: Int
+    var originY: Int
+    var width: Int
+    var height: Int
+    var alphaBytes: [UInt8]
 }
 
 private struct GeneratorStrokeSessionState {

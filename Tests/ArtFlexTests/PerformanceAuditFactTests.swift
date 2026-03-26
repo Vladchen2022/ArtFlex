@@ -205,6 +205,24 @@ struct PerformanceAuditFactTests {
             outputPath: "/tmp/fill_at_point_dirty_pilot_8192_8.txt"
         )
     }
+
+    @Test
+    @MainActor
+    func selectionFillProfilingBreakdown() throws {
+        let selectionFill = try measureSelectionPixelOperationBreakdown(
+            operation: .selectionFill,
+            canvasSize: .init(width: 3000, height: 3000),
+            layerCount: 4
+        )
+        let lassoFill = try measureSelectionPixelOperationBreakdown(
+            operation: .lassoFill,
+            canvasSize: .init(width: 3000, height: 3000),
+            layerCount: 4
+        )
+
+        print("[selection-fill-profile] kind=selection.fill canvas=3000x3000 layers=4 historyCheckpoint=\(String(format: "%.3f", selectionFill.historyCheckpointMs))ms maskPreparation=\(String(format: "%.3f", selectionFill.maskPreparationMs))ms snapshot=\(String(format: "%.3f", selectionFill.snapshotMs))ms pixelMutation=\(String(format: "%.3f", selectionFill.pixelMutationMs))ms restore=\(String(format: "%.3f", selectionFill.restoreMs))ms uiConfirm=\(String(format: "%.3f", selectionFill.uiConfirmMs))ms total=\(String(format: "%.3f", selectionFill.totalMs))ms")
+        print("[selection-fill-profile] kind=lasso.fill canvas=3000x3000 layers=4 historyCheckpoint=\(String(format: "%.3f", lassoFill.historyCheckpointMs))ms maskPreparation=\(String(format: "%.3f", lassoFill.maskPreparationMs))ms snapshot=\(String(format: "%.3f", lassoFill.snapshotMs))ms pixelMutation=\(String(format: "%.3f", lassoFill.pixelMutationMs))ms restore=\(String(format: "%.3f", lassoFill.restoreMs))ms uiConfirm=\(String(format: "%.3f", lassoFill.uiConfirmMs))ms total=\(String(format: "%.3f", lassoFill.totalMs))ms")
+    }
 }
 
 private struct HistoryCostAuditRow {
@@ -230,6 +248,21 @@ private struct BrushDirtyHistoryPilotRow {
     var dirtyEntryBytes: Int
     var fullRetainedHistoryPoints: Int
     var dirtyRetainedHistoryPoints: Int
+}
+
+private struct SelectionPixelOperationProfileRow {
+    var historyCheckpointMs: Double
+    var maskPreparationMs: Double
+    var snapshotMs: Double
+    var pixelMutationMs: Double
+    var restoreMs: Double
+    var uiConfirmMs: Double
+    var totalMs: Double
+}
+
+private enum SelectionPixelOperationProfileKind {
+    case selectionFill
+    case lassoFill
 }
 
 @MainActor
@@ -288,6 +321,48 @@ private func measureAndWriteSingleFillAtPointDirtyPilotCase(
         "retained.full=\(row.fullRetainedHistoryPoints) retained.dirty=\(row.dirtyRetainedHistoryPoints)"
     print(line)
     try line.write(to: URL(fileURLWithPath: outputPath), atomically: true, encoding: .utf8)
+}
+
+@MainActor
+private func measureSelectionPixelOperationBreakdown(
+    operation: SelectionPixelOperationProfileKind,
+    canvasSize: CanvasSize,
+    layerCount: Int
+) throws -> SelectionPixelOperationProfileRow {
+    let harness = try makePixelOperationHistoryMeasurementHarness(
+        canvasSize: canvasSize,
+        layerCount: layerCount
+    )
+    PerformanceAuditStore.shared.reset()
+
+    switch operation {
+    case .selectionFill:
+        applySelectionFill(on: harness.viewModel, rect: (8, 8, 2800, 2800))
+    case .lassoFill:
+        harness.viewModel.selectTool(.lassoSelection)
+        createCommittedLassoSelection(
+            on: harness.viewModel,
+            points: [
+                .init(x: 8, y: 8),
+                .init(x: 2800, y: 8),
+                .init(x: 2800, y: 2800),
+                .init(x: 8, y: 2800),
+                .init(x: 8, y: 8)
+            ]
+        )
+        harness.viewModel.fillLassoContents()
+    }
+
+    let snapshot = PerformanceAuditStore.shared.snapshot()
+    return SelectionPixelOperationProfileRow(
+        historyCheckpointMs: snapshot.averageDuration("WorkspaceViewModel.applyPixelOperation.historyCheckpoint") ?? 0,
+        maskPreparationMs: snapshot.averageDuration("WorkspaceViewModel.applyPixelOperation.maskPreparation") ?? 0,
+        snapshotMs: snapshot.averageDuration("WorkspaceViewModel.applyPixelOperation.snapshot") ?? 0,
+        pixelMutationMs: snapshot.averageDuration("WorkspaceViewModel.applyPixelOperation.pixelMutation") ?? 0,
+        restoreMs: snapshot.averageDuration("WorkspaceViewModel.applyPixelOperation.restore") ?? 0,
+        uiConfirmMs: snapshot.averageDuration("WorkspaceViewModel.applyPixelOperation.uiConfirm") ?? 0,
+        totalMs: snapshot.averageDuration("WorkspaceViewModel.applyPixelOperation.total") ?? 0
+    )
 }
 
 @MainActor

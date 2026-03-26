@@ -74,6 +74,17 @@ struct HistoryControllerTests {
     }
 
     @Test
+    func defaultHistoryPolicySupportsAtLeastTwenty3000pxDirtyEntries() {
+        let dirtyEntryBytes = 3_000 * 3_000 * 4
+        let retainedByBudget = HistoryController.defaultMaxResidentBytes / dirtyEntryBytes
+        let retainedByPolicy = min(HistoryController.defaultMaxEntries, retainedByBudget)
+
+        #expect(HistoryController.defaultMaxEntries == 24)
+        #expect(HistoryController.defaultMaxResidentBytes == 768 * 1024 * 1024)
+        #expect(retainedByPolicy >= 20)
+    }
+
+    @Test
     @MainActor
     func oversizedSingleEntryStillKeepsLatestUndoState() throws {
         let harness = try BrushHistoryHarness(canvasSize: .init(width: 64, height: 64))

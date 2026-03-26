@@ -26,28 +26,13 @@ BrushCanvas Next 是现有 `BrushCanvas` 的 Metal 重构版。
 
 ## 当前阶段
 
-当前阶段目标是先完成一个可长期演进的 Metal 基础版本，而不是一次性复刻旧项目全部能力。
+当前仓库已经完成一轮性能收口与小范围 UX/perf follow-up，下一阶段默认转入新功能开发。
 
-第一阶段优先实现：
+如果你是新线程或刚恢复开发，不要从旧性能问题开始，先看：
 
-- 主窗口基础布局
-- Metal 画布显示
-- 基础图层系统
-- 基础画笔输入
-- 橡皮擦
-- 缩放 / 平移
-- 基础颜色与工具栏
-- PNG 导出
-- 最小可用工程格式
-
-第一阶段暂不追求：
-
-- 生成器全量复刻
-- 涂抹最终版
-- 完整笔刷库系统
-- 自定义笔尖设计全量功能
-- 完全兼容旧项目工程格式
-- 一次性覆盖所有高级工具
+1. [HANDOFF.md](/Users/victorcloux/Desktop/ArtFlex/HANDOFF.md)
+2. [CURRENT_TASK.md](/Users/victorcloux/Desktop/ArtFlex/CURRENT_TASK.md)
+3. [DECISIONS.md](/Users/victorcloux/Desktop/ArtFlex/DECISIONS.md)
 
 ## 当前进展
 
@@ -70,7 +55,7 @@ BrushCanvas Next 是现有 `BrushCanvas` 的 Metal 重构版。
 `打开应用 -> 多图层绘制 -> 选区编辑 -> 撤销 / 重做 -> 导出 PNG -> 保存工程 -> 重新打开继续编辑`
 
 当前更完整的阶段状态可见 [CURRENT_STATUS.md](/Users/victorcloux/Desktop/ArtFlex/CURRENT_STATUS.md)。  
-第一阶段完成时的历史总结仍可见 [STAGE1_STATUS.md](/Users/victorcloux/Desktop/ArtFlex/STAGE1_STATUS.md)。
+第一阶段完成时的历史总结已归档到 [STAGE1_STATUS.md](/Users/victorcloux/Desktop/ArtFlex/Docs/archive/STAGE1_STATUS.md)。
 
 ## 迁移原则
 

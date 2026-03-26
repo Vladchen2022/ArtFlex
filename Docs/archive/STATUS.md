@@ -1,12 +1,18 @@
 # STATUS
 
-最后更新：2026-03-20
+最后更新：2026-03-26
 
 本文件记录 **当前仓库代码可确认的真实状态**。  
 它用于回答两个问题：
 
 - 现在这个项目已经有什么
 - 哪些部分已经定下，哪些部分仍在继续打磨
+
+说明：
+
+- 这个文件是广义状态记录，不是当前任务入口
+- 如果你是新线程，先看 [HANDOFF.md](/Users/victorcloux/Desktop/ArtFlex/HANDOFF.md) 和 [CURRENT_TASK.md](/Users/victorcloux/Desktop/ArtFlex/CURRENT_TASK.md)
+- performance 主线已经收口；当前不是再开大范围性能项目
 
 ## 总体状态
 
@@ -21,11 +27,11 @@
 - 画布旋转工具
 - 顶栏 / 左栏 / 右侧检查器的较大规模 UI 收口
 
-当前最明显仍在继续打磨的方向是：
+当前最值得继续打磨的方向已经收敛为：
 
-- 画布缩放流畅性
-- 自由变形缩放/旋转后的最终像素质量
-- 若干局部 UI 细节
+- history retention / 连续 undo 体感
+- brush size indicator 的 UI 响应
+- `selection.fill / lasso.fill` 的确认慢点
 
 ## 当前代码里已经确认存在的主界面结构
 

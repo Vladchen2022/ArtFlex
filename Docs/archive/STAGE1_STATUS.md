@@ -1,5 +1,11 @@
 # ArtFlex 第一阶段当前状态
 
+说明：
+
+- 这是历史阶段文档，只描述“第一阶段当时的状态”
+- 它不是当前任务入口，也不代表当前项目主线
+- 新线程默认先看 [HANDOFF.md](/Users/victorcloux/Desktop/ArtFlex/HANDOFF.md) 和 [CURRENT_TASK.md](/Users/victorcloux/Desktop/ArtFlex/CURRENT_TASK.md)
+
 ## 当前结论
 
 ArtFlex 第一阶段 MVP 的核心闭环已经基本打通。
