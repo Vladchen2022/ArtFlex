@@ -13,7 +13,11 @@ struct WorkspaceViewModelPixelHistoryTests {
         #expect(try harness.alpha(atX: 12, y: 12, layerID: layerID) > 0.01)
 
         harness.viewModel.undo()
-        #expect(try harness.alpha(atX: 12, y: 12, layerID: layerID) < 0.01)
+        let restoredFillPixel = try harness.color(atX: 12, y: 12, layerID: layerID)
+        #expect(restoredFillPixel.alpha > 0.99)
+        #expect(restoredFillPixel.red > 0.99)
+        #expect(restoredFillPixel.green > 0.99)
+        #expect(restoredFillPixel.blue > 0.99)
 
         harness.viewModel.redo()
         #expect(try harness.alpha(atX: 12, y: 12, layerID: layerID) > 0.01)
@@ -100,7 +104,11 @@ struct WorkspaceViewModelPixelHistoryTests {
         #expect(try harness.alpha(atX: 12, y: 12, layerID: layerID) > 0.01)
 
         harness.viewModel.undo()
-        #expect(try harness.alpha(atX: 12, y: 12, layerID: layerID) < 0.01)
+        let restoredSelectionPixel = try harness.color(atX: 12, y: 12, layerID: layerID)
+        #expect(restoredSelectionPixel.alpha > 0.99)
+        #expect(restoredSelectionPixel.red > 0.99)
+        #expect(restoredSelectionPixel.green > 0.99)
+        #expect(restoredSelectionPixel.blue > 0.99)
 
         harness.viewModel.redo()
         #expect(try harness.alpha(atX: 12, y: 12, layerID: layerID) > 0.01)
@@ -354,13 +362,17 @@ private struct PixelHistoryHarness {
     }
 
     func alpha(atX x: Int, y: Int, layerID: LayerID) throws -> Float {
+        try color(atX: x, y: y, layerID: layerID).alpha
+    }
+
+    func color(atX x: Int, y: Int, layerID: LayerID) throws -> RGBAColor {
         guard
             let surfaceID = bootstrap.layerSurfaceStore.surfaceID(for: layerID),
             let texture = bootstrap.layerSurfaceStore.texture(for: surfaceID)
         else {
             throw PixelHistoryHarnessError.textureUnavailable
         }
-        return try bootstrap.textureSerializer.samplePixel(texture: texture, x: x, y: y).alpha
+        return try bootstrap.textureSerializer.samplePixel(texture: texture, x: x, y: y)
     }
 }
 

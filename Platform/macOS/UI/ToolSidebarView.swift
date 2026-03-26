@@ -1,5 +1,18 @@
 import SwiftUI
 
+private let sidebarButtonLabelFontSize: CGFloat = 11
+private let sidebarButtonWidth: CGFloat = 122
+private let sidebarButtonHeight: CGFloat = 34
+private let sidebarButtonCornerRadius: CGFloat = 9
+private let sidebarButtonHorizontalPadding: CGFloat = 10
+private let sidebarButtonContentSpacing: CGFloat = 6
+private let sidebarButtonLeadingIconWidth: CGFloat = 13
+private let sidebarButtonTrailingGap: CGFloat = 4
+private let sidebarButtonIconFontSize: CGFloat = 11
+private let sidebarUtilityButtonSpacing: CGFloat = 8
+private let snapshotCountBadgeTrailingPadding: CGFloat = 8
+private let snapshotCountBadgeReservedWidth: CGFloat = 28
+
 struct ToolSidebarView: View {
     @ObservedObject var viewModel: WorkspaceViewModel
     @ObservedObject var hostViewModel: WorkspaceViewModel
@@ -48,13 +61,16 @@ struct ToolSidebarView: View {
 
             Spacer()
 
-            snapshotButton
-            ideationButton
-            recorderButton
+            VStack(spacing: sidebarUtilityButtonSpacing) {
+                snapshotButton
+                ideationButton
+                recorderButton
+            }
+            .padding(.vertical, 8)
         }
         .padding(.top, 10)
         .padding(.horizontal, 8)
-        .frame(width: 136)
+        .frame(width: 142)
         .frame(maxHeight: .infinity)
         .background(Color(red: 0.13, green: 0.13, blue: 0.14))
     }
@@ -68,27 +84,42 @@ struct ToolSidebarView: View {
             showsRecorderPopover = false
             hostViewModel.handleSnapshotSavePrimaryAction()
         } label: {
-            HStack(spacing: 5) {
+            HStack(spacing: sidebarButtonContentSpacing) {
                 Image(systemName: "camera.viewfinder")
-                    .font(.system(size: 10, weight: .semibold))
-                    .frame(width: 12)
+                    .font(.system(size: sidebarButtonIconFontSize, weight: .semibold))
+                    .frame(width: sidebarButtonLeadingIconWidth)
                     .foregroundStyle(Color.white.opacity(0.9))
 
                 Text("快照保存")
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(.system(size: sidebarButtonLabelFontSize, weight: .semibold))
                     .lineLimit(1)
                     .minimumScaleFactor(1)
                     .layoutPriority(1)
                     .foregroundStyle(Color.white.opacity(0.9))
 
-                Spacer(minLength: 6)
-
+                Spacer(minLength: 0)
+            }
+            .padding(.leading, sidebarButtonHorizontalPadding)
+            .padding(
+                .trailing,
+                sidebarButtonHorizontalPadding + snapshotCountBadgeReservedWidth + sidebarButtonTrailingGap
+            )
+            .frame(width: sidebarButtonWidth, height: sidebarButtonHeight)
+            .background(
+                RoundedRectangle(cornerRadius: sidebarButtonCornerRadius)
+                    .fill(
+                        hostViewModel.snapshotCompareSession == nil
+                            ? Color.white.opacity(0.08)
+                            : Color.accentColor.opacity(0.22)
+                    )
+            )
+            .overlay(alignment: .trailing) {
                 Text("\(hostViewModel.savedSnapshotCount)")
-                    .font(.system(size: 10, weight: .bold, design: .rounded))
+                    .font(.system(size: 9, weight: .bold, design: .rounded))
                     .foregroundStyle(Color.white.opacity(hostViewModel.savedSnapshotCount == 0 ? 0.48 : 0.92))
-                    .frame(minWidth: 12)
-                    .padding(.horizontal, 5)
-                    .padding(.vertical, 3)
+                    .frame(minWidth: 10)
+                    .padding(.horizontal, 4)
+                    .padding(.vertical, 2)
                     .fixedSize(horizontal: true, vertical: true)
                     .background(
                         Capsule()
@@ -98,17 +129,8 @@ struct ToolSidebarView: View {
                                     : Color.white.opacity(0.18)
                             )
                     )
+                    .padding(.trailing, snapshotCountBadgeTrailingPadding)
             }
-            .padding(.horizontal, 8)
-            .frame(width: 116, height: 34)
-            .background(
-                RoundedRectangle(cornerRadius: 9)
-                    .fill(
-                        hostViewModel.snapshotCompareSession == nil
-                            ? Color.white.opacity(0.08)
-                            : Color.accentColor.opacity(0.22)
-                    )
-            )
         }
         .buttonStyle(.plain)
         .help(snapshotButtonHelpText)
@@ -174,7 +196,6 @@ struct ToolSidebarView: View {
             .background(Color(red: 0.16, green: 0.16, blue: 0.17))
         }
         .disabled(hostViewModel.ideationSession != nil || hostViewModel.snapshotCompareSession != nil)
-        .padding(.top, 8)
     }
 
     private var ideationButton: some View {
@@ -192,19 +213,19 @@ struct ToolSidebarView: View {
                 hostViewModel.cancelIdeationSession()
             }
         } label: {
-            HStack(spacing: 6) {
+            HStack(spacing: sidebarButtonContentSpacing) {
                 Image(systemName: "square.grid.2x2")
-                    .font(.system(size: 11, weight: .semibold))
-                    .frame(width: 13)
+                    .font(.system(size: sidebarButtonIconFontSize, weight: .semibold))
+                    .frame(width: sidebarButtonLeadingIconWidth)
                     .foregroundStyle(Color.white.opacity(0.9))
 
                 Text("方案试探")
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(.system(size: sidebarButtonLabelFontSize, weight: .semibold))
                     .lineLimit(1)
                     .minimumScaleFactor(0.95)
                     .foregroundStyle(Color.white.opacity(0.9))
 
-                Spacer(minLength: 4)
+                Spacer(minLength: sidebarButtonTrailingGap)
 
                 Circle()
                     .fill(
@@ -218,10 +239,10 @@ struct ToolSidebarView: View {
                             .stroke(Color.white.opacity(0.18), lineWidth: 1)
                     )
             }
-            .padding(.horizontal, 10)
-            .frame(width: 116, height: 34)
+            .padding(.horizontal, sidebarButtonHorizontalPadding)
+            .frame(width: sidebarButtonWidth, height: sidebarButtonHeight)
             .background(
-                RoundedRectangle(cornerRadius: 9)
+                RoundedRectangle(cornerRadius: sidebarButtonCornerRadius)
                     .fill(
                         hostViewModel.snapshotCompareSession != nil
                             ? Color.white.opacity(0.05)
@@ -236,8 +257,6 @@ struct ToolSidebarView: View {
                 ? "快照对比期间不可进入方案试探"
                 : (hostViewModel.ideationSession == nil ? "方案试探" : "退出方案试探")
         )
-        .padding(.top, 8)
-        .padding(.bottom, 4)
     }
 
     private var recorderButton: some View {
@@ -249,19 +268,19 @@ struct ToolSidebarView: View {
             }
             showsRecorderPopover.toggle()
         } label: {
-            HStack(spacing: 6) {
+            HStack(spacing: sidebarButtonContentSpacing) {
                 Image(systemName: "record.circle")
-                    .font(.system(size: 11, weight: .semibold))
-                    .frame(width: 13)
+                    .font(.system(size: sidebarButtonIconFontSize, weight: .semibold))
+                    .frame(width: sidebarButtonLeadingIconWidth)
                     .foregroundStyle(Color.white.opacity(0.9))
 
                 Text("录像工具")
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(.system(size: sidebarButtonLabelFontSize, weight: .semibold))
                     .lineLimit(1)
                     .minimumScaleFactor(0.95)
                     .foregroundStyle(Color.white.opacity(0.9))
 
-                Spacer(minLength: 4)
+                Spacer(minLength: sidebarButtonTrailingGap)
 
                 Circle()
                     .fill(
@@ -275,10 +294,10 @@ struct ToolSidebarView: View {
                             .stroke(Color.white.opacity(0.18), lineWidth: 1)
                     )
             }
-            .padding(.horizontal, 10)
-            .frame(width: 116, height: 34)
+            .padding(.horizontal, sidebarButtonHorizontalPadding)
+            .frame(width: sidebarButtonWidth, height: sidebarButtonHeight)
             .background(
-                RoundedRectangle(cornerRadius: 9)
+                RoundedRectangle(cornerRadius: sidebarButtonCornerRadius)
                     .fill(
                         hostViewModel.ideationSession != nil || hostViewModel.snapshotCompareSession != nil
                             ? Color.orange.opacity(0.16)
@@ -295,7 +314,6 @@ struct ToolSidebarView: View {
                     ? "方案试探期间录像已暂停"
                     : (hostViewModel.timelapseRecorder.isRecording ? "录像工具（录制中）" : "录像工具（未录制）"))
         )
-        .padding(.vertical, 8)
         .popover(isPresented: $showsRecorderPopover, arrowEdge: .leading) {
             RecorderSectionView(
                 viewModel: hostViewModel,
@@ -333,19 +351,19 @@ private struct ToolSidebarGroupButton: View {
 
     var body: some View {
         Button(action: activateGroup) {
-            HStack(spacing: 6) {
+            HStack(spacing: sidebarButtonContentSpacing) {
                 Image(systemName: displayedTool.sidebarIconName)
-                    .font(.system(size: 11, weight: .semibold))
-                    .frame(width: 13)
+                    .font(.system(size: sidebarButtonIconFontSize, weight: .semibold))
+                    .frame(width: sidebarButtonLeadingIconWidth)
                     .foregroundStyle(isSelected ? Color.white : Color.white.opacity(0.85))
 
                 Text(displayedTool.displayName)
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(.system(size: sidebarButtonLabelFontSize, weight: .semibold))
                     .lineLimit(1)
                     .minimumScaleFactor(0.95)
                     .foregroundStyle(isSelected ? Color.white : Color.white.opacity(0.9))
 
-                Spacer(minLength: 4)
+                Spacer(minLength: sidebarButtonTrailingGap)
 
                 if group.isGrouped {
                     Image(systemName: "chevron.down")
@@ -353,10 +371,10 @@ private struct ToolSidebarGroupButton: View {
                         .foregroundStyle(isSelected ? Color.white.opacity(0.88) : Color.white.opacity(0.5))
                 }
             }
-            .padding(.horizontal, 10)
-            .frame(width: 116, height: 34)
+            .padding(.horizontal, sidebarButtonHorizontalPadding)
+            .frame(width: sidebarButtonWidth, height: sidebarButtonHeight)
             .background(
-                RoundedRectangle(cornerRadius: 9)
+                RoundedRectangle(cornerRadius: sidebarButtonCornerRadius)
                     .fill(isSelected ? Color.accentColor : Color.white.opacity(0.08))
             )
         }

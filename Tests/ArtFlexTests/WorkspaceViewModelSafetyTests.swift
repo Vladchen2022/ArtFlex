@@ -6,6 +6,19 @@ import Testing
 struct WorkspaceViewModelSafetyTests {
     @Test
     @MainActor
+    func initialWorkspaceStartsWithOpaqueWhiteBackgroundLayer() throws {
+        let harness = try BrushEditingBoundaryHarness()
+
+        #expect(harness.viewModel.workspace.document.layers.count == 1)
+        #expect(harness.viewModel.workspace.document.layers.first?.name == LayerRecord.defaultBackgroundLayerName)
+        #expect(try harness.color(atX: 0, y: 0).alpha > 0.99)
+        #expect(try harness.color(atX: 0, y: 0).red > 0.99)
+        #expect(try harness.color(atX: 0, y: 0).green > 0.99)
+        #expect(try harness.color(atX: 0, y: 0).blue > 0.99)
+    }
+
+    @Test
+    @MainActor
     func exportPNGFlushesPendingBrushCommitsBeforeReadingLayerTexture() throws {
         let harness = try BrushEditingBoundaryHarness()
         try harness.makePendingBrushCommit()
@@ -39,7 +52,12 @@ struct WorkspaceViewModelSafetyTests {
 
         #expect(harness.bootstrap.strokeEngine.hasPendingBrushCommitJobs == false)
         #expect(harness.viewModel.workspace.document.canvasSize == .init(width: 32, height: 32))
+        #expect(harness.viewModel.workspace.document.layers.first?.name == LayerRecord.defaultBackgroundLayerName)
         #expect(PerformanceAuditStore.shared.snapshot().latestDuration("HistoryController.captureCheckpoint") != nil)
+        #expect(try harness.color(atX: 0, y: 0).alpha > 0.99)
+        #expect(try harness.color(atX: 0, y: 0).red > 0.99)
+        #expect(try harness.color(atX: 0, y: 0).green > 0.99)
+        #expect(try harness.color(atX: 0, y: 0).blue > 0.99)
     }
 
     @Test
@@ -100,6 +118,10 @@ private struct BrushEditingBoundaryHarness {
     }
 
     func alpha(atX x: Int, y: Int) throws -> Float {
+        try color(atX: x, y: y).alpha
+    }
+
+    func color(atX x: Int, y: Int) throws -> RGBAColor {
         let layerID = viewModel.workspace.document.activeLayerID
         guard
             let surfaceID = bootstrap.layerSurfaceStore.surfaceID(for: layerID),
@@ -107,7 +129,7 @@ private struct BrushEditingBoundaryHarness {
         else {
             throw BoundaryHarnessError.textureUnavailable
         }
-        return try bootstrap.textureSerializer.samplePixel(texture: texture, x: x, y: y).alpha
+        return try bootstrap.textureSerializer.samplePixel(texture: texture, x: x, y: y)
     }
 }
 

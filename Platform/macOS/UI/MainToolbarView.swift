@@ -6,19 +6,19 @@ struct MainToolbarView: View {
 
     var body: some View {
         HStack(spacing: 14) {
-            toolbarIconButton("新建文件", systemImage: "doc.badge.plus") {
+            toolbarTextButton("新建") {
                 hostViewModel.presentNewCanvasSheet()
             }
 
-            toolbarIconButton("打开", systemImage: "folder") {
+            toolbarTextButton("打开") {
                 hostViewModel.openProject()
             }
 
-            toolbarIconButton("保存", systemImage: "square.and.arrow.down") {
+            toolbarTextButton("保存") {
                 hostViewModel.saveProject()
             }
 
-            toolbarIconButton("导出", systemImage: "square.and.arrow.up") {
+            toolbarTextButton("导出") {
                 hostViewModel.exportPNG()
             }
 
@@ -78,16 +78,13 @@ struct MainToolbarView: View {
             .frame(width: 1, height: 20)
     }
 
-    private func toolbarIconButton(
-        _ title: String,
-        systemImage: String,
-        action: @escaping () -> Void
-    ) -> some View {
+    private func toolbarTextButton(_ title: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            Image(systemName: systemImage)
+            Text(title)
                 .font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(Color.white.opacity(0.86))
-                .frame(width: 18, height: 18)
+                .frame(minWidth: 28)
+                .frame(height: 18)
         }
         .buttonStyle(.plain)
         .help(title)

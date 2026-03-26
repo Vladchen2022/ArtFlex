@@ -8,7 +8,8 @@ struct DocumentStateTests {
 
         #expect(document.canvasSize == .stageOneDefault)
         #expect(document.layers.count == 1)
-        #expect(document.layers.first?.name == "图层 1")
+        #expect(document.layers.first?.name == LayerRecord.defaultBackgroundLayerName)
+        #expect(document.layers.first?.isLocked == false)
         #expect(document.activeLayerID == document.layers.first?.id)
         #expect(document.colorStandard == .stageOneDefault)
     }

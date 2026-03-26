@@ -15,10 +15,12 @@ struct LayerRecord: Codable, Sendable, Equatable {
     var isLocked: Bool
     var opacity: Float
 
+    static let defaultBackgroundLayerName = "背景"
+
     static func stageOneDefault() -> LayerRecord {
         LayerRecord(
             id: LayerID(),
-            name: "图层 1",
+            name: Self.defaultBackgroundLayerName,
             isVisible: true,
             isLocked: false,
             opacity: 1

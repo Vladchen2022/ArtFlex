@@ -145,6 +145,9 @@ final class WorkspaceViewModel: ObservableObject {
         if let group = ToolSidebarGroup.group(containing: state.toolSession.activeTool) {
             toolGroupSurfaceTools[group.id] = state.toolSession.activeTool
         }
+        if preparesInitialTextures {
+            seedDefaultBackgroundLayerIfNeeded(for: state.document)
+        }
         syncTimelapseDocumentContext()
         if installsZoomKeyboardMonitor {
             setupZoomKeyboardMonitor()
@@ -4869,6 +4872,7 @@ final class WorkspaceViewModel: ObservableObject {
             for: newWorkspace.document,
             metal: bootstrap.metalContext
         )
+        seedDefaultBackgroundLayerIfNeeded(for: newWorkspace.document)
         bootstrap.textureSerializer.purgeStagingTextures(exceeding: newWorkspace.document.canvasSize)
         bootstrap.historyController.resetHistory()
 
@@ -4878,6 +4882,60 @@ final class WorkspaceViewModel: ObservableObject {
         syncTimelapseDocumentContext()
         showStatus(.init(kind: .success, message: "已创建新画布：\(canvasSize.width)×\(canvasSize.height)"))
         refresh()
+    }
+
+    private func seedDefaultBackgroundLayerIfNeeded(for document: ArtDocument) {
+        guard
+            document.layers.count == 1,
+            let backgroundLayer = document.layers.first,
+            backgroundLayer.name == LayerRecord.defaultBackgroundLayerName,
+            let surfaceID = bootstrap.layerSurfaceStore.surfaceID(for: backgroundLayer.id),
+            let texture = bootstrap.layerSurfaceStore.texture(for: surfaceID)
+        else {
+            return
+        }
+
+        let snapshot = Self.solidColorSnapshot(
+            width: document.canvasSize.width,
+            height: document.canvasSize.height,
+            blue: 255,
+            green: 255,
+            red: 255,
+            alpha: 255
+        )
+
+        do {
+            try bootstrap.textureSerializer.restore(snapshot: snapshot, into: texture)
+            layerThumbnailCache.removeValue(forKey: backgroundLayer.id)
+        } catch {
+            return
+        }
+    }
+
+    private static func solidColorSnapshot(
+        width: Int,
+        height: Int,
+        blue: UInt8,
+        green: UInt8,
+        red: UInt8,
+        alpha: UInt8
+    ) -> LayerTextureSnapshot {
+        let bytesPerRow = width * 4
+        var pixels = [UInt8](repeating: 0, count: bytesPerRow * height)
+
+        for offset in stride(from: 0, to: pixels.count, by: 4) {
+            pixels[offset] = blue
+            pixels[offset + 1] = green
+            pixels[offset + 2] = red
+            pixels[offset + 3] = alpha
+        }
+
+        return LayerTextureSnapshot(
+            width: width,
+            height: height,
+            bytesPerRow: bytesPerRow,
+            pixelData: Data(pixels)
+        )
     }
 
     private static func makeSceneSnapshot(
