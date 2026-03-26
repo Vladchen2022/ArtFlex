@@ -95,6 +95,10 @@ final class WorkspaceViewModel: ObservableObject {
     private let transformLogger = Logger(subsystem: "ArtFlex", category: "Transform")
     private var documentChangeRevision: UInt64 = 0
     private var strokePacketCount = 0
+#if DEBUG
+    var debugPixelOperationHistoryCaptureModeOverride: HistoryCaptureMode?
+    var debugFillAtPointHistoryCaptureModeOverride: HistoryCaptureMode?
+#endif
     private var freeTransformMoveLogCount = 0
     private var wholeLayerInteractionBoundsCacheKey: WholeLayerInteractionBoundsKey?
     private var wholeLayerInteractionBoundsCacheEntry: WholeLayerInteractionBoundsCacheEntry?
@@ -1168,7 +1172,18 @@ final class WorkspaceViewModel: ObservableObject {
             return
         }
 
-        checkpointHistoryIfPossible()
+        let fillAtPointCaptureMode: HistoryCaptureMode
+#if DEBUG
+        fillAtPointCaptureMode = debugFillAtPointHistoryCaptureModeOverride ?? .inPlaceChangedLayers([layerID])
+#else
+        fillAtPointCaptureMode = .inPlaceChangedLayers([layerID])
+#endif
+
+        checkpointHistoryIfPossible(
+            operationKind: "fillAtPoint",
+            candidateChangedLayerIDs: [layerID],
+            captureMode: fillAtPointCaptureMode
+        )
 
         do {
             try bootstrap.bucketFillEngine.fill(
@@ -2540,6 +2555,7 @@ final class WorkspaceViewModel: ObservableObject {
             _ = applyPixelOperation(
                 to: preferredShape,
                 operation: operation,
+                historyOperationKind: combineMode == .subtract ? "lasso.erase" : "lasso.fill",
                 successMessage: successMessage
             )
             activeLassoRawPoints = []
@@ -3601,6 +3617,7 @@ final class WorkspaceViewModel: ObservableObject {
         _ = applyPixelOperation(
             to: selectionShape,
             operation: .clear,
+            historyOperationKind: "selection.erase",
             successMessage: "已删除选区内容"
         )
     }
@@ -3613,6 +3630,7 @@ final class WorkspaceViewModel: ObservableObject {
         _ = applyPixelOperation(
             to: selectionShape,
             operation: .fill(premultipliedPixel(from: workspace.toolSession.selectedColor)),
+            historyOperationKind: "selection.fill",
             successMessage: "已填充选区"
         )
     }
@@ -3628,7 +3646,12 @@ final class WorkspaceViewModel: ObservableObject {
             return
         }
 
-        fillSelectionContents()
+        _ = applyPixelOperation(
+            to: selectionShape,
+            operation: .fill(premultipliedPixel(from: workspace.toolSession.selectedColor)),
+            historyOperationKind: "lasso.fill",
+            successMessage: "已填充选区"
+        )
     }
 
     func applyGeneratorToActiveLayer(clearSelectionAfterApply: Bool = false) {
@@ -3957,7 +3980,12 @@ final class WorkspaceViewModel: ObservableObject {
             return
         }
 
-        deleteSelectionContents()
+        _ = applyPixelOperation(
+            to: selectionShape,
+            operation: .clear,
+            historyOperationKind: "lasso.erase",
+            successMessage: "已删除选区内容"
+        )
     }
 
     func handleKeyDown(_ event: NSEvent) -> Bool {
@@ -5017,10 +5045,26 @@ final class WorkspaceViewModel: ObservableObject {
         }
     }
 
-    private func checkpointHistoryIfPossible() {
+    private func checkpointHistoryIfPossible(
+        operationKind: String = "generic.checkpoint",
+        candidateChangedLayerIDs: [LayerID] = [],
+        topologyOperation: Bool = false,
+        additionalOperationKinds: [String] = [],
+        captureMode: HistoryCaptureMode = .full
+    ) {
         _ = flushBrushEditingBoundary(reason: "checkpointHistoryIfPossible")
         do {
-            try bootstrap.historyController.captureCheckpoint()
+            try bootstrap.historyController.captureCheckpoint(
+                captureMode: captureMode,
+                auditContext: HistoryEligibilityAuditContext(
+                    operationKind: operationKind,
+                    candidateChangedLayerIDs: candidateChangedLayerIDs,
+                    candidateChangedLayerIDsKnown: !candidateChangedLayerIDs.isEmpty,
+                    comparisonWorkspace: captureHistoryEligibilityComparisonWorkspace(),
+                    topologyOperation: topologyOperation,
+                    additionalOperationKinds: additionalOperationKinds
+                )
+            )
             hasUnsavedChanges = true
             canUndo = bootstrap.historyController.canUndo
             canRedo = bootstrap.historyController.canRedo
@@ -5087,8 +5131,32 @@ final class WorkspaceViewModel: ObservableObject {
         tool == .brush || tool == .eraser || tool == .smudge
     }
 
-    private func captureBrushCommitCheckpoint(for _: BrushCommitJob) throws {
-        try bootstrap.historyController.captureCheckpoint()
+    private func captureBrushCommitCheckpoint(for job: BrushCommitJob) throws {
+        let operationKind: String
+        let captureMode: HistoryCaptureMode
+        switch job.packets.last?.tool {
+        case .brush:
+            operationKind = "brush.commit"
+            captureMode = .inPlaceChangedLayers([job.layerID])
+        case .eraser:
+            operationKind = "eraser.commit"
+            captureMode = .inPlaceChangedLayers([job.layerID])
+        case .smudge:
+            operationKind = "smudge.commit"
+            captureMode = .full
+        default:
+            operationKind = "brushLike.commit"
+            captureMode = .full
+        }
+        try bootstrap.historyController.captureCheckpoint(
+            captureMode: captureMode,
+            auditContext: HistoryEligibilityAuditContext(
+                operationKind: operationKind,
+                candidateChangedLayerIDs: [job.layerID],
+                candidateChangedLayerIDsKnown: true,
+                comparisonWorkspace: captureHistoryEligibilityComparisonWorkspace()
+            )
+        )
     }
 
     func makeVisibleCompositeSnapshot() throws -> LayerTextureSnapshot {
@@ -5198,6 +5266,7 @@ final class WorkspaceViewModel: ObservableObject {
     private func applyPixelOperation(
         to selectionShape: SelectionShape,
         operation: SelectionPixelOperation,
+        historyOperationKind: String,
         successMessage: String
     ) -> Bool {
         guard let layerID = bootstrap.interactionController.activeEditableLayerID() else {
@@ -5213,7 +5282,19 @@ final class WorkspaceViewModel: ObservableObject {
             return false
         }
 
-        checkpointHistoryIfPossible()
+        let pixelOperationCaptureMode: HistoryCaptureMode
+#if DEBUG
+        pixelOperationCaptureMode = debugPixelOperationHistoryCaptureModeOverride ?? .inPlaceChangedLayers([layerID])
+#else
+        pixelOperationCaptureMode = .inPlaceChangedLayers([layerID])
+#endif
+
+        checkpointHistoryIfPossible(
+            operationKind: historyOperationKind,
+            candidateChangedLayerIDs: [layerID],
+            additionalOperationKinds: ["applyPixelOperation"],
+            captureMode: pixelOperationCaptureMode
+        )
 
         do {
             let clampedSelection = selectionShape.clamped(
@@ -5285,6 +5366,10 @@ final class WorkspaceViewModel: ObservableObject {
             showStatus(.init(kind: .error, message: error.localizedDescription))
             return false
         }
+    }
+
+    private func captureHistoryEligibilityComparisonWorkspace() -> WorkspaceState? {
+        bootstrap.historyController.latestUndoWorkspaceForAudit
     }
 
     private func mutateSelectionPixels(

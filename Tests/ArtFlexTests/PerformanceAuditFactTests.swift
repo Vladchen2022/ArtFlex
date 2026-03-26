@@ -1,4 +1,5 @@
 import Darwin
+import Foundation
 import Metal
 import Testing
 @testable import ArtFlex
@@ -29,6 +30,12 @@ struct PerformanceAuditFactTests {
             viewModel: baselineViewModel,
             metalContext: metalContext
         )
+        let historyEligibilityRows = try measureHistoryEligibilitySummary(metalContext: metalContext)
+        let historyCostRows = try measureHistoryCostByCanvasAndLayerCount(metalContext: metalContext)
+        let brushDirtyPilotRows = try measureBrushDirtyHistoryPilot(metalContext: metalContext)
+        let eraserDirtyPilotRows = try measureEraserDirtyHistoryPilot(metalContext: metalContext)
+        let pixelOperationDirtyPilotRows = try measureApplyPixelOperationDirtyPilot(metalContext: metalContext)
+        let fillAtPointDirtyPilotRows = try measureFillAtPointDirtyPilot(metalContext: metalContext)
         let serializerMetrics = try measureSerializerAndExportTimings(
             bootstrap: baselineBootstrap,
             metalContext: metalContext
@@ -40,19 +47,247 @@ struct PerformanceAuditFactTests {
         for (label, value) in interactiveMetrics.sorted(by: { $0.key < $1.key }) {
             print("[audit-timing] \(label)=\(String(format: "%.3f", value))ms")
         }
+        for row in historyEligibilityRows {
+            let reasons = row.ineligibleReasonCounts
+                .sorted { $0.key.rawValue < $1.key.rawValue }
+                .map { "\($0.key.rawValue):\($0.value)" }
+                .joined(separator: ",")
+            print(
+                "[history-eligibility] kind=\(row.operationKind) canvas=\(row.canvasSizeBucket) " +
+                "layers=\(row.layerCountBucket) phase=\(row.warmupOrSteadyState.rawValue) " +
+                "count=\(row.count) eligibleCount=\(row.eligibleCount) " +
+                "eligibleRatio=\(String(format: "%.3f", row.eligibleRatio)) " +
+                "fullBytes=\(row.fullEntryBytes) dirtyBytes=\(row.projectedDirtyEntryBytes) " +
+                "savedBytes=\(row.savedBytes) fullLayers=\(row.fullLayers) " +
+                "dirtyLayers=\(row.dirtyLayers) savedLayers=\(row.savedLayers) " +
+                "overBudgetCount=\(row.overBudgetCount) reasons=\(reasons)"
+            )
+        }
+        for row in historyCostRows {
+            print(
+                "[history-cost] canvas=\(row.canvasWidth)x\(row.canvasHeight) layers=\(row.layerCount) " +
+                "entryBytes=\(row.entryBytes) checkpointMs=\(String(format: "%.3f", row.checkpointMs))"
+            )
+        }
+        for row in brushDirtyPilotRows {
+            print(
+                "[\(row.toolLabel)-dirty-pilot] canvas=\(row.canvasWidth)x\(row.canvasHeight) layers=\(row.layerCount) " +
+                "capture.full=\(String(format: "%.3f", row.fullCaptureCheckpointMs))ms " +
+                "capture.dirty=\(String(format: "%.3f", row.dirtyCaptureCheckpointMs))ms " +
+                "undo.full=\(String(format: "%.3f", row.fullUndoMs))ms " +
+                "undo.dirty=\(String(format: "%.3f", row.dirtyUndoMs))ms " +
+                "redo.full=\(String(format: "%.3f", row.fullRedoMs))ms " +
+                "redo.dirty=\(String(format: "%.3f", row.dirtyRedoMs))ms " +
+                "entryBytes.full=\(row.fullEntryBytes) entryBytes.dirty=\(row.dirtyEntryBytes) " +
+                "retained.full=\(row.fullRetainedHistoryPoints) retained.dirty=\(row.dirtyRetainedHistoryPoints)"
+            )
+        }
+        for row in eraserDirtyPilotRows {
+            print(
+                "[\(row.toolLabel)-dirty-pilot] canvas=\(row.canvasWidth)x\(row.canvasHeight) layers=\(row.layerCount) " +
+                "capture.full=\(String(format: "%.3f", row.fullCaptureCheckpointMs))ms " +
+                "capture.dirty=\(String(format: "%.3f", row.dirtyCaptureCheckpointMs))ms " +
+                "undo.full=\(String(format: "%.3f", row.fullUndoMs))ms " +
+                "undo.dirty=\(String(format: "%.3f", row.dirtyUndoMs))ms " +
+                "redo.full=\(String(format: "%.3f", row.fullRedoMs))ms " +
+                "redo.dirty=\(String(format: "%.3f", row.dirtyRedoMs))ms " +
+                "entryBytes.full=\(row.fullEntryBytes) entryBytes.dirty=\(row.dirtyEntryBytes) " +
+                "retained.full=\(row.fullRetainedHistoryPoints) retained.dirty=\(row.dirtyRetainedHistoryPoints)"
+            )
+        }
+        for row in pixelOperationDirtyPilotRows {
+            print(
+                "[\(row.toolLabel)-dirty-pilot] canvas=\(row.canvasWidth)x\(row.canvasHeight) layers=\(row.layerCount) " +
+                "capture.full=\(String(format: "%.3f", row.fullCaptureCheckpointMs))ms " +
+                "capture.dirty=\(String(format: "%.3f", row.dirtyCaptureCheckpointMs))ms " +
+                "undo.full=\(String(format: "%.3f", row.fullUndoMs))ms " +
+                "undo.dirty=\(String(format: "%.3f", row.dirtyUndoMs))ms " +
+                "redo.full=\(String(format: "%.3f", row.fullRedoMs))ms " +
+                "redo.dirty=\(String(format: "%.3f", row.dirtyRedoMs))ms " +
+                "entryBytes.full=\(row.fullEntryBytes) entryBytes.dirty=\(row.dirtyEntryBytes) " +
+                "retained.full=\(row.fullRetainedHistoryPoints) retained.dirty=\(row.dirtyRetainedHistoryPoints)"
+            )
+        }
+        for row in fillAtPointDirtyPilotRows {
+            print(
+                "[\(row.toolLabel)-dirty-pilot] canvas=\(row.canvasWidth)x\(row.canvasHeight) layers=\(row.layerCount) " +
+                "capture.full=\(String(format: "%.3f", row.fullCaptureCheckpointMs))ms " +
+                "capture.dirty=\(String(format: "%.3f", row.dirtyCaptureCheckpointMs))ms " +
+                "undo.full=\(String(format: "%.3f", row.fullUndoMs))ms " +
+                "undo.dirty=\(String(format: "%.3f", row.dirtyUndoMs))ms " +
+                "redo.full=\(String(format: "%.3f", row.fullRedoMs))ms " +
+                "redo.dirty=\(String(format: "%.3f", row.dirtyRedoMs))ms " +
+                "entryBytes.full=\(row.fullEntryBytes) entryBytes.dirty=\(row.dirtyEntryBytes) " +
+                "retained.full=\(row.fullRetainedHistoryPoints) retained.dirty=\(row.dirtyRetainedHistoryPoints)"
+            )
+        }
         for (label, value) in serializerMetrics.sorted(by: { $0.key < $1.key }) {
             print("[audit-timing] \(label)=\(String(format: "%.3f", value))ms")
         }
         print("[audit-memory] brush4096.peakBytes=\(brushPeakBytes)")
         print("[audit-memory] smudge4096.peakBytes=\(smudge4096Metrics.peakBytes)")
         print("[audit-memory] smudge8192.peakBytes=\(smudge8192Metrics.peakBytes)")
-        print("[audit-timing] StageOneBrushRenderer.makeSmudgeSourceTexture.4096=\(String(format: "%.3f", smudge4096Metrics.makeSmudgeSourceTextureMs))ms")
-        print("[audit-timing] StageOneBrushRenderer.makeSmudgeSourceTexture.8192=\(String(format: "%.3f", smudge8192Metrics.makeSmudgeSourceTextureMs))ms")
+        print("[audit-timing] StageOneBrushRenderer.smudgeGatherPass.4096=\(String(format: "%.3f", smudge4096Metrics.smudgeGatherPassMs))ms")
+        print("[audit-timing] StageOneBrushRenderer.smudgeGatherPass.8192=\(String(format: "%.3f", smudge8192Metrics.smudgeGatherPassMs))ms")
         print("[audit-timing] MetalStrokeEngine.smudgeStrokeWallTime.4096=\(String(format: "%.3f", smudge4096Metrics.strokeWallMs))ms")
         print("[audit-timing] MetalStrokeEngine.smudgeStrokeWallTime.8192=\(String(format: "%.3f", smudge8192Metrics.strokeWallMs))ms")
         print("[audit-timing] MetalStrokeEngine.smudgeFlushCommandBufferCompletion.4096=\(String(format: "%.3f", smudge4096Metrics.commandBufferCompletionMs))ms")
         print("[audit-timing] MetalStrokeEngine.smudgeFlushCommandBufferCompletion.8192=\(String(format: "%.3f", smudge8192Metrics.commandBufferCompletionMs))ms")
     }
+
+    @Test
+    @MainActor
+    func fillAtPointDirtyPilotMeasurementOnly() throws {
+        guard let metalContext = MetalDeviceContext() else {
+            Issue.record("Metal unavailable")
+            return
+        }
+
+        let rows = try measureFillAtPointDirtyPilot(metalContext: metalContext)
+        var outputLines: [String] = []
+        for row in rows {
+            let line =
+                "[\(row.toolLabel)-dirty-pilot] canvas=\(row.canvasWidth)x\(row.canvasHeight) layers=\(row.layerCount) " +
+                "capture.full=\(String(format: "%.3f", row.fullCaptureCheckpointMs))ms " +
+                "capture.dirty=\(String(format: "%.3f", row.dirtyCaptureCheckpointMs))ms " +
+                "undo.full=\(String(format: "%.3f", row.fullUndoMs))ms " +
+                "undo.dirty=\(String(format: "%.3f", row.dirtyUndoMs))ms " +
+                "redo.full=\(String(format: "%.3f", row.fullRedoMs))ms " +
+                "redo.dirty=\(String(format: "%.3f", row.dirtyRedoMs))ms " +
+                "entryBytes.full=\(row.fullEntryBytes) entryBytes.dirty=\(row.dirtyEntryBytes) " +
+                "retained.full=\(row.fullRetainedHistoryPoints) retained.dirty=\(row.dirtyRetainedHistoryPoints)"
+            print(line)
+            outputLines.append(line)
+        }
+        try outputLines.joined(separator: "\n").write(
+            to: URL(fileURLWithPath: "/tmp/fill_at_point_dirty_pilot.txt"),
+            atomically: true,
+            encoding: .utf8
+        )
+    }
+
+    @Test
+    @MainActor
+    func fillAtPointDirtyPilot4096x4096_4Layers() throws {
+        try measureAndWriteSingleFillAtPointDirtyPilotCase(
+            canvasSize: .init(width: 4096, height: 4096),
+            layerCount: 4,
+            outputPath: "/tmp/fill_at_point_dirty_pilot_4096_4.txt"
+        )
+    }
+
+    @Test
+    @MainActor
+    func fillAtPointDirtyPilot4096x4096_8Layers() throws {
+        try measureAndWriteSingleFillAtPointDirtyPilotCase(
+            canvasSize: .init(width: 4096, height: 4096),
+            layerCount: 8,
+            outputPath: "/tmp/fill_at_point_dirty_pilot_4096_8.txt"
+        )
+    }
+
+    @Test
+    @MainActor
+    func fillAtPointDirtyPilot8192x8192_4Layers() throws {
+        try measureAndWriteSingleFillAtPointDirtyPilotCase(
+            canvasSize: .init(width: 8192, height: 8192),
+            layerCount: 4,
+            outputPath: "/tmp/fill_at_point_dirty_pilot_8192_4.txt"
+        )
+    }
+
+    @Test
+    @MainActor
+    func fillAtPointDirtyPilot8192x8192_8Layers() throws {
+        try measureAndWriteSingleFillAtPointDirtyPilotCase(
+            canvasSize: .init(width: 8192, height: 8192),
+            layerCount: 8,
+            outputPath: "/tmp/fill_at_point_dirty_pilot_8192_8.txt"
+        )
+    }
+}
+
+private struct HistoryCostAuditRow {
+    var canvasWidth: Int
+    var canvasHeight: Int
+    var layerCount: Int
+    var entryBytes: Int
+    var checkpointMs: Double
+}
+
+private struct BrushDirtyHistoryPilotRow {
+    var toolLabel: String
+    var canvasWidth: Int
+    var canvasHeight: Int
+    var layerCount: Int
+    var fullCaptureCheckpointMs: Double
+    var dirtyCaptureCheckpointMs: Double
+    var fullUndoMs: Double
+    var dirtyUndoMs: Double
+    var fullRedoMs: Double
+    var dirtyRedoMs: Double
+    var fullEntryBytes: Int
+    var dirtyEntryBytes: Int
+    var fullRetainedHistoryPoints: Int
+    var dirtyRetainedHistoryPoints: Int
+}
+
+@MainActor
+private func measureAndWriteSingleFillAtPointDirtyPilotCase(
+    canvasSize: CanvasSize,
+    layerCount: Int,
+    outputPath: String
+) throws {
+    let fullCapture = try measureFillAtPointCheckpoint(
+        canvasSize: canvasSize,
+        layerCount: layerCount,
+        captureMode: .full
+    )
+    let dirtyCapture = try measureFillAtPointCheckpoint(
+        canvasSize: canvasSize,
+        layerCount: layerCount,
+        captureMode: .inPlaceChangedLayers([LayerID()])
+    )
+    let fullHistoryNavigation = try measureFillAtPointUndoRedo(
+        canvasSize: canvasSize,
+        layerCount: layerCount,
+        captureMode: .full
+    )
+    let dirtyHistoryNavigation = try measureFillAtPointUndoRedo(
+        canvasSize: canvasSize,
+        layerCount: layerCount,
+        captureMode: .inPlaceChangedLayers([LayerID()])
+    )
+
+    let row = BrushDirtyHistoryPilotRow(
+        toolLabel: "fill-at-point",
+        canvasWidth: canvasSize.width,
+        canvasHeight: canvasSize.height,
+        layerCount: layerCount,
+        fullCaptureCheckpointMs: fullCapture.checkpointMs,
+        dirtyCaptureCheckpointMs: dirtyCapture.checkpointMs,
+        fullUndoMs: fullHistoryNavigation.undoMs,
+        dirtyUndoMs: dirtyHistoryNavigation.undoMs,
+        fullRedoMs: fullHistoryNavigation.redoMs,
+        dirtyRedoMs: dirtyHistoryNavigation.redoMs,
+        fullEntryBytes: fullCapture.entryBytes,
+        dirtyEntryBytes: dirtyCapture.entryBytes,
+        fullRetainedHistoryPoints: retainedHistoryPointsForBudget(entryBytes: fullCapture.entryBytes),
+        dirtyRetainedHistoryPoints: retainedHistoryPointsForBudget(entryBytes: dirtyCapture.entryBytes)
+    )
+
+    let line =
+        "[\(row.toolLabel)-dirty-pilot] canvas=\(row.canvasWidth)x\(row.canvasHeight) layers=\(row.layerCount) " +
+        "capture.full=\(String(format: "%.3f", row.fullCaptureCheckpointMs))ms " +
+        "capture.dirty=\(String(format: "%.3f", row.dirtyCaptureCheckpointMs))ms " +
+        "undo.full=\(String(format: "%.3f", row.fullUndoMs))ms " +
+        "undo.dirty=\(String(format: "%.3f", row.dirtyUndoMs))ms " +
+        "redo.full=\(String(format: "%.3f", row.fullRedoMs))ms " +
+        "redo.dirty=\(String(format: "%.3f", row.dirtyRedoMs))ms " +
+        "entryBytes.full=\(row.fullEntryBytes) entryBytes.dirty=\(row.dirtyEntryBytes) " +
+        "retained.full=\(row.fullRetainedHistoryPoints) retained.dirty=\(row.dirtyRetainedHistoryPoints)"
+    print(line)
+    try line.write(to: URL(fileURLWithPath: outputPath), atomically: true, encoding: .utf8)
 }
 
 @MainActor
@@ -87,6 +322,790 @@ private func measureInteractiveTimings(
         "WorkspaceViewModel.undo": snapshot.averageDuration("WorkspaceViewModel.undo") ?? 0,
         "WorkspaceViewModel.redo": snapshot.averageDuration("WorkspaceViewModel.redo") ?? 0
     ]
+}
+
+@MainActor
+private func measureHistoryEligibilitySummary(
+    metalContext: MetalDeviceContext
+) throws -> [HistoryEligibilityAuditSummaryRow] {
+    let bootstrap = try AppBootstrap(
+        metalContext: metalContext,
+        layerSurfaceStore: StageOneLayerSurfaceStore()
+    )
+    let viewModel = WorkspaceViewModel(
+        bootstrap: bootstrap,
+        installsZoomKeyboardMonitor: false
+    )
+
+    viewModel.addLayer()
+    viewModel.addLayer()
+    viewModel.addLayer()
+
+    bootstrap.historyController.resetHistory()
+    PerformanceAuditStore.shared.reset()
+
+    viewModel.selectTool(.brush)
+    viewModel.beginStrokeIfNeeded()
+    viewModel.applyStroke(
+        samples: [
+            .init(location: .init(x: 10, y: 10), pressure: 1),
+            .init(location: .init(x: 20, y: 18), pressure: 1)
+        ]
+    )
+    viewModel.endStroke()
+    try flushPendingBrushWork(viewModel: viewModel, metalContext: metalContext)
+    viewModel.opportunisticallyDrainBrushCommits(hadLiveBrushWorkThisFrame: false)
+
+    viewModel.selectTool(.eraser)
+    viewModel.beginStrokeIfNeeded()
+    viewModel.applyStroke(
+        samples: [
+            .init(location: .init(x: 12, y: 12), pressure: 1),
+            .init(location: .init(x: 22, y: 20), pressure: 1)
+        ]
+    )
+    viewModel.endStroke()
+    try flushPendingBrushWork(viewModel: viewModel, metalContext: metalContext)
+    viewModel.opportunisticallyDrainBrushCommits(hadLiveBrushWorkThisFrame: false)
+
+    viewModel.selectTool(.smudge)
+    viewModel.beginStrokeIfNeeded()
+    viewModel.applyStroke(
+        samples: [
+            .init(location: .init(x: 14, y: 14), pressure: 1),
+            .init(location: .init(x: 24, y: 22), pressure: 1)
+        ]
+    )
+    viewModel.endStroke()
+    try flushPendingBrushWork(viewModel: viewModel, metalContext: metalContext)
+    viewModel.opportunisticallyDrainBrushCommits(hadLiveBrushWorkThisFrame: false)
+
+    viewModel.selectTool(.brush)
+    viewModel.beginStrokeIfNeeded()
+    viewModel.applyStroke(
+        samples: [
+            .init(location: .init(x: 18, y: 18), pressure: 1),
+            .init(location: .init(x: 28, y: 26), pressure: 1)
+        ]
+    )
+    viewModel.endStroke()
+    try flushPendingBrushWork(viewModel: viewModel, metalContext: metalContext)
+    viewModel.opportunisticallyDrainBrushCommits(hadLiveBrushWorkThisFrame: false)
+
+    viewModel.fillAtPoint(.init(x: 14, y: 14))
+
+    viewModel.selectTool(.lassoSelection)
+    createCommittedLassoSelection(
+        on: viewModel,
+        points: [
+            .init(x: 8, y: 8),
+            .init(x: 36, y: 8),
+            .init(x: 36, y: 36),
+            .init(x: 8, y: 36),
+            .init(x: 8, y: 8)
+        ]
+    )
+    viewModel.fillSelectionContents()
+
+    viewModel.selectTool(.lassoSelection)
+    createCommittedLassoSelection(
+        on: viewModel,
+        points: [
+            .init(x: 16, y: 16),
+            .init(x: 32, y: 16),
+            .init(x: 32, y: 32),
+            .init(x: 16, y: 32),
+            .init(x: 16, y: 16)
+        ]
+    )
+    viewModel.fillLassoContents()
+
+    viewModel.selectTool(.lassoSelection)
+    createCommittedLassoSelection(
+        on: viewModel,
+        points: [
+            .init(x: 20, y: 20),
+            .init(x: 28, y: 20),
+            .init(x: 28, y: 28),
+            .init(x: 20, y: 28),
+            .init(x: 20, y: 20)
+        ]
+    )
+    viewModel.eraseLassoContents()
+
+    viewModel.undo()
+    viewModel.redo()
+
+    try recordEligibilityAuditOnly(
+        metalContext: metalContext,
+        canvasSize: .init(width: 4096, height: 4096),
+        layerCount: 1,
+        operationKind: "brush.commit",
+        candidateChangedLayerIDsKnown: true
+    )
+    try recordEligibilityAuditOnly(
+        metalContext: metalContext,
+        canvasSize: .init(width: 4096, height: 4096),
+        layerCount: 8,
+        operationKind: "brush.commit",
+        candidateChangedLayerIDsKnown: true
+    )
+    try recordEligibilityAuditOnly(
+        metalContext: metalContext,
+        canvasSize: .init(width: 8192, height: 8192),
+        layerCount: 4,
+        operationKind: "brush.commit",
+        candidateChangedLayerIDsKnown: true
+    )
+    try recordEligibilityAuditOnly(
+        metalContext: metalContext,
+        canvasSize: .init(width: 8192, height: 8192),
+        layerCount: 8,
+        operationKind: "brush.commit",
+        candidateChangedLayerIDsKnown: true
+    )
+
+    return PerformanceAuditStore.shared.snapshot().historyEligibilitySummaryRows()
+}
+
+@MainActor
+private func recordEligibilityAuditOnly(
+    metalContext: MetalDeviceContext,
+    canvasSize: CanvasSize,
+    layerCount: Int,
+    operationKind: String,
+    candidateChangedLayerIDsKnown: Bool
+) throws {
+    var workspaceState = WorkspaceState.stageOneDefault
+    workspaceState.document.canvasSize = canvasSize
+    workspaceState.document.metadata.updatedAt = Date()
+
+    let workspaceStore = WorkspaceStore(state: workspaceState)
+    let layerSurfaceStore = StageOneLayerSurfaceStore()
+    layerSurfaceStore.prepareTextures(for: workspaceState.document, metal: metalContext)
+    let serializer = LayerTextureSerializer(metalContext: metalContext)
+    let history = HistoryController(
+        workspaceStore: workspaceStore,
+        layerSurfaceStore: layerSurfaceStore,
+        serializer: serializer,
+        metalContext: metalContext
+    )
+
+    if layerCount > 1 {
+        for _ in 1..<layerCount {
+            workspaceStore.updateDocument { document in
+                _ = document.addLayer()
+            }
+        }
+        layerSurfaceStore.prepareTextures(for: workspaceStore.state.document, metal: metalContext)
+    }
+
+    let activeLayerID = workspaceStore.state.document.activeLayerID
+    try history.captureCheckpoint(
+        auditContext: HistoryEligibilityAuditContext(
+            operationKind: operationKind,
+            candidateChangedLayerIDs: candidateChangedLayerIDsKnown ? [activeLayerID] : [],
+            candidateChangedLayerIDsKnown: candidateChangedLayerIDsKnown,
+            comparisonWorkspace: workspaceStore.state
+        )
+    )
+}
+
+@MainActor
+private func measureHistoryCostByCanvasAndLayerCount(
+    metalContext: MetalDeviceContext
+) throws -> [HistoryCostAuditRow] {
+    let cases: [(CanvasSize, Int)] = [
+        (.init(width: 4096, height: 4096), 1),
+        (.init(width: 4096, height: 4096), 4),
+        (.init(width: 4096, height: 4096), 8),
+        (.init(width: 8192, height: 8192), 1),
+        (.init(width: 8192, height: 8192), 4),
+        (.init(width: 8192, height: 8192), 8)
+    ]
+
+    return try cases.map { canvasSize, layerCount in
+        var workspaceState = WorkspaceState.stageOneDefault
+        workspaceState.document.canvasSize = canvasSize
+        workspaceState.document.metadata.updatedAt = Date()
+
+        let workspaceStore = WorkspaceStore(state: workspaceState)
+        let layerSurfaceStore = StageOneLayerSurfaceStore()
+        layerSurfaceStore.prepareTextures(for: workspaceState.document, metal: metalContext)
+        let serializer = LayerTextureSerializer(metalContext: metalContext)
+        let history = HistoryController(
+            workspaceStore: workspaceStore,
+            layerSurfaceStore: layerSurfaceStore,
+            serializer: serializer,
+            metalContext: metalContext
+        )
+
+        if layerCount > 1 {
+            for _ in 1..<layerCount {
+                workspaceStore.updateDocument { document in
+                    _ = document.addLayer()
+                }
+            }
+            layerSurfaceStore.prepareTextures(for: workspaceStore.state.document, metal: metalContext)
+        }
+
+        let startNs = DispatchTime.now().uptimeNanoseconds
+        try history.captureCheckpoint()
+        let checkpointMs = Double(DispatchTime.now().uptimeNanoseconds - startNs) / 1_000_000
+        let entry = try history.captureCurrentEntry()
+
+        return HistoryCostAuditRow(
+            canvasWidth: canvasSize.width,
+            canvasHeight: canvasSize.height,
+            layerCount: layerCount,
+            entryBytes: entry.approxByteCount,
+            checkpointMs: checkpointMs
+        )
+    }
+}
+
+@MainActor
+private func measureBrushDirtyHistoryPilot(
+    metalContext: MetalDeviceContext
+) throws -> [BrushDirtyHistoryPilotRow] {
+    try measureDirtyHistoryPilot(metalContext: metalContext, tool: .brush, toolLabel: "brush")
+}
+
+@MainActor
+private func measureEraserDirtyHistoryPilot(
+    metalContext: MetalDeviceContext
+) throws -> [BrushDirtyHistoryPilotRow] {
+    try measureDirtyHistoryPilot(metalContext: metalContext, tool: .eraser, toolLabel: "eraser")
+}
+
+@MainActor
+private func measureApplyPixelOperationDirtyPilot(
+    metalContext: MetalDeviceContext
+) throws -> [BrushDirtyHistoryPilotRow] {
+    let cases: [(CanvasSize, Int)] = [
+        (.init(width: 4096, height: 4096), 4),
+        (.init(width: 4096, height: 4096), 8),
+        (.init(width: 8192, height: 8192), 4),
+        (.init(width: 8192, height: 8192), 8)
+    ]
+
+    return try cases.map { canvasSize, layerCount in
+        let fullCapture = try measureApplyPixelOperationCheckpoint(
+            canvasSize: canvasSize,
+            layerCount: layerCount,
+            captureMode: .full
+        )
+        let dirtyCapture = try measureApplyPixelOperationCheckpoint(
+            canvasSize: canvasSize,
+            layerCount: layerCount,
+            captureMode: .inPlaceChangedLayers([LayerID()])
+        )
+        let fullHistoryNavigation = try measureApplyPixelOperationUndoRedo(
+            canvasSize: canvasSize,
+            layerCount: layerCount,
+            captureMode: .full
+        )
+        let dirtyHistoryNavigation = try measureApplyPixelOperationUndoRedo(
+            canvasSize: canvasSize,
+            layerCount: layerCount,
+            captureMode: .inPlaceChangedLayers([LayerID()])
+        )
+
+        return BrushDirtyHistoryPilotRow(
+            toolLabel: "apply-pixel-operation",
+            canvasWidth: canvasSize.width,
+            canvasHeight: canvasSize.height,
+            layerCount: layerCount,
+            fullCaptureCheckpointMs: fullCapture.checkpointMs,
+            dirtyCaptureCheckpointMs: dirtyCapture.checkpointMs,
+            fullUndoMs: fullHistoryNavigation.undoMs,
+            dirtyUndoMs: dirtyHistoryNavigation.undoMs,
+            fullRedoMs: fullHistoryNavigation.redoMs,
+            dirtyRedoMs: dirtyHistoryNavigation.redoMs,
+            fullEntryBytes: fullCapture.entryBytes,
+            dirtyEntryBytes: dirtyCapture.entryBytes,
+            fullRetainedHistoryPoints: retainedHistoryPointsForBudget(entryBytes: fullCapture.entryBytes),
+            dirtyRetainedHistoryPoints: retainedHistoryPointsForBudget(entryBytes: dirtyCapture.entryBytes)
+        )
+    }
+}
+
+@MainActor
+private func measureFillAtPointDirtyPilot(
+    metalContext: MetalDeviceContext
+) throws -> [BrushDirtyHistoryPilotRow] {
+    let cases: [(CanvasSize, Int)] = [
+        (.init(width: 4096, height: 4096), 4),
+        (.init(width: 4096, height: 4096), 8),
+        (.init(width: 8192, height: 8192), 4),
+        (.init(width: 8192, height: 8192), 8)
+    ]
+
+    return try cases.map { canvasSize, layerCount in
+        let fullCapture = try measureFillAtPointCheckpoint(
+            canvasSize: canvasSize,
+            layerCount: layerCount,
+            captureMode: .full
+        )
+        let dirtyCapture = try measureFillAtPointCheckpoint(
+            canvasSize: canvasSize,
+            layerCount: layerCount,
+            captureMode: .inPlaceChangedLayers([LayerID()])
+        )
+        let fullHistoryNavigation = try measureFillAtPointUndoRedo(
+            canvasSize: canvasSize,
+            layerCount: layerCount,
+            captureMode: .full
+        )
+        let dirtyHistoryNavigation = try measureFillAtPointUndoRedo(
+            canvasSize: canvasSize,
+            layerCount: layerCount,
+            captureMode: .inPlaceChangedLayers([LayerID()])
+        )
+
+        return BrushDirtyHistoryPilotRow(
+            toolLabel: "fill-at-point",
+            canvasWidth: canvasSize.width,
+            canvasHeight: canvasSize.height,
+            layerCount: layerCount,
+            fullCaptureCheckpointMs: fullCapture.checkpointMs,
+            dirtyCaptureCheckpointMs: dirtyCapture.checkpointMs,
+            fullUndoMs: fullHistoryNavigation.undoMs,
+            dirtyUndoMs: dirtyHistoryNavigation.undoMs,
+            fullRedoMs: fullHistoryNavigation.redoMs,
+            dirtyRedoMs: dirtyHistoryNavigation.redoMs,
+            fullEntryBytes: fullCapture.entryBytes,
+            dirtyEntryBytes: dirtyCapture.entryBytes,
+            fullRetainedHistoryPoints: retainedHistoryPointsForBudget(entryBytes: fullCapture.entryBytes),
+            dirtyRetainedHistoryPoints: retainedHistoryPointsForBudget(entryBytes: dirtyCapture.entryBytes)
+        )
+    }
+}
+
+@MainActor
+private func measureDirtyHistoryPilot(
+    metalContext: MetalDeviceContext,
+    tool: ToolKind,
+    toolLabel: String
+) throws -> [BrushDirtyHistoryPilotRow] {
+    let cases: [(CanvasSize, Int)] = [
+        (.init(width: 4096, height: 4096), 4),
+        (.init(width: 4096, height: 4096), 8),
+        (.init(width: 8192, height: 8192), 4),
+        (.init(width: 8192, height: 8192), 8)
+    ]
+
+    return try cases.map { canvasSize, layerCount in
+        let fullCapture = try measureBrushCommitCheckpoint(
+            canvasSize: canvasSize,
+            layerCount: layerCount,
+            captureMode: .full,
+            tool: tool
+        )
+        let dirtyCapture = try measureBrushCommitCheckpoint(
+            canvasSize: canvasSize,
+            layerCount: layerCount,
+            captureMode: .inPlaceChangedLayers([LayerID()]),
+            tool: tool
+        )
+        let fullHistoryNavigation = try measureBrushUndoRedo(
+            canvasSize: canvasSize,
+            layerCount: layerCount,
+            captureMode: .full,
+            tool: tool
+        )
+        let dirtyHistoryNavigation = try measureBrushUndoRedo(
+            canvasSize: canvasSize,
+            layerCount: layerCount,
+            captureMode: .inPlaceChangedLayers([LayerID()]),
+            tool: tool
+        )
+
+        return BrushDirtyHistoryPilotRow(
+            toolLabel: toolLabel,
+            canvasWidth: canvasSize.width,
+            canvasHeight: canvasSize.height,
+            layerCount: layerCount,
+            fullCaptureCheckpointMs: fullCapture.checkpointMs,
+            dirtyCaptureCheckpointMs: dirtyCapture.checkpointMs,
+            fullUndoMs: fullHistoryNavigation.undoMs,
+            dirtyUndoMs: dirtyHistoryNavigation.undoMs,
+            fullRedoMs: fullHistoryNavigation.redoMs,
+            dirtyRedoMs: dirtyHistoryNavigation.redoMs,
+            fullEntryBytes: fullCapture.entryBytes,
+            dirtyEntryBytes: dirtyCapture.entryBytes,
+            fullRetainedHistoryPoints: retainedHistoryPointsForBudget(entryBytes: fullCapture.entryBytes),
+            dirtyRetainedHistoryPoints: retainedHistoryPointsForBudget(entryBytes: dirtyCapture.entryBytes)
+        )
+    }
+}
+
+@MainActor
+private func measureBrushCommitCheckpoint(
+    canvasSize: CanvasSize,
+    layerCount: Int,
+    captureMode: HistoryCaptureMode,
+    tool: ToolKind
+) throws -> (checkpointMs: Double, entryBytes: Int) {
+    let harness = try makeBrushHistoryMeasurementHarness(
+        canvasSize: canvasSize,
+        layerCount: layerCount
+    )
+    let activeLayerID = harness.workspaceStore.state.document.activeLayerID
+    let resolvedCaptureMode = resolvedBrushCaptureMode(
+        captureMode,
+        layerID: activeLayerID
+    )
+
+    let startNs = DispatchTime.now().uptimeNanoseconds
+    try recordBrushStroke(
+        with: harness,
+        tool: tool,
+        layerID: activeLayerID,
+        captureMode: resolvedCaptureMode,
+        pointSeed: 0
+    )
+    let checkpointMs = Double(DispatchTime.now().uptimeNanoseconds - startNs) / 1_000_000
+    let entryBytes = harness.history.debugUndoEntryApproxByteCounts.last ?? 0
+    return (checkpointMs: checkpointMs, entryBytes: entryBytes)
+}
+
+@MainActor
+private func measureApplyPixelOperationCheckpoint(
+    canvasSize: CanvasSize,
+    layerCount: Int,
+    captureMode: HistoryCaptureMode
+) throws -> (checkpointMs: Double, entryBytes: Int) {
+    let harness = try makePixelOperationHistoryMeasurementHarness(
+        canvasSize: canvasSize,
+        layerCount: layerCount
+    )
+    let activeLayerID = harness.viewModel.workspace.document.activeLayerID
+    harness.viewModel.selectLayer(activeLayerID)
+    harness.viewModel.debugPixelOperationHistoryCaptureModeOverride = resolvedBrushCaptureMode(captureMode, layerID: activeLayerID)
+
+    let startNs = DispatchTime.now().uptimeNanoseconds
+    applySelectionFill(on: harness.viewModel, rect: (8, 8, 40, 40))
+    let checkpointMs = Double(DispatchTime.now().uptimeNanoseconds - startNs) / 1_000_000
+    let entryBytes = harness.bootstrap.historyController.debugUndoEntryApproxByteCounts.last ?? 0
+    return (checkpointMs: checkpointMs, entryBytes: entryBytes)
+}
+
+@MainActor
+private func measureFillAtPointCheckpoint(
+    canvasSize: CanvasSize,
+    layerCount: Int,
+    captureMode: HistoryCaptureMode
+) throws -> (checkpointMs: Double, entryBytes: Int) {
+    let harness = try makePixelOperationHistoryMeasurementHarness(
+        canvasSize: canvasSize,
+        layerCount: layerCount
+    )
+    let activeLayerID = harness.viewModel.workspace.document.activeLayerID
+    harness.viewModel.selectLayer(activeLayerID)
+    harness.viewModel.debugFillAtPointHistoryCaptureModeOverride = resolvedBrushCaptureMode(captureMode, layerID: activeLayerID)
+
+    let startNs = DispatchTime.now().uptimeNanoseconds
+    harness.viewModel.fillAtPoint(.init(x: 12, y: 12))
+    let checkpointMs = Double(DispatchTime.now().uptimeNanoseconds - startNs) / 1_000_000
+    let entryBytes = harness.bootstrap.historyController.debugUndoEntryApproxByteCounts.last ?? 0
+    return (checkpointMs: checkpointMs, entryBytes: entryBytes)
+}
+
+@MainActor
+private func measureBrushUndoRedo(
+    canvasSize: CanvasSize,
+    layerCount: Int,
+    captureMode: HistoryCaptureMode,
+    tool: ToolKind
+) throws -> (undoMs: Double, redoMs: Double) {
+    let harness = try makeBrushHistoryMeasurementHarness(
+        canvasSize: canvasSize,
+        layerCount: layerCount
+    )
+    let layerIDs = harness.workspaceStore.state.document.layers.map(\.id)
+    let firstLayerID = layerIDs[0]
+    let secondLayerID = layerIDs[min(1, layerIDs.count - 1)]
+
+    try recordBrushStroke(
+        with: harness,
+        tool: .brush,
+        layerID: firstLayerID,
+        captureMode: .full,
+        pointSeed: 0
+    )
+    try recordBrushStroke(
+        with: harness,
+        tool: .brush,
+        layerID: secondLayerID,
+        captureMode: .full,
+        pointSeed: 1
+    )
+    try recordBrushStroke(
+        with: harness,
+        tool: tool,
+        layerID: firstLayerID,
+        captureMode: resolvedBrushCaptureMode(captureMode, layerID: firstLayerID),
+        pointSeed: 2
+    )
+    try recordBrushStroke(
+        with: harness,
+        tool: tool,
+        layerID: secondLayerID,
+        captureMode: resolvedBrushCaptureMode(captureMode, layerID: secondLayerID),
+        pointSeed: 3
+    )
+
+    let undoStartNs = DispatchTime.now().uptimeNanoseconds
+    _ = try harness.history.undo()
+    let undoMs = Double(DispatchTime.now().uptimeNanoseconds - undoStartNs) / 1_000_000
+
+    let redoStartNs = DispatchTime.now().uptimeNanoseconds
+    _ = try harness.history.redo()
+    let redoMs = Double(DispatchTime.now().uptimeNanoseconds - redoStartNs) / 1_000_000
+
+    return (undoMs: undoMs, redoMs: redoMs)
+}
+
+@MainActor
+private func measureApplyPixelOperationUndoRedo(
+    canvasSize: CanvasSize,
+    layerCount: Int,
+    captureMode: HistoryCaptureMode
+) throws -> (undoMs: Double, redoMs: Double) {
+    let harness = try makePixelOperationHistoryMeasurementHarness(
+        canvasSize: canvasSize,
+        layerCount: layerCount
+    )
+    let layerIDs = harness.viewModel.workspace.document.layers.map(\.id)
+    let firstLayerID = layerIDs[0]
+    let secondLayerID = layerIDs[min(1, layerIDs.count - 1)]
+
+    harness.viewModel.debugPixelOperationHistoryCaptureModeOverride = resolvedBrushCaptureMode(captureMode, layerID: firstLayerID)
+    harness.viewModel.selectLayer(firstLayerID)
+    applySelectionFill(on: harness.viewModel, rect: (8, 8, 40, 40))
+
+    harness.viewModel.debugPixelOperationHistoryCaptureModeOverride = resolvedBrushCaptureMode(captureMode, layerID: secondLayerID)
+    harness.viewModel.selectLayer(secondLayerID)
+    applySelectionFill(on: harness.viewModel, rect: (48, 48, 80, 80))
+
+    let undoStartNs = DispatchTime.now().uptimeNanoseconds
+    harness.viewModel.undo()
+    let undoMs = Double(DispatchTime.now().uptimeNanoseconds - undoStartNs) / 1_000_000
+
+    let redoStartNs = DispatchTime.now().uptimeNanoseconds
+    harness.viewModel.redo()
+    let redoMs = Double(DispatchTime.now().uptimeNanoseconds - redoStartNs) / 1_000_000
+
+    return (undoMs: undoMs, redoMs: redoMs)
+}
+
+@MainActor
+private func measureFillAtPointUndoRedo(
+    canvasSize: CanvasSize,
+    layerCount: Int,
+    captureMode: HistoryCaptureMode
+) throws -> (undoMs: Double, redoMs: Double) {
+    let harness = try makePixelOperationHistoryMeasurementHarness(
+        canvasSize: canvasSize,
+        layerCount: layerCount
+    )
+    let layerIDs = harness.viewModel.workspace.document.layers.map(\.id)
+    let firstLayerID = layerIDs[0]
+    let secondLayerID = layerIDs[min(1, layerIDs.count - 1)]
+
+    harness.viewModel.debugFillAtPointHistoryCaptureModeOverride = resolvedBrushCaptureMode(captureMode, layerID: firstLayerID)
+    harness.viewModel.selectLayer(firstLayerID)
+    harness.viewModel.fillAtPoint(.init(x: 12, y: 12))
+
+    harness.viewModel.debugFillAtPointHistoryCaptureModeOverride = resolvedBrushCaptureMode(captureMode, layerID: secondLayerID)
+    harness.viewModel.selectLayer(secondLayerID)
+    harness.viewModel.fillAtPoint(.init(x: 46, y: 46))
+
+    let undoStartNs = DispatchTime.now().uptimeNanoseconds
+    harness.viewModel.undo()
+    let undoMs = Double(DispatchTime.now().uptimeNanoseconds - undoStartNs) / 1_000_000
+
+    let redoStartNs = DispatchTime.now().uptimeNanoseconds
+    harness.viewModel.redo()
+    let redoMs = Double(DispatchTime.now().uptimeNanoseconds - redoStartNs) / 1_000_000
+
+    return (undoMs: undoMs, redoMs: redoMs)
+}
+
+@MainActor
+private func makeBrushHistoryMeasurementHarness(
+    canvasSize: CanvasSize,
+    layerCount: Int
+) throws -> (
+    workspaceStore: WorkspaceStore,
+    metalContext: MetalDeviceContext,
+    layerSurfaceStore: StageOneLayerSurfaceStore,
+    serializer: LayerTextureSerializer,
+    history: HistoryController,
+    engine: MetalStrokeEngine
+) {
+    guard let metalContext = MetalDeviceContext() else {
+        throw AuditHarnessError.metalUnavailable
+    }
+
+    var workspaceState = WorkspaceState.stageOneDefault
+    workspaceState.document.canvasSize = canvasSize
+    workspaceState.document.metadata.updatedAt = Date()
+
+    let workspaceStore = WorkspaceStore(state: workspaceState)
+    let layerSurfaceStore = StageOneLayerSurfaceStore()
+    layerSurfaceStore.prepareTextures(for: workspaceState.document, metal: metalContext)
+    if layerCount > 1 {
+        for _ in 1..<layerCount {
+            workspaceStore.updateDocument { document in
+                _ = document.addLayer()
+            }
+        }
+        layerSurfaceStore.prepareTextures(for: workspaceStore.state.document, metal: metalContext)
+    }
+
+    let serializer = LayerTextureSerializer(metalContext: metalContext)
+    let history = HistoryController(
+        workspaceStore: workspaceStore,
+        layerSurfaceStore: layerSurfaceStore,
+        serializer: serializer,
+        metalContext: metalContext
+    )
+    let engine = try MetalStrokeEngine(
+        metalContext: metalContext,
+        layerSurfaceStore: layerSurfaceStore
+    )
+    return (
+        workspaceStore: workspaceStore,
+        metalContext: metalContext,
+        layerSurfaceStore: layerSurfaceStore,
+        serializer: serializer,
+        history: history,
+        engine: engine
+    )
+}
+
+@MainActor
+private func makePixelOperationHistoryMeasurementHarness(
+    canvasSize: CanvasSize,
+    layerCount: Int
+) throws -> (
+    bootstrap: AppBootstrap,
+    viewModel: WorkspaceViewModel
+) {
+    guard let metalContext = MetalDeviceContext() else {
+        throw AuditHarnessError.metalUnavailable
+    }
+    let workspaceStore = WorkspaceStore(state: .stageOneDefault)
+    workspaceStore.updateDocument { document in
+        document.canvasSize = canvasSize
+    }
+    let bootstrap = try AppBootstrap(
+        workspaceStore: workspaceStore,
+        metalContext: metalContext,
+        layerSurfaceStore: StageOneLayerSurfaceStore()
+    )
+    let viewModel = WorkspaceViewModel(bootstrap: bootstrap, installsZoomKeyboardMonitor: false)
+    if layerCount > 1 {
+        for _ in 1..<layerCount {
+            viewModel.addLayer()
+        }
+    }
+    return (bootstrap: bootstrap, viewModel: viewModel)
+}
+
+@MainActor
+private func applySelectionFill(
+    on viewModel: WorkspaceViewModel,
+    rect: (minX: Double, minY: Double, maxX: Double, maxY: Double)
+) {
+    viewModel.selectTool(.lassoSelection)
+    let points: [CanvasPoint] = [
+        .init(x: rect.minX, y: rect.minY),
+        .init(x: rect.maxX, y: rect.minY),
+        .init(x: rect.maxX, y: rect.maxY),
+        .init(x: rect.minX, y: rect.maxY),
+        .init(x: rect.minX, y: rect.minY)
+    ]
+    guard let first = points.first else { return }
+    viewModel.beginSelection(kind: .lasso, at: first)
+    for point in points.dropFirst().dropLast() {
+        viewModel.updateSelection(to: point)
+    }
+    viewModel.commitSelection(at: points.last ?? first)
+    viewModel.fillSelectionContents()
+}
+
+@MainActor
+private func recordBrushStroke(
+    with harness: (
+        workspaceStore: WorkspaceStore,
+        metalContext: MetalDeviceContext,
+        layerSurfaceStore: StageOneLayerSurfaceStore,
+        serializer: LayerTextureSerializer,
+        history: HistoryController,
+        engine: MetalStrokeEngine
+    ),
+    tool: ToolKind = .brush,
+    layerID: LayerID,
+    captureMode: HistoryCaptureMode,
+    pointSeed: Int
+) throws {
+    harness.engine.beginStrokeIfNeeded(
+        toolSession: .stageOneDefault,
+        layerID: layerID
+    )
+    let x0 = Double(40 + pointSeed * 24)
+    let y0 = Double(48 + pointSeed * 18)
+    _ = harness.engine.applyStroke(
+        StrokeDescriptor(
+            tool: tool,
+            color: .black,
+            brush: .stageOneDefault,
+            points: [
+                .init(x: x0, y: y0, pressure: 1),
+                .init(x: x0 + 12, y: y0 + 8, pressure: 1)
+            ],
+            selectionShape: nil,
+            skipLeadingStamp: false
+        ),
+        to: layerID
+    )
+    harness.engine.endStroke()
+    try flushPendingStrokePackets(
+        engine: harness.engine,
+        metalContext: harness.metalContext
+    )
+    try harness.engine.drainPendingBrushCommitJobs { job in
+        try harness.history.captureCheckpoint(
+            captureMode: resolvedBrushCaptureMode(captureMode, layerID: job.layerID)
+        )
+    }
+}
+
+private func resolvedBrushCaptureMode(
+    _ captureMode: HistoryCaptureMode,
+    layerID: LayerID
+) -> HistoryCaptureMode {
+    switch captureMode {
+    case .full:
+        return .full
+    case .inPlaceChangedLayers:
+        return .inPlaceChangedLayers([layerID])
+    }
+}
+
+private func retainedHistoryPointsForBudget(
+    entryBytes: Int,
+    maxEntries: Int = 8,
+    maxResidentBytes: Int = 512 * 1024 * 1024
+) -> Int {
+    guard entryBytes > 0 else { return 0 }
+    if entryBytes > maxResidentBytes {
+        return 1
+    }
+    return min(maxEntries, max(1, maxResidentBytes / entryBytes))
 }
 
 @MainActor
@@ -200,7 +1219,7 @@ private func measureSmudgeMetrics(
     canvasSize: CanvasSize
 ) throws -> (
     peakBytes: UInt64,
-    makeSmudgeSourceTextureMs: Double,
+    smudgeGatherPassMs: Double,
     strokeWallMs: Double,
     commandBufferCompletionMs: Double
 ) {
@@ -273,7 +1292,7 @@ private func measureSmudgeMetrics(
     let audit = PerformanceAuditStore.shared.snapshot()
     return (
         peakBytes: peakBytes,
-        makeSmudgeSourceTextureMs: audit.averageDuration("StageOneBrushRenderer.makeSmudgeSourceTexture") ?? 0,
+        smudgeGatherPassMs: audit.averageDuration("StageOneBrushRenderer.smudgeGatherPass") ?? 0,
         strokeWallMs: average(strokeDurationsMs),
         commandBufferCompletionMs: average(commandBufferCompletionDurationsMs)
     )
@@ -291,6 +1310,19 @@ private func flushPendingBrushWork(
     _ = viewModel.flushPendingBrushWork(into: commandBuffer)
     commandBuffer.commit()
     commandBuffer.waitUntilCompleted()
+}
+
+@MainActor
+private func createCommittedLassoSelection(
+    on viewModel: WorkspaceViewModel,
+    points: [CanvasPoint]
+) {
+    guard let first = points.first, points.count > 1 else { return }
+    viewModel.beginSelection(kind: .lasso, at: first)
+    for point in points.dropFirst().dropLast() {
+        viewModel.updateSelection(to: point)
+    }
+    viewModel.commitSelection(at: points.last ?? first)
 }
 
 private func flushPendingStrokePackets(

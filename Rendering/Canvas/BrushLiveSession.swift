@@ -48,7 +48,6 @@ struct BrushLiveSession {
     var currentStrokePackets: [StrokeDescriptor] = []
     var brushSamplingState: BrushStrokeSamplingState?
     var opacityCapSession: OpacityCapSessionResources?
-    var smudgeSourceTexture: MTLTexture?
     var interactiveState: BrushInteractiveState = .idle
     var lastInputUptimeNs: UInt64 = 0
     var shouldRetainWorkingTexture: Bool = true

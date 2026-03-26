@@ -26,6 +26,22 @@ private struct BrushUniforms {
     var selectionMax: SIMD2<Float>
 }
 
+private struct SmudgeGatherInput {
+    var center: SIMD2<Float>
+}
+
+private struct SmudgeGatherUniforms {
+    var sampleCount: UInt32
+    var paddingCount: SIMD3<UInt32> = .zero
+    var canvasSize: SIMD2<Float>
+    var paddingCanvasSize: SIMD2<Float> = .zero
+}
+
+private struct SmudgeFragmentUniforms {
+    var stampIndex: UInt32
+    var paddingValues: SIMD3<UInt32> = .zero
+}
+
 private struct CompositeUniforms {
     var brushColor: SIMD4<Float>
     var mode: UInt32 = 0
@@ -90,6 +106,8 @@ final class StageOneBrushRenderer {
     private let brushPipelineState: MTLRenderPipelineState
     private let eraserPipelineState: MTLRenderPipelineState
     private let smudgePipelineState: MTLRenderPipelineState
+    private let smudgeFrozenTexturePipelineState: MTLRenderPipelineState
+    private let smudgeGatherPipelineState: MTLComputePipelineState
     private let opacityCapMaskPipelineState: MTLRenderPipelineState
     private let opacityCapCompositePipelineState: MTLRenderPipelineState
     private let vertexBuffer: MTLBuffer
@@ -129,6 +147,22 @@ final class StageOneBrushRenderer {
             uint selectionMode;
             float2 selectionMin;
             float2 selectionMax;
+        };
+
+        struct SmudgeGatherInput {
+            float2 center;
+        };
+
+        struct SmudgeGatherUniforms {
+            uint sampleCount;
+            uint3 paddingCount;
+            float2 canvasSize;
+            float2 paddingCanvasSize;
+        };
+
+        struct SmudgeFragmentUniforms {
+            uint stampIndex;
+            uint3 paddingValues;
         };
 
         struct VertexOut {
@@ -412,6 +446,58 @@ final class StageOneBrushRenderer {
         fragment float4 stageOneSmudgeFragment(
             VertexOut in [[stage_in]],
             constant BrushUniforms &uniforms [[buffer(1)]],
+            constant SmudgeFragmentUniforms &smudgeUniforms [[buffer(3)]],
+            texture2d<float, access::read> selectionMask [[texture(0)]],
+            texture2d<float, access::read> gatheredColors [[texture(1)]],
+            texture2d<float, access::sample> customTipMask [[texture(2)]]
+        ) {
+            float alphaMask = tipAlpha(in.localPoint, uniforms, customTipMask);
+            if (alphaMask <= 0.001) {
+                discard_fragment();
+            }
+
+            if (uniforms.selectionMode != 0) {
+                float2 minPoint = uniforms.selectionMin;
+                float2 maxPoint = uniforms.selectionMax;
+                bool insideBounds =
+                    in.pixelPoint.x >= minPoint.x &&
+                    in.pixelPoint.x <= maxPoint.x &&
+                    in.pixelPoint.y >= minPoint.y &&
+                    in.pixelPoint.y <= maxPoint.y;
+
+                if (!insideBounds) {
+                    discard_fragment();
+                }
+
+                if (uniforms.selectionMode == 2) {
+                    float2 center = (minPoint + maxPoint) * 0.5;
+                    float2 radius = max((maxPoint - minPoint) * 0.5, float2(0.0001));
+                    float2 normalized = (in.pixelPoint - center) / radius;
+                    if (dot(normalized, normalized) > 1.0) {
+                        discard_fragment();
+                    }
+                } else if (uniforms.selectionMode == 3) {
+                    uint x = uint(clamp(in.pixelPoint.x, 0.0, uniforms.canvasSize.x - 1.0));
+                    uint y = uint(clamp(in.pixelPoint.y, 0.0, uniforms.canvasSize.y - 1.0));
+                    if (selectionMask.read(uint2(x, y)).r < 0.5) {
+                        discard_fragment();
+                    }
+                }
+            }
+
+            float alpha = uniforms.opacity * alphaMask;
+            if (alpha <= 0.0) {
+                discard_fragment();
+            }
+
+            float4 sampled = gatheredColors.read(uint2(smudgeUniforms.stampIndex, 0));
+            float3 visibleRGB = sampled.rgb + ((1.0 - sampled.a) * float3(1.0));
+            return float4(visibleRGB * alpha, alpha);
+        }
+
+        fragment float4 stageOneSmudgeFrozenTextureFragment(
+            VertexOut in [[stage_in]],
+            constant BrushUniforms &uniforms [[buffer(1)]],
             texture2d<float, access::read> selectionMask [[texture(0)]],
             texture2d<float, access::sample> sourceTexture [[texture(1)]],
             texture2d<float, access::sample> customTipMask [[texture(2)]]
@@ -467,6 +553,30 @@ final class StageOneBrushRenderer {
             float4 sampled = sourceTexture.sample(sourceSampler, sampleUV);
             float3 visibleRGB = sampled.rgb + ((1.0 - sampled.a) * float3(1.0));
             return float4(visibleRGB * alpha, alpha);
+        }
+
+        kernel void stageOneSmudgeGatherKernel(
+            const device SmudgeGatherInput *inputs [[buffer(0)]],
+            constant SmudgeGatherUniforms &uniforms [[buffer(1)]],
+            texture2d<float, access::sample> sourceTexture [[texture(0)]],
+            texture2d<float, access::write> gatheredColorsTexture [[texture(1)]],
+            uint gid [[thread_position_in_grid]]
+        ) {
+            if (gid >= uniforms.sampleCount) {
+                return;
+            }
+
+            float2 center = inputs[gid].center;
+            float2 sampleUV = float2(
+                clamp(center.x / uniforms.canvasSize.x, 0.0, 1.0),
+                clamp(center.y / uniforms.canvasSize.y, 0.0, 1.0)
+            );
+            constexpr sampler sourceSampler(
+                coord::normalized,
+                address::clamp_to_edge,
+                filter::linear
+            );
+            gatheredColorsTexture.write(sourceTexture.sample(sourceSampler, sampleUV), uint2(gid, 0));
         }
 
         fragment float4 stageOneOpacityCapMaskFragment(
@@ -613,6 +723,37 @@ final class StageOneBrushRenderer {
             throw StageOneBrushRendererInitializationError.pipelineState("smudge", error)
         }
 
+        let smudgeFrozenTextureDescriptor = MTLRenderPipelineDescriptor()
+        smudgeFrozenTextureDescriptor.vertexFunction = vertexFunction
+        guard let smudgeFrozenTextureFunction = library.makeFunction(name: "stageOneSmudgeFrozenTextureFragment") else {
+            throw StageOneBrushRendererInitializationError.missingFunction("stageOneSmudgeFrozenTextureFragment")
+        }
+        smudgeFrozenTextureDescriptor.fragmentFunction = smudgeFrozenTextureFunction
+        smudgeFrozenTextureDescriptor.colorAttachments[0].pixelFormat = .bgra8Unorm_srgb
+
+        let smudgeFrozenTextureAttachment = smudgeFrozenTextureDescriptor.colorAttachments[0]!
+        smudgeFrozenTextureAttachment.isBlendingEnabled = true
+        smudgeFrozenTextureAttachment.rgbBlendOperation = .add
+        smudgeFrozenTextureAttachment.alphaBlendOperation = .add
+        smudgeFrozenTextureAttachment.sourceRGBBlendFactor = .one
+        smudgeFrozenTextureAttachment.sourceAlphaBlendFactor = .one
+        smudgeFrozenTextureAttachment.destinationRGBBlendFactor = .oneMinusSourceAlpha
+        smudgeFrozenTextureAttachment.destinationAlphaBlendFactor = .oneMinusSourceAlpha
+        do {
+            self.smudgeFrozenTexturePipelineState = try device.makeRenderPipelineState(descriptor: smudgeFrozenTextureDescriptor)
+        } catch {
+            throw StageOneBrushRendererInitializationError.pipelineState("smudgeFrozenTexture", error)
+        }
+
+        guard let smudgeGatherFunction = library.makeFunction(name: "stageOneSmudgeGatherKernel") else {
+            throw StageOneBrushRendererInitializationError.missingFunction("stageOneSmudgeGatherKernel")
+        }
+        do {
+            self.smudgeGatherPipelineState = try device.makeComputePipelineState(function: smudgeGatherFunction)
+        } catch {
+            throw StageOneBrushRendererInitializationError.pipelineState("smudgeGather", error)
+        }
+
         let opacityCapMaskDescriptor = MTLRenderPipelineDescriptor()
         opacityCapMaskDescriptor.vertexFunction = vertexFunction
         guard let opacityCapMaskFunction = library.makeFunction(name: "stageOneOpacityCapMaskFragment") else {
@@ -715,14 +856,12 @@ final class StageOneBrushRenderer {
             completion?()
             return 0
         }
-        var reusableSmudgeSourceTexture: MTLTexture?
         let emitted = encodeStroke(
             stroke: stroke,
             into: texture,
             commandQueue: commandQueue,
             commandBuffer: commandBuffer,
-            samplingState: &samplingState,
-            reusableSmudgeSourceTexture: &reusableSmudgeSourceTexture
+            samplingState: &samplingState
         )
 
         if let completion {
@@ -815,29 +954,27 @@ final class StageOneBrushRenderer {
         commandBuffer: MTLCommandBuffer,
         samplingState: inout BrushStrokeSamplingState?
     ) -> Int {
-        var reusableSmudgeSourceTexture: MTLTexture?
-        return encodeStroke(
-            stroke: stroke,
-            into: texture,
-            commandQueue: commandQueue,
-            commandBuffer: commandBuffer,
-            samplingState: &samplingState,
-            reusableSmudgeSourceTexture: &reusableSmudgeSourceTexture
-        )
-    }
-
-    @discardableResult
-    func encodeStroke(
-        stroke: StrokeDescriptor,
-        into texture: MTLTexture,
-        commandQueue: MTLCommandQueue,
-        commandBuffer: MTLCommandBuffer,
-        samplingState: inout BrushStrokeSamplingState?,
-        reusableSmudgeSourceTexture: inout MTLTexture?
-    ) -> Int {
         let samples = interpolatedPoints(for: stroke, samplingState: &samplingState)
         guard !samples.isEmpty else {
             return 0
+        }
+
+        if stroke.tool == .smudge {
+            guard let smudgeGatheredColorsTexture = makeSmudgeGatheredColorsTexture(
+                from: texture,
+                samples: samples,
+                commandBuffer: commandBuffer
+            ) else {
+                return 0
+            }
+            return encodeSmudgeStroke(
+                samples: samples,
+                stroke: stroke,
+                into: texture,
+                commandBuffer: commandBuffer,
+                gatheredColorsTexture: smudgeGatheredColorsTexture,
+                frozenSourceTexture: nil
+            )
         }
 
         let passDescriptor = MTLRenderPassDescriptor()
@@ -853,8 +990,6 @@ final class StageOneBrushRenderer {
         switch stroke.tool {
         case .eraser:
             pipelineState = eraserPipelineState
-        case .smudge:
-            pipelineState = smudgePipelineState
         default:
             pipelineState = brushPipelineState
         }
@@ -880,15 +1015,6 @@ final class StageOneBrushRenderer {
             index: 2
         )
         encoder.setFragmentSamplerState(tipSamplerState, index: 1)
-
-        if stroke.tool == .smudge {
-            let smudgeSourceTexture = makeSmudgeSourceTexture(
-                from: texture,
-                reusableTexture: &reusableSmudgeSourceTexture,
-                commandQueue: commandQueue
-            )
-            encoder.setFragmentTexture(smudgeSourceTexture, index: 1)
-        }
 
         for sample in samples {
             var uniforms = makeUniforms(
@@ -1868,69 +1994,178 @@ final class StageOneBrushRenderer {
         return texture
     }
 
-    private func makeSmudgeSourceTexture(
+    @discardableResult
+    func debugEncodeSmudgeStrokeUsingFrozenTexture(
+        stroke: StrokeDescriptor,
+        frozenSourceTexture: MTLTexture,
+        into texture: MTLTexture,
+        commandBuffer: MTLCommandBuffer,
+        samplingState: inout BrushStrokeSamplingState?
+    ) -> Int {
+        let samples = interpolatedPoints(for: stroke, samplingState: &samplingState)
+        return encodeSmudgeStroke(
+            samples: samples,
+            stroke: stroke,
+            into: texture,
+            commandBuffer: commandBuffer,
+            gatheredColorsTexture: nil,
+            frozenSourceTexture: frozenSourceTexture
+        )
+    }
+
+    private func makeSmudgeGatheredColorsTexture(
         from texture: MTLTexture,
-        reusableTexture: inout MTLTexture?,
-        commandQueue: MTLCommandQueue
+        samples: [StampSample],
+        commandBuffer: MTLCommandBuffer
     ) -> MTLTexture? {
         let startNs = DispatchTime.now().uptimeNanoseconds
         defer {
             let ms = Double(DispatchTime.now().uptimeNanoseconds - startNs) / 1_000_000
-            PerformanceAuditStore.shared.recordDuration("StageOneBrushRenderer.makeSmudgeSourceTexture", ms: ms)
-        }
-        let copyTexture: MTLTexture
-        if let existingTexture = reusableTexture,
-           existingTexture.width == texture.width,
-           existingTexture.height == texture.height,
-           existingTexture.pixelFormat == texture.pixelFormat {
-            copyTexture = existingTexture
-        } else {
-            let descriptor = MTLTextureDescriptor.texture2DDescriptor(
-                pixelFormat: texture.pixelFormat,
-                width: texture.width,
-                height: texture.height,
-                mipmapped: false
-            )
-            descriptor.storageMode = .private
-            descriptor.usage = [.shaderRead]
-
-            guard let allocatedTexture = device.makeTexture(descriptor: descriptor) else {
-                return nil
-            }
-            reusableTexture = allocatedTexture
-            copyTexture = allocatedTexture
-            PerformanceAuditStore.shared.recordInt(
-                "StageOneBrushRenderer.smudgeSourceTexture.allocations",
-                value: 1
-            )
+            PerformanceAuditStore.shared.recordDuration("StageOneBrushRenderer.smudgeGatherPass", ms: ms)
         }
 
-        PerformanceAuditStore.shared.recordInt(
-            "StageOneBrushRenderer.smudgeSourceTexture.copyCalls",
-            value: 1
+        guard !samples.isEmpty else {
+            return nil
+        }
+
+        let gatherInputs = samples.map { sample in
+            SmudgeGatherInput(
+                center: SIMD2(
+                    Float(sample.point.x),
+                    Float(sample.point.y)
+                )
+            )
+        }
+        let inputBufferLength = MemoryLayout<SmudgeGatherInput>.stride * gatherInputs.count
+        let gatherUniforms = SmudgeGatherUniforms(
+            sampleCount: UInt32(samples.count),
+            canvasSize: SIMD2(Float(texture.width), Float(texture.height))
         )
 
+        let inputBuffer = gatherInputs.withUnsafeBytes { bytes -> MTLBuffer? in
+            guard let baseAddress = bytes.baseAddress else { return nil }
+            return device.makeBuffer(
+                bytes: baseAddress,
+                length: inputBufferLength,
+                options: .storageModeShared
+            )
+        }
+
+        let outputTextureDescriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .rgba32Float,
+            width: samples.count,
+            height: 1,
+            mipmapped: false
+        )
+        outputTextureDescriptor.usage = [.shaderRead, .shaderWrite]
+        outputTextureDescriptor.storageMode = .private
+
         guard
-            let commandBuffer = commandQueue.makeCommandBuffer(),
-            let blitEncoder = commandBuffer.makeBlitCommandEncoder()
+            let inputBuffer,
+            let gatheredColorsTexture = device.makeTexture(descriptor: outputTextureDescriptor),
+            let computeEncoder = commandBuffer.makeComputeCommandEncoder()
         else {
             return nil
         }
 
-        blitEncoder.copy(
-            from: texture,
-            sourceSlice: 0,
-            sourceLevel: 0,
-            sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
-            sourceSize: MTLSize(width: texture.width, height: texture.height, depth: 1),
-            to: copyTexture,
-            destinationSlice: 0,
-            destinationLevel: 0,
-            destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
+        PerformanceAuditStore.shared.recordInt(
+            "StageOneBrushRenderer.smudgeGather.sampleCount",
+            value: samples.count
         )
-        blitEncoder.endEncoding()
-        commandBuffer.commit()
-        return copyTexture
+
+        computeEncoder.setComputePipelineState(smudgeGatherPipelineState)
+        computeEncoder.setBuffer(inputBuffer, offset: 0, index: 0)
+        var mutableGatherUniforms = gatherUniforms
+        computeEncoder.setBytes(
+            &mutableGatherUniforms,
+            length: MemoryLayout<SmudgeGatherUniforms>.stride,
+            index: 1
+        )
+        computeEncoder.setTexture(texture, index: 0)
+        computeEncoder.setTexture(gatheredColorsTexture, index: 1)
+
+        let threadWidth = min(smudgeGatherPipelineState.maxTotalThreadsPerThreadgroup, samples.count)
+        computeEncoder.dispatchThreads(
+            MTLSize(width: samples.count, height: 1, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: max(threadWidth, 1), height: 1, depth: 1)
+        )
+        computeEncoder.endEncoding()
+        return gatheredColorsTexture
+    }
+
+    private func encodeSmudgeStroke(
+        samples: [StampSample],
+        stroke: StrokeDescriptor,
+        into texture: MTLTexture,
+        commandBuffer: MTLCommandBuffer,
+        gatheredColorsTexture: MTLTexture?,
+        frozenSourceTexture: MTLTexture?
+    ) -> Int {
+        guard !samples.isEmpty else {
+            return 0
+        }
+
+        let passDescriptor = MTLRenderPassDescriptor()
+        passDescriptor.colorAttachments[0].texture = texture
+        passDescriptor.colorAttachments[0].loadAction = .load
+        passDescriptor.colorAttachments[0].storeAction = .store
+
+        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: passDescriptor) else {
+            return 0
+        }
+
+        let selectionShape = stroke.selectionShape?.clamped(
+            to: CanvasSize(width: texture.width, height: texture.height)
+        )
+        if let selectionShape, selectionShape.isEmpty {
+            encoder.endEncoding()
+            return 0
+        }
+
+        encoder.setRenderPipelineState(
+            frozenSourceTexture == nil ? smudgePipelineState : smudgeFrozenTexturePipelineState
+        )
+        encoder.setVertexBuffer(vertexBuffer, offset: 0, index: 0)
+
+        let selectionMaskTexture = makeSelectionMaskTexture(
+            for: selectionShape,
+            canvasSize: CanvasSize(width: texture.width, height: texture.height)
+        )
+        encoder.setFragmentTexture(selectionMaskTexture, index: 0)
+        if let frozenSourceTexture {
+            encoder.setFragmentTexture(frozenSourceTexture, index: 1)
+        } else if let gatheredColorsTexture {
+            encoder.setFragmentTexture(gatheredColorsTexture, index: 1)
+        }
+        encoder.setFragmentTexture(
+            customTipTexture(for: stroke.brush.customTipMaskData) ?? defaultTipTexture,
+            index: 2
+        )
+        encoder.setFragmentSamplerState(tipSamplerState, index: 1)
+
+        for (stampIndex, sample) in samples.enumerated() {
+            var uniforms = makeUniforms(
+                for: sample,
+                stroke: stroke,
+                texture: texture,
+                selectionShape: selectionShape
+            )
+            var smudgeUniforms = SmudgeFragmentUniforms(stampIndex: UInt32(stampIndex))
+
+            encoder.setVertexBytes(&uniforms, length: MemoryLayout<BrushUniforms>.stride, index: 1)
+            encoder.setFragmentBytes(&uniforms, length: MemoryLayout<BrushUniforms>.stride, index: 1)
+            if frozenSourceTexture == nil {
+                encoder.setFragmentBytes(
+                    &smudgeUniforms,
+                    length: MemoryLayout<SmudgeFragmentUniforms>.stride,
+                    index: 3
+                )
+            }
+            encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+        }
+
+        encoder.endEncoding()
+        return samples.count
     }
 
     private func trimPendingInputPoints(_ state: inout BrushStrokeSamplingState) {

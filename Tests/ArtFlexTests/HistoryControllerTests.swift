@@ -75,11 +75,94 @@ struct HistoryControllerTests {
 
     @Test
     @MainActor
-    func historySupportsUndoRedoForTwoStrokesOnSameLayer() throws {
+    func oversizedSingleEntryStillKeepsLatestUndoState() throws {
         let harness = try BrushHistoryHarness(canvasSize: .init(width: 64, height: 64))
+        let history = HistoryController(
+            workspaceStore: harness.workspaceStore,
+            layerSurfaceStore: harness.layerSurfaceStore,
+            serializer: harness.serializer,
+            metalContext: harness.metalContext,
+            maxEntries: 10,
+            maxResidentBytes: 1_024
+        )
         let layerID = harness.workspaceStore.state.document.activeLayerID
 
         try harness.drawBrushStroke(
+            history: history,
+            layerID: layerID,
+            points: [
+                .init(x: 10, y: 10, pressure: 1),
+                .init(x: 18, y: 18, pressure: 1)
+            ]
+        )
+
+        #expect(history.canUndo)
+        #expect(try history.undo())
+        #expect(try harness.alpha(atX: 12, y: 12, layerID: layerID) < 0.01)
+    }
+
+    @Test
+    @MainActor
+    func consecutiveOversizedEntriesTrimOlderEntriesButKeepNewest() throws {
+        let harness = try BrushHistoryHarness(canvasSize: .init(width: 64, height: 64))
+        let history = HistoryController(
+            workspaceStore: harness.workspaceStore,
+            layerSurfaceStore: harness.layerSurfaceStore,
+            serializer: harness.serializer,
+            metalContext: harness.metalContext,
+            maxEntries: 10,
+            maxResidentBytes: 1_024
+        )
+        let layerID = harness.workspaceStore.state.document.activeLayerID
+
+        try harness.drawBrushStroke(
+            history: history,
+            layerID: layerID,
+            points: [
+                .init(x: 8, y: 8, pressure: 1),
+                .init(x: 16, y: 16, pressure: 1)
+            ]
+        )
+        try harness.drawBrushStroke(
+            history: history,
+            layerID: layerID,
+            points: [
+                .init(x: 28, y: 28, pressure: 1),
+                .init(x: 36, y: 36, pressure: 1)
+            ]
+        )
+        try harness.drawBrushStroke(
+            history: history,
+            layerID: layerID,
+            points: [
+                .init(x: 44, y: 12, pressure: 1),
+                .init(x: 52, y: 20, pressure: 1)
+            ]
+        )
+
+        #expect(try history.undo())
+        #expect(try harness.alpha(atX: 12, y: 12, layerID: layerID) > 0.01)
+        #expect(try harness.alpha(atX: 32, y: 32, layerID: layerID) > 0.01)
+        #expect(try harness.alpha(atX: 48, y: 16, layerID: layerID) < 0.01)
+        #expect(!(try history.undo()))
+    }
+
+    @Test
+    @MainActor
+    func oversizedEntriesStillSupportUndoRedoForNewestEntry() throws {
+        let harness = try BrushHistoryHarness(canvasSize: .init(width: 64, height: 64))
+        let history = HistoryController(
+            workspaceStore: harness.workspaceStore,
+            layerSurfaceStore: harness.layerSurfaceStore,
+            serializer: harness.serializer,
+            metalContext: harness.metalContext,
+            maxEntries: 10,
+            maxResidentBytes: 1_024
+        )
+        let layerID = harness.workspaceStore.state.document.activeLayerID
+
+        try harness.drawBrushStroke(
+            history: history,
             layerID: layerID,
             points: [
                 .init(x: 10, y: 10, pressure: 1),
@@ -87,6 +170,39 @@ struct HistoryControllerTests {
             ]
         )
         try harness.drawBrushStroke(
+            history: history,
+            layerID: layerID,
+            points: [
+                .init(x: 40, y: 40, pressure: 1),
+                .init(x: 48, y: 48, pressure: 1)
+            ]
+        )
+
+        #expect(try history.undo())
+        #expect(try harness.alpha(atX: 12, y: 12, layerID: layerID) > 0.01)
+        #expect(try harness.alpha(atX: 44, y: 44, layerID: layerID) < 0.01)
+
+        #expect(try history.redo())
+        #expect(try harness.alpha(atX: 12, y: 12, layerID: layerID) > 0.01)
+        #expect(try harness.alpha(atX: 44, y: 44, layerID: layerID) > 0.01)
+    }
+
+    @Test
+    @MainActor
+    func historySupportsUndoRedoForTwoStrokesOnSameLayer() throws {
+        let harness = try BrushHistoryHarness(canvasSize: .init(width: 64, height: 64))
+        let layerID = harness.workspaceStore.state.document.activeLayerID
+
+        try harness.drawBrushStroke(
+            useDirtyBrushHistory: true,
+            layerID: layerID,
+            points: [
+                .init(x: 10, y: 10, pressure: 1),
+                .init(x: 18, y: 18, pressure: 1)
+            ]
+        )
+        try harness.drawBrushStroke(
+            useDirtyBrushHistory: true,
             layerID: layerID,
             points: [
                 .init(x: 42, y: 42, pressure: 1),
@@ -112,6 +228,7 @@ struct HistoryControllerTests {
         #expect(try harness.history.redo())
         #expect(try harness.alpha(atX: 12, y: 12, layerID: layerID) > 0.01)
         #expect(try harness.alpha(atX: 46, y: 46, layerID: layerID) > 0.01)
+        #expect(!harness.history.debugAttemptedFullResetWithDirtyEntry)
     }
 
     @Test
@@ -122,6 +239,7 @@ struct HistoryControllerTests {
         let secondLayerID = harness.addLayer()
 
         try harness.drawBrushStroke(
+            useDirtyBrushHistory: true,
             layerID: firstLayerID,
             points: [
                 .init(x: 10, y: 10, pressure: 1),
@@ -129,6 +247,7 @@ struct HistoryControllerTests {
             ]
         )
         try harness.drawBrushStroke(
+            useDirtyBrushHistory: true,
             layerID: secondLayerID,
             points: [
                 .init(x: 42, y: 42, pressure: 1),
@@ -154,6 +273,48 @@ struct HistoryControllerTests {
         #expect(try harness.history.redo())
         #expect(try harness.alpha(atX: 12, y: 12, layerID: firstLayerID) > 0.01)
         #expect(try harness.alpha(atX: 46, y: 46, layerID: secondLayerID) > 0.01)
+        #expect(!harness.history.debugAttemptedFullResetWithDirtyEntry)
+    }
+
+    @Test
+    @MainActor
+    func hiddenLockedOpacityLayersRemainIntactAcrossDirtyBrushRestore() throws {
+        let harness = try BrushHistoryHarness(canvasSize: .init(width: 64, height: 64))
+        let baseLayerID = harness.workspaceStore.state.document.layers[0].id
+        let decoratedLayerID = harness.addLayer()
+
+        try harness.drawBrushStroke(
+            useDirtyBrushHistory: true,
+            layerID: decoratedLayerID,
+            points: [
+                .init(x: 42, y: 42, pressure: 1),
+                .init(x: 52, y: 52, pressure: 1)
+            ]
+        )
+
+        harness.workspaceStore.updateDocument { document in
+            document.setLayerVisibility(decoratedLayerID, isVisible: false)
+            document.toggleLayerLock(decoratedLayerID)
+            document.setLayerOpacity(decoratedLayerID, opacity: 0.35)
+        }
+
+        try harness.drawBrushStroke(
+            useDirtyBrushHistory: true,
+            layerID: baseLayerID,
+            points: [
+                .init(x: 10, y: 10, pressure: 1),
+                .init(x: 18, y: 18, pressure: 1)
+            ]
+        )
+
+        #expect(try harness.history.undo())
+        #expect(try harness.alpha(atX: 46, y: 46, layerID: decoratedLayerID) > 0.01)
+        #expect(try harness.alpha(atX: 12, y: 12, layerID: baseLayerID) < 0.01)
+        let decoratedLayer = try #require(harness.workspaceStore.state.document.layers.first(where: { $0.id == decoratedLayerID }))
+        #expect(decoratedLayer.isVisible == false)
+        #expect(decoratedLayer.isLocked == true)
+        #expect(abs(decoratedLayer.opacity - 0.35) < 0.001)
+        #expect(!harness.history.debugAttemptedFullResetWithDirtyEntry)
     }
 
     @Test
@@ -164,6 +325,7 @@ struct HistoryControllerTests {
         let secondLayerID = harness.addLayer()
 
         try harness.drawBrushStroke(
+            useDirtyBrushHistory: true,
             layerID: firstLayerID,
             points: [
                 .init(x: 10, y: 10, pressure: 1),
@@ -171,6 +333,7 @@ struct HistoryControllerTests {
             ]
         )
         try harness.drawBrushStroke(
+            useDirtyBrushHistory: true,
             layerID: secondLayerID,
             points: [
                 .init(x: 42, y: 42, pressure: 1),
@@ -178,14 +341,22 @@ struct HistoryControllerTests {
             ]
         )
         try harness.drawBrushStroke(
+            useDirtyBrushHistory: true,
             layerID: firstLayerID,
             points: [
                 .init(x: 36, y: 20, pressure: 1),
                 .init(x: 46, y: 30, pressure: 1)
             ]
         )
+        try harness.history.captureCheckpoint()
         let thirdLayerID = harness.addLayer()
         #expect(harness.workspaceStore.state.document.layers.count == 3)
+
+        #expect(try harness.history.undo())
+        #expect(harness.workspaceStore.state.document.layers.count == 2)
+        #expect(try harness.alpha(atX: 12, y: 12, layerID: firstLayerID) > 0.01)
+        #expect(try harness.alpha(atX: 40, y: 24, layerID: firstLayerID) > 0.01)
+        #expect(try harness.alpha(atX: 46, y: 46, layerID: secondLayerID) > 0.01)
 
         #expect(try harness.history.undo())
         #expect(harness.workspaceStore.state.document.layers.count == 2)
@@ -194,11 +365,413 @@ struct HistoryControllerTests {
         #expect(try harness.alpha(atX: 46, y: 46, layerID: secondLayerID) > 0.01)
 
         #expect(try harness.history.redo())
+        #expect(harness.workspaceStore.state.document.layers.count == 2)
+        #expect(try harness.alpha(atX: 12, y: 12, layerID: firstLayerID) > 0.01)
+        #expect(try harness.alpha(atX: 40, y: 24, layerID: firstLayerID) > 0.01)
+        #expect(try harness.alpha(atX: 46, y: 46, layerID: secondLayerID) > 0.01)
+
+        #expect(try harness.history.redo())
         #expect(harness.workspaceStore.state.document.layers.count == 3)
         #expect(try harness.alpha(atX: 12, y: 12, layerID: firstLayerID) > 0.01)
         #expect(try harness.alpha(atX: 40, y: 24, layerID: firstLayerID) > 0.01)
         #expect(try harness.alpha(atX: 46, y: 46, layerID: secondLayerID) > 0.01)
         #expect(try harness.alpha(atX: 12, y: 12, layerID: thirdLayerID) < 0.01)
+        #expect(!harness.history.debugAttemptedFullResetWithDirtyEntry)
+    }
+
+    @Test
+    @MainActor
+    func singleLayerBrushHistoryStillUsesFullEntries() throws {
+        let harness = try BrushHistoryHarness(canvasSize: .init(width: 64, height: 64))
+        let layerID = harness.workspaceStore.state.document.activeLayerID
+
+        try harness.drawBrushStroke(
+            useDirtyBrushHistory: true,
+            layerID: layerID,
+            points: [
+                .init(x: 12, y: 12, pressure: 1),
+                .init(x: 24, y: 24, pressure: 1)
+            ]
+        )
+
+        let latestMode = try #require(harness.history.debugUndoEntryModes.last)
+        switch latestMode {
+        case .full:
+            break
+        case .inPlaceChangedLayers:
+            Issue.record("Single-layer document should not produce dirty history entries")
+        }
+    }
+
+    @Test
+    @MainActor
+    func dirtyBrushHistoryNeverFallsBackToFullResetWithPartialSnapshots() throws {
+        let harness = try BrushHistoryHarness(canvasSize: .init(width: 64, height: 64))
+        let firstLayerID = harness.workspaceStore.state.document.layers[0].id
+        let secondLayerID = harness.addLayer()
+
+        try harness.drawBrushStroke(
+            useDirtyBrushHistory: true,
+            layerID: firstLayerID,
+            points: [
+                .init(x: 8, y: 8, pressure: 1),
+                .init(x: 16, y: 16, pressure: 1)
+            ]
+        )
+        try harness.drawBrushStroke(
+            useDirtyBrushHistory: true,
+            layerID: secondLayerID,
+            points: [
+                .init(x: 36, y: 36, pressure: 1),
+                .init(x: 44, y: 44, pressure: 1)
+            ]
+        )
+
+        #expect(try harness.history.undo())
+        #expect(try harness.history.undo())
+        #expect(try harness.history.redo())
+        #expect(try harness.history.redo())
+        #expect(!harness.history.debugAttemptedFullResetWithDirtyEntry)
+    }
+
+    @Test
+    @MainActor
+    func dirtyUndoCapturePushesSymmetricDirtyEntryOntoRedoStack() throws {
+        let harness = try BrushHistoryHarness(canvasSize: .init(width: 64, height: 64))
+        let firstLayerID = harness.workspaceStore.state.document.layers[0].id
+        let secondLayerID = harness.addLayer()
+
+        try harness.drawBrushStroke(
+            useDirtyBrushHistory: true,
+            layerID: firstLayerID,
+            points: [
+                .init(x: 10, y: 10, pressure: 1),
+                .init(x: 18, y: 18, pressure: 1)
+            ]
+        )
+        try harness.drawBrushStroke(
+            useDirtyBrushHistory: true,
+            layerID: secondLayerID,
+            points: [
+                .init(x: 40, y: 40, pressure: 1),
+                .init(x: 48, y: 48, pressure: 1)
+            ]
+        )
+
+        #expect(try harness.history.undo())
+        let redoMode = try #require(harness.history.debugRedoEntryModes.last)
+        switch redoMode {
+        case .full:
+            Issue.record("Expected symmetric dirty current-entry capture in redo stack")
+        case .inPlaceChangedLayers(_, let changedLayerIDs):
+            #expect(Set(changedLayerIDs) == [secondLayerID])
+        }
+    }
+
+    @Test
+    @MainActor
+    func eraserHistorySupportsUndoRedoForTwoStrokesOnSameLayer() throws {
+        let harness = try BrushHistoryHarness(canvasSize: .init(width: 64, height: 64))
+        let layerID = harness.workspaceStore.state.document.activeLayerID
+
+        try harness.drawStroke(
+            tool: .brush,
+            layerID: layerID,
+            points: [
+                .init(x: 10, y: 10, pressure: 1),
+                .init(x: 18, y: 18, pressure: 1)
+            ]
+        )
+        try harness.drawStroke(
+            tool: .brush,
+            layerID: layerID,
+            points: [
+                .init(x: 42, y: 42, pressure: 1),
+                .init(x: 52, y: 52, pressure: 1)
+            ]
+        )
+
+        try harness.drawStroke(
+            tool: .eraser,
+            useDirtyHistory: true,
+            layerID: layerID,
+            points: [
+                .init(x: 10, y: 10, pressure: 1),
+                .init(x: 18, y: 18, pressure: 1)
+            ]
+        )
+        try harness.drawStroke(
+            tool: .eraser,
+            useDirtyHistory: true,
+            layerID: layerID,
+            points: [
+                .init(x: 42, y: 42, pressure: 1),
+                .init(x: 52, y: 52, pressure: 1)
+            ]
+        )
+
+        #expect(try harness.alpha(atX: 12, y: 12, layerID: layerID) < 0.01)
+        #expect(try harness.alpha(atX: 46, y: 46, layerID: layerID) < 0.01)
+
+        #expect(try harness.history.undo())
+        #expect(try harness.alpha(atX: 12, y: 12, layerID: layerID) < 0.01)
+        #expect(try harness.alpha(atX: 46, y: 46, layerID: layerID) > 0.01)
+
+        #expect(try harness.history.undo())
+        #expect(try harness.alpha(atX: 12, y: 12, layerID: layerID) > 0.01)
+        #expect(try harness.alpha(atX: 46, y: 46, layerID: layerID) > 0.01)
+
+        #expect(try harness.history.redo())
+        #expect(try harness.alpha(atX: 12, y: 12, layerID: layerID) < 0.01)
+        #expect(try harness.alpha(atX: 46, y: 46, layerID: layerID) > 0.01)
+
+        #expect(try harness.history.redo())
+        #expect(try harness.alpha(atX: 12, y: 12, layerID: layerID) < 0.01)
+        #expect(try harness.alpha(atX: 46, y: 46, layerID: layerID) < 0.01)
+        #expect(!harness.history.debugAttemptedFullResetWithDirtyEntry)
+    }
+
+    @Test
+    @MainActor
+    func eraserHistorySupportsUndoRedoAcrossDifferentLayersWithoutClearingUntouchedLayers() throws {
+        let harness = try BrushHistoryHarness(canvasSize: .init(width: 64, height: 64))
+        let firstLayerID = harness.workspaceStore.state.document.layers[0].id
+        let secondLayerID = harness.addLayer()
+
+        try harness.drawStroke(
+            tool: .brush,
+            layerID: firstLayerID,
+            points: [
+                .init(x: 10, y: 10, pressure: 1),
+                .init(x: 18, y: 18, pressure: 1)
+            ]
+        )
+        try harness.drawStroke(
+            tool: .brush,
+            layerID: secondLayerID,
+            points: [
+                .init(x: 42, y: 42, pressure: 1),
+                .init(x: 52, y: 52, pressure: 1)
+            ]
+        )
+
+        try harness.drawStroke(
+            tool: .eraser,
+            useDirtyHistory: true,
+            layerID: firstLayerID,
+            points: [
+                .init(x: 10, y: 10, pressure: 1),
+                .init(x: 18, y: 18, pressure: 1)
+            ]
+        )
+        try harness.drawStroke(
+            tool: .eraser,
+            useDirtyHistory: true,
+            layerID: secondLayerID,
+            points: [
+                .init(x: 42, y: 42, pressure: 1),
+                .init(x: 52, y: 52, pressure: 1)
+            ]
+        )
+
+        #expect(try harness.alpha(atX: 12, y: 12, layerID: firstLayerID) < 0.01)
+        #expect(try harness.alpha(atX: 46, y: 46, layerID: secondLayerID) < 0.01)
+
+        #expect(try harness.history.undo())
+        #expect(try harness.alpha(atX: 12, y: 12, layerID: firstLayerID) < 0.01)
+        #expect(try harness.alpha(atX: 46, y: 46, layerID: secondLayerID) > 0.01)
+
+        #expect(try harness.history.undo())
+        #expect(try harness.alpha(atX: 12, y: 12, layerID: firstLayerID) > 0.01)
+        #expect(try harness.alpha(atX: 46, y: 46, layerID: secondLayerID) > 0.01)
+
+        #expect(try harness.history.redo())
+        #expect(try harness.alpha(atX: 12, y: 12, layerID: firstLayerID) < 0.01)
+        #expect(try harness.alpha(atX: 46, y: 46, layerID: secondLayerID) > 0.01)
+
+        #expect(try harness.history.redo())
+        #expect(try harness.alpha(atX: 12, y: 12, layerID: firstLayerID) < 0.01)
+        #expect(try harness.alpha(atX: 46, y: 46, layerID: secondLayerID) < 0.01)
+        #expect(!harness.history.debugAttemptedFullResetWithDirtyEntry)
+    }
+
+    @Test
+    @MainActor
+    func hiddenLockedOpacityLayersRemainIntactAcrossDirtyEraserRestore() throws {
+        let harness = try BrushHistoryHarness(canvasSize: .init(width: 64, height: 64))
+        let baseLayerID = harness.workspaceStore.state.document.layers[0].id
+        let decoratedLayerID = harness.addLayer()
+
+        try harness.drawStroke(
+            tool: .brush,
+            layerID: decoratedLayerID,
+            points: [
+                .init(x: 42, y: 42, pressure: 1),
+                .init(x: 52, y: 52, pressure: 1)
+            ]
+        )
+
+        harness.workspaceStore.updateDocument { document in
+            document.setLayerVisibility(decoratedLayerID, isVisible: false)
+            document.toggleLayerLock(decoratedLayerID)
+            document.setLayerOpacity(decoratedLayerID, opacity: 0.35)
+        }
+
+        try harness.drawStroke(
+            tool: .brush,
+            layerID: baseLayerID,
+            points: [
+                .init(x: 10, y: 10, pressure: 1),
+                .init(x: 18, y: 18, pressure: 1)
+            ]
+        )
+        try harness.drawStroke(
+            tool: .eraser,
+            useDirtyHistory: true,
+            layerID: baseLayerID,
+            points: [
+                .init(x: 10, y: 10, pressure: 1),
+                .init(x: 18, y: 18, pressure: 1)
+            ]
+        )
+
+        #expect(try harness.history.undo())
+        #expect(try harness.alpha(atX: 46, y: 46, layerID: decoratedLayerID) > 0.01)
+        #expect(try harness.alpha(atX: 12, y: 12, layerID: baseLayerID) > 0.01)
+        let decoratedLayer = try #require(harness.workspaceStore.state.document.layers.first(where: { $0.id == decoratedLayerID }))
+        #expect(decoratedLayer.isVisible == false)
+        #expect(decoratedLayer.isLocked == true)
+        #expect(abs(decoratedLayer.opacity - 0.35) < 0.001)
+        #expect(!harness.history.debugAttemptedFullResetWithDirtyEntry)
+    }
+
+    @Test
+    @MainActor
+    func eraserTopologyFenceKeepsUndoRedoChainCorrect() throws {
+        let harness = try BrushHistoryHarness(canvasSize: .init(width: 64, height: 64))
+        let firstLayerID = harness.workspaceStore.state.document.layers[0].id
+        let secondLayerID = harness.addLayer()
+
+        try harness.drawStroke(
+            tool: .brush,
+            layerID: firstLayerID,
+            points: [
+                .init(x: 10, y: 10, pressure: 1),
+                .init(x: 18, y: 18, pressure: 1)
+            ]
+        )
+        try harness.drawStroke(
+            tool: .brush,
+            layerID: secondLayerID,
+            points: [
+                .init(x: 42, y: 42, pressure: 1),
+                .init(x: 52, y: 52, pressure: 1)
+            ]
+        )
+        try harness.drawStroke(
+            tool: .eraser,
+            useDirtyHistory: true,
+            layerID: firstLayerID,
+            points: [
+                .init(x: 10, y: 10, pressure: 1),
+                .init(x: 18, y: 18, pressure: 1)
+            ]
+        )
+        try harness.history.captureCheckpoint()
+        let thirdLayerID = harness.addLayer()
+
+        #expect(try harness.history.undo())
+        #expect(harness.workspaceStore.state.document.layers.count == 2)
+        #expect(try harness.alpha(atX: 12, y: 12, layerID: firstLayerID) < 0.01)
+        #expect(try harness.alpha(atX: 46, y: 46, layerID: secondLayerID) > 0.01)
+
+        #expect(try harness.history.undo())
+        #expect(harness.workspaceStore.state.document.layers.count == 2)
+        #expect(try harness.alpha(atX: 12, y: 12, layerID: firstLayerID) > 0.01)
+        #expect(try harness.alpha(atX: 46, y: 46, layerID: secondLayerID) > 0.01)
+
+        #expect(try harness.history.redo())
+        #expect(harness.workspaceStore.state.document.layers.count == 2)
+        #expect(try harness.alpha(atX: 12, y: 12, layerID: firstLayerID) < 0.01)
+        #expect(try harness.alpha(atX: 46, y: 46, layerID: secondLayerID) > 0.01)
+
+        #expect(try harness.history.redo())
+        #expect(harness.workspaceStore.state.document.layers.count == 3)
+        #expect(try harness.alpha(atX: 12, y: 12, layerID: firstLayerID) < 0.01)
+        #expect(try harness.alpha(atX: 46, y: 46, layerID: secondLayerID) > 0.01)
+        #expect(try harness.alpha(atX: 12, y: 12, layerID: thirdLayerID) < 0.01)
+        #expect(!harness.history.debugAttemptedFullResetWithDirtyEntry)
+    }
+
+    @Test
+    @MainActor
+    func dirtyRestoreTopologyMismatchLeavesWorkspaceAndStacksUnchanged() throws {
+        let harness = try BrushHistoryHarness(canvasSize: .init(width: 64, height: 64))
+        let secondLayerID = harness.addLayer()
+
+        try harness.drawBrushStroke(
+            useDirtyBrushHistory: true,
+            layerID: secondLayerID,
+            points: [
+                .init(x: 36, y: 36, pressure: 1),
+                .init(x: 44, y: 44, pressure: 1)
+            ]
+        )
+
+        let undoCountBefore = harness.history.debugUndoCount
+        let redoCountBefore = harness.history.debugRedoCount
+
+        harness.workspaceStore.updateDocument { document in
+            _ = document.addLayer()
+        }
+        harness.layerSurfaceStore.prepareTextures(for: harness.workspaceStore.state.document, metal: harness.metalContext)
+        let workspaceAfterTopologyChange = harness.workspaceStore.state
+
+        do {
+            _ = try harness.history.undo()
+            Issue.record("Expected dirty restore topology mismatch to throw")
+        } catch {
+        }
+
+        #expect(harness.history.debugUndoCount == undoCountBefore)
+        #expect(harness.history.debugRedoCount == redoCountBefore)
+        #expect(harness.workspaceStore.state == workspaceAfterTopologyChange)
+        #expect(try harness.alpha(atX: 40, y: 40, layerID: secondLayerID) > 0.01)
+    }
+
+    @Test
+    @MainActor
+    func dirtyEraserUndoCapturePushesSymmetricDirtyEntryOntoRedoStack() throws {
+        let harness = try BrushHistoryHarness(canvasSize: .init(width: 64, height: 64))
+        _ = harness.workspaceStore.state.document.activeLayerID
+        let layerID = harness.addLayer()
+
+        try harness.drawStroke(
+            tool: .brush,
+            layerID: layerID,
+            points: [
+                .init(x: 12, y: 12, pressure: 1),
+                .init(x: 20, y: 20, pressure: 1)
+            ]
+        )
+        try harness.drawStroke(
+            tool: .eraser,
+            useDirtyHistory: true,
+            layerID: layerID,
+            points: [
+                .init(x: 12, y: 12, pressure: 1),
+                .init(x: 20, y: 20, pressure: 1)
+            ]
+        )
+
+        #expect(try harness.history.undo())
+        let redoMode = try #require(harness.history.debugRedoEntryModes.last)
+        switch redoMode {
+        case .full:
+            Issue.record("Expected symmetric dirty current-entry capture for eraser in redo stack")
+        case .inPlaceChangedLayers(_, let changedLayerIDs):
+            #expect(Set(changedLayerIDs) == [layerID])
+        }
     }
 }
 
@@ -259,6 +832,24 @@ private struct BrushHistoryHarness {
     }
 
     func drawBrushStroke(
+        history: HistoryController? = nil,
+        useDirtyBrushHistory: Bool = false,
+        layerID: LayerID,
+        points: [StrokePoint]
+    ) throws {
+        try drawStroke(
+            history: history,
+            tool: .brush,
+            useDirtyHistory: useDirtyBrushHistory,
+            layerID: layerID,
+            points: points
+        )
+    }
+
+    func drawStroke(
+        history: HistoryController? = nil,
+        tool: ToolKind,
+        useDirtyHistory: Bool = false,
         layerID: LayerID,
         points: [StrokePoint]
     ) throws {
@@ -268,7 +859,7 @@ private struct BrushHistoryHarness {
         )
         _ = engine.applyStroke(
             StrokeDescriptor(
-                tool: .brush,
+                tool: tool,
                 color: .black,
                 brush: .stageOneDefault,
                 points: points,
@@ -286,8 +877,15 @@ private struct BrushHistoryHarness {
         commandBuffer.commit()
         commandBuffer.waitUntilCompleted()
 
-        try engine.drainPendingBrushCommitJobs { [history] _ in
-            try history.captureCheckpoint()
+        let historyController = history ?? self.history
+        try engine.drainPendingBrushCommitJobs { job in
+            let captureMode: HistoryCaptureMode
+            if useDirtyHistory, job.packets.last?.tool == .brush || job.packets.last?.tool == .eraser {
+                captureMode = .inPlaceChangedLayers([job.layerID])
+            } else {
+                captureMode = .full
+            }
+            try historyController.captureCheckpoint(captureMode: captureMode)
         }
     }
 

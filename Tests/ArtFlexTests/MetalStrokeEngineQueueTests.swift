@@ -224,7 +224,7 @@ struct MetalStrokeEngineQueueTests {
     }
 
     @Test
-    func smudgeLiveSessionReusesSingleFullSizeSourceTextureAcrossPackets() throws {
+    func smudgeLiveSessionDoesNotUseFullSizeSnapshotCopiesAcrossPackets() throws {
         guard
             let metalContext = MetalDeviceContext(),
             let firstCommandBuffer = metalContext.commandQueue.makeCommandBuffer(),
@@ -273,11 +273,7 @@ struct MetalStrokeEngineQueueTests {
         _ = engine.flushPendingStrokePackets(into: firstCommandBuffer)
         firstCommandBuffer.commit()
         firstCommandBuffer.waitUntilCompleted()
-
-        guard let firstSmudgeSourceTextureIdentifier = engine.debugLiveSmudgeSourceTextureIdentifier else {
-            Issue.record("Expected live smudge source texture after first flush")
-            return
-        }
+        #expect(engine.debugLastFlushSmudgeFullSizeCopyCount == 0)
 
         _ = engine.applyStroke(
             StrokeDescriptor(
@@ -297,12 +293,11 @@ struct MetalStrokeEngineQueueTests {
         _ = engine.flushPendingStrokePackets(into: secondCommandBuffer)
         secondCommandBuffer.commit()
         secondCommandBuffer.waitUntilCompleted()
-
-        #expect(engine.debugLiveSmudgeSourceTextureIdentifier == firstSmudgeSourceTextureIdentifier)
+        #expect(engine.debugLastFlushSmudgeFullSizeCopyCount == 0)
     }
 
     @Test
-    func smudgeCommitReplayReusesSingleFullSizeSourceTextureAcrossPackets() throws {
+    func smudgeCommitReplayDoesNotUseFullSizeSnapshotCopiesAcrossPackets() throws {
         guard
             let metalContext = MetalDeviceContext(),
             let commandBuffer = metalContext.commandQueue.makeCommandBuffer()
@@ -357,11 +352,11 @@ struct MetalStrokeEngineQueueTests {
 
         try engine.drainPendingBrushCommitJobs { _ in }
 
-        #expect(engine.debugLastCommitSmudgeSourceTextureAllocationCount == 1)
+        #expect(engine.debugLastCommitSmudgeFullSizeCopyCount == 0)
     }
 
     @Test
-    func smudgeReusableSourceTextureMatchesFreshAllocationOutput() throws {
+    func smudgeGatheredColorsMatchFrozenSourceTextureOutput() throws {
         guard let metalContext = MetalDeviceContext() else {
             Issue.record("Metal unavailable")
             return
@@ -372,122 +367,72 @@ struct MetalStrokeEngineQueueTests {
         let renderer = try StageOneBrushRenderer(device: metalContext.device)
 
         guard
-            let reusedTexture = surfaceStore.makeTexture(width: 96, height: 96, metal: metalContext),
-            let freshTexture = surfaceStore.makeTexture(width: 96, height: 96, metal: metalContext),
+            let gatheredTexture = surfaceStore.makeTexture(width: 96, height: 96, metal: metalContext),
+            let frozenTextureTarget = surfaceStore.makeTexture(width: 96, height: 96, metal: metalContext),
             let commandBufferA = metalContext.commandQueue.makeCommandBuffer(),
-            let commandBufferB = metalContext.commandQueue.makeCommandBuffer()
+            let commandBufferB = metalContext.commandQueue.makeCommandBuffer(),
+            let frozenSourceTexture = surfaceStore.makeTexture(width: 96, height: 96, metal: metalContext)
         else {
             Issue.record("Texture unavailable")
             return
         }
 
         let seedSnapshot = gradientSnapshot(width: 96, height: 96)
-        try serializer.restore(snapshot: seedSnapshot, into: reusedTexture)
-        try serializer.restore(snapshot: seedSnapshot, into: freshTexture)
+        try serializer.restore(snapshot: seedSnapshot, into: gatheredTexture)
+        try serializer.restore(snapshot: seedSnapshot, into: frozenTextureTarget)
+        try serializer.restore(snapshot: seedSnapshot, into: frozenSourceTexture)
 
-        let packets: [StrokeDescriptor] = [
-            StrokeDescriptor(
-                tool: .smudge,
-                color: .black,
-                brush: .stageOneDefault,
-                points: [
-                    .init(x: 18, y: 18, pressure: 1),
-                    .init(x: 36, y: 30, pressure: 1),
-                    .init(x: 50, y: 42, pressure: 1)
-                ],
-                selectionShape: nil,
-                skipLeadingStamp: false
-            ),
-            StrokeDescriptor(
-                tool: .smudge,
-                color: .black,
-                brush: .stageOneDefault,
-                points: [
-                    .init(x: 46, y: 44, pressure: 1),
-                    .init(x: 58, y: 56, pressure: 1),
-                    .init(x: 70, y: 70, pressure: 1)
-                ],
-                selectionShape: nil,
-                skipLeadingStamp: false
-            )
-        ]
+        let packet = StrokeDescriptor(
+            tool: .smudge,
+            color: .black,
+            brush: .stageOneDefault,
+            points: [
+                .init(x: 18, y: 18, pressure: 1),
+                .init(x: 28, y: 24, pressure: 1),
+                .init(x: 36, y: 30, pressure: 1),
+                .init(x: 44, y: 36, pressure: 1),
+                .init(x: 52, y: 42, pressure: 1),
+                .init(x: 60, y: 50, pressure: 1),
+                .init(x: 68, y: 58, pressure: 1),
+                .init(x: 76, y: 68, pressure: 1)
+            ],
+            selectionShape: nil,
+            skipLeadingStamp: false
+        )
 
-        var reusedSamplingState: BrushStrokeSamplingState?
-        var reusedSmudgeSourceTexture: MTLTexture?
-        for packet in packets {
-            _ = renderer.encodeStroke(
-                stroke: packet,
-                into: reusedTexture,
-                commandQueue: metalContext.commandQueue,
-                commandBuffer: commandBufferA,
-                samplingState: &reusedSamplingState,
-                reusableSmudgeSourceTexture: &reusedSmudgeSourceTexture
-            )
-        }
+        var gatheredSamplingState: BrushStrokeSamplingState?
+        _ = renderer.encodeStroke(
+            stroke: packet,
+            into: gatheredTexture,
+            commandQueue: metalContext.commandQueue,
+            commandBuffer: commandBufferA,
+            samplingState: &gatheredSamplingState
+        )
 
-        if let lastPacket = packets.last {
-            var flushSamplingState = reusedSamplingState
-            flushSamplingState?.isFlushing = true
-            _ = renderer.encodeStroke(
-                stroke: StrokeDescriptor(
-                    tool: .smudge,
-                    color: lastPacket.color,
-                    brush: lastPacket.brush,
-                    points: [],
-                    selectionShape: nil,
-                    skipLeadingStamp: true
-                ),
-                into: reusedTexture,
-                commandQueue: metalContext.commandQueue,
-                commandBuffer: commandBufferA,
-                samplingState: &flushSamplingState,
-                reusableSmudgeSourceTexture: &reusedSmudgeSourceTexture
-            )
-        }
-
-        var freshSamplingState: BrushStrokeSamplingState?
-        for packet in packets {
-            var freshSmudgeSourceTexture: MTLTexture?
-            _ = renderer.encodeStroke(
-                stroke: packet,
-                into: freshTexture,
-                commandQueue: metalContext.commandQueue,
-                commandBuffer: commandBufferB,
-                samplingState: &freshSamplingState,
-                reusableSmudgeSourceTexture: &freshSmudgeSourceTexture
-            )
-        }
-
-        if let lastPacket = packets.last {
-            var flushSamplingState = freshSamplingState
-            flushSamplingState?.isFlushing = true
-            var freshSmudgeSourceTexture: MTLTexture?
-            _ = renderer.encodeStroke(
-                stroke: StrokeDescriptor(
-                    tool: .smudge,
-                    color: lastPacket.color,
-                    brush: lastPacket.brush,
-                    points: [],
-                    selectionShape: nil,
-                    skipLeadingStamp: true
-                ),
-                into: freshTexture,
-                commandQueue: metalContext.commandQueue,
-                commandBuffer: commandBufferB,
-                samplingState: &flushSamplingState,
-                reusableSmudgeSourceTexture: &freshSmudgeSourceTexture
-            )
-        }
+        surfaceStore.copyTexture(
+            from: frozenTextureTarget,
+            to: frozenSourceTexture,
+            metal: metalContext
+        )
+        var frozenSamplingState: BrushStrokeSamplingState?
+        _ = renderer.debugEncodeSmudgeStrokeUsingFrozenTexture(
+            stroke: packet,
+            frozenSourceTexture: frozenSourceTexture,
+            into: frozenTextureTarget,
+            commandBuffer: commandBufferB,
+            samplingState: &frozenSamplingState
+        )
 
         commandBufferA.commit()
         commandBufferB.commit()
         commandBufferA.waitUntilCompleted()
         commandBufferB.waitUntilCompleted()
 
-        let reusedSnapshot = try serializer.snapshot(texture: reusedTexture)
-        let freshSnapshot = try serializer.snapshot(texture: freshTexture)
+        let gatheredSnapshot = try serializer.snapshot(texture: gatheredTexture)
+        let frozenSnapshot = try serializer.snapshot(texture: frozenTextureTarget)
+        let maxDelta = maxByteDelta(gatheredSnapshot.pixelData, frozenSnapshot.pixelData)
 
-        #expect(reusedSnapshot == freshSnapshot)
+        #expect(maxDelta <= 1)
     }
 }
 
@@ -509,4 +454,9 @@ private func gradientSnapshot(width: Int, height: Int) -> LayerTextureSnapshot {
         bytesPerRow: bytesPerRow,
         pixelData: Data(pixels)
     )
+}
+
+private func maxByteDelta(_ lhs: Data, _ rhs: Data) -> Int {
+    precondition(lhs.count == rhs.count)
+    return zip(lhs, rhs).map { abs(Int($0) - Int($1)) }.max() ?? 0
 }

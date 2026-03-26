@@ -18,7 +18,8 @@ final class MetalStrokeEngine: StrokeEngine {
     private var liveSession: BrushLiveSession?
     private let commitQueue = BrushCommitQueue()
     private var nextCommitRevision: UInt64 = 0
-    private(set) var debugLastCommitSmudgeSourceTextureAllocationCount = 0
+    private(set) var debugLastFlushSmudgeFullSizeCopyCount = 0
+    private(set) var debugLastCommitSmudgeFullSizeCopyCount = 0
 
     init(
         metalContext: MetalDeviceContext,
@@ -138,6 +139,7 @@ final class MetalStrokeEngine: StrokeEngine {
         }.min() ?? flushStartNs
 
         var flushedPacketCount = 0
+        debugLastFlushSmudgeFullSizeCopyCount = 0
 
         for event in queuedEvents {
             switch event {
@@ -170,8 +172,7 @@ final class MetalStrokeEngine: StrokeEngine {
                         into: session.workingTexture,
                         commandQueue: metalContext.commandQueue,
                         commandBuffer: commandBuffer,
-                        samplingState: &session.brushSamplingState,
-                        reusableSmudgeSourceTexture: &session.smudgeSourceTexture
+                        samplingState: &session.brushSamplingState
                     )
                 }
 
@@ -221,8 +222,7 @@ final class MetalStrokeEngine: StrokeEngine {
                         into: session.workingTexture,
                         commandQueue: metalContext.commandQueue,
                         commandBuffer: commandBuffer,
-                        samplingState: &flushSamplingState,
-                        reusableSmudgeSourceTexture: &session.smudgeSourceTexture
+                        samplingState: &flushSamplingState
                     )
                 }
 
@@ -288,10 +288,6 @@ final class MetalStrokeEngine: StrokeEngine {
             return nil
         }
         return liveSession?.workingTexture
-    }
-
-    var debugLiveSmudgeSourceTextureIdentifier: ObjectIdentifier? {
-        liveSession?.smudgeSourceTexture.map { ObjectIdentifier($0 as AnyObject) }
     }
 
     func drainPendingBrushCommitJobs(beforeEachCommit: (BrushCommitJob) throws -> Void) throws {
@@ -474,8 +470,7 @@ final class MetalStrokeEngine: StrokeEngine {
 
         var samplingState: BrushStrokeSamplingState?
         var opacityCapSession: OpacityCapSessionResources?
-        var smudgeSourceTexture: MTLTexture?
-        var smudgeSourceTextureAllocationCount = 0
+        debugLastCommitSmudgeFullSizeCopyCount = 0
 
         for packet in job.packets {
             if requiresOpacityCap(packet), opacityCapSession == nil {
@@ -494,18 +489,13 @@ final class MetalStrokeEngine: StrokeEngine {
                     samplingState: &samplingState
                 )
             } else {
-                let hadSmudgeSourceTexture = smudgeSourceTexture != nil
                 _ = brushRenderer.encodeStroke(
                     stroke: packet,
                     into: texture,
                     commandQueue: metalContext.commandQueue,
                     commandBuffer: commandBuffer,
-                    samplingState: &samplingState,
-                    reusableSmudgeSourceTexture: &smudgeSourceTexture
+                    samplingState: &samplingState
                 )
-                if !hadSmudgeSourceTexture, smudgeSourceTexture != nil {
-                    smudgeSourceTextureAllocationCount += 1
-                }
             }
         }
 
@@ -530,22 +520,16 @@ final class MetalStrokeEngine: StrokeEngine {
                     samplingState: &flushSamplingState
                 )
             } else {
-                let hadSmudgeSourceTexture = smudgeSourceTexture != nil
                 _ = brushRenderer.encodeStroke(
                     stroke: flushStroke,
                     into: texture,
                     commandQueue: metalContext.commandQueue,
                     commandBuffer: commandBuffer,
-                    samplingState: &flushSamplingState,
-                    reusableSmudgeSourceTexture: &smudgeSourceTexture
+                    samplingState: &flushSamplingState
                 )
-                if !hadSmudgeSourceTexture, smudgeSourceTexture != nil {
-                    smudgeSourceTextureAllocationCount += 1
-                }
             }
         }
 
-        debugLastCommitSmudgeSourceTextureAllocationCount = smudgeSourceTextureAllocationCount
         commandBuffer.commit()
         commandBuffer.waitUntilCompleted()
     }
