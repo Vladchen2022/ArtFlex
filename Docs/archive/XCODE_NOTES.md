@@ -54,13 +54,14 @@
 
 如果现在从 Xcode 恢复开发，建议优先看：
 
-1. [STATUS.md](/Users/victorcloux/Desktop/ArtFlex/STATUS.md)
+1. [HANDOFF.md](/Users/victorcloux/Desktop/ArtFlex/HANDOFF.md)
 2. [CURRENT_TASK.md](/Users/victorcloux/Desktop/ArtFlex/CURRENT_TASK.md)
 3. [DECISIONS.md](/Users/victorcloux/Desktop/ArtFlex/DECISIONS.md)
 
 说明：
 
-- [CURRENT_STATUS.md](/Users/victorcloux/Desktop/ArtFlex/CURRENT_STATUS.md) 是较早阶段文档，已经落后于当前代码
+- 本文件已归档，仅作历史参考
+- [CURRENT_STATUS.md](/Users/victorcloux/Desktop/ArtFlex/CURRENT_STATUS.md) 用于当前阶段快照，不再把旧的 `STATUS.md` 当主入口
 
 ## 4. 当前最重要的代码入口
 
@@ -218,8 +219,8 @@ swift test --filter TransformInteractionStateTests
 
 如果下一轮恢复开发，建议先看：
 
-1. [CURRENT_TASK.md](/Users/victorcloux/Desktop/ArtFlex/CURRENT_TASK.md)
-2. [STATUS.md](/Users/victorcloux/Desktop/ArtFlex/STATUS.md)
+1. [HANDOFF.md](/Users/victorcloux/Desktop/ArtFlex/HANDOFF.md)
+2. [CURRENT_TASK.md](/Users/victorcloux/Desktop/ArtFlex/CURRENT_TASK.md)
 3. [DECISIONS.md](/Users/victorcloux/Desktop/ArtFlex/DECISIONS.md)
 
 然后优先继续：

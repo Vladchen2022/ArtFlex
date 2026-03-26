@@ -50,6 +50,7 @@ final class IdeationSessionState: ObservableObject {
     @Published var canvasDisplayMode: CanvasDisplayMode = .grid
 
     let branches: [Branch]
+    let baseCompositeSnapshot: LayerTextureSnapshot
 
     var activeBranchViewModel: WorkspaceViewModel {
         branches[selectedBranchIndex].viewModel
@@ -64,9 +65,11 @@ final class IdeationSessionState: ObservableObject {
     init(
         hostViewModel: WorkspaceViewModel,
         sourceSnapshot: WorkspaceHistoryEntry,
+        baseCompositeSnapshot: LayerTextureSnapshot,
         metalContext: MetalDeviceContext
     ) throws {
         self.hostViewModel = hostViewModel
+        self.baseCompositeSnapshot = baseCompositeSnapshot
         var createdBranches: [Branch] = []
         createdBranches.reserveCapacity(4)
 
@@ -80,7 +83,8 @@ final class IdeationSessionState: ObservableObject {
             )
             let branchViewModel = WorkspaceViewModel(
                 bootstrap: bootstrap,
-                installsZoomKeyboardMonitor: false
+                installsZoomKeyboardMonitor: false,
+                preparesInitialTextures: false
             )
             try branchViewModel.restoreWorkspaceSnapshot(sourceSnapshot)
             createdBranches.append(
@@ -138,19 +142,23 @@ final class IdeationSessionState: ObservableObject {
                 }
                 .removeDuplicates()
                 .dropFirst()
-                .sink { [weak self] _ in
-                    self?.propagateEditingContext(from: index)
+                .sink { [weak self] context in
+                    self?.propagateEditingContext(context, from: index)
                 }
             cancellables.append(cancellable)
         }
     }
 
     private func propagateEditingContext(from index: Int) {
+        let context = branches[index].viewModel.makeIdeationEditingContext()
+        propagateEditingContext(context, from: index)
+    }
+
+    private func propagateEditingContext(_ context: IdeationEditingContext, from index: Int) {
         guard mode == .synchronized, !isPropagatingContext else { return }
         isPropagatingContext = true
         defer { isPropagatingContext = false }
 
-        let context = branches[index].viewModel.makeIdeationEditingContext()
         for otherIndex in branches.indices where otherIndex != index {
             branches[otherIndex].viewModel.applyIdeationEditingContext(context)
         }

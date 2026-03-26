@@ -109,17 +109,23 @@ final class WorkspaceViewModel: ObservableObject {
     private lazy var transformGPUCompositorResult: Result<TransformGPUCompositor, Error> = Result {
         try TransformGPUCompositor(device: bootstrap.metalContext.device)
     }
-    init(bootstrap: AppBootstrap, installsZoomKeyboardMonitor: Bool = true) {
+    init(
+        bootstrap: AppBootstrap,
+        installsZoomKeyboardMonitor: Bool = true,
+        preparesInitialTextures: Bool = true
+    ) {
         self.bootstrap = bootstrap
         resetSelectionTraceLog()
         Self.restorePersistedBrushLibraryIfAvailable(in: bootstrap)
         Self.normalizeLegacySelectionIfNeeded(in: bootstrap.workspaceStore)
         Self.normalizeDisabledToolsIfNeeded(in: bootstrap.workspaceStore)
         let state = bootstrap.workspaceStore.state
-        bootstrap.layerSurfaceStore.prepareTextures(
-            for: state.document,
-            metal: bootstrap.metalContext
-        )
+        if preparesInitialTextures {
+            bootstrap.layerSurfaceStore.prepareTextures(
+                for: state.document,
+                metal: bootstrap.metalContext
+            )
+        }
         self.workspace = state
         self.sceneSnapshot = WorkspaceViewModel.makeSceneSnapshot(
             workspace: state,
@@ -248,6 +254,11 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func toggleTimelapseRecording() {
+        guard ideationSession == nil else {
+            showStatus(.init(kind: .info, message: "方案试探期间录像已暂停"))
+            return
+        }
+
         if timelapseRecorder.isRecording {
             timelapseRecorder.stopRecording()
             showStatus(.init(kind: .info, message: "已停止录制"))
@@ -2552,7 +2563,7 @@ final class WorkspaceViewModel: ObservableObject {
                 ? .clear
                 : .fill(premultipliedPixel(from: workspace.toolSession.selectedColor))
             let successMessage = combineMode == .subtract ? "已删除套索区域像素" : "已填充套索区域"
-            _ = applyPixelOperation(
+            let didApplyPixelOperation = applyPixelOperation(
                 to: preferredShape,
                 operation: operation,
                 historyOperationKind: combineMode == .subtract ? "lasso.erase" : "lasso.fill",
@@ -2571,6 +2582,9 @@ final class WorkspaceViewModel: ObservableObject {
                 selection.activeCombineMode = .replace
             }
             refreshLightweight()
+            if didApplyPixelOperation {
+                relayIdeationOperation(.commitSelection(end: end, modifiers: .init(flags: modifiers)))
+            }
             return
         }
         // 对于 lasso 且 replace 模式：直接提交平滑后的 lasso 形状。
@@ -2628,6 +2642,7 @@ final class WorkspaceViewModel: ObservableObject {
                 }
                 self.refreshLightweight()
             }
+            relayIdeationOperation(.commitSelection(end: end, modifiers: .init(flags: modifiers)))
             return
         }
 
@@ -2704,6 +2719,7 @@ final class WorkspaceViewModel: ObservableObject {
                 }
                 self.refresh()
             }
+            relayIdeationOperation(.commitSelection(end: end, modifiers: .init(flags: modifiers)))
             return
         }
 
@@ -4418,9 +4434,11 @@ final class WorkspaceViewModel: ObservableObject {
             _ = flushBrushEditingBoundary(reason: "startIdeationSession")
             suspendTimelapseForIdeationIfNeeded()
             let snapshot = try bootstrap.historyController.captureCurrentEntry()
+            let baseCompositeSnapshot = try makeVisibleCompositeSnapshot()
             ideationSession = try IdeationSessionState(
                 hostViewModel: self,
                 sourceSnapshot: snapshot,
+                baseCompositeSnapshot: baseCompositeSnapshot,
                 metalContext: bootstrap.metalContext
             )
             showStatus(.init(kind: .success, message: "已进入方案试探"))
@@ -4440,13 +4458,23 @@ final class WorkspaceViewModel: ObservableObject {
         guard let ideationSession else { return }
 
         do {
+            _ = ideationSession.activeBranchViewModel.flushBrushEditingBoundary(
+                reason: "applySelectedIdeationVariantToMainCanvas.ideationBranch"
+            )
             let snapshot = try ideationSession.activeBranchViewModel.makeVisibleCompositeSnapshot()
+            guard let deltaSnapshot = try ideationDeltaSnapshot(
+                variantSnapshot: snapshot,
+                baseSnapshot: ideationSession.baseCompositeSnapshot
+            ) else {
+                showStatus(.init(kind: .info, message: "当前方案没有可附加到新图层的可见差异"))
+                return
+            }
             let slotIndex = ideationSession.selectedBranchIndex + 1
+            self.ideationSession = nil
             try appendCompositeSnapshotAsNewLayer(
-                snapshot,
+                deltaSnapshot,
                 named: "方案试探 \(slotIndex)"
             )
-            self.ideationSession = nil
             resumeTimelapseAfterIdeationIfNeeded(recordCurrentCanvas: true)
             showStatus(.init(kind: .success, message: "已将方案 \(slotIndex) 应用于主画布"))
         } catch {
@@ -4477,7 +4505,10 @@ final class WorkspaceViewModel: ObservableObject {
 
                 for (index, branch) in ideationSession.branches.enumerated() {
                     let snapshot = try await MainActor.run {
-                        try branch.viewModel.makeVisibleCompositeSnapshot()
+                        _ = branch.viewModel.flushBrushEditingBoundary(
+                            reason: "exportIdeationVariantsToDisk.branch\(index)"
+                        )
+                        return try branch.viewModel.makeVisibleCompositeSnapshot()
                     }
                     snapshots.append((index, snapshot))
                     await Task.yield()
@@ -5099,7 +5130,25 @@ final class WorkspaceViewModel: ObservableObject {
     @discardableResult
     func flushBrushEditingBoundary(reason: String) -> Bool {
         _ = reason
-        return drainPendingBrushCommitsIfNeeded(resetLiveSession: true)
+        let hadPendingWork = flushPendingBrushWorkAtEditingBoundaryIfNeeded()
+        let hadPendingCommits = drainPendingBrushCommitsIfNeeded(resetLiveSession: true)
+        return hadPendingWork || hadPendingCommits
+    }
+
+    @discardableResult
+    private func flushPendingBrushWorkAtEditingBoundaryIfNeeded() -> Bool {
+        guard bootstrap.strokeEngine.hasPendingBrushWork else {
+            return false
+        }
+        guard let commandBuffer = bootstrap.metalContext.commandQueue.makeCommandBuffer() else {
+            showStatus(.init(kind: .error, message: "无法刷新待提交的笔刷内容"))
+            return false
+        }
+
+        let didFlushLiveWork = flushPendingBrushWork(into: commandBuffer) != nil
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+        return didFlushLiveWork
     }
 
     private func drainPendingBrushCommitsIfNeeded(resetLiveSession: Bool) -> Bool {
@@ -5222,6 +5271,52 @@ final class WorkspaceViewModel: ObservableObject {
         try bootstrap.textureSerializer.restore(snapshot: snapshot, into: texture)
         refresh()
         noteCanvasContentChanged()
+    }
+
+    private func ideationDeltaSnapshot(
+        variantSnapshot: LayerTextureSnapshot,
+        baseSnapshot: LayerTextureSnapshot
+    ) throws -> LayerTextureSnapshot? {
+        guard
+            variantSnapshot.width == baseSnapshot.width,
+            variantSnapshot.height == baseSnapshot.height,
+            variantSnapshot.bytesPerRow == baseSnapshot.bytesPerRow,
+            variantSnapshot.pixelData.count == baseSnapshot.pixelData.count
+        else {
+            throw CocoaError(.fileReadCorruptFile)
+        }
+
+        let variantBytes = [UInt8](variantSnapshot.pixelData)
+        let baseBytes = [UInt8](baseSnapshot.pixelData)
+        var deltaBytes = [UInt8](repeating: 0, count: variantBytes.count)
+        var hasVisibleDelta = false
+
+        for index in stride(from: 0, to: variantBytes.count, by: 4) {
+            let pixelsMatch =
+                variantBytes[index] == baseBytes[index] &&
+                variantBytes[index + 1] == baseBytes[index + 1] &&
+                variantBytes[index + 2] == baseBytes[index + 2] &&
+                variantBytes[index + 3] == baseBytes[index + 3]
+            guard !pixelsMatch else { continue }
+
+            let alpha = variantBytes[index + 3]
+            guard alpha > 0 else { continue }
+
+            deltaBytes[index] = variantBytes[index]
+            deltaBytes[index + 1] = variantBytes[index + 1]
+            deltaBytes[index + 2] = variantBytes[index + 2]
+            deltaBytes[index + 3] = alpha
+            hasVisibleDelta = true
+        }
+
+        guard hasVisibleDelta else { return nil }
+
+        return LayerTextureSnapshot(
+            width: variantSnapshot.width,
+            height: variantSnapshot.height,
+            bytesPerRow: variantSnapshot.bytesPerRow,
+            pixelData: Data(deltaBytes)
+        )
     }
 
     private func syncTimelapseDocumentContext() {

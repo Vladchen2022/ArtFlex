@@ -58,6 +58,7 @@ struct ToolSidebarView: View {
     private var ideationButton: some View {
         Button {
             if hostViewModel.ideationSession == nil {
+                showsRecorderPopover = false
                 hostViewModel.startIdeationSession()
             } else {
                 hostViewModel.cancelIdeationSession()
@@ -100,6 +101,10 @@ struct ToolSidebarView: View {
 
     private var recorderButton: some View {
         Button {
+            guard hostViewModel.ideationSession == nil else {
+                showsRecorderPopover = false
+                return
+            }
             showsRecorderPopover.toggle()
         } label: {
             HStack(spacing: 6) {
@@ -117,7 +122,11 @@ struct ToolSidebarView: View {
                 Spacer(minLength: 4)
 
                 Circle()
-                    .fill(hostViewModel.timelapseRecorder.isRecording ? Color.red : Color.green)
+                    .fill(
+                        hostViewModel.ideationSession != nil
+                            ? Color.orange
+                            : (hostViewModel.timelapseRecorder.isRecording ? Color.red : Color.green)
+                    )
                     .frame(width: 8, height: 8)
                     .overlay(
                         Circle()
@@ -128,11 +137,20 @@ struct ToolSidebarView: View {
             .frame(width: 116, height: 34)
             .background(
                 RoundedRectangle(cornerRadius: 9)
-                    .fill(Color.white.opacity(0.08))
+                    .fill(
+                        hostViewModel.ideationSession != nil
+                            ? Color.orange.opacity(0.16)
+                            : Color.white.opacity(0.08)
+                    )
             )
         }
         .buttonStyle(.plain)
-        .help(hostViewModel.timelapseRecorder.isRecording ? "录像工具（录制中）" : "录像工具（未录制）")
+        .disabled(hostViewModel.ideationSession != nil)
+        .help(
+            hostViewModel.ideationSession != nil
+                ? "方案试探期间录像已暂停"
+                : (hostViewModel.timelapseRecorder.isRecording ? "录像工具（录制中）" : "录像工具（未录制）")
+        )
         .padding(.vertical, 8)
         .popover(isPresented: $showsRecorderPopover, arrowEdge: .leading) {
             RecorderSectionView(

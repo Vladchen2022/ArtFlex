@@ -1030,6 +1030,7 @@ final class StrokeCaptureMTKView: MTKView {
         let current = smoothed(sample(from: event))
         emitCoalescedStrokeSamples([current])
         enqueuePendingBrushEnd()
+        let _ = flushPendingBrushInputQueue()
         endContinuousStrokeRendering()
         endBrushStrokeDiagnostics()
         scheduleBrushOutlineRevealAfterIdle()

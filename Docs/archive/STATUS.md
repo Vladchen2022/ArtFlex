@@ -332,9 +332,9 @@
 
 如果现在继续恢复开发，建议优先阅读：
 
-1. [STATUS.md](/Users/victorcloux/Desktop/ArtFlex/STATUS.md)
+1. [HANDOFF.md](/Users/victorcloux/Desktop/ArtFlex/HANDOFF.md)
 2. [CURRENT_TASK.md](/Users/victorcloux/Desktop/ArtFlex/CURRENT_TASK.md)
 3. [DECISIONS.md](/Users/victorcloux/Desktop/ArtFlex/DECISIONS.md)
-4. [XCODE_NOTES.md](/Users/victorcloux/Desktop/ArtFlex/XCODE_NOTES.md)
+4. [XCODE_NOTES.md](/Users/victorcloux/Desktop/ArtFlex/Docs/archive/XCODE_NOTES.md)
 
-不要再把旧的 [CURRENT_STATUS.md](/Users/victorcloux/Desktop/ArtFlex/CURRENT_STATUS.md) 当作最新状态来源。
+不要再把本归档文档或旧的 [CURRENT_STATUS.md](/Users/victorcloux/Desktop/ArtFlex/CURRENT_STATUS.md) 当作最新状态来源。
