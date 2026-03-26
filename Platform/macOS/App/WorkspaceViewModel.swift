@@ -34,6 +34,9 @@ final class WorkspaceViewModel: ObservableObject {
     private static let runSamePathCommitTest = false
     private static let runSamplingTruthTest = false
     private static let brushTipMaskResolution = 256
+    private static let maxSavedSnapshotCount = 6
+    private static let savedSnapshotThumbnailDimension = 92
+    private static let snapshotComparePreviewDimension = 960
     @Published private(set) var workspace: WorkspaceState
     @Published private(set) var sceneSnapshot: CanvasSceneSnapshot
     @Published private(set) var status: WorkspaceStatus?
@@ -86,9 +89,14 @@ final class WorkspaceViewModel: ObservableObject {
     @Published private(set) var selectionRevision: UInt64 = 0
     @Published private(set) var viewportRevision: UInt64 = 0
     @Published private(set) var transformPreviewRevision: UInt64 = 0
+    @Published private(set) var savedSnapshots: [CanvasSavedSnapshot] = []
     @Published private(set) var ideationSession: IdeationSessionState?
+    @Published private(set) var snapshotCompareSession: SnapshotCompareSessionState?
     private var currentProjectURL: URL?
     private var shouldResumeTimelapseAfterIdeation = false
+    private var shouldResumeTimelapseAfterSnapshotCompare = false
+    private var snapshotPreviewPreparationTasks: [UUID: Task<Void, Never>] = [:]
+    private var frozenSnapshotPreviewPreparationTask: Task<Void, Never>?
     private var deferredGradientAction: DeferredGradientAction?
     private let selectionTraceLogger = Logger(subsystem: "ArtFlex", category: "SelectionTrace")
     private let brushStrokeLogger = Logger(subsystem: "ArtFlex", category: "BrushStroke")
@@ -239,6 +247,14 @@ final class WorkspaceViewModel: ObservableObject {
         bootstrap.timelapseRecorder
     }
 
+    var savedSnapshotCount: Int {
+        savedSnapshots.count
+    }
+
+    var isSnapshotCompareActive: Bool {
+        snapshotCompareSession != nil
+    }
+
     func chooseTimelapseOutputDirectory() {
         guard let url = bootstrap.filePanelService.presentDirectorySelectionPanel(
             title: "选择录像数据文件夹",
@@ -254,6 +270,10 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func toggleTimelapseRecording() {
+        guard snapshotCompareSession == nil else {
+            showStatus(.init(kind: .info, message: "快照对比期间录像已暂停"))
+            return
+        }
         guard ideationSession == nil else {
             showStatus(.init(kind: .info, message: "方案试探期间录像已暂停"))
             return
@@ -1581,45 +1601,10 @@ final class WorkspaceViewModel: ObservableObject {
 
         do {
             let snapshot = try bootstrap.textureSerializer.snapshot(texture: texture)
-            let thumbnailWidth = Swift.max(1, Swift.min(maxDimension, snapshot.width))
-            let thumbnailHeight = Swift.max(1, Swift.min(maxDimension, snapshot.height))
-            let sourceBytes = [UInt8](snapshot.pixelData)
-            let sourceWidth = snapshot.width
-            let sourceHeight = snapshot.height
-            let sourceBytesPerRow = snapshot.bytesPerRow
-            let bytesPerPixel = 4
-            let thumbnailBytesPerRow = thumbnailWidth * bytesPerPixel
-            var rgba = [UInt8](repeating: 0, count: thumbnailHeight * thumbnailBytesPerRow)
-
-            for targetY in 0..<thumbnailHeight {
-                let sourceY = Swift.min((targetY * sourceHeight) / thumbnailHeight, sourceHeight - 1)
-                for targetX in 0..<thumbnailWidth {
-                    let sourceX = Swift.min((targetX * sourceWidth) / thumbnailWidth, sourceWidth - 1)
-                    let sourceOffset = (sourceY * sourceBytesPerRow) + (sourceX * bytesPerPixel)
-                    let targetOffset = (targetY * thumbnailBytesPerRow) + (targetX * bytesPerPixel)
-                    rgba[targetOffset] = sourceBytes[sourceOffset + 2]
-                    rgba[targetOffset + 1] = sourceBytes[sourceOffset + 1]
-                    rgba[targetOffset + 2] = sourceBytes[sourceOffset]
-                    rgba[targetOffset + 3] = sourceBytes[sourceOffset + 3]
-                }
-            }
-
-            guard let provider = CGDataProvider(data: Data(rgba) as CFData) else {
-                return nil
-            }
-
-            let image = CGImage(
-                width: thumbnailWidth,
-                height: thumbnailHeight,
-                bitsPerComponent: 8,
-                bitsPerPixel: 32,
-                bytesPerRow: thumbnailBytesPerRow,
-                space: colorSpace,
-                bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
-                provider: provider,
-                decode: nil,
-                shouldInterpolate: true,
-                intent: .defaultIntent
+            let image = Self.snapshotImage(
+                from: snapshot,
+                maxDimension: maxDimension,
+                colorSpace: colorSpace
             )
             if let image {
                 layerThumbnailCache[layerID] = image
@@ -1628,6 +1613,17 @@ final class WorkspaceViewModel: ObservableObject {
         } catch {
             return nil
         }
+    }
+
+    func savedSnapshot(with id: UUID) -> CanvasSavedSnapshot? {
+        savedSnapshots.first { $0.id == id }
+    }
+
+    func savedSnapshotDisplayIndex(for id: UUID) -> Int? {
+        guard let index = savedSnapshots.firstIndex(where: { $0.id == id }) else {
+            return nil
+        }
+        return index + 1
     }
 
     func beginSelection(kind: SelectionShapeKind, at start: CanvasPoint, modifiers: NSEvent.ModifierFlags = []) {
@@ -4424,7 +4420,196 @@ final class WorkspaceViewModel: ObservableObject {
         ideationSession?.activeBranchViewModel
     }
 
+    func handleSnapshotSavePrimaryAction() {
+        guard snapshotCompareSession == nil else { return }
+        guard ideationSession == nil else {
+            showStatus(.init(kind: .info, message: "方案试探期间不可使用快照保存"))
+            return
+        }
+
+        if savedSnapshots.count >= Self.maxSavedSnapshotCount {
+            openSnapshotCompare()
+            return
+        }
+
+        do {
+            _ = flushBrushEditingBoundary(reason: "handleSnapshotSavePrimaryAction")
+            let snapshot = try makeVisibleCompositeSnapshot()
+            let savedSnapshot = makeSavedCanvasSnapshot(from: snapshot, includesPreviewImage: false)
+            savedSnapshots.append(savedSnapshot)
+
+            if savedSnapshots.count >= Self.maxSavedSnapshotCount {
+                openSnapshotCompare(frozenSnapshotOverride: savedSnapshot)
+            } else {
+                showStatus(.init(kind: .success, message: "已保存快照（\(savedSnapshots.count)/\(Self.maxSavedSnapshotCount)）"))
+            }
+        } catch {
+            showStatus(.init(kind: .error, message: error.localizedDescription))
+        }
+    }
+
+    func openSnapshotCompare(frozenSnapshotOverride: CanvasSavedSnapshot? = nil) {
+        guard snapshotCompareSession == nil else {
+            showStatus(.init(kind: .info, message: "快照对比已开启"))
+            return
+        }
+        guard ideationSession == nil else {
+            showStatus(.init(kind: .info, message: "方案试探期间不可进入快照对比"))
+            return
+        }
+        guard !savedSnapshots.isEmpty else {
+            showStatus(.init(kind: .info, message: "当前还没有已保存的快照"))
+            return
+        }
+
+        do {
+            _ = flushBrushEditingBoundary(reason: "openSnapshotCompare")
+            suspendTimelapseForSnapshotCompareIfNeeded()
+            let frozenSnapshot: CanvasSavedSnapshot
+            if let frozenSnapshotOverride {
+                frozenSnapshot = frozenSnapshotOverride
+            } else {
+                frozenSnapshot = makeSavedCanvasSnapshot(
+                    from: try makeVisibleCompositeSnapshot(),
+                    includesPreviewImage: false
+                )
+            }
+            snapshotCompareSession = SnapshotCompareSessionState(frozenCurrentSnapshot: frozenSnapshot)
+            prepareFrozenSnapshotPreviewIfNeeded(for: frozenSnapshot)
+            showStatus(.init(kind: .success, message: "已进入快照对比"))
+        } catch {
+            resumeTimelapseAfterSnapshotCompareIfNeeded()
+            showStatus(.init(kind: .error, message: error.localizedDescription))
+        }
+    }
+
+    func cancelSnapshotCompare() {
+        guard snapshotCompareSession != nil else { return }
+        cancelSnapshotPreviewPreparationTasks()
+        snapshotCompareSession = nil
+        resumeTimelapseAfterSnapshotCompareIfNeeded()
+        showStatus(.init(kind: .info, message: "已退出快照对比"))
+    }
+
+    func clearSavedSnapshots() {
+        guard !savedSnapshots.isEmpty else {
+            showStatus(.init(kind: .info, message: "当前没有可清空的快照"))
+            return
+        }
+
+        savedSnapshots.removeAll()
+        cancelSnapshotPreviewPreparationTasks()
+        if snapshotCompareSession != nil {
+            snapshotCompareSession = nil
+            resumeTimelapseAfterSnapshotCompareIfNeeded()
+        }
+        showStatus(.init(kind: .info, message: "已清空全部快照"))
+    }
+
+    func deleteSavedSnapshot(_ id: UUID) {
+        guard let index = savedSnapshots.firstIndex(where: { $0.id == id }) else {
+            return
+        }
+        savedSnapshots.remove(at: index)
+        cancelSavedSnapshotPreviewPreparationTask(for: id)
+        snapshotCompareSession?.removeSnapshot(id)
+
+        if savedSnapshots.isEmpty, snapshotCompareSession != nil {
+            snapshotCompareSession = nil
+            resumeTimelapseAfterSnapshotCompareIfNeeded()
+            showStatus(.init(kind: .info, message: "已删除最后一张快照，并退出快照对比"))
+        } else {
+            showStatus(.init(kind: .info, message: "已删除快照"))
+        }
+    }
+
+    func selectSavedSnapshotForCompare(_ id: UUID?) {
+        snapshotCompareSession?.selectedSnapshotID = id
+    }
+
+    func assignSavedSnapshot(_ id: UUID, to slot: SnapshotCompareSlot) {
+        guard savedSnapshot(with: id) != nil else { return }
+        snapshotCompareSession?.assignSnapshot(id, to: slot)
+        prepareSavedSnapshotPreviewIfNeeded(for: id)
+    }
+
+    func clearSavedSnapshotCompareSlot(_ slot: SnapshotCompareSlot) {
+        snapshotCompareSession?.clearSlot(slot)
+    }
+
+    func applySelectedSavedSnapshotToMainCanvas() {
+        guard
+            let session = snapshotCompareSession,
+            let selectedSnapshotID = session.selectedSnapshotID,
+            let savedSnapshot = savedSnapshot(with: selectedSnapshotID)
+        else {
+            showStatus(.init(kind: .info, message: "请先选择一个快照"))
+            return
+        }
+
+        do {
+            _ = flushBrushEditingBoundary(reason: "applySelectedSavedSnapshotToMainCanvas")
+            let labelIndex = savedSnapshotDisplayIndex(for: selectedSnapshotID) ?? savedSnapshots.count
+            try appendCompositeSnapshotAsNewLayer(
+                savedSnapshot.snapshot,
+                named: "快照 \(labelIndex)"
+            )
+            cancelSnapshotPreviewPreparationTasks()
+            snapshotCompareSession = nil
+            resumeTimelapseAfterSnapshotCompareIfNeeded(recordCurrentCanvas: true)
+            showStatus(.init(kind: .success, message: "已将快照 \(labelIndex) 应用于主画布"))
+        } catch {
+            showStatus(.init(kind: .error, message: error.localizedDescription))
+        }
+    }
+
+    func exportSavedSnapshotsToDisk() {
+        guard !savedSnapshots.isEmpty else {
+            showStatus(.init(kind: .info, message: "当前没有可导出的快照"))
+            return
+        }
+
+        let defaultDirectoryName = "\(workspace.document.metadata.name)-快照"
+        guard let directoryURL = bootstrap.filePanelService.presentDirectorySelectionPanel(
+            title: "选择快照导出文件夹",
+            prompt: "导出"
+        ) else {
+            showStatus(.init(kind: .info, message: "已取消导出快照"))
+            return
+        }
+
+        let exportEntries = savedSnapshots.enumerated().map { index, entry in
+            (index: index, snapshot: entry.snapshot)
+        }
+        let boxedExporter = WorkspaceUncheckedBox(bootstrap.pngExporter)
+        showStatus(.init(kind: .info, message: "正在导出 \(exportEntries.count) 个快照..."))
+
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                try await withThrowingTaskGroup(of: Void.self) { group in
+                    for entry in exportEntries {
+                        let outputURL = directoryURL
+                            .appendingPathComponent("\(defaultDirectoryName)-\(entry.index + 1).png")
+                        group.addTask(priority: .userInitiated) {
+                            try boxedExporter.value.export(snapshot: entry.snapshot, to: outputURL)
+                        }
+                    }
+                    try await group.waitForAll()
+                }
+
+                self.showStatus(.init(kind: .success, message: "已导出 \(exportEntries.count) 个快照"))
+            } catch {
+                self.showStatus(.init(kind: .error, message: error.localizedDescription))
+            }
+        }
+    }
+
     func startIdeationSession() {
+        guard snapshotCompareSession == nil else {
+            showStatus(.init(kind: .info, message: "快照对比期间不可进入方案试探"))
+            return
+        }
         guard ideationSession == nil else {
             showStatus(.init(kind: .info, message: "方案试探已开启"))
             return
@@ -4571,6 +4756,7 @@ final class WorkspaceViewModel: ObservableObject {
         }
 
         do {
+            resetSnapshotToolState(resumeTimelapseIfNeeded: false)
             let result = try bootstrap.persistenceController.openProject(from: url)
             bootstrap.workspaceStore.replaceState(result.workspace)
             Self.normalizeLegacySelectionIfNeeded(in: bootstrap.workspaceStore)
@@ -4650,6 +4836,8 @@ final class WorkspaceViewModel: ObservableObject {
             _ = flushBrushEditingBoundary(reason: "createNewCanvas.discard")
             break
         }
+
+        resetSnapshotToolState(resumeTimelapseIfNeeded: false)
 
         let now = Date()
         let layer = LayerRecord.stageOneDefault()
@@ -5061,6 +5249,204 @@ final class WorkspaceViewModel: ObservableObject {
         } catch {
             showStatus(.init(kind: .error, message: "恢复录像失败：\(error.localizedDescription)"))
         }
+    }
+
+    private func suspendTimelapseForSnapshotCompareIfNeeded() {
+        shouldResumeTimelapseAfterSnapshotCompare = timelapseRecorder.isRecording
+        guard shouldResumeTimelapseAfterSnapshotCompare else { return }
+        timelapseRecorder.stopRecording()
+    }
+
+    private func resumeTimelapseAfterSnapshotCompareIfNeeded(recordCurrentCanvas: Bool = false) {
+        guard shouldResumeTimelapseAfterSnapshotCompare else { return }
+        shouldResumeTimelapseAfterSnapshotCompare = false
+
+        syncTimelapseDocumentContext()
+        do {
+            _ = try timelapseRecorder.startRecording(
+                documentName: workspace.document.metadata.name,
+                documentFileURL: currentProjectURL
+            )
+            if recordCurrentCanvas {
+                timelapseRecorder.noteCanvasChanged(
+                    revision: documentChangeRevision,
+                    documentName: workspace.document.metadata.name,
+                    documentFileURL: currentProjectURL
+                )
+            }
+        } catch {
+            showStatus(.init(kind: .error, message: "恢复录像失败：\(error.localizedDescription)"))
+        }
+    }
+
+    private func resetSnapshotToolState(resumeTimelapseIfNeeded: Bool) {
+        savedSnapshots.removeAll()
+        cancelSnapshotPreviewPreparationTasks()
+        snapshotCompareSession = nil
+        if resumeTimelapseIfNeeded {
+            resumeTimelapseAfterSnapshotCompareIfNeeded()
+        } else {
+            shouldResumeTimelapseAfterSnapshotCompare = false
+        }
+    }
+
+    private func makeSavedCanvasSnapshot(
+        from snapshot: LayerTextureSnapshot,
+        includesPreviewImage: Bool
+    ) -> CanvasSavedSnapshot {
+        CanvasSavedSnapshot(
+            id: UUID(),
+            snapshot: snapshot,
+            thumbnailImage: Self.snapshotImage(from: snapshot, maxDimension: Self.savedSnapshotThumbnailDimension),
+            previewImage: includesPreviewImage
+                ? Self.snapshotImage(from: snapshot, maxDimension: Self.snapshotComparePreviewDimension)
+                : nil
+        )
+    }
+
+    private func prepareSavedSnapshotPreviewIfNeeded(for id: UUID) {
+        guard snapshotPreviewPreparationTasks[id] == nil else { return }
+        guard let snapshot = savedSnapshot(with: id), snapshot.previewImage == nil else { return }
+
+        let sourceSnapshot = snapshot.snapshot
+        let previewDimension = Self.snapshotComparePreviewDimension
+        snapshotPreviewPreparationTasks[id] = Task.detached(priority: .userInitiated) { [sourceSnapshot] in
+            let image = WorkspaceViewModel.snapshotImage(
+                from: sourceSnapshot,
+                maxDimension: previewDimension
+            )
+
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                guard let updatedIndex = self.savedSnapshots.firstIndex(where: { $0.id == id }) else {
+                    self.snapshotPreviewPreparationTasks[id] = nil
+                    return
+                }
+
+                var updatedSnapshots = self.savedSnapshots
+                if updatedSnapshots[updatedIndex].previewImage == nil {
+                    updatedSnapshots[updatedIndex].previewImage = image
+                    self.savedSnapshots = updatedSnapshots
+                }
+                self.snapshotPreviewPreparationTasks[id] = nil
+            }
+        }
+    }
+
+    private func prepareFrozenSnapshotPreviewIfNeeded(for snapshot: CanvasSavedSnapshot) {
+        guard snapshot.previewImage == nil else { return }
+
+        frozenSnapshotPreviewPreparationTask?.cancel()
+        let snapshotID = snapshot.id
+        let sourceSnapshot = snapshot.snapshot
+        let previewDimension = Self.snapshotComparePreviewDimension
+
+        frozenSnapshotPreviewPreparationTask = Task.detached(priority: .userInitiated) { [sourceSnapshot] in
+            let image = WorkspaceViewModel.snapshotImage(
+                from: sourceSnapshot,
+                maxDimension: previewDimension
+            )
+
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                guard let session = self.snapshotCompareSession else {
+                    self.frozenSnapshotPreviewPreparationTask = nil
+                    return
+                }
+                guard session.frozenCurrentSnapshot.id == snapshotID else {
+                    self.frozenSnapshotPreviewPreparationTask = nil
+                    return
+                }
+
+                var updatedSnapshot = session.frozenCurrentSnapshot
+                if updatedSnapshot.previewImage == nil {
+                    updatedSnapshot.previewImage = image
+                    session.updateFrozenCurrentSnapshot(updatedSnapshot)
+                }
+                self.frozenSnapshotPreviewPreparationTask = nil
+            }
+        }
+    }
+
+    private func cancelSavedSnapshotPreviewPreparationTask(for id: UUID) {
+        snapshotPreviewPreparationTasks[id]?.cancel()
+        snapshotPreviewPreparationTasks[id] = nil
+    }
+
+    private func cancelSnapshotPreviewPreparationTasks() {
+        for task in snapshotPreviewPreparationTasks.values {
+            task.cancel()
+        }
+        snapshotPreviewPreparationTasks.removeAll()
+
+        frozenSnapshotPreviewPreparationTask?.cancel()
+        frozenSnapshotPreviewPreparationTask = nil
+    }
+
+    nonisolated private static func snapshotImage(
+        from snapshot: LayerTextureSnapshot,
+        maxDimension: Int?,
+        colorSpace: CGColorSpace = CGColorSpaceCreateDeviceRGB()
+    ) -> CGImage? {
+        let (targetWidth, targetHeight) = fittedSnapshotPreviewSize(
+            width: snapshot.width,
+            height: snapshot.height,
+            maxDimension: maxDimension
+        )
+        let bytesPerPixel = 4
+        let targetBytesPerRow = targetWidth * bytesPerPixel
+        let sourceBytes = [UInt8](snapshot.pixelData)
+        var rgba = [UInt8](repeating: 0, count: targetHeight * targetBytesPerRow)
+
+        for targetY in 0..<targetHeight {
+            let sourceY = Swift.min((targetY * snapshot.height) / targetHeight, snapshot.height - 1)
+            for targetX in 0..<targetWidth {
+                let sourceX = Swift.min((targetX * snapshot.width) / targetWidth, snapshot.width - 1)
+                let sourceOffset = (sourceY * snapshot.bytesPerRow) + (sourceX * bytesPerPixel)
+                let targetOffset = (targetY * targetBytesPerRow) + (targetX * bytesPerPixel)
+                rgba[targetOffset] = sourceBytes[sourceOffset + 2]
+                rgba[targetOffset + 1] = sourceBytes[sourceOffset + 1]
+                rgba[targetOffset + 2] = sourceBytes[sourceOffset]
+                rgba[targetOffset + 3] = sourceBytes[sourceOffset + 3]
+            }
+        }
+
+        guard let provider = CGDataProvider(data: Data(rgba) as CFData) else {
+            return nil
+        }
+
+        return CGImage(
+            width: targetWidth,
+            height: targetHeight,
+            bitsPerComponent: 8,
+            bitsPerPixel: 32,
+            bytesPerRow: targetBytesPerRow,
+            space: colorSpace,
+            bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
+            provider: provider,
+            decode: nil,
+            shouldInterpolate: true,
+            intent: .defaultIntent
+        )
+    }
+
+    nonisolated private static func fittedSnapshotPreviewSize(
+        width: Int,
+        height: Int,
+        maxDimension: Int?
+    ) -> (width: Int, height: Int) {
+        guard
+            let maxDimension,
+            maxDimension > 0,
+            max(width, height) > maxDimension
+        else {
+            return (max(1, width), max(1, height))
+        }
+
+        let scale = Double(maxDimension) / Double(max(width, height))
+        let targetWidth = max(1, Int((Double(width) * scale).rounded()))
+        let targetHeight = max(1, Int((Double(height) * scale).rounded()))
+        return (targetWidth, targetHeight)
     }
 
     private static func normalizeLegacySelectionIfNeeded(in workspaceStore: WorkspaceStore) {

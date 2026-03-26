@@ -3,6 +3,8 @@ import SwiftUI
 struct ToolSidebarView: View {
     @ObservedObject var viewModel: WorkspaceViewModel
     @ObservedObject var hostViewModel: WorkspaceViewModel
+    @State private var showsSnapshotPopover = false
+    @State private var suppressSnapshotPrimaryAction = false
     @State private var showsRecorderPopover = false
     @State private var recorderExportFPS = 12.0
 
@@ -42,9 +44,11 @@ struct ToolSidebarView: View {
                     }
                 }
             }
+            .disabled(hostViewModel.snapshotCompareSession != nil)
 
             Spacer()
 
+            snapshotButton
             ideationButton
             recorderButton
         }
@@ -55,9 +59,133 @@ struct ToolSidebarView: View {
         .background(Color(red: 0.13, green: 0.13, blue: 0.14))
     }
 
+    private var snapshotButton: some View {
+        Button {
+            if suppressSnapshotPrimaryAction {
+                suppressSnapshotPrimaryAction = false
+                return
+            }
+            showsRecorderPopover = false
+            hostViewModel.handleSnapshotSavePrimaryAction()
+        } label: {
+            HStack(spacing: 5) {
+                Image(systemName: "camera.viewfinder")
+                    .font(.system(size: 10, weight: .semibold))
+                    .frame(width: 12)
+                    .foregroundStyle(Color.white.opacity(0.9))
+
+                Text("快照保存")
+                    .font(.system(size: 11, weight: .semibold))
+                    .lineLimit(1)
+                    .minimumScaleFactor(1)
+                    .layoutPriority(1)
+                    .foregroundStyle(Color.white.opacity(0.9))
+
+                Spacer(minLength: 6)
+
+                Text("\(hostViewModel.savedSnapshotCount)")
+                    .font(.system(size: 10, weight: .bold, design: .rounded))
+                    .foregroundStyle(Color.white.opacity(hostViewModel.savedSnapshotCount == 0 ? 0.48 : 0.92))
+                    .frame(minWidth: 12)
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 3)
+                    .fixedSize(horizontal: true, vertical: true)
+                    .background(
+                        Capsule()
+                            .fill(
+                                hostViewModel.snapshotCompareSession == nil
+                                    ? Color.white.opacity(0.12)
+                                    : Color.white.opacity(0.18)
+                            )
+                    )
+            }
+            .padding(.horizontal, 8)
+            .frame(width: 116, height: 34)
+            .background(
+                RoundedRectangle(cornerRadius: 9)
+                    .fill(
+                        hostViewModel.snapshotCompareSession == nil
+                            ? Color.white.opacity(0.08)
+                            : Color.accentColor.opacity(0.22)
+                    )
+            )
+        }
+        .buttonStyle(.plain)
+        .help(snapshotButtonHelpText)
+        .simultaneousGesture(
+            LongPressGesture(minimumDuration: 0.35)
+                .onEnded { _ in
+                    guard hostViewModel.ideationSession == nil else { return }
+                    guard hostViewModel.snapshotCompareSession == nil else { return }
+                    suppressSnapshotPrimaryAction = true
+                    showsRecorderPopover = false
+                    showsSnapshotPopover = true
+                }
+        )
+        .popover(isPresented: $showsSnapshotPopover, arrowEdge: .leading) {
+            VStack(alignment: .leading, spacing: 8) {
+                Button {
+                    showsSnapshotPopover = false
+                    hostViewModel.openSnapshotCompare()
+                } label: {
+                    HStack {
+                        Text("快照对比")
+                            .font(.system(size: 13, weight: .semibold))
+                        Spacer(minLength: 10)
+                        Text("\(hostViewModel.savedSnapshotCount)/6")
+                            .font(.system(size: 11, weight: .bold, design: .rounded))
+                            .foregroundStyle(Color.white.opacity(0.65))
+                    }
+                    .foregroundStyle(Color.white)
+                    .padding(.horizontal, 10)
+                    .frame(width: 188, height: 32)
+                    .background(
+                        RoundedRectangle(cornerRadius: 8)
+                            .fill(Color.white.opacity(0.08))
+                    )
+                }
+                .buttonStyle(.plain)
+                .disabled(hostViewModel.savedSnapshotCount == 0)
+
+                Button {
+                    showsSnapshotPopover = false
+                    hostViewModel.clearSavedSnapshots()
+                } label: {
+                    HStack {
+                        Text("清空快照")
+                            .font(.system(size: 13, weight: .semibold))
+                        Spacer(minLength: 10)
+                        Image(systemName: "trash")
+                            .font(.system(size: 11, weight: .bold))
+                    }
+                    .foregroundStyle(Color.white)
+                    .padding(.horizontal, 10)
+                    .frame(width: 188, height: 32)
+                    .background(
+                        RoundedRectangle(cornerRadius: 8)
+                            .fill(Color.red.opacity(0.16))
+                    )
+                }
+                .buttonStyle(.plain)
+                .disabled(hostViewModel.savedSnapshotCount == 0)
+            }
+            .padding(8)
+            .frame(width: 204)
+            .background(Color(red: 0.16, green: 0.16, blue: 0.17))
+        }
+        .disabled(hostViewModel.ideationSession != nil || hostViewModel.snapshotCompareSession != nil)
+        .padding(.top, 8)
+    }
+
     private var ideationButton: some View {
         Button {
+            guard hostViewModel.snapshotCompareSession == nil else {
+                showsSnapshotPopover = false
+                showsRecorderPopover = false
+                return
+            }
             if hostViewModel.ideationSession == nil {
+                showsSnapshotPopover = false
                 showsRecorderPopover = false
                 hostViewModel.startIdeationSession()
             } else {
@@ -79,7 +207,11 @@ struct ToolSidebarView: View {
                 Spacer(minLength: 4)
 
                 Circle()
-                    .fill(hostViewModel.ideationSession == nil ? Color.white.opacity(0.25) : Color.accentColor)
+                    .fill(
+                        hostViewModel.snapshotCompareSession != nil
+                            ? Color.white.opacity(0.16)
+                            : (hostViewModel.ideationSession == nil ? Color.white.opacity(0.25) : Color.accentColor)
+                    )
                     .frame(width: 8, height: 8)
                     .overlay(
                         Circle()
@@ -90,18 +222,28 @@ struct ToolSidebarView: View {
             .frame(width: 116, height: 34)
             .background(
                 RoundedRectangle(cornerRadius: 9)
-                    .fill(hostViewModel.ideationSession == nil ? Color.white.opacity(0.08) : Color.accentColor.opacity(0.22))
+                    .fill(
+                        hostViewModel.snapshotCompareSession != nil
+                            ? Color.white.opacity(0.05)
+                            : (hostViewModel.ideationSession == nil ? Color.white.opacity(0.08) : Color.accentColor.opacity(0.22))
+                    )
             )
         }
         .buttonStyle(.plain)
-        .help(hostViewModel.ideationSession == nil ? "方案试探" : "退出方案试探")
+        .disabled(hostViewModel.snapshotCompareSession != nil)
+        .help(
+            hostViewModel.snapshotCompareSession != nil
+                ? "快照对比期间不可进入方案试探"
+                : (hostViewModel.ideationSession == nil ? "方案试探" : "退出方案试探")
+        )
         .padding(.top, 8)
         .padding(.bottom, 4)
     }
 
     private var recorderButton: some View {
         Button {
-            guard hostViewModel.ideationSession == nil else {
+            guard hostViewModel.ideationSession == nil, hostViewModel.snapshotCompareSession == nil else {
+                showsSnapshotPopover = false
                 showsRecorderPopover = false
                 return
             }
@@ -123,7 +265,7 @@ struct ToolSidebarView: View {
 
                 Circle()
                     .fill(
-                        hostViewModel.ideationSession != nil
+                        hostViewModel.ideationSession != nil || hostViewModel.snapshotCompareSession != nil
                             ? Color.orange
                             : (hostViewModel.timelapseRecorder.isRecording ? Color.red : Color.green)
                     )
@@ -138,18 +280,20 @@ struct ToolSidebarView: View {
             .background(
                 RoundedRectangle(cornerRadius: 9)
                     .fill(
-                        hostViewModel.ideationSession != nil
+                        hostViewModel.ideationSession != nil || hostViewModel.snapshotCompareSession != nil
                             ? Color.orange.opacity(0.16)
                             : Color.white.opacity(0.08)
                     )
             )
         }
         .buttonStyle(.plain)
-        .disabled(hostViewModel.ideationSession != nil)
+        .disabled(hostViewModel.ideationSession != nil || hostViewModel.snapshotCompareSession != nil)
         .help(
-            hostViewModel.ideationSession != nil
-                ? "方案试探期间录像已暂停"
-                : (hostViewModel.timelapseRecorder.isRecording ? "录像工具（录制中）" : "录像工具（未录制）")
+            hostViewModel.snapshotCompareSession != nil
+                ? "快照对比期间录像已暂停"
+                : (hostViewModel.ideationSession != nil
+                    ? "方案试探期间录像已暂停"
+                    : (hostViewModel.timelapseRecorder.isRecording ? "录像工具（录制中）" : "录像工具（未录制）"))
         )
         .padding(.vertical, 8)
         .popover(isPresented: $showsRecorderPopover, arrowEdge: .leading) {
@@ -162,6 +306,19 @@ struct ToolSidebarView: View {
             .frame(width: 320)
             .background(Color(red: 0.16, green: 0.16, blue: 0.17))
         }
+    }
+
+    private var snapshotButtonHelpText: String {
+        if hostViewModel.snapshotCompareSession != nil {
+            return "快照对比中"
+        }
+        if hostViewModel.ideationSession != nil {
+            return "方案试探期间不可使用快照保存"
+        }
+        if hostViewModel.savedSnapshotCount >= 6 {
+            return "已达到 6 张快照上限，再点会直接进入快照对比"
+        }
+        return "快照保存（长按可打开快照对比 / 清空快照）"
     }
 }
 
