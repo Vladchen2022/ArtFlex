@@ -14,7 +14,7 @@ enum BrushBuildMode: String, Codable, Sendable, Equatable, CaseIterable {
     }
 }
 
-enum BrushTipShape: String, Codable, Sendable, Equatable, CaseIterable {
+enum BrushTipShape: String, Codable, Sendable, Equatable, Hashable, CaseIterable {
     case hardRound
     case softRound
     case square
@@ -71,6 +71,41 @@ enum BrushTipShape: String, Codable, Sendable, Equatable, CaseIterable {
         case .square:
             return distance <= 1 ? 1 : 0
         }
+    }
+}
+
+enum DualTipCombineMode: String, Codable, Sendable, Equatable, Hashable, CaseIterable {
+    case subtract
+    case multiply
+    case intersect
+
+    var displayName: String {
+        switch self {
+        case .subtract:
+            return "减去"
+        case .multiply:
+            return "调制"
+        case .intersect:
+            return "相交"
+        }
+    }
+}
+
+struct SecondaryTipDescriptor: Codable, Sendable, Equatable {
+    var tipShape: BrushTipShape
+
+    static let stageOneDefault = SecondaryTipDescriptor(tipShape: .hardRound)
+}
+
+extension BrushTipShape {
+    var isPhaseOneDualTipSupportedRound: Bool {
+        self == .hardRound || self == .softRound
+    }
+}
+
+extension SecondaryTipDescriptor {
+    var supportsPhaseOneDualTipRealDrawing: Bool {
+        tipShape.isPhaseOneDualTipSupportedRound
     }
 }
 
@@ -281,6 +316,14 @@ struct BrushSettings: Codable, Sendable, Equatable {
     var opacity: Float
     var buildMode: BrushBuildMode
     var tipShape: BrushTipShape
+    var dualTipEnabled: Bool
+    var secondaryTipDescriptor: SecondaryTipDescriptor
+    var dualTipCombineMode: DualTipCombineMode
+    var dualTipStrength: Float
+    var secondarySizeRatio: Float
+    var secondaryAngleOffsetDegrees: Float
+    var secondaryScatter: Float
+    var secondaryInvert: Bool
     var spacingPercent: Float
     var scatterAmount: Float
     var jitterAmount: Float
@@ -307,6 +350,14 @@ struct BrushSettings: Codable, Sendable, Equatable {
         opacity: 1,
         buildMode: .buildUp,
         tipShape: .hardRound,
+        dualTipEnabled: false,
+        secondaryTipDescriptor: .stageOneDefault,
+        dualTipCombineMode: .multiply,
+        dualTipStrength: 1,
+        secondarySizeRatio: 1,
+        secondaryAngleOffsetDegrees: 0,
+        secondaryScatter: 0,
+        secondaryInvert: false,
         spacingPercent: 15,
         scatterAmount: 0,
         jitterAmount: 0,
@@ -334,6 +385,14 @@ struct BrushSettings: Codable, Sendable, Equatable {
         case opacity
         case buildMode
         case tipShape
+        case dualTipEnabled
+        case secondaryTipDescriptor
+        case dualTipCombineMode
+        case dualTipStrength
+        case secondarySizeRatio
+        case secondaryAngleOffsetDegrees
+        case secondaryScatter
+        case secondaryInvert
         case spacingPercent
         case scatterAmount
         case jitterAmount
@@ -361,6 +420,14 @@ struct BrushSettings: Codable, Sendable, Equatable {
         opacity: Float,
         buildMode: BrushBuildMode,
         tipShape: BrushTipShape,
+        dualTipEnabled: Bool = false,
+        secondaryTipDescriptor: SecondaryTipDescriptor = .stageOneDefault,
+        dualTipCombineMode: DualTipCombineMode = .multiply,
+        dualTipStrength: Float = 1,
+        secondarySizeRatio: Float = 1,
+        secondaryAngleOffsetDegrees: Float = 0,
+        secondaryScatter: Float = 0,
+        secondaryInvert: Bool = false,
         spacingPercent: Float,
         scatterAmount: Float,
         jitterAmount: Float,
@@ -386,6 +453,14 @@ struct BrushSettings: Codable, Sendable, Equatable {
         self.opacity = opacity
         self.buildMode = buildMode
         self.tipShape = tipShape
+        self.dualTipEnabled = dualTipEnabled
+        self.secondaryTipDescriptor = secondaryTipDescriptor
+        self.dualTipCombineMode = dualTipCombineMode
+        self.dualTipStrength = dualTipStrength
+        self.secondarySizeRatio = secondarySizeRatio
+        self.secondaryAngleOffsetDegrees = secondaryAngleOffsetDegrees
+        self.secondaryScatter = secondaryScatter
+        self.secondaryInvert = secondaryInvert
         self.spacingPercent = spacingPercent
         self.scatterAmount = scatterAmount
         self.jitterAmount = jitterAmount
@@ -416,6 +491,14 @@ struct BrushSettings: Codable, Sendable, Equatable {
         opacity = try container.decodeIfPresent(Float.self, forKey: .opacity) ?? defaults.opacity
         buildMode = try container.decodeIfPresent(BrushBuildMode.self, forKey: .buildMode) ?? defaults.buildMode
         tipShape = try container.decodeIfPresent(BrushTipShape.self, forKey: .tipShape) ?? defaults.tipShape
+        dualTipEnabled = try container.decodeIfPresent(Bool.self, forKey: .dualTipEnabled) ?? defaults.dualTipEnabled
+        secondaryTipDescriptor = try container.decodeIfPresent(SecondaryTipDescriptor.self, forKey: .secondaryTipDescriptor) ?? defaults.secondaryTipDescriptor
+        dualTipCombineMode = try container.decodeIfPresent(DualTipCombineMode.self, forKey: .dualTipCombineMode) ?? defaults.dualTipCombineMode
+        dualTipStrength = try container.decodeIfPresent(Float.self, forKey: .dualTipStrength) ?? defaults.dualTipStrength
+        secondarySizeRatio = try container.decodeIfPresent(Float.self, forKey: .secondarySizeRatio) ?? defaults.secondarySizeRatio
+        secondaryAngleOffsetDegrees = try container.decodeIfPresent(Float.self, forKey: .secondaryAngleOffsetDegrees) ?? defaults.secondaryAngleOffsetDegrees
+        secondaryScatter = try container.decodeIfPresent(Float.self, forKey: .secondaryScatter) ?? defaults.secondaryScatter
+        secondaryInvert = try container.decodeIfPresent(Bool.self, forKey: .secondaryInvert) ?? defaults.secondaryInvert
         spacingPercent = try container.decodeIfPresent(Float.self, forKey: .spacingPercent) ?? defaults.spacingPercent
         scatterAmount = try container.decodeIfPresent(Float.self, forKey: .scatterAmount) ?? defaults.scatterAmount
         jitterAmount = try container.decodeIfPresent(Float.self, forKey: .jitterAmount) ?? defaults.jitterAmount
@@ -444,6 +527,14 @@ struct BrushSettings: Codable, Sendable, Equatable {
         try container.encode(opacity, forKey: .opacity)
         try container.encode(buildMode, forKey: .buildMode)
         try container.encode(tipShape, forKey: .tipShape)
+        try container.encode(dualTipEnabled, forKey: .dualTipEnabled)
+        try container.encode(secondaryTipDescriptor, forKey: .secondaryTipDescriptor)
+        try container.encode(dualTipCombineMode, forKey: .dualTipCombineMode)
+        try container.encode(dualTipStrength, forKey: .dualTipStrength)
+        try container.encode(secondarySizeRatio, forKey: .secondarySizeRatio)
+        try container.encode(secondaryAngleOffsetDegrees, forKey: .secondaryAngleOffsetDegrees)
+        try container.encode(secondaryScatter, forKey: .secondaryScatter)
+        try container.encode(secondaryInvert, forKey: .secondaryInvert)
         try container.encode(spacingPercent, forKey: .spacingPercent)
         try container.encode(scatterAmount, forKey: .scatterAmount)
         try container.encode(jitterAmount, forKey: .jitterAmount)
@@ -464,6 +555,14 @@ struct BrushSettings: Codable, Sendable, Equatable {
         try container.encode(opacityCurveLow, forKey: .opacityCurveLow)
         try container.encode(opacityCurveMid, forKey: .opacityCurveMid)
         try container.encode(opacityCurveHigh, forKey: .opacityCurveHigh)
+    }
+
+    func supportsPhaseOneDualTipRealDrawing(for tool: ToolKind) -> Bool {
+        dualTipEnabled &&
+        dualTipCombineMode == .multiply &&
+        (tool == .brush || tool == .eraser) &&
+        tipShape.isPhaseOneDualTipSupportedRound &&
+        secondaryTipDescriptor.supportsPhaseOneDualTipRealDrawing
     }
 }
 

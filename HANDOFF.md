@@ -2,7 +2,7 @@
 
 ## 1. 项目一句话说明
 
-ArtFlex 是旧版 `BrushCanvas` 的 Metal-first 重构版 macOS 绘图软件；当前一轮性能主线与小范围 UX/perf follow-up 已经收尾，下一阶段默认转入新功能开发。
+ArtFlex 是旧版 `BrushCanvas` 的 Metal-first 重构版 macOS 绘图软件；当前一轮性能主线与小范围 UX/perf follow-up 已经收尾，项目已转入新功能开发。当前最新已完成的新功能节点是 Dual Tip / 复合笔尖 Phase 1，现阶段先做收尾与体验验证，不自动进入 Phase 2。
 
 本轮三个定点 follow-up 的最终状态是：
 
@@ -11,6 +11,54 @@ ArtFlex 是旧版 `BrushCanvas` 的 Metal-first 重构版 macOS 绘图软件；�
 3. `selection.fill / lasso.fill`：两轮最小优化先接受，hotspot 基本收口
 
 当前这一轮性能优化与小范围 UX/perf follow-up 已收尾。下一阶段默认转入新功能开发，不要回头重开旧性能项目；如果未来必须重开 `selection/lasso fill`，唯一允许优先检查的点仍然是 `mutateSelectionPixels(...)`。
+
+## 1.1 Dual Tip / 复合笔尖当前状态
+
+### Phase 1 已完成并手测通过
+
+- 当前真实绘制已接入
+- 当前只支持最窄闭环：
+  - 主笔尖：圆形
+  - 次笔尖：圆形
+  - 模式：`multiply`
+  - 当前真正会影响绘制的参数：`strength`、`secondary size ratio`
+- 当前仍未支持 / 尚未接入：
+  - `subtract`
+  - `intersect`
+  - `scatter`
+  - `angle offset`
+  - `invert`
+  - `secondary image tip`
+  - 更复杂 preview 同步
+  - `smudge` 路径
+
+### 当前用户体验状态
+
+- Dual Tip 的启用开关和 Phase 1 支持参数现在已经能真实影响落笔
+- `组合笔尖…` popover 已补齐可解释性：
+  - 主笔尖
+  - 次笔尖
+  - 最终笔尖
+  - `multiply` 当前是“调制 / 压缩”逻辑
+- 当前 Phase 1 已足够用来做基础“收口 / 压缩型”笔刷
+- 为了便于直接体验，默认画笔库现在附带 3 个 Dual Tip Phase 1 示例预设
+
+### 下一步建议
+
+- 当前不要自动进入 Phase 2
+- 先观察和体验 Phase 1 示例预设的实际观感
+- 如果后续继续扩，再考虑：
+  - `subtract`
+  - `intersect`
+  - `scatter`
+  - `image tip`
+
+### 风险边界
+
+- 不要重新污染旧绘制路径
+- 关闭 Dual Tip 时，必须继续和旧版行为一致
+- 开启但不满足 Phase 1 条件时，必须继续回旧路径
+- 不要在未验证前一次性扩很多模式
 
 ## 2. 当前进展
 

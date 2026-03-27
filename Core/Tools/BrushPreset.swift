@@ -8,12 +8,74 @@ struct BrushPreset: Codable, Sendable, Equatable, Identifiable {
     var slotIndex: Int? = nil
 }
 
+extension BrushPreset {
+    static let builtInDualTipPhaseOneDemoPresets: [BrushPreset] = [
+        makeBuiltInDualTipPhaseOnePreset(
+            id: "builtin-dual-tip-tighten",
+            name: "Dual Tip · 收口型",
+            slotIndex: 0,
+            primaryTip: .hardRound,
+            secondaryTip: .hardRound,
+            strength: 0.84,
+            sizeRatio: 0.56
+        ),
+        makeBuiltInDualTipPhaseOnePreset(
+            id: "builtin-dual-tip-soft-compress",
+            name: "Dual Tip · 柔边压缩",
+            slotIndex: 1,
+            primaryTip: .softRound,
+            secondaryTip: .softRound,
+            strength: 0.58,
+            sizeRatio: 0.72
+        ),
+        makeBuiltInDualTipPhaseOnePreset(
+            id: "builtin-dual-tip-strong-modulate",
+            name: "Dual Tip · 强调制",
+            slotIndex: 2,
+            primaryTip: .hardRound,
+            secondaryTip: .softRound,
+            strength: 1.0,
+            sizeRatio: 0.34
+        )
+    ]
+
+    static let builtInDualTipPhaseOneDemoPresetIDs = Set(
+        builtInDualTipPhaseOneDemoPresets.map(\.id)
+    )
+
+    private static func makeBuiltInDualTipPhaseOnePreset(
+        id: String,
+        name: String,
+        slotIndex: Int,
+        primaryTip: BrushTipShape,
+        secondaryTip: BrushTipShape,
+        strength: Float,
+        sizeRatio: Float
+    ) -> BrushPreset {
+        var brush = BrushSettings.stageOneDefault
+        brush.tipShape = primaryTip
+        brush.dualTipEnabled = true
+        brush.secondaryTipDescriptor = SecondaryTipDescriptor(tipShape: secondaryTip)
+        brush.dualTipCombineMode = .multiply
+        brush.dualTipStrength = strength
+        brush.secondarySizeRatio = sizeRatio
+
+        return BrushPreset(
+            id: id,
+            name: name,
+            brush: brush,
+            isBuiltIn: true,
+            slotIndex: slotIndex
+        )
+    }
+}
+
 struct BrushLibraryState: Codable, Sendable, Equatable {
     var presets: [BrushPreset]
     var selectedPresetID: String?
 
     static let stageOneDefault = BrushLibraryState(
-        presets: [],
+        presets: BrushPreset.builtInDualTipPhaseOneDemoPresets,
         selectedPresetID: nil
     )
 
@@ -108,6 +170,31 @@ struct BrushLibraryState: Codable, Sendable, Equatable {
         }
 
         return true
+    }
+
+    func ensuringBuiltInDualTipPhaseOneDemoPresets() -> BrushLibraryState {
+        var mergedPresets = BrushPreset.builtInDualTipPhaseOneDemoPresets
+        var seenIDs = Set(mergedPresets.map(\.id))
+
+        for preset in presets where !BrushPreset.builtInDualTipPhaseOneDemoPresetIDs.contains(preset.id) {
+            guard seenIDs.insert(preset.id).inserted else {
+                continue
+            }
+            mergedPresets.append(preset)
+        }
+
+        let resolvedSelectedPresetID: String?
+        if let selectedPresetID,
+           mergedPresets.contains(where: { $0.id == selectedPresetID }) {
+            resolvedSelectedPresetID = selectedPresetID
+        } else {
+            resolvedSelectedPresetID = nil
+        }
+
+        return BrushLibraryState(
+            presets: mergedPresets,
+            selectedPresetID: resolvedSelectedPresetID
+        )
     }
 }
 

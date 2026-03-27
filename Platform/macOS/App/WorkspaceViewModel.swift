@@ -606,6 +606,65 @@ final class WorkspaceViewModel: ObservableObject {
         refresh()
     }
 
+    func setDualTipEnabled(_ enabled: Bool) {
+        bootstrap.workspaceStore.updateToolSession { session in
+            session.brush.dualTipEnabled = enabled
+            if enabled && session.brush.secondarySizeRatio >= 0.95 {
+                session.brush.secondarySizeRatio = 0.65
+            }
+        }
+        refresh()
+    }
+
+    func setDualTipCombineMode(_ mode: DualTipCombineMode) {
+        bootstrap.workspaceStore.updateToolSession { session in
+            session.brush.dualTipCombineMode = mode
+        }
+        refresh()
+    }
+
+    func setDualTipStrength(_ strength: Float) {
+        bootstrap.workspaceStore.updateToolSession { session in
+            session.brush.dualTipStrength = min(max(strength, 0), 1)
+        }
+        refresh()
+    }
+
+    func setSecondaryTipShape(_ tipShape: BrushTipShape) {
+        bootstrap.workspaceStore.updateToolSession { session in
+            session.brush.secondaryTipDescriptor.tipShape = tipShape
+        }
+        refresh()
+    }
+
+    func setSecondarySizeRatio(_ ratio: Float) {
+        bootstrap.workspaceStore.updateToolSession { session in
+            session.brush.secondarySizeRatio = min(max(ratio, 0.25), 0.95)
+        }
+        refresh()
+    }
+
+    func setSecondaryAngleOffsetDegrees(_ angleDegrees: Float) {
+        bootstrap.workspaceStore.updateToolSession { session in
+            session.brush.secondaryAngleOffsetDegrees = min(max(angleDegrees, -180), 180)
+        }
+        refresh()
+    }
+
+    func setSecondaryScatter(_ scatter: Float) {
+        bootstrap.workspaceStore.updateToolSession { session in
+            session.brush.secondaryScatter = min(max(scatter, 0), 5)
+        }
+        refresh()
+    }
+
+    func setSecondaryInvert(_ invert: Bool) {
+        bootstrap.workspaceStore.updateToolSession { session in
+            session.brush.secondaryInvert = invert
+        }
+        refresh()
+    }
+
     func setCustomTipSoftness(_ softness: Float) {
         bootstrap.workspaceStore.updateToolSession { session in
             session.brush.customTipSoftness = min(max(softness, 0), 1)
@@ -5005,9 +5064,10 @@ final class WorkspaceViewModel: ObservableObject {
             bootstrap.workspaceStore.updateBrushLibrary { library in
                 switch mode {
                 case .replace:
-                    library = normalized
+                    library = normalized.ensuringBuiltInDualTipPhaseOneDemoPresets()
                 case .append:
                     library = Self.mergeBrushLibraries(base: library, imported: normalized)
+                        .ensuringBuiltInDualTipPhaseOneDemoPresets()
                 }
                 if library.selectedPresetID == nil {
                     library.selectedPresetID = library.presets.first?.id
@@ -5082,6 +5142,7 @@ final class WorkspaceViewModel: ObservableObject {
         guard let restored = bootstrap.brushLibraryPersistenceController.loadLibrary() else { return }
         bootstrap.workspaceStore.updateBrushLibrary { library in
             library = Self.normalizeImportedBrushLibrary(restored)
+                .ensuringBuiltInDualTipPhaseOneDemoPresets()
             if library.selectedPresetID == nil {
                 library.selectedPresetID = library.presets.first?.id
             }

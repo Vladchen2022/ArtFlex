@@ -32,12 +32,26 @@ struct DocumentStateTests {
     }
 
     @Test
-    func workspaceStartsWithEmptyBrushLibrary() {
+    func workspaceStartsWithDualTipPhaseOneDemoBrushLibrary() {
         let workspace = WorkspaceState.stageOneDefault
 
-        #expect(workspace.brushLibrary.presets.isEmpty)
+        #expect(workspace.brushLibrary.presets.count == 3)
         #expect(workspace.brushLibrary.selectedPresetID == nil)
+        #expect(workspace.brushLibrary.presets.map(\.name) == [
+            "Dual Tip · 收口型",
+            "Dual Tip · 柔边压缩",
+            "Dual Tip · 强调制"
+        ])
+        #expect(workspace.brushLibrary.presets.allSatisfy { $0.isBuiltIn })
         #expect(workspace.toolSession.brush.tipShape == .hardRound)
+        #expect(workspace.toolSession.brush.dualTipEnabled == false)
+        #expect(workspace.toolSession.brush.secondaryTipDescriptor.tipShape == .hardRound)
+        #expect(workspace.toolSession.brush.dualTipCombineMode == .multiply)
+        #expect(workspace.toolSession.brush.dualTipStrength == 1)
+        #expect(workspace.toolSession.brush.secondarySizeRatio == 1)
+        #expect(workspace.toolSession.brush.secondaryAngleOffsetDegrees == 0)
+        #expect(workspace.toolSession.brush.secondaryScatter == 0)
+        #expect(workspace.toolSession.brush.secondaryInvert == false)
         #expect(workspace.toolSession.brush.customTipSoftness == 0.5)
         #expect(workspace.toolSession.brush.customTipRoundness == 1)
         #expect(workspace.toolSession.brush.customTipAngleDegrees == 0)

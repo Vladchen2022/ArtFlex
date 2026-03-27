@@ -24,6 +24,10 @@ private struct BrushUniforms {
     var selectionMode: UInt32
     var selectionMin: SIMD2<Float>
     var selectionMax: SIMD2<Float>
+    var dualTipPhase1Enabled: UInt32
+    var dualTipSecondaryShape: UInt32
+    var dualTipStrength: Float
+    var secondarySizeRatio: Float
 }
 
 private struct SmudgeGatherInput {
@@ -147,6 +151,10 @@ final class StageOneBrushRenderer {
             uint selectionMode;
             float2 selectionMin;
             float2 selectionMax;
+            uint dualTipPhase1Enabled;
+            uint dualTipSecondaryShape;
+            float dualTipStrength;
+            float secondarySizeRatio;
         };
 
         struct SmudgeGatherInput {
@@ -213,45 +221,68 @@ final class StageOneBrushRenderer {
                 (-localPoint.x * sine) + (localPoint.y * cosine)
             );
 
+            float primaryAlpha = 0.0;
+
             if (uniforms.tipShape == 2) {
                 float squareDistance = max(abs(rotatedPoint.x), abs(rotatedPoint.y));
-                return squareDistance <= 1.0 ? 1.0 : 0.0;
-            }
-
-            if (uniforms.tipShape == 1) {
+                primaryAlpha = squareDistance <= 1.0 ? 1.0 : 0.0;
+            } else if (uniforms.tipShape == 1) {
                 float roundDistance = length(localPoint);
                 if (roundDistance >= 1.0) {
-                    return 0.0;
+                    primaryAlpha = 0.0;
+                } else {
+                    float feather = clamp(1.0 - roundDistance, 0.0, 1.0);
+                    primaryAlpha = feather * feather;
                 }
-
-                float feather = clamp(1.0 - roundDistance, 0.0, 1.0);
-                return feather * feather;
-            }
-
-            if (uniforms.tipShape == 3) {
+            } else if (uniforms.tipShape == 3) {
                 float roundness = clamp(uniforms.tipRoundness, 0.25, 1.0);
                 float2 shaped = float2(rotatedPoint.x / roundness, rotatedPoint.y);
                 if (max(abs(shaped.x), abs(shaped.y)) >= 1.0) {
-                    return 0.0;
+                    primaryAlpha = 0.0;
+                } else {
+                    float2 uv = float2(
+                        clamp((shaped.x + 1.0) * 0.5, 0.0, 1.0),
+                        clamp((shaped.y + 1.0) * 0.5, 0.0, 1.0)
+                    );
+                    constexpr sampler tipSampler(
+                        coord::normalized,
+                        address::clamp_to_edge,
+                        filter::linear
+                    );
+                    float sampledAlpha = customTipMask.sample(tipSampler, uv).r;
+                    float softness = clamp(uniforms.tipSoftness, 0.0, 1.0);
+                    float exponent = mix(3.2, 0.75, softness);
+                    primaryAlpha = pow(clamp(sampledAlpha, 0.0, 1.0), exponent);
                 }
-
-                float2 uv = float2(
-                    clamp((shaped.x + 1.0) * 0.5, 0.0, 1.0),
-                    clamp((shaped.y + 1.0) * 0.5, 0.0, 1.0)
-                );
-                constexpr sampler tipSampler(
-                    coord::normalized,
-                    address::clamp_to_edge,
-                    filter::linear
-                );
-                float sampledAlpha = customTipMask.sample(tipSampler, uv).r;
-                float softness = clamp(uniforms.tipSoftness, 0.0, 1.0);
-                float exponent = mix(3.2, 0.75, softness);
-                return pow(clamp(sampledAlpha, 0.0, 1.0), exponent);
+            } else {
+                float roundDistance = length(localPoint);
+                primaryAlpha = smoothHardnessAlpha(roundDistance, uniforms.tipHardness);
             }
 
-            float roundDistance = length(localPoint);
-            return smoothHardnessAlpha(roundDistance, uniforms.tipHardness);
+            if (uniforms.dualTipPhase1Enabled == 0 || primaryAlpha <= 0.0) {
+                return primaryAlpha;
+            }
+
+            float sizeRatio = max(uniforms.secondarySizeRatio, 0.001);
+            float2 secondaryPoint = localPoint / sizeRatio;
+            float secondaryAlpha;
+
+            if (uniforms.dualTipSecondaryShape == 1) {
+                float secondaryDistance = length(secondaryPoint);
+                if (secondaryDistance >= 1.0) {
+                    secondaryAlpha = 0.0;
+                } else {
+                    float feather = clamp(1.0 - secondaryDistance, 0.0, 1.0);
+                    secondaryAlpha = feather * feather;
+                }
+            } else {
+                float secondaryDistance = length(secondaryPoint);
+                secondaryAlpha = smoothHardnessAlpha(secondaryDistance, 1.0);
+            }
+
+            float strength = clamp(uniforms.dualTipStrength, 0.0, 1.0);
+            float modulation = mix(1.0, secondaryAlpha, strength);
+            return primaryAlpha * modulation;
         }
 
         float srgbChannelToLinear(float value) {
@@ -1249,7 +1280,11 @@ final class StageOneBrushRenderer {
                 (stroke.brush.tipShape == .customRound ? stroke.brush.customTipAngleDegrees : 0),
             selectionMode: selectionMode,
             selectionMin: selectionMin,
-            selectionMax: selectionMax
+            selectionMax: selectionMax,
+            dualTipPhase1Enabled: stroke.brush.supportsPhaseOneDualTipRealDrawing(for: stroke.tool) ? 1 : 0,
+            dualTipSecondaryShape: stroke.brush.secondaryTipDescriptor.tipShape == .softRound ? 1 : 0,
+            dualTipStrength: min(max(stroke.brush.dualTipStrength, 0), 1),
+            secondarySizeRatio: min(max(stroke.brush.secondarySizeRatio, 0.25), 0.95)
         )
     }
 
