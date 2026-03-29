@@ -13,7 +13,7 @@ extension BrushPreset {
         makeBuiltInDualTipPhaseOnePreset(
             id: "builtin-dual-tip-tighten",
             name: "Dual Tip · 收口型",
-            slotIndex: 0,
+            slotIndex: 4,
             primaryTip: .hardRound,
             secondaryTip: .hardRound,
             strength: 0.84,
@@ -22,7 +22,7 @@ extension BrushPreset {
         makeBuiltInDualTipPhaseOnePreset(
             id: "builtin-dual-tip-soft-compress",
             name: "Dual Tip · 柔边压缩",
-            slotIndex: 1,
+            slotIndex: 5,
             primaryTip: .softRound,
             secondaryTip: .softRound,
             strength: 0.58,
@@ -31,7 +31,7 @@ extension BrushPreset {
         makeBuiltInDualTipPhaseOnePreset(
             id: "builtin-dual-tip-strong-modulate",
             name: "Dual Tip · 强调制",
-            slotIndex: 2,
+            slotIndex: 6,
             primaryTip: .hardRound,
             secondaryTip: .softRound,
             strength: 1.0,
@@ -42,6 +42,10 @@ extension BrushPreset {
     static let builtInDualTipPhaseOneDemoPresetIDs = Set(
         builtInDualTipPhaseOneDemoPresets.map(\.id)
     )
+
+    var isDualTipPhaseOneDemoPreset: Bool {
+        Self.builtInDualTipPhaseOneDemoPresetIDs.contains(id)
+    }
 
     private static func makeBuiltInDualTipPhaseOnePreset(
         id: String,

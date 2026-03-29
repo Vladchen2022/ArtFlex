@@ -127,7 +127,7 @@ struct DualTipBrushSettingsTests {
             "Dual Tip · 柔边压缩",
             "Dual Tip · 强调制"
         ])
-        #expect(presets.map(\.slotIndex) == [0, 1, 2])
+        #expect(presets.map(\.slotIndex) == [4, 5, 6])
 
         for preset in presets {
             #expect(preset.brush.dualTipEnabled)
@@ -174,5 +174,22 @@ struct DualTipBrushSettingsTests {
         #expect(merged.presets.filter { BrushPreset.builtInDualTipPhaseOneDemoPresetIDs.contains($0.id) }.count == 3)
         #expect(merged.presets.first(where: { $0.id == "builtin-dual-tip-tighten" })?.isBuiltIn == true)
         #expect(merged.presets.first(where: { $0.id == "builtin-dual-tip-tighten" })?.name == "Dual Tip · 收口型")
+    }
+
+    @Test
+    func dualTipPhaseOneDemoHighlightOnlyAppliesToBuiltInExamples() {
+        let builtInPresets = BrushPreset.builtInDualTipPhaseOneDemoPresets
+
+        #expect(builtInPresets.allSatisfy { $0.isDualTipPhaseOneDemoPreset })
+
+        let customPreset = BrushPreset(
+            id: "custom-test-preset",
+            name: "Custom Test",
+            brush: .stageOneDefault,
+            isBuiltIn: false,
+            slotIndex: 9
+        )
+
+        #expect(customPreset.isDualTipPhaseOneDemoPreset == false)
     }
 }

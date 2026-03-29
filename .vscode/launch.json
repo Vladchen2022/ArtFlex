@@ -1,0 +1,24 @@
+{
+    "configurations": [
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:ArtFlex}",
+            "name": "Debug ArtFlex",
+            "target": "ArtFlex",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug ArtFlex"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:ArtFlex}",
+            "name": "Release ArtFlex",
+            "target": "ArtFlex",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release ArtFlex"
+        }
+    ]
+}

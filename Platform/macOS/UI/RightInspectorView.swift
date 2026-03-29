@@ -506,18 +506,50 @@ struct RightInspectorView: View {
                 48,
                 (viewModel.workspace.brushLibrary.resolvedSlotMap().values.max() ?? -1) + 1
             )
+            let selectedPreset = viewModel.workspace.brushLibrary.selectedPresetID.flatMap {
+                viewModel.workspace.brushLibrary.preset(id: $0)
+            }
 
-            ScrollView(.vertical, showsIndicators: true) {
-                LazyVGrid(
-                    columns: Array(repeating: GridItem(.fixed(slotWidth), spacing: spacing), count: columnCount),
-                    spacing: spacing
-                ) {
-                    ForEach(0..<totalSlotCount, id: \.self) { slotIndex in
-                        brushLibrarySlotCell(slotIndex: slotIndex)
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    if let selectedPreset {
+                        Text(selectedPreset.name)
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(Color.white.opacity(0.9))
+                            .lineLimit(1)
+                    } else {
+                        Text("当前未选中预设")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(Color.white.opacity(0.45))
                     }
+
+                    Spacer(minLength: 0)
+
+                    Text("青色描边 = Dual Tip 示例")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(Color(red: 0.42, green: 0.86, blue: 1.0))
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(
+                            Capsule()
+                                .fill(Color(red: 0.14, green: 0.24, blue: 0.31))
+                        )
                 }
                 .padding(.horizontal, horizontalInset)
-                .padding(.vertical, 2)
+
+                ScrollView(.vertical, showsIndicators: true) {
+                    LazyVGrid(
+                        columns: Array(repeating: GridItem(.fixed(slotWidth), spacing: spacing), count: columnCount),
+                        spacing: spacing
+                    ) {
+                        ForEach(0..<totalSlotCount, id: \.self) { slotIndex in
+                            brushLibrarySlotCell(slotIndex: slotIndex)
+                        }
+                    }
+                    .padding(.horizontal, horizontalInset)
+                    .padding(.vertical, 2)
+                    .frame(maxWidth: .infinity, alignment: .top)
+                }
                 .frame(maxWidth: .infinity, alignment: .top)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
@@ -1851,6 +1883,11 @@ struct RightInspectorView: View {
 
     private func brushPresetCell(_ preset: BrushPreset, slotIndex: Int) -> some View {
         let isSelected = viewModel.workspace.brushLibrary.selectedPresetID == preset.id
+        let isDualTipDemo = preset.isDualTipPhaseOneDemoPreset
+        let strokeColor: Color = isDualTipDemo
+            ? Color(red: 0.42, green: 0.86, blue: 1.0).opacity(isSelected ? 0.98 : 0.8)
+            : (isSelected ? Color.accentColor.opacity(0.9) : Color.white.opacity(0.06))
+        let strokeWidth: CGFloat = isSelected ? 1.5 : (isDualTipDemo ? 1.35 : 1.0)
 
         return Button {
             viewModel.applyBrushPreset(preset.id)
@@ -1861,8 +1898,8 @@ struct RightInspectorView: View {
                     .overlay {
                         RoundedRectangle(cornerRadius: 10)
                             .stroke(
-                                isSelected ? Color.accentColor.opacity(0.9) : Color.white.opacity(0.06),
-                                lineWidth: isSelected ? 1.5 : 1
+                                strokeColor,
+                                lineWidth: strokeWidth
                             )
                     }
                 GeometryReader { geometry in
@@ -1910,6 +1947,7 @@ struct RightInspectorView: View {
             .aspectRatio(1, contentMode: .fit)
         }
         .buttonStyle(.plain)
+        .help(preset.isDualTipPhaseOneDemoPreset ? "\(preset.name)\nDual Tip Phase 1 示例预设" : preset.name)
         .contextMenu {
             Button("应用") {
                 viewModel.applyBrushPreset(preset.id)
