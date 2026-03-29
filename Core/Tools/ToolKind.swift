@@ -93,8 +93,60 @@ enum DualTipCombineMode: String, Codable, Sendable, Equatable, Hashable, CaseIte
 
 struct SecondaryTipDescriptor: Codable, Sendable, Equatable {
     var tipShape: BrushTipShape
+    var customTipMaskData: Data?
+    var customTipSoftness: Float
+    var customTipRoundness: Float
+    var customTipAngleDegrees: Float
 
-    static let stageOneDefault = SecondaryTipDescriptor(tipShape: .hardRound)
+    static let stageOneDefault = SecondaryTipDescriptor(
+        tipShape: .hardRound,
+        customTipMaskData: nil,
+        customTipSoftness: 0.5,
+        customTipRoundness: 1,
+        customTipAngleDegrees: 0
+    )
+
+    enum CodingKeys: String, CodingKey {
+        case tipShape
+        case customTipMaskData
+        case customTipSoftness
+        case customTipRoundness
+        case customTipAngleDegrees
+    }
+
+    init(
+        tipShape: BrushTipShape,
+        customTipMaskData: Data? = nil,
+        customTipSoftness: Float = 0.5,
+        customTipRoundness: Float = 1,
+        customTipAngleDegrees: Float = 0
+    ) {
+        self.tipShape = tipShape
+        self.customTipMaskData = customTipMaskData
+        self.customTipSoftness = customTipSoftness
+        self.customTipRoundness = customTipRoundness
+        self.customTipAngleDegrees = customTipAngleDegrees
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let defaults = Self.stageOneDefault
+
+        tipShape = try container.decodeIfPresent(BrushTipShape.self, forKey: .tipShape) ?? defaults.tipShape
+        customTipMaskData = try container.decodeIfPresent(Data.self, forKey: .customTipMaskData) ?? defaults.customTipMaskData
+        customTipSoftness = try container.decodeIfPresent(Float.self, forKey: .customTipSoftness) ?? defaults.customTipSoftness
+        customTipRoundness = try container.decodeIfPresent(Float.self, forKey: .customTipRoundness) ?? defaults.customTipRoundness
+        customTipAngleDegrees = try container.decodeIfPresent(Float.self, forKey: .customTipAngleDegrees) ?? defaults.customTipAngleDegrees
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(tipShape, forKey: .tipShape)
+        try container.encodeIfPresent(customTipMaskData, forKey: .customTipMaskData)
+        try container.encode(customTipSoftness, forKey: .customTipSoftness)
+        try container.encode(customTipRoundness, forKey: .customTipRoundness)
+        try container.encode(customTipAngleDegrees, forKey: .customTipAngleDegrees)
+    }
 }
 
 extension BrushTipShape {
@@ -105,7 +157,11 @@ extension BrushTipShape {
 
 extension SecondaryTipDescriptor {
     var supportsPhaseOneDualTipRealDrawing: Bool {
-        tipShape.isPhaseOneDualTipSupportedRound
+        tipShape.isPhaseOneDualTipSupportedRound || tipShape == .customRound
+    }
+
+    var supportsPhaseTwoDualTipSubtractRealDrawing: Bool {
+        tipShape.isPhaseOneDualTipSupportedRound || tipShape == .customRound
     }
 }
 
@@ -563,6 +619,14 @@ struct BrushSettings: Codable, Sendable, Equatable {
         (tool == .brush || tool == .eraser) &&
         tipShape.isPhaseOneDualTipSupportedRound &&
         secondaryTipDescriptor.supportsPhaseOneDualTipRealDrawing
+    }
+
+    func supportsPhaseTwoDualTipSubtractRealDrawing(for tool: ToolKind) -> Bool {
+        dualTipEnabled &&
+        dualTipCombineMode == .subtract &&
+        (tool == .brush || tool == .eraser) &&
+        tipShape.isPhaseOneDualTipSupportedRound &&
+        secondaryTipDescriptor.supportsPhaseTwoDualTipSubtractRealDrawing
     }
 }
 

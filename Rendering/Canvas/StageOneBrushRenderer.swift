@@ -25,9 +25,14 @@ private struct BrushUniforms {
     var selectionMin: SIMD2<Float>
     var selectionMax: SIMD2<Float>
     var dualTipPhase1Enabled: UInt32
+    var dualTipSubtractEnabled: UInt32
     var dualTipSecondaryShape: UInt32
+    var dualTipSecondaryHasCustomMask: UInt32
     var dualTipStrength: Float
     var secondarySizeRatio: Float
+    var dualTipSecondarySoftness: Float
+    var dualTipSecondaryRoundness: Float
+    var dualTipSecondaryAngleDegrees: Float
 }
 
 private struct SmudgeGatherInput {
@@ -152,9 +157,14 @@ final class StageOneBrushRenderer {
             float2 selectionMin;
             float2 selectionMax;
             uint dualTipPhase1Enabled;
+            uint dualTipSubtractEnabled;
             uint dualTipSecondaryShape;
+            uint dualTipSecondaryHasCustomMask;
             float dualTipStrength;
             float secondarySizeRatio;
+            float dualTipSecondarySoftness;
+            float dualTipSecondaryRoundness;
+            float dualTipSecondaryAngleDegrees;
         };
 
         struct SmudgeGatherInput {
@@ -259,7 +269,7 @@ final class StageOneBrushRenderer {
                 primaryAlpha = smoothHardnessAlpha(roundDistance, uniforms.tipHardness);
             }
 
-            if (uniforms.dualTipPhase1Enabled == 0 || primaryAlpha <= 0.0) {
+            if ((uniforms.dualTipPhase1Enabled == 0 && uniforms.dualTipSubtractEnabled == 0) || primaryAlpha <= 0.0) {
                 return primaryAlpha;
             }
 
@@ -267,7 +277,41 @@ final class StageOneBrushRenderer {
             float2 secondaryPoint = localPoint / sizeRatio;
             float secondaryAlpha;
 
-            if (uniforms.dualTipSecondaryShape == 1) {
+            if (uniforms.dualTipSecondaryShape == 3) {
+                float secondaryRadiansValue = uniforms.dualTipSecondaryAngleDegrees * 0.017453292519943295;
+                float secondaryCosine = cos(secondaryRadiansValue);
+                float secondarySine = sin(secondaryRadiansValue);
+                float2 rotatedSecondaryPoint = float2(
+                    (secondaryPoint.x * secondaryCosine) + (secondaryPoint.y * secondarySine),
+                    (-secondaryPoint.x * secondarySine) + (secondaryPoint.y * secondaryCosine)
+                );
+                float secondaryRoundness = clamp(uniforms.dualTipSecondaryRoundness, 0.25, 1.0);
+                float2 shapedSecondaryPoint = float2(rotatedSecondaryPoint.x / secondaryRoundness, rotatedSecondaryPoint.y);
+
+                if (uniforms.dualTipSecondaryHasCustomMask != 0) {
+                    if (max(abs(shapedSecondaryPoint.x), abs(shapedSecondaryPoint.y)) >= 1.0) {
+                        secondaryAlpha = 0.0;
+                    } else {
+                        float2 uv = float2(
+                            clamp((shapedSecondaryPoint.x + 1.0) * 0.5, 0.0, 1.0),
+                            clamp((shapedSecondaryPoint.y + 1.0) * 0.5, 0.0, 1.0)
+                        );
+                        constexpr sampler tipSampler(
+                            coord::normalized,
+                            address::clamp_to_edge,
+                            filter::linear
+                        );
+                        float sampledSecondaryAlpha = customTipMask.sample(tipSampler, uv).r;
+                        float secondarySoftness = clamp(uniforms.dualTipSecondarySoftness, 0.0, 1.0);
+                        float exponent = mix(3.2, 0.75, secondarySoftness);
+                        secondaryAlpha = pow(clamp(sampledSecondaryAlpha, 0.0, 1.0), exponent);
+                    }
+                } else {
+                    float secondaryDistance = length(shapedSecondaryPoint);
+                    float secondaryHardness = (1.0 - clamp(uniforms.dualTipSecondarySoftness, 0.0, 1.0)) * 0.995;
+                    secondaryAlpha = smoothHardnessAlpha(secondaryDistance, secondaryHardness);
+                }
+            } else if (uniforms.dualTipSecondaryShape == 1) {
                 float secondaryDistance = length(secondaryPoint);
                 if (secondaryDistance >= 1.0) {
                     secondaryAlpha = 0.0;
@@ -281,6 +325,11 @@ final class StageOneBrushRenderer {
             }
 
             float strength = clamp(uniforms.dualTipStrength, 0.0, 1.0);
+            if (uniforms.dualTipSubtractEnabled != 0) {
+                float subtraction = clamp(secondaryAlpha * strength, 0.0, 1.0);
+                return primaryAlpha * (1.0 - subtraction);
+            }
+
             float modulation = mix(1.0, secondaryAlpha, strength);
             return primaryAlpha * modulation;
         }
@@ -1042,7 +1091,7 @@ final class StageOneBrushRenderer {
         )
         encoder.setFragmentTexture(selectionMaskTexture, index: 0)
         encoder.setFragmentTexture(
-            customTipTexture(for: stroke.brush.customTipMaskData) ?? defaultTipTexture,
+            customTipTexture(for: activeCustomTipMaskData(for: stroke)) ?? defaultTipTexture,
             index: 2
         )
         encoder.setFragmentSamplerState(tipSamplerState, index: 1)
@@ -1100,7 +1149,7 @@ final class StageOneBrushRenderer {
             encoder.setVertexBuffer(vertexBuffer, offset: 0, index: 0)
             encoder.setFragmentTexture(selectionMaskTexture, index: 0)
             encoder.setFragmentTexture(
-                customTipTexture(for: stroke.brush.customTipMaskData) ?? defaultTipTexture,
+                customTipTexture(for: activeCustomTipMaskData(for: stroke)) ?? defaultTipTexture,
                 index: 2
             )
             encoder.setFragmentSamplerState(tipSamplerState, index: 1)
@@ -1282,9 +1331,18 @@ final class StageOneBrushRenderer {
             selectionMin: selectionMin,
             selectionMax: selectionMax,
             dualTipPhase1Enabled: stroke.brush.supportsPhaseOneDualTipRealDrawing(for: stroke.tool) ? 1 : 0,
-            dualTipSecondaryShape: stroke.brush.secondaryTipDescriptor.tipShape == .softRound ? 1 : 0,
+            dualTipSubtractEnabled: stroke.brush.supportsPhaseTwoDualTipSubtractRealDrawing(for: stroke.tool) ? 1 : 0,
+            dualTipSecondaryShape: stroke.brush.secondaryTipDescriptor.tipShape == .softRound
+                ? 1
+                : (stroke.brush.secondaryTipDescriptor.tipShape == .square
+                    ? 2
+                    : (stroke.brush.secondaryTipDescriptor.tipShape == .customRound ? 3 : 0)),
+            dualTipSecondaryHasCustomMask: stroke.brush.secondaryTipDescriptor.customTipMaskData == nil ? 0 : 1,
             dualTipStrength: min(max(stroke.brush.dualTipStrength, 0), 1),
-            secondarySizeRatio: min(max(stroke.brush.secondarySizeRatio, 0.25), 0.95)
+            secondarySizeRatio: min(max(stroke.brush.secondarySizeRatio, 0.25), 0.95),
+            dualTipSecondarySoftness: stroke.brush.secondaryTipDescriptor.customTipSoftness,
+            dualTipSecondaryRoundness: stroke.brush.secondaryTipDescriptor.customTipRoundness,
+            dualTipSecondaryAngleDegrees: stroke.brush.secondaryTipDescriptor.customTipAngleDegrees
         )
     }
 
@@ -2173,7 +2231,7 @@ final class StageOneBrushRenderer {
             encoder.setFragmentTexture(gatheredColorsTexture, index: 1)
         }
         encoder.setFragmentTexture(
-            customTipTexture(for: stroke.brush.customTipMaskData) ?? defaultTipTexture,
+            customTipTexture(for: activeCustomTipMaskData(for: stroke)) ?? defaultTipTexture,
             index: 2
         )
         encoder.setFragmentSamplerState(tipSamplerState, index: 1)
@@ -2219,6 +2277,22 @@ final class StageOneBrushRenderer {
         }
         state.pendingInputPoints.removeFirst(trimCount)
         state.nextSegmentIndexToCommit = max(0, state.nextSegmentIndexToCommit - trimCount)
+    }
+
+    private func activeCustomTipMaskData(for stroke: StrokeDescriptor) -> Data? {
+        if stroke.brush.tipShape == .customRound {
+            return stroke.brush.customTipMaskData
+        }
+
+        let usesSecondaryInRealDrawing =
+            stroke.brush.supportsPhaseOneDualTipRealDrawing(for: stroke.tool) ||
+            stroke.brush.supportsPhaseTwoDualTipSubtractRealDrawing(for: stroke.tool)
+        if usesSecondaryInRealDrawing,
+           stroke.brush.secondaryTipDescriptor.tipShape == .customRound {
+            return stroke.brush.secondaryTipDescriptor.customTipMaskData
+        }
+
+        return nil
     }
 
     private func customTipTexture(for data: Data?) -> MTLTexture? {

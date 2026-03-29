@@ -17,7 +17,13 @@ struct ProjectPackageTests {
                         buildMode: .opacityCap,
                         tipShape: .customRound,
                         dualTipEnabled: true,
-                        secondaryTipDescriptor: SecondaryTipDescriptor(tipShape: .square),
+                        secondaryTipDescriptor: SecondaryTipDescriptor(
+                            tipShape: .customRound,
+                            customTipMaskData: Data([5, 10, 180, 240]),
+                            customTipSoftness: 0.37,
+                            customTipRoundness: 0.69,
+                            customTipAngleDegrees: 52
+                        ),
                         dualTipCombineMode: .intersect,
                         dualTipStrength: 0.68,
                         secondarySizeRatio: 1.45,

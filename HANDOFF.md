@@ -2,7 +2,7 @@
 
 ## 1. 项目一句话说明
 
-ArtFlex 是旧版 `BrushCanvas` 的 Metal-first 重构版 macOS 绘图软件；当前一轮性能主线与小范围 UX/perf follow-up 已经收尾，项目已转入新功能开发。当前最新已完成的新功能节点是 Dual Tip / 复合笔尖 Phase 1，现阶段先做收尾与体验验证，不自动进入 Phase 2。
+ArtFlex 是旧版 `BrushCanvas` 的 Metal-first 重构版 macOS 绘图软件；当前一轮性能主线与小范围 UX/perf follow-up 已经收尾，项目已转入新功能开发。当前最新已完成的新功能节点是 Dual Tip / 复合笔尖到 Phase 2 第一刀（`subtract`）并补齐自定义次笔尖真实接入与三格示意对齐；当前先做阶段性收尾，不自动进入更复杂的下一刀。
 
 本轮三个定点 follow-up 的最终状态是：
 
@@ -14,51 +14,118 @@ ArtFlex 是旧版 `BrushCanvas` 的 Metal-first 重构版 macOS 绘图软件；�
 
 ## 1.1 Dual Tip / 复合笔尖当前状态
 
-### Phase 1 已完成并手测通过
+### 已完成到 Phase 2 第一刀（subtract）并通过手测
 
-- 当前真实绘制已接入
-- 当前只支持最窄闭环：
-  - 主笔尖：圆形
-  - 次笔尖：圆形
-  - 模式：`multiply`
-  - 当前真正会影响绘制的参数：`strength`、`secondary size ratio`
-- 当前仍未支持 / 尚未接入：
+- Phase 0 已完成：
+  - 数据层 / UI 占位 / preset 与 project round-trip 已打通
+  - 关闭时不影响旧绘制
+- Phase 0.5 已完成：
+  - UI 可读性、参数说明和可见性问题已修正
+- Phase 1 已完成：
+  - 真实绘制的最小闭环已接入：
+    - 主笔尖：圆形
+    - 次笔尖：圆形
+    - 模式：`multiply`
+    - 当前真正会影响绘制的参数：`strength`、`secondary size ratio`
+- Phase 2 第一刀已完成：
+  - `subtract` 已进入真实绘制
+  - 手测通过
+  - 基线和旧主绘制路径未被打坏
+
+### 当前真实已支持的范围
+
+- 当前真实已支持的模式：
+  - `multiply`
   - `subtract`
-  - `intersect`
-  - `scatter`
-  - `angle offset`
-  - `invert`
-  - `secondary image tip`
-  - 更复杂 preview 同步
-  - `smudge` 路径
+- 它们当前只在窄 gate 下真实生效：
+  - 工具：`brush`、`eraser`
+  - 主笔尖：`硬边圆`、`柔边圆`
+  - 次笔尖：`硬边圆`、`柔边圆`、`自定义笔尖`
+- 当前真正会影响绘制的参数包括：
+  - `strength`
+  - `secondary size ratio`
+  - 当次笔尖是 `自定义笔尖` 时：
+    - `customTipMaskData`
+    - `customTipSoftness`
+    - `customTipRoundness`
+    - `customTipAngleDegrees`
+
+### 当前来源编辑 / 保存层状态
+
+- 主笔尖单一真相源接通已完成：
+  - `组合笔尖…` 面板里的主笔尖现在只做“真实摘要 + 编辑入口”
+  - `编辑主笔尖…` 会直接把用户带回现有 `笔尖形状设计` 主入口
+  - 不存在第二套独立主笔尖状态
+- 次笔尖来源接通已完成：
+  - `SecondaryTipDescriptor` 现在已扩成 tip-source 安全子集：
+    - `tipShape`
+    - `customTipMaskData`
+    - `customTipSoftness`
+    - `customTipRoundness`
+    - `customTipAngleDegrees`
+  - `组合笔尖…` 面板里现在能看到当前次笔尖摘要
+  - `编辑次笔尖…` 会打开独立子面板，复用现有笔尖遮罩编辑画布
+  - 次笔尖自定义遮罩和参数已经能保存到 preset / project
+  - 当前自定义次笔尖已经进入 `multiply / subtract` 的真实绘制
+  - 当前三格示意也已经按自定义次笔尖的真实遮罩关系显示，不再退回柔边圆近似
+- 但要注意：
+  - 这不代表所有次笔尖来源都已进入真实绘制
+  - `方形` 次笔尖当前仍然只是编辑 / 保存，真实绘制仍会回旧 gate
+
+### 当前仍未支持 / 尚未接入真实绘制
+
+- `intersect`
+- `scatter`
+- `angle offset`
+- `invert`
+- `secondary image tip`
+- 更复杂 preview 同步
+- `smudge` 路径
+
+以上这些现在最多只是数据 / UI 层存在，不代表已经进入真实绘制。
 
 ### 当前用户体验状态
 
-- Dual Tip 的启用开关和 Phase 1 支持参数现在已经能真实影响落笔
+- Dual Tip 的启用开关和当前已接入参数现在已经能真实影响落笔
+- `subtract` 现在也已经进入真实绘制
 - `组合笔尖…` popover 已补齐可解释性：
   - 主笔尖
   - 次笔尖
   - 最终笔尖
   - `multiply` 当前是“调制 / 压缩”逻辑
-- 当前 Phase 1 已足够用来做基础“收口 / 压缩型”笔刷
+  - `subtract` 当前是“挖掉 / 削减”逻辑
+- `组合笔尖…` 面板里的主笔尖现在与真实绘制主笔尖保持同一真相源
+- 次笔尖现在不再只是形状 picker，而是已经能独立编辑和保存来源
+- 自定义次笔尖现在不只可编辑 / 可保存，也已经能进入当前 `multiply / subtract` 真实绘制
+- 三格示意现在已经能按自定义次笔尖的真实形状示意最终组合结果
+- 当前 Dual Tip 已从概念验证进入“可用阶段”
+- 当前已可用来做基础“收口 / 压缩型”和“挖空 / 削减型”笔刷，也能开始体验异形次笔尖的挖空/调制效果
 - 为了便于直接体验，默认画笔库现在附带 3 个 Dual Tip Phase 1 示例预设
 
 ### 下一步建议
 
-- 当前不要自动进入 Phase 2
-- 先观察和体验 Phase 1 示例预设的实际观感
+- 当前不要自动进入下一刀
+- 先观察和体验 `multiply / subtract` 的实际观感
 - 如果后续继续扩，再考虑：
-  - `subtract`
   - `intersect`
   - `scatter`
   - `image tip`
+- 其中：
+  - `intersect` 比较适合作为下一候选
+  - `scatter` 风险更高，应后放
 
 ### 风险边界
 
 - 不要重新污染旧绘制路径
 - 关闭 Dual Tip 时，必须继续和旧版行为一致
-- 开启但不满足 Phase 1 条件时，必须继续回旧路径
+- 开启但不满足当前已接入条件时，必须继续回旧路径
+- 不要把“来源接通”和“真实绘制扩范围”绑在一起
+- 当前自定义次笔尖虽然已经进入 `multiply / subtract` 的真实绘制，但 gate 仍必须保持窄范围：
+  - 主笔尖继续只限圆形
+  - 工具继续只限 `brush / eraser`
+  - `intersect / scatter / image tip` 继续后放
 - 不要在未验证前一次性扩很多模式
+- 不要把当前 Dual Tip 直接扩成“全家桶”实现
 
 ## 2. 当前进展
 

@@ -160,6 +160,13 @@ struct RightInspectorView: View {
     @FocusState private var focusedLayerNameFieldID: LayerID?
     @State private var isTipImageDropTarget = false
     @State private var isColorPaletteDropTarget = false
+    @State private var highlightsPrimaryTipEditor = false
+    @State private var primaryTipEditorHighlightGeneration = 0
+    @State private var showsSecondaryTipEditor = false
+    @State private var secondaryTipPaintMode: TipPaintMode = .round
+    @State private var secondaryTipPaintSoftness: Double = 0.35
+    @State private var secondaryTipPaintIntensity: Double = 1.0
+    @State private var secondaryTipUsesImportedPreviewFit = false
 
     var body: some View {
         GeometryReader { proxy in
@@ -190,6 +197,17 @@ struct RightInspectorView: View {
                         InspectorPanel(title: "笔尖形状设计") {
                             tipShapeSection
                         }
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 12)
+                                .stroke(
+                                    highlightsPrimaryTipEditor ? Color.accentColor.opacity(0.92) : Color.clear,
+                                    lineWidth: 2
+                                )
+                        }
+                        .shadow(
+                            color: highlightsPrimaryTipEditor ? Color.accentColor.opacity(0.22) : .clear,
+                            radius: 12
+                        )
 
                         InspectorPanel(title: "画笔参数") {
                             brushSection
@@ -210,6 +228,9 @@ struct RightInspectorView: View {
         .frame(width: 560)
         .frame(maxHeight: .infinity)
         .background(Color(red: 0.12, green: 0.12, blue: 0.13))
+        .sheet(isPresented: $showsSecondaryTipEditor) {
+            secondaryTipEditorSheet
+        }
     }
 
     private var generatorSection: some View {
@@ -755,9 +776,11 @@ struct RightInspectorView: View {
         let brush = viewModel.workspace.toolSession.brush
         let activeTool = viewModel.workspace.toolSession.activeTool
         let phaseOneRealDrawingSupported = brush.supportsPhaseOneDualTipRealDrawing(for: activeTool)
+        let phaseTwoSubtractRealDrawingSupported = brush.supportsPhaseTwoDualTipSubtractRealDrawing(for: activeTool)
+        let dualTipRealDrawingSupported = phaseOneRealDrawingSupported || phaseTwoSubtractRealDrawingSupported
         let primaryTextColor = Color(red: 0.12, green: 0.12, blue: 0.13)
         let secondaryTextColor = Color(red: 0.32, green: 0.32, blue: 0.34)
-        let statusAccentColor = phaseOneRealDrawingSupported
+        let statusAccentColor = dualTipRealDrawingSupported
             ? Color(red: 0.15, green: 0.55, blue: 0.26)
             : Color.orange
 
@@ -767,14 +790,20 @@ struct RightInspectorView: View {
                 .foregroundStyle(primaryTextColor)
 
             VStack(alignment: .leading, spacing: 8) {
-                Text(phaseOneRealDrawingSupported ? "Phase 1 已接入最小真实绘制" : "Phase 1 条件式接入")
+                Text(
+                    phaseTwoSubtractRealDrawingSupported
+                    ? "Phase 2 subtract 已接入真实绘制"
+                    : (phaseOneRealDrawingSupported ? "Phase 1 已接入最小真实绘制" : "当前为条件式真实接入")
+                )
                     .font(.system(size: 11, weight: .bold))
                     .foregroundStyle(statusAccentColor.opacity(0.92))
 
                 Text(
-                    phaseOneRealDrawingSupported
-                    ? "当前配置会影响真实绘制：工具为画笔/橡皮、主笔尖为圆形、次笔尖为圆形、组合模式为调制。预览仍是占位显示，请以实际落笔为准。"
-                    : "只有在工具为画笔/橡皮、主笔尖为圆形、次笔尖为圆形、组合模式为调制时，组合笔尖才会影响真实绘制。其余情况当前只保存参数，不会改变画布。预览仍是占位显示。"
+                    phaseTwoSubtractRealDrawingSupported
+                    ? "当前配置会影响真实绘制：工具为画笔/橡皮、主笔尖为圆形、次笔尖为圆形或自定义笔尖、组合模式为减去。次笔尖会从主笔尖里挖掉一部分覆盖区域。预览仍是示意，请以实际落笔为准。"
+                    : (phaseOneRealDrawingSupported
+                        ? "当前配置会影响真实绘制：工具为画笔/橡皮、主笔尖为圆形、次笔尖为圆形或自定义笔尖、组合模式为调制。预览仍是示意，请以实际落笔为准。"
+                        : "只有在工具为画笔/橡皮、主笔尖为圆形、次笔尖为圆形或自定义笔尖，且组合模式为调制或减去时，组合笔尖才会影响真实绘制。其余情况当前只保存参数，不会改变画布。预览仍是示意。")
                 )
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(statusAccentColor.opacity(0.88))
@@ -802,31 +831,86 @@ struct RightInspectorView: View {
                 .toggleStyle(.switch)
                 .foregroundStyle(primaryTextColor)
 
-                Text("启用后只有在“调制 + 圆形主笔尖 + 圆形次笔尖 + 画笔/橡皮”这组条件满足时，才会影响真实落笔。")
+                Text("启用后只有在“调制或减去 + 圆形主笔尖 + 圆形/自定义次笔尖 + 画笔/橡皮”这组条件满足时，才会影响真实落笔。")
                     .font(.system(size: 10, weight: .medium))
                     .foregroundStyle(secondaryTextColor)
                     .fixedSize(horizontal: false, vertical: true)
             }
 
             VStack(alignment: .leading, spacing: 6) {
-                Text("主笔尖（真实参与 Phase 1 gate）")
+                Text("主笔尖（真实绘制同源）")
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(primaryTextColor)
 
-                Picker(
-                    "主笔尖",
-                    selection: Binding(
-                        get: { brush.tipShape },
-                        set: { viewModel.setBrushTipShape($0) }
-                    )
-                ) {
-                    ForEach(BrushTipShape.allCases, id: \.self) { tipShape in
-                        Text(dualTipPrimaryTipLabel(for: tipShape)).tag(tipShape)
+                HStack(alignment: .top, spacing: 10) {
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 10)
+                            .fill(Color.black.opacity(0.05))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 10)
+                                    .stroke(Color.black.opacity(0.08), lineWidth: 1)
+                            )
+
+                        brushPreviewGlyph(for: brush, maxExtent: 48)
+                            .padding(8)
+                    }
+                    .frame(width: 76, height: 76)
+
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(dualTipPrimaryTipSummaryTitle(for: brush))
+                            .font(.system(size: 12, weight: .bold))
+                            .foregroundStyle(primaryTextColor)
+
+                        Text(dualTipPrimaryTipSummaryDetail(for: brush))
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundStyle(secondaryTextColor)
+                            .fixedSize(horizontal: false, vertical: true)
+
+                        Text("这里显示的始终是当前真实绘制主笔尖；不是第二套独立主笔尖状态。")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(primaryTextColor.opacity(0.84))
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                 }
-                .pickerStyle(.menu)
+                .padding(10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(
+                    RoundedRectangle(cornerRadius: 10)
+                        .fill(Color.black.opacity(0.04))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10)
+                        .stroke(Color.black.opacity(0.08), lineWidth: 1)
+                )
 
-                Text("当前真实主笔尖：\(brush.tipShape.displayName)。Phase 1 只有硬边圆 / 柔边圆会真正接入 multiply 落笔。")
+                Text("真正修改主笔尖，请使用上方“笔尖形状设计”区域。那里改的是同一个主笔尖，也就是实际绘制正在使用的主笔尖。")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(secondaryTextColor)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                Button {
+                    revealPrimaryTipEditor()
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "arrow.up.left.and.arrow.down.right")
+                            .font(.system(size: 11, weight: .bold))
+                        Text("编辑主笔尖…")
+                            .font(.system(size: 11, weight: .semibold))
+                    }
+                    .foregroundStyle(Color.accentColor)
+                    .frame(maxWidth: .infinity, minHeight: 30)
+                    .background(
+                        RoundedRectangle(cornerRadius: 8)
+                            .fill(Color.accentColor.opacity(0.10))
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8)
+                            .stroke(Color.accentColor.opacity(0.22), lineWidth: 1)
+                    )
+                }
+                .buttonStyle(.plain)
+
+                Text("点击后会关闭当前 popover，并高亮上方已有的“笔尖形状设计”区域；真正编辑仍然只在那里完成。")
                     .font(.system(size: 10, weight: .medium))
                     .foregroundStyle(secondaryTextColor)
                     .fixedSize(horizontal: false, vertical: true)
@@ -839,36 +923,38 @@ struct RightInspectorView: View {
 
                 dualTipStatusLine(
                     title: "主笔尖",
-                    value: brush.tipShape.displayName,
+                    value: dualTipPrimaryTipSummaryTitle(for: brush),
                     isSupported: brush.tipShape.isPhaseOneDualTipSupportedRound,
-                    supportedText: "Phase 1"
+                    supportedText: "当前支持"
                 )
                 dualTipStatusLine(
                     title: "次笔尖",
-                    value: brush.secondaryTipDescriptor.tipShape.displayName,
+                    value: dualTipSecondaryTipSummaryTitle(for: brush.secondaryTipDescriptor),
                     isSupported: brush.secondaryTipDescriptor.supportsPhaseOneDualTipRealDrawing,
-                    supportedText: "Phase 1"
+                    supportedText: "当前支持"
                 )
                 dualTipStatusLine(
                     title: "模式",
                     value: brush.dualTipCombineMode.displayName,
-                    isSupported: brush.dualTipCombineMode == .multiply,
-                    supportedText: "Phase 1"
+                    isSupported: brush.dualTipCombineMode == .multiply || brush.dualTipCombineMode == .subtract,
+                    supportedText: brush.dualTipCombineMode == .subtract ? "Phase 2" : "Phase 1"
                 )
                 dualTipStatusLine(
                     title: "工具",
                     value: activeTool.displayName,
                     isSupported: activeTool == .brush || activeTool == .eraser,
-                    supportedText: "Phase 1"
+                    supportedText: "当前支持"
                 )
 
                 Text(
-                    phaseOneRealDrawingSupported
-                    ? "当前真实 Dual Tip 路径已接通。强度和次笔尖大小比例会直接影响落笔。"
-                    : "当前仍走旧绘制路径。只有上面 4 项都满足 Phase 1 条件时，真实画布才会出现变化。"
+                    phaseTwoSubtractRealDrawingSupported
+                    ? "当前真实 subtract 路径已接通。强度和次笔尖大小比例会直接决定挖空程度与范围。"
+                    : (phaseOneRealDrawingSupported
+                        ? "当前真实 Dual Tip 路径已接通。强度和次笔尖大小比例会直接影响落笔。"
+                        : "当前仍走旧绘制路径。只有上面 4 项都满足已接入条件时，真实画布才会出现变化。")
                 )
                 .font(.system(size: 10, weight: .semibold))
-                .foregroundStyle(phaseOneRealDrawingSupported ? statusAccentColor : secondaryTextColor)
+                .foregroundStyle(dualTipRealDrawingSupported ? statusAccentColor : secondaryTextColor)
                 .fixedSize(horizontal: false, vertical: true)
             }
             .padding(10)
@@ -900,14 +986,14 @@ struct RightInspectorView: View {
                 }
                 .pickerStyle(.menu)
 
-                Text("调制 = 用次笔尖压缩/削弱主笔尖的覆盖区域。次笔尖越小、强度越高，收口越明显。减去 / 相交仍留到 Phase 2。")
+                Text(dualTipModeDescription(for: brush))
                     .font(.system(size: 10, weight: .medium))
                     .foregroundStyle(secondaryTextColor)
                     .fixedSize(horizontal: false, vertical: true)
             }
 
             VStack(alignment: .leading, spacing: 8) {
-                Text("Phase 1 三格示意")
+                Text("Dual Tip 三格示意")
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(primaryTextColor)
 
@@ -928,9 +1014,9 @@ struct RightInspectorView: View {
 
                     DualTipPreviewCell(
                         title: "最终笔尖",
-                        caption: dualTipPhaseOnePreviewCaption(for: brush, activeTool: activeTool)
+                        caption: dualTipCompositePreviewCaption(for: brush, activeTool: activeTool)
                     ) {
-                        if let previewImage = dualTipPhaseOneCompositePreviewImage(for: brush) {
+                        if let previewImage = dualTipCompositePreviewImage(for: brush) {
                             Image(decorative: previewImage, scale: 1)
                                 .resizable()
                                 .interpolation(.high)
@@ -945,7 +1031,7 @@ struct RightInspectorView: View {
                     }
                 }
 
-                Text("这组示意图只帮助理解当前 Phase 1 的圆形 x 调制关系；真实效果仍以实际落笔为准。")
+                Text("这组示意图只帮助理解当前已接入模式下的主/次笔尖关系；真实效果仍以实际落笔为准。")
                     .font(.system(size: 10, weight: .medium))
                     .foregroundStyle(secondaryTextColor)
                     .fixedSize(horizontal: false, vertical: true)
@@ -960,7 +1046,7 @@ struct RightInspectorView: View {
                 ),
                 range: 0...1,
                 onCommit: { viewModel.setDualTipStrength(Float($0)) },
-                helperText: "控制次笔尖削弱主笔尖的程度。越高，最终笔尖越明显被压缩。"
+                helperText: dualTipStrengthHelperText(for: brush)
             )
 
             DualTipPhaseZeroSliderRow(
@@ -972,7 +1058,7 @@ struct RightInspectorView: View {
                 ),
                 range: 0.25...0.95,
                 onCommit: { viewModel.setSecondarySizeRatio(Float($0)) },
-                helperText: "控制次笔尖相对主笔尖的大小。越小，越容易看到收口和压缩效果。"
+                helperText: dualTipSizeRatioHelperText(for: brush)
             )
 
             DualTipPhaseZeroSliderRow(
@@ -1021,24 +1107,75 @@ struct RightInspectorView: View {
             .opacity(0.68)
 
             VStack(alignment: .leading, spacing: 8) {
-                Text("次笔尖占位区")
+                Text("次笔尖来源（独立编辑/保存）")
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(primaryTextColor)
 
-                Picker(
-                    "次笔尖形状",
-                    selection: Binding(
-                        get: { brush.secondaryTipDescriptor.tipShape },
-                        set: { viewModel.setSecondaryTipShape($0) }
-                    )
-                ) {
-                    ForEach(phaseZeroSecondaryTipShapeOptions, id: \.self) { tipShape in
-                        Text(dualTipSecondaryTipLabel(for: tipShape)).tag(tipShape)
+                HStack(alignment: .top, spacing: 10) {
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 10)
+                            .fill(Color.black.opacity(0.05))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 10)
+                                    .stroke(Color.black.opacity(0.08), lineWidth: 1)
+                            )
+
+                        brushPreviewGlyph(for: dualTipSecondaryPreviewBrush(from: brush), maxExtent: 48)
+                            .padding(8)
+                    }
+                    .frame(width: 76, height: 76)
+
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(dualTipSecondaryTipSummaryTitle(for: brush.secondaryTipDescriptor))
+                            .font(.system(size: 12, weight: .bold))
+                            .foregroundStyle(primaryTextColor)
+
+                        Text(dualTipSecondaryTipSummaryDetail(for: brush.secondaryTipDescriptor))
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundStyle(secondaryTextColor)
+                            .fixedSize(horizontal: false, vertical: true)
+
+                        Text("这里编辑的是次笔尖来源本身；不会改动主笔尖。")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(primaryTextColor.opacity(0.84))
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                 }
-                .pickerStyle(.menu)
+                .padding(10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(
+                    RoundedRectangle(cornerRadius: 10)
+                        .fill(Color.black.opacity(0.04))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10)
+                        .stroke(Color.black.opacity(0.08), lineWidth: 1)
+                )
 
-                Text("Phase 1 只有硬边圆 / 柔边圆会生效；方形、图片和自定义次笔尖留到 Phase 2。")
+                Button {
+                    showsDualTipPopover = false
+                    showsSecondaryTipEditor = true
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "slider.horizontal.3")
+                            .font(.system(size: 11, weight: .bold))
+                        Text("编辑次笔尖…")
+                            .font(.system(size: 11, weight: .semibold))
+                    }
+                    .foregroundStyle(Color.accentColor)
+                    .frame(maxWidth: .infinity, minHeight: 30)
+                    .background(
+                        RoundedRectangle(cornerRadius: 8)
+                            .fill(Color.accentColor.opacity(0.10))
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8)
+                            .stroke(Color.accentColor.opacity(0.22), lineWidth: 1)
+                    )
+                }
+                .buttonStyle(.plain)
+
+                Text("点击后会打开独立的次笔尖编辑子面板。当前自定义次笔尖已可进入 multiply / subtract 的真实绘制 gate；方形次笔尖仍只编辑和保存。")
                     .font(.system(size: 10, weight: .medium))
                     .foregroundStyle(secondaryTextColor)
                     .fixedSize(horizontal: false, vertical: true)
@@ -1170,17 +1307,41 @@ struct RightInspectorView: View {
         switch mode {
         case .multiply:
             return "\(mode.displayName)（Phase 1）"
-        case .subtract, .intersect:
-            return "\(mode.displayName)（Phase 2）"
+        case .subtract:
+            return "\(mode.displayName)（Phase 2 已接入）"
+        case .intersect:
+            return "\(mode.displayName)（Phase 2 占位）"
         }
     }
 
-    private func dualTipPrimaryTipLabel(for tipShape: BrushTipShape) -> String {
-        switch tipShape {
-        case .hardRound, .softRound:
-            return "\(tipShape.displayName)（Phase 1）"
-        case .square, .customRound:
-            return "\(tipShape.displayName)（Phase 2）"
+    private func dualTipPrimaryTipSummaryTitle(for brush: BrushSettings) -> String {
+        switch brush.tipShape {
+        case .hardRound, .softRound, .square:
+            return brush.tipShape.displayName
+        case .customRound:
+            if brush.customTipMaskData != nil, viewModel.brushTipUsesImportedPreviewFit {
+                return "导入图像笔尖（当前会话）"
+            }
+            return "自定义笔尖"
+        }
+    }
+
+    private func dualTipPrimaryTipSummaryDetail(for brush: BrushSettings) -> String {
+        switch brush.tipShape {
+        case .hardRound:
+            return "当前真实主笔尖是硬边圆；实际落笔直接使用它。"
+        case .softRound:
+            return "当前真实主笔尖是柔边圆；实际落笔直接使用它。"
+        case .square:
+            return "当前真实主笔尖是方形；当前 Dual Tip 已接入 gate 里仍会回旧路径。"
+        case .customRound:
+            if brush.customTipMaskData != nil, viewModel.brushTipUsesImportedPreviewFit {
+                return "当前会话里的真实主笔尖来自图片导入；实际落笔正在直接使用这份导入笔尖。"
+            }
+            if brush.customTipMaskData != nil {
+                return "当前真实主笔尖是自定义笔尖遮罩；实际落笔正在直接使用这份自定义笔尖。"
+            }
+            return "当前真实主笔尖来自自定义笔尖参数（柔边、圆度、角度）；实际落笔正在直接使用它。"
         }
     }
 
@@ -1224,28 +1385,184 @@ struct RightInspectorView: View {
         }
     }
 
+    private func dualTipSecondaryTipEditorLabel(for tipShape: BrushTipShape) -> String {
+        switch tipShape {
+        case .hardRound, .softRound:
+            return "\(tipShape.displayName)（当前真实支持）"
+        case .square:
+            return "\(tipShape.displayName)（仅编辑/保存）"
+        case .customRound:
+            return "自定义笔尖（当前真实支持）"
+        }
+    }
+
+    private func dualTipSecondaryTipSummaryTitle(for secondary: SecondaryTipDescriptor) -> String {
+        switch secondary.tipShape {
+        case .hardRound, .softRound, .square:
+            return secondary.tipShape.displayName
+        case .customRound:
+            return "自定义笔尖"
+        }
+    }
+
+    private func dualTipSecondaryTipSummaryDetail(for secondary: SecondaryTipDescriptor) -> String {
+        switch secondary.tipShape {
+        case .hardRound:
+            return "当前次笔尖是硬边圆；在当前 multiply / subtract gate 下可直接参与真实绘制。"
+        case .softRound:
+            return "当前次笔尖是柔边圆；在当前 multiply / subtract gate 下可直接参与真实绘制。"
+        case .square:
+            return "当前次笔尖是方形；现在可以编辑和保存，但真实绘制仍会回旧 gate。"
+        case .customRound:
+            if secondary.customTipMaskData != nil {
+                return "当前次笔尖是自定义遮罩；在当前 multiply / subtract gate 下已可参与真实绘制。"
+            }
+            return "当前次笔尖使用自定义参数（柔边、圆度、角度）；在当前 multiply / subtract gate 下已可参与真实绘制。"
+        }
+    }
+
     private func dualTipSecondaryPreviewBrush(from brush: BrushSettings) -> BrushSettings {
         var previewBrush = brush
-        previewBrush.tipShape = brush.secondaryTipDescriptor.tipShape
+        let secondary = brush.secondaryTipDescriptor
+        previewBrush.tipShape = secondary.tipShape
         previewBrush.size = max(1, brush.size * min(max(brush.secondarySizeRatio, 0.25), 0.95))
+        previewBrush.customTipMaskData = secondary.customTipMaskData
+        previewBrush.customTipSoftness = secondary.customTipSoftness
+        previewBrush.customTipRoundness = secondary.customTipRoundness
+        previewBrush.customTipAngleDegrees = secondary.customTipAngleDegrees
         return previewBrush
     }
 
-    private func dualTipPhaseOnePreviewCaption(for brush: BrushSettings, activeTool: ToolKind) -> String {
+    private func dualTipModeDescription(for brush: BrushSettings) -> String {
+        switch brush.dualTipCombineMode {
+        case .multiply:
+            return "调制 = 用次笔尖压缩/削弱主笔尖的覆盖区域。次笔尖越小、强度越高，收口越明显。减去已接入；相交仍留到后续。"
+        case .subtract:
+            return "减去 = 次笔尖会从主笔尖里挖掉一部分覆盖区域。次笔尖越小、强度越高，挖空越集中也越明显。相交仍留到后续。"
+        case .intersect:
+            return "相交当前仍是占位参数，尚未接入真实绘制。现在真正会影响画布的是调制和减去。"
+        }
+    }
+
+    private func dualTipStrengthHelperText(for brush: BrushSettings) -> String {
+        switch brush.dualTipCombineMode {
+        case .multiply:
+            return "控制次笔尖削弱主笔尖的程度。越高，最终笔尖越明显被压缩。"
+        case .subtract:
+            return "控制次笔尖从主笔尖里挖掉的程度。越高，挖空感越明显。"
+        case .intersect:
+            return "相交尚未接入真实绘制；当前只保留已保存值。"
+        }
+    }
+
+    private func dualTipSizeRatioHelperText(for brush: BrushSettings) -> String {
+        switch brush.dualTipCombineMode {
+        case .multiply:
+            return "控制次笔尖相对主笔尖的大小。越小，越容易看到收口和压缩效果。"
+        case .subtract:
+            return "控制次笔尖相对主笔尖的大小。越小，挖空更集中；越大，削减范围更宽。"
+        case .intersect:
+            return "相交尚未接入真实绘制；当前只保留已保存值。"
+        }
+    }
+
+    private func dualTipCompositePreviewCaption(for brush: BrushSettings, activeTool: ToolKind) -> String {
+        if brush.supportsPhaseTwoDualTipSubtractRealDrawing(for: activeTool) {
+            return "当前真实路径已接通；会按强度和大小比例挖掉主笔尖一部分。"
+        }
         if brush.supportsPhaseOneDualTipRealDrawing(for: activeTool) {
             return "当前真实路径已接通；会按强度和大小比例收口。"
         }
-        if brush.dualTipCombineMode != .multiply {
-            return "Phase 1 只示意调制 Multiply。"
+        if brush.dualTipCombineMode == .intersect {
+            return "相交当前仍是占位；尚未接入真实绘制。"
+        }
+        if brush.dualTipCombineMode == .subtract {
+            return "Phase 2 subtract 目前示意当前已接通的主/次笔尖关系。"
         }
         if !brush.tipShape.isPhaseOneDualTipSupportedRound || !brush.secondaryTipDescriptor.supportsPhaseOneDualTipRealDrawing {
-            return "Phase 1 目前只示意圆形主/次笔尖。"
+            return "当前已接入模式只示意已接通的真实绘制条件。"
         }
-        return "图形可示意当前调制关系，但当前工具仍走旧路径。"
+        return "图形可示意当前组合关系，但当前工具仍走旧路径。"
     }
 
-    private func dualTipPhaseOneCompositePreviewImage(for brush: BrushSettings, resolution: Int = 80) -> CGImage? {
-        guard brush.dualTipCombineMode == .multiply,
+    private func dualTipPreviewAlpha(
+        tipShape: BrushTipShape,
+        normalizedX: Double,
+        normalizedY: Double,
+        customMaskBytes: [UInt8]?,
+        softness: Float,
+        roundness: Float,
+        angleDegrees: Float
+    ) -> Double {
+        switch tipShape {
+        case .hardRound:
+            let distance = hypot(normalizedX, normalizedY)
+            return distance < 1.0 ? 1.0 : 0.0
+        case .softRound:
+            let distance = hypot(normalizedX, normalizedY)
+            guard distance < 1.0 else { return 0.0 }
+            let feather = max(0.0, 1.0 - distance)
+            return feather * feather
+        case .square:
+            return max(abs(normalizedX), abs(normalizedY)) < 1.0 ? 1.0 : 0.0
+        case .customRound:
+            let radians = Double(angleDegrees) * .pi / 180.0
+            let cosine = cos(radians)
+            let sine = sin(radians)
+            let rotatedX = (normalizedX * cosine) + (normalizedY * sine)
+            let rotatedY = (-normalizedX * sine) + (normalizedY * cosine)
+            let clampedRoundness = max(Double(roundness), 0.25)
+            let shapedX = rotatedX / clampedRoundness
+            let shapedY = rotatedY
+
+            if let customMaskBytes {
+                guard max(abs(shapedX), abs(shapedY)) < 1.0 else {
+                    return 0.0
+                }
+
+                let resolution = Int(Double(customMaskBytes.count).squareRoot())
+                guard resolution > 1 else {
+                    return 0.0
+                }
+
+                let u = min(max((shapedX + 1.0) * 0.5, 0.0), 1.0)
+                let v = min(max((shapedY + 1.0) * 0.5, 0.0), 1.0)
+                let x = u * Double(resolution - 1)
+                let y = v * Double(resolution - 1)
+                let x0 = Int(floor(x))
+                let y0 = Int(floor(y))
+                let x1 = min(x0 + 1, resolution - 1)
+                let y1 = min(y0 + 1, resolution - 1)
+                let tx = x - Double(x0)
+                let ty = y - Double(y0)
+
+                func sample(_ sampleX: Int, _ sampleY: Int) -> Double {
+                    let index = (sampleY * resolution) + sampleX
+                    return Double(customMaskBytes[index]) / 255.0
+                }
+
+                let top = (sample(x0, y0) * (1.0 - tx)) + (sample(x1, y0) * tx)
+                let bottom = (sample(x0, y1) * (1.0 - tx)) + (sample(x1, y1) * tx)
+                let sampledAlpha = (top * (1.0 - ty)) + (bottom * ty)
+                let clampedSoftness = min(max(Double(softness), 0.0), 1.0)
+                let exponent = (3.2 * (1.0 - clampedSoftness)) + (0.75 * clampedSoftness)
+                return pow(min(max(sampledAlpha, 0.0), 1.0), exponent)
+            }
+
+            let hardness = Double(BrushTipShape.customRoundHardness(for: softness))
+            let distance = hypot(shapedX, shapedY)
+            guard distance < 1.0 else { return 0.0 }
+            if hardness >= 0.999 || distance <= hardness {
+                return 1.0
+            }
+
+            let t = min(max((distance - hardness) / (1.0 - hardness), 0.0), 1.0)
+            return 1.0 - (t * t * (3.0 - (2.0 * t)))
+        }
+    }
+
+    private func dualTipCompositePreviewImage(for brush: BrushSettings, resolution: Int = 80) -> CGImage? {
+        guard (brush.dualTipCombineMode == .multiply || brush.dualTipCombineMode == .subtract),
               brush.tipShape.isPhaseOneDualTipSupportedRound,
               brush.secondaryTipDescriptor.supportsPhaseOneDualTipRealDrawing else {
             return nil
@@ -1259,23 +1576,42 @@ struct RightInspectorView: View {
 
         let strength = Double(min(max(brush.dualTipStrength, 0), 1))
         let sizeRatio = Double(min(max(brush.secondarySizeRatio, 0.25), 0.95))
+        let secondaryMaskBytes = resampledMaskData(
+            brush.secondaryTipDescriptor.customTipMaskData,
+            targetResolution: resolution
+        ).map(Array.init)
 
         for y in 0..<height {
             for x in 0..<width {
                 let normalizedX = ((Double(x) + 0.5) / Double(width)) * 2.0 - 1.0
                 let normalizedY = ((Double(y) + 0.5) / Double(height)) * 2.0 - 1.0
-
-                let primaryDistance = Float(sqrt((normalizedX * normalizedX) + (normalizedY * normalizedY)))
-                let secondaryDistance = Float(
-                    sqrt(
-                        ((normalizedX / sizeRatio) * (normalizedX / sizeRatio)) +
-                        ((normalizedY / sizeRatio) * (normalizedY / sizeRatio))
-                    )
+                let primaryAlpha = dualTipPreviewAlpha(
+                    tipShape: brush.tipShape,
+                    normalizedX: normalizedX,
+                    normalizedY: normalizedY,
+                    customMaskBytes: nil,
+                    softness: brush.customTipSoftness,
+                    roundness: brush.customTipRoundness,
+                    angleDegrees: brush.customTipAngleDegrees
                 )
-
-                let primaryAlpha = Double(brush.tipShape.alphaMask(forNormalizedDistance: primaryDistance))
-                let secondaryAlpha = Double(brush.secondaryTipDescriptor.tipShape.alphaMask(forNormalizedDistance: secondaryDistance))
-                let combinedAlpha = primaryAlpha * ((1.0 - strength) + (secondaryAlpha * strength))
+                let secondaryAlpha = dualTipPreviewAlpha(
+                    tipShape: brush.secondaryTipDescriptor.tipShape,
+                    normalizedX: normalizedX / sizeRatio,
+                    normalizedY: normalizedY / sizeRatio,
+                    customMaskBytes: secondaryMaskBytes,
+                    softness: brush.secondaryTipDescriptor.customTipSoftness,
+                    roundness: brush.secondaryTipDescriptor.customTipRoundness,
+                    angleDegrees: brush.secondaryTipDescriptor.customTipAngleDegrees
+                )
+                let combinedAlpha: Double
+                switch brush.dualTipCombineMode {
+                case .multiply:
+                    combinedAlpha = primaryAlpha * ((1.0 - strength) + (secondaryAlpha * strength))
+                case .subtract:
+                    combinedAlpha = primaryAlpha * (1.0 - min(max(secondaryAlpha * strength, 0.0), 1.0))
+                case .intersect:
+                    combinedAlpha = primaryAlpha
+                }
 
                 let alpha = UInt8(min(max(combinedAlpha * 255.0, 0), 255))
                 let offset = (y * bytesPerRow) + (x * bytesPerPixel)
@@ -1305,6 +1641,219 @@ struct RightInspectorView: View {
             shouldInterpolate: true,
             intent: .defaultIntent
         )
+    }
+
+    private var secondaryTipEditorSheet: some View {
+        let brush = viewModel.workspace.toolSession.brush
+        let secondary = brush.secondaryTipDescriptor
+        let primaryTextColor = Color(red: 0.12, green: 0.12, blue: 0.13)
+        let secondaryTextColor = Color(red: 0.32, green: 0.32, blue: 0.34)
+
+        return VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("编辑次笔尖")
+                        .font(.system(size: 15, weight: .bold))
+                        .foregroundStyle(primaryTextColor)
+
+                    Text("这里只编辑 SecondaryTipDescriptor。真实绘制当前允许圆形和自定义次笔尖进入 multiply / subtract gate；方形仍只编辑和保存。")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(secondaryTextColor)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                Spacer(minLength: 8)
+
+                Button("完成") {
+                    showsSecondaryTipEditor = false
+                }
+                .font(.system(size: 12, weight: .semibold))
+            }
+
+            HStack(alignment: .top, spacing: 10) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 10)
+                        .fill(Color.black.opacity(0.05))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 10)
+                                .stroke(Color.black.opacity(0.08), lineWidth: 1)
+                        )
+
+                    brushPreviewGlyph(for: dualTipSecondaryPreviewBrush(from: brush), maxExtent: 54)
+                        .padding(8)
+                }
+                .frame(width: 84, height: 84)
+
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(dualTipSecondaryTipSummaryTitle(for: secondary))
+                        .font(.system(size: 12, weight: .bold))
+                        .foregroundStyle(primaryTextColor)
+
+                    Text(dualTipSecondaryTipSummaryDetail(for: secondary))
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(secondaryTextColor)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .padding(10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 10)
+                    .fill(Color.black.opacity(0.04))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 10)
+                    .stroke(Color.black.opacity(0.08), lineWidth: 1)
+            )
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("次笔尖形状")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(primaryTextColor)
+
+                Picker(
+                    "次笔尖形状",
+                    selection: Binding(
+                        get: { secondary.tipShape },
+                        set: { viewModel.setSecondaryTipShape($0) }
+                    )
+                ) {
+                    ForEach(BrushTipShape.allCases, id: \.self) { tipShape in
+                        Text(dualTipSecondaryTipEditorLabel(for: tipShape)).tag(tipShape)
+                    }
+                }
+                .pickerStyle(.menu)
+
+                Text("硬边圆 / 柔边圆 / 自定义次笔尖当前可进入真实绘制。方形这轮仍只接编辑与保存，不扩 renderer gate。")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(secondaryTextColor)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 8) {
+                    Picker("绘制模式", selection: $secondaryTipPaintMode) {
+                        Text("绘制").tag(TipPaintMode.round)
+                        Text("擦除").tag(TipPaintMode.eraser)
+                    }
+                    .pickerStyle(.segmented)
+
+                    Button("导入图片…") {
+                        if viewModel.importSecondaryTipImageFromDisk() {
+                            secondaryTipUsesImportedPreviewFit = true
+                        }
+                    }
+
+                    Button("清空自定义") {
+                        viewModel.clearSecondaryTipMask()
+                        secondaryTipUsesImportedPreviewFit = false
+                    }
+                }
+
+                ZStack {
+                    RoundedRectangle(cornerRadius: 12)
+                        .fill(Color.white)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 12)
+                                .stroke(Color.black.opacity(0.08), lineWidth: 1)
+                        )
+
+                    TipMaskCanvasView(
+                        maskData: secondary.customTipMaskData,
+                        fitImportedPreview: secondaryTipUsesImportedPreviewFit,
+                        paintMode: secondaryTipPaintMode,
+                        softness: Float(secondaryTipPaintSoftness),
+                        intensity: Float(secondaryTipPaintIntensity),
+                        brushSize: brush.size,
+                        onFocusChanged: { _ in },
+                        onImportImage: { image in
+                            if viewModel.importSecondaryTipImage(from: image) {
+                                secondaryTipUsesImportedPreviewFit = true
+                            }
+                        },
+                        onUpdateMask: { data in
+                            secondaryTipUsesImportedPreviewFit = false
+                            viewModel.updateSecondaryTipMask(data)
+                        }
+                    )
+                    .frame(height: 180)
+                }
+
+                Text("在这里绘制或导入，会把次笔尖来源切到“自定义笔尖”；当前 multiply / subtract 已可使用自定义次笔尖，方形仍会回旧 gate。")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(secondaryTextColor)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            DualTipPhaseZeroSliderRow(
+                title: "自定义柔边",
+                valueText: "\(Int(secondary.customTipSoftness * 100))%",
+                value: Binding(
+                    get: { Double(secondary.customTipSoftness) },
+                    set: { _ in }
+                ),
+                range: 0...1,
+                onCommit: { viewModel.setSecondaryTipSoftness(Float($0)) },
+                helperText: "影响次笔尖自定义来源的柔边特性；当前 multiply / subtract gate 下已可参与真实绘制。"
+            )
+
+            DualTipPhaseZeroSliderRow(
+                title: "自定义圆度",
+                valueText: "\(Int(secondary.customTipRoundness * 100))%",
+                value: Binding(
+                    get: { Double(secondary.customTipRoundness) },
+                    set: { _ in }
+                ),
+                range: 0.25...1,
+                onCommit: { viewModel.setSecondaryTipRoundness(Float($0)) },
+                helperText: "控制次笔尖自定义来源的横向压缩比例。"
+            )
+
+            DualTipPhaseZeroSliderRow(
+                title: "自定义角度",
+                valueText: "\(Int(secondary.customTipAngleDegrees))°",
+                value: Binding(
+                    get: { Double(secondary.customTipAngleDegrees) },
+                    set: { _ in }
+                ),
+                range: 0...180,
+                onCommit: { viewModel.setSecondaryTipSourceAngleDegrees(Float($0)) },
+                helperText: "控制次笔尖自定义来源的旋转角度。当前 multiply / subtract gate 下已可参与真实绘制。"
+            )
+
+            DualTipPhaseZeroSliderRow(
+                title: "编辑画笔柔边",
+                valueText: "\(Int(secondaryTipPaintSoftness * 100))%",
+                value: Binding(
+                    get: { secondaryTipPaintSoftness },
+                    set: { _ in }
+                ),
+                range: 0...1,
+                onCommit: { secondaryTipPaintSoftness = $0 },
+                helperText: "只影响当前次笔尖遮罩编辑手感，不会写入真实次笔尖来源参数。"
+            )
+        }
+        .padding(16)
+        .frame(width: 420)
+        .background(Color(nsColor: .windowBackgroundColor))
+    }
+
+    private func revealPrimaryTipEditor() {
+        showsDualTipPopover = false
+        primaryTipEditorHighlightGeneration += 1
+        let currentGeneration = primaryTipEditorHighlightGeneration
+
+        withAnimation(.easeInOut(duration: 0.18)) {
+            highlightsPrimaryTipEditor = true
+        }
+
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 1_400_000_000)
+            guard currentGeneration == primaryTipEditorHighlightGeneration else { return }
+            withAnimation(.easeInOut(duration: 0.24)) {
+                highlightsPrimaryTipEditor = false
+            }
+        }
     }
 
     private func compactToolButton(

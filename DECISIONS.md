@@ -1,6 +1,6 @@
 # DECISIONS
 
-最后更新：2026-03-26
+最后更新：2026-03-29
 
 本文件记录：**当前代码和产品层已经确认的关键决策。**  
 如果后续改动与这些点冲突，应先重新讨论，而不是直接改代码。
@@ -52,27 +52,72 @@
 - 不引入 `full reset + partial snapshots` fallback
 - 不动 `trim / restore` 主模型
 
-### 0.6 Dual Tip Phase 1 已完成，当前先停在体验验证
+### 0.6 Dual Tip 当前先停在 `multiply + subtract`
 
 已确认：
 
-- Dual Tip Phase 1 已完成并通过手测
-- 当前先停在 Phase 1，不自动进入 Phase 2
-- 下一步优先做示例预设和体验验证，而不是继续扩实现范围
+- Dual Tip Phase 0 已完成
+- Dual Tip Phase 0.5 已完成
+- Dual Tip Phase 1（`multiply`）已完成并通过手测
+- Dual Tip Phase 2 第一刀（`subtract`）已完成并通过手测
+- 当前先停在：
+  - `multiply`
+  - `subtract`
+- 当前不自动进入：
+  - `intersect`
+  - `scatter`
+- `scatter` 明确后放
 - 当前已支持的真实绘制边界：
   - 主笔尖：圆形
-  - 次笔尖：圆形
+  - 次笔尖：圆形、自定义笔尖
   - 模式：`multiply`
-  - 当前真正会影响绘制的参数：`strength`、`secondary size ratio`
+  - 模式：`subtract`
+  - 当前真正会影响绘制的参数：
+    - `strength`
+    - `secondary size ratio`
+    - 当次笔尖为自定义笔尖时：`customTipMaskData / customTipSoftness / customTipRoundness / customTipAngleDegrees`
 - 当前未支持：
-  - `subtract / intersect`
+  - `intersect`
   - `scatter / angle offset / invert`
   - `secondary image tip`
   - 更复杂 preview 同步
   - `smudge` 路径
 - 关闭 Dual Tip 时，必须继续完全回到旧绘制路径
-- 开启但不满足 Phase 1 条件时，也必须继续回旧路径
+- 开启但不满足当前已接入条件时，也必须继续回旧路径
+- 后续若继续扩，仍必须坚持窄 gate 和强旁路原则
 - 不允许在未验证前一次性扩很多模式，重新污染旧绘制路径
+
+### 0.7 Dual Tip 的主/次笔尖来源已接通；自定义次笔尖已进入当前真实绘制
+
+已确认：
+
+- `组合笔尖…` 面板里的主笔尖不再维护第二套状态
+- 主笔尖当前只做：
+  - 真实摘要
+  - `编辑主笔尖…` 跳回现有主入口
+- 必须继续保证：
+  - Dual Tip 面板里的主笔尖
+  - 右侧 `笔尖形状设计` 里的主笔尖
+  - 真实绘制主笔尖
+  三者始终是同一个东西
+- 次笔尖来源接通已完成：
+  - `tipShape`
+  - `customTipMaskData`
+  - `customTipSoftness`
+  - `customTipRoundness`
+  - `customTipAngleDegrees`
+- `编辑次笔尖…` 当前可以修改和保存这些来源参数
+- 自定义次笔尖现在已经进入当前真实绘制，但 gate 仍是窄范围：
+  - `multiply`
+  - `subtract`
+- 当前真实 renderer gate 继续要求：
+  - 主笔尖：圆形
+  - 工具：`brush / eraser`
+  - 次笔尖若为 `方形`，仍然只编辑 / 保存，不进入真实绘制
+- 三格示意当前也已与自定义次笔尖的真实形状对齐
+- 后续如果继续扩，必须先单独决策：
+  - 是否先做 `intersect`
+  - `scatter` 继续后放
 
 ## 1. 总体架构
 
@@ -243,7 +288,7 @@
 
 - 默认画笔库不再是完全空白状态
 - 当前默认会带 3 个 built-in Dual Tip Phase 1 示例预设，方便直接体验当前能力边界
-- 这 3 个示例预设不是 Phase 2 能力演示，不应假装使用未接入能力
+- 这 3 个示例预设是 `multiply` 能力演示，不应假装使用未接入的 `intersect / scatter / image tip`
 
 ## 6. 笔尖形状设计
 

@@ -4,6 +4,26 @@ import Testing
 
 struct DualTipBrushSettingsTests {
     @Test
+    func legacySecondaryTipDescriptorDecodeFallsBackToSafeDefaults() throws {
+        let legacyJSON = """
+        {
+          "tipShape": "softRound"
+        }
+        """
+
+        let decoded = try JSONDecoder().decode(
+            SecondaryTipDescriptor.self,
+            from: Data(legacyJSON.utf8)
+        )
+
+        #expect(decoded.tipShape == .softRound)
+        #expect(decoded.customTipMaskData == nil)
+        #expect(decoded.customTipSoftness == 0.5)
+        #expect(decoded.customTipRoundness == 1)
+        #expect(decoded.customTipAngleDegrees == 0)
+    }
+
+    @Test
     func legacyBrushSettingsDecodeFallsBackToPhaseZeroDualTipDefaults() throws {
         let legacyJSON = """
         {
@@ -36,7 +56,13 @@ struct DualTipBrushSettingsTests {
     func brushPresetRoundTripPreservesDualTipPhaseZeroFields() throws {
         var brush = BrushSettings.stageOneDefault
         brush.dualTipEnabled = true
-        brush.secondaryTipDescriptor = SecondaryTipDescriptor(tipShape: .square)
+        brush.secondaryTipDescriptor = SecondaryTipDescriptor(
+            tipShape: .customRound,
+            customTipMaskData: Data([0, 64, 255, 128]),
+            customTipSoftness: 0.36,
+            customTipRoundness: 0.71,
+            customTipAngleDegrees: 41
+        )
         brush.dualTipCombineMode = .subtract
         brush.dualTipStrength = 0.42
         brush.secondarySizeRatio = 1.8
@@ -112,7 +138,89 @@ struct DualTipBrushSettingsTests {
         wrongSecondaryShape.secondaryTipDescriptor = SecondaryTipDescriptor(tipShape: .square)
         #expect(wrongSecondaryShape.supportsPhaseOneDualTipRealDrawing(for: .brush) == false)
 
+        var customSecondary = supported
+        customSecondary.secondaryTipDescriptor = SecondaryTipDescriptor(
+            tipShape: .customRound,
+            customTipMaskData: Data([255, 0, 255]),
+            customTipSoftness: 0.4,
+            customTipRoundness: 0.7,
+            customTipAngleDegrees: 23
+        )
+        #expect(customSecondary.supportsPhaseOneDualTipRealDrawing(for: .brush))
+
+        var customPrimary = supported
+        customPrimary.tipShape = .customRound
+        customPrimary.customTipMaskData = Data([255, 128, 64])
+        #expect(customPrimary.supportsPhaseOneDualTipRealDrawing(for: .brush) == false)
+
         #expect(supported.supportsPhaseOneDualTipRealDrawing(for: .smudge) == false)
+    }
+
+    @Test
+    func phaseTwoSubtractRealDrawingSupportGateStaysNarrow() {
+        var supported = BrushSettings.stageOneDefault
+        supported.dualTipEnabled = true
+        supported.tipShape = .softRound
+        supported.secondaryTipDescriptor = SecondaryTipDescriptor(tipShape: .hardRound)
+        supported.dualTipCombineMode = .subtract
+
+        #expect(supported.supportsPhaseTwoDualTipSubtractRealDrawing(for: .brush))
+        #expect(supported.supportsPhaseTwoDualTipSubtractRealDrawing(for: .eraser))
+
+        var disabled = supported
+        disabled.dualTipEnabled = false
+        #expect(disabled.supportsPhaseTwoDualTipSubtractRealDrawing(for: .brush) == false)
+
+        var wrongModeMultiply = supported
+        wrongModeMultiply.dualTipCombineMode = .multiply
+        #expect(wrongModeMultiply.supportsPhaseTwoDualTipSubtractRealDrawing(for: .brush) == false)
+
+        var wrongModeIntersect = supported
+        wrongModeIntersect.dualTipCombineMode = .intersect
+        #expect(wrongModeIntersect.supportsPhaseTwoDualTipSubtractRealDrawing(for: .brush) == false)
+
+        var wrongPrimaryShape = supported
+        wrongPrimaryShape.tipShape = .square
+        #expect(wrongPrimaryShape.supportsPhaseTwoDualTipSubtractRealDrawing(for: .brush) == false)
+
+        var wrongSecondaryShape = supported
+        wrongSecondaryShape.secondaryTipDescriptor = SecondaryTipDescriptor(tipShape: .square)
+        #expect(wrongSecondaryShape.supportsPhaseTwoDualTipSubtractRealDrawing(for: .brush) == false)
+
+        var customSecondary = supported
+        customSecondary.secondaryTipDescriptor = SecondaryTipDescriptor(
+            tipShape: .customRound,
+            customTipMaskData: Data([255, 128, 32]),
+            customTipSoftness: 0.55,
+            customTipRoundness: 0.62,
+            customTipAngleDegrees: 17
+        )
+        #expect(customSecondary.supportsPhaseTwoDualTipSubtractRealDrawing(for: .brush))
+
+        var customPrimary = supported
+        customPrimary.tipShape = .customRound
+        customPrimary.customTipMaskData = Data([255, 32, 16])
+        #expect(customPrimary.supportsPhaseTwoDualTipSubtractRealDrawing(for: .brush) == false)
+
+        #expect(supported.supportsPhaseTwoDualTipSubtractRealDrawing(for: .smudge) == false)
+    }
+
+    @Test
+    func multiplyAndIntersectRemainSeparatedAfterSubtractFollowUp() {
+        var multiplyBrush = BrushSettings.stageOneDefault
+        multiplyBrush.dualTipEnabled = true
+        multiplyBrush.tipShape = .hardRound
+        multiplyBrush.secondaryTipDescriptor = SecondaryTipDescriptor(tipShape: .softRound)
+        multiplyBrush.dualTipCombineMode = .multiply
+
+        #expect(multiplyBrush.supportsPhaseOneDualTipRealDrawing(for: .brush))
+        #expect(multiplyBrush.supportsPhaseTwoDualTipSubtractRealDrawing(for: .brush) == false)
+
+        var intersectBrush = multiplyBrush
+        intersectBrush.dualTipCombineMode = .intersect
+
+        #expect(intersectBrush.supportsPhaseOneDualTipRealDrawing(for: .brush) == false)
+        #expect(intersectBrush.supportsPhaseTwoDualTipSubtractRealDrawing(for: .brush) == false)
     }
 
     @Test
@@ -135,6 +243,7 @@ struct DualTipBrushSettingsTests {
             #expect(preset.brush.tipShape.isPhaseOneDualTipSupportedRound)
             #expect(preset.brush.secondaryTipDescriptor.supportsPhaseOneDualTipRealDrawing)
             #expect(preset.brush.supportsPhaseOneDualTipRealDrawing(for: .brush))
+            #expect(preset.brush.supportsPhaseTwoDualTipSubtractRealDrawing(for: .brush) == false)
             #expect(preset.brush.secondarySizeRatio >= 0.25)
             #expect(preset.brush.secondarySizeRatio <= 0.95)
         }

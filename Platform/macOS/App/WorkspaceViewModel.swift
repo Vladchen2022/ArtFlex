@@ -637,6 +637,43 @@ final class WorkspaceViewModel: ObservableObject {
         refresh()
     }
 
+    func setSecondaryTipSoftness(_ softness: Float) {
+        bootstrap.workspaceStore.updateToolSession { session in
+            session.brush.secondaryTipDescriptor.customTipSoftness = min(max(softness, 0), 1)
+        }
+        refresh()
+    }
+
+    func setSecondaryTipRoundness(_ roundness: Float) {
+        bootstrap.workspaceStore.updateToolSession { session in
+            session.brush.secondaryTipDescriptor.customTipRoundness = min(max(roundness, 0.25), 1)
+        }
+        refresh()
+    }
+
+    func setSecondaryTipSourceAngleDegrees(_ angleDegrees: Float) {
+        bootstrap.workspaceStore.updateToolSession { session in
+            var normalized = angleDegrees.truncatingRemainder(dividingBy: 180)
+            if normalized < 0 {
+                normalized += 180
+            }
+            session.brush.secondaryTipDescriptor.customTipAngleDegrees = normalized
+        }
+        refresh()
+    }
+
+    func updateSecondaryTipMask(_ data: Data?) {
+        bootstrap.workspaceStore.updateToolSession { session in
+            session.brush.secondaryTipDescriptor.tipShape = .customRound
+            session.brush.secondaryTipDescriptor.customTipMaskData = data
+        }
+        refresh()
+    }
+
+    func clearSecondaryTipMask() {
+        updateSecondaryTipMask(nil)
+    }
+
     func setSecondarySizeRatio(_ ratio: Float) {
         bootstrap.workspaceStore.updateToolSession { session in
             session.brush.secondarySizeRatio = min(max(ratio, 0.25), 0.95)
@@ -767,6 +804,41 @@ final class WorkspaceViewModel: ObservableObject {
         brushTipUsesImportedPreviewFit = true
         refresh()
         showStatus(.init(kind: .success, message: "已从\(sourceDescription)导入笔尖"))
+        return true
+    }
+
+    @discardableResult
+    func importSecondaryTipImageFromDisk() -> Bool {
+        guard let url = bootstrap.filePanelService.presentImageOpenPanel() else {
+            showStatus(.init(kind: .info, message: "已取消选择图片"))
+            return false
+        }
+
+        return importSecondaryTipImage(from: url)
+    }
+
+    @discardableResult
+    func importSecondaryTipImage(from url: URL) -> Bool {
+        guard let image = NSImage(contentsOf: url) else {
+            showStatus(.init(kind: .error, message: "无法读取图片"))
+            return false
+        }
+        return importSecondaryTipImage(from: image, sourceDescription: url.deletingPathExtension().lastPathComponent)
+    }
+
+    @discardableResult
+    func importSecondaryTipImage(from image: NSImage, sourceDescription: String = "图片") -> Bool {
+        guard let maskData = makeBrushTipMaskData(from: image) else {
+            showStatus(.init(kind: .error, message: "无法将图片转换为次笔尖"))
+            return false
+        }
+
+        bootstrap.workspaceStore.updateToolSession { session in
+            session.brush.secondaryTipDescriptor.tipShape = .customRound
+            session.brush.secondaryTipDescriptor.customTipMaskData = maskData
+        }
+        refresh()
+        showStatus(.init(kind: .success, message: "已从\(sourceDescription)导入次笔尖"))
         return true
     }
 
