@@ -26,6 +26,7 @@ private struct BrushUniforms {
     var selectionMax: SIMD2<Float>
     var dualTipPhase1Enabled: UInt32
     var dualTipSubtractEnabled: UInt32
+    var dualTipIntersectEnabled: UInt32
     var dualTipSecondaryShape: UInt32
     var dualTipSecondaryHasCustomMask: UInt32
     var dualTipStrength: Float
@@ -82,6 +83,11 @@ struct OpacityCapSessionResources {
 
 private let customTipMaskResolution = 256
 
+private enum CustomTipTextureRole {
+    case primary
+    case secondary
+}
+
 enum StageOneBrushRendererInitializationError: LocalizedError {
     case shaderLibrary(Error)
     case missingFunction(String)
@@ -126,8 +132,10 @@ final class StageOneBrushRenderer {
     private var cachedSelectionMaskShape: SelectionShape?
     private var cachedSelectionMaskCanvasSize: CanvasSize?
     private var cachedSelectionMaskTexture: MTLTexture?
-    private var cachedCustomTipData: Data?
-    private var cachedCustomTipTexture: MTLTexture?
+    private var cachedPrimaryCustomTipData: Data?
+    private var cachedPrimaryCustomTipTexture: MTLTexture?
+    private var cachedSecondaryCustomTipData: Data?
+    private var cachedSecondaryCustomTipTexture: MTLTexture?
 
     init(device: MTLDevice) throws {
         self.device = device
@@ -158,6 +166,7 @@ final class StageOneBrushRenderer {
             float2 selectionMax;
             uint dualTipPhase1Enabled;
             uint dualTipSubtractEnabled;
+            uint dualTipIntersectEnabled;
             uint dualTipSecondaryShape;
             uint dualTipSecondaryHasCustomMask;
             float dualTipStrength;
@@ -221,7 +230,8 @@ final class StageOneBrushRenderer {
         float tipAlpha(
             float2 localPoint,
             constant BrushUniforms &uniforms,
-            texture2d<float, access::sample> customTipMask
+            texture2d<float, access::sample> customTipMask,
+            texture2d<float, access::sample> secondaryCustomTipMask
         ) {
             float radiansValue = uniforms.tipAngleDegrees * 0.017453292519943295;
             float cosine = cos(radiansValue);
@@ -269,7 +279,9 @@ final class StageOneBrushRenderer {
                 primaryAlpha = smoothHardnessAlpha(roundDistance, uniforms.tipHardness);
             }
 
-            if ((uniforms.dualTipPhase1Enabled == 0 && uniforms.dualTipSubtractEnabled == 0) || primaryAlpha <= 0.0) {
+            if ((uniforms.dualTipPhase1Enabled == 0 &&
+                 uniforms.dualTipSubtractEnabled == 0 &&
+                 uniforms.dualTipIntersectEnabled == 0) || primaryAlpha <= 0.0) {
                 return primaryAlpha;
             }
 
@@ -301,7 +313,7 @@ final class StageOneBrushRenderer {
                             address::clamp_to_edge,
                             filter::linear
                         );
-                        float sampledSecondaryAlpha = customTipMask.sample(tipSampler, uv).r;
+                        float sampledSecondaryAlpha = secondaryCustomTipMask.sample(tipSampler, uv).r;
                         float secondarySoftness = clamp(uniforms.dualTipSecondarySoftness, 0.0, 1.0);
                         float exponent = mix(3.2, 0.75, secondarySoftness);
                         secondaryAlpha = pow(clamp(sampledSecondaryAlpha, 0.0, 1.0), exponent);
@@ -325,6 +337,11 @@ final class StageOneBrushRenderer {
             }
 
             float strength = clamp(uniforms.dualTipStrength, 0.0, 1.0);
+            if (uniforms.dualTipIntersectEnabled != 0) {
+                float pureIntersection = min(primaryAlpha, secondaryAlpha);
+                return mix(primaryAlpha, pureIntersection, strength);
+            }
+
             if (uniforms.dualTipSubtractEnabled != 0) {
                 float subtraction = clamp(secondaryAlpha * strength, 0.0, 1.0);
                 return primaryAlpha * (1.0 - subtraction);
@@ -474,9 +491,10 @@ final class StageOneBrushRenderer {
             VertexOut in [[stage_in]],
             constant BrushUniforms &uniforms [[buffer(1)]],
             texture2d<float, access::read> selectionMask [[texture(0)]],
-            texture2d<float, access::sample> customTipMask [[texture(2)]]
+            texture2d<float, access::sample> customTipMask [[texture(2)]],
+            texture2d<float, access::sample> secondaryCustomTipMask [[texture(3)]]
         ) {
-            float alphaMask = tipAlpha(in.localPoint, uniforms, customTipMask);
+            float alphaMask = tipAlpha(in.localPoint, uniforms, customTipMask, secondaryCustomTipMask);
             if (alphaMask <= 0.001) {
                 discard_fragment();
             }
@@ -529,9 +547,10 @@ final class StageOneBrushRenderer {
             constant SmudgeFragmentUniforms &smudgeUniforms [[buffer(3)]],
             texture2d<float, access::read> selectionMask [[texture(0)]],
             texture2d<float, access::read> gatheredColors [[texture(1)]],
-            texture2d<float, access::sample> customTipMask [[texture(2)]]
+            texture2d<float, access::sample> customTipMask [[texture(2)]],
+            texture2d<float, access::sample> secondaryCustomTipMask [[texture(3)]]
         ) {
-            float alphaMask = tipAlpha(in.localPoint, uniforms, customTipMask);
+            float alphaMask = tipAlpha(in.localPoint, uniforms, customTipMask, secondaryCustomTipMask);
             if (alphaMask <= 0.001) {
                 discard_fragment();
             }
@@ -580,9 +599,10 @@ final class StageOneBrushRenderer {
             constant BrushUniforms &uniforms [[buffer(1)]],
             texture2d<float, access::read> selectionMask [[texture(0)]],
             texture2d<float, access::sample> sourceTexture [[texture(1)]],
-            texture2d<float, access::sample> customTipMask [[texture(2)]]
+            texture2d<float, access::sample> customTipMask [[texture(2)]],
+            texture2d<float, access::sample> secondaryCustomTipMask [[texture(3)]]
         ) {
-            float alphaMask = tipAlpha(in.localPoint, uniforms, customTipMask);
+            float alphaMask = tipAlpha(in.localPoint, uniforms, customTipMask, secondaryCustomTipMask);
             if (alphaMask <= 0.001) {
                 discard_fragment();
             }
@@ -663,9 +683,10 @@ final class StageOneBrushRenderer {
             VertexOut in [[stage_in]],
             constant BrushUniforms &uniforms [[buffer(1)]],
             texture2d<float, access::read> selectionMask [[texture(0)]],
-            texture2d<float, access::sample> customTipMask [[texture(2)]]
+            texture2d<float, access::sample> customTipMask [[texture(2)]],
+            texture2d<float, access::sample> secondaryCustomTipMask [[texture(3)]]
         ) {
-            float alphaMask = tipAlpha(in.localPoint, uniforms, customTipMask);
+            float alphaMask = tipAlpha(in.localPoint, uniforms, customTipMask, secondaryCustomTipMask);
             if (alphaMask <= 0.001) {
                 discard_fragment();
             }
@@ -1089,11 +1110,13 @@ final class StageOneBrushRenderer {
             for: selectionShape,
             canvasSize: CanvasSize(width: texture.width, height: texture.height)
         )
+        let primaryCustomTipTexture =
+            customTipTexture(for: primaryCustomTipMaskData(for: stroke), role: .primary) ?? defaultTipTexture
+        let secondaryCustomTipTexture =
+            customTipTexture(for: secondaryCustomTipMaskData(for: stroke), role: .secondary) ?? defaultTipTexture
         encoder.setFragmentTexture(selectionMaskTexture, index: 0)
-        encoder.setFragmentTexture(
-            customTipTexture(for: activeCustomTipMaskData(for: stroke)) ?? defaultTipTexture,
-            index: 2
-        )
+        encoder.setFragmentTexture(primaryCustomTipTexture, index: 2)
+        encoder.setFragmentTexture(secondaryCustomTipTexture, index: 3)
         encoder.setFragmentSamplerState(tipSamplerState, index: 1)
 
         for sample in samples {
@@ -1147,11 +1170,13 @@ final class StageOneBrushRenderer {
         if let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: accumulationPassDescriptor) {
             encoder.setRenderPipelineState(opacityCapMaskPipelineState)
             encoder.setVertexBuffer(vertexBuffer, offset: 0, index: 0)
+            let primaryCustomTipTexture =
+                customTipTexture(for: primaryCustomTipMaskData(for: stroke), role: .primary) ?? defaultTipTexture
+            let secondaryCustomTipTexture =
+                customTipTexture(for: secondaryCustomTipMaskData(for: stroke), role: .secondary) ?? defaultTipTexture
             encoder.setFragmentTexture(selectionMaskTexture, index: 0)
-            encoder.setFragmentTexture(
-                customTipTexture(for: activeCustomTipMaskData(for: stroke)) ?? defaultTipTexture,
-                index: 2
-            )
+            encoder.setFragmentTexture(primaryCustomTipTexture, index: 2)
+            encoder.setFragmentTexture(secondaryCustomTipTexture, index: 3)
             encoder.setFragmentSamplerState(tipSamplerState, index: 1)
             encoder.setScissorRect(dirtyRect)
 
@@ -1332,6 +1357,7 @@ final class StageOneBrushRenderer {
             selectionMax: selectionMax,
             dualTipPhase1Enabled: stroke.brush.supportsPhaseOneDualTipRealDrawing(for: stroke.tool) ? 1 : 0,
             dualTipSubtractEnabled: stroke.brush.supportsPhaseTwoDualTipSubtractRealDrawing(for: stroke.tool) ? 1 : 0,
+            dualTipIntersectEnabled: stroke.brush.supportsPhaseTwoDualTipIntersectRealDrawing(for: stroke.tool) ? 1 : 0,
             dualTipSecondaryShape: stroke.brush.secondaryTipDescriptor.tipShape == .softRound
                 ? 1
                 : (stroke.brush.secondaryTipDescriptor.tipShape == .square
@@ -2230,10 +2256,12 @@ final class StageOneBrushRenderer {
         } else if let gatheredColorsTexture {
             encoder.setFragmentTexture(gatheredColorsTexture, index: 1)
         }
-        encoder.setFragmentTexture(
-            customTipTexture(for: activeCustomTipMaskData(for: stroke)) ?? defaultTipTexture,
-            index: 2
-        )
+        let primaryCustomTipTexture =
+            customTipTexture(for: primaryCustomTipMaskData(for: stroke), role: .primary) ?? defaultTipTexture
+        let secondaryCustomTipTexture =
+            customTipTexture(for: secondaryCustomTipMaskData(for: stroke), role: .secondary) ?? defaultTipTexture
+        encoder.setFragmentTexture(primaryCustomTipTexture, index: 2)
+        encoder.setFragmentTexture(secondaryCustomTipTexture, index: 3)
         encoder.setFragmentSamplerState(tipSamplerState, index: 1)
 
         for (stampIndex, sample) in samples.enumerated() {
@@ -2279,31 +2307,47 @@ final class StageOneBrushRenderer {
         state.nextSegmentIndexToCommit = max(0, state.nextSegmentIndexToCommit - trimCount)
     }
 
-    private func activeCustomTipMaskData(for stroke: StrokeDescriptor) -> Data? {
-        if stroke.brush.tipShape == .customRound {
-            return stroke.brush.customTipMaskData
+    private func primaryCustomTipMaskData(for stroke: StrokeDescriptor) -> Data? {
+        guard stroke.brush.tipShape == .customRound else {
+            return nil
         }
-
-        let usesSecondaryInRealDrawing =
-            stroke.brush.supportsPhaseOneDualTipRealDrawing(for: stroke.tool) ||
-            stroke.brush.supportsPhaseTwoDualTipSubtractRealDrawing(for: stroke.tool)
-        if usesSecondaryInRealDrawing,
-           stroke.brush.secondaryTipDescriptor.tipShape == .customRound {
-            return stroke.brush.secondaryTipDescriptor.customTipMaskData
-        }
-
-        return nil
+        return stroke.brush.customTipMaskData
     }
 
-    private func customTipTexture(for data: Data?) -> MTLTexture? {
+    private func secondaryCustomTipMaskData(for stroke: StrokeDescriptor) -> Data? {
+        let usesSecondaryInRealDrawing =
+            stroke.brush.supportsPhaseOneDualTipRealDrawing(for: stroke.tool) ||
+            stroke.brush.supportsPhaseTwoDualTipSubtractRealDrawing(for: stroke.tool) ||
+            stroke.brush.supportsPhaseTwoDualTipIntersectRealDrawing(for: stroke.tool)
+        guard usesSecondaryInRealDrawing,
+              stroke.brush.secondaryTipDescriptor.tipShape == .customRound else {
+            return nil
+        }
+        return stroke.brush.secondaryTipDescriptor.customTipMaskData
+    }
+
+    private func customTipTexture(for data: Data?, role: CustomTipTextureRole) -> MTLTexture? {
         guard let data = resampledCustomTipData(data) else {
-            cachedCustomTipData = nil
-            cachedCustomTipTexture = nil
+            switch role {
+            case .primary:
+                cachedPrimaryCustomTipData = nil
+                cachedPrimaryCustomTipTexture = nil
+            case .secondary:
+                cachedSecondaryCustomTipData = nil
+                cachedSecondaryCustomTipTexture = nil
+            }
             return nil
         }
 
-        if cachedCustomTipData == data, let cachedCustomTipTexture {
-            return cachedCustomTipTexture
+        switch role {
+        case .primary:
+            if cachedPrimaryCustomTipData == data, let cachedPrimaryCustomTipTexture {
+                return cachedPrimaryCustomTipTexture
+            }
+        case .secondary:
+            if cachedSecondaryCustomTipData == data, let cachedSecondaryCustomTipTexture {
+                return cachedSecondaryCustomTipTexture
+            }
         }
 
         let descriptor = MTLTextureDescriptor.texture2DDescriptor(
@@ -2329,8 +2373,14 @@ final class StageOneBrushRenderer {
             )
         }
 
-        cachedCustomTipData = data
-        cachedCustomTipTexture = texture
+        switch role {
+        case .primary:
+            cachedPrimaryCustomTipData = data
+            cachedPrimaryCustomTipTexture = texture
+        case .secondary:
+            cachedSecondaryCustomTipData = data
+            cachedSecondaryCustomTipTexture = texture
+        }
         return texture
     }
 

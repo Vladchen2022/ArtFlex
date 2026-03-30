@@ -151,7 +151,17 @@ struct DualTipBrushSettingsTests {
         var customPrimary = supported
         customPrimary.tipShape = .customRound
         customPrimary.customTipMaskData = Data([255, 128, 64])
-        #expect(customPrimary.supportsPhaseOneDualTipRealDrawing(for: .brush) == false)
+        #expect(customPrimary.supportsPhaseOneDualTipRealDrawing(for: .brush))
+
+        var customBoth = customPrimary
+        customBoth.secondaryTipDescriptor = SecondaryTipDescriptor(
+            tipShape: .customRound,
+            customTipMaskData: Data([255, 0, 255]),
+            customTipSoftness: 0.4,
+            customTipRoundness: 0.7,
+            customTipAngleDegrees: 23
+        )
+        #expect(customBoth.supportsPhaseOneDualTipRealDrawing(for: .brush))
 
         #expect(supported.supportsPhaseOneDualTipRealDrawing(for: .smudge) == false)
     }
@@ -200,13 +210,64 @@ struct DualTipBrushSettingsTests {
         var customPrimary = supported
         customPrimary.tipShape = .customRound
         customPrimary.customTipMaskData = Data([255, 32, 16])
-        #expect(customPrimary.supportsPhaseTwoDualTipSubtractRealDrawing(for: .brush) == false)
+        #expect(customPrimary.supportsPhaseTwoDualTipSubtractRealDrawing(for: .brush))
+
+        var customBoth = customPrimary
+        customBoth.secondaryTipDescriptor = SecondaryTipDescriptor(
+            tipShape: .customRound,
+            customTipMaskData: Data([255, 128, 32]),
+            customTipSoftness: 0.55,
+            customTipRoundness: 0.62,
+            customTipAngleDegrees: 17
+        )
+        #expect(customBoth.supportsPhaseTwoDualTipSubtractRealDrawing(for: .brush))
 
         #expect(supported.supportsPhaseTwoDualTipSubtractRealDrawing(for: .smudge) == false)
     }
 
     @Test
-    func multiplyAndIntersectRemainSeparatedAfterSubtractFollowUp() {
+    func phaseTwoIntersectRealDrawingSupportGateStaysNarrow() {
+        var supported = BrushSettings.stageOneDefault
+        supported.dualTipEnabled = true
+        supported.tipShape = .customRound
+        supported.customTipMaskData = Data([255, 32, 16])
+        supported.secondaryTipDescriptor = SecondaryTipDescriptor(
+            tipShape: .customRound,
+            customTipMaskData: Data([255, 128, 32]),
+            customTipSoftness: 0.55,
+            customTipRoundness: 0.62,
+            customTipAngleDegrees: 17
+        )
+        supported.dualTipCombineMode = .intersect
+
+        #expect(supported.supportsPhaseTwoDualTipIntersectRealDrawing(for: .brush))
+        #expect(supported.supportsPhaseTwoDualTipIntersectRealDrawing(for: .eraser))
+
+        var disabled = supported
+        disabled.dualTipEnabled = false
+        #expect(disabled.supportsPhaseTwoDualTipIntersectRealDrawing(for: .brush) == false)
+
+        var wrongModeMultiply = supported
+        wrongModeMultiply.dualTipCombineMode = .multiply
+        #expect(wrongModeMultiply.supportsPhaseTwoDualTipIntersectRealDrawing(for: .brush) == false)
+
+        var wrongModeSubtract = supported
+        wrongModeSubtract.dualTipCombineMode = .subtract
+        #expect(wrongModeSubtract.supportsPhaseTwoDualTipIntersectRealDrawing(for: .brush) == false)
+
+        var wrongPrimaryShape = supported
+        wrongPrimaryShape.tipShape = .square
+        #expect(wrongPrimaryShape.supportsPhaseTwoDualTipIntersectRealDrawing(for: .brush) == false)
+
+        var wrongSecondaryShape = supported
+        wrongSecondaryShape.secondaryTipDescriptor = SecondaryTipDescriptor(tipShape: .square)
+        #expect(wrongSecondaryShape.supportsPhaseTwoDualTipIntersectRealDrawing(for: .brush) == false)
+
+        #expect(supported.supportsPhaseTwoDualTipIntersectRealDrawing(for: .smudge) == false)
+    }
+
+    @Test
+    func multiplySubtractAndIntersectRealDrawingGatesRemainSeparated() {
         var multiplyBrush = BrushSettings.stageOneDefault
         multiplyBrush.dualTipEnabled = true
         multiplyBrush.tipShape = .hardRound
@@ -215,12 +276,21 @@ struct DualTipBrushSettingsTests {
 
         #expect(multiplyBrush.supportsPhaseOneDualTipRealDrawing(for: .brush))
         #expect(multiplyBrush.supportsPhaseTwoDualTipSubtractRealDrawing(for: .brush) == false)
+        #expect(multiplyBrush.supportsPhaseTwoDualTipIntersectRealDrawing(for: .brush) == false)
+
+        var subtractBrush = multiplyBrush
+        subtractBrush.dualTipCombineMode = .subtract
+
+        #expect(subtractBrush.supportsPhaseOneDualTipRealDrawing(for: .brush) == false)
+        #expect(subtractBrush.supportsPhaseTwoDualTipSubtractRealDrawing(for: .brush))
+        #expect(subtractBrush.supportsPhaseTwoDualTipIntersectRealDrawing(for: .brush) == false)
 
         var intersectBrush = multiplyBrush
         intersectBrush.dualTipCombineMode = .intersect
 
         #expect(intersectBrush.supportsPhaseOneDualTipRealDrawing(for: .brush) == false)
         #expect(intersectBrush.supportsPhaseTwoDualTipSubtractRealDrawing(for: .brush) == false)
+        #expect(intersectBrush.supportsPhaseTwoDualTipIntersectRealDrawing(for: .brush))
     }
 
     @Test

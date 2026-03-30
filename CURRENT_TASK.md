@@ -3,14 +3,13 @@
 ## 1. 当前任务
 
 - 当前任务不是继续扩 Dual Tip 下一刀
-- 当前任务是：Dual Tip 阶段性文档同步已完成，等待决定下一步是否继续做 `intersect`
+- 当前任务是：Dual Tip 到 `intersect` 的阶段性文档同步已完成，等待决定下一步是否继续进入 `scatter` 的安全规划
 - 当前不是性能优化阶段
 - 新线程默认先看 [HANDOFF.md](/Users/victorcloux/Desktop/ArtFlex/HANDOFF.md) 和 [DECISIONS.md](/Users/victorcloux/Desktop/ArtFlex/DECISIONS.md)
 
 ## 2. 当前阶段约束
 
 - 不要把当前线程重新拉回性能优化
-- 不要自动进入 `intersect`
 - 不要自动进入 `scatter`
 - 不要默认把“来源已接通”误读成“所有次笔尖来源都已进入真实绘制”
 - 当前不是复杂 `image tip` 阶段
@@ -22,8 +21,8 @@
 
 - `selection.fill / lasso.fill` 慢确认：deferred known limitation
 - 完整 `swift test` 的长跑 perf 项未收口到最终 passed / failed 结论：deferred validation note
-- Dual Tip 的 `intersect / scatter / image tip / smudge`：后续再决定；当前不自动继续
-- 非圆形 / 更复杂次笔尖来源进入真实绘制：后续再决定；当前仍只放开圆形与自定义次笔尖
+- Dual Tip 的 `scatter / image tip / smudge`：后续再决定；当前不自动继续
+- 非圆形 / 更复杂次笔尖来源进入真实绘制：后续再决定；当前仍只放开圆形与自定义主/次笔尖
 
 ## 4. 不要做的事
 

@@ -153,6 +153,10 @@ extension BrushTipShape {
     var isPhaseOneDualTipSupportedRound: Bool {
         self == .hardRound || self == .softRound
     }
+
+    var supportsDualTipRealDrawingPrimary: Bool {
+        isPhaseOneDualTipSupportedRound || self == .customRound
+    }
 }
 
 extension SecondaryTipDescriptor {
@@ -161,6 +165,10 @@ extension SecondaryTipDescriptor {
     }
 
     var supportsPhaseTwoDualTipSubtractRealDrawing: Bool {
+        tipShape.isPhaseOneDualTipSupportedRound || tipShape == .customRound
+    }
+
+    var supportsPhaseTwoDualTipIntersectRealDrawing: Bool {
         tipShape.isPhaseOneDualTipSupportedRound || tipShape == .customRound
     }
 }
@@ -617,7 +625,7 @@ struct BrushSettings: Codable, Sendable, Equatable {
         dualTipEnabled &&
         dualTipCombineMode == .multiply &&
         (tool == .brush || tool == .eraser) &&
-        tipShape.isPhaseOneDualTipSupportedRound &&
+        tipShape.supportsDualTipRealDrawingPrimary &&
         secondaryTipDescriptor.supportsPhaseOneDualTipRealDrawing
     }
 
@@ -625,8 +633,16 @@ struct BrushSettings: Codable, Sendable, Equatable {
         dualTipEnabled &&
         dualTipCombineMode == .subtract &&
         (tool == .brush || tool == .eraser) &&
-        tipShape.isPhaseOneDualTipSupportedRound &&
+        tipShape.supportsDualTipRealDrawingPrimary &&
         secondaryTipDescriptor.supportsPhaseTwoDualTipSubtractRealDrawing
+    }
+
+    func supportsPhaseTwoDualTipIntersectRealDrawing(for tool: ToolKind) -> Bool {
+        dualTipEnabled &&
+        dualTipCombineMode == .intersect &&
+        (tool == .brush || tool == .eraser) &&
+        tipShape.supportsDualTipRealDrawingPrimary &&
+        secondaryTipDescriptor.supportsPhaseTwoDualTipIntersectRealDrawing
     }
 }
 

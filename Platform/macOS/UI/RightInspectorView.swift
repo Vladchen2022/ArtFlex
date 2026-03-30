@@ -103,6 +103,7 @@ private struct DualTipPreviewCell<Content: View>: View {
 
     private let primaryTextColor = Color(red: 0.12, green: 0.12, blue: 0.13)
     private let secondaryTextColor = Color(red: 0.32, green: 0.32, blue: 0.34)
+    private let previewBackgroundColor = Color(red: 0.08, green: 0.08, blue: 0.09)
 
     init(
         title: String,
@@ -122,10 +123,10 @@ private struct DualTipPreviewCell<Content: View>: View {
 
             ZStack {
                 RoundedRectangle(cornerRadius: 10)
-                    .fill(Color.black.opacity(0.05))
+                    .fill(previewBackgroundColor)
                     .overlay(
                         RoundedRectangle(cornerRadius: 10)
-                            .stroke(Color.black.opacity(0.08), lineWidth: 1)
+                            .stroke(Color.white.opacity(0.10), lineWidth: 1)
                     )
 
                 content
@@ -777,7 +778,11 @@ struct RightInspectorView: View {
         let activeTool = viewModel.workspace.toolSession.activeTool
         let phaseOneRealDrawingSupported = brush.supportsPhaseOneDualTipRealDrawing(for: activeTool)
         let phaseTwoSubtractRealDrawingSupported = brush.supportsPhaseTwoDualTipSubtractRealDrawing(for: activeTool)
-        let dualTipRealDrawingSupported = phaseOneRealDrawingSupported || phaseTwoSubtractRealDrawingSupported
+        let phaseTwoIntersectRealDrawingSupported = brush.supportsPhaseTwoDualTipIntersectRealDrawing(for: activeTool)
+        let dualTipRealDrawingSupported =
+            phaseOneRealDrawingSupported ||
+            phaseTwoSubtractRealDrawingSupported ||
+            phaseTwoIntersectRealDrawingSupported
         let primaryTextColor = Color(red: 0.12, green: 0.12, blue: 0.13)
         let secondaryTextColor = Color(red: 0.32, green: 0.32, blue: 0.34)
         let statusAccentColor = dualTipRealDrawingSupported
@@ -791,19 +796,23 @@ struct RightInspectorView: View {
 
             VStack(alignment: .leading, spacing: 8) {
                 Text(
-                    phaseTwoSubtractRealDrawingSupported
+                    phaseTwoIntersectRealDrawingSupported
+                    ? "Phase 2 intersect 已接入真实绘制"
+                    : (phaseTwoSubtractRealDrawingSupported
                     ? "Phase 2 subtract 已接入真实绘制"
-                    : (phaseOneRealDrawingSupported ? "Phase 1 已接入最小真实绘制" : "当前为条件式真实接入")
+                    : (phaseOneRealDrawingSupported ? "Phase 1 已接入最小真实绘制" : "当前为条件式真实接入"))
                 )
                     .font(.system(size: 11, weight: .bold))
                     .foregroundStyle(statusAccentColor.opacity(0.92))
 
                 Text(
-                    phaseTwoSubtractRealDrawingSupported
-                    ? "当前配置会影响真实绘制：工具为画笔/橡皮、主笔尖为圆形、次笔尖为圆形或自定义笔尖、组合模式为减去。次笔尖会从主笔尖里挖掉一部分覆盖区域。预览仍是示意，请以实际落笔为准。"
+                    phaseTwoIntersectRealDrawingSupported
+                    ? "当前配置会影响真实绘制：工具为画笔/橡皮、主笔尖为圆形或自定义笔尖、次笔尖为圆形或自定义笔尖、组合模式为相交。次笔尖会只保留与主笔尖重叠的覆盖区域；强度越高，越接近纯交集。预览仍是示意，请以实际落笔为准。"
+                    : (phaseTwoSubtractRealDrawingSupported
+                    ? "当前配置会影响真实绘制：工具为画笔/橡皮、主笔尖为圆形或自定义笔尖、次笔尖为圆形或自定义笔尖、组合模式为减去。次笔尖会从主笔尖里挖掉一部分覆盖区域。预览仍是示意，请以实际落笔为准。"
                     : (phaseOneRealDrawingSupported
-                        ? "当前配置会影响真实绘制：工具为画笔/橡皮、主笔尖为圆形、次笔尖为圆形或自定义笔尖、组合模式为调制。预览仍是示意，请以实际落笔为准。"
-                        : "只有在工具为画笔/橡皮、主笔尖为圆形、次笔尖为圆形或自定义笔尖，且组合模式为调制或减去时，组合笔尖才会影响真实绘制。其余情况当前只保存参数，不会改变画布。预览仍是示意。")
+                        ? "当前配置会影响真实绘制：工具为画笔/橡皮、主笔尖为圆形或自定义笔尖、次笔尖为圆形或自定义笔尖、组合模式为调制。预览仍是示意，请以实际落笔为准。"
+                        : "只有在工具为画笔/橡皮、主笔尖为圆形或自定义笔尖、次笔尖为圆形或自定义笔尖，且组合模式为调制、减去或相交时，组合笔尖才会影响真实绘制。其余情况当前只保存参数，不会改变画布。预览仍是示意。"))
                 )
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(statusAccentColor.opacity(0.88))
@@ -831,7 +840,7 @@ struct RightInspectorView: View {
                 .toggleStyle(.switch)
                 .foregroundStyle(primaryTextColor)
 
-                Text("启用后只有在“调制或减去 + 圆形主笔尖 + 圆形/自定义次笔尖 + 画笔/橡皮”这组条件满足时，才会影响真实落笔。")
+                Text("启用后只有在“调制、减去或相交 + 圆形/自定义主笔尖 + 圆形/自定义次笔尖 + 画笔/橡皮”这组条件满足时，才会影响真实落笔。")
                     .font(.system(size: 10, weight: .medium))
                     .foregroundStyle(secondaryTextColor)
                     .fixedSize(horizontal: false, vertical: true)
@@ -924,7 +933,7 @@ struct RightInspectorView: View {
                 dualTipStatusLine(
                     title: "主笔尖",
                     value: dualTipPrimaryTipSummaryTitle(for: brush),
-                    isSupported: brush.tipShape.isPhaseOneDualTipSupportedRound,
+                    isSupported: brush.tipShape.supportsDualTipRealDrawingPrimary,
                     supportedText: "当前支持"
                 )
                 dualTipStatusLine(
@@ -936,8 +945,8 @@ struct RightInspectorView: View {
                 dualTipStatusLine(
                     title: "模式",
                     value: brush.dualTipCombineMode.displayName,
-                    isSupported: brush.dualTipCombineMode == .multiply || brush.dualTipCombineMode == .subtract,
-                    supportedText: brush.dualTipCombineMode == .subtract ? "Phase 2" : "Phase 1"
+                    isSupported: brush.dualTipCombineMode == .multiply || brush.dualTipCombineMode == .subtract || brush.dualTipCombineMode == .intersect,
+                    supportedText: brush.dualTipCombineMode == .multiply ? "Phase 1" : "Phase 2"
                 )
                 dualTipStatusLine(
                     title: "工具",
@@ -947,11 +956,13 @@ struct RightInspectorView: View {
                 )
 
                 Text(
-                    phaseTwoSubtractRealDrawingSupported
+                    phaseTwoIntersectRealDrawingSupported
+                    ? "当前真实 intersect 路径已接通。强度和次笔尖大小比例会直接决定交集收口程度与范围。"
+                    : (phaseTwoSubtractRealDrawingSupported
                     ? "当前真实 subtract 路径已接通。强度和次笔尖大小比例会直接决定挖空程度与范围。"
                     : (phaseOneRealDrawingSupported
                         ? "当前真实 Dual Tip 路径已接通。强度和次笔尖大小比例会直接影响落笔。"
-                        : "当前仍走旧绘制路径。只有上面 4 项都满足已接入条件时，真实画布才会出现变化。")
+                        : "当前仍走旧绘制路径。只有上面 4 项都满足已接入条件时，真实画布才会出现变化。"))
                 )
                 .font(.system(size: 10, weight: .semibold))
                 .foregroundStyle(dualTipRealDrawingSupported ? statusAccentColor : secondaryTextColor)
@@ -1025,7 +1036,7 @@ struct RightInspectorView: View {
                         } else {
                             Text("当前模式或笔尖\n还未接入示意")
                                 .font(.system(size: 10, weight: .semibold))
-                                .foregroundStyle(secondaryTextColor)
+                                .foregroundStyle(Color.white.opacity(0.76))
                                 .multilineTextAlignment(.center)
                         }
                     }
@@ -1175,7 +1186,7 @@ struct RightInspectorView: View {
                 }
                 .buttonStyle(.plain)
 
-                Text("点击后会打开独立的次笔尖编辑子面板。当前自定义次笔尖已可进入 multiply / subtract 的真实绘制 gate；方形次笔尖仍只编辑和保存。")
+                Text("点击后会打开独立的次笔尖编辑子面板。当前自定义次笔尖已可进入 multiply / subtract / intersect 的真实绘制 gate；方形次笔尖仍只编辑和保存。")
                     .font(.system(size: 10, weight: .medium))
                     .foregroundStyle(secondaryTextColor)
                     .fixedSize(horizontal: false, vertical: true)
@@ -1310,7 +1321,7 @@ struct RightInspectorView: View {
         case .subtract:
             return "\(mode.displayName)（Phase 2 已接入）"
         case .intersect:
-            return "\(mode.displayName)（Phase 2 占位）"
+            return "\(mode.displayName)（Phase 2 已接入）"
         }
     }
 
@@ -1336,12 +1347,12 @@ struct RightInspectorView: View {
             return "当前真实主笔尖是方形；当前 Dual Tip 已接入 gate 里仍会回旧路径。"
         case .customRound:
             if brush.customTipMaskData != nil, viewModel.brushTipUsesImportedPreviewFit {
-                return "当前会话里的真实主笔尖来自图片导入；实际落笔正在直接使用这份导入笔尖。"
+                return "当前会话里的真实主笔尖来自图片导入；在当前 multiply / subtract / intersect gate 下，实际落笔正在直接使用这份导入笔尖。"
             }
             if brush.customTipMaskData != nil {
-                return "当前真实主笔尖是自定义笔尖遮罩；实际落笔正在直接使用这份自定义笔尖。"
+                return "当前真实主笔尖是自定义笔尖遮罩；在当前 multiply / subtract / intersect gate 下，实际落笔正在直接使用这份自定义笔尖。"
             }
-            return "当前真实主笔尖来自自定义笔尖参数（柔边、圆度、角度）；实际落笔正在直接使用它。"
+            return "当前真实主笔尖来自自定义笔尖参数（柔边、圆度、角度）；在当前 multiply / subtract / intersect gate 下，实际落笔正在直接使用它。"
         }
     }
 
@@ -1408,16 +1419,16 @@ struct RightInspectorView: View {
     private func dualTipSecondaryTipSummaryDetail(for secondary: SecondaryTipDescriptor) -> String {
         switch secondary.tipShape {
         case .hardRound:
-            return "当前次笔尖是硬边圆；在当前 multiply / subtract gate 下可直接参与真实绘制。"
+            return "当前次笔尖是硬边圆；在当前 multiply / subtract / intersect gate 下可直接参与真实绘制。"
         case .softRound:
-            return "当前次笔尖是柔边圆；在当前 multiply / subtract gate 下可直接参与真实绘制。"
+            return "当前次笔尖是柔边圆；在当前 multiply / subtract / intersect gate 下可直接参与真实绘制。"
         case .square:
             return "当前次笔尖是方形；现在可以编辑和保存，但真实绘制仍会回旧 gate。"
         case .customRound:
             if secondary.customTipMaskData != nil {
-                return "当前次笔尖是自定义遮罩；在当前 multiply / subtract gate 下已可参与真实绘制。"
+                return "当前次笔尖是自定义遮罩；在当前 multiply / subtract / intersect gate 下已可参与真实绘制。"
             }
-            return "当前次笔尖使用自定义参数（柔边、圆度、角度）；在当前 multiply / subtract gate 下已可参与真实绘制。"
+            return "当前次笔尖使用自定义参数（柔边、圆度、角度）；在当前 multiply / subtract / intersect gate 下已可参与真实绘制。"
         }
     }
 
@@ -1436,11 +1447,11 @@ struct RightInspectorView: View {
     private func dualTipModeDescription(for brush: BrushSettings) -> String {
         switch brush.dualTipCombineMode {
         case .multiply:
-            return "调制 = 用次笔尖压缩/削弱主笔尖的覆盖区域。次笔尖越小、强度越高，收口越明显。减去已接入；相交仍留到后续。"
+            return "调制 = 用次笔尖压缩/削弱主笔尖的覆盖区域。次笔尖越小、强度越高，收口越明显。减去和相交都已接入。"
         case .subtract:
-            return "减去 = 次笔尖会从主笔尖里挖掉一部分覆盖区域。次笔尖越小、强度越高，挖空越集中也越明显。相交仍留到后续。"
+            return "减去 = 次笔尖会从主笔尖里挖掉一部分覆盖区域。次笔尖越小、强度越高，挖空越集中也越明显。相交也已接入。"
         case .intersect:
-            return "相交当前仍是占位参数，尚未接入真实绘制。现在真正会影响画布的是调制和减去。"
+            return "相交 = 只保留主笔尖和次笔尖重叠的覆盖区域。强度越高，结果越接近纯交集；次笔尖越小，收口越明显。"
         }
     }
 
@@ -1451,7 +1462,7 @@ struct RightInspectorView: View {
         case .subtract:
             return "控制次笔尖从主笔尖里挖掉的程度。越高，挖空感越明显。"
         case .intersect:
-            return "相交尚未接入真实绘制；当前只保留已保存值。"
+            return "控制相交收口的程度。越高，最终笔尖越接近主笔尖与次笔尖的纯交集。"
         }
     }
 
@@ -1462,11 +1473,14 @@ struct RightInspectorView: View {
         case .subtract:
             return "控制次笔尖相对主笔尖的大小。越小，挖空更集中；越大，削减范围更宽。"
         case .intersect:
-            return "相交尚未接入真实绘制；当前只保留已保存值。"
+            return "控制次笔尖相对主笔尖的大小。越小，交集越集中；越大，保留区域更宽。"
         }
     }
 
     private func dualTipCompositePreviewCaption(for brush: BrushSettings, activeTool: ToolKind) -> String {
+        if brush.supportsPhaseTwoDualTipIntersectRealDrawing(for: activeTool) {
+            return "当前真实路径已接通；会按强度和大小比例只保留主/次笔尖的重叠区域。"
+        }
         if brush.supportsPhaseTwoDualTipSubtractRealDrawing(for: activeTool) {
             return "当前真实路径已接通；会按强度和大小比例挖掉主笔尖一部分。"
         }
@@ -1474,12 +1488,12 @@ struct RightInspectorView: View {
             return "当前真实路径已接通；会按强度和大小比例收口。"
         }
         if brush.dualTipCombineMode == .intersect {
-            return "相交当前仍是占位；尚未接入真实绘制。"
+            return "Phase 2 intersect 目前示意当前已接通的主/次笔尖关系。"
         }
         if brush.dualTipCombineMode == .subtract {
             return "Phase 2 subtract 目前示意当前已接通的主/次笔尖关系。"
         }
-        if !brush.tipShape.isPhaseOneDualTipSupportedRound || !brush.secondaryTipDescriptor.supportsPhaseOneDualTipRealDrawing {
+        if !brush.tipShape.supportsDualTipRealDrawingPrimary || !brush.secondaryTipDescriptor.supportsPhaseOneDualTipRealDrawing {
             return "当前已接入模式只示意已接通的真实绘制条件。"
         }
         return "图形可示意当前组合关系，但当前工具仍走旧路径。"
@@ -1562,8 +1576,10 @@ struct RightInspectorView: View {
     }
 
     private func dualTipCompositePreviewImage(for brush: BrushSettings, resolution: Int = 80) -> CGImage? {
-        guard (brush.dualTipCombineMode == .multiply || brush.dualTipCombineMode == .subtract),
-              brush.tipShape.isPhaseOneDualTipSupportedRound,
+        guard (brush.dualTipCombineMode == .multiply ||
+               brush.dualTipCombineMode == .subtract ||
+               brush.dualTipCombineMode == .intersect),
+              brush.tipShape.supportsDualTipRealDrawingPrimary,
               brush.secondaryTipDescriptor.supportsPhaseOneDualTipRealDrawing else {
             return nil
         }
@@ -1576,6 +1592,10 @@ struct RightInspectorView: View {
 
         let strength = Double(min(max(brush.dualTipStrength, 0), 1))
         let sizeRatio = Double(min(max(brush.secondarySizeRatio, 0.25), 0.95))
+        let primaryMaskBytes = resampledMaskData(
+            brush.customTipMaskData,
+            targetResolution: resolution
+        ).map(Array.init)
         let secondaryMaskBytes = resampledMaskData(
             brush.secondaryTipDescriptor.customTipMaskData,
             targetResolution: resolution
@@ -1589,7 +1609,7 @@ struct RightInspectorView: View {
                     tipShape: brush.tipShape,
                     normalizedX: normalizedX,
                     normalizedY: normalizedY,
-                    customMaskBytes: nil,
+                    customMaskBytes: primaryMaskBytes,
                     softness: brush.customTipSoftness,
                     roundness: brush.customTipRoundness,
                     angleDegrees: brush.customTipAngleDegrees
@@ -1610,14 +1630,15 @@ struct RightInspectorView: View {
                 case .subtract:
                     combinedAlpha = primaryAlpha * (1.0 - min(max(secondaryAlpha * strength, 0.0), 1.0))
                 case .intersect:
-                    combinedAlpha = primaryAlpha
+                    let pureIntersection = min(primaryAlpha, secondaryAlpha)
+                    combinedAlpha = primaryAlpha + ((pureIntersection - primaryAlpha) * strength)
                 }
 
                 let alpha = UInt8(min(max(combinedAlpha * 255.0, 0), 255))
                 let offset = (y * bytesPerRow) + (x * bytesPerPixel)
-                pixels[offset] = 18
-                pixels[offset + 1] = 18
-                pixels[offset + 2] = 20
+                pixels[offset] = 255
+                pixels[offset + 1] = 255
+                pixels[offset + 2] = 255
                 pixels[offset + 3] = alpha
             }
         }
@@ -1656,7 +1677,7 @@ struct RightInspectorView: View {
                         .font(.system(size: 15, weight: .bold))
                         .foregroundStyle(primaryTextColor)
 
-                    Text("这里只编辑 SecondaryTipDescriptor。真实绘制当前允许圆形和自定义次笔尖进入 multiply / subtract gate；方形仍只编辑和保存。")
+                    Text("这里只编辑 SecondaryTipDescriptor。真实绘制当前允许圆形和自定义次笔尖进入 multiply / subtract / intersect gate；方形仍只编辑和保存。")
                         .font(.system(size: 11, weight: .medium))
                         .foregroundStyle(secondaryTextColor)
                         .fixedSize(horizontal: false, vertical: true)
@@ -1779,7 +1800,7 @@ struct RightInspectorView: View {
                     .frame(height: 180)
                 }
 
-                Text("在这里绘制或导入，会把次笔尖来源切到“自定义笔尖”；当前 multiply / subtract 已可使用自定义次笔尖，方形仍会回旧 gate。")
+                Text("在这里绘制或导入，会把次笔尖来源切到“自定义笔尖”；当前 multiply / subtract / intersect 已可使用自定义次笔尖，方形仍会回旧 gate。")
                     .font(.system(size: 10, weight: .medium))
                     .foregroundStyle(secondaryTextColor)
                     .fixedSize(horizontal: false, vertical: true)
@@ -1794,7 +1815,7 @@ struct RightInspectorView: View {
                 ),
                 range: 0...1,
                 onCommit: { viewModel.setSecondaryTipSoftness(Float($0)) },
-                helperText: "影响次笔尖自定义来源的柔边特性；当前 multiply / subtract gate 下已可参与真实绘制。"
+                helperText: "影响次笔尖自定义来源的柔边特性；当前 multiply / subtract / intersect gate 下已可参与真实绘制。"
             )
 
             DualTipPhaseZeroSliderRow(
@@ -1818,7 +1839,7 @@ struct RightInspectorView: View {
                 ),
                 range: 0...180,
                 onCommit: { viewModel.setSecondaryTipSourceAngleDegrees(Float($0)) },
-                helperText: "控制次笔尖自定义来源的旋转角度。当前 multiply / subtract gate 下已可参与真实绘制。"
+                helperText: "控制次笔尖自定义来源的旋转角度。当前 multiply / subtract / intersect gate 下已可参与真实绘制。"
             )
 
             DualTipPhaseZeroSliderRow(

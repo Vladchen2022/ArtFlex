@@ -2,7 +2,7 @@
 
 ## 1. 项目一句话说明
 
-ArtFlex 是旧版 `BrushCanvas` 的 Metal-first 重构版 macOS 绘图软件；当前一轮性能主线与小范围 UX/perf follow-up 已经收尾，项目已转入新功能开发。当前最新已完成的新功能节点是 Dual Tip / 复合笔尖到 Phase 2 第一刀（`subtract`）并补齐自定义次笔尖真实接入与三格示意对齐；当前先做阶段性收尾，不自动进入更复杂的下一刀。
+ArtFlex 是旧版 `BrushCanvas` 的 Metal-first 重构版 macOS 绘图软件；当前一轮性能主线与小范围 UX/perf follow-up 已经收尾，项目已转入新功能开发。当前最新已完成的新功能节点是 Dual Tip / 复合笔尖到 Phase 2 第二刀（`intersect`），并继续补齐了自定义主/次笔尖真实接入与三格示意高对比收尾；当前先做阶段性收尾，不自动进入更复杂的 `scatter`。
 
 本轮三个定点 follow-up 的最终状态是：
 
@@ -14,7 +14,7 @@ ArtFlex 是旧版 `BrushCanvas` 的 Metal-first 重构版 macOS 绘图软件；�
 
 ## 1.1 Dual Tip / 复合笔尖当前状态
 
-### 已完成到 Phase 2 第一刀（subtract）并通过手测
+### 已完成到 Phase 2 第二刀（intersect）并通过手测
 
 - Phase 0 已完成：
   - 数据层 / UI 占位 / preset 与 project round-trip 已打通
@@ -31,19 +31,29 @@ ArtFlex 是旧版 `BrushCanvas` 的 Metal-first 重构版 macOS 绘图软件；�
   - `subtract` 已进入真实绘制
   - 手测通过
   - 基线和旧主绘制路径未被打坏
+- Phase 2 第二刀已完成：
+  - `intersect` 已进入真实绘制
+  - 手测通过
+  - 基线和旧主绘制路径未被打坏
 
 ### 当前真实已支持的范围
 
 - 当前真实已支持的模式：
   - `multiply`
   - `subtract`
+  - `intersect`
 - 它们当前只在窄 gate 下真实生效：
   - 工具：`brush`、`eraser`
-  - 主笔尖：`硬边圆`、`柔边圆`
+  - 主笔尖：`硬边圆`、`柔边圆`、`自定义笔尖`
   - 次笔尖：`硬边圆`、`柔边圆`、`自定义笔尖`
 - 当前真正会影响绘制的参数包括：
   - `strength`
   - `secondary size ratio`
+  - 当主笔尖是 `自定义笔尖` 时：
+    - `customTipMaskData`
+    - `customTipSoftness`
+    - `customTipRoundness`
+    - `customTipAngleDegrees`
   - 当次笔尖是 `自定义笔尖` 时：
     - `customTipMaskData`
     - `customTipSoftness`
@@ -56,6 +66,7 @@ ArtFlex 是旧版 `BrushCanvas` 的 Metal-first 重构版 macOS 绘图软件；�
   - `组合笔尖…` 面板里的主笔尖现在只做“真实摘要 + 编辑入口”
   - `编辑主笔尖…` 会直接把用户带回现有 `笔尖形状设计` 主入口
   - 不存在第二套独立主笔尖状态
+  - 当前自定义主笔尖已经进入 `multiply / subtract / intersect` 的真实绘制
 - 次笔尖来源接通已完成：
   - `SecondaryTipDescriptor` 现在已扩成 tip-source 安全子集：
     - `tipShape`
@@ -66,15 +77,15 @@ ArtFlex 是旧版 `BrushCanvas` 的 Metal-first 重构版 macOS 绘图软件；�
   - `组合笔尖…` 面板里现在能看到当前次笔尖摘要
   - `编辑次笔尖…` 会打开独立子面板，复用现有笔尖遮罩编辑画布
   - 次笔尖自定义遮罩和参数已经能保存到 preset / project
-  - 当前自定义次笔尖已经进入 `multiply / subtract` 的真实绘制
-  - 当前三格示意也已经按自定义次笔尖的真实遮罩关系显示，不再退回柔边圆近似
+  - 当前自定义次笔尖已经进入 `multiply / subtract / intersect` 的真实绘制
+  - 当前三格示意也已经按自定义主/次笔尖的真实遮罩关系显示，不再退回柔边圆近似
+  - 当前三格示意已调整为高对比显示，默认使用黑底白笔触，更容易辨认主/次/最终组合关系
 - 但要注意：
   - 这不代表所有次笔尖来源都已进入真实绘制
   - `方形` 次笔尖当前仍然只是编辑 / 保存，真实绘制仍会回旧 gate
 
 ### 当前仍未支持 / 尚未接入真实绘制
 
-- `intersect`
 - `scatter`
 - `angle offset`
 - `invert`
@@ -87,31 +98,32 @@ ArtFlex 是旧版 `BrushCanvas` 的 Metal-first 重构版 macOS 绘图软件；�
 ### 当前用户体验状态
 
 - Dual Tip 的启用开关和当前已接入参数现在已经能真实影响落笔
-- `subtract` 现在也已经进入真实绘制
+- `subtract`、`intersect` 现在都已经进入真实绘制
 - `组合笔尖…` popover 已补齐可解释性：
   - 主笔尖
   - 次笔尖
   - 最终笔尖
   - `multiply` 当前是“调制 / 压缩”逻辑
   - `subtract` 当前是“挖掉 / 削减”逻辑
+  - `intersect` 当前是“只保留交集 / 收口”逻辑
 - `组合笔尖…` 面板里的主笔尖现在与真实绘制主笔尖保持同一真相源
 - 次笔尖现在不再只是形状 picker，而是已经能独立编辑和保存来源
-- 自定义次笔尖现在不只可编辑 / 可保存，也已经能进入当前 `multiply / subtract` 真实绘制
-- 三格示意现在已经能按自定义次笔尖的真实形状示意最终组合结果
+- 自定义主笔尖现在也已经能进入当前 `multiply / subtract / intersect` 真实绘制
+- 自定义次笔尖现在不只可编辑 / 可保存，也已经能进入当前 `multiply / subtract / intersect` 真实绘制
+- 三格示意现在已经能按自定义主/次笔尖的真实形状示意最终组合结果
+- 三格示意的视觉对比已收口到高对比样式，当前默认是黑底白笔触
 - 当前 Dual Tip 已从概念验证进入“可用阶段”
-- 当前已可用来做基础“收口 / 压缩型”和“挖空 / 削减型”笔刷，也能开始体验异形次笔尖的挖空/调制效果
+- 当前已可用来做基础“收口 / 压缩型”“挖空 / 削减型”“交集 / 收口型”笔刷，也能开始体验异形次笔尖的挖空、调制和交集效果
 - 为了便于直接体验，默认画笔库现在附带 3 个 Dual Tip Phase 1 示例预设
 
 ### 下一步建议
 
 - 当前不要自动进入下一刀
-- 先观察和体验 `multiply / subtract` 的实际观感
+- 先观察和体验 `multiply / subtract / intersect` 的实际观感
 - 如果后续继续扩，再考虑：
-  - `intersect`
   - `scatter`
   - `image tip`
 - 其中：
-  - `intersect` 比较适合作为下一候选
   - `scatter` 风险更高，应后放
 
 ### 风险边界
@@ -120,10 +132,11 @@ ArtFlex 是旧版 `BrushCanvas` 的 Metal-first 重构版 macOS 绘图软件；�
 - 关闭 Dual Tip 时，必须继续和旧版行为一致
 - 开启但不满足当前已接入条件时，必须继续回旧路径
 - 不要把“来源接通”和“真实绘制扩范围”绑在一起
-- 当前自定义次笔尖虽然已经进入 `multiply / subtract` 的真实绘制，但 gate 仍必须保持窄范围：
-  - 主笔尖继续只限圆形
+- 当前自定义主/次笔尖虽然都已经进入 `multiply / subtract / intersect` 的真实绘制，但 gate 仍必须保持窄范围：
+  - 当前真实已接入模式是 `multiply / subtract / intersect`
+  - 主笔尖当前只限圆形与自定义笔尖
   - 工具继续只限 `brush / eraser`
-  - `intersect / scatter / image tip` 继续后放
+  - `scatter / image tip` 继续后放
 - 不要在未验证前一次性扩很多模式
 - 不要把当前 Dual Tip 直接扩成“全家桶”实现
 
