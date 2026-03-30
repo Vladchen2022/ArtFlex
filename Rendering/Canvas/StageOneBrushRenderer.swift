@@ -31,6 +31,7 @@ private struct BrushUniforms {
     var dualTipSecondaryHasCustomMask: UInt32
     var dualTipStrength: Float
     var secondarySizeRatio: Float
+    var dualTipSecondaryOffset: SIMD2<Float>
     var dualTipSecondarySoftness: Float
     var dualTipSecondaryRoundness: Float
     var dualTipSecondaryAngleDegrees: Float
@@ -171,6 +172,7 @@ final class StageOneBrushRenderer {
             uint dualTipSecondaryHasCustomMask;
             float dualTipStrength;
             float secondarySizeRatio;
+            float2 dualTipSecondaryOffset;
             float dualTipSecondarySoftness;
             float dualTipSecondaryRoundness;
             float dualTipSecondaryAngleDegrees;
@@ -286,7 +288,7 @@ final class StageOneBrushRenderer {
             }
 
             float sizeRatio = max(uniforms.secondarySizeRatio, 0.001);
-            float2 secondaryPoint = localPoint / sizeRatio;
+            float2 secondaryPoint = (localPoint - uniforms.dualTipSecondaryOffset) / sizeRatio;
             float secondaryAlpha;
 
             if (uniforms.dualTipSecondaryShape == 3) {
@@ -1366,6 +1368,7 @@ final class StageOneBrushRenderer {
             dualTipSecondaryHasCustomMask: stroke.brush.secondaryTipDescriptor.customTipMaskData == nil ? 0 : 1,
             dualTipStrength: min(max(stroke.brush.dualTipStrength, 0), 1),
             secondarySizeRatio: min(max(stroke.brush.secondarySizeRatio, 0.25), 0.95),
+            dualTipSecondaryOffset: dualTipSecondaryOffset(for: sample.point, stroke: stroke),
             dualTipSecondarySoftness: stroke.brush.secondaryTipDescriptor.customTipSoftness,
             dualTipSecondaryRoundness: stroke.brush.secondaryTipDescriptor.customTipRoundness,
             dualTipSecondaryAngleDegrees: stroke.brush.secondaryTipDescriptor.customTipAngleDegrees
@@ -2324,6 +2327,26 @@ final class StageOneBrushRenderer {
             return nil
         }
         return stroke.brush.secondaryTipDescriptor.customTipMaskData
+    }
+
+    private func dualTipSecondaryOffset(for point: StrokePoint, stroke: StrokeDescriptor) -> SIMD2<Float> {
+        guard stroke.brush.supportsSecondaryScatterRealDrawing(for: stroke.tool) else {
+            return .zero
+        }
+
+        let scatterAmount = min(max(stroke.brush.secondaryScatter, 0), 5)
+        guard scatterAmount > 0.0001 else {
+            return .zero
+        }
+
+        let radial = pow(stableScatterRandom(x: point.x, y: point.y, index: 0, salt: 0xD1B5_4A31), 0.55)
+        let spreadAngle = stableScatterRandom(x: point.x, y: point.y, index: 0, salt: 0xA24B_1C76) * (.pi * 2.0)
+        let scatterRadius = Double(scatterAmount) * 0.18 * radial
+
+        return SIMD2(
+            Float(cos(spreadAngle) * scatterRadius),
+            Float(sin(spreadAngle) * scatterRadius)
+        )
     }
 
     private func customTipTexture(for data: Data?, role: CustomTipTextureRole) -> MTLTexture? {

@@ -1094,8 +1094,7 @@ struct RightInspectorView: View {
                 ),
                 range: 0...5,
                 onCommit: { viewModel.setSecondaryScatter(Float($0)) },
-                isEnabled: false,
-                helperText: "Phase 2 后接入真实绘制；当前不会影响落笔。"
+                helperText: dualTipSecondaryScatterHelperText(for: brush, activeTool: activeTool)
             )
 
             VStack(alignment: .leading, spacing: 6) {
@@ -1477,6 +1476,20 @@ struct RightInspectorView: View {
         }
     }
 
+    private func dualTipSecondaryScatterHelperText(for brush: BrushSettings, activeTool: ToolKind) -> String {
+        if brush.supportsSecondaryScatterRealDrawing(for: activeTool) {
+            return "控制次笔尖相对主笔尖的每-dab 稳定偏移。越高，次笔尖偏得越开；当前已进入真实绘制。"
+        }
+
+        if brush.dualTipCombineMode == .multiply ||
+            brush.dualTipCombineMode == .subtract ||
+            brush.dualTipCombineMode == .intersect {
+            return "散布已接入，但只有当前工具、主笔尖和次笔尖都满足已接入条件时，才会真实影响落笔。"
+        }
+
+        return "散布当前只在 multiply / subtract / intersect 路径下生效。"
+    }
+
     private func dualTipCompositePreviewCaption(for brush: BrushSettings, activeTool: ToolKind) -> String {
         if brush.supportsPhaseTwoDualTipIntersectRealDrawing(for: activeTool) {
             return "当前真实路径已接通；会按强度和大小比例只保留主/次笔尖的重叠区域。"
@@ -1592,6 +1605,7 @@ struct RightInspectorView: View {
 
         let strength = Double(min(max(brush.dualTipStrength, 0), 1))
         let sizeRatio = Double(min(max(brush.secondarySizeRatio, 0.25), 0.95))
+        let secondaryScatterOffset = dualTipPreviewSecondaryScatterOffset(for: brush)
         let primaryMaskBytes = resampledMaskData(
             brush.customTipMaskData,
             targetResolution: resolution
@@ -1616,8 +1630,8 @@ struct RightInspectorView: View {
                 )
                 let secondaryAlpha = dualTipPreviewAlpha(
                     tipShape: brush.secondaryTipDescriptor.tipShape,
-                    normalizedX: normalizedX / sizeRatio,
-                    normalizedY: normalizedY / sizeRatio,
+                    normalizedX: (normalizedX - secondaryScatterOffset.x) / sizeRatio,
+                    normalizedY: (normalizedY - secondaryScatterOffset.y) / sizeRatio,
                     customMaskBytes: secondaryMaskBytes,
                     softness: brush.secondaryTipDescriptor.customTipSoftness,
                     roundness: brush.secondaryTipDescriptor.customTipRoundness,
@@ -2674,6 +2688,22 @@ struct RightInspectorView: View {
     private func previewRandom(seed: Int) -> Double {
         let x = sin(Double(seed) * 12.9898) * 43758.5453
         return x - floor(x)
+    }
+
+    private func dualTipPreviewSecondaryScatterOffset(for brush: BrushSettings) -> CGPoint {
+        let scatterAmount = Double(min(max(brush.secondaryScatter, 0), 5))
+        guard scatterAmount > 0.0001 else {
+            return .zero
+        }
+
+        let radial = pow(previewRandom(seed: 701), 0.55)
+        let spreadAngle = previewRandom(seed: 1701) * (.pi * 2.0)
+        let scatterRadius = scatterAmount * 0.18 * radial
+
+        return CGPoint(
+            x: cos(spreadAngle) * scatterRadius,
+            y: sin(spreadAngle) * scatterRadius
+        )
     }
 
     private func tipShapePreview(_ tipShape: BrushTipShape) -> some View {

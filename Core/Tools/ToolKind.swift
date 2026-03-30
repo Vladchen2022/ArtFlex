@@ -644,6 +644,15 @@ struct BrushSettings: Codable, Sendable, Equatable {
         tipShape.supportsDualTipRealDrawingPrimary &&
         secondaryTipDescriptor.supportsPhaseTwoDualTipIntersectRealDrawing
     }
+
+    func supportsSecondaryScatterRealDrawing(for tool: ToolKind) -> Bool {
+        secondaryScatter > 0.0001 &&
+        (
+            supportsPhaseOneDualTipRealDrawing(for: tool) ||
+            supportsPhaseTwoDualTipSubtractRealDrawing(for: tool) ||
+            supportsPhaseTwoDualTipIntersectRealDrawing(for: tool)
+        )
+    }
 }
 
 struct ToolSessionState: Codable, Sendable, Equatable {

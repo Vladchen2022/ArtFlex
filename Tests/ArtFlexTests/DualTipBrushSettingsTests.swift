@@ -294,6 +294,44 @@ struct DualTipBrushSettingsTests {
     }
 
     @Test
+    func secondaryScatterOnlyAppliesInsideCurrentRealDrawingGates() {
+        var supported = BrushSettings.stageOneDefault
+        supported.dualTipEnabled = true
+        supported.tipShape = .customRound
+        supported.customTipMaskData = Data([255, 32, 16])
+        supported.secondaryTipDescriptor = SecondaryTipDescriptor(
+            tipShape: .customRound,
+            customTipMaskData: Data([255, 128, 32]),
+            customTipSoftness: 0.55,
+            customTipRoundness: 0.62,
+            customTipAngleDegrees: 17
+        )
+        supported.dualTipCombineMode = .intersect
+        supported.secondaryScatter = 1.8
+
+        #expect(supported.supportsSecondaryScatterRealDrawing(for: .brush))
+        #expect(supported.supportsSecondaryScatterRealDrawing(for: .eraser))
+
+        var disabled = supported
+        disabled.dualTipEnabled = false
+        #expect(disabled.supportsSecondaryScatterRealDrawing(for: .brush) == false)
+
+        var zeroScatter = supported
+        zeroScatter.secondaryScatter = 0
+        #expect(zeroScatter.supportsSecondaryScatterRealDrawing(for: .brush) == false)
+
+        var wrongMode = supported
+        wrongMode.dualTipCombineMode = .multiply
+        #expect(wrongMode.supportsSecondaryScatterRealDrawing(for: .brush))
+
+        var unsupportedSecondary = supported
+        unsupportedSecondary.secondaryTipDescriptor = SecondaryTipDescriptor(tipShape: .square)
+        #expect(unsupportedSecondary.supportsSecondaryScatterRealDrawing(for: .brush) == false)
+
+        #expect(supported.supportsSecondaryScatterRealDrawing(for: .smudge) == false)
+    }
+
+    @Test
     func builtInDualTipPhaseOneDemoPresetsStayWithinCurrentSupportedRange() {
         let presets = BrushPreset.builtInDualTipPhaseOneDemoPresets
 
