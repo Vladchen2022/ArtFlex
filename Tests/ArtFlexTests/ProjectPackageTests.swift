@@ -19,6 +19,12 @@ struct ProjectPackageTests {
                         dualTipEnabled: true,
                         secondaryTipDescriptor: SecondaryTipDescriptor(
                             tipShape: .customRound,
+                            sourceSemantic: .importedImage,
+                            importedSourceInfo: ImportedTipSourceInfo(
+                                sourceLabel: "Project Secondary",
+                                pixelWidth: 96,
+                                pixelHeight: 144
+                            ),
                             customTipMaskData: Data([5, 10, 180, 240]),
                             customTipSoftness: 0.37,
                             customTipRoundness: 0.69,
@@ -36,6 +42,13 @@ struct ProjectPackageTests {
                         colorJitterAmount: 0.46,
                         stampRotationDegrees: 0,
                         followsStrokeDirection: false,
+                        customTipSourceSemantic: .importedImage,
+                        customTipImportedSourceInfo: ImportedTipSourceInfo(
+                            sourceLabel: "Project Primary",
+                            pixelWidth: 192,
+                            pixelHeight: 128
+                        ),
+                        customTipMaskData: Data([11, 22, 140, 250]),
                         customTipSoftness: 0.82,
                         customTipRoundness: 0.58,
                         customTipAngleDegrees: 33,
@@ -80,7 +93,23 @@ struct ProjectPackageTests {
             layerSnapshots: layerSnapshots
         )
 
-        #expect(package.workspaceState == workspace)
+        #expect(package.tipImageAssets.count == 2)
+        #expect(package.toolSession.brush.customTipMaskData == nil)
+        #expect(package.toolSession.brush.customTipAssetID == nil)
+        #expect(package.toolSession.brush.secondaryTipDescriptor.customTipMaskData == nil)
+        #expect(package.toolSession.brush.secondaryTipDescriptor.tipAssetID == nil)
+        #expect(package.brushLibrary.presets.first?.brush.customTipMaskData == nil)
+        #expect(package.brushLibrary.presets.first?.brush.customTipAssetID != nil)
+        #expect(package.brushLibrary.presets.first?.brush.secondaryTipDescriptor.customTipMaskData == nil)
+        #expect(package.brushLibrary.presets.first?.brush.secondaryTipDescriptor.tipAssetID != nil)
+        #expect(package.workspaceState.toolSession.brush == workspace.toolSession.brush)
+        #expect(package.workspaceState.brushLibrary.presets.first?.brush.customTipMaskData == workspace.brushLibrary.presets.first?.brush.customTipMaskData)
+        #expect(package.workspaceState.brushLibrary.presets.first?.brush.secondaryTipDescriptor.customTipMaskData == workspace.brushLibrary.presets.first?.brush.secondaryTipDescriptor.customTipMaskData)
+        #expect(package.workspaceState.brushLibrary.presets.first?.brush.customTipSourceSemantic == workspace.brushLibrary.presets.first?.brush.customTipSourceSemantic)
+        #expect(package.workspaceState.brushLibrary.presets.first?.brush.customTipImportedSourceInfo == workspace.brushLibrary.presets.first?.brush.customTipImportedSourceInfo)
+        #expect(package.workspaceState.brushLibrary.presets.first?.brush.secondaryTipDescriptor.sourceSemantic == workspace.brushLibrary.presets.first?.brush.secondaryTipDescriptor.sourceSemantic)
+        #expect(package.workspaceState.brushLibrary.presets.first?.brush.secondaryTipDescriptor.importedSourceInfo == workspace.brushLibrary.presets.first?.brush.secondaryTipDescriptor.importedSourceInfo)
+        #expect(package.workspaceState.brushLibrary.selectedPresetID == workspace.brushLibrary.selectedPresetID)
         #expect(package.layerSnapshots == layerSnapshots)
     }
 }

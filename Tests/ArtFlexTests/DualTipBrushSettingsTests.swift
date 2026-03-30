@@ -17,6 +17,9 @@ struct DualTipBrushSettingsTests {
         )
 
         #expect(decoded.tipShape == .softRound)
+        #expect(decoded.sourceSemantic == .procedural)
+        #expect(decoded.tipAssetID == nil)
+        #expect(decoded.importedSourceInfo == nil)
         #expect(decoded.customTipMaskData == nil)
         #expect(decoded.customTipSoftness == 0.5)
         #expect(decoded.customTipRoundness == 1)
@@ -41,12 +44,18 @@ struct DualTipBrushSettingsTests {
 
         #expect(decoded.dualTipEnabled == false)
         #expect(decoded.secondaryTipDescriptor.tipShape == .hardRound)
+        #expect(decoded.secondaryTipDescriptor.sourceSemantic == .procedural)
+        #expect(decoded.secondaryTipDescriptor.tipAssetID == nil)
+        #expect(decoded.secondaryTipDescriptor.importedSourceInfo == nil)
         #expect(decoded.dualTipCombineMode == .multiply)
         #expect(decoded.dualTipStrength == 1)
         #expect(decoded.secondarySizeRatio == 1)
         #expect(decoded.secondaryAngleOffsetDegrees == 0)
         #expect(decoded.secondaryScatter == 0)
         #expect(decoded.secondaryInvert == false)
+        #expect(decoded.customTipSourceSemantic == .procedural)
+        #expect(decoded.customTipAssetID == nil)
+        #expect(decoded.customTipImportedSourceInfo == nil)
         #expect(decoded.size == 36)
         #expect(decoded.opacity == 0.72)
         #expect(decoded.tipShape == .softRound)
@@ -56,8 +65,14 @@ struct DualTipBrushSettingsTests {
     func brushPresetRoundTripPreservesDualTipPhaseZeroFields() throws {
         var brush = BrushSettings.stageOneDefault
         brush.dualTipEnabled = true
+        brush.tipShape = .customRound
+        brush.customTipSourceSemantic = .customMask
+        brush.customTipAssetID = BrushTipImageAssetID(rawValue: "primary-asset")
+        brush.customTipMaskData = Data([255, 24, 128, 96])
         brush.secondaryTipDescriptor = SecondaryTipDescriptor(
             tipShape: .customRound,
+            sourceSemantic: .importedImage,
+            tipAssetID: BrushTipImageAssetID(rawValue: "secondary-asset"),
             customTipMaskData: Data([0, 64, 255, 128]),
             customTipSoftness: 0.36,
             customTipRoundness: 0.71,
@@ -107,8 +122,112 @@ struct DualTipBrushSettingsTests {
 
         #expect(decoded.brush.dualTipEnabled == false)
         #expect(decoded.brush.secondaryTipDescriptor.tipShape == .hardRound)
+        #expect(decoded.brush.secondaryTipDescriptor.sourceSemantic == .procedural)
+        #expect(decoded.brush.secondaryTipDescriptor.tipAssetID == nil)
         #expect(decoded.brush.dualTipCombineMode == .multiply)
         #expect(decoded.brush.secondaryInvert == false)
+        #expect(decoded.brush.customTipSourceSemantic == .procedural)
+        #expect(decoded.brush.customTipAssetID == nil)
+    }
+
+    @Test
+    func importedImageTipSemanticsRoundTripPreservesSourceMeaning() throws {
+        var brush = BrushSettings.stageOneDefault
+        brush.tipShape = .customRound
+        brush.customTipSourceSemantic = .importedImage
+        brush.customTipAssetID = BrushTipImageAssetID(rawValue: "primary-asset")
+        brush.customTipImportedSourceInfo = ImportedTipSourceInfo(
+            sourceLabel: "Primary Source",
+            pixelWidth: 144,
+            pixelHeight: 96
+        )
+        brush.customTipMaskData = Data([255, 16, 96, 200])
+        brush.secondaryTipDescriptor = SecondaryTipDescriptor(
+            tipShape: .customRound,
+            sourceSemantic: .importedImage,
+            tipAssetID: BrushTipImageAssetID(rawValue: "secondary-asset"),
+            importedSourceInfo: ImportedTipSourceInfo(
+                sourceLabel: "Secondary Source",
+                pixelWidth: 80,
+                pixelHeight: 120
+            ),
+            customTipMaskData: Data([255, 32, 128, 224]),
+            customTipSoftness: 0.44,
+            customTipRoundness: 0.73,
+            customTipAngleDegrees: 27
+        )
+
+        let encoded = try JSONEncoder().encode(brush)
+        let decoded = try JSONDecoder().decode(BrushSettings.self, from: encoded)
+
+        #expect(decoded.customTipSourceSemantic == .importedImage)
+        #expect(decoded.secondaryTipDescriptor.sourceSemantic == .importedImage)
+        #expect(decoded.customTipAssetID == brush.customTipAssetID)
+        #expect(decoded.secondaryTipDescriptor.tipAssetID == brush.secondaryTipDescriptor.tipAssetID)
+        #expect(decoded.customTipImportedSourceInfo == brush.customTipImportedSourceInfo)
+        #expect(decoded.secondaryTipDescriptor.importedSourceInfo == brush.secondaryTipDescriptor.importedSourceInfo)
+        #expect(decoded.customTipMaskData == brush.customTipMaskData)
+        #expect(decoded.secondaryTipDescriptor.customTipMaskData == brush.secondaryTipDescriptor.customTipMaskData)
+    }
+
+    @Test
+    func brushLibraryArchiveExtractsAndRestoresImportedTipAssets() throws {
+        var brush = BrushSettings.stageOneDefault
+        brush.tipShape = .customRound
+        brush.customTipSourceSemantic = .importedImage
+        brush.customTipImportedSourceInfo = ImportedTipSourceInfo(
+            sourceLabel: "Library Primary",
+            pixelWidth: 256,
+            pixelHeight: 128
+        )
+        brush.customTipMaskData = Data([255, 16, 96, 200])
+        brush.secondaryTipDescriptor = SecondaryTipDescriptor(
+            tipShape: .customRound,
+            sourceSemantic: .importedImage,
+            importedSourceInfo: ImportedTipSourceInfo(
+                sourceLabel: "Library Secondary",
+                pixelWidth: 64,
+                pixelHeight: 64
+            ),
+            customTipMaskData: Data([255, 32, 128, 224]),
+            customTipSoftness: 0.44,
+            customTipRoundness: 0.73,
+            customTipAngleDegrees: 27
+        )
+
+        let library = BrushLibraryState(
+            presets: [
+                BrushPreset(
+                    id: "imported",
+                    name: "Imported",
+                    brush: brush,
+                    isBuiltIn: false
+                )
+            ],
+            selectedPresetID: "imported"
+        )
+
+        let archive = BrushLibraryArchive(library: library)
+
+        #expect(archive.tipImageAssets.count == 2)
+        #expect(archive.library.presets[0].brush.customTipMaskData == nil)
+        #expect(archive.library.presets[0].brush.customTipAssetID != nil)
+        #expect(archive.library.presets[0].brush.secondaryTipDescriptor.customTipMaskData == nil)
+        #expect(archive.library.presets[0].brush.secondaryTipDescriptor.tipAssetID != nil)
+        #expect(archive.resolvedLibrary == BrushTipImageAssetSystem.resolveLibrary(archive.library, assets: archive.tipImageAssets))
+        #expect(archive.resolvedLibrary.presets[0].brush.customTipImportedSourceInfo == brush.customTipImportedSourceInfo)
+        #expect(archive.resolvedLibrary.presets[0].brush.secondaryTipDescriptor.importedSourceInfo == brush.secondaryTipDescriptor.importedSourceInfo)
+        #expect(archive.resolvedLibrary.presets[0].brush.customTipMaskData == brush.customTipMaskData)
+        #expect(archive.resolvedLibrary.presets[0].brush.secondaryTipDescriptor.customTipMaskData == brush.secondaryTipDescriptor.customTipMaskData)
+
+        let encoded = try JSONEncoder().encode(archive)
+        let decoded = try JSONDecoder().decode(BrushLibraryArchive.self, from: encoded)
+
+        #expect(decoded.tipImageAssets == archive.tipImageAssets)
+        #expect(decoded.resolvedLibrary.presets[0].brush.customTipImportedSourceInfo == brush.customTipImportedSourceInfo)
+        #expect(decoded.resolvedLibrary.presets[0].brush.secondaryTipDescriptor.importedSourceInfo == brush.secondaryTipDescriptor.importedSourceInfo)
+        #expect(decoded.resolvedLibrary.presets[0].brush.customTipMaskData == brush.customTipMaskData)
+        #expect(decoded.resolvedLibrary.presets[0].brush.secondaryTipDescriptor.customTipMaskData == brush.secondaryTipDescriptor.customTipMaskData)
     }
 
     @Test
@@ -329,6 +448,82 @@ struct DualTipBrushSettingsTests {
         #expect(unsupportedSecondary.supportsSecondaryScatterRealDrawing(for: .brush) == false)
 
         #expect(supported.supportsSecondaryScatterRealDrawing(for: .smudge) == false)
+    }
+
+    @Test
+    func secondaryAngleOffsetOnlyAppliesForCustomSecondaryInsideCurrentRealDrawingGates() {
+        var supported = BrushSettings.stageOneDefault
+        supported.dualTipEnabled = true
+        supported.tipShape = .customRound
+        supported.customTipMaskData = Data([255, 32, 16])
+        supported.secondaryTipDescriptor = SecondaryTipDescriptor(
+            tipShape: .customRound,
+            customTipMaskData: Data([255, 128, 32]),
+            customTipSoftness: 0.55,
+            customTipRoundness: 0.62,
+            customTipAngleDegrees: 17
+        )
+        supported.dualTipCombineMode = .subtract
+        supported.secondaryAngleOffsetDegrees = 34
+
+        #expect(supported.supportsSecondaryAngleOffsetRealDrawing(for: .brush))
+        #expect(supported.supportsSecondaryAngleOffsetRealDrawing(for: .eraser))
+
+        var disabled = supported
+        disabled.dualTipEnabled = false
+        #expect(disabled.supportsSecondaryAngleOffsetRealDrawing(for: .brush) == false)
+
+        var zeroOffset = supported
+        zeroOffset.secondaryAngleOffsetDegrees = 0
+        #expect(zeroOffset.supportsSecondaryAngleOffsetRealDrawing(for: .brush) == false)
+
+        var roundSecondary = supported
+        roundSecondary.secondaryTipDescriptor = SecondaryTipDescriptor(tipShape: .softRound)
+        #expect(roundSecondary.supportsSecondaryAngleOffsetRealDrawing(for: .brush) == false)
+
+        var wrongMode = supported
+        wrongMode.dualTipCombineMode = .multiply
+        #expect(wrongMode.supportsSecondaryAngleOffsetRealDrawing(for: .brush))
+
+        #expect(supported.supportsSecondaryAngleOffsetRealDrawing(for: .smudge) == false)
+    }
+
+    @Test
+    func secondaryInvertOnlyAppliesInsideCurrentRealDrawingGates() {
+        var supported = BrushSettings.stageOneDefault
+        supported.dualTipEnabled = true
+        supported.tipShape = .customRound
+        supported.customTipMaskData = Data([255, 32, 16])
+        supported.secondaryTipDescriptor = SecondaryTipDescriptor(
+            tipShape: .customRound,
+            customTipMaskData: Data([255, 128, 32]),
+            customTipSoftness: 0.55,
+            customTipRoundness: 0.62,
+            customTipAngleDegrees: 17
+        )
+        supported.dualTipCombineMode = .intersect
+        supported.secondaryInvert = true
+
+        #expect(supported.supportsSecondaryInvertRealDrawing(for: .brush))
+        #expect(supported.supportsSecondaryInvertRealDrawing(for: .eraser))
+
+        var disabled = supported
+        disabled.dualTipEnabled = false
+        #expect(disabled.supportsSecondaryInvertRealDrawing(for: .brush) == false)
+
+        var toggleOff = supported
+        toggleOff.secondaryInvert = false
+        #expect(toggleOff.supportsSecondaryInvertRealDrawing(for: .brush) == false)
+
+        var wrongMode = supported
+        wrongMode.dualTipCombineMode = .multiply
+        #expect(wrongMode.supportsSecondaryInvertRealDrawing(for: .brush))
+
+        var unsupportedSecondary = supported
+        unsupportedSecondary.secondaryTipDescriptor = SecondaryTipDescriptor(tipShape: .square)
+        #expect(unsupportedSecondary.supportsSecondaryInvertRealDrawing(for: .brush) == false)
+
+        #expect(supported.supportsSecondaryInvertRealDrawing(for: .smudge) == false)
     }
 
     @Test

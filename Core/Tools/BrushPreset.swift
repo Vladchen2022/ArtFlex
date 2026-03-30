@@ -203,6 +203,47 @@ struct BrushLibraryState: Codable, Sendable, Equatable {
 }
 
 struct BrushLibraryArchive: Codable, Sendable, Equatable {
-    var version: Int = 1
+    var version: Int = 2
     var library: BrushLibraryState
+    var tipImageAssets: [BrushTipImageAsset]
+
+    init(
+        version: Int = 2,
+        library: BrushLibraryState,
+        tipImageAssets: [BrushTipImageAsset]? = nil
+    ) {
+        self.version = version
+        if let tipImageAssets {
+            self.library = library
+            self.tipImageAssets = tipImageAssets
+        } else {
+            let normalized = BrushTipImageAssetSystem.archivedLibrary(library)
+            self.library = normalized.library
+            self.tipImageAssets = normalized.assets
+        }
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case version
+        case library
+        case tipImageAssets
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        version = try container.decodeIfPresent(Int.self, forKey: .version) ?? 1
+        library = try container.decode(BrushLibraryState.self, forKey: .library)
+        tipImageAssets = try container.decodeIfPresent([BrushTipImageAsset].self, forKey: .tipImageAssets) ?? []
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(version, forKey: .version)
+        try container.encode(library, forKey: .library)
+        try container.encode(tipImageAssets, forKey: .tipImageAssets)
+    }
+
+    var resolvedLibrary: BrushLibraryState {
+        BrushTipImageAssetSystem.resolveLibrary(library, assets: tipImageAssets)
+    }
 }

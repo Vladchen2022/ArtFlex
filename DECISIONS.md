@@ -52,7 +52,7 @@
 - 不引入 `full reset + partial snapshots` fallback
 - 不动 `trim / restore` 主模型
 
-### 0.6 Dual Tip 当前先停在 `multiply + subtract + intersect`
+### 0.6 Dual Tip 下一阶段继续扩展，`smudge` 仍排除
 
 已确认：
 
@@ -61,33 +61,49 @@
 - Dual Tip Phase 1（`multiply`）已完成并通过手测
 - Dual Tip Phase 2 第一刀（`subtract`）已完成并通过手测
 - Dual Tip Phase 2 第二刀（`intersect`）已完成并通过手测
-- 当前先停在：
+- `scatter` 已完成并通过手测
+- `angle offset` 已完成并通过手测
+- `invert` 已完成并通过手测
+- 当前代码基线已完成到：
   - `multiply`
   - `subtract`
   - `intersect`
-- 当前不自动进入：
-  - `scatter`
-- `scatter` 明确后放
+  - `secondary scatter`
+  - `secondary angle offset`
+  - `secondary invert`
+- 下一阶段已确认纳入：
+  - 完整 `secondary image tip` 独立资产系统
+  - 更严格 renderer-backed preview
+  - 更复杂随机 / spacing 系统
+  - 更宽真实绘制 gate
+- `smudge` 路径继续排除，不在本轮 Dual Tip 范围
 - 当前已支持的真实绘制边界：
   - 主笔尖：圆形、自定义笔尖
   - 次笔尖：圆形、自定义笔尖
   - 模式：`multiply`
   - 模式：`subtract`
   - 模式：`intersect`
+  - 变换 / 调制参数：`secondary scatter`
+  - 变换 / 调制参数：`secondary angle offset`
+  - 变换 / 调制参数：`secondary invert`
   - 当前真正会影响绘制的参数：
     - `strength`
     - `secondary size ratio`
+    - `secondary scatter`
+    - `secondary angle offset`
+    - `secondary invert`
     - 当主笔尖为自定义笔尖时：`customTipMaskData / customTipSoftness / customTipRoundness / customTipAngleDegrees`
     - 当次笔尖为自定义笔尖时：`customTipMaskData / customTipSoftness / customTipRoundness / customTipAngleDegrees`
-- 当前未支持：
-  - `scatter / angle offset / invert`
-  - `secondary image tip`
-  - 更复杂 preview 同步
+- 当前仍未落地：
+  - `secondary image tip` 的完整入口 / 生命周期资产系统
+  - 更严格 renderer-backed preview
+  - 更复杂随机 / spacing 系统
+  - 更宽真实绘制 gate
   - `smudge` 路径
 - 关闭 Dual Tip 时，必须继续完全回到旧绘制路径
 - 开启但不满足当前已接入条件时，也必须继续回旧路径
-- 后续若继续扩，仍必须坚持窄 gate 和强旁路原则
-- 不允许在未验证前一次性扩很多模式，重新污染旧绘制路径
+- 后续继续扩时，仍必须坚持窄 gate 基线、强旁路和分阶段验证
+- 不允许在未验证前一次性扩很多模式 / 工具 / 主次笔尖类型，重新污染旧绘制路径
 
 ### 0.7 Dual Tip 的主/次笔尖来源已接通；自定义主/次笔尖已进入当前真实绘制
 
@@ -114,14 +130,45 @@
   - `multiply`
   - `subtract`
   - `intersect`
+  - `scatter`
+  - `angle offset`
+  - `invert`
 - 当前真实 renderer gate 继续要求：
   - 主笔尖：圆形、自定义笔尖
   - 工具：`brush / eraser`
   - 次笔尖若为 `方形`，仍然只编辑 / 保存，不进入真实绘制
+- 当前真正会影响绘制的参数现在包括：
+  - `strength`
+  - `secondary size ratio`
+  - `secondary scatter`
+  - `secondary angle offset`
+  - `secondary invert`
 - 三格示意当前也已与自定义主/次笔尖的真实形状对齐
 - 三格示意当前已收口到高对比样式，默认使用黑底白笔触
-- 后续如果继续扩，必须先单独决策：
-  - `scatter` 继续后放
+- 主/次笔尖当前都已补齐来源语义：
+  - `procedural`
+  - `customMask`
+  - `importedImage`
+- 当前 `importedImage` 语义已进入摘要 / preset / project / preview 说明链，但仍基于 `customTipMaskData`，不是独立资产系统
+- `secondary image tip` 独立资产系统第一刀已完成：
+  - project package / brush library archive 现在会把 imported-image 主/次笔尖抽成独立 `tipImageAssets`
+  - archive 内 brush 现在会保存资产引用，再在打开 / 导入时解析回运行态 `maskData`
+  - 当前 renderer 与 preview 运行态仍继续复用解析后的 `maskData`，这一刀不重写真实绘制主链
+- `secondary image tip` 第二刀已完成：
+  - imported-image 的 preview fit 现在由 `TipSourceSemantic` 驱动，不再依赖会话态 flag
+  - imported-image 的来源标签与原始像素尺寸现在由 `ImportedTipSourceInfo` 保存并在 UI 摘要中显示
+  - 手绘 / 清空主次笔尖遮罩时，会同步清掉 imported-image 资产引用和来源信息，保持来源语义单一
+- 最近一轮回归已修复：
+  - 编辑组合笔尖后普通画笔卡顿
+  - 偶发画不出笔触
+  - 导入图像笔尖后的白边
+- 下一阶段扩展方向已经确认：
+  - 完整 `image tip` 资产系统
+  - 更严格 preview 同源
+  - 更复杂随机 / spacing 系统
+  - 更宽真实绘制 gate
+- `smudge` 路径继续不纳入本轮范围
+- 但这些事项必须拆成独立小刀推进，不应一次性并到同一改动
 
 ## 1. 总体架构
 

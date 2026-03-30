@@ -91,8 +91,31 @@ enum DualTipCombineMode: String, Codable, Sendable, Equatable, Hashable, CaseIte
     }
 }
 
+enum TipSourceSemantic: String, Codable, Sendable, Equatable, Hashable {
+    case procedural
+    case customMask
+    case importedImage
+
+    var usesImportedPreviewFit: Bool {
+        self == .importedImage
+    }
+}
+
+struct ImportedTipSourceInfo: Codable, Sendable, Equatable {
+    var sourceLabel: String
+    var pixelWidth: Int
+    var pixelHeight: Int
+
+    var formattedSummary: String {
+        "\(sourceLabel) · \(pixelWidth)x\(pixelHeight)"
+    }
+}
+
 struct SecondaryTipDescriptor: Codable, Sendable, Equatable {
     var tipShape: BrushTipShape
+    var sourceSemantic: TipSourceSemantic
+    var tipAssetID: BrushTipImageAssetID?
+    var importedSourceInfo: ImportedTipSourceInfo?
     var customTipMaskData: Data?
     var customTipSoftness: Float
     var customTipRoundness: Float
@@ -100,6 +123,9 @@ struct SecondaryTipDescriptor: Codable, Sendable, Equatable {
 
     static let stageOneDefault = SecondaryTipDescriptor(
         tipShape: .hardRound,
+        sourceSemantic: .procedural,
+        tipAssetID: nil,
+        importedSourceInfo: nil,
         customTipMaskData: nil,
         customTipSoftness: 0.5,
         customTipRoundness: 1,
@@ -108,6 +134,9 @@ struct SecondaryTipDescriptor: Codable, Sendable, Equatable {
 
     enum CodingKeys: String, CodingKey {
         case tipShape
+        case sourceSemantic
+        case tipAssetID
+        case importedSourceInfo
         case customTipMaskData
         case customTipSoftness
         case customTipRoundness
@@ -116,12 +145,18 @@ struct SecondaryTipDescriptor: Codable, Sendable, Equatable {
 
     init(
         tipShape: BrushTipShape,
+        sourceSemantic: TipSourceSemantic = .procedural,
+        tipAssetID: BrushTipImageAssetID? = nil,
+        importedSourceInfo: ImportedTipSourceInfo? = nil,
         customTipMaskData: Data? = nil,
         customTipSoftness: Float = 0.5,
         customTipRoundness: Float = 1,
         customTipAngleDegrees: Float = 0
     ) {
         self.tipShape = tipShape
+        self.sourceSemantic = sourceSemantic
+        self.tipAssetID = tipAssetID
+        self.importedSourceInfo = importedSourceInfo
         self.customTipMaskData = customTipMaskData
         self.customTipSoftness = customTipSoftness
         self.customTipRoundness = customTipRoundness
@@ -133,6 +168,9 @@ struct SecondaryTipDescriptor: Codable, Sendable, Equatable {
         let defaults = Self.stageOneDefault
 
         tipShape = try container.decodeIfPresent(BrushTipShape.self, forKey: .tipShape) ?? defaults.tipShape
+        sourceSemantic = try container.decodeIfPresent(TipSourceSemantic.self, forKey: .sourceSemantic) ?? defaults.sourceSemantic
+        tipAssetID = try container.decodeIfPresent(BrushTipImageAssetID.self, forKey: .tipAssetID) ?? defaults.tipAssetID
+        importedSourceInfo = try container.decodeIfPresent(ImportedTipSourceInfo.self, forKey: .importedSourceInfo) ?? defaults.importedSourceInfo
         customTipMaskData = try container.decodeIfPresent(Data.self, forKey: .customTipMaskData) ?? defaults.customTipMaskData
         customTipSoftness = try container.decodeIfPresent(Float.self, forKey: .customTipSoftness) ?? defaults.customTipSoftness
         customTipRoundness = try container.decodeIfPresent(Float.self, forKey: .customTipRoundness) ?? defaults.customTipRoundness
@@ -142,6 +180,9 @@ struct SecondaryTipDescriptor: Codable, Sendable, Equatable {
     func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(tipShape, forKey: .tipShape)
+        try container.encode(sourceSemantic, forKey: .sourceSemantic)
+        try container.encodeIfPresent(tipAssetID, forKey: .tipAssetID)
+        try container.encodeIfPresent(importedSourceInfo, forKey: .importedSourceInfo)
         try container.encodeIfPresent(customTipMaskData, forKey: .customTipMaskData)
         try container.encode(customTipSoftness, forKey: .customTipSoftness)
         try container.encode(customTipRoundness, forKey: .customTipRoundness)
@@ -394,6 +435,9 @@ struct BrushSettings: Codable, Sendable, Equatable {
     var colorJitterAmount: Float
     var stampRotationDegrees: Float
     var followsStrokeDirection: Bool
+    var customTipSourceSemantic: TipSourceSemantic
+    var customTipAssetID: BrushTipImageAssetID?
+    var customTipImportedSourceInfo: ImportedTipSourceInfo?
     var customTipMaskData: Data?
     var customTipSoftness: Float
     var customTipRoundness: Float
@@ -428,6 +472,9 @@ struct BrushSettings: Codable, Sendable, Equatable {
         colorJitterAmount: 0,
         stampRotationDegrees: 0,
         followsStrokeDirection: false,
+        customTipSourceSemantic: .procedural,
+        customTipAssetID: nil,
+        customTipImportedSourceInfo: nil,
         customTipMaskData: nil,
         customTipSoftness: 0.5,
         customTipRoundness: 1,
@@ -463,6 +510,9 @@ struct BrushSettings: Codable, Sendable, Equatable {
         case colorJitterAmount
         case stampRotationDegrees
         case followsStrokeDirection
+        case customTipSourceSemantic
+        case customTipAssetID
+        case customTipImportedSourceInfo
         case customTipMaskData
         case customTipSoftness
         case customTipRoundness
@@ -498,6 +548,9 @@ struct BrushSettings: Codable, Sendable, Equatable {
         colorJitterAmount: Float = 0,
         stampRotationDegrees: Float,
         followsStrokeDirection: Bool,
+        customTipSourceSemantic: TipSourceSemantic = .procedural,
+        customTipAssetID: BrushTipImageAssetID? = nil,
+        customTipImportedSourceInfo: ImportedTipSourceInfo? = nil,
         customTipMaskData: Data? = nil,
         customTipSoftness: Float,
         customTipRoundness: Float,
@@ -531,6 +584,9 @@ struct BrushSettings: Codable, Sendable, Equatable {
         self.colorJitterAmount = colorJitterAmount
         self.stampRotationDegrees = stampRotationDegrees
         self.followsStrokeDirection = followsStrokeDirection
+        self.customTipSourceSemantic = customTipSourceSemantic
+        self.customTipAssetID = customTipAssetID
+        self.customTipImportedSourceInfo = customTipImportedSourceInfo
         self.customTipMaskData = customTipMaskData
         self.customTipSoftness = customTipSoftness
         self.customTipRoundness = customTipRoundness
@@ -569,6 +625,9 @@ struct BrushSettings: Codable, Sendable, Equatable {
         colorJitterAmount = try container.decodeIfPresent(Float.self, forKey: .colorJitterAmount) ?? defaults.colorJitterAmount
         stampRotationDegrees = try container.decodeIfPresent(Float.self, forKey: .stampRotationDegrees) ?? defaults.stampRotationDegrees
         followsStrokeDirection = try container.decodeIfPresent(Bool.self, forKey: .followsStrokeDirection) ?? defaults.followsStrokeDirection
+        customTipSourceSemantic = try container.decodeIfPresent(TipSourceSemantic.self, forKey: .customTipSourceSemantic) ?? defaults.customTipSourceSemantic
+        customTipAssetID = try container.decodeIfPresent(BrushTipImageAssetID.self, forKey: .customTipAssetID) ?? defaults.customTipAssetID
+        customTipImportedSourceInfo = try container.decodeIfPresent(ImportedTipSourceInfo.self, forKey: .customTipImportedSourceInfo) ?? defaults.customTipImportedSourceInfo
         customTipMaskData = try container.decodeIfPresent(Data.self, forKey: .customTipMaskData) ?? defaults.customTipMaskData
         customTipSoftness = try container.decodeIfPresent(Float.self, forKey: .customTipSoftness) ?? defaults.customTipSoftness
         customTipRoundness = try container.decodeIfPresent(Float.self, forKey: .customTipRoundness) ?? defaults.customTipRoundness
@@ -605,6 +664,9 @@ struct BrushSettings: Codable, Sendable, Equatable {
         try container.encode(colorJitterAmount, forKey: .colorJitterAmount)
         try container.encode(stampRotationDegrees, forKey: .stampRotationDegrees)
         try container.encode(followsStrokeDirection, forKey: .followsStrokeDirection)
+        try container.encode(customTipSourceSemantic, forKey: .customTipSourceSemantic)
+        try container.encodeIfPresent(customTipAssetID, forKey: .customTipAssetID)
+        try container.encodeIfPresent(customTipImportedSourceInfo, forKey: .customTipImportedSourceInfo)
         try container.encodeIfPresent(customTipMaskData, forKey: .customTipMaskData)
         try container.encode(customTipSoftness, forKey: .customTipSoftness)
         try container.encode(customTipRoundness, forKey: .customTipRoundness)
@@ -647,6 +709,25 @@ struct BrushSettings: Codable, Sendable, Equatable {
 
     func supportsSecondaryScatterRealDrawing(for tool: ToolKind) -> Bool {
         secondaryScatter > 0.0001 &&
+        (
+            supportsPhaseOneDualTipRealDrawing(for: tool) ||
+            supportsPhaseTwoDualTipSubtractRealDrawing(for: tool) ||
+            supportsPhaseTwoDualTipIntersectRealDrawing(for: tool)
+        )
+    }
+
+    func supportsSecondaryAngleOffsetRealDrawing(for tool: ToolKind) -> Bool {
+        abs(secondaryAngleOffsetDegrees) > 0.0001 &&
+        secondaryTipDescriptor.tipShape == .customRound &&
+        (
+            supportsPhaseOneDualTipRealDrawing(for: tool) ||
+            supportsPhaseTwoDualTipSubtractRealDrawing(for: tool) ||
+            supportsPhaseTwoDualTipIntersectRealDrawing(for: tool)
+        )
+    }
+
+    func supportsSecondaryInvertRealDrawing(for tool: ToolKind) -> Bool {
+        secondaryInvert &&
         (
             supportsPhaseOneDualTipRealDrawing(for: tool) ||
             supportsPhaseTwoDualTipSubtractRealDrawing(for: tool) ||

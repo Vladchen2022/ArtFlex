@@ -62,7 +62,6 @@ final class WorkspaceViewModel: ObservableObject {
     @Published private(set) var isFreeTransformDragging = false
     @Published private(set) var activeFreeTransformInteractionMode: FreeTransformInteractionMode?
     @Published private(set) var isBrushTipCanvasFocused = false
-    @Published private(set) var brushTipUsesImportedPreviewFit = false
     @Published private(set) var isColorBlocksPanelFocused = false
     private(set) var lassoSamplingDebugPoints: [CanvasPoint] = []
     private(set) var samePathCommittedDebugShape: SelectionShape?
@@ -665,6 +664,9 @@ final class WorkspaceViewModel: ObservableObject {
     func updateSecondaryTipMask(_ data: Data?) {
         bootstrap.workspaceStore.updateToolSession { session in
             session.brush.secondaryTipDescriptor.tipShape = .customRound
+            session.brush.secondaryTipDescriptor.sourceSemantic = data == nil ? .procedural : .customMask
+            session.brush.secondaryTipDescriptor.tipAssetID = nil
+            session.brush.secondaryTipDescriptor.importedSourceInfo = nil
             session.brush.secondaryTipDescriptor.customTipMaskData = data
         }
         refresh()
@@ -730,9 +732,11 @@ final class WorkspaceViewModel: ObservableObject {
     func updateCustomTipMask(_ data: Data?) {
         bootstrap.workspaceStore.updateToolSession { session in
             session.brush.tipShape = .customRound
+            session.brush.customTipSourceSemantic = data == nil ? .procedural : .customMask
+            session.brush.customTipAssetID = nil
+            session.brush.customTipImportedSourceInfo = nil
             session.brush.customTipMaskData = data
         }
-        brushTipUsesImportedPreviewFit = false
         refresh()
     }
 
@@ -796,12 +800,15 @@ final class WorkspaceViewModel: ObservableObject {
             showStatus(.init(kind: .error, message: "无法将图片转换为笔尖"))
             return false
         }
+        let importedSourceInfo = makeImportedTipSourceInfo(from: image, sourceDescription: sourceDescription)
 
         bootstrap.workspaceStore.updateToolSession { session in
             session.brush.tipShape = .customRound
+            session.brush.customTipSourceSemantic = .importedImage
+            session.brush.customTipAssetID = BrushTipImageAssetID(maskData: maskData)
+            session.brush.customTipImportedSourceInfo = importedSourceInfo
             session.brush.customTipMaskData = maskData
         }
-        brushTipUsesImportedPreviewFit = true
         refresh()
         showStatus(.init(kind: .success, message: "已从\(sourceDescription)导入笔尖"))
         return true
@@ -832,9 +839,13 @@ final class WorkspaceViewModel: ObservableObject {
             showStatus(.init(kind: .error, message: "无法将图片转换为次笔尖"))
             return false
         }
+        let importedSourceInfo = makeImportedTipSourceInfo(from: image, sourceDescription: sourceDescription)
 
         bootstrap.workspaceStore.updateToolSession { session in
             session.brush.secondaryTipDescriptor.tipShape = .customRound
+            session.brush.secondaryTipDescriptor.sourceSemantic = .importedImage
+            session.brush.secondaryTipDescriptor.tipAssetID = BrushTipImageAssetID(maskData: maskData)
+            session.brush.secondaryTipDescriptor.importedSourceInfo = importedSourceInfo
             session.brush.secondaryTipDescriptor.customTipMaskData = maskData
         }
         refresh()
@@ -868,8 +879,7 @@ final class WorkspaceViewModel: ObservableObject {
             return nil
         }
 
-        context.setFillColor(NSColor.white.cgColor)
-        context.fill(CGRect(origin: .zero, size: targetSize))
+        context.clear(CGRect(origin: .zero, size: targetSize))
 
         let imageSize = CGSize(width: cgImage.width, height: cgImage.height)
         let scale = min(targetSize.width / max(imageSize.width, 1), targetSize.height / max(imageSize.height, 1))
@@ -897,6 +907,30 @@ final class WorkspaceViewModel: ObservableObject {
         }
 
         return Data(mask)
+    }
+
+    private func makeImportedTipSourceInfo(from image: NSImage, sourceDescription: String) -> ImportedTipSourceInfo {
+        let pixelSize = resolvedPixelSize(for: image)
+        return ImportedTipSourceInfo(
+            sourceLabel: sourceDescription,
+            pixelWidth: pixelSize.width,
+            pixelHeight: pixelSize.height
+        )
+    }
+
+    private func resolvedPixelSize(for image: NSImage) -> (width: Int, height: Int) {
+        if let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) {
+            return (max(cgImage.width, 1), max(cgImage.height, 1))
+        }
+
+        if let representation = image.representations.first {
+            return (max(representation.pixelsWide, 1), max(representation.pixelsHigh, 1))
+        }
+
+        return (
+            max(Int(image.size.width.rounded()), 1),
+            max(Int(image.size.height.rounded()), 1)
+        )
     }
 
     func setGeneratorKind(_ kind: GeneratorKind) {

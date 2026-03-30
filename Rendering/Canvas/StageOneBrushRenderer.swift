@@ -27,6 +27,7 @@ private struct BrushUniforms {
     var dualTipPhase1Enabled: UInt32
     var dualTipSubtractEnabled: UInt32
     var dualTipIntersectEnabled: UInt32
+    var dualTipSecondaryInvertEnabled: UInt32
     var dualTipSecondaryShape: UInt32
     var dualTipSecondaryHasCustomMask: UInt32
     var dualTipStrength: Float
@@ -168,6 +169,7 @@ final class StageOneBrushRenderer {
             uint dualTipPhase1Enabled;
             uint dualTipSubtractEnabled;
             uint dualTipIntersectEnabled;
+            uint dualTipSecondaryInvertEnabled;
             uint dualTipSecondaryShape;
             uint dualTipSecondaryHasCustomMask;
             float dualTipStrength;
@@ -336,6 +338,10 @@ final class StageOneBrushRenderer {
             } else {
                 float secondaryDistance = length(secondaryPoint);
                 secondaryAlpha = smoothHardnessAlpha(secondaryDistance, 1.0);
+            }
+
+            if (uniforms.dualTipSecondaryInvertEnabled != 0) {
+                secondaryAlpha = 1.0 - clamp(secondaryAlpha, 0.0, 1.0);
             }
 
             float strength = clamp(uniforms.dualTipStrength, 0.0, 1.0);
@@ -1360,6 +1366,7 @@ final class StageOneBrushRenderer {
             dualTipPhase1Enabled: stroke.brush.supportsPhaseOneDualTipRealDrawing(for: stroke.tool) ? 1 : 0,
             dualTipSubtractEnabled: stroke.brush.supportsPhaseTwoDualTipSubtractRealDrawing(for: stroke.tool) ? 1 : 0,
             dualTipIntersectEnabled: stroke.brush.supportsPhaseTwoDualTipIntersectRealDrawing(for: stroke.tool) ? 1 : 0,
+            dualTipSecondaryInvertEnabled: stroke.brush.supportsSecondaryInvertRealDrawing(for: stroke.tool) ? 1 : 0,
             dualTipSecondaryShape: stroke.brush.secondaryTipDescriptor.tipShape == .softRound
                 ? 1
                 : (stroke.brush.secondaryTipDescriptor.tipShape == .square
@@ -1371,7 +1378,10 @@ final class StageOneBrushRenderer {
             dualTipSecondaryOffset: dualTipSecondaryOffset(for: sample.point, stroke: stroke),
             dualTipSecondarySoftness: stroke.brush.secondaryTipDescriptor.customTipSoftness,
             dualTipSecondaryRoundness: stroke.brush.secondaryTipDescriptor.customTipRoundness,
-            dualTipSecondaryAngleDegrees: stroke.brush.secondaryTipDescriptor.customTipAngleDegrees
+            dualTipSecondaryAngleDegrees: stroke.brush.secondaryTipDescriptor.customTipAngleDegrees +
+                (stroke.brush.supportsSecondaryAngleOffsetRealDrawing(for: stroke.tool)
+                    ? stroke.brush.secondaryAngleOffsetDegrees
+                    : 0)
         )
     }
 

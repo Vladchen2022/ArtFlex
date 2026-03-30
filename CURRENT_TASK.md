@@ -2,29 +2,44 @@
 
 ## 1. 当前任务
 
-- 当前任务不是继续扩 Dual Tip 下一刀
-- 当前任务是：Dual Tip 到 `intersect` 的阶段性文档同步已完成，等待决定下一步是否继续进入 `scatter` 的安全规划
+- 当前任务已切换为：继续推进 Dual Tip 下一阶段，但按安全顺序分刀实施
+- 当前已完成的前两刀：
+  - `secondary image tip` 独立资产系统已先落到 archive / persistence 边界
+  - imported-image 的来源说明与 preview fit 已改成 model-driven：主/次笔尖现在会保存导入来源信息，preview 不再依赖会话态 flag
+- 当前已确认纳入本轮范围：
+  - 完整 `secondary image tip` 独立资产系统
+  - 更严格 `renderer-backed preview`
+  - 更复杂随机 / spacing 系统
+  - 更宽真实绘制 gate
+- `smudge` 明确不在本轮 Dual Tip 范围
 - 当前不是性能优化阶段
 - 新线程默认先看 [HANDOFF.md](/Users/victorcloux/Desktop/ArtFlex/HANDOFF.md) 和 [DECISIONS.md](/Users/victorcloux/Desktop/ArtFlex/DECISIONS.md)
 
 ## 2. 当前阶段约束
 
 - 不要把当前线程重新拉回性能优化
-- 不要自动进入 `scatter`
-- 不要默认把“来源已接通”误读成“所有次笔尖来源都已进入真实绘制”
-- 当前不是复杂 `image tip` 阶段
-- 没有新的明确需求前，不要继续扩 Dual Tip 模式和参数
+- 不要把本轮四项范围一次性打成单次大扩展
+- 不要默认把“来源已接通”误读成“所有参数和来源都已进入真实绘制”
+- 真实绘制 gate 的扩大必须逐项验证，不要一次性放开到所有工具 / 主次笔尖类型 / 模式
+- 当前需要继续扩 Dual Tip，但必须按分阶段顺序推进
+- `smudge` 继续排除在本轮范围外
 - 旧的 `selection.fill / lasso.fill` 慢确认问题暂不处理
 - 除非新功能开发中引入新的 P0 / P1 回归，否则不要重开这一轮性能项目
 
-## 3. Deferred Items
+## 3. 当前推荐顺序
+
+1. 收尾 `secondary image tip` 资产入口 / 生命周期体验
+2. 更严格 `renderer-backed preview`
+3. 更复杂随机 / spacing 系统
+4. 更宽真实绘制 gate
+
+## 4. Deferred Items
 
 - `selection.fill / lasso.fill` 慢确认：deferred known limitation
 - 完整 `swift test` 的长跑 perf 项未收口到最终 passed / failed 结论：deferred validation note
-- Dual Tip 的 `scatter / image tip / smudge`：后续再决定；当前不自动继续
-- 非圆形 / 更复杂次笔尖来源进入真实绘制：后续再决定；当前仍只放开圆形与自定义主/次笔尖
+- Dual Tip 的 `smudge` 路径：继续排除，不在本轮范围
 
-## 4. 不要做的事
+## 5. 不要做的事
 
 - 不要再写 performance closure audit
 - 不要再复述 [performance-closure-audit.md](/Users/victorcloux/Desktop/ArtFlex/Docs/performance-closure-audit.md)
@@ -32,8 +47,8 @@
 - 不要碰 `smudge / trim / restore` 主线语义
 - 不要重开通用 partial history
 - 不要把当前任务扩成新的大范围性能项目
-- 不要在没有明确需求前继续扩 Dual Tip 实现边界
-- 不要默认进入 `scatter`
+- 不要脱离当前已确认范围去扩新的 Dual Tip 家族能力
+- 不要默认将更宽 gate 一次性放开到所有工具 / 所有主次笔尖 / 所有模式
 
 恢复开发时，默认先看：
 

@@ -14,7 +14,7 @@ final class BrushLibraryPersistenceController {
         guard let url = persistentLibraryURL() else { return nil }
         guard let data = try? Data(contentsOf: url) else { return nil }
         if let archive = try? decoder.decode(BrushLibraryArchive.self, from: data) {
-            return archive.library
+            return archive.resolvedLibrary
         }
         return try? decoder.decode(BrushLibraryState.self, from: data)
     }
@@ -38,7 +38,7 @@ final class BrushLibraryPersistenceController {
     func importLibrary(from url: URL) throws -> BrushLibraryState {
         let data = try Data(contentsOf: url)
         if let archive = try? decoder.decode(BrushLibraryArchive.self, from: data) {
-            return archive.library
+            return archive.resolvedLibrary
         }
         return try decoder.decode(BrushLibraryState.self, from: data)
     }
