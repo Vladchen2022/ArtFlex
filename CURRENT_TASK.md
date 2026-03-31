@@ -3,6 +3,7 @@
 ## 1. 当前任务
 
 - 当前任务已切换为：继续推进 Dual Tip 下一阶段，但按安全顺序分刀实施
+- 当前另有一条非 Dual Tip 小主线：画布视口交互已开始补功能，当前已纳入“锁定画布（禁缩放/禁旋转/禁移动）”和“按笔尖位置缩放”的实现
 - 当前范围已重新收缩：后续只继续做“明显影响画笔效果”或“明显影响保存 / 预览一致性 / 资料稳定性”的事项；轻微影响画笔效果的新随机 / `spacing` 小参数默认暂停
 - 当前已完成的阶段性刀法：
   - `secondary image tip` 独立资产系统已先落到 archive / persistence 边界
@@ -17,6 +18,7 @@
   - `tip image library` 资料库面板现在支持批量导入图片；在资料库里导入只会批量入库，不会立刻改当前笔尖，仍需点选后按“完成”应用
   - `undo / redo` 的 history 合并链现在会保留 `tip image library`，不会再把资料库误掉成空库或局部库后写回磁盘
   - 默认画笔库不再附带 3 个 Dual Tip Phase 1 示例预设；旧持久化或导入链若还带着这 3 个 legacy demo preset ID，也会在恢复时被过滤掉
+  - 无选区 whole-layer `移动变形` 的旋转预览当前已收口：预览阶段与最终提交都围绕被移动像素的内容中心旋转，不再在拖动预览时临时退回整张画布中心
   - `renderer-backed preview` 第一刀已落地：新增共享 `StageOneBrushPreviewRasterizer`，主/次笔尖卡片、三格示意最终笔尖、画笔库斜线笔触预览、以及 `tip image library` 资料库卡片都已切到同一套 stamp rasterizer
   - `renderer-backed preview` 第一刀的启动成本已补收口：画笔库斜线预览不再为每个 stamp 重算 Dual Tip 组合图，小尺寸 preview 分辨率也会按显示尺寸动态下调
   - `组合笔尖` 面板里的主笔尖 / 次笔尖 / 最终笔尖预览现在已拆成独立异步刷新；参数或图片变化时不会再等三张图串行算完才一起更新

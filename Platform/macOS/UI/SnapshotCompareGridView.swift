@@ -12,6 +12,7 @@ struct SnapshotCompareGridView: View {
     private let controlsBarHeight: CGFloat = 54
     private let cardHeaderHeight: CGFloat = 38
     private let filmstripWidth: CGFloat = 190
+    private let compareCardChromeHeight: CGFloat = 54
 
     var body: some View {
         GeometryReader { geometry in
@@ -21,7 +22,7 @@ struct SnapshotCompareGridView: View {
             let availableHeight = max(geometry.size.height - (outerPadding * 2) - controlsBarHeight - 14, 160)
             let cellWidth = max((rightRegionWidth - gridSpacing) / 2, 120)
             let cardHeight = max((availableHeight - gridSpacing) / 2, 90)
-            let canvasHeightLimit = max(cardHeight - cardHeaderHeight - 10, 40)
+            let canvasHeightLimit = max(cardHeight - compareCardChromeHeight, 40)
             let fittedCanvasHeight = min(canvasHeightLimit, cellWidth / max(aspectRatio, 0.0001))
             let fittedCanvasWidth = fittedCanvasHeight * aspectRatio
 
@@ -248,7 +249,8 @@ struct SnapshotCompareGridView: View {
                 snapshotPreviewImage(
                     assignedSnapshot?.previewImage ?? assignedSnapshot?.thumbnailImage,
                     canvasSize: canvasSize,
-                    placeholderTitle: "拖拽快照到这里"
+                    placeholderTitle: "拖拽快照到这里",
+                    extraCanvasPadding: 0
                 )
 
                 if assignedSnapshot != nil {
@@ -270,6 +272,7 @@ struct SnapshotCompareGridView: View {
             RoundedRectangle(cornerRadius: 12)
                 .fill(Color.white.opacity(0.06))
         )
+        .frame(height: canvasSize.height + compareCardChromeHeight)
         .overlay(
             RoundedRectangle(cornerRadius: 12)
                 .stroke(isSelected ? Color.accentColor : Color.white.opacity(0.12), lineWidth: isSelected ? 2 : 1)
@@ -307,7 +310,8 @@ struct SnapshotCompareGridView: View {
             snapshotPreviewImage(
                 session.frozenCurrentSnapshot.previewImage ?? session.frozenCurrentSnapshot.thumbnailImage,
                 canvasSize: canvasSize,
-                placeholderTitle: "当前画面"
+                placeholderTitle: "当前画面",
+                extraCanvasPadding: 0
             )
         }
         .frame(maxWidth: .infinity)
@@ -316,6 +320,7 @@ struct SnapshotCompareGridView: View {
             RoundedRectangle(cornerRadius: 12)
                 .fill(Color.white.opacity(0.06))
         )
+        .frame(height: canvasSize.height + compareCardChromeHeight)
         .overlay(
             RoundedRectangle(cornerRadius: 12)
                 .stroke(Color.orange.opacity(0.6), lineWidth: 1.5)
@@ -325,7 +330,8 @@ struct SnapshotCompareGridView: View {
     private func snapshotPreviewImage(
         _ image: CGImage?,
         canvasSize: CGSize,
-        placeholderTitle: String
+        placeholderTitle: String,
+        extraCanvasPadding: CGFloat = 24
     ) -> some View {
         ZStack {
             RoundedRectangle(cornerRadius: 12)
@@ -360,7 +366,7 @@ struct SnapshotCompareGridView: View {
             }
         }
         .frame(maxWidth: .infinity)
-        .frame(height: max(canvasSize.height + 24, 124))
+        .frame(height: max(canvasSize.height + extraCanvasPadding, 124))
         .clipShape(RoundedRectangle(cornerRadius: 12))
     }
 

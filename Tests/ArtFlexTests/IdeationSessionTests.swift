@@ -163,6 +163,51 @@ struct IdeationSessionTests {
         harness.viewModel.cancelIdeationSession()
         #expect(harness.viewModel.timelapseRecorder.isRecording)
     }
+
+    @Test
+    @MainActor
+    func ideationGridResetsBranchViewportsAndLocksCanvasInteraction() throws {
+        let harness = try IdeationHarness()
+        harness.viewModel.updateCanvasViewportSize(.init(width: 1200, height: 900))
+        harness.viewModel.updateCanvasToolHover(to: .init(x: 40, y: 40))
+        harness.viewModel.zoomIn()
+        harness.viewModel.setViewportOffset(x: 180, y: -140)
+        harness.viewModel.setViewportRotation(24)
+
+        harness.viewModel.startIdeationSession()
+        let session = try #require(harness.viewModel.ideationSession)
+
+        for branch in session.branches {
+            #expect(branch.viewModel.workspace.viewport == .stageOneDefault)
+            #expect(branch.viewModel.isCanvasViewportLocked)
+        }
+    }
+
+    @Test
+    @MainActor
+    func returningToIdeationGridReLocksAndRecentersBranches() throws {
+        let harness = try IdeationHarness()
+        harness.viewModel.startIdeationSession()
+        let session = try #require(harness.viewModel.ideationSession)
+        let activeBranch = session.activeBranchViewModel
+
+        session.focusSelectedBranchCanvas()
+        #expect(activeBranch.isCanvasViewportLocked == false)
+
+        activeBranch.updateCanvasViewportSize(.init(width: 1200, height: 900))
+        activeBranch.updateCanvasToolHover(to: .init(x: 48, y: 48))
+        activeBranch.zoomIn()
+        activeBranch.setViewportOffset(x: 90, y: -60)
+        activeBranch.setViewportRotation(18)
+        #expect(activeBranch.workspace.viewport != .stageOneDefault)
+
+        session.returnToGridCanvasLayout()
+
+        for branch in session.branches {
+            #expect(branch.viewModel.workspace.viewport == .stageOneDefault)
+            #expect(branch.viewModel.isCanvasViewportLocked)
+        }
+    }
 }
 
 @MainActor

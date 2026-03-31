@@ -5,6 +5,29 @@ import Testing
 struct WorkspaceViewModelPixelHistoryTests {
     @Test
     @MainActor
+    func freeTransformWholeLayerImmediatelyUsesContentBoundsInsteadOfFullCanvas() throws {
+        let harness = try PixelHistoryHarness()
+        let layerID = harness.addLayer()
+
+        try harness.drawBrushStroke(
+            on: layerID,
+            points: [
+                .init(location: .init(x: 10, y: 10), pressure: 1),
+                .init(location: .init(x: 18, y: 18), pressure: 1)
+            ]
+        )
+
+        harness.viewModel.selectTool(.freeTransform)
+
+        let bounds = try #require(harness.viewModel.sceneSnapshot.selectionShape?.bounds)
+        #expect(bounds.size.x < Double(harness.viewModel.workspace.document.canvasSize.width))
+        #expect(bounds.size.y < Double(harness.viewModel.workspace.document.canvasSize.height))
+        #expect(bounds.size.x > 0)
+        #expect(bounds.size.y > 0)
+    }
+
+    @Test
+    @MainActor
     func fillAtPointSupportsUndoRedo() throws {
         let harness = try PixelHistoryHarness()
         let layerID = harness.viewModel.workspace.document.activeLayerID

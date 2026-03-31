@@ -80,6 +80,7 @@ final class WorkspaceViewModel: ObservableObject {
     @Published private(set) var sceneSnapshot: CanvasSceneSnapshot
     @Published private(set) var status: WorkspaceStatus?
     @Published private(set) var isPanModeActive = false
+    @Published private(set) var isCanvasViewportLocked = false
     @Published private(set) var canUndo = false
     @Published private(set) var canRedo = false
     @Published private(set) var hasUnsavedChanges = false
@@ -139,6 +140,8 @@ final class WorkspaceViewModel: ObservableObject {
     private let selectionTraceLogger = Logger(subsystem: "ArtFlex", category: "SelectionTrace")
     private let brushStrokeLogger = Logger(subsystem: "ArtFlex", category: "BrushStroke")
     private let transformLogger = Logger(subsystem: "ArtFlex", category: "Transform")
+    private var latestCanvasViewportSize: CGSize = .zero
+    private var lastCanvasHoverPoint: CanvasPoint?
     private var documentChangeRevision: UInt64 = 0
     private var strokePacketCount = 0
 #if DEBUG
@@ -255,6 +258,10 @@ final class WorkspaceViewModel: ObservableObject {
         }
         if let group = ToolSidebarGroup.group(containing: tool) {
             toolGroupSurfaceTools[group.id] = tool
+        }
+        let latestState = bootstrap.workspaceStore.state
+        if tool == .freeTransform {
+            ensureWholeLayerInteractionBoundsAvailableIfNeeded(for: latestState)
         }
         if tool == .freeTransform {
             activateImplicitFreeTransformSelectionIfNeeded()
@@ -1728,29 +1735,51 @@ final class WorkspaceViewModel: ObservableObject {
         refresh()
     }
 
-    func zoomIn() {
-        bootstrap.workspaceStore.updateViewport { viewport in
-            viewport.zoomScale = min(max(viewport.zoomScale * 1.2, 0.05), 32)
+    func setCanvasViewportLocked(_ isLocked: Bool) {
+        guard isCanvasViewportLocked != isLocked else { return }
+        isCanvasViewportLocked = isLocked
+        if isLocked {
+            isPanModeActive = false
         }
-        refreshLightweight()
+    }
+
+    func updateCanvasViewportSize(_ size: CGSize) {
+        guard size.width.isFinite, size.height.isFinite else { return }
+        latestCanvasViewportSize = size
+    }
+
+    func zoomIn() {
+        setViewportZoomScale(workspace.viewport.zoomScale * 1.2)
     }
 
     func zoomOut() {
-        bootstrap.workspaceStore.updateViewport { viewport in
-            viewport.zoomScale = min(max(viewport.zoomScale / 1.2, 0.05), 32)
-        }
-        refreshLightweight()
+        setViewportZoomScale(workspace.viewport.zoomScale / 1.2)
     }
 
     func adjustViewportZoom(byScaleMultiplier multiplier: Double) {
         guard multiplier.isFinite, multiplier > 0 else { return }
+        setViewportZoomScale(workspace.viewport.zoomScale * multiplier)
+    }
+
+    private func setViewportZoomScale(_ newZoomScale: Double) {
+        guard !isCanvasViewportLocked else { return }
+        let anchorPoint = lastCanvasHoverPoint
+        let canvasSize = workspace.document.canvasSize
+        let viewportSize = latestCanvasViewportSize
         bootstrap.workspaceStore.updateViewport { viewport in
-            viewport.zoomScale = min(max(viewport.zoomScale * multiplier, 0.05), 32)
+            viewport.setZoomScale(
+                newZoomScale,
+                anchoredAt: anchorPoint,
+                canvasSize: canvasSize,
+                availableWidth: viewportSize.width,
+                availableHeight: viewportSize.height
+            )
         }
         refreshLightweight()
     }
 
     func panViewport(deltaX: Double, deltaY: Double) {
+        guard !isCanvasViewportLocked else { return }
         bootstrap.workspaceStore.updateViewport { viewport in
             viewport.contentOffset.x += deltaX
             viewport.contentOffset.y += deltaY
@@ -1759,6 +1788,7 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func setViewportOffset(x: Double, y: Double) {
+        guard !isCanvasViewportLocked else { return }
         bootstrap.workspaceStore.updateViewport { viewport in
             viewport.contentOffset = CanvasPoint(x: x, y: y)
         }
@@ -1766,6 +1796,7 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func setViewportRotation(_ angleDegrees: Double) {
+        guard !isCanvasViewportLocked else { return }
         bootstrap.workspaceStore.updateViewport { viewport in
             viewport.rotationDegrees = Self.normalizedViewportRotation(angleDegrees)
         }
@@ -1773,6 +1804,7 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func setPanModeActive(_ isActive: Bool) {
+        guard !isCanvasViewportLocked || !isActive else { return }
         isPanModeActive = isActive
         if isActive {
             showStatus(.init(kind: .info, message: "已开启平移模式"))
@@ -2287,6 +2319,7 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func updateCanvasToolHover(to point: CanvasPoint) {
+        lastCanvasHoverPoint = point
         switch workspace.toolSession.activeTool {
         case .straightLine:
             updateStraightLineHover(to: point)
@@ -3467,6 +3500,7 @@ final class WorkspaceViewModel: ObservableObject {
         modifiers: NSEvent.ModifierFlags
     ) {
         ideationBranchActivityHandler?()
+        ensureWholeLayerInteractionBoundsAvailableIfNeeded(for: bootstrap.workspaceStore.state)
         activateImplicitFreeTransformSelectionIfNeeded()
         guard effectiveTransformOperationShape != nil else { return }
 
@@ -4055,6 +4089,40 @@ final class WorkspaceViewModel: ObservableObject {
             }
             self.sceneSnapshot = self.currentSceneSnapshot(for: self.workspace)
             self.syncSelectionOverlayProxy()
+        }
+    }
+
+    private func ensureWholeLayerInteractionBoundsAvailableIfNeeded(for state: WorkspaceState) {
+        guard let key = wholeLayerInteractionBoundsKey(for: state) else {
+            return
+        }
+        if wholeLayerInteractionBoundsCacheKey == key,
+           case .ready = wholeLayerInteractionBoundsCacheEntry {
+            return
+        }
+        guard
+            let texture = bootstrap.layerSurfaceStore.texture(for: key.surfaceID),
+            let snapshot = try? bootstrap.textureSerializer.snapshot(texture: texture)
+        else {
+            return
+        }
+
+        wholeLayerInteractionBoundsTask?.cancel()
+        wholeLayerInteractionBoundsTask = nil
+        wholeLayerInteractionBoundsBuildingKey = nil
+
+        let entry = Self.wholeLayerInteractionBounds(from: snapshot)
+        wholeLayerInteractionBoundsCacheKey = key
+        wholeLayerInteractionBoundsCacheEntry = entry
+        switch entry {
+        case .ready(let bounds):
+            transformLogger.debug(
+                "[transform] wholeLayerContentBoundsSyncReady=true rect=\(String(describing: bounds), privacy: .public)"
+            )
+            logWholeLayerOverlayUsesInteractionBounds(true)
+        case .empty:
+            transformLogger.debug("[transform] wholeLayerContentBoundsSyncReady=false rect=nil")
+            logWholeLayerOverlayUsesInteractionBounds(false)
         }
     }
 

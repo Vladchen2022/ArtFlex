@@ -450,6 +450,34 @@ func freeTransformShouldSkipSessionRebuild(
     isTransformingSelection && isFreeTransformDragging && activeInteractionMode == .move
 }
 
+func freeTransformActiveLayerPreviewStrategy(
+    hasActivePreview: Bool,
+    sessionMode: TransformPreviewMode?,
+    hasBaseTexture: Bool,
+    plannedMode: TransformPreviewMode?
+) -> FreeTransformActiveLayerPreviewStrategy {
+    guard hasActivePreview else { return .showOriginalLayer }
+
+    if let sessionMode {
+        if sessionMode == .selection, hasBaseTexture {
+            return .showBaseTexture
+        }
+        return .hideOriginalLayer
+    }
+
+    if plannedMode == .wholeLayer {
+        return .hideOriginalLayer
+    }
+
+    return .showOriginalLayer
+}
+
+enum FreeTransformActiveLayerPreviewStrategy: Equatable {
+    case showOriginalLayer
+    case showBaseTexture
+    case hideOriginalLayer
+}
+
 final class StrokeCaptureMTKView: MTKView {
     private struct BrushInputDebugRecord {
         var index: Int
@@ -1120,8 +1148,9 @@ final class StrokeCaptureMTKView: MTKView {
         hoverLocation = convert(event.locationInWindow, from: nil)
         updateCursorIndicator()
         updateCursorAppearance()
+        let point = sample(from: event).location
+        strokeDelegate?.strokeCaptureView(self, didHoverCanvasAt: point)
         if activeTool == .straightLine || activeTool == .polygonSelection {
-            strokeDelegate?.strokeCaptureView(self, didHoverCanvasAt: sample(from: event).location)
             setNeedsDisplay(bounds)
         }
     }
@@ -1131,6 +1160,7 @@ final class StrokeCaptureMTKView: MTKView {
         hoverLocation = convert(event.locationInWindow, from: nil)
         updateCursorIndicator()
         updateCursorAppearance()
+        strokeDelegate?.strokeCaptureView(self, didHoverCanvasAt: sample(from: event).location)
         if handleAuxiliaryBrushInputEvent(event, source: "tabletPoint") {
             return
         }
@@ -1142,6 +1172,7 @@ final class StrokeCaptureMTKView: MTKView {
         hoverLocation = convert(event.locationInWindow, from: nil)
         updateCursorIndicator()
         updateCursorAppearance()
+        strokeDelegate?.strokeCaptureView(self, didHoverCanvasAt: sample(from: event).location)
         if handleAuxiliaryBrushInputEvent(event, source: "pressureChange") {
             return
         }
@@ -1153,6 +1184,7 @@ final class StrokeCaptureMTKView: MTKView {
         hoverLocation = convert(event.locationInWindow, from: nil)
         updateCursorIndicator()
         updateCursorAppearance()
+        strokeDelegate?.strokeCaptureView(self, didHoverCanvasAt: sample(from: event).location)
     }
 
     override func mouseExited(with event: NSEvent) {
@@ -2012,6 +2044,7 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
             let activeLayerOpacity = activeLayerSurfaceID.flatMap { surfaceID in
                 snapshot.layerSurfaces.first(where: { $0.surfaceID == surfaceID })?.opacity
             } ?? 1
+            let currentTransformPlan = currentTransformPreviewPlan()
             let previewEncodeStart = DispatchTime.now().uptimeNanoseconds
 
             let orderedVisibleLayers = snapshot.layerSurfaces.compactMap { surface -> (LayerSurfaceID, MTLTexture, Float)? in
@@ -2027,13 +2060,22 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
                 }
 
                 if hasActivePreview, surface.surfaceID == activeLayerSurfaceID {
-                    if let session = transformPreviewSession {
-                        if session.mode == .selection, let baseTexture = session.baseTexture {
-                            return (surface.surfaceID, baseTexture, surface.opacity)
+                    switch freeTransformActiveLayerPreviewStrategy(
+                        hasActivePreview: hasActivePreview,
+                        sessionMode: transformPreviewSession?.mode,
+                        hasBaseTexture: transformPreviewSession?.baseTexture != nil,
+                        plannedMode: currentTransformPlan?.mode
+                    ) {
+                    case .showOriginalLayer:
+                        return (surface.surfaceID, texture, surface.opacity)
+                    case .showBaseTexture:
+                        guard let baseTexture = transformPreviewSession?.baseTexture else {
+                            return (surface.surfaceID, texture, surface.opacity)
                         }
+                        return (surface.surfaceID, baseTexture, surface.opacity)
+                    case .hideOriginalLayer:
                         return nil
                     }
-                    return (surface.surfaceID, texture, surface.opacity)
                 }
                 return (surface.surfaceID, texture, surface.opacity)
             }
@@ -2102,11 +2144,12 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
                         opacity: activeLayerOpacity,
                         canvasSize: canvasSize,
                         bounds: session.operationBounds,
+                        pivotBounds: session.interactionBounds ?? session.operationBounds,
                         preview: effectivePreview,
                         into: descriptor,
                         commandBuffer: commandBuffer
                     )
-                } else if currentPreparedTransformSignature()?.mode == .wholeLayer,
+                } else if currentTransformPlan?.mode == .wholeLayer,
                           let texture = layerSurfaceStore.texture(for: surfaceID) {
                     let fullBounds = CanvasRect(
                         origin: .init(x: 0, y: 0),
@@ -2117,6 +2160,7 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
                         opacity: activeLayerOpacity,
                         canvasSize: canvasSize,
                         bounds: fullBounds,
+                        pivotBounds: currentTransformPlan?.interactionBounds ?? fullBounds,
                         preview: effectivePreview,
                         into: descriptor,
                         commandBuffer: commandBuffer
@@ -2558,11 +2602,7 @@ extension MetalCanvasCoordinator: TransformPreviewDelegate {
         guard
             let snapshot = sceneSnapshot,
             let activeLayerSurfaceID = snapshot.activeLayerSurfaceID,
-            let plan = TransformPreviewSessionBuilder.plan(
-                canvasSize: snapshot.renderSnapshot.document.canvasSize,
-                selectionShape: transformSelectionShape,
-                interactionBounds: snapshot.selectionShape?.bounds
-            )
+            let plan = currentTransformPreviewPlan()
         else {
             return nil
         }
@@ -2573,6 +2613,17 @@ extension MetalCanvasCoordinator: TransformPreviewDelegate {
             canvasContentRevision: snapshot.renderSnapshot.canvasContentRevision,
             selectionRevision: snapshot.selectionRevision,
             operationBounds: plan.operationBounds
+        )
+    }
+
+    private func currentTransformPreviewPlan() -> TransformPreviewPlan? {
+        guard let snapshot = sceneSnapshot else {
+            return nil
+        }
+        return TransformPreviewSessionBuilder.plan(
+            canvasSize: snapshot.renderSnapshot.document.canvasSize,
+            selectionShape: transformSelectionShape,
+            interactionBounds: snapshot.selectionShape?.bounds
         )
     }
 

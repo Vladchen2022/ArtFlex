@@ -46,6 +46,14 @@ struct MainToolbarView: View {
                 width: 110
             )
 
+            toolbarToggleButton(
+                title: "锁定画布",
+                systemImage: editingViewModel.isCanvasViewportLocked ? "lock.fill" : "lock.open",
+                isOn: editingViewModel.isCanvasViewportLocked
+            ) {
+                editingViewModel.setCanvasViewportLocked(!editingViewModel.isCanvasViewportLocked)
+            }
+
             Spacer(minLength: 0)
 
             Text(hostViewModel.workspace.document.metadata.name)
@@ -108,5 +116,34 @@ struct MainToolbarView: View {
                 .foregroundStyle(Color.white.opacity(0.88))
                 .frame(width: 36, alignment: .leading)
         }
+    }
+
+    private func toolbarToggleButton(
+        title: String,
+        systemImage: String,
+        isOn: Bool,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            HStack(spacing: 6) {
+                Image(systemName: systemImage)
+                    .font(.system(size: 11, weight: .semibold))
+                Text(title)
+                    .font(.system(size: 11, weight: .semibold))
+            }
+            .foregroundStyle(Color.white.opacity(isOn ? 0.98 : 0.86))
+            .padding(.horizontal, 10)
+            .frame(height: 24)
+            .background(
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(isOn ? Color.accentColor.opacity(0.92) : Color.white.opacity(0.09))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 8)
+                    .stroke(isOn ? Color.accentColor.opacity(0.95) : Color.white.opacity(0.08), lineWidth: 1)
+            )
+        }
+        .buttonStyle(.plain)
+        .help(isOn ? "已锁定画布：主画布不能缩放、旋转或移动" : "锁定画布：主画布不能缩放、旋转或移动")
     }
 }

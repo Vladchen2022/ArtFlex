@@ -305,6 +305,7 @@ struct CanvasContainerView: View {
                 if viewModel.workspace.toolSession.activeTool == .canvasRotate || abs(viewModel.workspace.viewport.rotationDegrees) > 0.05 {
                     CanvasRotationHUD(
                         angleDegrees: viewModel.workspace.viewport.rotationDegrees,
+                        isLocked: viewModel.isCanvasViewportLocked,
                         onReset: {
                             viewModel.setViewportRotation(0)
                         }
@@ -362,7 +363,7 @@ struct CanvasContainerView: View {
                     .position(x: geometry.size.width / 2, y: 28)
                 }
 
-                if viewModel.isPanModeActive {
+                if viewModel.isPanModeActive && !viewModel.isCanvasViewportLocked {
                     PanGestureOverlay(
                         onPanChanged: { translation in
                             if panStartOffset == nil {
@@ -388,6 +389,12 @@ struct CanvasContainerView: View {
             }
             .clipped()
             .contentShape(Rectangle())
+            .onAppear {
+                viewModel.updateCanvasViewportSize(geometry.size)
+            }
+            .onChange(of: geometry.size) { _, newSize in
+                viewModel.updateCanvasViewportSize(newSize)
+            }
             } // CanvasViewportHost
         }
         .clipped()
@@ -519,6 +526,7 @@ private struct DebugLassoPathOverlay: View {
 
 private struct CanvasRotationHUD: View {
     let angleDegrees: Double
+    let isLocked: Bool
     let onReset: () -> Void
 
     var body: some View {
@@ -543,6 +551,8 @@ private struct CanvasRotationHUD: View {
                     )
             }
             .buttonStyle(.plain)
+            .disabled(isLocked)
+            .opacity(isLocked ? 0.4 : 1)
             .help("将画布旋转恢复到 0°")
         }
         .padding(.horizontal, 12)

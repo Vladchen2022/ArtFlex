@@ -207,11 +207,13 @@ struct FreeTransformPreview: Sendable, Equatable {
 
 func freeTransformAffineTransform(
     bounds: CanvasRect,
-    preview: FreeTransformPreview
+    preview: FreeTransformPreview,
+    pivotBounds: CanvasRect? = nil
 ) -> CGAffineTransform {
+    let referenceBounds = pivotBounds ?? bounds
     let center = CGPoint(
-        x: bounds.origin.x + (bounds.size.x / 2),
-        y: bounds.origin.y + (bounds.size.y / 2)
+        x: referenceBounds.origin.x + (referenceBounds.size.x / 2),
+        y: referenceBounds.origin.y + (referenceBounds.size.y / 2)
     )
 
     var transform = CGAffineTransform.identity
@@ -227,9 +229,14 @@ func freeTransformAffineTransform(
 
 func freeTransformCornerPoints(
     bounds: CanvasRect,
-    preview: FreeTransformPreview
+    preview: FreeTransformPreview,
+    pivotBounds: CanvasRect? = nil
 ) -> [CanvasPoint] {
-    let transform = freeTransformAffineTransform(bounds: bounds, preview: preview)
+    let transform = freeTransformAffineTransform(
+        bounds: bounds,
+        preview: preview,
+        pivotBounds: pivotBounds
+    )
     let points = [
         CGPoint(x: bounds.minX, y: bounds.minY),
         CGPoint(x: bounds.maxX, y: bounds.minY),

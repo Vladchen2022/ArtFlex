@@ -62,4 +62,28 @@ struct FreeTransformHostLogicTests {
             ) == false
         )
     }
+
+    @Test
+    func wholeLayerPreviewHidesOriginalActiveLayer() {
+        #expect(
+            freeTransformActiveLayerPreviewStrategy(
+                hasActivePreview: true,
+                sessionMode: nil,
+                hasBaseTexture: false,
+                plannedMode: .wholeLayer
+            ) == .hideOriginalLayer
+        )
+    }
+
+    @Test
+    func selectionPreviewUsesBaseTextureWhenAvailable() {
+        #expect(
+            freeTransformActiveLayerPreviewStrategy(
+                hasActivePreview: true,
+                sessionMode: .selection,
+                hasBaseTexture: true,
+                plannedMode: .selection
+            ) == .showBaseTexture
+        )
+    }
 }

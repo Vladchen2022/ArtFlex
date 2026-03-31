@@ -3096,25 +3096,6 @@ struct RightInspectorView: View {
                 }
 
                 shortcutSlotLabel(for: slotIndex)
-
-                if !preset.isBuiltIn {
-                    VStack {
-                        HStack {
-                            Spacer()
-                            Button {
-                                viewModel.deleteBrushPreset(preset.id)
-                            } label: {
-                                Image(systemName: "xmark.circle.fill")
-                                    .font(.system(size: 12, weight: .bold))
-                                    .foregroundStyle(Color.white.opacity(0.55))
-                            }
-                            .buttonStyle(.plain)
-                            .help("删除笔刷预设")
-                            .padding(6)
-                        }
-                        Spacer()
-                    }
-                }
             }
             .aspectRatio(1, contentMode: .fit)
         }
@@ -3125,7 +3106,7 @@ struct RightInspectorView: View {
                 viewModel.applyBrushPreset(preset.id)
             }
 
-            if !preset.isBuiltIn {
+            if !preset.isBuiltIn && isSelected {
                 Button("删除") {
                     viewModel.deleteBrushPreset(preset.id)
                 }

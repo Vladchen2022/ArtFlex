@@ -370,6 +370,7 @@ final class TransformGPUCompositor {
             opacity: 1,
             canvasSize: canvasSize,
             bounds: session.operationBounds,
+            pivotBounds: session.interactionBounds ?? session.operationBounds,
             preview: preview,
             into: overlayPass,
             commandBuffer: commandBuffer

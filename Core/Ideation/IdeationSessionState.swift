@@ -48,7 +48,12 @@ final class IdeationSessionState: ObservableObject {
         }
     }
     @Published var selectedBranchIndex: Int = 0
-    @Published var canvasDisplayMode: CanvasDisplayMode = .grid
+    @Published var canvasDisplayMode: CanvasDisplayMode = .grid {
+        didSet {
+            guard canvasDisplayMode != oldValue else { return }
+            applyCanvasDisplayModeToBranches()
+        }
+    }
 
     let branches: [Branch]
     let baseCompositeSnapshot: LayerTextureSnapshot
@@ -95,6 +100,7 @@ final class IdeationSessionState: ObservableObject {
 
         self.branches = createdBranches
         configureBranches()
+        applyCanvasDisplayModeToBranches()
     }
 
     func selectBranch(_ index: Int) {
@@ -148,6 +154,20 @@ final class IdeationSessionState: ObservableObject {
                     self?.propagateEditingContext(context, from: index)
                 }
             cancellables.append(cancellable)
+        }
+    }
+
+    private func applyCanvasDisplayModeToBranches() {
+        switch canvasDisplayMode {
+        case .grid:
+            for branch in branches {
+                branch.viewModel.resetViewport()
+                branch.viewModel.setCanvasViewportLocked(true)
+            }
+        case .focused:
+            for branch in branches {
+                branch.viewModel.setCanvasViewportLocked(false)
+            }
         }
     }
 

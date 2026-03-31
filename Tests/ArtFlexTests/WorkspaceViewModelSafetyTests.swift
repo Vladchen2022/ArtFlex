@@ -76,6 +76,25 @@ struct WorkspaceViewModelSafetyTests {
         #expect(PerformanceAuditStore.shared.snapshot().latestDuration("HistoryController.captureCheckpoint") != nil)
         #expect(try harness.alpha(atX: 12, y: 12) > 0.01)
     }
+
+    @Test
+    @MainActor
+    func canvasViewportLockBlocksZoomAndRotation() throws {
+        let harness = try BrushEditingBoundaryHarness()
+        harness.viewModel.updateCanvasViewportSize(.init(width: 1200, height: 900))
+        harness.viewModel.updateCanvasToolHover(to: .init(x: 720, y: 360))
+        harness.viewModel.setViewportRotation(18)
+
+        let baselineViewport = harness.viewModel.workspace.viewport
+        harness.viewModel.setCanvasViewportLocked(true)
+        harness.viewModel.zoomIn()
+        harness.viewModel.setViewportOffset(x: 120, y: -60)
+        harness.viewModel.setViewportRotation(42)
+
+        #expect(harness.viewModel.workspace.viewport.zoomScale == baselineViewport.zoomScale)
+        #expect(harness.viewModel.workspace.viewport.contentOffset == baselineViewport.contentOffset)
+        #expect(harness.viewModel.workspace.viewport.rotationDegrees == baselineViewport.rotationDegrees)
+    }
 }
 
 @MainActor

@@ -45,4 +45,61 @@ struct CanvasViewport: Codable, Sendable, Equatable {
         contentOffset: CanvasPoint(x: 0, y: 0),
         rotationDegrees: 0
     )
+
+    mutating func setZoomScale(
+        _ newZoomScale: Double,
+        anchoredAt anchorCanvasPoint: CanvasPoint?,
+        canvasSize: CanvasSize,
+        availableWidth: Double,
+        availableHeight: Double
+    ) {
+        let clampedZoomScale = min(max(newZoomScale, 0.05), 32)
+        guard clampedZoomScale.isFinite else { return }
+
+        guard
+            let anchorCanvasPoint,
+            availableWidth > 0,
+            availableHeight > 0,
+            canvasSize.width > 0,
+            canvasSize.height > 0
+        else {
+            zoomScale = clampedZoomScale
+            return
+        }
+
+        let previousZoomScale = max(zoomScale, 0.01)
+        guard abs(previousZoomScale - clampedZoomScale) > 0.000_001 else { return }
+
+        let presentation = CanvasPresentationBuilder.makePresentation(
+            canvasSize: canvasSize,
+            viewport: self,
+            availableWidth: availableWidth,
+            availableHeight: availableHeight
+        )
+        let displayWidth = presentation.documentDisplaySize.x
+        let displayHeight = presentation.documentDisplaySize.y
+        guard displayWidth > 0, displayHeight > 0 else {
+            zoomScale = clampedZoomScale
+            return
+        }
+
+        let clampedAnchor = CanvasPoint(
+            x: min(max(anchorCanvasPoint.x, 0), Double(canvasSize.width)),
+            y: min(max(anchorCanvasPoint.y, 0), Double(canvasSize.height))
+        )
+        let localAnchor = CanvasPoint(
+            x: (clampedAnchor.x / Double(canvasSize.width)) * displayWidth - (displayWidth / 2),
+            y: (clampedAnchor.y / Double(canvasSize.height)) * displayHeight - (displayHeight / 2)
+        )
+        let rotationRadians = rotationDegrees * .pi / 180
+        let rotatedAnchor = CanvasPoint(
+            x: (localAnchor.x * cos(rotationRadians)) - (localAnchor.y * sin(rotationRadians)),
+            y: (localAnchor.x * sin(rotationRadians)) + (localAnchor.y * cos(rotationRadians))
+        )
+        let zoomDelta = previousZoomScale - clampedZoomScale
+
+        contentOffset.x += rotatedAnchor.x * zoomDelta
+        contentOffset.y += rotatedAnchor.y * zoomDelta
+        zoomScale = clampedZoomScale
+    }
 }

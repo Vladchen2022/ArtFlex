@@ -1,4 +1,5 @@
 import Testing
+import CoreGraphics
 @testable import ArtFlex
 
 struct TransformInteractionStateTests {
@@ -136,6 +137,32 @@ struct TransformInteractionStateTests {
         )
 
         #expect(abs(preview.scaleX - preview.scaleY) < 0.0001)
+    }
+
+    @Test
+    func customPivotBoundsAffectWholeLayerRotationCenter() {
+        let fullBounds = CanvasRect(
+            origin: .init(x: 0, y: 0),
+            size: .init(x: 100, y: 100)
+        )
+        let pivotBounds = CanvasRect(
+            origin: .init(x: 60, y: 60),
+            size: .init(x: 20, y: 20)
+        )
+        let transform = freeTransformAffineTransform(
+            bounds: fullBounds,
+            preview: FreeTransformPreview(
+                translation: .init(x: 0, y: 0),
+                scaleX: 1,
+                scaleY: 1,
+                rotationRadians: .pi / 2
+            ),
+            pivotBounds: pivotBounds
+        )
+
+        let transformedCenter = CGPoint(x: 50, y: 50).applying(transform)
+        #expect(abs(transformedCenter.x - 90) < 0.001)
+        #expect(abs(transformedCenter.y - 50) < 0.001)
     }
 
     @Test

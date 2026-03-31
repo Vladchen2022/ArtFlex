@@ -156,6 +156,7 @@ final class StageOneCanvasPresenter {
         opacity: Float,
         canvasSize: CanvasSize,
         bounds: CanvasRect,
+        pivotBounds: CanvasRect? = nil,
         preview: FreeTransformPreview,
         into renderPassDescriptor: MTLRenderPassDescriptor,
         commandBuffer: MTLCommandBuffer
@@ -164,7 +165,11 @@ final class StageOneCanvasPresenter {
             return
         }
 
-        let corners = freeTransformCornerPoints(bounds: bounds, preview: preview)
+        let corners = freeTransformCornerPoints(
+            bounds: bounds,
+            preview: preview,
+            pivotBounds: pivotBounds
+        )
         guard corners.count == 4 else {
             encoder.endEncoding()
             return
