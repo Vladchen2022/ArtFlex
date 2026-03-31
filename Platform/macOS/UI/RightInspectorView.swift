@@ -143,6 +143,22 @@ private struct DualTipPreviewCell<Content: View>: View {
     }
 }
 
+private enum TipImageLibrarySheetTarget: String, Identifiable {
+    case primary
+    case secondary
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .primary:
+            return "主笔尖图片资料库"
+        case .secondary:
+            return "次笔尖图片资料库"
+        }
+    }
+}
+
 struct RightInspectorView: View {
     @ObservedObject var viewModel: WorkspaceViewModel
     @State private var showsPressureCurveEditor = false
@@ -168,6 +184,12 @@ struct RightInspectorView: View {
     @State private var secondaryTipPaintSoftness: Double = 0.35
     @State private var secondaryTipPaintIntensity: Double = 1.0
     @State private var showsDualTipAdvancedControls = false
+    @State private var tipImageLibrarySheetTarget: TipImageLibrarySheetTarget?
+    @State private var showsSecondaryTipImageLibrarySheet = false
+    @State private var primaryTipImageLibraryPendingSelection: BrushTipImageAssetID?
+    @State private var secondaryTipImageLibraryPendingSelection: BrushTipImageAssetID?
+    @State private var draggedTipImageLibraryAssetID: BrushTipImageAssetID?
+    @State private var tipImageLibraryDropTargetID: BrushTipImageAssetID?
 
     var body: some View {
         GeometryReader { proxy in
@@ -231,6 +253,11 @@ struct RightInspectorView: View {
         .background(Color(red: 0.12, green: 0.12, blue: 0.13))
         .sheet(isPresented: $showsSecondaryTipEditor) {
             secondaryTipEditorSheet
+        }
+        .sheet(item: $tipImageLibrarySheetTarget) { target in
+            tipImageLibrarySheet(for: target) {
+                tipImageLibrarySheetTarget = nil
+            }
         }
     }
 
@@ -711,6 +738,15 @@ struct RightInspectorView: View {
                     viewModel.importBrushTipImageFromDisk()
                 }
 
+                compactToolButton(
+                    systemImage: "square.grid.3x2",
+                    tooltip: "打开笔尖图片资料库",
+                    isSelected: false
+                ) {
+                    prepareTipImageLibraryPresentation(for: .primary)
+                    tipImageLibrarySheetTarget = .primary
+                }
+
                 compactTextActionButton(
                     title: "组合笔尖…",
                     tooltip: "打开组合笔尖参数"
@@ -728,6 +764,12 @@ struct RightInspectorView: View {
             if let sourceInfo = viewModel.workspace.toolSession.brush.customTipImportedSourceInfo,
                effectivePrimaryTipSourceSemantic(for: viewModel.workspace.toolSession.brush) == .importedImage {
                 importedTipSourceInfoRow(sourceInfo, title: "当前导入来源")
+            }
+
+            if let restoreTitle = primaryDormantTipRestoreTitle(for: viewModel.workspace.toolSession.brush) {
+                tipSourceRestoreButton(title: restoreTitle) {
+                    viewModel.reactivatePrimaryCustomTipSourceIfAvailable()
+                }
             }
 
             // ⚡️ 优化：笔尖绘制参数使用本地状态，不需要触发 ViewModel
@@ -1867,6 +1909,7 @@ struct RightInspectorView: View {
                 Spacer(minLength: 8)
 
                 Button("完成") {
+                    showsSecondaryTipImageLibrarySheet = false
                     showsSecondaryTipEditor = false
                 }
                 .font(.system(size: 12, weight: .semibold))
@@ -1944,6 +1987,11 @@ struct RightInspectorView: View {
                         _ = viewModel.importSecondaryTipImageFromDisk()
                     }
 
+                    Button("资料库…") {
+                        prepareTipImageLibraryPresentation(for: .secondary)
+                        showsSecondaryTipImageLibrarySheet = true
+                    }
+
                     Button("清空自定义") {
                         viewModel.clearSecondaryTipMask()
                     }
@@ -1951,6 +1999,12 @@ struct RightInspectorView: View {
 
                 if let sourceInfo = secondary.importedSourceInfo, secondary.sourceSemantic == .importedImage {
                     importedTipSourceInfoRow(sourceInfo, title: "当前导入来源")
+                }
+
+                if let restoreTitle = secondaryDormantTipRestoreTitle(for: secondary) {
+                    tipSourceRestoreButton(title: restoreTitle) {
+                        viewModel.reactivateSecondaryCustomTipSourceIfAvailable()
+                    }
                 }
 
                 ZStack {
@@ -2036,6 +2090,11 @@ struct RightInspectorView: View {
         .padding(16)
         .frame(width: 420)
         .background(Color(nsColor: .windowBackgroundColor))
+        .sheet(isPresented: $showsSecondaryTipImageLibrarySheet) {
+            tipImageLibrarySheet(for: .secondary) {
+                showsSecondaryTipImageLibrarySheet = false
+            }
+        }
     }
 
     private func revealPrimaryTipEditor() {
@@ -2498,6 +2557,358 @@ struct RightInspectorView: View {
             RoundedRectangle(cornerRadius: 10)
                 .stroke(Color.black.opacity(0.08), lineWidth: 1)
         )
+    }
+
+    private func tipImageLibrarySheet(
+        for target: TipImageLibrarySheetTarget,
+        dismiss: @escaping () -> Void
+    ) -> some View {
+        let items = viewModel.workspace.tipImageLibrary.items
+        let columns = Array(repeating: GridItem(.flexible(), spacing: 10), count: 5)
+        let pendingSelection = pendingTipImageLibrarySelection(for: target)
+
+        return VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(target.title)
+                        .font(.system(size: 15, weight: .bold))
+
+                    Text("共享主/次笔尖图片；删除时若仍被当前画笔或预设引用，会阻止删除。")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(Color.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                Spacer(minLength: 8)
+
+                Text("\(items.count)/\(TipImageLibraryState.suggestedCapacity)")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(Color.secondary)
+            }
+
+            HStack(spacing: 8) {
+                Button("导入并应用…") {
+                    importTipImageViaLibrarySheet(for: target)
+                }
+                .buttonStyle(.borderedProminent)
+
+                Spacer(minLength: 0)
+
+                Button("完成") {
+                    completeTipImageLibrarySheet(for: target, dismiss: dismiss)
+                }
+                .buttonStyle(.bordered)
+            }
+
+            if items.isEmpty {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("资料库为空")
+                        .font(.system(size: 13, weight: .semibold))
+
+                    Text("从主笔尖或次笔尖导入图片后，会自动进入这里。也可以直接在这里导入并应用。")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(Color.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+            } else {
+                ScrollView(.vertical, showsIndicators: true) {
+                    LazyVGrid(columns: columns, spacing: 10) {
+                        ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
+                            tipImageLibraryCell(
+                                item,
+                                isSelected: pendingSelection == item.id,
+                                isDropTarget: tipImageLibraryDropTargetID == item.id
+                            )
+                            .contentShape(RoundedRectangle(cornerRadius: 12))
+                            .onTapGesture {
+                                setPendingTipImageLibrarySelection(item.id, for: target)
+                            }
+                            .onDrag {
+                                draggedTipImageLibraryAssetID = item.id
+                                return NSItemProvider(object: item.id.rawValue as NSString)
+                            }
+                            .onDrop(
+                                of: [UTType.plainText.identifier],
+                                isTargeted: tipImageLibraryDropTargetBinding(for: item.id)
+                            ) { providers in
+                                moveTipImageLibraryItemFromDrop(providers: providers, to: index)
+                            }
+                        }
+                    }
+                    .padding(.vertical, 2)
+                }
+            }
+        }
+        .padding(16)
+        .frame(width: 620, height: 520, alignment: .topLeading)
+        .background(Color(nsColor: .windowBackgroundColor))
+        .onExitCommand {
+            dismissTipImageLibrarySheet(for: target, dismiss: dismiss)
+        }
+    }
+
+    private func tipImageLibraryCell(
+        _ item: TipImageLibraryItem,
+        isSelected: Bool,
+        isDropTarget: Bool
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 10)
+                    .fill(Color.black.opacity(0.94))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 10)
+                            .stroke(
+                                isDropTarget ? Color.accentColor.opacity(0.96) : (isSelected ? Color.accentColor.opacity(0.92) : Color.white.opacity(0.12)),
+                                lineWidth: isDropTarget || isSelected ? 2 : 1
+                            )
+                    )
+
+                if let image = customTipPreviewImage(from: item.maskData, usesImportedPreviewFit: true) {
+                    Image(decorative: image, scale: 1)
+                        .resizable()
+                        .interpolation(.high)
+                        .scaledToFit()
+                        .padding(10)
+                } else {
+                    Text("无预览")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(Color.white.opacity(0.65))
+                }
+
+                VStack {
+                    HStack {
+                        Spacer()
+                        Button {
+                            if viewModel.deleteTipImageLibraryItem(item.id) {
+                                if primaryTipImageLibraryPendingSelection == item.id {
+                                    primaryTipImageLibraryPendingSelection = nil
+                                }
+                                if secondaryTipImageLibraryPendingSelection == item.id {
+                                    secondaryTipImageLibraryPendingSelection = nil
+                                }
+                            }
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .font(.system(size: 12, weight: .bold))
+                                .foregroundStyle(Color.white.opacity(0.78))
+                        }
+                        .buttonStyle(.plain)
+                        .help("删除笔尖图片")
+                        .padding(6)
+                    }
+                    Spacer()
+                }
+            }
+            .frame(height: 86)
+
+            Text(item.displayName)
+                .font(.system(size: 11, weight: .semibold))
+                .lineLimit(1)
+
+            Text("\(item.sourceInfo.pixelWidth)x\(item.sourceInfo.pixelHeight)")
+                .font(.system(size: 10, weight: .medium))
+                .foregroundStyle(Color.secondary)
+                .lineLimit(1)
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 12)
+                .fill(Color.white.opacity(0.72))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(isSelected ? Color.accentColor.opacity(0.24) : Color.black.opacity(0.06), lineWidth: 1)
+        )
+    }
+
+    private func selectedTipImageLibraryAssetID(for target: TipImageLibrarySheetTarget) -> BrushTipImageAssetID? {
+        switch target {
+        case .primary:
+            let brush = viewModel.workspace.toolSession.brush
+            guard brush.tipShape == .customRound, effectivePrimaryTipSourceSemantic(for: brush) == .importedImage else {
+                return nil
+            }
+            return brush.customTipAssetID
+        case .secondary:
+            let secondary = viewModel.workspace.toolSession.brush.secondaryTipDescriptor
+            guard secondary.tipShape == .customRound, secondary.sourceSemantic == .importedImage else {
+                return nil
+            }
+            return secondary.tipAssetID
+        }
+    }
+
+    private func pendingTipImageLibrarySelection(for target: TipImageLibrarySheetTarget) -> BrushTipImageAssetID? {
+        switch target {
+        case .primary:
+            return primaryTipImageLibraryPendingSelection
+        case .secondary:
+            return secondaryTipImageLibraryPendingSelection
+        }
+    }
+
+    private func setPendingTipImageLibrarySelection(
+        _ assetID: BrushTipImageAssetID?,
+        for target: TipImageLibrarySheetTarget
+    ) {
+        switch target {
+        case .primary:
+            primaryTipImageLibraryPendingSelection = assetID
+        case .secondary:
+            secondaryTipImageLibraryPendingSelection = assetID
+        }
+    }
+
+    private func prepareTipImageLibraryPresentation(for target: TipImageLibrarySheetTarget) {
+        viewModel.prepareTipImageLibraryForBrowser()
+        setPendingTipImageLibrarySelection(selectedTipImageLibraryAssetID(for: target), for: target)
+        draggedTipImageLibraryAssetID = nil
+        tipImageLibraryDropTargetID = nil
+    }
+
+    private func completeTipImageLibrarySheet(
+        for target: TipImageLibrarySheetTarget,
+        dismiss: @escaping () -> Void
+    ) {
+        let currentSelection = selectedTipImageLibraryAssetID(for: target)
+        if let pendingSelection = pendingTipImageLibrarySelection(for: target),
+           pendingSelection != currentSelection {
+            applyTipImageLibraryItem(pendingSelection, to: target)
+        }
+        dismissTipImageLibrarySheet(for: target, dismiss: dismiss)
+    }
+
+    private func dismissTipImageLibrarySheet(
+        for target: TipImageLibrarySheetTarget,
+        dismiss: @escaping () -> Void
+    ) {
+        setPendingTipImageLibrarySelection(nil, for: target)
+        draggedTipImageLibraryAssetID = nil
+        tipImageLibraryDropTargetID = nil
+        dismiss()
+    }
+
+    private func importTipImageViaLibrarySheet(for target: TipImageLibrarySheetTarget) {
+        switch target {
+        case .primary:
+            viewModel.importBrushTipImageFromDisk()
+        case .secondary:
+            _ = viewModel.importSecondaryTipImageFromDisk()
+        }
+        setPendingTipImageLibrarySelection(selectedTipImageLibraryAssetID(for: target), for: target)
+    }
+
+    private func applyTipImageLibraryItem(_ assetID: BrushTipImageAssetID, to target: TipImageLibrarySheetTarget) {
+        switch target {
+        case .primary:
+            viewModel.applyPrimaryTipImageLibraryItem(assetID)
+        case .secondary:
+            viewModel.applySecondaryTipImageLibraryItem(assetID)
+        }
+    }
+
+    private func moveTipImageLibraryItemFromDrop(
+        providers: [NSItemProvider],
+        to targetIndex: Int
+    ) -> Bool {
+        if let draggedTipImageLibraryAssetID {
+            viewModel.moveTipImageLibraryItem(draggedTipImageLibraryAssetID, to: targetIndex)
+            self.draggedTipImageLibraryAssetID = nil
+            self.tipImageLibraryDropTargetID = nil
+            return true
+        }
+
+        guard let provider = providers.first(where: { $0.canLoadObject(ofClass: NSString.self) }) else {
+            tipImageLibraryDropTargetID = nil
+            return false
+        }
+
+        provider.loadObject(ofClass: NSString.self) { object, _ in
+            guard let rawValue = object as? NSString else {
+                return
+            }
+            let assetID = BrushTipImageAssetID(rawValue: String(rawValue))
+            DispatchQueue.main.async {
+                viewModel.moveTipImageLibraryItem(assetID, to: targetIndex)
+                self.tipImageLibraryDropTargetID = nil
+            }
+        }
+        return true
+    }
+
+    private func tipImageLibraryDropTargetBinding(
+        for assetID: BrushTipImageAssetID
+    ) -> Binding<Bool> {
+        Binding(
+            get: {
+                tipImageLibraryDropTargetID == assetID
+            },
+            set: { isTargeted in
+                if isTargeted {
+                    tipImageLibraryDropTargetID = assetID
+                } else if tipImageLibraryDropTargetID == assetID {
+                    tipImageLibraryDropTargetID = nil
+                }
+            }
+        )
+    }
+
+    private func tipSourceRestoreButton(
+        title: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            HStack(spacing: 6) {
+                Image(systemName: "arrow.uturn.backward.circle")
+                    .font(.system(size: 11, weight: .bold))
+                Text(title)
+                    .font(.system(size: 11, weight: .semibold))
+            }
+            .foregroundStyle(Color.accentColor)
+            .frame(maxWidth: .infinity, minHeight: 30)
+            .background(
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(Color.accentColor.opacity(0.10))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 8)
+                    .stroke(Color.accentColor.opacity(0.22), lineWidth: 1)
+            )
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func primaryDormantTipRestoreTitle(for brush: BrushSettings) -> String? {
+        guard brush.tipShape != .customRound else { return nil }
+
+        if effectivePrimaryTipSourceSemantic(for: brush) == .importedImage,
+           brush.customTipMaskData != nil || brush.customTipAssetID != nil {
+            return "切回导入图像笔尖"
+        }
+
+        if brush.customTipMaskData != nil {
+            return "切回自定义笔尖"
+        }
+
+        return nil
+    }
+
+    private func secondaryDormantTipRestoreTitle(for secondary: SecondaryTipDescriptor) -> String? {
+        guard secondary.tipShape != .customRound else { return nil }
+
+        if secondary.sourceSemantic == .importedImage,
+           secondary.customTipMaskData != nil || secondary.tipAssetID != nil {
+            return "切回导入图像笔尖"
+        }
+
+        if secondary.customTipMaskData != nil {
+            return "切回自定义笔尖"
+        }
+
+        return nil
     }
 
     private func insertNextPresetShape() {

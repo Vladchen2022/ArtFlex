@@ -3,6 +3,22 @@ import Testing
 @testable import ArtFlex
 
 struct DualTipBrushSettingsTests {
+    private final class BrushLibraryPersistenceTestFileManager: FileManager {
+        private let rootURL: URL
+
+        init(rootURL: URL) {
+            self.rootURL = rootURL
+            super.init()
+        }
+
+        override func urls(
+            for directory: SearchPathDirectory,
+            in domainMask: SearchPathDomainMask
+        ) -> [URL] {
+            [rootURL]
+        }
+    }
+
     @Test
     func legacySecondaryTipDescriptorDecodeFallsBackToSafeDefaults() throws {
         let legacyJSON = """
@@ -207,14 +223,37 @@ struct DualTipBrushSettingsTests {
             selectedPresetID: "imported"
         )
 
-        let archive = BrushLibraryArchive(library: library)
+        let primaryAssetID = BrushTipImageAssetID(maskData: brush.customTipMaskData!)
+        let secondaryAssetID = BrushTipImageAssetID(maskData: brush.secondaryTipDescriptor.customTipMaskData!)
+        let tipImageLibrary = TipImageLibraryState(
+            items: [
+                TipImageLibraryItem(
+                    id: primaryAssetID,
+                    sourceInfo: brush.customTipImportedSourceInfo!,
+                    maskData: brush.customTipMaskData
+                ),
+                TipImageLibraryItem(
+                    id: secondaryAssetID,
+                    sourceInfo: brush.secondaryTipDescriptor.importedSourceInfo!,
+                    maskData: brush.secondaryTipDescriptor.customTipMaskData
+                )
+            ]
+        )
+
+        let archive = BrushLibraryArchive(
+            library: library,
+            tipImageLibrary: tipImageLibrary
+        )
 
         #expect(archive.tipImageAssets.count == 2)
+        #expect(archive.tipImageLibrary.items.allSatisfy { $0.maskData == nil })
         #expect(archive.library.presets[0].brush.customTipMaskData == nil)
         #expect(archive.library.presets[0].brush.customTipAssetID != nil)
         #expect(archive.library.presets[0].brush.secondaryTipDescriptor.customTipMaskData == nil)
         #expect(archive.library.presets[0].brush.secondaryTipDescriptor.tipAssetID != nil)
         #expect(archive.resolvedLibrary == BrushTipImageAssetSystem.resolveLibrary(archive.library, assets: archive.tipImageAssets))
+        #expect(archive.resolvedTipImageLibrary.items[0].maskData == brush.customTipMaskData)
+        #expect(archive.resolvedTipImageLibrary.items[1].maskData == brush.secondaryTipDescriptor.customTipMaskData)
         #expect(archive.resolvedLibrary.presets[0].brush.customTipImportedSourceInfo == brush.customTipImportedSourceInfo)
         #expect(archive.resolvedLibrary.presets[0].brush.secondaryTipDescriptor.importedSourceInfo == brush.secondaryTipDescriptor.importedSourceInfo)
         #expect(archive.resolvedLibrary.presets[0].brush.customTipMaskData == brush.customTipMaskData)
@@ -224,10 +263,166 @@ struct DualTipBrushSettingsTests {
         let decoded = try JSONDecoder().decode(BrushLibraryArchive.self, from: encoded)
 
         #expect(decoded.tipImageAssets == archive.tipImageAssets)
+        #expect(decoded.resolvedTipImageLibrary == archive.resolvedTipImageLibrary)
         #expect(decoded.resolvedLibrary.presets[0].brush.customTipImportedSourceInfo == brush.customTipImportedSourceInfo)
         #expect(decoded.resolvedLibrary.presets[0].brush.secondaryTipDescriptor.importedSourceInfo == brush.secondaryTipDescriptor.importedSourceInfo)
         #expect(decoded.resolvedLibrary.presets[0].brush.customTipMaskData == brush.customTipMaskData)
         #expect(decoded.resolvedLibrary.presets[0].brush.secondaryTipDescriptor.customTipMaskData == brush.secondaryTipDescriptor.customTipMaskData)
+    }
+
+    @Test
+    func brushLibraryArchivePreservesImportedTipAssetsEvenWhenAnotherShapeIsActive() throws {
+        var brush = BrushSettings.stageOneDefault
+        brush.tipShape = .hardRound
+        brush.customTipSourceSemantic = .importedImage
+        brush.customTipImportedSourceInfo = ImportedTipSourceInfo(
+            sourceLabel: "Dormant Primary",
+            pixelWidth: 300,
+            pixelHeight: 180
+        )
+        brush.customTipMaskData = Data([255, 80, 32, 0, 96])
+        brush.secondaryTipDescriptor = SecondaryTipDescriptor(
+            tipShape: .square,
+            sourceSemantic: .importedImage,
+            importedSourceInfo: ImportedTipSourceInfo(
+                sourceLabel: "Dormant Secondary",
+                pixelWidth: 144,
+                pixelHeight: 144
+            ),
+            customTipMaskData: Data([0, 255, 96, 32, 8]),
+            customTipSoftness: 0.44,
+            customTipRoundness: 0.73,
+            customTipAngleDegrees: 27
+        )
+
+        let library = BrushLibraryState(
+            presets: [
+                BrushPreset(
+                    id: "dormant-imported",
+                    name: "Dormant Imported",
+                    brush: brush,
+                    isBuiltIn: false
+                )
+            ],
+            selectedPresetID: "dormant-imported"
+        )
+
+        let archive = BrushLibraryArchive(library: library)
+
+        #expect(archive.tipImageAssets.count == 2)
+        #expect(archive.library.presets[0].brush.customTipMaskData == nil)
+        #expect(archive.library.presets[0].brush.customTipAssetID != nil)
+        #expect(archive.library.presets[0].brush.secondaryTipDescriptor.customTipMaskData == nil)
+        #expect(archive.library.presets[0].brush.secondaryTipDescriptor.tipAssetID != nil)
+        #expect(archive.library.presets[0].brush.tipShape == .hardRound)
+        #expect(archive.library.presets[0].brush.secondaryTipDescriptor.tipShape == .square)
+        #expect(archive.resolvedLibrary.presets[0].brush.customTipMaskData == brush.customTipMaskData)
+        #expect(archive.resolvedLibrary.presets[0].brush.secondaryTipDescriptor.customTipMaskData == brush.secondaryTipDescriptor.customTipMaskData)
+        #expect(archive.resolvedLibrary.presets[0].brush.customTipImportedSourceInfo == brush.customTipImportedSourceInfo)
+        #expect(archive.resolvedLibrary.presets[0].brush.secondaryTipDescriptor.importedSourceInfo == brush.secondaryTipDescriptor.importedSourceInfo)
+    }
+
+    @Test
+    func tipImageLibraryCanBackfillImportedTipsFromBrushes() {
+        let primaryMask = Data([255, 16, 96, 200])
+        let secondaryMask = Data([255, 32, 128, 224])
+
+        var brush = BrushSettings.stageOneDefault
+        brush.tipShape = .customRound
+        brush.customTipSourceSemantic = .importedImage
+        brush.customTipImportedSourceInfo = ImportedTipSourceInfo(
+            sourceLabel: "Primary Source",
+            pixelWidth: 144,
+            pixelHeight: 96
+        )
+        brush.customTipMaskData = primaryMask
+        brush.secondaryTipDescriptor = SecondaryTipDescriptor(
+            tipShape: .customRound,
+            sourceSemantic: .importedImage,
+            importedSourceInfo: ImportedTipSourceInfo(
+                sourceLabel: "Secondary Source",
+                pixelWidth: 80,
+                pixelHeight: 120
+            ),
+            customTipMaskData: secondaryMask,
+            customTipSoftness: 0.44,
+            customTipRoundness: 0.73,
+            customTipAngleDegrees: 27
+        )
+
+        var library = TipImageLibraryState.empty
+        let changed = library.upsertImportedTips(from: brush)
+
+        #expect(changed)
+        #expect(library.items.count == 2)
+
+        let unchanged = library.upsertImportedTips(from: brush)
+        #expect(!unchanged)
+        #expect(library.items.count == 2)
+    }
+
+    @Test
+    func tipImageLibraryMoveItemReordersByDropTargetIndex() {
+        let first = TipImageLibraryItem(
+            id: BrushTipImageAssetID(rawValue: "first"),
+            sourceInfo: ImportedTipSourceInfo(sourceLabel: "First", pixelWidth: 64, pixelHeight: 64),
+            maskData: Data([1])
+        )
+        let second = TipImageLibraryItem(
+            id: BrushTipImageAssetID(rawValue: "second"),
+            sourceInfo: ImportedTipSourceInfo(sourceLabel: "Second", pixelWidth: 64, pixelHeight: 64),
+            maskData: Data([2])
+        )
+        let third = TipImageLibraryItem(
+            id: BrushTipImageAssetID(rawValue: "third"),
+            sourceInfo: ImportedTipSourceInfo(sourceLabel: "Third", pixelWidth: 64, pixelHeight: 64),
+            maskData: Data([3])
+        )
+        var library = TipImageLibraryState(items: [first, second, third])
+
+        let movedToEnd = library.moveItem(id: first.id, to: 2)
+        #expect(movedToEnd)
+        #expect(library.items.map(\.id) == [second.id, third.id, first.id])
+
+        let movedToFront = library.moveItem(id: first.id, to: 0)
+        #expect(movedToFront)
+        #expect(library.items.map(\.id) == [first.id, second.id, third.id])
+    }
+
+    @Test
+    func brushLibraryPersistenceRestoresUnreferencedTipImageLibraryItems() throws {
+        let tempRoot = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: tempRoot, withIntermediateDirectories: true)
+        defer {
+            try? FileManager.default.removeItem(at: tempRoot)
+        }
+
+        let fileManager = BrushLibraryPersistenceTestFileManager(rootURL: tempRoot)
+        let controller = BrushLibraryPersistenceController(fileManager: fileManager)
+
+        let orphanMask = Data([7, 14, 21, 28])
+        let tipImageLibrary = TipImageLibraryState(
+            items: [
+                TipImageLibraryItem(
+                    id: BrushTipImageAssetID(maskData: orphanMask),
+                    sourceInfo: ImportedTipSourceInfo(
+                        sourceLabel: "Unused Tip",
+                        pixelWidth: 128,
+                        pixelHeight: 96
+                    ),
+                    maskData: orphanMask
+                )
+            ]
+        )
+
+        try controller.saveResources(
+            library: .stageOneDefault,
+            tipImageLibrary: tipImageLibrary
+        )
+
+        let restored = try #require(controller.loadResources())
+        #expect(restored.tipImageLibrary == tipImageLibrary)
     }
 
     @Test

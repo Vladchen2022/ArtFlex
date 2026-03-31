@@ -1,6 +1,6 @@
 # DECISIONS
 
-最后更新：2026-03-30
+最后更新：2026-03-31
 
 本文件记录：**当前代码和产品层已经确认的关键决策。**  
 如果后续改动与这些点冲突，应先重新讨论，而不是直接改代码。
@@ -158,6 +158,17 @@
   - imported-image 的 preview fit 现在由 `TipSourceSemantic` 驱动，不再依赖会话态 flag
   - imported-image 的来源标签与原始像素尺寸现在由 `ImportedTipSourceInfo` 保存并在 UI 摘要中显示
   - 手绘 / 清空主次笔尖遮罩时，会同步清掉 imported-image 资产引用和来源信息，保持来源语义单一
+- `secondary image tip` 第三刀已完成：
+  - imported-image 资产的 archive / resolve 条件不再绑定“当前正在使用 customRound”
+  - 即使当前临时切到硬边圆 / 柔边圆 / 方形，隐藏的 imported-image 笔尖状态也会继续走统一资产链
+  - 这保证了用户切回 `customRound` 后，导入图像笔尖不会因为保存工程 / 导出笔刷库 / 重开而丢失
+- `secondary image tip` 第四刀方向已确认并开始落地：
+  - 主笔尖与次笔尖共用一套持久化 `tip image library`
+  - 由外部导入图片制作、并已保存为画笔的笔刷，无论是否重启软件，都必须恢复出此前导入图片的笔尖效果
+  - `tip image library` 中未被任何画笔引用的图片，也必须独立保留并在重启后恢复
+  - `tip image library` 现在已接通 workspace / project / brush library 持久化，当前 UI 采用“点选卡片后按完成应用 / 拖拽排序 / 右上角删除 / Esc 退出资料库”
+  - 删除规则已冻结为：如果某张资料库图片仍被当前笔刷或任一画笔预设引用，则阻止删除
+  - 当前“临时切走别的形状后仍保留隐藏 imported tip”只作为兼容语义存在，后续主入口以显式资料库为准
 - 最近一轮回归已修复：
   - 编辑组合笔尖后普通画笔卡顿
   - 偶发画不出笔触

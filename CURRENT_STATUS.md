@@ -1,6 +1,6 @@
 # ArtFlex 当前状态
 
-- 当前阶段：Dual Tip 已完成到 `invert`，并补齐了主/次笔尖来源语义、preview 收口，以及最近一轮普通画笔卡顿 / 偶发不出笔 / 导入笔尖白边修复；下一阶段已开始推进，其中 `secondary image tip` 已完成两刀：第一刀落到 project / brush library archive 持久化链，第二刀把 imported-image 来源说明和 preview fit 收口为 model-driven 行为
+- 当前阶段：Dual Tip 已完成到 `invert`，并补齐了主/次笔尖来源语义、preview 收口，以及最近一轮普通画笔卡顿 / 偶发不出笔 / 导入笔尖白边修复；下一阶段已开始推进，其中 `secondary image tip` 已先完成 archive / persistence 边界、imported-image model-driven 收口，以及共享 `tip image library` 第一刀
 - 当前代码状态：`multiply`、`subtract`、`intersect` 已可用；`secondary scatter`、`secondary angle offset`、`secondary invert` 已进入真实绘制；当前基线和主绘制路径未被打坏
 - 当前编辑/保存状态：主笔尖单一真相源已接通；次笔尖来源已接通；主/次笔尖的 `procedural / customMask / importedImage` 来源语义已能保存到 preset / project；imported-image 的来源标签与原始像素尺寸也已能保存和恢复
 - 当前支持：
@@ -22,9 +22,14 @@
   1. imported-image 主/次笔尖现在会在 project package / brush library archive 中抽成独立 `tipImageAssets`
   2. archive 内的主/次 imported-image 笔尖现在会保存资产引用，再在打开/导入时解析回当前运行态 `maskData`
   3. imported-image 的来源说明和 preview fit 现在由 `TipSourceSemantic + ImportedTipSourceInfo` 决定，不再依赖会话态 flag
-  4. 当前 renderer / preview 运行态仍继续直接吃解析后的 `maskData`，这一刀没有改动真实绘制主链
+  4. 主笔尖和次笔尖现在共用一套持久化 `tip image library`，资料库会跟随 workspace / project / brush library 一起保存和恢复
+  5. `tip image library` 现在会独立保留未被任何画笔引用的图片；重启后打开资料库也能恢复这些未使用项
+  6. `tip image library` 当前 UI 已切到：点选卡片后按“完成”应用、拖拽排序、右上角删除图标、`Esc` 退出资料库
+  7. 当前删除规则已冻结为：如果某张图片仍被当前笔刷或任一画笔预设引用，则禁止删除
+  8. 即使当前临时切到硬边圆 / 柔边圆 / 方形，隐藏的 imported-image 笔尖状态也会继续走统一资产归档与恢复链；这目前作为兼容行为保留，但后续主入口将以显式资料库为准
+  9. 当前 renderer / preview 运行态仍继续直接吃解析后的 `maskData`，这一刀没有改动真实绘制主链
 - 当前未完全落地但已确认继续推进：
-  1. `secondary image tip` 的完整入口 / 生命周期体验
+  1. 共享 `tip image library` 的剩余生命周期 / 管理体验收尾
   2. 更严格 `renderer-backed preview`
   3. 更复杂随机 / spacing 系统
   4. 更宽真实绘制 gate

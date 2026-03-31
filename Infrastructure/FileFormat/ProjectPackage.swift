@@ -5,6 +5,7 @@ struct ProjectPackage: Codable, Sendable, Equatable {
     var toolSession: ToolSessionState
     var colorPanel: ColorPanelState
     var brushLibrary: BrushLibraryState
+    var tipImageLibrary: TipImageLibraryState
     var generator: GeneratorSettings
     var viewport: CanvasViewport
     var selection: SelectionState
@@ -16,6 +17,7 @@ struct ProjectPackage: Codable, Sendable, Equatable {
         case toolSession
         case colorPanel
         case brushLibrary
+        case tipImageLibrary
         case generator
         case viewport
         case selection
@@ -28,6 +30,7 @@ struct ProjectPackage: Codable, Sendable, Equatable {
         toolSession: ToolSessionState,
         colorPanel: ColorPanelState,
         brushLibrary: BrushLibraryState,
+        tipImageLibrary: TipImageLibraryState,
         generator: GeneratorSettings,
         viewport: CanvasViewport,
         selection: SelectionState,
@@ -38,6 +41,7 @@ struct ProjectPackage: Codable, Sendable, Equatable {
         self.toolSession = toolSession
         self.colorPanel = colorPanel
         self.brushLibrary = brushLibrary
+        self.tipImageLibrary = tipImageLibrary
         self.generator = generator
         self.viewport = viewport
         self.selection = selection
@@ -51,6 +55,7 @@ struct ProjectPackage: Codable, Sendable, Equatable {
         toolSession = try container.decode(ToolSessionState.self, forKey: .toolSession)
         colorPanel = try container.decode(ColorPanelState.self, forKey: .colorPanel)
         brushLibrary = try container.decode(BrushLibraryState.self, forKey: .brushLibrary)
+        tipImageLibrary = try container.decodeIfPresent(TipImageLibraryState.self, forKey: .tipImageLibrary) ?? .empty
         generator = try container.decode(GeneratorSettings.self, forKey: .generator)
         viewport = try container.decode(CanvasViewport.self, forKey: .viewport)
         selection = try container.decode(SelectionState.self, forKey: .selection)
@@ -64,6 +69,7 @@ struct ProjectPackage: Codable, Sendable, Equatable {
         try container.encode(toolSession, forKey: .toolSession)
         try container.encode(colorPanel, forKey: .colorPanel)
         try container.encode(brushLibrary, forKey: .brushLibrary)
+        try container.encode(tipImageLibrary, forKey: .tipImageLibrary)
         try container.encode(generator, forKey: .generator)
         try container.encode(viewport, forKey: .viewport)
         try container.encode(selection, forKey: .selection)
@@ -81,6 +87,7 @@ struct ProjectPackage: Codable, Sendable, Equatable {
             toolSession: normalized.workspace.toolSession,
             colorPanel: normalized.workspace.colorPanel,
             brushLibrary: normalized.workspace.brushLibrary,
+            tipImageLibrary: normalized.workspace.tipImageLibrary,
             generator: normalized.workspace.generator,
             viewport: normalized.workspace.viewport,
             selection: normalized.workspace.selection,
@@ -96,6 +103,7 @@ struct ProjectPackage: Codable, Sendable, Equatable {
                 toolSession: toolSession,
                 colorPanel: colorPanel,
                 brushLibrary: brushLibrary,
+                tipImageLibrary: tipImageLibrary,
                 generator: generator,
                 viewport: viewport,
                 selection: selection

@@ -605,6 +605,17 @@ final class WorkspaceViewModel: ObservableObject {
         refresh()
     }
 
+    func reactivatePrimaryCustomTipSourceIfAvailable() {
+        bootstrap.workspaceStore.updateToolSession { session in
+            let hasDormantCustomTip =
+                session.brush.customTipMaskData != nil ||
+                (session.brush.customTipSourceSemantic == .importedImage && session.brush.customTipAssetID != nil)
+            guard hasDormantCustomTip else { return }
+            session.brush.tipShape = .customRound
+        }
+        refresh()
+    }
+
     func setDualTipEnabled(_ enabled: Bool) {
         bootstrap.workspaceStore.updateToolSession { session in
             session.brush.dualTipEnabled = enabled
@@ -632,6 +643,18 @@ final class WorkspaceViewModel: ObservableObject {
     func setSecondaryTipShape(_ tipShape: BrushTipShape) {
         bootstrap.workspaceStore.updateToolSession { session in
             session.brush.secondaryTipDescriptor.tipShape = tipShape
+        }
+        refresh()
+    }
+
+    func reactivateSecondaryCustomTipSourceIfAvailable() {
+        bootstrap.workspaceStore.updateToolSession { session in
+            let secondary = session.brush.secondaryTipDescriptor
+            let hasDormantCustomTip =
+                secondary.customTipMaskData != nil ||
+                (secondary.sourceSemantic == .importedImage && secondary.tipAssetID != nil)
+            guard hasDormantCustomTip else { return }
+            session.brush.secondaryTipDescriptor.tipShape = .customRound
         }
         refresh()
     }
@@ -801,14 +824,16 @@ final class WorkspaceViewModel: ObservableObject {
             return false
         }
         let importedSourceInfo = makeImportedTipSourceInfo(from: image, sourceDescription: sourceDescription)
+        let libraryItem = upsertTipImageLibraryItem(maskData: maskData, sourceInfo: importedSourceInfo)
 
         bootstrap.workspaceStore.updateToolSession { session in
             session.brush.tipShape = .customRound
             session.brush.customTipSourceSemantic = .importedImage
-            session.brush.customTipAssetID = BrushTipImageAssetID(maskData: maskData)
-            session.brush.customTipImportedSourceInfo = importedSourceInfo
+            session.brush.customTipAssetID = libraryItem.id
+            session.brush.customTipImportedSourceInfo = libraryItem.sourceInfo
             session.brush.customTipMaskData = maskData
         }
+        persistBrushLibrary()
         refresh()
         showStatus(.init(kind: .success, message: "已从\(sourceDescription)导入笔尖"))
         return true
@@ -840,14 +865,16 @@ final class WorkspaceViewModel: ObservableObject {
             return false
         }
         let importedSourceInfo = makeImportedTipSourceInfo(from: image, sourceDescription: sourceDescription)
+        let libraryItem = upsertTipImageLibraryItem(maskData: maskData, sourceInfo: importedSourceInfo)
 
         bootstrap.workspaceStore.updateToolSession { session in
             session.brush.secondaryTipDescriptor.tipShape = .customRound
             session.brush.secondaryTipDescriptor.sourceSemantic = .importedImage
-            session.brush.secondaryTipDescriptor.tipAssetID = BrushTipImageAssetID(maskData: maskData)
-            session.brush.secondaryTipDescriptor.importedSourceInfo = importedSourceInfo
+            session.brush.secondaryTipDescriptor.tipAssetID = libraryItem.id
+            session.brush.secondaryTipDescriptor.importedSourceInfo = libraryItem.sourceInfo
             session.brush.secondaryTipDescriptor.customTipMaskData = maskData
         }
+        persistBrushLibrary()
         refresh()
         showStatus(.init(kind: .success, message: "已从\(sourceDescription)导入次笔尖"))
         return true
@@ -931,6 +958,124 @@ final class WorkspaceViewModel: ObservableObject {
             max(Int(image.size.width.rounded()), 1),
             max(Int(image.size.height.rounded()), 1)
         )
+    }
+
+    @discardableResult
+    private func upsertTipImageLibraryItem(
+        maskData: Data,
+        sourceInfo: ImportedTipSourceInfo
+    ) -> TipImageLibraryItem {
+        let assetID = BrushTipImageAssetID(maskData: maskData)
+        var resolvedItem = TipImageLibraryItem(
+            id: assetID,
+            sourceInfo: sourceInfo,
+            maskData: maskData
+        )
+
+        bootstrap.workspaceStore.updateTipImageLibrary { library in
+            resolvedItem = library.upsertImportedItem(
+                id: assetID,
+                sourceInfo: sourceInfo,
+                maskData: maskData
+            )
+        }
+
+        return resolvedItem
+    }
+
+    func applyPrimaryTipImageLibraryItem(_ assetID: BrushTipImageAssetID) {
+        guard let item = workspace.tipImageLibrary.item(id: assetID),
+              let maskData = item.maskData else {
+            showStatus(.init(kind: .error, message: "无法读取该笔尖图片"))
+            return
+        }
+
+        bootstrap.workspaceStore.updateToolSession { session in
+            session.brush.tipShape = .customRound
+            session.brush.customTipSourceSemantic = .importedImage
+            session.brush.customTipAssetID = item.id
+            session.brush.customTipImportedSourceInfo = item.sourceInfo
+            session.brush.customTipMaskData = maskData
+        }
+        refresh()
+        showStatus(.init(kind: .success, message: "已应用共享笔尖图片"))
+    }
+
+    func applySecondaryTipImageLibraryItem(_ assetID: BrushTipImageAssetID) {
+        guard let item = workspace.tipImageLibrary.item(id: assetID),
+              let maskData = item.maskData else {
+            showStatus(.init(kind: .error, message: "无法读取该笔尖图片"))
+            return
+        }
+
+        bootstrap.workspaceStore.updateToolSession { session in
+            session.brush.secondaryTipDescriptor.tipShape = .customRound
+            session.brush.secondaryTipDescriptor.sourceSemantic = .importedImage
+            session.brush.secondaryTipDescriptor.tipAssetID = item.id
+            session.brush.secondaryTipDescriptor.importedSourceInfo = item.sourceInfo
+            session.brush.secondaryTipDescriptor.customTipMaskData = maskData
+        }
+        refresh()
+        showStatus(.init(kind: .success, message: "已应用共享次笔尖图片"))
+    }
+
+    func moveTipImageLibraryItem(_ assetID: BrushTipImageAssetID, to targetIndex: Int) {
+        var moved = false
+        bootstrap.workspaceStore.updateTipImageLibrary { library in
+            moved = library.moveItem(id: assetID, to: targetIndex)
+        }
+        guard moved else { return }
+        persistBrushLibrary()
+        refresh()
+    }
+
+    @discardableResult
+    func deleteTipImageLibraryItem(_ assetID: BrushTipImageAssetID) -> Bool {
+        let referenceCount = tipImageLibraryReferenceCount(for: assetID)
+        guard referenceCount == 0 else {
+            showStatus(.init(kind: .info, message: "该笔尖图片仍被 \(referenceCount) 处引用，无法删除"))
+            return false
+        }
+
+        var didDelete = false
+        bootstrap.workspaceStore.updateTipImageLibrary { library in
+            didDelete = library.deleteItem(id: assetID)
+        }
+        guard didDelete else {
+            showStatus(.init(kind: .info, message: "未找到该笔尖图片"))
+            return false
+        }
+
+        persistBrushLibrary()
+        refresh()
+        showStatus(.init(kind: .success, message: "已删除笔尖图片"))
+        return true
+    }
+
+    private func tipImageLibraryReferenceCount(for assetID: BrushTipImageAssetID) -> Int {
+        var count = 0
+
+        let currentBrush = workspace.toolSession.brush
+        if currentBrush.customTipSourceSemantic == .importedImage, currentBrush.customTipAssetID == assetID {
+            count += 1
+        }
+        if currentBrush.secondaryTipDescriptor.sourceSemantic == .importedImage,
+           currentBrush.secondaryTipDescriptor.tipAssetID == assetID {
+            count += 1
+        }
+
+        for preset in workspace.brushLibrary.presets {
+            if preset.brush.customTipSourceSemantic == .importedImage,
+               preset.brush.customTipAssetID == assetID {
+                count += 1
+            }
+            if preset.brush.secondaryTipDescriptor.sourceSemantic == .importedImage,
+               preset.brush.secondaryTipDescriptor.tipAssetID == assetID {
+                count += 1
+            }
+        }
+
+        return count
     }
 
     func setGeneratorKind(_ kind: GeneratorKind) {
@@ -1295,6 +1440,7 @@ final class WorkspaceViewModel: ObservableObject {
         bootstrap.workspaceStore.updateBrushLibrary { library in
             library.selectPreset(id: presetID)
         }
+        _ = synchronizeTipImageLibraryFromWorkspace(persistIfChanged: true)
         refresh()
         if showFeedback {
             showStatus(.init(kind: .success, message: "已应用 \(preset.name)"))
@@ -1307,9 +1453,21 @@ final class WorkspaceViewModel: ObservableObject {
                 brush: workspace.toolSession.brush
             )
         }
+        _ = synchronizeTipImageLibraryFromWorkspace(persistIfChanged: false)
         persistBrushLibrary()
         refresh()
         showStatus(.init(kind: .success, message: "已保存画笔"))
+    }
+
+    @discardableResult
+    func prepareTipImageLibraryForBrowser() -> Bool {
+        let restored = restorePersistedTipImageLibraryIfAvailable()
+        let synchronized = synchronizeTipImageLibraryFromWorkspace(persistIfChanged: true)
+        let changed = restored || synchronized
+        if changed {
+            refreshLightweight()
+        }
+        return changed
     }
 
     func deleteBrushPreset(_ presetID: String) {
@@ -1349,7 +1507,11 @@ final class WorkspaceViewModel: ObservableObject {
         }
 
         do {
-            try bootstrap.brushLibraryPersistenceController.exportLibrary(workspace.brushLibrary, to: url)
+            try bootstrap.brushLibraryPersistenceController.exportLibrary(
+                workspace.brushLibrary,
+                tipImageLibrary: workspace.tipImageLibrary,
+                to: url
+            )
             showStatus(.init(kind: .success, message: "已导出画笔库"))
         } catch {
             showStatus(.init(kind: .error, message: error.localizedDescription))
@@ -4926,7 +5088,14 @@ final class WorkspaceViewModel: ObservableObject {
         do {
             resetSnapshotToolState(resumeTimelapseIfNeeded: false)
             let result = try bootstrap.persistenceController.openProject(from: url)
-            bootstrap.workspaceStore.replaceState(result.workspace)
+            let existingTipImageLibrary = bootstrap.workspaceStore.state.tipImageLibrary
+            var openedWorkspace = result.workspace
+            openedWorkspace.tipImageLibrary = Self.mergeTipImageLibraries(
+                base: existingTipImageLibrary,
+                imported: Self.normalizeImportedTipImageLibrary(result.workspace.tipImageLibrary)
+            )
+            bootstrap.workspaceStore.replaceState(openedWorkspace)
+            _ = synchronizeTipImageLibraryFromWorkspace(persistIfChanged: false)
             Self.normalizeLegacySelectionIfNeeded(in: bootstrap.workspaceStore)
             bootstrap.layerSurfaceStore.reset()
             bootstrap.layerSurfaceStore.prepareTextures(
@@ -5026,6 +5195,7 @@ final class WorkspaceViewModel: ObservableObject {
             toolSession: workspace.toolSession,
             colorPanel: workspace.colorPanel,
             brushLibrary: workspace.brushLibrary,
+            tipImageLibrary: workspace.tipImageLibrary,
             generator: workspace.generator,
             viewport: .stageOneDefault,
             selection: .empty
@@ -5166,17 +5336,29 @@ final class WorkspaceViewModel: ObservableObject {
 
         do {
             let imported = try bootstrap.brushLibraryPersistenceController.importLibrary(from: url)
-            let normalized = Self.normalizeImportedBrushLibrary(imported)
+            let normalizedLibrary = Self.normalizeImportedBrushLibrary(imported.library)
+            let normalizedTipImageLibrary = Self.normalizeImportedTipImageLibrary(imported.tipImageLibrary)
             bootstrap.workspaceStore.updateBrushLibrary { library in
                 switch mode {
                 case .replace:
-                    library = normalized.ensuringBuiltInDualTipPhaseOneDemoPresets()
+                    library = normalizedLibrary.ensuringBuiltInDualTipPhaseOneDemoPresets()
                 case .append:
-                    library = Self.mergeBrushLibraries(base: library, imported: normalized)
+                    library = Self.mergeBrushLibraries(base: library, imported: normalizedLibrary)
                         .ensuringBuiltInDualTipPhaseOneDemoPresets()
                 }
                 if library.selectedPresetID == nil {
                     library.selectedPresetID = library.presets.first?.id
+                }
+            }
+            bootstrap.workspaceStore.updateTipImageLibrary { tipImageLibrary in
+                switch mode {
+                case .replace:
+                    tipImageLibrary = normalizedTipImageLibrary
+                case .append:
+                    tipImageLibrary = Self.mergeTipImageLibraries(
+                        base: tipImageLibrary,
+                        imported: normalizedTipImageLibrary
+                    )
                 }
             }
             persistBrushLibrary()
@@ -5236,22 +5418,98 @@ final class WorkspaceViewModel: ObservableObject {
         return merged
     }
 
+    private static func normalizeImportedTipImageLibrary(_ library: TipImageLibraryState) -> TipImageLibraryState {
+        var seen = Set<BrushTipImageAssetID>()
+        var items: [TipImageLibraryItem] = []
+
+        for item in library.items {
+            guard seen.insert(item.id).inserted else {
+                continue
+            }
+            items.append(item)
+        }
+
+        return TipImageLibraryState(items: items)
+    }
+
+    private static func mergeTipImageLibraries(
+        base: TipImageLibraryState,
+        imported: TipImageLibraryState
+    ) -> TipImageLibraryState {
+        var merged = base
+
+        for item in imported.items where !merged.contains(id: item.id) {
+            merged.items.append(item)
+        }
+
+        return merged
+    }
+
+    @discardableResult
+    private func restorePersistedTipImageLibraryIfAvailable() -> Bool {
+        guard let restored = bootstrap.brushLibraryPersistenceController.loadResources() else {
+            return false
+        }
+
+        let normalizedTipImageLibrary = Self.normalizeImportedTipImageLibrary(restored.tipImageLibrary)
+        var changed = false
+        bootstrap.workspaceStore.updateTipImageLibrary { tipImageLibrary in
+            let merged = Self.mergeTipImageLibraries(
+                base: tipImageLibrary,
+                imported: normalizedTipImageLibrary
+            )
+            if merged != tipImageLibrary {
+                tipImageLibrary = merged
+                changed = true
+            }
+        }
+        return changed
+    }
+
+    @discardableResult
+    private func synchronizeTipImageLibraryFromWorkspace(
+        persistIfChanged: Bool
+    ) -> Bool {
+        let state = bootstrap.workspaceStore.state
+        let currentBrush = state.toolSession.brush
+        let presetBrushes = state.brushLibrary.presets.map(\.brush)
+
+        var changed = false
+        bootstrap.workspaceStore.updateTipImageLibrary { library in
+            changed = library.upsertImportedTips(from: currentBrush)
+            for brush in presetBrushes {
+                changed = library.upsertImportedTips(from: brush) || changed
+            }
+        }
+
+        if changed, persistIfChanged {
+            persistBrushLibrary()
+        }
+        return changed
+    }
+
     private func persistBrushLibrary() {
         do {
-            try bootstrap.brushLibraryPersistenceController.saveLibrary(bootstrap.workspaceStore.state.brushLibrary)
+            try bootstrap.brushLibraryPersistenceController.saveResources(
+                library: bootstrap.workspaceStore.state.brushLibrary,
+                tipImageLibrary: bootstrap.workspaceStore.state.tipImageLibrary
+            )
         } catch {
             showStatus(.init(kind: .error, message: "保存画笔库失败：\(error.localizedDescription)"))
         }
     }
 
     private static func restorePersistedBrushLibraryIfAvailable(in bootstrap: AppBootstrap) {
-        guard let restored = bootstrap.brushLibraryPersistenceController.loadLibrary() else { return }
+        guard let restored = bootstrap.brushLibraryPersistenceController.loadResources() else { return }
         bootstrap.workspaceStore.updateBrushLibrary { library in
-            library = Self.normalizeImportedBrushLibrary(restored)
+            library = Self.normalizeImportedBrushLibrary(restored.library)
                 .ensuringBuiltInDualTipPhaseOneDemoPresets()
             if library.selectedPresetID == nil {
                 library.selectedPresetID = library.presets.first?.id
             }
+        }
+        bootstrap.workspaceStore.updateTipImageLibrary { tipImageLibrary in
+            tipImageLibrary = Self.normalizeImportedTipImageLibrary(restored.tipImageLibrary)
         }
     }
 
@@ -5431,6 +5689,7 @@ final class WorkspaceViewModel: ObservableObject {
             toolSession: workspace.toolSession,
             colorPanel: workspace.colorPanel,
             brushLibrary: workspace.brushLibrary,
+            tipImageLibrary: workspace.tipImageLibrary,
             generator: workspace.generator
         )
     }
@@ -5439,6 +5698,7 @@ final class WorkspaceViewModel: ObservableObject {
         bootstrap.workspaceStore.updateToolSession { $0 = context.toolSession }
         bootstrap.workspaceStore.updateColorPanel { $0 = context.colorPanel }
         bootstrap.workspaceStore.updateBrushLibrary { $0 = context.brushLibrary }
+        bootstrap.workspaceStore.updateTipImageLibrary { $0 = context.tipImageLibrary }
         bootstrap.workspaceStore.updateGenerator { $0 = context.generator }
         refreshLightweight()
     }

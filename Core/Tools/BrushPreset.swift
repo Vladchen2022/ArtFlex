@@ -203,22 +203,29 @@ struct BrushLibraryState: Codable, Sendable, Equatable {
 }
 
 struct BrushLibraryArchive: Codable, Sendable, Equatable {
-    var version: Int = 2
+    var version: Int = 3
     var library: BrushLibraryState
+    var tipImageLibrary: TipImageLibraryState
     var tipImageAssets: [BrushTipImageAsset]
 
     init(
-        version: Int = 2,
+        version: Int = 3,
         library: BrushLibraryState,
+        tipImageLibrary: TipImageLibraryState = .empty,
         tipImageAssets: [BrushTipImageAsset]? = nil
     ) {
         self.version = version
         if let tipImageAssets {
             self.library = library
+            self.tipImageLibrary = tipImageLibrary
             self.tipImageAssets = tipImageAssets
         } else {
-            let normalized = BrushTipImageAssetSystem.archivedLibrary(library)
+            let normalized = BrushTipImageAssetSystem.archivedLibrary(
+                library,
+                tipImageLibrary: tipImageLibrary
+            )
             self.library = normalized.library
+            self.tipImageLibrary = normalized.tipImageLibrary
             self.tipImageAssets = normalized.assets
         }
     }
@@ -226,6 +233,7 @@ struct BrushLibraryArchive: Codable, Sendable, Equatable {
     enum CodingKeys: String, CodingKey {
         case version
         case library
+        case tipImageLibrary
         case tipImageAssets
     }
 
@@ -233,6 +241,7 @@ struct BrushLibraryArchive: Codable, Sendable, Equatable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         version = try container.decodeIfPresent(Int.self, forKey: .version) ?? 1
         library = try container.decode(BrushLibraryState.self, forKey: .library)
+        tipImageLibrary = try container.decodeIfPresent(TipImageLibraryState.self, forKey: .tipImageLibrary) ?? .empty
         tipImageAssets = try container.decodeIfPresent([BrushTipImageAsset].self, forKey: .tipImageAssets) ?? []
     }
 
@@ -240,10 +249,15 @@ struct BrushLibraryArchive: Codable, Sendable, Equatable {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(version, forKey: .version)
         try container.encode(library, forKey: .library)
+        try container.encode(tipImageLibrary, forKey: .tipImageLibrary)
         try container.encode(tipImageAssets, forKey: .tipImageAssets)
     }
 
     var resolvedLibrary: BrushLibraryState {
         BrushTipImageAssetSystem.resolveLibrary(library, assets: tipImageAssets)
+    }
+
+    var resolvedTipImageLibrary: TipImageLibraryState {
+        BrushTipImageAssetSystem.resolveTipImageLibrary(tipImageLibrary, assets: tipImageAssets)
     }
 }

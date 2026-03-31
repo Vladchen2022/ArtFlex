@@ -5,6 +5,7 @@ struct IdeationEditingContext: Equatable {
     var toolSession: ToolSessionState
     var colorPanel: ColorPanelState
     var brushLibrary: BrushLibraryState
+    var tipImageLibrary: TipImageLibraryState
     var generator: GeneratorSettings
 }
 
@@ -137,6 +138,7 @@ final class IdeationSessionState: ObservableObject {
                         toolSession: workspace.toolSession,
                         colorPanel: workspace.colorPanel,
                         brushLibrary: workspace.brushLibrary,
+                        tipImageLibrary: workspace.tipImageLibrary,
                         generator: workspace.generator
                     )
                 }

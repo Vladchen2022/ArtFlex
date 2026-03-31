@@ -2,7 +2,7 @@
 
 ## 1. 项目一句话说明
 
-ArtFlex 是旧版 `BrushCanvas` 的 Metal-first 重构版 macOS 绘图软件；当前一轮性能主线与小范围 UX/perf follow-up 已经收尾，项目已转入新功能开发。当前最新已完成的新功能节点是 Dual Tip / 复合笔尖到 `invert`，并继续补齐了主/次笔尖来源语义、三格示意同源性收口，以及最近一轮“普通画笔卡顿 / 偶发不出笔 / 导入笔尖白边”修复；当前下一阶段范围已经确认，将继续推进 `secondary image tip` 独立资产系统、`renderer-backed preview`、更复杂随机 / `spacing`、以及更宽真实绘制 gate，`smudge` 明确不在本轮范围内。`secondary image tip` 目前已完成两刀：第一刀是 archive-backed 资产边界，第二刀是 imported-image 来源说明与 preview fit 的 model-driven 收口。
+ArtFlex 是旧版 `BrushCanvas` 的 Metal-first 重构版 macOS 绘图软件；当前一轮性能主线与小范围 UX/perf follow-up 已经收尾，项目已转入新功能开发。当前最新已完成的新功能节点是 Dual Tip / 复合笔尖到 `invert`，并继续补齐了主/次笔尖来源语义、三格示意同源性收口，以及最近一轮“普通画笔卡顿 / 偶发不出笔 / 导入笔尖白边”修复；当前下一阶段范围已经确认，将继续推进共享 `tip image library` / `secondary image tip` 资产系统、`renderer-backed preview`、更复杂随机 / `spacing`、以及更宽真实绘制 gate，`smudge` 明确不在本轮范围内。`secondary image tip` 目前已完成三步：archive-backed 资产边界、imported-image 来源说明与 preview fit 的 model-driven 收口，以及共享 `tip image library` 当前基线。
 
 本轮三个定点 follow-up 的最终状态是：
 
@@ -110,13 +110,13 @@ ArtFlex 是旧版 `BrushCanvas` 的 Metal-first 重构版 macOS 绘图软件；�
 
 ### 当前仍未支持 / 尚未接入真实绘制
 
-- `secondary image tip` 的完整入口 / 生命周期资产系统
+- 共享 `tip image library` 的剩余管理 / 生命周期体验
 - 更严格 renderer-backed preview
 - 更复杂随机 / spacing 系统
 - 更宽真实绘制 gate
 - `smudge` 路径
 
-其中除 `smudge` 外，其余四项已确认纳入下一阶段开发范围；`smudge` 继续排除在本轮范围外。需要注意：`secondary image tip` 目前只完成了两刀，当前 project package / brush library archive 已能把 imported-image 主/次笔尖抽成独立 `tipImageAssets` 并在载入时解析回运行态 `maskData`，同时 UI 摘要和 preview fit 也已改成模型语义驱动；但完整入口 / 生命周期还未做完。以上这些现在最多只是局部数据 / UI / persistence 层存在，不代表已经进入最终形态真实绘制。
+其中除 `smudge` 外，其余四项已确认纳入下一阶段开发范围；`smudge` 继续排除在本轮范围外。需要注意：`secondary image tip` 目前虽然已经接通 project package / brush library archive 的 `tipImageAssets`、来源摘要 / preview fit 的模型语义驱动，以及共享 `tip image library` 第一刀，但完整管理体验和 preview/renderer 终态都还没做完。以上这些现在最多只是局部数据 / UI / persistence 层存在，不代表已经进入最终形态真实绘制。
 
 ### 当前用户体验状态
 
@@ -141,6 +141,16 @@ ArtFlex 是旧版 `BrushCanvas` 的 Metal-first 重构版 macOS 绘图软件；�
 - 主/次笔尖的 `importedImage / customMask / procedural` 来源语义现在已经能保存、恢复并在 UI 摘要中稳定区分
 - imported-image 主/次笔尖现在还会在 UI 中显示当前导入来源和原始像素尺寸摘要
 - imported-image preview fit 现在由模型语义驱动，不再依赖“当前会话”临时 flag
+- 主笔尖与次笔尖现在共用一套 `tip image library` 入口
+- `tip image library` 会跟随 workspace / project / brush library 一起保存和恢复；已保存为画笔的 imported-image 笔刷，重启后再次点击仍会恢复原图片笔尖效果
+- `tip image library` 中未被任何画笔引用的图片，现在也会独立保留并在重启后恢复，不会因为“当前没在用”而丢失
+- 资料库当前 UI 已切到：
+  - 点选卡片后按“完成”应用
+  - 拖拽排序
+  - 右上角删除图标
+  - `Esc` 退出资料库
+- 如果某张资料库图片仍被当前笔刷或某个画笔预设引用，当前规则是阻止删除
+- imported-image 主/次笔尖即使暂时切到其他笔尖形状，保存 / 重开后也仍会保留隐藏的图像笔尖资产状态；这现在作为兼容行为保留，但后续主入口将以显式资料库为准
 - 最近一轮回归已修复：
   - 编辑组合笔尖后普通画笔卡顿
   - 偶发画不出笔触
@@ -153,7 +163,7 @@ ArtFlex 是旧版 `BrushCanvas` 的 Metal-first 重构版 macOS 绘图软件；�
 
 - 下一阶段范围已经确认，不再停留在“只观察、不继续扩”的状态
 - 推荐按以下顺序推进：
-  1. 完整 `secondary image tip` 资产入口 / 生命周期体验
+  1. 收尾共享 `tip image library` 的管理 / 生命周期体验
   2. 更严格 `renderer-backed preview`
   3. 更复杂随机 / spacing 系统
   4. 更宽真实绘制 gate

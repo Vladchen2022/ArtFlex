@@ -1,5 +1,10 @@
 import Foundation
 
+struct PersistedBrushResources {
+    var library: BrushLibraryState
+    var tipImageLibrary: TipImageLibraryState
+}
+
 final class BrushLibraryPersistenceController {
     private let fileManager: FileManager
     private let encoder = JSONEncoder()
@@ -10,37 +15,70 @@ final class BrushLibraryPersistenceController {
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
     }
 
-    func loadLibrary() -> BrushLibraryState? {
+    func loadResources() -> PersistedBrushResources? {
         guard let url = persistentLibraryURL() else { return nil }
         guard let data = try? Data(contentsOf: url) else { return nil }
         if let archive = try? decoder.decode(BrushLibraryArchive.self, from: data) {
-            return archive.resolvedLibrary
+            return PersistedBrushResources(
+                library: archive.resolvedLibrary,
+                tipImageLibrary: archive.resolvedTipImageLibrary
+            )
         }
-        return try? decoder.decode(BrushLibraryState.self, from: data)
+        if let library = try? decoder.decode(BrushLibraryState.self, from: data) {
+            return PersistedBrushResources(
+                library: library,
+                tipImageLibrary: .empty
+            )
+        }
+        return nil
     }
 
-    func saveLibrary(_ library: BrushLibraryState) throws {
+    func saveResources(
+        library: BrushLibraryState,
+        tipImageLibrary: TipImageLibraryState
+    ) throws {
         guard let url = persistentLibraryURL(createDirectories: true) else {
             throw NSError(domain: "ArtFlex.BrushLibraryPersistence", code: 1, userInfo: [
                 NSLocalizedDescriptionKey: "无法创建画笔库存储目录"
             ])
         }
 
-        let data = try encoder.encode(BrushLibraryArchive(library: library))
+        let data = try encoder.encode(
+            BrushLibraryArchive(
+                library: library,
+                tipImageLibrary: tipImageLibrary
+            )
+        )
         try data.write(to: url, options: .atomic)
     }
 
-    func exportLibrary(_ library: BrushLibraryState, to url: URL) throws {
-        let data = try encoder.encode(BrushLibraryArchive(library: library))
+    func exportLibrary(
+        _ library: BrushLibraryState,
+        tipImageLibrary: TipImageLibraryState,
+        to url: URL
+    ) throws {
+        let data = try encoder.encode(
+            BrushLibraryArchive(
+                library: library,
+                tipImageLibrary: tipImageLibrary
+            )
+        )
         try data.write(to: url, options: .atomic)
     }
 
-    func importLibrary(from url: URL) throws -> BrushLibraryState {
+    func importLibrary(from url: URL) throws -> PersistedBrushResources {
         let data = try Data(contentsOf: url)
         if let archive = try? decoder.decode(BrushLibraryArchive.self, from: data) {
-            return archive.resolvedLibrary
+            return PersistedBrushResources(
+                library: archive.resolvedLibrary,
+                tipImageLibrary: archive.resolvedTipImageLibrary
+            )
         }
-        return try decoder.decode(BrushLibraryState.self, from: data)
+        let library = try decoder.decode(BrushLibraryState.self, from: data)
+        return PersistedBrushResources(
+            library: library,
+            tipImageLibrary: .empty
+        )
     }
 
     private func persistentLibraryURL(createDirectories: Bool = false) -> URL? {

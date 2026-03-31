@@ -5,15 +5,37 @@ struct WorkspaceState: Codable, Sendable, Equatable {
     var toolSession: ToolSessionState
     var colorPanel: ColorPanelState
     var brushLibrary: BrushLibraryState
+    var tipImageLibrary: TipImageLibraryState
     var generator: GeneratorSettings
     var viewport: CanvasViewport
     var selection: SelectionState
+
+    init(
+        document: ArtDocument,
+        toolSession: ToolSessionState,
+        colorPanel: ColorPanelState,
+        brushLibrary: BrushLibraryState,
+        tipImageLibrary: TipImageLibraryState = .empty,
+        generator: GeneratorSettings,
+        viewport: CanvasViewport,
+        selection: SelectionState
+    ) {
+        self.document = document
+        self.toolSession = toolSession
+        self.colorPanel = colorPanel
+        self.brushLibrary = brushLibrary
+        self.tipImageLibrary = tipImageLibrary
+        self.generator = generator
+        self.viewport = viewport
+        self.selection = selection
+    }
 
     static let stageOneDefault = WorkspaceState(
         document: .stageOneDefault(),
         toolSession: .stageOneDefault,
         colorPanel: .stageOneDefault,
         brushLibrary: .stageOneDefault,
+        tipImageLibrary: .empty,
         generator: .stageOneDefault,
         viewport: .stageOneDefault,
         selection: .empty
@@ -46,6 +68,10 @@ final class WorkspaceStore {
 
     func updateBrushLibrary(_ transform: (inout BrushLibraryState) -> Void) {
         transform(&state.brushLibrary)
+    }
+
+    func updateTipImageLibrary(_ transform: (inout TipImageLibraryState) -> Void) {
+        transform(&state.tipImageLibrary)
     }
 
     func updateGenerator(_ transform: (inout GeneratorSettings) -> Void) {
