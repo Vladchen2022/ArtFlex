@@ -426,8 +426,13 @@ struct BrushSettings: Codable, Sendable, Equatable {
     var dualTipCombineMode: DualTipCombineMode
     var dualTipStrength: Float
     var secondarySizeRatio: Float
+    var secondarySizeJitter: Float
+    var secondaryAngleJitterDegrees: Float
     var secondaryAngleOffsetDegrees: Float
+    var secondarySpacingPhase: Float
+    var secondarySpacingPhaseJitter: Float
     var secondaryScatter: Float
+    var secondaryScatterJitter: Float
     var secondaryInvert: Bool
     var spacingPercent: Float
     var scatterAmount: Float
@@ -463,8 +468,13 @@ struct BrushSettings: Codable, Sendable, Equatable {
         dualTipCombineMode: .multiply,
         dualTipStrength: 1,
         secondarySizeRatio: 1,
+        secondarySizeJitter: 0,
+        secondaryAngleJitterDegrees: 0,
         secondaryAngleOffsetDegrees: 0,
+        secondarySpacingPhase: 0,
+        secondarySpacingPhaseJitter: 0,
         secondaryScatter: 0,
+        secondaryScatterJitter: 0,
         secondaryInvert: false,
         spacingPercent: 15,
         scatterAmount: 0,
@@ -501,8 +511,13 @@ struct BrushSettings: Codable, Sendable, Equatable {
         case dualTipCombineMode
         case dualTipStrength
         case secondarySizeRatio
+        case secondarySizeJitter
+        case secondaryAngleJitterDegrees
         case secondaryAngleOffsetDegrees
+        case secondarySpacingPhase
+        case secondarySpacingPhaseJitter
         case secondaryScatter
+        case secondaryScatterJitter
         case secondaryInvert
         case spacingPercent
         case scatterAmount
@@ -539,8 +554,13 @@ struct BrushSettings: Codable, Sendable, Equatable {
         dualTipCombineMode: DualTipCombineMode = .multiply,
         dualTipStrength: Float = 1,
         secondarySizeRatio: Float = 1,
+        secondarySizeJitter: Float = 0,
+        secondaryAngleJitterDegrees: Float = 0,
         secondaryAngleOffsetDegrees: Float = 0,
+        secondarySpacingPhase: Float = 0,
+        secondarySpacingPhaseJitter: Float = 0,
         secondaryScatter: Float = 0,
+        secondaryScatterJitter: Float = 0,
         secondaryInvert: Bool = false,
         spacingPercent: Float,
         scatterAmount: Float,
@@ -575,8 +595,13 @@ struct BrushSettings: Codable, Sendable, Equatable {
         self.dualTipCombineMode = dualTipCombineMode
         self.dualTipStrength = dualTipStrength
         self.secondarySizeRatio = secondarySizeRatio
+        self.secondarySizeJitter = secondarySizeJitter
+        self.secondaryAngleJitterDegrees = secondaryAngleJitterDegrees
         self.secondaryAngleOffsetDegrees = secondaryAngleOffsetDegrees
+        self.secondarySpacingPhase = secondarySpacingPhase
+        self.secondarySpacingPhaseJitter = secondarySpacingPhaseJitter
         self.secondaryScatter = secondaryScatter
+        self.secondaryScatterJitter = secondaryScatterJitter
         self.secondaryInvert = secondaryInvert
         self.spacingPercent = spacingPercent
         self.scatterAmount = scatterAmount
@@ -616,8 +641,13 @@ struct BrushSettings: Codable, Sendable, Equatable {
         dualTipCombineMode = try container.decodeIfPresent(DualTipCombineMode.self, forKey: .dualTipCombineMode) ?? defaults.dualTipCombineMode
         dualTipStrength = try container.decodeIfPresent(Float.self, forKey: .dualTipStrength) ?? defaults.dualTipStrength
         secondarySizeRatio = try container.decodeIfPresent(Float.self, forKey: .secondarySizeRatio) ?? defaults.secondarySizeRatio
+        secondarySizeJitter = try container.decodeIfPresent(Float.self, forKey: .secondarySizeJitter) ?? defaults.secondarySizeJitter
+        secondaryAngleJitterDegrees = try container.decodeIfPresent(Float.self, forKey: .secondaryAngleJitterDegrees) ?? defaults.secondaryAngleJitterDegrees
         secondaryAngleOffsetDegrees = try container.decodeIfPresent(Float.self, forKey: .secondaryAngleOffsetDegrees) ?? defaults.secondaryAngleOffsetDegrees
+        secondarySpacingPhase = try container.decodeIfPresent(Float.self, forKey: .secondarySpacingPhase) ?? defaults.secondarySpacingPhase
+        secondarySpacingPhaseJitter = try container.decodeIfPresent(Float.self, forKey: .secondarySpacingPhaseJitter) ?? defaults.secondarySpacingPhaseJitter
         secondaryScatter = try container.decodeIfPresent(Float.self, forKey: .secondaryScatter) ?? defaults.secondaryScatter
+        secondaryScatterJitter = try container.decodeIfPresent(Float.self, forKey: .secondaryScatterJitter) ?? defaults.secondaryScatterJitter
         secondaryInvert = try container.decodeIfPresent(Bool.self, forKey: .secondaryInvert) ?? defaults.secondaryInvert
         spacingPercent = try container.decodeIfPresent(Float.self, forKey: .spacingPercent) ?? defaults.spacingPercent
         scatterAmount = try container.decodeIfPresent(Float.self, forKey: .scatterAmount) ?? defaults.scatterAmount
@@ -655,8 +685,13 @@ struct BrushSettings: Codable, Sendable, Equatable {
         try container.encode(dualTipCombineMode, forKey: .dualTipCombineMode)
         try container.encode(dualTipStrength, forKey: .dualTipStrength)
         try container.encode(secondarySizeRatio, forKey: .secondarySizeRatio)
+        try container.encode(secondarySizeJitter, forKey: .secondarySizeJitter)
+        try container.encode(secondaryAngleJitterDegrees, forKey: .secondaryAngleJitterDegrees)
         try container.encode(secondaryAngleOffsetDegrees, forKey: .secondaryAngleOffsetDegrees)
+        try container.encode(secondarySpacingPhase, forKey: .secondarySpacingPhase)
+        try container.encode(secondarySpacingPhaseJitter, forKey: .secondarySpacingPhaseJitter)
         try container.encode(secondaryScatter, forKey: .secondaryScatter)
+        try container.encode(secondaryScatterJitter, forKey: .secondaryScatterJitter)
         try container.encode(secondaryInvert, forKey: .secondaryInvert)
         try container.encode(spacingPercent, forKey: .spacingPercent)
         try container.encode(scatterAmount, forKey: .scatterAmount)
@@ -719,6 +754,53 @@ struct BrushSettings: Codable, Sendable, Equatable {
     func supportsSecondaryAngleOffsetRealDrawing(for tool: ToolKind) -> Bool {
         abs(secondaryAngleOffsetDegrees) > 0.0001 &&
         secondaryTipDescriptor.tipShape == .customRound &&
+        (
+            supportsPhaseOneDualTipRealDrawing(for: tool) ||
+            supportsPhaseTwoDualTipSubtractRealDrawing(for: tool) ||
+            supportsPhaseTwoDualTipIntersectRealDrawing(for: tool)
+        )
+    }
+
+    func supportsSecondarySizeJitterRealDrawing(for tool: ToolKind) -> Bool {
+        secondarySizeJitter > 0.0001 &&
+        (
+            supportsPhaseOneDualTipRealDrawing(for: tool) ||
+            supportsPhaseTwoDualTipSubtractRealDrawing(for: tool) ||
+            supportsPhaseTwoDualTipIntersectRealDrawing(for: tool)
+        )
+    }
+
+    func supportsSecondaryAngleJitterRealDrawing(for tool: ToolKind) -> Bool {
+        abs(secondaryAngleJitterDegrees) > 0.0001 &&
+        secondaryTipDescriptor.tipShape == .customRound &&
+        (
+            supportsPhaseOneDualTipRealDrawing(for: tool) ||
+            supportsPhaseTwoDualTipSubtractRealDrawing(for: tool) ||
+            supportsPhaseTwoDualTipIntersectRealDrawing(for: tool)
+        )
+    }
+
+    func supportsSecondarySpacingPhaseRealDrawing(for tool: ToolKind) -> Bool {
+        abs(secondarySpacingPhase) > 0.0001 &&
+        (
+            supportsPhaseOneDualTipRealDrawing(for: tool) ||
+            supportsPhaseTwoDualTipSubtractRealDrawing(for: tool) ||
+            supportsPhaseTwoDualTipIntersectRealDrawing(for: tool)
+        )
+    }
+
+    func supportsSecondarySpacingPhaseJitterRealDrawing(for tool: ToolKind) -> Bool {
+        secondarySpacingPhaseJitter > 0.0001 &&
+        (
+            supportsPhaseOneDualTipRealDrawing(for: tool) ||
+            supportsPhaseTwoDualTipSubtractRealDrawing(for: tool) ||
+            supportsPhaseTwoDualTipIntersectRealDrawing(for: tool)
+        )
+    }
+
+    func supportsSecondaryScatterJitterRealDrawing(for tool: ToolKind) -> Bool {
+        secondaryScatter > 0.0001 &&
+        secondaryScatterJitter > 0.0001 &&
         (
             supportsPhaseOneDualTipRealDrawing(for: tool) ||
             supportsPhaseTwoDualTipSubtractRealDrawing(for: tool) ||

@@ -9,68 +9,14 @@ struct BrushPreset: Codable, Sendable, Equatable, Identifiable {
 }
 
 extension BrushPreset {
-    static let builtInDualTipPhaseOneDemoPresets: [BrushPreset] = [
-        makeBuiltInDualTipPhaseOnePreset(
-            id: "builtin-dual-tip-tighten",
-            name: "Dual Tip · 收口型",
-            slotIndex: 4,
-            primaryTip: .hardRound,
-            secondaryTip: .hardRound,
-            strength: 0.84,
-            sizeRatio: 0.56
-        ),
-        makeBuiltInDualTipPhaseOnePreset(
-            id: "builtin-dual-tip-soft-compress",
-            name: "Dual Tip · 柔边压缩",
-            slotIndex: 5,
-            primaryTip: .softRound,
-            secondaryTip: .softRound,
-            strength: 0.58,
-            sizeRatio: 0.72
-        ),
-        makeBuiltInDualTipPhaseOnePreset(
-            id: "builtin-dual-tip-strong-modulate",
-            name: "Dual Tip · 强调制",
-            slotIndex: 6,
-            primaryTip: .hardRound,
-            secondaryTip: .softRound,
-            strength: 1.0,
-            sizeRatio: 0.34
-        )
+    static let legacyDualTipPhaseOneDemoPresetIDs: Set<String> = [
+        "builtin-dual-tip-tighten",
+        "builtin-dual-tip-soft-compress",
+        "builtin-dual-tip-strong-modulate"
     ]
 
-    static let builtInDualTipPhaseOneDemoPresetIDs = Set(
-        builtInDualTipPhaseOneDemoPresets.map(\.id)
-    )
-
-    var isDualTipPhaseOneDemoPreset: Bool {
-        Self.builtInDualTipPhaseOneDemoPresetIDs.contains(id)
-    }
-
-    private static func makeBuiltInDualTipPhaseOnePreset(
-        id: String,
-        name: String,
-        slotIndex: Int,
-        primaryTip: BrushTipShape,
-        secondaryTip: BrushTipShape,
-        strength: Float,
-        sizeRatio: Float
-    ) -> BrushPreset {
-        var brush = BrushSettings.stageOneDefault
-        brush.tipShape = primaryTip
-        brush.dualTipEnabled = true
-        brush.secondaryTipDescriptor = SecondaryTipDescriptor(tipShape: secondaryTip)
-        brush.dualTipCombineMode = .multiply
-        brush.dualTipStrength = strength
-        brush.secondarySizeRatio = sizeRatio
-
-        return BrushPreset(
-            id: id,
-            name: name,
-            brush: brush,
-            isBuiltIn: true,
-            slotIndex: slotIndex
-        )
+    var isLegacyDualTipPhaseOneDemoPreset: Bool {
+        Self.legacyDualTipPhaseOneDemoPresetIDs.contains(id)
     }
 }
 
@@ -79,7 +25,7 @@ struct BrushLibraryState: Codable, Sendable, Equatable {
     var selectedPresetID: String?
 
     static let stageOneDefault = BrushLibraryState(
-        presets: BrushPreset.builtInDualTipPhaseOneDemoPresets,
+        presets: [],
         selectedPresetID: nil
     )
 
@@ -176,27 +122,19 @@ struct BrushLibraryState: Codable, Sendable, Equatable {
         return true
     }
 
-    func ensuringBuiltInDualTipPhaseOneDemoPresets() -> BrushLibraryState {
-        var mergedPresets = BrushPreset.builtInDualTipPhaseOneDemoPresets
-        var seenIDs = Set(mergedPresets.map(\.id))
-
-        for preset in presets where !BrushPreset.builtInDualTipPhaseOneDemoPresetIDs.contains(preset.id) {
-            guard seenIDs.insert(preset.id).inserted else {
-                continue
-            }
-            mergedPresets.append(preset)
-        }
-
+    func removingLegacyDualTipPhaseOneDemoPresets() -> BrushLibraryState {
+        let filteredPresets = presets.filter { !$0.isLegacyDualTipPhaseOneDemoPreset }
         let resolvedSelectedPresetID: String?
+
         if let selectedPresetID,
-           mergedPresets.contains(where: { $0.id == selectedPresetID }) {
+           filteredPresets.contains(where: { $0.id == selectedPresetID }) {
             resolvedSelectedPresetID = selectedPresetID
         } else {
-            resolvedSelectedPresetID = nil
+            resolvedSelectedPresetID = filteredPresets.first?.id
         }
 
         return BrushLibraryState(
-            presets: mergedPresets,
+            presets: filteredPresets,
             selectedPresetID: resolvedSelectedPresetID
         )
     }

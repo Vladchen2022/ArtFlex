@@ -26,7 +26,8 @@ struct AppBootstrap {
     init(
         workspaceStore: WorkspaceStore = WorkspaceStore(),
         metalContext: MetalDeviceContext? = MetalDeviceContext(),
-        layerSurfaceStore: StageOneLayerSurfaceStore = StageOneLayerSurfaceStore()
+        layerSurfaceStore: StageOneLayerSurfaceStore = StageOneLayerSurfaceStore(),
+        brushLibraryPersistenceController: BrushLibraryPersistenceController? = nil
     ) throws {
         guard let metalContext else {
             fatalError("Metal is required to launch ArtFlex.")
@@ -67,7 +68,7 @@ struct AppBootstrap {
             metalContext: metalContext
         )
         self.filePanelService = FilePanelService()
-        self.brushLibraryPersistenceController = BrushLibraryPersistenceController()
+        self.brushLibraryPersistenceController = brushLibraryPersistenceController ?? BrushLibraryPersistenceController()
         self.imagePaletteExtractor = ImagePaletteExtractor()
         self.timelapseRecorder = TimelapseRecorderController(
             workspaceStore: workspaceStore,

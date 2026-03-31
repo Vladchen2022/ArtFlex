@@ -1374,14 +1374,11 @@ final class StageOneBrushRenderer {
                     : (stroke.brush.secondaryTipDescriptor.tipShape == .customRound ? 3 : 0)),
             dualTipSecondaryHasCustomMask: stroke.brush.secondaryTipDescriptor.customTipMaskData == nil ? 0 : 1,
             dualTipStrength: min(max(stroke.brush.dualTipStrength, 0), 1),
-            secondarySizeRatio: min(max(stroke.brush.secondarySizeRatio, 0.25), 0.95),
-            dualTipSecondaryOffset: dualTipSecondaryOffset(for: sample.point, stroke: stroke),
+            secondarySizeRatio: dualTipSecondarySizeRatio(for: sample.point, stroke: stroke),
+            dualTipSecondaryOffset: dualTipSecondaryOffset(for: sample, stroke: stroke),
             dualTipSecondarySoftness: stroke.brush.secondaryTipDescriptor.customTipSoftness,
             dualTipSecondaryRoundness: stroke.brush.secondaryTipDescriptor.customTipRoundness,
-            dualTipSecondaryAngleDegrees: stroke.brush.secondaryTipDescriptor.customTipAngleDegrees +
-                (stroke.brush.supportsSecondaryAngleOffsetRealDrawing(for: stroke.tool)
-                    ? stroke.brush.secondaryAngleOffsetDegrees
-                    : 0)
+            dualTipSecondaryAngleDegrees: dualTipSecondaryAngleDegrees(for: sample.point, stroke: stroke)
         )
     }
 
@@ -2339,12 +2336,13 @@ final class StageOneBrushRenderer {
         return stroke.brush.secondaryTipDescriptor.customTipMaskData
     }
 
-    private func dualTipSecondaryOffset(for point: StrokePoint, stroke: StrokeDescriptor) -> SIMD2<Float> {
-        guard stroke.brush.supportsSecondaryScatterRealDrawing(for: stroke.tool) else {
-            return .zero
-        }
+    private func dualTipSecondaryOffset(for sample: StampSample, stroke: StrokeDescriptor) -> SIMD2<Float> {
+        dualTipSecondaryScatterOffset(for: sample.point, stroke: stroke) +
+        dualTipSecondarySpacingPhaseOffset(for: sample, stroke: stroke)
+    }
 
-        let scatterAmount = min(max(stroke.brush.secondaryScatter, 0), 5)
+    private func dualTipSecondaryScatterOffset(for point: StrokePoint, stroke: StrokeDescriptor) -> SIMD2<Float> {
+        let scatterAmount = dualTipSecondaryResolvedScatterAmount(for: point, stroke: stroke)
         guard scatterAmount > 0.0001 else {
             return .zero
         }
@@ -2357,6 +2355,122 @@ final class StageOneBrushRenderer {
             Float(cos(spreadAngle) * scatterRadius),
             Float(sin(spreadAngle) * scatterRadius)
         )
+    }
+
+    private func dualTipSecondaryResolvedScatterAmount(for point: StrokePoint, stroke: StrokeDescriptor) -> Float {
+        let baseScatter = stroke.brush.supportsSecondaryScatterRealDrawing(for: stroke.tool)
+            ? min(max(stroke.brush.secondaryScatter, 0), 5)
+            : 0
+        guard stroke.brush.supportsSecondaryScatterJitterRealDrawing(for: stroke.tool) else {
+            return baseScatter
+        }
+
+        let jitterAmount = min(max(stroke.brush.secondaryScatterJitter, 0), 1)
+        guard jitterAmount > 0.0001 else {
+            return baseScatter
+        }
+
+        let scatterRandom = Float(
+            stableScatterRandom(
+                x: point.x,
+                y: point.y,
+                index: 0,
+                salt: 0x91E1_CF13
+            )
+        )
+        let jitterScale = max(1 + (((scatterRandom * 2) - 1) * jitterAmount), 0)
+        return min(max(baseScatter * jitterScale, 0), 5)
+    }
+
+    private func dualTipSecondarySpacingPhaseOffset(for sample: StampSample, stroke: StrokeDescriptor) -> SIMD2<Float> {
+        let phase = dualTipSecondaryResolvedSpacingPhase(for: sample.point, stroke: stroke)
+        guard abs(phase) > 0.0001 else {
+            return .zero
+        }
+
+        let normalizedSpacing = Double(min(max(stroke.brush.spacingPercent, 5), 150)) / 50.0
+        let offsetDistance = Double(phase) * normalizedSpacing
+        let radians = Double(sample.jitterDirectionDegrees) * (.pi / 180.0)
+
+        return SIMD2(
+            Float(cos(radians) * offsetDistance),
+            Float(sin(radians) * offsetDistance)
+        )
+    }
+
+    private func dualTipSecondaryResolvedSpacingPhase(for point: StrokePoint, stroke: StrokeDescriptor) -> Float {
+        let basePhase = min(max(stroke.brush.secondarySpacingPhase, -0.5), 0.5)
+        let effectiveBasePhase = stroke.brush.supportsSecondarySpacingPhaseRealDrawing(for: stroke.tool)
+            ? basePhase
+            : 0
+        guard stroke.brush.supportsSecondarySpacingPhaseJitterRealDrawing(for: stroke.tool) else {
+            return effectiveBasePhase
+        }
+
+        let jitterAmount = min(max(stroke.brush.secondarySpacingPhaseJitter, 0), 0.5)
+        guard jitterAmount > 0.0001 else {
+            return effectiveBasePhase
+        }
+
+        let phaseRandom = Float(
+            stableScatterRandom(
+                x: point.x,
+                y: point.y,
+                index: 0,
+                salt: 0x4A1D_93E7
+            )
+        )
+        let jitterPhase = ((phaseRandom * 2) - 1) * jitterAmount
+        return min(max(effectiveBasePhase + jitterPhase, -0.5), 0.5)
+    }
+
+    private func dualTipSecondarySizeRatio(for point: StrokePoint, stroke: StrokeDescriptor) -> Float {
+        let baseRatio = min(max(stroke.brush.secondarySizeRatio, 0.25), 0.95)
+        guard stroke.brush.supportsSecondarySizeJitterRealDrawing(for: stroke.tool) else {
+            return baseRatio
+        }
+
+        let jitterAmount = min(max(stroke.brush.secondarySizeJitter, 0), 1)
+        guard jitterAmount > 0.0001 else {
+            return baseRatio
+        }
+
+        let sizeRandom = Float(
+            stableScatterRandom(
+                x: point.x,
+                y: point.y,
+                index: 0,
+                salt: 0x71F4_1D29
+            )
+        )
+        let jitterScale = max(1 + (((sizeRandom * 2) - 1) * jitterAmount), 0.05)
+        return min(max(baseRatio * jitterScale, 0.25), 0.95)
+    }
+
+    private func dualTipSecondaryAngleDegrees(for point: StrokePoint, stroke: StrokeDescriptor) -> Float {
+        let baseAngle = stroke.brush.secondaryTipDescriptor.customTipAngleDegrees +
+            (stroke.brush.supportsSecondaryAngleOffsetRealDrawing(for: stroke.tool)
+                ? stroke.brush.secondaryAngleOffsetDegrees
+                : 0)
+        guard stroke.brush.supportsSecondaryAngleJitterRealDrawing(for: stroke.tool) else {
+            return baseAngle
+        }
+
+        let jitterAmount = min(max(abs(stroke.brush.secondaryAngleJitterDegrees), 0), 180)
+        guard jitterAmount > 0.0001 else {
+            return baseAngle
+        }
+
+        let angleRandom = Float(
+            stableScatterRandom(
+                x: point.x,
+                y: point.y,
+                index: 0,
+                salt: 0x5E2F_7A4C
+            )
+        )
+        let jitterDegrees = ((angleRandom * 2) - 1) * jitterAmount
+        return baseAngle + jitterDegrees
     }
 
     private func customTipTexture(for data: Data?, role: CustomTipTextureRole) -> MTLTexture? {

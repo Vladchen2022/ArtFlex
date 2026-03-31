@@ -25,6 +25,80 @@ struct HistoryControllerTests {
     }
 
     @Test
+    func historyNavigationPreservesTipImageLibraryState() {
+        var restored = WorkspaceState.stageOneDefault
+        var current = WorkspaceState.stageOneDefault
+
+        restored.tipImageLibrary = .empty
+        current.tipImageLibrary = TipImageLibraryState(
+            items: [
+                TipImageLibraryItem(
+                    id: BrushTipImageAssetID(rawValue: "tip-a"),
+                    sourceInfo: ImportedTipSourceInfo(
+                        sourceLabel: "A",
+                        pixelWidth: 64,
+                        pixelHeight: 64
+                    ),
+                    maskData: Data([255, 0, 0, 255])
+                ),
+                TipImageLibraryItem(
+                    id: BrushTipImageAssetID(rawValue: "tip-b"),
+                    sourceInfo: ImportedTipSourceInfo(
+                        sourceLabel: "B",
+                        pixelWidth: 96,
+                        pixelHeight: 96
+                    ),
+                    maskData: Data([0, 255, 0, 255])
+                )
+            ]
+        )
+
+        let merged = HistoryController.mergedWorkspaceForHistoryNavigation(
+            restored: restored,
+            current: current
+        )
+
+        #expect(merged.tipImageLibrary == current.tipImageLibrary)
+        #expect(merged.tipImageLibrary.items.count == 2)
+    }
+
+    @Test
+    @MainActor
+    func undoDoesNotDropTipImageLibraryState() throws {
+        let harness = try BrushHistoryHarness(canvasSize: .init(width: 16, height: 16))
+        let tipImageLibrary = TipImageLibraryState(
+            items: [
+                TipImageLibraryItem(
+                    id: BrushTipImageAssetID(rawValue: "tip-a"),
+                    sourceInfo: ImportedTipSourceInfo(
+                        sourceLabel: "A",
+                        pixelWidth: 64,
+                        pixelHeight: 64
+                    ),
+                    maskData: Data([255, 0, 0, 255])
+                ),
+                TipImageLibraryItem(
+                    id: BrushTipImageAssetID(rawValue: "tip-b"),
+                    sourceInfo: ImportedTipSourceInfo(
+                        sourceLabel: "B",
+                        pixelWidth: 96,
+                        pixelHeight: 96
+                    ),
+                    maskData: Data([0, 255, 0, 255])
+                )
+            ]
+        )
+
+        harness.workspaceStore.updateTipImageLibrary { library in
+            library = tipImageLibrary
+        }
+
+        try harness.history.captureCheckpoint()
+        #expect(try harness.history.undo())
+        #expect(harness.workspaceStore.state.tipImageLibrary == tipImageLibrary)
+    }
+
+    @Test
     @MainActor
     func historyLimitsTrimByEntryCount() throws {
         let harness = try BrushHistoryHarness(canvasSize: .init(width: 16, height: 16))

@@ -18,6 +18,29 @@ struct TipImageLibraryItem: Codable, Sendable, Equatable, Identifiable {
     var displayName: String {
         sourceInfo.sourceLabel
     }
+
+    func merged(with incoming: TipImageLibraryItem) -> TipImageLibraryItem {
+        guard id == incoming.id else { return self }
+
+        var merged = self
+        let currentMaskData = merged.maskData
+        let incomingMaskData = incoming.maskData
+
+        switch (currentMaskData, incomingMaskData) {
+        case (nil, .some):
+            merged = incoming
+        case let (.some(current), .some(candidate)) where current != candidate:
+            let currentMatchesAssetID = BrushTipImageAssetID(maskData: current) == id
+            let candidateMatchesAssetID = BrushTipImageAssetID(maskData: candidate) == id
+            if !currentMatchesAssetID && candidateMatchesAssetID {
+                merged = incoming
+            }
+        default:
+            break
+        }
+
+        return merged
+    }
 }
 
 struct TipImageLibraryState: Codable, Sendable, Equatable {
@@ -117,6 +140,32 @@ struct TipImageLibraryState: Codable, Sendable, Equatable {
         }
         items.remove(at: index)
         return true
+    }
+
+    func normalizedMergingDuplicates() -> TipImageLibraryState {
+        var normalized = TipImageLibraryState.empty
+        _ = normalized.mergeItems(from: self)
+        return normalized
+    }
+
+    @discardableResult
+    mutating func mergeItems(from incoming: TipImageLibraryState) -> Bool {
+        var changed = false
+
+        for item in incoming.items {
+            if let index = items.firstIndex(where: { $0.id == item.id }) {
+                let merged = items[index].merged(with: item)
+                if merged != items[index] {
+                    items[index] = merged
+                    changed = true
+                }
+            } else {
+                items.append(item)
+                changed = true
+            }
+        }
+
+        return changed
     }
 
     private mutating func upsertImportedItemIfNeeded(

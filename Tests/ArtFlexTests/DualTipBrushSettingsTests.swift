@@ -66,8 +66,13 @@ struct DualTipBrushSettingsTests {
         #expect(decoded.dualTipCombineMode == .multiply)
         #expect(decoded.dualTipStrength == 1)
         #expect(decoded.secondarySizeRatio == 1)
+        #expect(decoded.secondarySizeJitter == 0)
+        #expect(decoded.secondaryAngleJitterDegrees == 0)
         #expect(decoded.secondaryAngleOffsetDegrees == 0)
+        #expect(decoded.secondarySpacingPhase == 0)
+        #expect(decoded.secondarySpacingPhaseJitter == 0)
         #expect(decoded.secondaryScatter == 0)
+        #expect(decoded.secondaryScatterJitter == 0)
         #expect(decoded.secondaryInvert == false)
         #expect(decoded.customTipSourceSemantic == .procedural)
         #expect(decoded.customTipAssetID == nil)
@@ -97,8 +102,13 @@ struct DualTipBrushSettingsTests {
         brush.dualTipCombineMode = .subtract
         brush.dualTipStrength = 0.42
         brush.secondarySizeRatio = 1.8
+        brush.secondarySizeJitter = 0.36
+        brush.secondaryAngleJitterDegrees = 29
         brush.secondaryAngleOffsetDegrees = -35
+        brush.secondarySpacingPhase = 0.24
+        brush.secondarySpacingPhaseJitter = 0.18
         brush.secondaryScatter = 1.25
+        brush.secondaryScatterJitter = 0.31
         brush.secondaryInvert = true
 
         let preset = BrushPreset(
@@ -426,6 +436,366 @@ struct DualTipBrushSettingsTests {
     }
 
     @Test
+    func tipImageLibraryNormalizesDuplicateAssetIDsByKeepingAvailableMaskData() {
+        let sharedID = BrushTipImageAssetID(rawValue: "shared-tip")
+        let maskData = Data([9, 18, 27, 36])
+        let placeholder = TipImageLibraryItem(
+            id: sharedID,
+            sourceInfo: ImportedTipSourceInfo(
+                sourceLabel: "Placeholder",
+                pixelWidth: 32,
+                pixelHeight: 32
+            ),
+            maskData: nil
+        )
+        let resolved = TipImageLibraryItem(
+            id: sharedID,
+            sourceInfo: ImportedTipSourceInfo(
+                sourceLabel: "Resolved",
+                pixelWidth: 128,
+                pixelHeight: 96
+            ),
+            maskData: maskData
+        )
+
+        let normalized = TipImageLibraryState(items: [placeholder, resolved])
+            .normalizedMergingDuplicates()
+
+        #expect(normalized.items.count == 1)
+        #expect(normalized.items[0].id == sharedID)
+        #expect(normalized.items[0].maskData == maskData)
+        #expect(normalized.items[0].sourceInfo == resolved.sourceInfo)
+    }
+
+    @Test
+    func tipImageLibraryMergeFillsExistingDuplicateMaskData() {
+        let sharedID = BrushTipImageAssetID(rawValue: "shared-tip")
+        let maskData = Data([1, 3, 5, 7])
+
+        var base = TipImageLibraryState(
+            items: [
+                TipImageLibraryItem(
+                    id: sharedID,
+                    sourceInfo: ImportedTipSourceInfo(
+                        sourceLabel: "Base",
+                        pixelWidth: 24,
+                        pixelHeight: 24
+                    ),
+                    maskData: nil
+                )
+            ]
+        )
+        let imported = TipImageLibraryState(
+            items: [
+                TipImageLibraryItem(
+                    id: sharedID,
+                    sourceInfo: ImportedTipSourceInfo(
+                        sourceLabel: "Imported",
+                        pixelWidth: 80,
+                        pixelHeight: 64
+                    ),
+                    maskData: maskData
+                )
+            ]
+        )
+
+        let changed = base.mergeItems(from: imported)
+
+        #expect(changed)
+        #expect(base.items.count == 1)
+        #expect(base.items[0].maskData == maskData)
+        #expect(base.items[0].sourceInfo == imported.items[0].sourceInfo)
+    }
+
+    @MainActor
+    @Test
+    func workspaceViewModelRestoreReappliesSelectedPresetBrushOnLaunch() throws {
+        guard let metalContext = MetalDeviceContext() else {
+            Issue.record("Metal is required for WorkspaceViewModel tests.")
+            return
+        }
+
+        let tempRoot = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: tempRoot, withIntermediateDirectories: true)
+        defer {
+            try? FileManager.default.removeItem(at: tempRoot)
+        }
+
+        let controller = BrushLibraryPersistenceController(
+            fileManager: BrushLibraryPersistenceTestFileManager(rootURL: tempRoot)
+        )
+
+        var restoredBrush = BrushSettings.stageOneDefault
+        restoredBrush.tipShape = .customRound
+        restoredBrush.dualTipEnabled = true
+        restoredBrush.secondaryTipDescriptor = SecondaryTipDescriptor(tipShape: .softRound)
+        restoredBrush.dualTipCombineMode = .intersect
+        restoredBrush.secondarySizeRatio = 1.42
+        restoredBrush.secondarySpacingPhase = 0.24
+
+        let customPreset = BrushPreset(
+            id: "restored-custom",
+            name: "Restored Custom",
+            brush: restoredBrush,
+            isBuiltIn: false,
+            slotIndex: 12
+        )
+
+        try controller.saveResources(
+            library: BrushLibraryState(
+                presets: [customPreset],
+                selectedPresetID: customPreset.id
+            ),
+            tipImageLibrary: .empty
+        )
+
+        let bootstrap = try AppBootstrap(
+            workspaceStore: WorkspaceStore(state: .stageOneDefault),
+            metalContext: metalContext,
+            layerSurfaceStore: StageOneLayerSurfaceStore(),
+            brushLibraryPersistenceController: controller
+        )
+        let viewModel = WorkspaceViewModel(
+            bootstrap: bootstrap,
+            installsZoomKeyboardMonitor: false,
+            preparesInitialTextures: false
+        )
+
+        #expect(viewModel.workspace.brushLibrary.selectedPresetID == customPreset.id)
+        #expect(viewModel.workspace.toolSession.brush == customPreset.brush)
+        #expect(
+            bootstrap.workspaceStore.state.brushLibrary.preset(id: customPreset.id)?.brush == customPreset.brush
+        )
+    }
+
+    @MainActor
+    @Test
+    func importedBrushLibraryReplaceRealignsCurrentBrushAndBackfillsTipImageLibrary() throws {
+        guard let metalContext = MetalDeviceContext() else {
+            Issue.record("Metal is required for WorkspaceViewModel tests.")
+            return
+        }
+
+        let tempRoot = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: tempRoot, withIntermediateDirectories: true)
+        defer {
+            try? FileManager.default.removeItem(at: tempRoot)
+        }
+
+        let controller = BrushLibraryPersistenceController(
+            fileManager: BrushLibraryPersistenceTestFileManager(rootURL: tempRoot)
+        )
+
+        let assetMask = Data([255, 12, 99, 33])
+        let assetID = BrushTipImageAssetID(maskData: assetMask)
+        let sourceInfo = ImportedTipSourceInfo(
+            sourceLabel: "Imported Library Tip",
+            pixelWidth: 96,
+            pixelHeight: 96
+        )
+
+        var importedBrush = BrushSettings.stageOneDefault
+        importedBrush.tipShape = .customRound
+        importedBrush.customTipSourceSemantic = .importedImage
+        importedBrush.customTipAssetID = assetID
+        importedBrush.customTipImportedSourceInfo = sourceInfo
+        importedBrush.customTipMaskData = assetMask
+        importedBrush.dualTipEnabled = true
+
+        let importedPreset = BrushPreset(
+            id: "imported-preset",
+            name: "Imported Preset",
+            brush: importedBrush,
+            isBuiltIn: false,
+            slotIndex: 8
+        )
+
+        let bootstrap = try AppBootstrap(
+            workspaceStore: WorkspaceStore(state: .stageOneDefault),
+            metalContext: metalContext,
+            layerSurfaceStore: StageOneLayerSurfaceStore(),
+            brushLibraryPersistenceController: controller
+        )
+        let viewModel = WorkspaceViewModel(
+            bootstrap: bootstrap,
+            installsZoomKeyboardMonitor: false,
+            preparesInitialTextures: false
+        )
+
+        let didRealign = viewModel.applyImportedBrushLibraryResources(
+            PersistedBrushResources(
+                library: BrushLibraryState(
+                    presets: [importedPreset],
+                    selectedPresetID: importedPreset.id
+                ),
+                tipImageLibrary: .empty
+            ),
+            replacingExistingLibrary: true
+        )
+
+        let state = bootstrap.workspaceStore.state
+        #expect(didRealign)
+        #expect(state.brushLibrary.selectedPresetID == importedPreset.id)
+        #expect(state.toolSession.brush == importedPreset.brush)
+        #expect(state.tipImageLibrary.item(id: assetID)?.maskData == assetMask)
+        #expect(state.tipImageLibrary.item(id: assetID)?.sourceInfo == sourceInfo)
+    }
+
+    @MainActor
+    @Test
+    func deletingSelectedBrushPresetRealignsCurrentBrushToRemainingSelection() throws {
+        guard let metalContext = MetalDeviceContext() else {
+            Issue.record("Metal is required for WorkspaceViewModel tests.")
+            return
+        }
+
+        let tempRoot = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: tempRoot, withIntermediateDirectories: true)
+        defer {
+            try? FileManager.default.removeItem(at: tempRoot)
+        }
+
+        let controller = BrushLibraryPersistenceController(
+            fileManager: BrushLibraryPersistenceTestFileManager(rootURL: tempRoot)
+        )
+
+        var firstBrush = BrushSettings.stageOneDefault
+        firstBrush.size = 22
+        firstBrush.opacity = 0.4
+
+        var secondBrush = BrushSettings.stageOneDefault
+        secondBrush.size = 77
+        secondBrush.opacity = 0.91
+        secondBrush.dualTipEnabled = true
+        secondBrush.dualTipCombineMode = .subtract
+
+        let firstPreset = BrushPreset(
+            id: "first-preset",
+            name: "First Preset",
+            brush: firstBrush,
+            isBuiltIn: false,
+            slotIndex: 0
+        )
+        let secondPreset = BrushPreset(
+            id: "second-preset",
+            name: "Second Preset",
+            brush: secondBrush,
+            isBuiltIn: false,
+            slotIndex: 1
+        )
+
+        var workspace = WorkspaceState.stageOneDefault
+        workspace.brushLibrary = BrushLibraryState(
+            presets: [firstPreset, secondPreset],
+            selectedPresetID: secondPreset.id
+        )
+        workspace.toolSession.brush = secondBrush
+
+        let bootstrap = try AppBootstrap(
+            workspaceStore: WorkspaceStore(state: workspace),
+            metalContext: metalContext,
+            layerSurfaceStore: StageOneLayerSurfaceStore(),
+            brushLibraryPersistenceController: controller
+        )
+        let viewModel = WorkspaceViewModel(
+            bootstrap: bootstrap,
+            installsZoomKeyboardMonitor: false,
+            preparesInitialTextures: false
+        )
+        bootstrap.workspaceStore.replaceState(workspace)
+
+        viewModel.deleteBrushPreset(secondPreset.id)
+
+        #expect(viewModel.workspace.brushLibrary.selectedPresetID == firstPreset.id)
+        #expect(viewModel.workspace.toolSession.brush == firstPreset.brush)
+    }
+
+    @MainActor
+    @Test
+    func workspaceViewModelReportsTipImageLibraryReferenceSummary() throws {
+        guard let metalContext = MetalDeviceContext() else {
+            Issue.record("Metal is required for WorkspaceViewModel tests.")
+            return
+        }
+
+        let sharedAssetID = BrushTipImageAssetID(rawValue: "shared-tip")
+        let importedSource = ImportedTipSourceInfo(
+            sourceLabel: "Shared",
+            pixelWidth: 64,
+            pixelHeight: 64
+        )
+
+        var currentBrush = BrushSettings.stageOneDefault
+        currentBrush.tipShape = .customRound
+        currentBrush.customTipSourceSemantic = .importedImage
+        currentBrush.customTipAssetID = sharedAssetID
+        currentBrush.customTipImportedSourceInfo = importedSource
+        currentBrush.customTipMaskData = Data([255, 32, 128, 16])
+        currentBrush.secondaryTipDescriptor = SecondaryTipDescriptor(
+            tipShape: .customRound,
+            sourceSemantic: .importedImage,
+            tipAssetID: sharedAssetID,
+            importedSourceInfo: importedSource,
+            customTipMaskData: Data([255, 64, 0, 32]),
+            customTipSoftness: 0.5,
+            customTipRoundness: 1,
+            customTipAngleDegrees: 0
+        )
+
+        var presetPrimaryBrush = BrushSettings.stageOneDefault
+        presetPrimaryBrush.tipShape = .customRound
+        presetPrimaryBrush.customTipSourceSemantic = .importedImage
+        presetPrimaryBrush.customTipAssetID = sharedAssetID
+        presetPrimaryBrush.customTipImportedSourceInfo = importedSource
+        presetPrimaryBrush.customTipMaskData = Data([255, 0, 0, 0])
+
+        var presetSecondaryBrush = BrushSettings.stageOneDefault
+        presetSecondaryBrush.secondaryTipDescriptor = SecondaryTipDescriptor(
+            tipShape: .customRound,
+            sourceSemantic: .importedImage,
+            tipAssetID: sharedAssetID,
+            importedSourceInfo: importedSource,
+            customTipMaskData: Data([0, 255, 0, 0]),
+            customTipSoftness: 0.5,
+            customTipRoundness: 1,
+            customTipAngleDegrees: 0
+        )
+
+        var workspace = WorkspaceState.stageOneDefault
+        workspace.toolSession.brush = currentBrush
+        workspace.brushLibrary = BrushLibraryState(
+            presets: [
+                BrushPreset(id: "preset-primary", name: "Preset Primary", brush: presetPrimaryBrush, isBuiltIn: false),
+                BrushPreset(id: "preset-secondary", name: "Preset Secondary", brush: presetSecondaryBrush, isBuiltIn: false)
+            ],
+            selectedPresetID: nil
+        )
+
+        let bootstrap = try AppBootstrap(
+            workspaceStore: WorkspaceStore(state: workspace),
+            metalContext: metalContext,
+            layerSurfaceStore: StageOneLayerSurfaceStore()
+        )
+        let viewModel = WorkspaceViewModel(bootstrap: bootstrap, installsZoomKeyboardMonitor: false)
+        bootstrap.workspaceStore.replaceState(workspace)
+
+        let summary = viewModel.tipImageLibraryReferenceSummary(for: sharedAssetID)
+        #expect(summary.currentBrushUsesPrimary)
+        #expect(summary.currentBrushUsesSecondary)
+        #expect(summary.currentBrushPrimaryCount == 1)
+        #expect(summary.currentBrushSecondaryCount == 1)
+        #expect(summary.presetPrimaryNames == ["Preset Primary"])
+        #expect(summary.presetSecondaryNames == ["Preset Secondary"])
+        #expect(summary.presetPrimaryCount == 1)
+        #expect(summary.presetSecondaryCount == 1)
+        #expect(summary.totalCount == 4)
+        #expect(summary.isReferenced)
+    }
+
+    @Test
     func phaseOneRealDrawingSupportGateStaysNarrow() {
         var supported = BrushSettings.stageOneDefault
         supported.dualTipEnabled = true
@@ -646,6 +1016,41 @@ struct DualTipBrushSettingsTests {
     }
 
     @Test
+    func secondaryScatterJitterOnlyAppliesInsideCurrentRealDrawingGates() {
+        var supported = BrushSettings.stageOneDefault
+        supported.dualTipEnabled = true
+        supported.tipShape = .customRound
+        supported.customTipMaskData = Data([255, 32, 16])
+        supported.secondaryTipDescriptor = SecondaryTipDescriptor(
+            tipShape: .customRound,
+            customTipMaskData: Data([255, 128, 32]),
+            customTipSoftness: 0.55,
+            customTipRoundness: 0.62,
+            customTipAngleDegrees: 17
+        )
+        supported.dualTipCombineMode = .subtract
+        supported.secondaryScatter = 1.8
+        supported.secondaryScatterJitter = 0.35
+
+        #expect(supported.supportsSecondaryScatterJitterRealDrawing(for: .brush))
+        #expect(supported.supportsSecondaryScatterJitterRealDrawing(for: .eraser))
+
+        var disabled = supported
+        disabled.dualTipEnabled = false
+        #expect(disabled.supportsSecondaryScatterJitterRealDrawing(for: .brush) == false)
+
+        var zeroJitter = supported
+        zeroJitter.secondaryScatterJitter = 0
+        #expect(zeroJitter.supportsSecondaryScatterJitterRealDrawing(for: .brush) == false)
+
+        var zeroScatter = supported
+        zeroScatter.secondaryScatter = 0
+        #expect(zeroScatter.supportsSecondaryScatterJitterRealDrawing(for: .brush) == false)
+
+        #expect(supported.supportsSecondaryScatterJitterRealDrawing(for: .smudge) == false)
+    }
+
+    @Test
     func secondaryAngleOffsetOnlyAppliesForCustomSecondaryInsideCurrentRealDrawingGates() {
         var supported = BrushSettings.stageOneDefault
         supported.dualTipEnabled = true
@@ -681,6 +1086,148 @@ struct DualTipBrushSettingsTests {
         #expect(wrongMode.supportsSecondaryAngleOffsetRealDrawing(for: .brush))
 
         #expect(supported.supportsSecondaryAngleOffsetRealDrawing(for: .smudge) == false)
+    }
+
+    @Test
+    func secondarySizeJitterOnlyAppliesInsideCurrentRealDrawingGates() {
+        var supported = BrushSettings.stageOneDefault
+        supported.dualTipEnabled = true
+        supported.tipShape = .customRound
+        supported.customTipMaskData = Data([255, 32, 16])
+        supported.secondaryTipDescriptor = SecondaryTipDescriptor(
+            tipShape: .customRound,
+            customTipMaskData: Data([255, 128, 32]),
+            customTipSoftness: 0.55,
+            customTipRoundness: 0.62,
+            customTipAngleDegrees: 17
+        )
+        supported.dualTipCombineMode = .subtract
+        supported.secondarySizeJitter = 0.42
+
+        #expect(supported.supportsSecondarySizeJitterRealDrawing(for: .brush))
+        #expect(supported.supportsSecondarySizeJitterRealDrawing(for: .eraser))
+
+        var disabled = supported
+        disabled.dualTipEnabled = false
+        #expect(disabled.supportsSecondarySizeJitterRealDrawing(for: .brush) == false)
+
+        var zeroJitter = supported
+        zeroJitter.secondarySizeJitter = 0
+        #expect(zeroJitter.supportsSecondarySizeJitterRealDrawing(for: .brush) == false)
+
+        var wrongMode = supported
+        wrongMode.dualTipCombineMode = .multiply
+        #expect(wrongMode.supportsSecondarySizeJitterRealDrawing(for: .brush))
+
+        var unsupportedSecondary = supported
+        unsupportedSecondary.secondaryTipDescriptor = SecondaryTipDescriptor(tipShape: .square)
+        #expect(unsupportedSecondary.supportsSecondarySizeJitterRealDrawing(for: .brush) == false)
+
+        #expect(supported.supportsSecondarySizeJitterRealDrawing(for: .smudge) == false)
+    }
+
+    @Test
+    func secondaryAngleJitterOnlyAppliesForCustomSecondaryInsideCurrentRealDrawingGates() {
+        var supported = BrushSettings.stageOneDefault
+        supported.dualTipEnabled = true
+        supported.tipShape = .customRound
+        supported.customTipMaskData = Data([255, 32, 16])
+        supported.secondaryTipDescriptor = SecondaryTipDescriptor(
+            tipShape: .customRound,
+            customTipMaskData: Data([255, 128, 32]),
+            customTipSoftness: 0.55,
+            customTipRoundness: 0.62,
+            customTipAngleDegrees: 17
+        )
+        supported.dualTipCombineMode = .intersect
+        supported.secondaryAngleJitterDegrees = 42
+
+        #expect(supported.supportsSecondaryAngleJitterRealDrawing(for: .brush))
+        #expect(supported.supportsSecondaryAngleJitterRealDrawing(for: .eraser))
+
+        var disabled = supported
+        disabled.dualTipEnabled = false
+        #expect(disabled.supportsSecondaryAngleJitterRealDrawing(for: .brush) == false)
+
+        var zeroJitter = supported
+        zeroJitter.secondaryAngleJitterDegrees = 0
+        #expect(zeroJitter.supportsSecondaryAngleJitterRealDrawing(for: .brush) == false)
+
+        var roundSecondary = supported
+        roundSecondary.secondaryTipDescriptor = SecondaryTipDescriptor(tipShape: .softRound)
+        #expect(roundSecondary.supportsSecondaryAngleJitterRealDrawing(for: .brush) == false)
+
+        var wrongMode = supported
+        wrongMode.dualTipCombineMode = .multiply
+        #expect(wrongMode.supportsSecondaryAngleJitterRealDrawing(for: .brush))
+
+        #expect(supported.supportsSecondaryAngleJitterRealDrawing(for: .smudge) == false)
+    }
+
+    @Test
+    func secondarySpacingPhaseOnlyAppliesInsideCurrentRealDrawingGates() {
+        var supported = BrushSettings.stageOneDefault
+        supported.dualTipEnabled = true
+        supported.tipShape = .customRound
+        supported.customTipMaskData = Data([255, 32, 16])
+        supported.secondaryTipDescriptor = SecondaryTipDescriptor(
+            tipShape: .softRound,
+            customTipSoftness: 0.55,
+            customTipRoundness: 0.62,
+            customTipAngleDegrees: 17
+        )
+        supported.dualTipCombineMode = .subtract
+        supported.secondarySpacingPhase = 0.3
+
+        #expect(supported.supportsSecondarySpacingPhaseRealDrawing(for: .brush))
+        #expect(supported.supportsSecondarySpacingPhaseRealDrawing(for: .eraser))
+
+        var disabled = supported
+        disabled.dualTipEnabled = false
+        #expect(disabled.supportsSecondarySpacingPhaseRealDrawing(for: .brush) == false)
+
+        var zeroPhase = supported
+        zeroPhase.secondarySpacingPhase = 0
+        #expect(zeroPhase.supportsSecondarySpacingPhaseRealDrawing(for: .brush) == false)
+
+        var wrongMode = supported
+        wrongMode.dualTipCombineMode = .multiply
+        #expect(wrongMode.supportsSecondarySpacingPhaseRealDrawing(for: .brush))
+
+        #expect(supported.supportsSecondarySpacingPhaseRealDrawing(for: .smudge) == false)
+    }
+
+    @Test
+    func secondarySpacingPhaseJitterOnlyAppliesInsideCurrentRealDrawingGates() {
+        var supported = BrushSettings.stageOneDefault
+        supported.dualTipEnabled = true
+        supported.tipShape = .customRound
+        supported.customTipMaskData = Data([255, 32, 16])
+        supported.secondaryTipDescriptor = SecondaryTipDescriptor(
+            tipShape: .softRound,
+            customTipSoftness: 0.55,
+            customTipRoundness: 0.62,
+            customTipAngleDegrees: 17
+        )
+        supported.dualTipCombineMode = .intersect
+        supported.secondarySpacingPhaseJitter = 0.2
+
+        #expect(supported.supportsSecondarySpacingPhaseJitterRealDrawing(for: .brush))
+        #expect(supported.supportsSecondarySpacingPhaseJitterRealDrawing(for: .eraser))
+
+        var disabled = supported
+        disabled.dualTipEnabled = false
+        #expect(disabled.supportsSecondarySpacingPhaseJitterRealDrawing(for: .brush) == false)
+
+        var zeroJitter = supported
+        zeroJitter.secondarySpacingPhaseJitter = 0
+        #expect(zeroJitter.supportsSecondarySpacingPhaseJitterRealDrawing(for: .brush) == false)
+
+        var wrongMode = supported
+        wrongMode.dualTipCombineMode = .multiply
+        #expect(wrongMode.supportsSecondarySpacingPhaseJitterRealDrawing(for: .brush))
+
+        #expect(supported.supportsSecondarySpacingPhaseJitterRealDrawing(for: .smudge) == false)
     }
 
     @Test
@@ -722,33 +1269,16 @@ struct DualTipBrushSettingsTests {
     }
 
     @Test
-    func builtInDualTipPhaseOneDemoPresetsStayWithinCurrentSupportedRange() {
-        let presets = BrushPreset.builtInDualTipPhaseOneDemoPresets
-
-        #expect(presets.count == 3)
-        #expect(Set(presets.map(\.id)).count == presets.count)
-        #expect(presets.allSatisfy { $0.isBuiltIn })
-        #expect(presets.map(\.name) == [
-            "Dual Tip · 收口型",
-            "Dual Tip · 柔边压缩",
-            "Dual Tip · 强调制"
-        ])
-        #expect(presets.map(\.slotIndex) == [4, 5, 6])
-
-        for preset in presets {
-            #expect(preset.brush.dualTipEnabled)
-            #expect(preset.brush.dualTipCombineMode == .multiply)
-            #expect(preset.brush.tipShape.isPhaseOneDualTipSupportedRound)
-            #expect(preset.brush.secondaryTipDescriptor.supportsPhaseOneDualTipRealDrawing)
-            #expect(preset.brush.supportsPhaseOneDualTipRealDrawing(for: .brush))
-            #expect(preset.brush.supportsPhaseTwoDualTipSubtractRealDrawing(for: .brush) == false)
-            #expect(preset.brush.secondarySizeRatio >= 0.25)
-            #expect(preset.brush.secondarySizeRatio <= 0.95)
-        }
+    func legacyDualTipPhaseOneDemoPresetIDsStayStableForMigration() {
+        #expect(BrushPreset.legacyDualTipPhaseOneDemoPresetIDs == Set([
+            "builtin-dual-tip-tighten",
+            "builtin-dual-tip-soft-compress",
+            "builtin-dual-tip-strong-modulate"
+        ]))
     }
 
     @Test
-    func ensuringBuiltInDualTipPhaseOneDemoPresetsRehydratesExamplesWithoutLosingCustomPresets() {
+    func removingLegacyDualTipPhaseOneDemoPresetsDropsExamplesWithoutLosingCustomPresets() {
         var customBrush = BrushSettings.stageOneDefault
         customBrush.tipShape = .customRound
         let customPreset = BrushPreset(
@@ -770,24 +1300,27 @@ struct DualTipBrushSettingsTests {
                 ),
                 customPreset
             ],
-            selectedPresetID: customPreset.id
+            selectedPresetID: "builtin-dual-tip-tighten"
         )
 
-        let merged = restoredLikeLibrary.ensuringBuiltInDualTipPhaseOneDemoPresets()
+        let filtered = restoredLikeLibrary.removingLegacyDualTipPhaseOneDemoPresets()
 
-        #expect(merged.presets.count == 4)
-        #expect(merged.selectedPresetID == customPreset.id)
-        #expect(merged.presets.contains(where: { $0.id == customPreset.id }))
-        #expect(merged.presets.filter { BrushPreset.builtInDualTipPhaseOneDemoPresetIDs.contains($0.id) }.count == 3)
-        #expect(merged.presets.first(where: { $0.id == "builtin-dual-tip-tighten" })?.isBuiltIn == true)
-        #expect(merged.presets.first(where: { $0.id == "builtin-dual-tip-tighten" })?.name == "Dual Tip · 收口型")
+        #expect(filtered.presets.count == 1)
+        #expect(filtered.presets.first?.id == customPreset.id)
+        #expect(filtered.selectedPresetID == customPreset.id)
     }
 
     @Test
-    func dualTipPhaseOneDemoHighlightOnlyAppliesToBuiltInExamples() {
-        let builtInPresets = BrushPreset.builtInDualTipPhaseOneDemoPresets
+    func legacyDualTipPhaseOneDemoDetectionOnlyAppliesToKnownIDs() {
+        let legacyPreset = BrushPreset(
+            id: "builtin-dual-tip-tighten",
+            name: "Legacy Dual Tip",
+            brush: .stageOneDefault,
+            isBuiltIn: false,
+            slotIndex: 9
+        )
 
-        #expect(builtInPresets.allSatisfy { $0.isDualTipPhaseOneDemoPreset })
+        #expect(legacyPreset.isLegacyDualTipPhaseOneDemoPreset)
 
         let customPreset = BrushPreset(
             id: "custom-test-preset",
@@ -797,6 +1330,6 @@ struct DualTipBrushSettingsTests {
             slotIndex: 9
         )
 
-        #expect(customPreset.isDualTipPhaseOneDemoPreset == false)
+        #expect(customPreset.isLegacyDualTipPhaseOneDemoPreset == false)
     }
 }

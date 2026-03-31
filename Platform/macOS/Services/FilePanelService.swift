@@ -58,14 +58,18 @@ final class FilePanelService {
     }
 
     func presentImageOpenPanel() -> URL? {
+        presentImageOpenPanelURLs()?.first
+    }
+
+    func presentImageOpenPanelURLs(allowsMultipleSelection: Bool = false) -> [URL]? {
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [.png, .jpeg]
         panel.canChooseDirectories = false
         panel.canChooseFiles = true
-        panel.allowsMultipleSelection = false
+        panel.allowsMultipleSelection = allowsMultipleSelection
         panel.title = "选择图片"
         panel.prompt = "导入"
-        return panel.runModal() == .OK ? panel.url : nil
+        return panel.runModal() == .OK ? panel.urls : nil
     }
 
     func presentBrushLibraryExportPanel(defaultName: String) -> URL? {

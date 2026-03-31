@@ -2,7 +2,9 @@
 
 ## 1. 项目一句话说明
 
-ArtFlex 是旧版 `BrushCanvas` 的 Metal-first 重构版 macOS 绘图软件；当前一轮性能主线与小范围 UX/perf follow-up 已经收尾，项目已转入新功能开发。当前最新已完成的新功能节点是 Dual Tip / 复合笔尖到 `invert`，并继续补齐了主/次笔尖来源语义、三格示意同源性收口，以及最近一轮“普通画笔卡顿 / 偶发不出笔 / 导入笔尖白边”修复；当前下一阶段范围已经确认，将继续推进共享 `tip image library` / `secondary image tip` 资产系统、`renderer-backed preview`、更复杂随机 / `spacing`、以及更宽真实绘制 gate，`smudge` 明确不在本轮范围内。`secondary image tip` 目前已完成三步：archive-backed 资产边界、imported-image 来源说明与 preview fit 的 model-driven 收口，以及共享 `tip image library` 当前基线。
+ArtFlex 是旧版 `BrushCanvas` 的 Metal-first 重构版 macOS 绘图软件；当前一轮性能主线与小范围 UX/perf follow-up 已经收尾，项目已转入新功能开发。当前最新已完成的新功能节点是 Dual Tip / 复合笔尖到 `invert`，并继续补齐了主/次笔尖来源语义、三格示意同源性收口，以及最近一轮“普通画笔卡顿 / 偶发不出笔 / 导入笔尖白边”修复；当前下一阶段范围已经确认，将继续推进共享 `tip image library` / `secondary image tip` 资产系统、`renderer-backed preview`、更复杂随机 / `spacing`、以及更宽真实绘制 gate，`smudge` 明确不在本轮范围内。`secondary image tip` 目前已完成三步：archive-backed 资产边界、imported-image 来源说明与 preview fit 的 model-driven 收口，以及共享 `tip image library` 当前基线；`renderer-backed preview` 第一刀也已落地；更复杂随机 / `spacing` 的前五刀 `secondary size jitter`、`secondary angle jitter`、`secondary spacing phase`、`secondary spacing phase jitter` 与 `secondary scatter jitter` 也已落地。
+
+本轮范围判断已收缩：组合笔尖后续默认只继续推进“明显影响画笔效果”的能力，以及“预览 / 保存恢复 / 资料库稳定性”这类必做收口；轻微影响画笔效果的新随机 / `spacing` 小参数默认暂停。
 
 本轮三个定点 follow-up 的最终状态是：
 
@@ -65,7 +67,12 @@ ArtFlex 是旧版 `BrushCanvas` 的 Metal-first 重构版 macOS 绘图软件；�
 - 当前真正会影响绘制的参数包括：
   - `strength`
   - `secondary size ratio`
+  - `secondary size jitter`
+  - `secondary angle jitter`
+  - `secondary spacing phase`
+  - `secondary spacing phase jitter`
   - `secondary scatter`
+  - `secondary scatter jitter`
   - `secondary angle offset`
   - `secondary invert`
   - 当主笔尖是 `自定义笔尖` 时：
@@ -110,8 +117,8 @@ ArtFlex 是旧版 `BrushCanvas` 的 Metal-first 重构版 macOS 绘图软件；�
 
 ### 当前仍未支持 / 尚未接入真实绘制
 
+- `renderer-backed preview` 的剩余 rollout
 - 共享 `tip image library` 的剩余管理 / 生命周期体验
-- 更严格 renderer-backed preview
 - 更复杂随机 / spacing 系统
 - 更宽真实绘制 gate
 - `smudge` 路径
@@ -144,12 +151,47 @@ ArtFlex 是旧版 `BrushCanvas` 的 Metal-first 重构版 macOS 绘图软件；�
 - 主笔尖与次笔尖现在共用一套 `tip image library` 入口
 - `tip image library` 会跟随 workspace / project / brush library 一起保存和恢复；已保存为画笔的 imported-image 笔刷，重启后再次点击仍会恢复原图片笔尖效果
 - `tip image library` 中未被任何画笔引用的图片，现在也会独立保留并在重启后恢复，不会因为“当前没在用”而丢失
+- `tip image library` 当前在打开工程、导入画笔库、以及恢复持久化资料库时，也会按重复 asset ID 做更稳的归并：不再简单丢弃后来的重复项；如果后来的项带着缺失的 `maskData` 或更可靠的资产内容，会补进现有资料库项
+- 恢复持久化画笔库时，如果此前有明确选中的画笔预设，当前笔刷现在也会重新对齐到这支预设，不再出现“预设高亮已恢复，但当前笔刷仍停在旧默认值”的分离状态
+- 画笔库替换/追加导入时，当前笔刷现在也会在需要时重新对齐到结果里的已选预设；如果导入资源里的 `tip image library` 不完整，也会从导入后的当前笔刷与预设里自动回填缺失的 imported tip 资料
+- 删除当前已选画笔预设时，如果画笔库自动切到了新的已选预设，当前笔刷现在也会一起切过去，不再留下“画笔库选中已变、当前笔刷仍停在已删预设”的分离状态
+- 自动化测试当前也已默认使用隔离的临时画笔库持久化，不再意外碰到真实 `Application Support/ArtFlex/brush-library.json`
+- `undo / redo` 的 history 合并链现在会保留 `tip image library`，不会再把资料库误掉成空库或局部库后写回磁盘
+- `tip image library` 卡片现在会直接显示引用状态：
+  - `当前主笔尖`
+  - `当前次笔尖`
+  - `N 个预设`
+  - `未引用`
+- 如果某张资料库图片仍被当前主/次笔尖或某个画笔预设引用，删除图标会直接禁用，并显示更明确的来源提示
+- 当前新增了共享 `StageOneBrushPreviewRasterizer`，会复用 `StageOneBrushRenderer` 的 `tipAlpha / dualTip combine / stable scatter` 公式来生成小尺寸 preview image
+- 主笔尖卡片、次笔尖卡片、三格示意最终笔尖、画笔库斜线笔触预览，以及 `tip image library` 资料库卡片，当前都已切到这条共享 preview 链
+- inspector 里残余的自定义笔尖静态预览，也已切到共享 stamp preview，不再直接画旧的 mask 直出图
+- 画笔库斜线预览不再为每个 stamp 重算一次 Dual Tip 组合图；小尺寸 preview 的 raster 分辨率也会按显示尺寸动态下调，避免拖慢启动和首屏布局
+- `组合笔尖` 面板里的主笔尖 / 次笔尖 / 最终笔尖预览，当前也已拆成独立异步刷新；参数或图片变化时不会再等三张图串行算完才一起更新
+- 三格示意里的最终笔尖，当前即使工具或形状不在真实绘制 gate，或 `Dual Tip` 开关暂时未开启，也仍会继续显示组合图形示意，不再只剩“示意”文字
+- 画笔库斜线笔触预览的 Dual Tip 语义，当前也已与三格示意对齐：只要预设启用了 `Dual Tip`，就会显示组合笔触示意，不再要求先进入当前真实 gate
+- 画笔库右下角的小 glyph 预览，当前也已与组合预览语义对齐：`Dual Tip` 预设会优先显示组合笔尖，而不是只显示主笔尖
+- `secondary size jitter / 次笔尖大小抖动` 当前也已落地：会让 `secondary size ratio` 围绕当前中心值按每个 stamp 的稳定随机值波动；真实落笔仍维持当前窄 gate
+- `secondary angle jitter / 次笔尖角度抖动` 当前也已落地：会让次笔尖角度围绕当前基准角度按每个 stamp 的稳定随机值波动；真实落笔仍维持当前窄 gate
+- `secondary spacing phase / 次笔尖节距错相` 当前也已落地：会让次笔尖沿当前笔触方向相对主笔尖前后错开半个节距以内；真实落笔仍维持当前窄 gate
+- `secondary spacing phase jitter / 次笔尖节距错相抖动` 当前也已落地：会让节距错相围绕当前中心值按每个 stamp 的稳定随机值波动；真实落笔仍维持当前窄 gate
+- `secondary scatter jitter / 次笔尖散布抖动` 当前也已落地：会让次笔尖散布量围绕当前 `secondary scatter` 中心值按每个 stamp 的稳定随机值波动；真实落笔仍维持当前窄 gate
+- 参数化 `customRound` 在没有 `maskData` 时的小预览，当前也已优先走共享 preview rasterizer，不再默认退回手工渐变椭圆
+- `组合笔尖` 面板与 `编辑次笔尖…` 在高清 preview 尚未回填前，当前也会先显示同源的小型 rasterized 占位笔尖，不再只剩 spinner
+- `编辑次笔尖…` 的“次笔尖形状”菜单项现在也会显示同源小预览，不再只剩文字标签
+- 笔尖形状设计区域里的黑白 mask 预览，当前也已复用共享 preview rasterizer 的 resample / crop / cache 链，不再单独维护一套小图生成逻辑
+- `编辑次笔尖…` 顶部概览卡片，当前也已切到独立异步 preview；换图或调参数时不会再被同步 `stampImage` 阻塞
+- 画笔库小 glyph、笔尖静态小预览、资料库卡片、`编辑次笔尖…` 形状菜单，以及 `组合笔尖` / `编辑次笔尖…` 的异步 preview 与占位图，当前都已切到 best-effort shared rasterizer：如果高清图或 composite 图一时拿不到，会先退同源低分辨率 raster preview，而不是再退回手工 `Circle / RadialGradient` 示意
+- 画笔库笔触 preview 当前已改成模拟由轻到重的压感变化，因此有无压力变化、以及压力变化强不强，会比原来的单一力度预览更容易辨认
+- `组合笔尖` 面板当前已再次瘦身：顶部 gate 徽标、支持 chip、主/次笔尖说明句、三格示意说明字都已去掉，默认只保留控制、必要状态和图形示意
+- `编辑次笔尖…` 面板当前也已按同一原则瘦身：顶部说明句、形状说明、画布说明，以及各 slider 的 helper text 都已去掉，只保留标题、控件、预览和按钮
 - 资料库当前 UI 已切到：
+  - 资料库里的“导入图片…”支持一次多选多张
+  - 在资料库里导入时只会先批量入库，不会立刻改当前笔尖
   - 点选卡片后按“完成”应用
   - 拖拽排序
   - 右上角删除图标
   - `Esc` 退出资料库
-- 如果某张资料库图片仍被当前笔刷或某个画笔预设引用，当前规则是阻止删除
 - imported-image 主/次笔尖即使暂时切到其他笔尖形状，保存 / 重开后也仍会保留隐藏的图像笔尖资产状态；这现在作为兼容行为保留，但后续主入口将以显式资料库为准
 - 最近一轮回归已修复：
   - 编辑组合笔尖后普通画笔卡顿
@@ -157,16 +199,15 @@ ArtFlex 是旧版 `BrushCanvas` 的 Metal-first 重构版 macOS 绘图软件；�
   - 导入图像笔尖后的白边
 - 当前 Dual Tip 已从概念验证进入“可用阶段”
 - 当前已可用来做基础“收口 / 压缩型”“挖空 / 削减型”“交集 / 收口型”笔刷，也能开始体验异形次笔尖的挖空、调制、交集、稳定偏移、角度偏移与反相效果
-- 为了便于直接体验，默认画笔库现在附带 3 个 Dual Tip Phase 1 示例预设
+- 默认画笔库现在不再附带 3 个 Dual Tip Phase 1 示例预设；旧持久化或导入链若还带着这 3 个 legacy demo preset ID，也会在恢复时过滤掉
 
 ### 下一步建议
 
 - 下一阶段范围已经确认，不再停留在“只观察、不继续扩”的状态
 - 推荐按以下顺序推进：
-  1. 收尾共享 `tip image library` 的管理 / 生命周期体验
-  2. 更严格 `renderer-backed preview`
-  3. 更复杂随机 / spacing 系统
-  4. 更宽真实绘制 gate
+  1. 继续推进 `renderer-backed preview` 的剩余 rollout
+  2. 收尾共享 `tip image library` 的管理 / 生命周期体验
+  3. 更宽真实绘制 gate
 - `smudge` 不在当前确认范围
 - 其中：
   - 更复杂随机 / 变换能力与更宽 gate 的风险仍然更高，应拆成独立小刀推进

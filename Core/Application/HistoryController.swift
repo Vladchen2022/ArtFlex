@@ -170,6 +170,7 @@ final class HistoryController {
             toolSession: current.toolSession,
             colorPanel: current.colorPanel,
             brushLibrary: current.brushLibrary,
+            tipImageLibrary: current.tipImageLibrary,
             generator: current.generator,
             viewport: current.viewport,
             selection: restored.selection

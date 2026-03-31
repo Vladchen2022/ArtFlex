@@ -98,20 +98,16 @@ private struct DualTipPhaseZeroSliderRow: View {
 
 private struct DualTipPreviewCell<Content: View>: View {
     let title: String
-    let caption: String
     let content: Content
 
     private let primaryTextColor = Color(red: 0.12, green: 0.12, blue: 0.13)
-    private let secondaryTextColor = Color(red: 0.32, green: 0.32, blue: 0.34)
     private let previewBackgroundColor = Color(red: 0.08, green: 0.08, blue: 0.09)
 
     init(
         title: String,
-        caption: String,
         @ViewBuilder content: () -> Content
     ) {
         self.title = title
-        self.caption = caption
         self.content = content()
     }
 
@@ -134,11 +130,6 @@ private struct DualTipPreviewCell<Content: View>: View {
                     .padding(8)
             }
             .frame(height: 84)
-
-            Text(caption)
-                .font(.system(size: 10, weight: .medium))
-                .foregroundStyle(secondaryTextColor)
-                .fixedSize(horizontal: false, vertical: true)
         }
     }
 }
@@ -183,13 +174,18 @@ struct RightInspectorView: View {
     @State private var secondaryTipPaintMode: TipPaintMode = .round
     @State private var secondaryTipPaintSoftness: Double = 0.35
     @State private var secondaryTipPaintIntensity: Double = 1.0
-    @State private var showsDualTipAdvancedControls = false
     @State private var tipImageLibrarySheetTarget: TipImageLibrarySheetTarget?
     @State private var showsSecondaryTipImageLibrarySheet = false
     @State private var primaryTipImageLibraryPendingSelection: BrushTipImageAssetID?
     @State private var secondaryTipImageLibraryPendingSelection: BrushTipImageAssetID?
     @State private var draggedTipImageLibraryAssetID: BrushTipImageAssetID?
     @State private var tipImageLibraryDropTargetID: BrushTipImageAssetID?
+    @State private var dualTipPopoverPrimaryPreviewImage: CGImage?
+    @State private var dualTipPopoverSecondaryPreviewImage: CGImage?
+    @State private var dualTipPopoverCompositePreviewImage: CGImage?
+    @State private var dualTipPopoverPreviewRequestKey: String = ""
+    @State private var secondaryTipEditorPreviewImage: CGImage?
+    @State private var secondaryTipEditorPreviewRequestKey: String = ""
 
     var body: some View {
         GeometryReader { proxy in
@@ -555,37 +551,8 @@ struct RightInspectorView: View {
                 48,
                 (viewModel.workspace.brushLibrary.resolvedSlotMap().values.max() ?? -1) + 1
             )
-            let selectedPreset = viewModel.workspace.brushLibrary.selectedPresetID.flatMap {
-                viewModel.workspace.brushLibrary.preset(id: $0)
-            }
 
-            VStack(alignment: .leading, spacing: 8) {
-                HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    if let selectedPreset {
-                        Text(selectedPreset.name)
-                            .font(.system(size: 11, weight: .semibold))
-                            .foregroundStyle(Color.white.opacity(0.9))
-                            .lineLimit(1)
-                    } else {
-                        Text("当前未选中预设")
-                            .font(.system(size: 11, weight: .medium))
-                            .foregroundStyle(Color.white.opacity(0.45))
-                    }
-
-                    Spacer(minLength: 0)
-
-                    Text("青色描边 = Dual Tip 示例")
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundStyle(Color(red: 0.42, green: 0.86, blue: 1.0))
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
-                        .background(
-                            Capsule()
-                                .fill(Color(red: 0.14, green: 0.24, blue: 0.31))
-                        )
-                }
-                .padding(.horizontal, horizontalInset)
-
+            VStack(alignment: .leading, spacing: 0) {
                 ScrollView(.vertical, showsIndicators: true) {
                     LazyVGrid(
                         columns: Array(repeating: GridItem(.fixed(slotWidth), spacing: spacing), count: columnCount),
@@ -751,19 +718,22 @@ struct RightInspectorView: View {
                     title: "组合笔尖…",
                     tooltip: "打开组合笔尖参数"
                 ) {
+                    let brush = viewModel.workspace.toolSession.brush
+                    let activeTool = viewModel.workspace.toolSession.activeTool
+                    let requestKey = dualTipPopoverPreviewKey(for: brush, activeTool: activeTool)
+                    scheduleDualTipPopoverPreviewRefresh(
+                        for: brush,
+                        activeTool: activeTool,
+                        requestKey: requestKey
+                    )
                     showsDualTipPopover.toggle()
                 }
                 .popover(isPresented: $showsDualTipPopover, arrowEdge: .bottom) {
                     dualTipEditor
                         .padding(14)
-                        .frame(width: 420, height: 620, alignment: .topLeading)
+                        .frame(width: 500, height: 680, alignment: .topLeading)
                         .background(Color(nsColor: .windowBackgroundColor))
                 }
-            }
-
-            if let sourceInfo = viewModel.workspace.toolSession.brush.customTipImportedSourceInfo,
-               effectivePrimaryTipSourceSemantic(for: viewModel.workspace.toolSession.brush) == .importedImage {
-                importedTipSourceInfoRow(sourceInfo, title: "当前导入来源")
             }
 
             if let restoreTitle = primaryDormantTipRestoreTitle(for: viewModel.workspace.toolSession.brush) {
@@ -823,18 +793,8 @@ struct RightInspectorView: View {
     private var dualTipEditor: some View {
         let brush = viewModel.workspace.toolSession.brush
         let activeTool = viewModel.workspace.toolSession.activeTool
-        let phaseOneRealDrawingSupported = brush.supportsPhaseOneDualTipRealDrawing(for: activeTool)
-        let phaseTwoSubtractRealDrawingSupported = brush.supportsPhaseTwoDualTipSubtractRealDrawing(for: activeTool)
-        let phaseTwoIntersectRealDrawingSupported = brush.supportsPhaseTwoDualTipIntersectRealDrawing(for: activeTool)
-        let dualTipRealDrawingSupported =
-            phaseOneRealDrawingSupported ||
-            phaseTwoSubtractRealDrawingSupported ||
-            phaseTwoIntersectRealDrawingSupported
+        let previewRequestKey = dualTipPopoverPreviewKey(for: brush, activeTool: activeTool)
         let primaryTextColor = Color(red: 0.12, green: 0.12, blue: 0.13)
-        let secondaryTextColor = Color(red: 0.32, green: 0.32, blue: 0.34)
-        let statusAccentColor = dualTipRealDrawingSupported
-            ? Color(red: 0.15, green: 0.55, blue: 0.26)
-            : Color.orange
         let compactColumns = [
             GridItem(.flexible(), spacing: 8, alignment: .top),
             GridItem(.flexible(), spacing: 8, alignment: .top)
@@ -846,67 +806,9 @@ struct RightInspectorView: View {
                     Text("组合笔尖")
                         .font(.system(size: 13, weight: .bold))
                         .foregroundStyle(primaryTextColor)
-
-                    Spacer(minLength: 8)
-
-                    Text(dualTipCompactGateBadgeTitle(
-                        phaseOneRealDrawingSupported: phaseOneRealDrawingSupported,
-                        phaseTwoSubtractRealDrawingSupported: phaseTwoSubtractRealDrawingSupported,
-                        phaseTwoIntersectRealDrawingSupported: phaseTwoIntersectRealDrawingSupported
-                    ))
-                    .font(.system(size: 10, weight: .bold))
-                    .foregroundStyle(statusAccentColor.opacity(0.94))
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 5)
-                    .background(
-                        Capsule()
-                            .fill(statusAccentColor.opacity(0.12))
-                    )
-                    .overlay(
-                        Capsule()
-                            .stroke(statusAccentColor.opacity(0.22), lineWidth: 1)
-                    )
                 }
 
                 dualTipCompactSection {
-                    Text(
-                        dualTipCompactGateSummary(
-                            phaseOneRealDrawingSupported: phaseOneRealDrawingSupported,
-                            phaseTwoSubtractRealDrawingSupported: phaseTwoSubtractRealDrawingSupported,
-                            phaseTwoIntersectRealDrawingSupported: phaseTwoIntersectRealDrawingSupported
-                        )
-                    )
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundStyle(secondaryTextColor)
-                    .fixedSize(horizontal: false, vertical: true)
-
-                    LazyVGrid(columns: compactColumns, spacing: 8) {
-                        dualTipCompactFactChip(
-                            title: "主笔尖",
-                            value: dualTipPrimaryTipSummaryTitle(for: brush),
-                            isSupported: brush.tipShape.supportsDualTipRealDrawingPrimary,
-                            supportedText: "当前支持"
-                        )
-                        dualTipCompactFactChip(
-                            title: "次笔尖",
-                            value: dualTipSecondaryTipSummaryTitle(for: brush.secondaryTipDescriptor),
-                            isSupported: brush.secondaryTipDescriptor.supportsPhaseOneDualTipRealDrawing,
-                            supportedText: "当前支持"
-                        )
-                        dualTipCompactFactChip(
-                            title: "模式",
-                            value: brush.dualTipCombineMode.displayName,
-                            isSupported: brush.dualTipCombineMode == .multiply || brush.dualTipCombineMode == .subtract || brush.dualTipCombineMode == .intersect,
-                            supportedText: brush.dualTipCombineMode == .multiply ? "Phase 1" : "Phase 2"
-                        )
-                        dualTipCompactFactChip(
-                            title: "工具",
-                            value: activeTool.displayName,
-                            isSupported: activeTool == .brush || activeTool == .eraser,
-                            supportedText: "当前支持"
-                        )
-                    }
-
                     LazyVGrid(columns: compactColumns, spacing: 8) {
                         dualTipCompactCard(title: "开关") {
                             Toggle(
@@ -937,81 +839,89 @@ struct RightInspectorView: View {
                     }
                 }
 
-                dualTipCompactSection("笔尖概览") {
-                    LazyVGrid(columns: compactColumns, spacing: 8) {
-                        dualTipCompactTipCard(
-                            title: "主笔尖",
-                            previewBrush: brush,
-                            summaryTitle: dualTipPrimaryTipSummaryTitle(for: brush),
-                            detail: dualTipCompactPrimaryTipSummaryDetail(for: brush)
-                        )
-
-                        dualTipCompactTipCard(
-                            title: "次笔尖",
-                            previewBrush: dualTipSecondaryPreviewBrush(from: brush, activeTool: activeTool),
-                            summaryTitle: dualTipSecondaryTipSummaryTitle(for: brush.secondaryTipDescriptor),
-                            detail: dualTipCompactSecondaryTipSummaryDetail(for: brush.secondaryTipDescriptor)
-                        )
-                    }
-
-                    HStack(spacing: 8) {
-                        dualTipCompactActionButton(
-                            title: "编辑主笔尖…",
-                            systemImage: "arrow.up.left.and.arrow.down.right"
-                        ) {
-                            revealPrimaryTipEditor()
-                        }
-
-                        dualTipCompactActionButton(
-                            title: "编辑次笔尖…",
-                            systemImage: "slider.horizontal.3"
-                        ) {
-                            showsDualTipPopover = false
-                            showsSecondaryTipEditor = true
-                        }
-                    }
-                }
-
                 dualTipCompactSection("三格示意") {
                     HStack(alignment: .top, spacing: 8) {
-                        DualTipPreviewCell(
-                            title: "主笔尖",
-                            caption: "基底"
-                        ) {
-                            brushPreviewGlyph(for: brush, maxExtent: 42)
-                        }
+                        VStack(alignment: .leading, spacing: 6) {
+                            DualTipPreviewCell(title: "主笔尖") {
+                                let placeholderImage = dualTipCompactPlaceholderPreviewImage(
+                                    for: brush,
+                                    activeTool: activeTool,
+                                    role: .primary,
+                                    displayExtent: 42
+                                )
+                                dualTipPopoverPreviewGlyph(
+                                    dualTipPopoverPrimaryPreviewImage,
+                                    placeholder: placeholderImage,
+                                    maxExtent: 42,
+                                    darkBackground: true
+                                )
+                            }
 
-                        DualTipPreviewCell(
-                            title: "次笔尖",
-                            caption: "调制"
-                        ) {
-                            brushPreviewGlyph(for: dualTipSecondaryPreviewBrush(from: brush, activeTool: activeTool), maxExtent: 42)
+                            dualTipCompactActionButton(
+                                title: "编辑主笔尖",
+                                systemImage: "arrow.up.left.and.arrow.down.right"
+                            ) {
+                                revealPrimaryTipEditor()
+                            }
                         }
+                        .frame(maxWidth: .infinity, alignment: .top)
 
-                        DualTipPreviewCell(
-                            title: "最终笔尖",
-                            caption: dualTipCompactCompositePreviewCaption(for: brush, activeTool: activeTool)
-                        ) {
-                            if let previewImage = dualTipCompositePreviewImage(for: brush, activeTool: activeTool) {
+                        VStack(alignment: .leading, spacing: 6) {
+                            DualTipPreviewCell(title: "次笔尖") {
+                                let placeholderImage = dualTipCompactPlaceholderPreviewImage(
+                                    for: brush,
+                                    activeTool: activeTool,
+                                    role: .secondary,
+                                    displayExtent: 42
+                                )
+                                dualTipPopoverPreviewGlyph(
+                                    dualTipPopoverSecondaryPreviewImage,
+                                    placeholder: placeholderImage,
+                                    maxExtent: 42,
+                                    darkBackground: true
+                                )
+                            }
+
+                            dualTipCompactActionButton(
+                                title: "编辑次笔尖",
+                                systemImage: "slider.horizontal.3"
+                            ) {
+                                showsDualTipPopover = false
+                                showsSecondaryTipEditor = true
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .top)
+
+                        DualTipPreviewCell(title: "最终笔尖") {
+                            if let previewImage = dualTipPopoverCompositePreviewImage {
                                 Image(decorative: previewImage, scale: 1)
                                     .resizable()
                                     .interpolation(.high)
                                     .scaledToFit()
                                     .frame(width: 42, height: 42)
                             } else {
-                                Text("示意")
-                                    .font(.system(size: 10, weight: .semibold))
-                                    .foregroundStyle(Color.white.opacity(0.76))
-                                    .multilineTextAlignment(.center)
+                                let placeholderImage = dualTipCompactPlaceholderPreviewImage(
+                                    for: brush,
+                                    activeTool: activeTool,
+                                    role: .composite,
+                                    displayExtent: 42
+                                )
+                                dualTipPopoverPreviewGlyph(
+                                    nil,
+                                    placeholder: placeholderImage,
+                                    maxExtent: 42,
+                                    darkBackground: true
+                                )
                             }
                         }
+                        .frame(maxWidth: .infinity, alignment: .top)
                     }
                 }
 
-                dualTipCompactSection("核心参数") {
+                dualTipCompactSection("参数") {
                     LazyVGrid(columns: compactColumns, spacing: 8) {
                         DualTipPhaseZeroSliderRow(
-                            title: "强度 Strength",
+                            title: "强度",
                             valueText: "\(Int(brush.dualTipStrength * 100))%",
                             value: Binding(
                                 get: { Double(brush.dualTipStrength) },
@@ -1033,69 +943,129 @@ struct RightInspectorView: View {
                             onCommit: { viewModel.setSecondarySizeRatio(Float($0)) },
                             helperText: nil
                         )
-                    }
-                }
 
-                dualTipCompactSection {
-                    DisclosureGroup(isExpanded: $showsDualTipAdvancedControls) {
-                        VStack(alignment: .leading, spacing: 8) {
-                            LazyVGrid(columns: compactColumns, spacing: 8) {
-                                DualTipPhaseZeroSliderRow(
-                                    title: "角度偏移",
-                                    valueText: "\(Int(brush.secondaryAngleOffsetDegrees))°",
-                                    value: Binding(
-                                        get: { Double(brush.secondaryAngleOffsetDegrees) },
-                                        set: { _ in }
-                                    ),
-                                    range: -180...180,
-                                    onCommit: { viewModel.setSecondaryAngleOffsetDegrees(Float($0)) },
-                                    helperText: nil
-                                )
+                        DualTipPhaseZeroSliderRow(
+                            title: "大小抖动",
+                            valueText: "\(Int(brush.secondarySizeJitter * 100))%",
+                            value: Binding(
+                                get: { Double(brush.secondarySizeJitter) },
+                                set: { _ in }
+                            ),
+                            range: 0...1,
+                            onCommit: { viewModel.setSecondarySizeJitter(Float($0)) },
+                            helperText: nil
+                        )
 
-                                DualTipPhaseZeroSliderRow(
-                                    title: "散布",
-                                    valueText: String(format: "%.1fx", brush.secondaryScatter),
-                                    value: Binding(
-                                        get: { Double(brush.secondaryScatter) },
-                                        set: { _ in }
-                                    ),
-                                    range: 0...5,
-                                    onCommit: { viewModel.setSecondaryScatter(Float($0)) },
-                                    helperText: nil
-                                )
-                            }
+                        DualTipPhaseZeroSliderRow(
+                            title: "角度抖动",
+                            valueText: "\(Int(brush.secondaryAngleJitterDegrees))°",
+                            value: Binding(
+                                get: { Double(brush.secondaryAngleJitterDegrees) },
+                                set: { _ in }
+                            ),
+                            range: 0...180,
+                            onCommit: { viewModel.setSecondaryAngleJitterDegrees(Float($0)) },
+                            helperText: nil
+                        )
 
-                            dualTipCompactCard(title: "反相") {
-                                Toggle(
-                                    "反相次笔尖",
-                                    isOn: Binding(
-                                        get: { brush.secondaryInvert },
-                                        set: { viewModel.setSecondaryInvert($0) }
-                                    )
+                        DualTipPhaseZeroSliderRow(
+                            title: "角度偏移",
+                            valueText: "\(Int(brush.secondaryAngleOffsetDegrees))°",
+                            value: Binding(
+                                get: { Double(brush.secondaryAngleOffsetDegrees) },
+                                set: { _ in }
+                            ),
+                            range: -180...180,
+                            onCommit: { viewModel.setSecondaryAngleOffsetDegrees(Float($0)) },
+                            helperText: nil
+                        )
+
+                        DualTipPhaseZeroSliderRow(
+                            title: "节距错相",
+                            valueText: "\(Int(brush.secondarySpacingPhase * 100))%",
+                            value: Binding(
+                                get: { Double(brush.secondarySpacingPhase) },
+                                set: { _ in }
+                            ),
+                            range: -0.5...0.5,
+                            onCommit: { viewModel.setSecondarySpacingPhase(Float($0)) },
+                            helperText: nil
+                        )
+
+                        DualTipPhaseZeroSliderRow(
+                            title: "错相抖动",
+                            valueText: "\(Int(brush.secondarySpacingPhaseJitter * 100))%",
+                            value: Binding(
+                                get: { Double(brush.secondarySpacingPhaseJitter) },
+                                set: { _ in }
+                            ),
+                            range: 0...0.5,
+                            onCommit: { viewModel.setSecondarySpacingPhaseJitter(Float($0)) },
+                            helperText: nil
+                        )
+
+                        DualTipPhaseZeroSliderRow(
+                            title: "散布",
+                            valueText: String(format: "%.1fx", brush.secondaryScatter),
+                            value: Binding(
+                                get: { Double(brush.secondaryScatter) },
+                                set: { _ in }
+                            ),
+                            range: 0...5,
+                            onCommit: { viewModel.setSecondaryScatter(Float($0)) },
+                            helperText: nil
+                        )
+
+                        DualTipPhaseZeroSliderRow(
+                            title: "散布抖动",
+                            valueText: "\(Int(brush.secondaryScatterJitter * 100))%",
+                            value: Binding(
+                                get: { Double(brush.secondaryScatterJitter) },
+                                set: { _ in }
+                            ),
+                            range: 0...1,
+                            onCommit: { viewModel.setSecondaryScatterJitter(Float($0)) },
+                            helperText: nil
+                        )
+
+                        dualTipCompactCard(title: "反相") {
+                            Toggle(
+                                "反相次笔尖",
+                                isOn: Binding(
+                                    get: { brush.secondaryInvert },
+                                    set: { viewModel.setSecondaryInvert($0) }
                                 )
-                                .toggleStyle(.switch)
-                                .foregroundStyle(primaryTextColor)
-                            }
-                        }
-                        .padding(.top, 8)
-                    } label: {
-                        Text("进阶参数")
-                            .font(.system(size: 11, weight: .semibold))
+                            )
+                            .toggleStyle(.switch)
                             .foregroundStyle(primaryTextColor)
+                        }
                     }
-                    .accentColor(.accentColor)
                 }
             }
             .padding(.trailing, 2)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .onAppear {
+            scheduleDualTipPopoverPreviewRefresh(
+                for: brush,
+                activeTool: activeTool,
+                requestKey: previewRequestKey
+            )
+        }
+        .onChange(of: previewRequestKey) { _, newValue in
+            scheduleDualTipPopoverPreviewRefresh(
+                for: brush,
+                activeTool: activeTool,
+                requestKey: newValue
+            )
+        }
     }
 
     private func dualTipCompactSection<Content: View>(
         _ title: String? = nil,
         @ViewBuilder content: () -> Content
     ) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 6) {
             if let title {
                 Text(title)
                     .font(.system(size: 11, weight: .semibold))
@@ -1104,7 +1074,7 @@ struct RightInspectorView: View {
 
             content()
         }
-        .padding(10)
+        .padding(8)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
             RoundedRectangle(cornerRadius: 10)
@@ -1120,14 +1090,14 @@ struct RightInspectorView: View {
         title: String,
         @ViewBuilder content: () -> Content
     ) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 6) {
             Text(title)
                 .font(.system(size: 10, weight: .semibold))
                 .foregroundStyle(Color(red: 0.12, green: 0.12, blue: 0.13))
 
             content()
         }
-        .padding(10)
+        .padding(8)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
             RoundedRectangle(cornerRadius: 10)
@@ -1139,59 +1109,12 @@ struct RightInspectorView: View {
         )
     }
 
-    private func dualTipCompactFactChip(
+    private func dualTipCompactTipCard<Preview: View>(
         title: String,
-        value: String,
-        isSupported: Bool,
-        supportedText: String
-    ) -> some View {
-        let tint = isSupported ? Color.green : Color.orange
-
-        return VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 6) {
-                Text(title)
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(Color(red: 0.24, green: 0.24, blue: 0.26))
-
-                Spacer(minLength: 6)
-
-                Text(isSupported ? supportedText : "未接入")
-                    .font(.system(size: 9, weight: .bold))
-                    .foregroundStyle(tint.opacity(0.88))
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 3)
-                    .background(
-                        Capsule()
-                            .fill(tint.opacity(0.12))
-                    )
-            }
-
-            Text(value)
-                .font(.system(size: 11, weight: .bold))
-                .foregroundStyle(Color(red: 0.12, green: 0.12, blue: 0.13))
-                .lineLimit(2)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-        .padding(10)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: 10)
-                .fill(Color.white.opacity(0.64))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 10)
-                .stroke(Color.black.opacity(0.06), lineWidth: 1)
-        )
-    }
-
-    private func dualTipCompactTipCard(
-        title: String,
-        previewBrush: BrushSettings,
         summaryTitle: String,
-        detail: String
+        @ViewBuilder preview: () -> Preview
     ) -> some View {
         let primaryTextColor = Color(red: 0.12, green: 0.12, blue: 0.13)
-        let secondaryTextColor = Color(red: 0.32, green: 0.32, blue: 0.34)
 
         return dualTipCompactCard(title: title) {
             HStack(alignment: .top, spacing: 8) {
@@ -1203,7 +1126,7 @@ struct RightInspectorView: View {
                                 .stroke(Color.black.opacity(0.08), lineWidth: 1)
                         )
 
-                    brushPreviewGlyph(for: previewBrush, maxExtent: 38)
+                    preview()
                         .padding(6)
                 }
                 .frame(width: 56, height: 56)
@@ -1212,11 +1135,6 @@ struct RightInspectorView: View {
                     Text(summaryTitle)
                         .font(.system(size: 11, weight: .bold))
                         .foregroundStyle(primaryTextColor)
-
-                    Text(detail)
-                        .font(.system(size: 10, weight: .medium))
-                        .foregroundStyle(secondaryTextColor)
-                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
         }
@@ -1236,7 +1154,7 @@ struct RightInspectorView: View {
                     .lineLimit(1)
             }
             .foregroundStyle(Color.accentColor)
-            .frame(maxWidth: .infinity, minHeight: 30)
+            .frame(maxWidth: .infinity, minHeight: 28)
             .background(
                 RoundedRectangle(cornerRadius: 8)
                     .fill(Color.accentColor.opacity(0.10))
@@ -1247,108 +1165,6 @@ struct RightInspectorView: View {
             )
         }
         .buttonStyle(.plain)
-    }
-
-    private func dualTipCompactGateBadgeTitle(
-        phaseOneRealDrawingSupported: Bool,
-        phaseTwoSubtractRealDrawingSupported: Bool,
-        phaseTwoIntersectRealDrawingSupported: Bool
-    ) -> String {
-        if phaseTwoIntersectRealDrawingSupported {
-            return "真实已接通"
-        }
-        if phaseTwoSubtractRealDrawingSupported {
-            return "减去已接通"
-        }
-        if phaseOneRealDrawingSupported {
-            return "调制已接通"
-        }
-        return "条件接入"
-    }
-
-    private func dualTipCompactGateHeadline(
-        phaseOneRealDrawingSupported: Bool,
-        phaseTwoSubtractRealDrawingSupported: Bool,
-        phaseTwoIntersectRealDrawingSupported: Bool
-    ) -> String {
-        if phaseTwoIntersectRealDrawingSupported {
-            return "当前配置会直接影响真实绘制"
-        }
-        if phaseTwoSubtractRealDrawingSupported {
-            return "当前配置会直接影响真实绘制"
-        }
-        if phaseOneRealDrawingSupported {
-            return "当前配置会直接影响真实绘制"
-        }
-        return "当前仍是条件式真实接入"
-    }
-
-    private func dualTipCompactGateSummary(
-        phaseOneRealDrawingSupported: Bool,
-        phaseTwoSubtractRealDrawingSupported: Bool,
-        phaseTwoIntersectRealDrawingSupported: Bool
-    ) -> String {
-        if phaseTwoIntersectRealDrawingSupported {
-            return "当前配置会直接影响真实落笔。"
-        }
-        if phaseTwoSubtractRealDrawingSupported {
-            return "当前配置会直接影响真实落笔。"
-        }
-        if phaseOneRealDrawingSupported {
-            return "当前配置会直接影响真实落笔。"
-        }
-        return "当前只保存参数；满足 gate 后才会进入真实绘制。"
-    }
-
-    private func dualTipCompactPrimaryTipSummaryDetail(for brush: BrushSettings) -> String {
-        switch brush.tipShape {
-        case .hardRound:
-            return "硬边圆，当前直接参与真实绘制。"
-        case .softRound:
-            return "柔边圆，当前直接参与真实绘制。"
-        case .square:
-            return "方形主笔尖当前仍回旧路径。"
-        case .customRound:
-            if brush.customTipMaskData != nil, effectivePrimaryTipSourceSemantic(for: brush) == .importedImage {
-                return brush.customTipImportedSourceInfo?.formattedSummary ?? "来自导入图像。"
-            }
-            if brush.customTipMaskData != nil {
-                return "手绘自定义遮罩。"
-            }
-            return "参数化自定义圆。"
-        }
-    }
-
-    private func dualTipCompactSecondaryTipSummaryDetail(for secondary: SecondaryTipDescriptor) -> String {
-        switch secondary.tipShape {
-        case .hardRound:
-            return "硬边圆，当前真实支持。"
-        case .softRound:
-            return "柔边圆，当前真实支持。"
-        case .square:
-            return "仅编辑和保存，不进真实绘制。"
-        case .customRound:
-            if secondary.customTipMaskData != nil, secondary.sourceSemantic == .importedImage {
-                return secondary.importedSourceInfo?.formattedSummary ?? "来自导入图像。"
-            }
-            if secondary.customTipMaskData != nil {
-                return "手绘自定义遮罩。"
-            }
-            return "参数化自定义圆。"
-        }
-    }
-
-    private func dualTipCompactCompositePreviewCaption(for brush: BrushSettings, activeTool: ToolKind) -> String {
-        if brush.supportsPhaseTwoDualTipIntersectRealDrawing(for: activeTool) {
-            return "交集结果"
-        }
-        if brush.supportsPhaseTwoDualTipSubtractRealDrawing(for: activeTool) {
-            return "挖空结果"
-        }
-        if brush.supportsPhaseOneDualTipRealDrawing(for: activeTool) {
-            return "调制结果"
-        }
-        return "当前示意"
     }
 
     private func colorPanelTopButton(
@@ -1609,6 +1425,178 @@ struct RightInspectorView: View {
         return previewBrush
     }
 
+    private func dualTipPopoverPreviewKey(for brush: BrushSettings, activeTool: ToolKind) -> String {
+        var hasher = Hasher()
+        hasher.combine(activeTool.rawValue)
+        hasher.combine(brush.tipShape.rawValue)
+        hasher.combine(brush.customTipSourceSemantic.rawValue)
+        hasher.combine(StageOneBrushPreviewRasterizer.maskFingerprint(for: brush.customTipMaskData))
+        hasher.combine(brush.customTipSoftness)
+        hasher.combine(brush.customTipRoundness)
+        hasher.combine(brush.customTipAngleDegrees)
+        hasher.combine(brush.dualTipEnabled)
+        hasher.combine(brush.dualTipCombineMode.rawValue)
+        hasher.combine(brush.dualTipStrength)
+        hasher.combine(brush.secondarySizeRatio)
+        hasher.combine(brush.secondarySizeJitter)
+        hasher.combine(brush.secondaryAngleJitterDegrees)
+        hasher.combine(brush.secondaryAngleOffsetDegrees)
+        hasher.combine(brush.secondarySpacingPhase)
+        hasher.combine(brush.secondarySpacingPhaseJitter)
+        hasher.combine(brush.spacingPercent)
+        hasher.combine(brush.secondaryScatter)
+        hasher.combine(brush.secondaryScatterJitter)
+        hasher.combine(brush.secondaryInvert)
+
+        let secondary = brush.secondaryTipDescriptor
+        hasher.combine(secondary.tipShape.rawValue)
+        hasher.combine(secondary.sourceSemantic.rawValue)
+        hasher.combine(StageOneBrushPreviewRasterizer.maskFingerprint(for: secondary.customTipMaskData))
+        hasher.combine(secondary.customTipSoftness)
+        hasher.combine(secondary.customTipRoundness)
+        hasher.combine(secondary.customTipAngleDegrees)
+        return String(hasher.finalize())
+    }
+
+    private func secondaryTipEditorPreviewKey(for brush: BrushSettings, activeTool: ToolKind) -> String {
+        let secondaryBrush = dualTipSecondaryPreviewBrush(from: brush, activeTool: activeTool)
+        var hasher = Hasher()
+        hasher.combine(activeTool.rawValue)
+        hasher.combine(secondaryBrush.tipShape.rawValue)
+        hasher.combine(secondaryBrush.size)
+        hasher.combine(secondaryBrush.customTipSourceSemantic.rawValue)
+        hasher.combine(secondaryBrush.customTipAssetID?.rawValue ?? "")
+        hasher.combine(StageOneBrushPreviewRasterizer.maskFingerprint(for: secondaryBrush.customTipMaskData))
+        hasher.combine(secondaryBrush.customTipSoftness)
+        hasher.combine(secondaryBrush.customTipRoundness)
+        hasher.combine(secondaryBrush.customTipAngleDegrees)
+        return String(hasher.finalize())
+    }
+
+    private func scheduleDualTipPopoverPreviewRefresh(
+        for brush: BrushSettings,
+        activeTool: ToolKind,
+        requestKey: String
+    ) {
+        guard dualTipPopoverPreviewRequestKey != requestKey ||
+                dualTipPopoverPrimaryPreviewImage == nil ||
+                dualTipPopoverSecondaryPreviewImage == nil ||
+                dualTipPopoverCompositePreviewImage == nil else {
+            return
+        }
+
+        let requestChanged = dualTipPopoverPreviewRequestKey != requestKey
+        dualTipPopoverPreviewRequestKey = requestKey
+        if requestChanged {
+            dualTipPopoverPrimaryPreviewImage = nil
+            dualTipPopoverSecondaryPreviewImage = nil
+            dualTipPopoverCompositePreviewImage = nil
+        }
+
+        let brushSnapshot = brush
+        let secondaryBrushSnapshot = dualTipSecondaryPreviewBrush(from: brush, activeTool: activeTool)
+        let primaryResolution = previewRasterResolution(
+            for: 42,
+            minimum: 52,
+            maximum: 72,
+            scale: 1.5
+        )
+        let secondaryResolution = previewRasterResolution(
+            for: 42,
+            minimum: 52,
+            maximum: 72,
+            scale: 1.5
+        )
+        let compositeResolution = previewRasterResolution(
+            for: 42,
+            minimum: 48,
+            maximum: 68,
+            scale: 1.35
+        )
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            let primaryImage = bestEffortStampPreviewImage(
+                for: brushSnapshot,
+                resolution: primaryResolution
+            )
+
+            DispatchQueue.main.async {
+                guard dualTipPopoverPreviewRequestKey == requestKey else {
+                    return
+                }
+                dualTipPopoverPrimaryPreviewImage = primaryImage
+            }
+        }
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            let secondaryImage = bestEffortStampPreviewImage(
+                for: secondaryBrushSnapshot,
+                resolution: secondaryResolution
+            )
+
+            DispatchQueue.main.async {
+                guard dualTipPopoverPreviewRequestKey == requestKey else {
+                    return
+                }
+                dualTipPopoverSecondaryPreviewImage = secondaryImage
+            }
+        }
+
+        DispatchQueue.global(qos: .utility).async {
+            let compositeImage = bestEffortCompositePreviewImage(
+                for: brushSnapshot,
+                activeTool: activeTool,
+                resolution: compositeResolution
+            )
+
+            DispatchQueue.main.async {
+                guard dualTipPopoverPreviewRequestKey == requestKey else {
+                    return
+                }
+                dualTipPopoverCompositePreviewImage = compositeImage
+            }
+        }
+    }
+
+    private func scheduleSecondaryTipEditorPreviewRefresh(
+        for brush: BrushSettings,
+        activeTool: ToolKind,
+        requestKey: String
+    ) {
+        guard secondaryTipEditorPreviewRequestKey != requestKey ||
+                secondaryTipEditorPreviewImage == nil else {
+            return
+        }
+
+        let requestChanged = secondaryTipEditorPreviewRequestKey != requestKey
+        secondaryTipEditorPreviewRequestKey = requestKey
+        if requestChanged {
+            secondaryTipEditorPreviewImage = nil
+        }
+
+        let secondaryBrushSnapshot = dualTipSecondaryPreviewBrush(from: brush, activeTool: activeTool)
+        let resolution = previewRasterResolution(
+            for: 54,
+            minimum: 52,
+            maximum: 72,
+            scale: 1.35
+        )
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            let previewImage = bestEffortStampPreviewImage(
+                for: secondaryBrushSnapshot,
+                resolution: resolution
+            )
+
+            DispatchQueue.main.async {
+                guard secondaryTipEditorPreviewRequestKey == requestKey else {
+                    return
+                }
+                secondaryTipEditorPreviewImage = previewImage
+            }
+        }
+    }
+
     private func dualTipModeDescription(for brush: BrushSettings) -> String {
         switch brush.dualTipCombineMode {
         case .multiply:
@@ -1681,8 +1669,14 @@ struct RightInspectorView: View {
     }
 
     private func effectiveDualTipSecondaryAngleDegrees(for brush: BrushSettings, activeTool: ToolKind) -> Float {
-        brush.secondaryTipDescriptor.customTipAngleDegrees +
-        (brush.supportsSecondaryAngleOffsetRealDrawing(for: activeTool) ? brush.secondaryAngleOffsetDegrees : 0)
+        Float(
+            StageOneBrushPreviewRasterizer.secondaryResolvedAngleDegrees(
+                for: brush,
+                activeTool: activeTool,
+                point: .zero,
+                sampleIndex: 0
+            )
+        )
     }
 
     private func dualTipCompositePreviewCaption(for brush: BrushSettings, activeTool: ToolKind) -> String {
@@ -1707,204 +1701,103 @@ struct RightInspectorView: View {
         return "图形可示意当前组合关系，但当前工具仍走旧路径。"
     }
 
-    private func dualTipPreviewAlpha(
-        tipShape: BrushTipShape,
-        normalizedX: Double,
-        normalizedY: Double,
-        customMaskBytes: [UInt8]?,
-        softness: Float,
-        roundness: Float,
-        angleDegrees: Float
-    ) -> Double {
-        switch tipShape {
-        case .hardRound:
-            let distance = hypot(normalizedX, normalizedY)
-            return distance < 1.0 ? 1.0 : 0.0
-        case .softRound:
-            let distance = hypot(normalizedX, normalizedY)
-            guard distance < 1.0 else { return 0.0 }
-            let feather = max(0.0, 1.0 - distance)
-            return feather * feather
-        case .square:
-            return max(abs(normalizedX), abs(normalizedY)) < 1.0 ? 1.0 : 0.0
-        case .customRound:
-            let radians = Double(angleDegrees) * .pi / 180.0
-            let cosine = cos(radians)
-            let sine = sin(radians)
-            let rotatedX = (normalizedX * cosine) + (normalizedY * sine)
-            let rotatedY = (-normalizedX * sine) + (normalizedY * cosine)
-            let clampedRoundness = max(Double(roundness), 0.25)
-            let shapedX = rotatedX / clampedRoundness
-            let shapedY = rotatedY
-
-            if let customMaskBytes {
-                guard max(abs(shapedX), abs(shapedY)) < 1.0 else {
-                    return 0.0
-                }
-
-                let resolution = Int(Double(customMaskBytes.count).squareRoot())
-                guard resolution > 1 else {
-                    return 0.0
-                }
-
-                let u = min(max((shapedX + 1.0) * 0.5, 0.0), 1.0)
-                let v = min(max((shapedY + 1.0) * 0.5, 0.0), 1.0)
-                let x = u * Double(resolution - 1)
-                let y = v * Double(resolution - 1)
-                let x0 = Int(floor(x))
-                let y0 = Int(floor(y))
-                let x1 = min(x0 + 1, resolution - 1)
-                let y1 = min(y0 + 1, resolution - 1)
-                let tx = x - Double(x0)
-                let ty = y - Double(y0)
-
-                func sample(_ sampleX: Int, _ sampleY: Int) -> Double {
-                    let index = (sampleY * resolution) + sampleX
-                    return Double(customMaskBytes[index]) / 255.0
-                }
-
-                let top = (sample(x0, y0) * (1.0 - tx)) + (sample(x1, y0) * tx)
-                let bottom = (sample(x0, y1) * (1.0 - tx)) + (sample(x1, y1) * tx)
-                let sampledAlpha = (top * (1.0 - ty)) + (bottom * ty)
-                let clampedSoftness = min(max(Double(softness), 0.0), 1.0)
-                let exponent = (3.2 * (1.0 - clampedSoftness)) + (0.75 * clampedSoftness)
-                return pow(min(max(sampledAlpha, 0.0), 1.0), exponent)
-            }
-
-            let hardness = Double(BrushTipShape.customRoundHardness(for: softness))
-            let distance = hypot(shapedX, shapedY)
-            guard distance < 1.0 else { return 0.0 }
-            if hardness >= 0.999 || distance <= hardness {
-                return 1.0
-            }
-
-            let t = min(max((distance - hardness) / (1.0 - hardness), 0.0), 1.0)
-            return 1.0 - (t * t * (3.0 - (2.0 * t)))
-        }
-    }
-
     private func dualTipCompositePreviewImage(
         for brush: BrushSettings,
         activeTool: ToolKind,
         resolution: Int = 80,
         previewPoint: CGPoint = .zero,
-        sampleIndex: Int = 0
+        sampleIndex: Int = 0,
+        directionDegrees: Double = 0
     ) -> CGImage? {
-        guard (brush.dualTipCombineMode == .multiply ||
-               brush.dualTipCombineMode == .subtract ||
-               brush.dualTipCombineMode == .intersect),
-              brush.tipShape.supportsDualTipRealDrawingPrimary,
-              brush.secondaryTipDescriptor.supportsPhaseOneDualTipRealDrawing else {
-            return nil
-        }
-
-        let width = resolution
-        let height = resolution
-        let bytesPerPixel = 4
-        let bytesPerRow = width * bytesPerPixel
-        var pixels = [UInt8](repeating: 0, count: width * height * bytesPerPixel)
-
-        let strength = Double(min(max(brush.dualTipStrength, 0), 1))
-        let sizeRatio = Double(min(max(brush.secondarySizeRatio, 0.25), 0.95))
-        let secondaryScatterOffset = dualTipPreviewSecondaryScatterOffset(
+        StageOneBrushPreviewRasterizer.compositeStampImage(
             for: brush,
-            point: previewPoint,
-            sampleIndex: sampleIndex
+            activeTool: activeTool,
+            resolution: resolution,
+            previewPoint: previewPoint,
+            sampleIndex: sampleIndex,
+            directionDegrees: directionDegrees
         )
-        let primaryMaskBytes = resampledMaskData(
-            brush.customTipMaskData,
-            targetResolution: resolution
-        ).map(Array.init)
-        let secondaryMaskBytes = resampledMaskData(
-            brush.secondaryTipDescriptor.customTipMaskData,
-            targetResolution: resolution
-        ).map(Array.init)
+    }
 
-        for y in 0..<height {
-            for x in 0..<width {
-                let normalizedX = ((Double(x) + 0.5) / Double(width)) * 2.0 - 1.0
-                let normalizedY = ((Double(y) + 0.5) / Double(height)) * 2.0 - 1.0
-                let primaryAlpha = dualTipPreviewAlpha(
-                    tipShape: brush.tipShape,
-                    normalizedX: normalizedX,
-                    normalizedY: normalizedY,
-                    customMaskBytes: primaryMaskBytes,
-                    softness: brush.customTipSoftness,
-                    roundness: brush.customTipRoundness,
-                    angleDegrees: brush.customTipAngleDegrees
-                )
-                let secondaryAlpha = dualTipPreviewAlpha(
-                    tipShape: brush.secondaryTipDescriptor.tipShape,
-                    normalizedX: (normalizedX - secondaryScatterOffset.x) / sizeRatio,
-                    normalizedY: (normalizedY - secondaryScatterOffset.y) / sizeRatio,
-                    customMaskBytes: secondaryMaskBytes,
-                    softness: brush.secondaryTipDescriptor.customTipSoftness,
-                    roundness: brush.secondaryTipDescriptor.customTipRoundness,
-                    angleDegrees: effectiveDualTipSecondaryAngleDegrees(for: brush, activeTool: activeTool)
-                )
-                let resolvedSecondaryAlpha = brush.supportsSecondaryInvertRealDrawing(for: activeTool)
-                    ? (1.0 - min(max(secondaryAlpha, 0.0), 1.0))
-                    : secondaryAlpha
-                let combinedAlpha: Double
-                switch brush.dualTipCombineMode {
-                case .multiply:
-                    combinedAlpha = primaryAlpha * ((1.0 - strength) + (resolvedSecondaryAlpha * strength))
-                case .subtract:
-                    combinedAlpha = primaryAlpha * (1.0 - min(max(resolvedSecondaryAlpha * strength, 0.0), 1.0))
-                case .intersect:
-                    let pureIntersection = min(primaryAlpha, resolvedSecondaryAlpha)
-                    combinedAlpha = primaryAlpha + ((pureIntersection - primaryAlpha) * strength)
-                }
-
-                let alpha = UInt8(min(max(combinedAlpha * 255.0, 0), 255))
-                let offset = (y * bytesPerRow) + (x * bytesPerPixel)
-                pixels[offset] = 255
-                pixels[offset + 1] = 255
-                pixels[offset + 2] = 255
-                pixels[offset + 3] = alpha
-            }
-        }
-
-        let colorSpace = CGColorSpaceCreateDeviceRGB()
-        let bitmapInfo = CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue)
-        guard let provider = CGDataProvider(data: Data(pixels) as CFData) else {
-            return nil
-        }
-
-        return CGImage(
-            width: width,
-            height: height,
-            bitsPerComponent: 8,
-            bitsPerPixel: 32,
-            bytesPerRow: bytesPerRow,
-            space: colorSpace,
-            bitmapInfo: bitmapInfo,
-            provider: provider,
-            decode: nil,
-            shouldInterpolate: true,
-            intent: .defaultIntent
+    private func dualTipCompactPlaceholderPreviewImage(
+        for brush: BrushSettings,
+        activeTool: ToolKind,
+        role: DualTipPlaceholderRole,
+        displayExtent: Double
+    ) -> CGImage? {
+        let resolution = previewRasterResolution(
+            for: displayExtent,
+            minimum: 22,
+            maximum: 32,
+            scale: 1.0
         )
+
+        switch role {
+        case .primary:
+            return bestEffortStampPreviewImage(
+                for: brush,
+                resolution: resolution
+            )
+        case .secondary:
+            return bestEffortStampPreviewImage(
+                for: dualTipSecondaryPreviewBrush(from: brush, activeTool: activeTool),
+                resolution: resolution
+            )
+        case .composite:
+            return bestEffortCompositePreviewImage(
+                for: brush,
+                activeTool: activeTool,
+                resolution: resolution
+            )
+        }
+    }
+
+    private enum DualTipPlaceholderRole {
+        case primary
+        case secondary
+        case composite
+    }
+
+    @ViewBuilder
+    private func dualTipPopoverPreviewGlyph(
+        _ image: CGImage?,
+        placeholder: CGImage? = nil,
+        maxExtent: Double,
+        darkBackground: Bool
+    ) -> some View {
+        if let image {
+            Image(decorative: image, scale: 1)
+                .resizable()
+                .interpolation(.high)
+                .scaledToFit()
+                .frame(width: maxExtent, height: maxExtent)
+        } else if let placeholder {
+            Image(decorative: placeholder, scale: 1)
+                .resizable()
+                .interpolation(.high)
+                .scaledToFit()
+                .frame(width: maxExtent, height: maxExtent)
+                .opacity(0.68)
+        } else {
+            ProgressView()
+                .controlSize(.small)
+                .tint(darkBackground ? Color.white.opacity(0.82) : Color.secondary.opacity(0.82))
+                .frame(width: maxExtent, height: maxExtent)
+        }
     }
 
     private var secondaryTipEditorSheet: some View {
         let brush = viewModel.workspace.toolSession.brush
         let secondary = brush.secondaryTipDescriptor
         let activeTool = viewModel.workspace.toolSession.activeTool
+        let previewRequestKey = secondaryTipEditorPreviewKey(for: brush, activeTool: activeTool)
         let primaryTextColor = Color(red: 0.12, green: 0.12, blue: 0.13)
-        let secondaryTextColor = Color(red: 0.32, green: 0.32, blue: 0.34)
 
         return VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("编辑次笔尖")
-                        .font(.system(size: 15, weight: .bold))
-                        .foregroundStyle(primaryTextColor)
-
-                    Text("这里只编辑 SecondaryTipDescriptor。现在会区分“手绘自定义遮罩”和“导入图像笔尖”语义；真实绘制当前允许圆形和自定义次笔尖进入 multiply / subtract / intersect / scatter gate；方形仍只编辑和保存。")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(secondaryTextColor)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
+                Text("编辑次笔尖")
+                    .font(.system(size: 15, weight: .bold))
+                    .foregroundStyle(primaryTextColor)
 
                 Spacer(minLength: 8)
 
@@ -1918,13 +1811,24 @@ struct RightInspectorView: View {
             HStack(alignment: .top, spacing: 10) {
                 ZStack {
                     RoundedRectangle(cornerRadius: 10)
-                        .fill(Color.black.opacity(0.05))
+                        .fill(Color(red: 0.08, green: 0.08, blue: 0.09))
                         .overlay(
                             RoundedRectangle(cornerRadius: 10)
-                                .stroke(Color.black.opacity(0.08), lineWidth: 1)
+                                .stroke(Color.white.opacity(0.10), lineWidth: 1)
                         )
 
-                    brushPreviewGlyph(for: dualTipSecondaryPreviewBrush(from: brush, activeTool: activeTool), maxExtent: 54)
+                    let placeholderImage = dualTipCompactPlaceholderPreviewImage(
+                        for: brush,
+                        activeTool: activeTool,
+                        role: .secondary,
+                        displayExtent: 54
+                    )
+                    dualTipPopoverPreviewGlyph(
+                        secondaryTipEditorPreviewImage,
+                        placeholder: placeholderImage,
+                        maxExtent: 54,
+                        darkBackground: true
+                    )
                         .padding(8)
                 }
                 .frame(width: 84, height: 84)
@@ -1933,11 +1837,6 @@ struct RightInspectorView: View {
                     Text(dualTipSecondaryTipSummaryTitle(for: secondary))
                         .font(.system(size: 12, weight: .bold))
                         .foregroundStyle(primaryTextColor)
-
-                    Text(dualTipSecondaryTipSummaryDetail(for: secondary))
-                        .font(.system(size: 10, weight: .medium))
-                        .foregroundStyle(secondaryTextColor)
-                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
             .padding(10)
@@ -1964,15 +1863,15 @@ struct RightInspectorView: View {
                     )
                 ) {
                     ForEach(BrushTipShape.allCases, id: \.self) { tipShape in
-                        Text(dualTipSecondaryTipEditorLabel(for: tipShape)).tag(tipShape)
+                        dualTipSecondaryTipShapeMenuLabel(
+                            for: tipShape,
+                            brush: brush,
+                            activeTool: activeTool
+                        )
+                        .tag(tipShape)
                     }
                 }
                 .pickerStyle(.menu)
-
-                Text("硬边圆 / 柔边圆 / 自定义次笔尖当前可进入真实绘制。导入图片会保留“图像笔尖”语义；方形这轮仍只接编辑与保存，不扩 renderer gate。")
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundStyle(secondaryTextColor)
-                    .fixedSize(horizontal: false, vertical: true)
             }
 
             VStack(alignment: .leading, spacing: 8) {
@@ -1995,10 +1894,6 @@ struct RightInspectorView: View {
                     Button("清空自定义") {
                         viewModel.clearSecondaryTipMask()
                     }
-                }
-
-                if let sourceInfo = secondary.importedSourceInfo, secondary.sourceSemantic == .importedImage {
-                    importedTipSourceInfoRow(sourceInfo, title: "当前导入来源")
                 }
 
                 if let restoreTitle = secondaryDormantTipRestoreTitle(for: secondary) {
@@ -2033,10 +1928,6 @@ struct RightInspectorView: View {
                     .frame(height: 180)
                 }
 
-                Text("在这里绘制会把次笔尖来源切到“手绘自定义遮罩”；导入图片会切到“导入图像笔尖”。当前 multiply / subtract / intersect / scatter 已可使用这些次笔尖来源，方形仍会回旧 gate。")
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundStyle(secondaryTextColor)
-                    .fixedSize(horizontal: false, vertical: true)
             }
 
             DualTipPhaseZeroSliderRow(
@@ -2048,7 +1939,7 @@ struct RightInspectorView: View {
                 ),
                 range: 0...1,
                 onCommit: { viewModel.setSecondaryTipSoftness(Float($0)) },
-                helperText: "影响次笔尖自定义来源的柔边特性；当前 multiply / subtract / intersect / scatter gate 下已可参与真实绘制。"
+                helperText: nil
             )
 
             DualTipPhaseZeroSliderRow(
@@ -2060,7 +1951,7 @@ struct RightInspectorView: View {
                 ),
                 range: 0.25...1,
                 onCommit: { viewModel.setSecondaryTipRoundness(Float($0)) },
-                helperText: "控制次笔尖自定义来源的横向压缩比例。"
+                helperText: nil
             )
 
             DualTipPhaseZeroSliderRow(
@@ -2072,7 +1963,7 @@ struct RightInspectorView: View {
                 ),
                 range: 0...180,
                 onCommit: { viewModel.setSecondaryTipSourceAngleDegrees(Float($0)) },
-                helperText: "控制次笔尖自定义来源的基础旋转角度；再叠加“角度偏移”后进入当前 multiply / subtract / intersect / scatter 真实绘制。"
+                helperText: nil
             )
 
             DualTipPhaseZeroSliderRow(
@@ -2084,7 +1975,7 @@ struct RightInspectorView: View {
                 ),
                 range: 0...1,
                 onCommit: { secondaryTipPaintSoftness = $0 },
-                helperText: "只影响当前次笔尖遮罩编辑手感，不会写入真实次笔尖来源参数。"
+                helperText: nil
             )
         }
         .padding(16)
@@ -2094,6 +1985,20 @@ struct RightInspectorView: View {
             tipImageLibrarySheet(for: .secondary) {
                 showsSecondaryTipImageLibrarySheet = false
             }
+        }
+        .onAppear {
+            scheduleSecondaryTipEditorPreviewRefresh(
+                for: brush,
+                activeTool: activeTool,
+                requestKey: previewRequestKey
+            )
+        }
+        .onChange(of: previewRequestKey) { _, newValue in
+            scheduleSecondaryTipEditorPreviewRefresh(
+                for: brush,
+                activeTool: activeTool,
+                requestKey: newValue
+            )
         }
     }
 
@@ -2536,29 +2441,6 @@ struct RightInspectorView: View {
         return false
     }
 
-    private func importedTipSourceInfoRow(_ info: ImportedTipSourceInfo, title: String) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(title)
-                .font(.system(size: 10, weight: .semibold))
-                .foregroundStyle(Color(red: 0.24, green: 0.24, blue: 0.26))
-
-            Text(info.formattedSummary)
-                .font(.system(size: 10, weight: .medium))
-                .foregroundStyle(Color(red: 0.32, green: 0.32, blue: 0.34))
-                .fixedSize(horizontal: false, vertical: true)
-        }
-        .padding(10)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: 10)
-                .fill(Color.black.opacity(0.04))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 10)
-                .stroke(Color.black.opacity(0.08), lineWidth: 1)
-        )
-    }
-
     private func tipImageLibrarySheet(
         for target: TipImageLibrarySheetTarget,
         dismiss: @escaping () -> Void
@@ -2587,7 +2469,7 @@ struct RightInspectorView: View {
             }
 
             HStack(spacing: 8) {
-                Button("导入并应用…") {
+                Button("导入图片…") {
                     importTipImageViaLibrarySheet(for: target)
                 }
                 .buttonStyle(.borderedProminent)
@@ -2605,7 +2487,7 @@ struct RightInspectorView: View {
                     Text("资料库为空")
                         .font(.system(size: 13, weight: .semibold))
 
-                    Text("从主笔尖或次笔尖导入图片后，会自动进入这里。也可以直接在这里导入并应用。")
+                    Text("从主笔尖或次笔尖导入图片后，会自动进入这里。也可以直接在这里批量导入，再选一张后点“完成”。")
                         .font(.system(size: 11, weight: .medium))
                         .foregroundStyle(Color.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -2653,7 +2535,8 @@ struct RightInspectorView: View {
         isSelected: Bool,
         isDropTarget: Bool
     ) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
+        let referenceSummary = viewModel.tipImageLibraryReferenceSummary(for: item.id)
+        return VStack(alignment: .leading, spacing: 8) {
             ZStack {
                 RoundedRectangle(cornerRadius: 10)
                     .fill(Color.black.opacity(0.94))
@@ -2665,7 +2548,7 @@ struct RightInspectorView: View {
                             )
                     )
 
-                if let image = customTipPreviewImage(from: item.maskData, usesImportedPreviewFit: true) {
+                if let image = tipImageLibraryPreviewImage(for: item, displayExtent: 66) {
                     Image(decorative: image, scale: 1)
                         .resizable()
                         .interpolation(.high)
@@ -2692,10 +2575,15 @@ struct RightInspectorView: View {
                         } label: {
                             Image(systemName: "xmark.circle.fill")
                                 .font(.system(size: 12, weight: .bold))
-                                .foregroundStyle(Color.white.opacity(0.78))
+                                .foregroundStyle(
+                                    referenceSummary.isReferenced
+                                        ? Color.white.opacity(0.26)
+                                        : Color.white.opacity(0.78)
+                                )
                         }
                         .buttonStyle(.plain)
-                        .help("删除笔尖图片")
+                        .disabled(referenceSummary.isReferenced)
+                        .help(tipImageLibraryDeleteTooltip(for: referenceSummary))
                         .padding(6)
                     }
                     Spacer()
@@ -2711,6 +2599,8 @@ struct RightInspectorView: View {
                 .font(.system(size: 10, weight: .medium))
                 .foregroundStyle(Color.secondary)
                 .lineLimit(1)
+
+            tipImageLibraryReferenceSummaryRow(referenceSummary)
         }
         .padding(10)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -2722,6 +2612,109 @@ struct RightInspectorView: View {
             RoundedRectangle(cornerRadius: 12)
                 .stroke(isSelected ? Color.accentColor.opacity(0.24) : Color.black.opacity(0.06), lineWidth: 1)
         )
+    }
+
+    @ViewBuilder
+    private func tipImageLibraryReferenceSummaryRow(
+        _ summary: WorkspaceViewModel.TipImageLibraryReferenceSummary
+    ) -> some View {
+        HStack(spacing: 6) {
+            if summary.currentBrushUsesPrimary {
+                tipImageLibraryReferenceChip(
+                    title: "当前主笔尖",
+                    tint: Color.accentColor,
+                    tooltip: "当前主笔尖正在使用这张图片"
+                )
+            }
+
+            if summary.currentBrushUsesSecondary {
+                tipImageLibraryReferenceChip(
+                    title: "当前次笔尖",
+                    tint: Color(red: 0.84, green: 0.46, blue: 0.16),
+                    tooltip: "当前次笔尖正在使用这张图片"
+                )
+            }
+
+            if summary.presetCount > 0 {
+                tipImageLibraryReferenceChip(
+                    title: "\(summary.presetCount) 个预设",
+                    tint: Color(red: 0.16, green: 0.46, blue: 0.78),
+                    tooltip: tipImageLibraryPresetReferenceTooltip(for: summary)
+                )
+            }
+
+            if summary.isReferenced == false {
+                tipImageLibraryReferenceChip(
+                    title: "未引用",
+                    tint: Color.secondary,
+                    tooltip: "当前没有主笔尖、次笔尖或已保存预设引用这张图片"
+                )
+            }
+        }
+    }
+
+    private func tipImageLibraryReferenceChip(
+        title: String,
+        tint: Color,
+        tooltip: String? = nil
+    ) -> some View {
+        Text(title)
+            .font(.system(size: 9, weight: .bold))
+            .foregroundStyle(tint.opacity(0.92))
+            .padding(.horizontal, 6)
+            .padding(.vertical, 3)
+            .background(
+                Capsule()
+                    .fill(tint.opacity(0.12))
+            )
+            .overlay(
+                Capsule()
+                    .stroke(tint.opacity(0.18), lineWidth: 1)
+            )
+            .help(tooltip ?? "")
+    }
+
+    private func tipImageLibraryPresetReferenceTooltip(
+        for summary: WorkspaceViewModel.TipImageLibraryReferenceSummary
+    ) -> String {
+        var lines: [String] = []
+        if summary.presetPrimaryNames.isEmpty == false {
+            lines.append("主笔尖预设：\(tipImageLibraryPresetNameSummary(summary.presetPrimaryNames))")
+        }
+        if summary.presetSecondaryNames.isEmpty == false {
+            lines.append("次笔尖预设：\(tipImageLibraryPresetNameSummary(summary.presetSecondaryNames))")
+        }
+        return lines.isEmpty ? "已有预设引用这张图片" : lines.joined(separator: "\n")
+    }
+
+    private func tipImageLibraryPresetNameSummary(_ names: [String]) -> String {
+        let previewNames = names.prefix(3)
+        let label = previewNames.joined(separator: "、")
+        guard names.count > 3 else { return label }
+        return "\(label) 等 \(names.count) 个预设"
+    }
+
+    private func tipImageLibraryDeleteTooltip(
+        for summary: WorkspaceViewModel.TipImageLibraryReferenceSummary
+    ) -> String {
+        guard summary.isReferenced else {
+            return "删除笔尖图片"
+        }
+
+        var parts: [String] = []
+        if summary.currentBrushUsesPrimary {
+            parts.append("当前主笔尖")
+        }
+        if summary.currentBrushUsesSecondary {
+            parts.append("当前次笔尖")
+        }
+        if summary.presetPrimaryNames.isEmpty == false {
+            parts.append("主笔尖预设：\(tipImageLibraryPresetNameSummary(summary.presetPrimaryNames))")
+        }
+        if summary.presetSecondaryNames.isEmpty == false {
+            parts.append("次笔尖预设：\(tipImageLibraryPresetNameSummary(summary.presetSecondaryNames))")
+        }
+        return "该笔尖图片仍被\(parts.joined(separator: "、"))引用，无法删除"
     }
 
     private func selectedTipImageLibraryAssetID(for target: TipImageLibrarySheetTarget) -> BrushTipImageAssetID? {
@@ -2792,13 +2785,12 @@ struct RightInspectorView: View {
     }
 
     private func importTipImageViaLibrarySheet(for target: TipImageLibrarySheetTarget) {
-        switch target {
-        case .primary:
-            viewModel.importBrushTipImageFromDisk()
-        case .secondary:
-            _ = viewModel.importSecondaryTipImageFromDisk()
+        guard let importedIDs = viewModel.importTipImageLibraryItemsFromDisk() else {
+            return
         }
-        setPendingTipImageLibrarySelection(selectedTipImageLibraryAssetID(for: target), for: target)
+        if importedIDs.count == 1, let importedID = importedIDs.first {
+            setPendingTipImageLibrarySelection(importedID, for: target)
+        }
     }
 
     private func applyTipImageLibraryItem(_ assetID: BrushTipImageAssetID, to target: TipImageLibrarySheetTarget) {
@@ -3066,11 +3058,8 @@ struct RightInspectorView: View {
 
     private func brushPresetCell(_ preset: BrushPreset, slotIndex: Int) -> some View {
         let isSelected = viewModel.workspace.brushLibrary.selectedPresetID == preset.id
-        let isDualTipDemo = preset.isDualTipPhaseOneDemoPreset
-        let strokeColor: Color = isDualTipDemo
-            ? Color(red: 0.42, green: 0.86, blue: 1.0).opacity(isSelected ? 0.98 : 0.8)
-            : (isSelected ? Color.accentColor.opacity(0.9) : Color.white.opacity(0.06))
-        let strokeWidth: CGFloat = isSelected ? 1.5 : (isDualTipDemo ? 1.35 : 1.0)
+        let strokeColor: Color = isSelected ? Color.accentColor.opacity(0.9) : Color.white.opacity(0.06)
+        let strokeWidth: CGFloat = isSelected ? 1.5 : 1.0
 
         return Button {
             viewModel.applyBrushPreset(preset.id)
@@ -3097,7 +3086,7 @@ struct RightInspectorView: View {
                             .padding(.leading, cellSide * 0.10)
                             .padding(.top, cellSide * 0.08)
 
-                        brushPreviewGlyph(for: preset.brush, maxExtent: glyphSide)
+                        brushPreviewGlyph(for: preset.brush, activeTool: .brush, maxExtent: glyphSide)
                             .frame(width: glyphSide, height: glyphSide, alignment: .center)
                             .padding(.trailing, cellSide * 0.09)
                             .padding(.bottom, cellSide * 0.07)
@@ -3130,7 +3119,7 @@ struct RightInspectorView: View {
             .aspectRatio(1, contentMode: .fit)
         }
         .buttonStyle(.plain)
-        .help(preset.isDualTipPhaseOneDemoPreset ? "\(preset.name)\nDual Tip Phase 1 示例预设" : preset.name)
+        .help(preset.name)
         .contextMenu {
             Button("应用") {
                 viewModel.applyBrushPreset(preset.id)
@@ -3149,10 +3138,10 @@ struct RightInspectorView: View {
         if slotIndex < 4 {
             Text("\(slotIndex + 1)")
                 .font(.system(size: 9, weight: .semibold).monospacedDigit())
-                .foregroundStyle(Color.white.opacity(0.72))
+                .foregroundStyle(Color.accentColor.opacity(0.95))
                 .padding(.leading, 8)
-                .padding(.top, 7)
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                .padding(.bottom, 7)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
         }
     }
 
@@ -3193,21 +3182,36 @@ struct RightInspectorView: View {
             let stampCount = max(4, Int(12.0 / spacing))
 
             let baseWidth = min(size.width, size.height) * 0.42
-            let tipImage = customTipPreviewImage(
-                from: brush.customTipMaskData,
-                usesImportedPreviewFit: effectivePrimaryTipSourceSemantic(for: brush).usesImportedPreviewFit
+            let primaryStampResolution = previewRasterResolution(
+                for: baseWidth,
+                minimum: 44,
+                maximum: 72,
+                scale: 1.35
             )
-            let usesDualTipPreviewStamp = supportsAnyCurrentDualTipRealDrawing(brush, activeTool: activeTool)
+            let compositeStampResolution = previewRasterResolution(
+                for: baseWidth,
+                minimum: 40,
+                maximum: 56,
+                scale: 1.1
+            )
+            let primaryStampPreviewImage = bestEffortStampPreviewImage(
+                for: brush,
+                resolution: primaryStampResolution
+            )
+            let usesDualTipPreviewStamp = brush.dualTipEnabled
             let dualTipStampPreviewImage = usesDualTipPreviewStamp
-                ? dualTipCompositePreviewImage(
+                ? bestEffortCompositePreviewImage(
                     for: brush,
                     activeTool: activeTool,
-                    resolution: 72
+                    resolution: compositeStampResolution,
+                    directionDegrees: pathAngle * 180.0 / .pi
                 )
                 : nil
 
             for index in 0..<stampCount {
                 let t = stampCount == 1 ? 0.0 : Double(index) / Double(stampCount - 1)
+                let pressure = previewStrokePressure(at: t)
+                let pressureMetrics = previewBrushStrokeMetrics(for: brush, pressure: pressure)
                 var point = CGPoint(
                     x: start.x + (dx * t),
                     y: start.y + (dy * t)
@@ -3218,16 +3222,26 @@ struct RightInspectorView: View {
                     let normalLength = max(sqrt((normal.x * normal.x) + (normal.y * normal.y)), 0.001)
                     let normalized = CGPoint(x: normal.x / normalLength, y: normal.y / normalLength)
                     let offset = (
-                        stablePreviewRandom(x: point.x, y: point.y, index: index, salt: 0x9E37_79B9) * 2.0 - 1.0
+                        StageOneBrushPreviewRasterizer.stableRandom(
+                            x: point.x,
+                            y: point.y,
+                            index: index,
+                            salt: 0x9E37_79B9
+                        ) * 2.0 - 1.0
                     ) * scatter * 2.6
                     point.x += normalized.x * offset
                     point.y += normalized.y * offset
                 }
 
                 let sizeScale = 1.0 - (
-                    stablePreviewRandom(x: point.x, y: point.y, index: index, salt: 0xC2B2_AE35) * jitter * 0.45
+                    StageOneBrushPreviewRasterizer.stableRandom(
+                        x: point.x,
+                        y: point.y,
+                        index: index,
+                        salt: 0xC2B2_AE35
+                    ) * jitter * 0.45
                 )
-                let stampWidth = max(6, baseWidth * sizeScale)
+                let stampWidth = max(4, baseWidth * sizeScale * pressureMetrics.sizeFactor)
                 let rect = CGRect(
                     x: point.x - (stampWidth / 2),
                     y: point.y - (stampWidth / 2),
@@ -3240,10 +3254,16 @@ struct RightInspectorView: View {
                     angle += pathAngle
                 }
                 angle += (
-                    stablePreviewRandom(x: point.x, y: point.y, index: index, salt: 0x27D4_EB2F) * 2.0 - 1.0
+                    StageOneBrushPreviewRasterizer.stableRandom(
+                        x: point.x,
+                        y: point.y,
+                        index: index,
+                        salt: 0x27D4_EB2F
+                    ) * 2.0 - 1.0
                 ) * jitter * 0.65
 
                 context.drawLayer { layer in
+                    layer.opacity = pressureMetrics.opacity
                     layer.translateBy(x: rect.midX, y: rect.midY)
                     layer.rotate(by: Angle(radians: angle))
                     layer.translateBy(x: -rect.midX, y: -rect.midY)
@@ -3254,168 +3274,249 @@ struct RightInspectorView: View {
                         return
                     }
 
-                    switch brush.tipShape {
-                    case .hardRound:
-                        layer.fill(
-                            Path(ellipseIn: rect),
-                            with: .color(Color.white.opacity(0.88))
-                        )
-                    case .softRound:
-                        layer.fill(
-                            Path(ellipseIn: rect),
-                            with: .radialGradient(
-                                Gradient(colors: [
-                                    Color.white.opacity(0.90),
-                                    Color.white.opacity(0.18)
-                                ]),
-                                center: CGPoint(x: rect.midX, y: rect.midY),
-                                startRadius: 0,
-                                endRadius: stampWidth * 0.5
-                            )
-                        )
-                    case .square:
-                        layer.fill(
-                            Path(CGRect(
-                                x: rect.midX - stampWidth * 0.42,
-                                y: rect.midY - stampWidth * 0.42,
-                                width: stampWidth * 0.84,
-                                height: stampWidth * 0.84
-                            )),
-                            with: .color(Color.white.opacity(0.88))
-                        )
-                    case .customRound:
-                        if let tipImage {
-                            let resolved = layer.resolve(Image(decorative: tipImage, scale: 1))
-                            layer.draw(resolved, in: rect)
-                        } else {
-                            layer.fill(
-                                Path(ellipseIn: rect),
-                                with: .radialGradient(
-                                    Gradient(colors: [
-                                        Color.white.opacity(0.90),
-                                        Color.white.opacity(0.12)
-                                    ]),
-                                    center: CGPoint(x: rect.midX, y: rect.midY),
-                                    startRadius: 0,
-                                    endRadius: stampWidth * 0.5
-                                )
-                            )
-                        }
+                    if let primaryStampPreviewImage {
+                        let resolved = layer.resolve(Image(decorative: primaryStampPreviewImage, scale: 1))
+                        layer.draw(resolved, in: rect)
                     }
                 }
             }
         }
     }
 
-    private func stablePreviewRandom(x: Double, y: Double, index: Int, salt: UInt64) -> Double {
-        var value = UInt64(bitPattern: Int64(index &* 1_103_515_245 &+ 12_345)) ^ salt
-        value ^= UInt64(abs(Int64(x * 10_000)).magnitude &* 0x9E37_79B1)
-        value ^= UInt64(abs(Int64(y * 10_000)).magnitude &* 0x85EB_CA77)
-        value ^= value >> 16
-        value &*= 0x45d9f3b
-        value ^= value >> 16
-        return Double(value & 0xffff) / Double(0xffff)
+    private func previewStrokePressure(at progress: Double) -> Double {
+        let clamped = min(max(progress, 0), 1)
+        let eased = clamped * clamped * (3 - (2 * clamped))
+        // Keep preview pressure clearly in the light-touch range so the sample
+        // reads like a test stroke instead of a near-full-pressure drag.
+        return 0.04 + (0.32 * eased)
     }
 
-    private func dualTipPreviewSecondaryScatterOffset(
+    private func previewBrushStrokeMetrics(
         for brush: BrushSettings,
-        point: CGPoint = .zero,
-        sampleIndex: Int = 0
-    ) -> CGPoint {
-        let scatterAmount = Double(min(max(brush.secondaryScatter, 0), 5))
-        guard scatterAmount > 0.0001 else {
-            return .zero
+        pressure: Double
+    ) -> (sizeFactor: Double, opacity: Double) {
+        let effectivePressure = min(max(pressure, 0), 1)
+        let sizePressure = max(effectivePressure, 0.01)
+        let opacityPressure = max(effectivePressure, 0.005)
+        let sizeResponse = min(max(Double(brush.pressureSizeAmount), 0), 1)
+        let opacityResponse = min(max(Double(brush.pressureOpacityAmount), 0), 1)
+        let curvedSizePressure = previewSizeCurvePressure(sizePressure, brush: brush)
+        let lowerBound = min(max(Double(brush.sizeLowerBound), 0), 1)
+        let lowerBoundedPressure = lowerBound + ((1 - lowerBound) * curvedSizePressure)
+        let rawSizeFactor = (1 - sizeResponse) + (sizeResponse * lowerBoundedPressure)
+        let remappedOpacityPressure = previewPressureResponsePressure(opacityPressure, brush: brush)
+        let curvedOpacityPressure = previewOpacityCurvePressure(remappedOpacityPressure, brush: brush)
+        let rawOpacityFactor = (1 - opacityResponse) + (opacityResponse * curvedOpacityPressure)
+
+        // Apply a preview-only attenuation so both the Dual Tip sample and brush
+        // library preview stay visually lighter than actual committed strokes.
+        let sizeFactor = rawSizeFactor * 0.72
+        let resolvedOpacity = min(max(Double(brush.opacity) * rawOpacityFactor * 0.52, 0.05), 0.72)
+        return (max(sizeFactor, 0.05), resolvedOpacity)
+    }
+
+    private func previewPressureResponsePressure(
+        _ pressure: Double,
+        brush: BrushSettings
+    ) -> Double {
+        let clamped = min(max(pressure, 0), 1)
+        let sensitivity = min(max(Double(brush.pressureSensitivity), 0), 2)
+        guard sensitivity > 0.0001 else {
+            return 1
         }
+        return pow(clamped, sensitivity)
+    }
 
-        let radial = pow(stablePreviewRandom(x: point.x, y: point.y, index: sampleIndex, salt: 0xD1B5_4A31), 0.55)
-        let spreadAngle = stablePreviewRandom(x: point.x, y: point.y, index: sampleIndex, salt: 0xA24B_1C76) * (.pi * 2.0)
-        let scatterRadius = scatterAmount * 0.18 * radial
-
-        return CGPoint(
-            x: cos(spreadAngle) * scatterRadius,
-            y: sin(spreadAngle) * scatterRadius
+    private func previewSizeCurvePressure(
+        _ pressure: Double,
+        brush: BrushSettings
+    ) -> Double {
+        let low = min(max(Double(brush.sizeCurveLow), 0), 0.85)
+        let mid = min(max(Double(brush.sizeCurveMid), low), 0.95)
+        let high = min(max(Double(brush.sizeCurveHigh), mid), 1)
+        return previewSamplePiecewiseCurve(
+            pressure: pressure,
+            points: [
+                (0.0, 0.0),
+                (0.2, low),
+                (0.5, mid),
+                (0.8, high),
+                (1.0, 1.0)
+            ]
         )
     }
 
-    private func supportsAnyCurrentDualTipRealDrawing(_ brush: BrushSettings, activeTool: ToolKind) -> Bool {
-        brush.supportsPhaseOneDualTipRealDrawing(for: activeTool) ||
-        brush.supportsPhaseTwoDualTipSubtractRealDrawing(for: activeTool) ||
-        brush.supportsPhaseTwoDualTipIntersectRealDrawing(for: activeTool)
+    private func previewOpacityCurvePressure(
+        _ pressure: Double,
+        brush: BrushSettings
+    ) -> Double {
+        if brush.buildMode == .opacityCap {
+            let low = min(max(Double(brush.opacityCurveLow), 0), 0.85)
+            let mid = min(max(Double(brush.opacityCurveMid), low), 0.95)
+            let high = min(max(Double(brush.opacityCurveHigh), mid), 1)
+            return previewSamplePiecewiseCurve(
+                pressure: pressure,
+                points: [
+                    (0.0, 0.0),
+                    (0.2, low),
+                    (0.5, mid),
+                    (0.8, high),
+                    (1.0, 1.0)
+                ]
+            )
+        }
+
+        return pow(min(max(pressure, 0), 1), 3.6)
     }
 
-    private func tipShapePreview(_ tipShape: BrushTipShape) -> some View {
-        ZStack {
-            RoundedRectangle(cornerRadius: 8)
-                .fill(Color.white.opacity(0.06))
-                .frame(width: 32, height: 32)
+    private func previewSamplePiecewiseCurve(
+        pressure: Double,
+        points: [(x: Double, y: Double)]
+    ) -> Double {
+        let clamped = min(max(pressure, 0), 1)
 
-            switch tipShape {
-            case .softRound:
-                Circle()
-                    .fill(
-                        RadialGradient(
-                            colors: [Color.white.opacity(0.85), Color.white.opacity(0.15)],
-                            center: .center,
-                            startRadius: 0,
-                            endRadius: 12
-                        )
-                    )
-                    .frame(width: 20, height: 20)
-            case .hardRound:
-                Circle()
-                    .fill(Color.white.opacity(0.8))
-                    .frame(width: 20, height: 20)
-            case .square:
-                Rectangle()
-                    .fill(Color.white.opacity(0.8))
-                    .frame(width: 18, height: 18)
-            case .customRound:
-                brushMaskPreview(
-                    maskData: viewModel.workspace.toolSession.brush.customTipMaskData,
-                    sourceSemantic: effectivePrimaryTipSourceSemantic(for: viewModel.workspace.toolSession.brush),
-                    frameWidth: 22,
-                    frameHeight: 22,
-                    fallbackBrush: viewModel.workspace.toolSession.brush
-                )
+        for index in 1..<points.count {
+            let previous = points[index - 1]
+            let current = points[index]
+            if clamped <= current.x {
+                let segmentLength = max(current.x - previous.x, 0.0001)
+                let t = min(max((clamped - previous.x) / segmentLength, 0), 1)
+                let smoothT = t * t * (3 - (2 * t))
+                return previous.y + ((current.y - previous.y) * smoothT)
             }
         }
+
+        return points.last?.y ?? clamped
     }
 
-    private func brushPreviewGlyph(for brush: BrushSettings, maxExtent: Double = 52) -> some View {
+    private func brushPreviewGlyph(
+        for brush: BrushSettings,
+        activeTool: ToolKind = .brush,
+        maxExtent: Double = 52
+    ) -> some View {
         let normalizedSize = min(max(Double(brush.size) / 64.0, 0.22), 1.0)
         let baseExtent = min(maxExtent, 34.0 + (18.0 * normalizedSize))
+        let stampResolution = previewRasterResolution(
+            for: baseExtent,
+            minimum: 40,
+            maximum: 96,
+            scale: 1.8
+        )
+        let previewImage = brush.dualTipEnabled
+            ? bestEffortCompositePreviewImage(
+                for: brush,
+                activeTool: activeTool,
+                resolution: stampResolution
+            )
+            : bestEffortStampPreviewImage(
+                for: brush,
+                resolution: stampResolution
+            )
 
         return ZStack {
-            switch brush.tipShape {
-            case .hardRound:
-                Circle()
-                    .fill(Color.white.opacity(0.85))
+            if let previewImage {
+                Image(decorative: previewImage, scale: 1)
+                    .resizable()
+                    .interpolation(.high)
+                    .scaledToFit()
                     .frame(width: baseExtent, height: baseExtent)
-            case .softRound:
-                Circle()
-                    .fill(
-                        RadialGradient(
-                            colors: [Color.white.opacity(0.85), Color.white.opacity(0.15)],
-                            center: .center,
-                            startRadius: 0,
-                            endRadius: baseExtent * 0.55
-                        )
-                    )
+            } else {
+                RoundedRectangle(cornerRadius: max(8, baseExtent * 0.22))
+                    .fill(Color.white.opacity(0.10))
                     .frame(width: baseExtent, height: baseExtent)
-            case .square:
-                Rectangle()
-                    .fill(Color.white.opacity(0.85))
-                    .frame(width: baseExtent * 0.9, height: baseExtent * 0.9)
-            case .customRound:
-                brushMaskPreview(
-                    maskData: brush.customTipMaskData,
-                    sourceSemantic: brush.customTipSourceSemantic,
-                    frameWidth: baseExtent,
-                    frameHeight: baseExtent,
-                    fallbackBrush: brush
-                )
             }
         }
+    }
+
+    private func previewRasterResolution(
+        for displayExtent: Double,
+        minimum: Int,
+        maximum: Int,
+        scale: Double
+    ) -> Int {
+        let proposed = Int(ceil(max(displayExtent, 1) * scale))
+        return min(max(proposed, minimum), maximum)
+    }
+
+    nonisolated private func compactPreviewFallbackResolution(for resolution: Int) -> Int? {
+        let fallback = max(24, min(resolution / 2, 40))
+        return fallback < resolution ? fallback : nil
+    }
+
+    nonisolated private func bestEffortStampPreviewImage(
+        for brush: BrushSettings,
+        resolution: Int
+    ) -> CGImage? {
+        if let image = StageOneBrushPreviewRasterizer.stampImage(
+            for: brush,
+            resolution: resolution
+        ) {
+            return image
+        }
+
+        guard let fallbackResolution = compactPreviewFallbackResolution(for: resolution) else {
+            return nil
+        }
+
+        return StageOneBrushPreviewRasterizer.stampImage(
+            for: brush,
+            resolution: fallbackResolution
+        )
+    }
+
+    nonisolated private func bestEffortCompositePreviewImage(
+        for brush: BrushSettings,
+        activeTool: ToolKind,
+        resolution: Int,
+        previewPoint: CGPoint = .zero,
+        sampleIndex: Int = 0,
+        directionDegrees: Double = 0
+    ) -> CGImage? {
+        if let image = StageOneBrushPreviewRasterizer.compositeStampImage(
+            for: brush,
+            activeTool: activeTool,
+            resolution: resolution,
+            previewPoint: previewPoint,
+            sampleIndex: sampleIndex,
+            directionDegrees: directionDegrees
+        ) {
+            return image
+        }
+
+        if let fallbackResolution = compactPreviewFallbackResolution(for: resolution),
+           let image = StageOneBrushPreviewRasterizer.compositeStampImage(
+                for: brush,
+                activeTool: activeTool,
+                resolution: fallbackResolution,
+                previewPoint: previewPoint,
+                sampleIndex: sampleIndex,
+                directionDegrees: directionDegrees
+           ) {
+            return image
+        }
+
+        return bestEffortStampPreviewImage(for: brush, resolution: resolution)
+    }
+
+    nonisolated private func bestEffortImportedAssetPreviewImage(
+        from maskData: Data?,
+        resolution: Int
+    ) -> CGImage? {
+        if let image = StageOneBrushPreviewRasterizer.importedAssetImage(
+            from: maskData,
+            resolution: resolution
+        ) {
+            return image
+        }
+
+        guard let fallbackResolution = compactPreviewFallbackResolution(for: resolution) else {
+            return nil
+        }
+
+        return StageOneBrushPreviewRasterizer.importedAssetImage(
+            from: maskData,
+            resolution: fallbackResolution
+        )
     }
 
     @ViewBuilder
@@ -3426,125 +3527,112 @@ struct RightInspectorView: View {
         frameHeight: Double,
         fallbackBrush: BrushSettings
     ) -> some View {
-        if let image = customTipPreviewImage(from: maskData, usesImportedPreviewFit: sourceSemantic.usesImportedPreviewFit) {
+        if let image = customTipPreviewImage(
+            from: maskData,
+            sourceSemantic: sourceSemantic,
+            frameWidth: frameWidth,
+            frameHeight: frameHeight,
+            fallbackBrush: fallbackBrush
+        ) {
             Image(decorative: image, scale: 1)
                 .resizable()
                 .interpolation(.high)
                 .scaledToFit()
                 .frame(width: frameWidth, height: frameHeight)
-                .rotationEffect(.degrees(Double(fallbackBrush.customTipAngleDegrees)))
-                .scaleEffect(
-                    x: CGFloat(max(Double(fallbackBrush.customTipRoundness), 0.25)),
-                    y: 1
-                )
         } else {
-            let softness = Double(fallbackBrush.customTipSoftness)
-            let hardness = Double(BrushTipShape.customRoundHardness(for: fallbackBrush.customTipSoftness))
-            let roundness = max(Double(fallbackBrush.customTipRoundness), 0.25)
-            let angle = Double(fallbackBrush.customTipAngleDegrees)
-            Ellipse()
-                .fill(
-                    RadialGradient(
-                        stops: [
-                            .init(color: Color.white.opacity(0.85), location: 0),
-                            .init(color: Color.white.opacity(0.85), location: max(0.05, hardness)),
-                            .init(
-                                color: Color.white.opacity(0.10),
-                                location: min(1, max(0.12, hardness + max(0.08, softness * 0.4)))
-                            ),
-                            .init(color: Color.white.opacity(0.02), location: 1)
-                        ],
-                        center: .center,
-                        startRadius: 0,
-                        endRadius: frameWidth * 0.55
-                    )
-                )
-                .frame(width: frameWidth * roundness, height: frameHeight)
-                .rotationEffect(.degrees(angle))
+            RoundedRectangle(cornerRadius: max(8, min(frameWidth, frameHeight) * 0.24))
+                .fill(Color.white.opacity(0.10))
+                .frame(width: frameWidth, height: frameHeight)
         }
     }
 
-    private func customTipPreviewImage(from maskData: Data?, usesImportedPreviewFit: Bool = false) -> CGImage? {
-        guard let maskData = resampledMaskData(maskData, targetResolution: tipMaskResolution) else {
-            return nil
+    private func customTipPreviewImage(
+        from maskData: Data?,
+        sourceSemantic: TipSourceSemantic,
+        frameWidth: Double,
+        frameHeight: Double,
+        fallbackBrush: BrushSettings
+    ) -> CGImage? {
+        var previewBrush = fallbackBrush
+        previewBrush.tipShape = .customRound
+        previewBrush.customTipSourceSemantic = sourceSemantic
+        previewBrush.customTipMaskData = maskData
+        if sourceSemantic != .importedImage {
+            previewBrush.customTipAssetID = nil
+            previewBrush.customTipImportedSourceInfo = nil
         }
 
-        let bytesPerPixel = 4
-        let bytesPerRow = tipMaskResolution * bytesPerPixel
-        var rgba = [UInt8](repeating: 0, count: tipMaskResolution * tipMaskResolution * bytesPerPixel)
-
-        for index in 0..<(tipMaskResolution * tipMaskResolution) {
-            let alpha = maskData[index]
-            let offset = index * bytesPerPixel
-            rgba[offset] = 255
-            rgba[offset + 1] = 255
-            rgba[offset + 2] = 255
-            rgba[offset + 3] = alpha
-        }
-
-        guard
-            let provider = CGDataProvider(data: Data(rgba) as CFData),
-            let colorSpace = CGColorSpace(name: CGColorSpace.sRGB)
-        else {
-            return nil
-        }
-
-        let image = CGImage(
-            width: tipMaskResolution,
-            height: tipMaskResolution,
-            bitsPerComponent: 8,
-            bitsPerPixel: 32,
-            bytesPerRow: bytesPerRow,
-            space: colorSpace,
-            bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
-            provider: provider,
-            decode: nil,
-            shouldInterpolate: true,
-            intent: .defaultIntent
+        let displayExtent = max(frameWidth, frameHeight)
+        let resolution = previewRasterResolution(
+            for: displayExtent,
+            minimum: 40,
+            maximum: 96,
+            scale: 1.9
         )
-
-        guard usesImportedPreviewFit, let image else {
-            return image
-        }
-
-        return croppedCustomTipPreviewImage(image, from: maskData) ?? image
+        return bestEffortStampPreviewImage(
+            for: previewBrush,
+            resolution: resolution
+        )
     }
 
-    private func croppedCustomTipPreviewImage(_ image: CGImage, from maskData: Data) -> CGImage? {
-        let maskBytes = [UInt8](maskData)
-        guard let bounds = customTipMaskContentBounds(maskBytes) else {
-            return image
-        }
-        return image.cropping(to: bounds)
+    private func tipImageLibraryPreviewImage(
+        for item: TipImageLibraryItem,
+        displayExtent: Double
+    ) -> CGImage? {
+        let resolution = previewRasterResolution(
+            for: displayExtent,
+            minimum: 72,
+            maximum: 128,
+            scale: 1.8
+        )
+        return bestEffortImportedAssetPreviewImage(
+            from: item.maskData,
+            resolution: resolution
+        )
     }
 
-    private func customTipMaskContentBounds(_ mask: [UInt8]) -> CGRect? {
-        var minX = tipMaskResolution
-        var minY = tipMaskResolution
-        var maxX = -1
-        var maxY = -1
+    private func dualTipSecondaryTipShapeMenuPreviewImage(
+        for tipShape: BrushTipShape,
+        brush: BrushSettings,
+        activeTool: ToolKind
+    ) -> CGImage? {
+        var previewBrush = dualTipSecondaryPreviewBrush(from: brush, activeTool: activeTool)
+        previewBrush.tipShape = tipShape
 
-        for y in 0..<tipMaskResolution {
-            for x in 0..<tipMaskResolution {
-                if mask[(y * tipMaskResolution) + x] > 0 {
-                    minX = min(minX, x)
-                    minY = min(minY, y)
-                    maxX = max(maxX, x)
-                    maxY = max(maxY, y)
-                }
+        if tipShape != .customRound {
+            previewBrush.customTipSourceSemantic = .procedural
+            previewBrush.customTipAssetID = nil
+            previewBrush.customTipImportedSourceInfo = nil
+            previewBrush.customTipMaskData = nil
+            previewBrush.customTipAngleDegrees = 0
+        }
+
+        return bestEffortStampPreviewImage(
+            for: previewBrush,
+            resolution: 28
+        )
+    }
+
+    private func dualTipSecondaryTipShapeMenuLabel(
+        for tipShape: BrushTipShape,
+        brush: BrushSettings,
+        activeTool: ToolKind
+    ) -> some View {
+        HStack(spacing: 6) {
+            if let previewImage = dualTipSecondaryTipShapeMenuPreviewImage(
+                for: tipShape,
+                brush: brush,
+                activeTool: activeTool
+            ) {
+                Image(decorative: previewImage, scale: 1)
+                    .resizable()
+                    .interpolation(.high)
+                    .scaledToFit()
+                    .frame(width: 14, height: 14)
             }
-        }
 
-        guard maxX >= minX, maxY >= minY else {
-            return nil
+            Text(dualTipSecondaryTipEditorLabel(for: tipShape))
         }
-
-        let inset = 2
-        let originX = max(0, minX - inset)
-        let originY = max(0, minY - inset)
-        let width = min(tipMaskResolution - originX, (maxX - minX + 1) + (inset * 2))
-        let height = min(tipMaskResolution - originY, (maxY - minY + 1) + (inset * 2))
-        return CGRect(x: originX, y: originY, width: width, height: height)
     }
 
     private var activeLayer: LayerRecord? {
@@ -4479,10 +4567,11 @@ private final class TipMaskEditorNSView: NSView {
         dirtyRect.fill()
 
         guard let context = NSGraphicsContext.current?.cgContext else { return }
-        if let image = makePreviewImage(from: Data(maskBytes)) {
-            let previewImage = fitImportedPreview
-                ? (croppedPreviewImage(image, from: maskBytes) ?? image)
-                : image
+        if let previewImage = StageOneBrushPreviewRasterizer.editorMaskImage(
+            from: Data(maskBytes),
+            resolution: tipMaskResolution,
+            cropToContent: fitImportedPreview
+        ) {
             let drawRect = previewDrawRect(for: previewImage)
             context.saveGState()
             context.interpolationQuality = .high
@@ -4699,73 +4788,6 @@ private final class TipMaskEditorNSView: NSView {
             return [UInt8](repeating: 0, count: tipMaskResolution * tipMaskResolution)
         }
         return [UInt8](data)
-    }
-
-    private func makePreviewImage(from mask: Data) -> CGImage? {
-        let bytesPerPixel = 4
-        let bytesPerRow = tipMaskResolution * bytesPerPixel
-        var rgba = [UInt8](repeating: 255, count: tipMaskResolution * tipMaskResolution * bytesPerPixel)
-
-        for index in 0..<(tipMaskResolution * tipMaskResolution) {
-            let alpha = 255 - mask[index]
-            let offset = index * bytesPerPixel
-            rgba[offset] = alpha
-            rgba[offset + 1] = alpha
-            rgba[offset + 2] = alpha
-            rgba[offset + 3] = 255
-        }
-
-        guard
-            let provider = CGDataProvider(data: Data(rgba) as CFData),
-            let colorSpace = CGColorSpace(name: CGColorSpace.sRGB)
-        else {
-            return nil
-        }
-
-        return CGImage(
-            width: tipMaskResolution,
-            height: tipMaskResolution,
-            bitsPerComponent: 8,
-            bitsPerPixel: 32,
-            bytesPerRow: bytesPerRow,
-            space: colorSpace,
-            bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
-            provider: provider,
-            decode: nil,
-            shouldInterpolate: false,
-            intent: .defaultIntent
-        )
-    }
-
-    private func croppedPreviewImage(_ image: CGImage, from mask: [UInt8]) -> CGImage? {
-        guard let bounds = maskContentBounds(mask) else { return image }
-        return image.cropping(to: bounds)
-    }
-
-    private func maskContentBounds(_ mask: [UInt8]) -> CGRect? {
-        var minX = tipMaskResolution
-        var minY = tipMaskResolution
-        var maxX = -1
-        var maxY = -1
-
-        for y in 0..<tipMaskResolution {
-            for x in 0..<tipMaskResolution {
-                if mask[(y * tipMaskResolution) + x] > 0 {
-                    minX = min(minX, x)
-                    minY = min(minY, y)
-                    maxX = max(maxX, x)
-                    maxY = max(maxY, y)
-                }
-            }
-        }
-
-        guard maxX >= minX, maxY >= minY else { return nil }
-        let inset = 2
-        let originX = max(0, minX - inset)
-        let originY = max(0, minY - inset)
-        let width = min(tipMaskResolution - originX, (maxX - minX + 1) + (inset * 2))
-        let height = min(tipMaskResolution - originY, (maxY - minY + 1) + (inset * 2))
-        return CGRect(x: originX, y: originY, width: width, height: height)
     }
 
     private func aspectFitRect(imageSize: CGSize, in bounds: CGRect) -> CGRect {
