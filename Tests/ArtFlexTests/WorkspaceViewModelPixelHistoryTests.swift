@@ -5,6 +5,60 @@ import Testing
 struct WorkspaceViewModelPixelHistoryTests {
     @Test
     @MainActor
+    func applyingWholeLayerFreeTransformReprimesIdleStateWithoutReselectingTool() async throws {
+        let harness = try PixelHistoryHarness()
+        let layerID = harness.addLayer()
+
+        try harness.drawBrushStroke(
+            on: layerID,
+            points: [
+                .init(location: .init(x: 10, y: 10), pressure: 1),
+                .init(location: .init(x: 18, y: 18), pressure: 1)
+            ]
+        )
+
+        harness.viewModel.selectTool(.freeTransform)
+        let initialBounds = try #require(harness.viewModel.sceneSnapshot.selectionShape?.bounds)
+        let start = CanvasPoint(
+            x: initialBounds.origin.x + initialBounds.size.x / 2,
+            y: initialBounds.origin.y + initialBounds.size.y / 2
+        )
+        let end = CanvasPoint(x: start.x + 10, y: start.y + 6)
+
+        harness.viewModel.beginSelectionTransform(at: start, mode: .move)
+        harness.viewModel.updateSelectionTransform(to: end)
+        harness.viewModel.commitSelectionTransform(at: end)
+        harness.viewModel.applySelectionTransform()
+
+        var movedBounds: CanvasRect?
+        for _ in 0..<50 {
+            if let bounds = harness.viewModel.sceneSnapshot.selectionShape?.bounds,
+               bounds.origin.x > initialBounds.origin.x + 4,
+               bounds.origin.y > initialBounds.origin.y + 2 {
+                movedBounds = bounds
+                break
+            }
+            await Task.yield()
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+
+        let rebound = try #require(movedBounds)
+        #expect(rebound.origin.x > initialBounds.origin.x + 4)
+        #expect(rebound.origin.y > initialBounds.origin.y + 2)
+
+        let secondStart = CanvasPoint(
+            x: rebound.origin.x + rebound.size.x / 2,
+            y: rebound.origin.y + rebound.size.y / 2
+        )
+        harness.viewModel.beginSelectionTransform(at: secondStart, mode: .move)
+
+        let secondInteractionBounds = try #require(harness.viewModel.sceneSnapshot.selectionShape?.bounds)
+        #expect(abs(secondInteractionBounds.origin.x - rebound.origin.x) < 0.5)
+        #expect(abs(secondInteractionBounds.origin.y - rebound.origin.y) < 0.5)
+    }
+
+    @Test
+    @MainActor
     func freeTransformWholeLayerImmediatelyUsesContentBoundsInsteadOfFullCanvas() throws {
         let harness = try PixelHistoryHarness()
         let layerID = harness.addLayer()

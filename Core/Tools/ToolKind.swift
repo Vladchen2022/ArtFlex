@@ -354,7 +354,7 @@ struct ToolSidebarGroup: Identifiable, Equatable, Sendable {
         .init(id: "brush", tools: [.brush], shortcutKey: "B"),
         .init(id: "eraser", tools: [.eraser], shortcutKey: "E"),
         .init(id: "eyedropper", tools: [.eyedropper], shortcutKey: nil),
-        .init(id: "bucket", tools: [.bucket, .linearGradient, .sectorGradient], shortcutKey: "G"),
+        .init(id: "bucket", tools: [.bucket], shortcutKey: "G"),
         .init(id: "selection-l", tools: [.lassoSelection, .polygonSelection], shortcutKey: "L"),
         .init(id: "lasso-fill", tools: [.lassoFill], shortcutKey: "K"),
         .init(id: "selection-m", tools: [.rectangleSelection, .ellipseSelection], shortcutKey: "M"),

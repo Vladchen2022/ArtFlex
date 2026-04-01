@@ -2,6 +2,7 @@
 
 - 当前阶段：Dual Tip 已完成到 `invert`，并补齐了主/次笔尖来源语义、preview 收口，以及最近一轮普通画笔卡顿 / 偶发不出笔 / 导入笔尖白边修复；下一阶段已开始推进，其中 `secondary image tip` 已先完成 archive / persistence 边界、imported-image model-driven 收口，以及共享 `tip image library` 当前基线；`renderer-backed preview` 第一刀也已落地；更复杂随机 / `spacing` 的前五刀 `secondary size jitter`、`secondary angle jitter`、`secondary spacing phase`、`secondary spacing phase jitter` 与 `secondary scatter jitter` 也已落地
 - 当前画布视口交互新增两项：顶部工具栏已提供 `锁定画布` 切换；开启后主画布不能缩放、旋转或移动。当前缩放也已改为优先围绕最近一次笔尖 / hover 所在的画布位置进行，而不是固定围绕画布中心
+- `直线渐变` 与 `扇形渐变` 当前已从工具入口、快捷键循环和工具切换主链中摘掉，现视为“停用待重建”状态；旧实现不再作为当前稳定功能继续维护
 - 画笔库当前已收口为：不再通过格子右上角小叉删除笔刷预设；删除入口改为“先选中格子，再右键菜单删除”，以降低误点
 - `方案试探` 当前也已收口一条视口规则：四宫格模式下 4 个分支画布会统一回到默认 fit 视口，并临时锁定视口交互；因此不再继承主画布的平移/旋转偏移，也不会在四宫格里被继续拖动
 - `快照对比` 当前也已收口一条布局规则：右侧 2x2 对比卡片会按卡片总高度反推预览可用高度，不再让底部两格因为额外留白和高度估算偏差而被裁掉；4 个预览位现在都以完整画布为目标

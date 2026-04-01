@@ -2037,8 +2037,21 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
             let activeLayerID = snapshot.renderSnapshot.document.activeLayerID
             let activeBrushDisplayTexture = resolveBrushDisplayTexture(activeLayerID)
             let hasActivePreview = isTransforming
-            let hasLinearGradientPreview = activeTool == .linearGradient && linearGradientPreview?.geometry != nil
-            let hasSectorGradientPreview = activeTool == .sectorGradient && sectorGradientPreview?.geometry != nil
+            let resolvedLinearGradientGeometry =
+                activeTool == .linearGradient
+                ? linearGradientPreview.flatMap {
+                    resolvedLinearGradientPreviewGeometry(
+                        preview: $0,
+                        canvasSize: canvasSize
+                    )
+                }
+                : nil
+            let resolvedSectorGradientGeometry =
+                activeTool == .sectorGradient
+                ? sectorGradientPreview.flatMap { resolvedSectorGradientPreviewGeometry(preview: $0) }
+                : nil
+            let hasLinearGradientPreview = resolvedLinearGradientGeometry != nil
+            let hasSectorGradientPreview = resolvedSectorGradientGeometry != nil
             let hasGradientPreview = hasLinearGradientPreview || hasSectorGradientPreview
 
             let activeLayerOpacity = activeLayerSurfaceID.flatMap { surfaceID in
@@ -2092,7 +2105,7 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
 
                 descriptor.colorAttachments[0].loadAction = .load
                 descriptor.colorAttachments[0].storeAction = .store
-                if hasLinearGradientPreview, let geometry = linearGradientPreview?.geometry {
+                if let geometry = resolvedLinearGradientGeometry {
                     linearGradientRenderer.encode(
                         into: descriptor,
                         commandBuffer: commandBuffer,
@@ -2102,7 +2115,7 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
                         pointC: geometry.pointC,
                         color: gradientPreviewColor
                     )
-                } else if hasSectorGradientPreview, let geometry = sectorGradientPreview?.geometry {
+                } else if let geometry = resolvedSectorGradientGeometry {
                     sectorGradientRenderer.encode(
                         into: descriptor,
                         commandBuffer: commandBuffer,

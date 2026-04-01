@@ -253,7 +253,7 @@ struct CanvasContainerView: View {
                 }
 
                 if viewModel.workspace.toolSession.activeTool == .linearGradient,
-                   viewModel.linearGradientState.isEditingSession,
+                   shouldShowGradientDraftOverlay(phase: viewModel.linearGradientState.phase),
                    let preview = viewModel.linearGradientState.preview {
                     LinearGradientToolOverlay(
                         preview: preview,
@@ -274,7 +274,7 @@ struct CanvasContainerView: View {
                 }
 
                 if viewModel.workspace.toolSession.activeTool == .sectorGradient,
-                   viewModel.sectorGradientState.isEditingSession,
+                   shouldShowGradientDraftOverlay(phase: viewModel.sectorGradientState.phase),
                    let preview = viewModel.sectorGradientState.preview {
                     SectorGradientToolOverlay(
                         preview: preview,

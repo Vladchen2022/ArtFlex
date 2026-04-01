@@ -258,6 +258,40 @@ func defaultSectorGradientEndPoint(center: CanvasPoint, startPoint: CanvasPoint)
     )
 }
 
+func resolvedLinearGradientPreviewGeometry(
+    preview: LinearGradientPreview,
+    canvasSize: CanvasSize
+) -> LinearGradientGeometry? {
+    guard distanceBetween(preview.pointA, preview.pointB) > 0.5 else { return nil }
+    let pointC = preview.pointC ?? defaultLinearGradientPointC(
+        pointA: preview.pointA,
+        pointB: preview.pointB,
+        canvasSize: canvasSize
+    )
+    return LinearGradientGeometry(
+        pointA: preview.pointA,
+        pointB: preview.pointB,
+        pointC: pointC
+    )
+}
+
+func resolvedSectorGradientPreviewGeometry(
+    preview: SectorGradientPreview
+) -> SectorGradientGeometry? {
+    guard distanceBetween(preview.center, preview.startPoint) > 0.5 else { return nil }
+    let endPoint = preview.endPoint ?? defaultSectorGradientEndPoint(
+        center: preview.center,
+        startPoint: preview.startPoint
+    )
+    let geometry = SectorGradientGeometry(
+        center: preview.center,
+        startPoint: preview.startPoint,
+        endPoint: endPoint
+    )
+    guard geometry.radius > 1, abs(geometry.sweepAngle) > 0.001 else { return nil }
+    return geometry
+}
+
 func linearGradientPreviewContains(_ geometry: LinearGradientGeometry, point: CanvasPoint) -> Bool {
     let polygon = [geometry.pointA, geometry.pointB, geometry.pointC, geometry.pointD]
     return polygonContains(point: point, polygon: polygon)
@@ -311,6 +345,24 @@ func shouldShowGradientAnnotator(phase: SectorGradientPhase) -> Bool {
         return true
     default:
         return false
+    }
+}
+
+func shouldShowGradientDraftOverlay(phase: LinearGradientPhase) -> Bool {
+    switch phase {
+    case .idle:
+        return false
+    case .drawingLeg1, .drawingLeg2, .pendingPreview, .editing, .draggingHandle, .movingWholeGradient:
+        return true
+    }
+}
+
+func shouldShowGradientDraftOverlay(phase: SectorGradientPhase) -> Bool {
+    switch phase {
+    case .idle:
+        return false
+    case .drawingLeg1, .drawingLeg2, .pendingPreview, .editing, .draggingHandle, .movingWholeGradient:
+        return true
     }
 }
 

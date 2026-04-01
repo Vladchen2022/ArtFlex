@@ -76,6 +76,16 @@ final class WorkspaceViewModel: ObservableObject {
     private static let maxSavedSnapshotCount = 6
     private static let savedSnapshotThumbnailDimension = 92
     private static let snapshotComparePreviewDimension = 960
+
+    private static func normalizedAvailableTool(_ tool: ToolKind) -> ToolKind {
+        switch tool {
+        case .linearGradient, .sectorGradient:
+            return .bucket
+        default:
+            return tool
+        }
+    }
+
     @Published private(set) var workspace: WorkspaceState
     @Published private(set) var sceneSnapshot: CanvasSceneSnapshot
     @Published private(set) var status: WorkspaceStatus?
@@ -218,8 +228,9 @@ final class WorkspaceViewModel: ObservableObject {
 
     func selectTool(_ tool: ToolKind) {
         ideationBranchActivityHandler?()
-        if shouldAutoApplyGradientBeforeSelectingTool(tool) {
-            deferredGradientAction = .toolSwitch(tool)
+        let normalizedTool = Self.normalizedAvailableTool(tool)
+        if shouldAutoApplyGradientBeforeSelectingTool(normalizedTool) {
+            deferredGradientAction = .toolSwitch(normalizedTool)
             transformLogger.debug("[gradient] autoApplyOnToolSwitch=true sessionState=\(self.gradientSessionStateDescription(), privacy: .public)")
             transformLogger.debug("[gradient] deferredToolSwitch=true sessionTool=\(String(describing: self.activeGradientTool()), privacy: .public)")
             guard !isApplyingGradientCommit else { return }
@@ -227,13 +238,14 @@ final class WorkspaceViewModel: ObservableObject {
             return
         }
         let currentTool = workspace.toolSession.activeTool
-        if isBrushLikeTool(currentTool) && !isBrushLikeTool(tool) {
+        if isBrushLikeTool(currentTool) && !isBrushLikeTool(normalizedTool) {
             _ = drainPendingBrushCommitsIfNeeded(resetLiveSession: true)
         }
-        performToolSelection(tool)
+        performToolSelection(normalizedTool)
     }
 
     private func performToolSelection(_ tool: ToolKind) {
+        let tool = Self.normalizedAvailableTool(tool)
         let previousTool = workspace.toolSession.activeTool
         if workspace.toolSession.activeTool != tool {
             resolveTransformSession(reason: .toolChange)
@@ -259,19 +271,8 @@ final class WorkspaceViewModel: ObservableObject {
         if let group = ToolSidebarGroup.group(containing: tool) {
             toolGroupSurfaceTools[group.id] = tool
         }
-        let latestState = bootstrap.workspaceStore.state
         if tool == .freeTransform {
-            ensureWholeLayerInteractionBoundsAvailableIfNeeded(for: latestState)
-        }
-        if tool == .freeTransform {
-            activateImplicitFreeTransformSelectionIfNeeded()
-            // 立即进入 transforming 状态，让 MetalCanvasHost 开始准备 TransformPreviewSession
-            if effectiveTransformOperationShape != nil && !transformState.isActive {
-                transformState.beginSession(at: .init(x: 0, y: 0))
-                transformState.dragStartPoint = nil // 只激活，不开始拖动
-                setFreeTransformPreview(.identity)
-                isTransformingSelection = true
-            }
+            primeWholeLayerFreeTransformIdleStateIfNeeded(for: bootstrap.workspaceStore.state)
             refreshLightweight()
         } else {
             setFreeTransformPreview(.identity)
@@ -2192,7 +2193,25 @@ final class WorkspaceViewModel: ObservableObject {
 
     func updateLinearGradientHover(to point: CanvasPoint) {
         guard workspace.toolSession.activeTool == .linearGradient else { return }
-        linearGradientState.hoverPoint = point
+        mutateLinearGradientState { state in
+            state.hoverPoint = point
+        }
+    }
+
+    private func mutateLinearGradientState(
+        _ mutate: (inout LinearGradientInteractionState) -> Void
+    ) {
+        var state = linearGradientState
+        mutate(&state)
+        linearGradientState = state
+    }
+
+    private func mutateSectorGradientState(
+        _ mutate: (inout SectorGradientInteractionState) -> Void
+    ) {
+        var state = sectorGradientState
+        mutate(&state)
+        sectorGradientState = state
     }
 
     private func activeGradientTool() -> ToolKind? {
@@ -2440,15 +2459,19 @@ final class WorkspaceViewModel: ObservableObject {
         let hitExistingEditorTarget: Bool
         if let geometry = linearGradientState.geometry {
             if let handle = linearGradientHandleHitTest(geometry, point: point) {
-                linearGradientState.phase = .draggingHandle(handle)
-                linearGradientState.dragStartPoint = point
-                linearGradientState.dragReferenceGeometry = geometry
+                mutateLinearGradientState { state in
+                    state.phase = .draggingHandle(handle)
+                    state.dragStartPoint = point
+                    state.dragReferenceGeometry = geometry
+                }
                 return
             }
             if linearGradientPreviewContains(geometry, point: point) {
-                linearGradientState.phase = .movingWholeGradient
-                linearGradientState.dragStartPoint = point
-                linearGradientState.dragReferenceGeometry = geometry
+                mutateLinearGradientState { state in
+                    state.phase = .movingWholeGradient
+                    state.dragStartPoint = point
+                    state.dragReferenceGeometry = geometry
+                }
                 return
             }
             hitExistingEditorTarget = linearGradientState.isEditingSession
@@ -2479,108 +2502,114 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     private func updateLinearGradientDrag(to point: CanvasPoint) {
-        linearGradientState.hoverPoint = point
+        mutateLinearGradientState { state in
+            state.hoverPoint = point
 
-        switch linearGradientState.phase {
+            switch state.phase {
         case .idle:
             break
         case .drawingLeg1:
-            guard let pointA = linearGradientState.pointA else { return }
-            let candidate = linearGradientState.leg1CandidatePoint ?? point
+            guard let pointA = state.pointA else { return }
+            let candidate = state.leg1CandidatePoint ?? point
             if shouldLatchGradientLeg2(origin: pointA, leg1Point: candidate, currentPoint: point) {
-                linearGradientState.phase = .drawingLeg2
-                linearGradientState.pointB = candidate
-                linearGradientState.pointC = point
-                linearGradientState.leg1CandidatePoint = candidate
+                state.phase = .drawingLeg2
+                state.pointB = candidate
+                state.pointC = point
+                state.leg1CandidatePoint = candidate
                 transformLogger.debug("[gradient] latchLeg2=true sessionTool=linear")
                 return
             }
 
-            linearGradientState.leg1CandidatePoint = point
-            linearGradientState.pointB = point
+            state.leg1CandidatePoint = point
+            state.pointB = point
         case .drawingLeg2:
-            linearGradientState.pointC = point
+            state.pointC = point
         case .draggingHandle(let handle):
-            guard let reference = linearGradientState.dragReferenceGeometry else { return }
+            guard let reference = state.dragReferenceGeometry else { return }
             switch handle {
             case .pointA:
-                linearGradientState.pointA = point
-                linearGradientState.pointB = reference.pointB
-                linearGradientState.pointC = reference.pointC
+                state.pointA = point
+                state.pointB = reference.pointB
+                state.pointC = reference.pointC
             case .pointB:
-                linearGradientState.pointA = reference.pointA
-                linearGradientState.pointB = point
-                linearGradientState.pointC = reference.pointC
+                state.pointA = reference.pointA
+                state.pointB = point
+                state.pointC = reference.pointC
             case .pointC:
-                linearGradientState.pointA = reference.pointA
-                linearGradientState.pointB = reference.pointB
-                linearGradientState.pointC = point
+                state.pointA = reference.pointA
+                state.pointB = reference.pointB
+                state.pointC = point
             }
         case .movingWholeGradient:
             guard
-                let reference = linearGradientState.dragReferenceGeometry,
-                let dragStartPoint = linearGradientState.dragStartPoint
+                let reference = state.dragReferenceGeometry,
+                let dragStartPoint = state.dragStartPoint
             else { return }
             let delta = CanvasPoint(x: point.x - dragStartPoint.x, y: point.y - dragStartPoint.y)
-            linearGradientState.pointA = CanvasPoint(x: reference.pointA.x + delta.x, y: reference.pointA.y + delta.y)
-            linearGradientState.pointB = CanvasPoint(x: reference.pointB.x + delta.x, y: reference.pointB.y + delta.y)
-            linearGradientState.pointC = CanvasPoint(x: reference.pointC.x + delta.x, y: reference.pointC.y + delta.y)
+            state.pointA = CanvasPoint(x: reference.pointA.x + delta.x, y: reference.pointA.y + delta.y)
+            state.pointB = CanvasPoint(x: reference.pointB.x + delta.x, y: reference.pointB.y + delta.y)
+            state.pointC = CanvasPoint(x: reference.pointC.x + delta.x, y: reference.pointC.y + delta.y)
         case .editing, .pendingPreview:
             break
+        }
         }
     }
 
     private func endLinearGradientDrag(at point: CanvasPoint) {
-        defer {
-            linearGradientState.dragStartPoint = nil
-            linearGradientState.dragReferenceGeometry = nil
-            linearGradientState.hoverPoint = point
-        }
+        mutateLinearGradientState { state in
+            defer {
+                state.dragStartPoint = nil
+                state.dragReferenceGeometry = nil
+                state.hoverPoint = point
+            }
 
-        switch linearGradientState.phase {
+            switch state.phase {
         case .idle:
             return
         case .drawingLeg1:
-            guard let pointA = linearGradientState.pointA else {
-                linearGradientState = .init()
+            guard let pointA = state.pointA else {
+                state = .init()
                 return
             }
-            let pointB = linearGradientState.pointB ?? point
+            let pointB = state.pointB ?? point
             guard distanceBetween(pointA, pointB) > 0.5 else {
-                linearGradientState = .init()
+                state = .init()
                 return
             }
-            linearGradientState.pointB = pointB
-            linearGradientState.pointC = defaultLinearGradientPointC(
+            state.pointB = pointB
+            state.pointC = defaultLinearGradientPointC(
                 pointA: pointA,
                 pointB: pointB,
                 canvasSize: workspace.document.canvasSize
             )
-            linearGradientState.phase = .pendingPreview
-            linearGradientState.leg1CandidatePoint = nil
+            state.phase = .pendingPreview
+            state.leg1CandidatePoint = nil
+            let phaseDescription = String(describing: state.phase)
             transformLogger.debug("[gradient] completedToPendingPreview=true sessionTool=linear")
-            transformLogger.debug("[gradient] sessionState=\(String(describing: self.linearGradientState.phase), privacy: .public)")
+            transformLogger.debug("[gradient] sessionState=\(phaseDescription, privacy: .public)")
         case .drawingLeg2:
-            guard let pointA = linearGradientState.pointA, let pointB = linearGradientState.pointB else {
-                linearGradientState = .init()
+            guard let pointA = state.pointA, let pointB = state.pointB else {
+                state = .init()
                 return
             }
-            let pointC = linearGradientState.pointC ?? defaultLinearGradientPointC(
+            let pointC = state.pointC ?? defaultLinearGradientPointC(
                 pointA: pointA,
                 pointB: pointB,
                 canvasSize: workspace.document.canvasSize
             )
-            linearGradientState.pointC = pointC
-            linearGradientState.phase = .pendingPreview
-            linearGradientState.leg1CandidatePoint = nil
+            state.pointC = pointC
+            state.phase = .pendingPreview
+            state.leg1CandidatePoint = nil
+            let phaseDescription = String(describing: state.phase)
             transformLogger.debug("[gradient] completedToPendingPreview=true sessionTool=linear")
-            transformLogger.debug("[gradient] sessionState=\(String(describing: self.linearGradientState.phase), privacy: .public)")
+            transformLogger.debug("[gradient] sessionState=\(phaseDescription, privacy: .public)")
         case .draggingHandle, .movingWholeGradient:
-            linearGradientState.phase = .editing
+            state.phase = .editing
         case .editing:
             break
         case .pendingPreview:
             break
+        }
         }
     }
 
@@ -2622,7 +2651,9 @@ final class WorkspaceViewModel: ObservableObject {
 
     func updateSectorGradientHover(to point: CanvasPoint) {
         guard workspace.toolSession.activeTool == .sectorGradient else { return }
-        sectorGradientState.hoverPoint = point
+        mutateSectorGradientState { state in
+            state.hoverPoint = point
+        }
     }
 
     func cancelSectorGradientInteraction() {
@@ -2651,15 +2682,19 @@ final class WorkspaceViewModel: ObservableObject {
         let hitExistingEditorTarget: Bool
         if let geometry = sectorGradientState.geometry {
             if let handle = sectorGradientHandleHitTest(geometry, point: point) {
-                sectorGradientState.phase = .draggingHandle(handle)
-                sectorGradientState.dragStartPoint = point
-                sectorGradientState.dragReferenceGeometry = geometry
+                mutateSectorGradientState { state in
+                    state.phase = .draggingHandle(handle)
+                    state.dragStartPoint = point
+                    state.dragReferenceGeometry = geometry
+                }
                 return
             }
             if sectorGradientPreviewContains(geometry, point: point) {
-                sectorGradientState.phase = .movingWholeGradient
-                sectorGradientState.dragStartPoint = point
-                sectorGradientState.dragReferenceGeometry = geometry
+                mutateSectorGradientState { state in
+                    state.phase = .movingWholeGradient
+                    state.dragStartPoint = point
+                    state.dragReferenceGeometry = geometry
+                }
                 return
             }
             hitExistingEditorTarget = sectorGradientState.isEditingSession
@@ -2690,100 +2725,106 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     private func updateSectorGradientDrag(to point: CanvasPoint) {
-        sectorGradientState.hoverPoint = point
+        mutateSectorGradientState { state in
+            state.hoverPoint = point
 
-        switch sectorGradientState.phase {
+            switch state.phase {
         case .idle:
             break
         case .drawingLeg1:
-            guard let center = sectorGradientState.center else { return }
-            let candidate = sectorGradientState.leg1CandidatePoint ?? point
+            guard let center = state.center else { return }
+            let candidate = state.leg1CandidatePoint ?? point
             if shouldLatchGradientLeg2(origin: center, leg1Point: candidate, currentPoint: point) {
-                sectorGradientState.phase = .drawingLeg2
-                sectorGradientState.startPoint = candidate
-                sectorGradientState.endPoint = point
-                sectorGradientState.leg1CandidatePoint = candidate
+                state.phase = .drawingLeg2
+                state.startPoint = candidate
+                state.endPoint = point
+                state.leg1CandidatePoint = candidate
                 transformLogger.debug("[gradient] latchLeg2=true sessionTool=sector")
                 return
             }
 
-            sectorGradientState.leg1CandidatePoint = point
-            sectorGradientState.startPoint = point
+            state.leg1CandidatePoint = point
+            state.startPoint = point
         case .drawingLeg2:
-            sectorGradientState.endPoint = point
+            state.endPoint = point
         case .draggingHandle(let handle):
-            guard let reference = sectorGradientState.dragReferenceGeometry else { return }
+            guard let reference = state.dragReferenceGeometry else { return }
             switch handle {
             case .center:
                 let delta = CanvasPoint(x: point.x - reference.center.x, y: point.y - reference.center.y)
-                sectorGradientState.center = point
-                sectorGradientState.startPoint = CanvasPoint(x: reference.startPoint.x + delta.x, y: reference.startPoint.y + delta.y)
-                sectorGradientState.endPoint = CanvasPoint(x: reference.endPoint.x + delta.x, y: reference.endPoint.y + delta.y)
+                state.center = point
+                state.startPoint = CanvasPoint(x: reference.startPoint.x + delta.x, y: reference.startPoint.y + delta.y)
+                state.endPoint = CanvasPoint(x: reference.endPoint.x + delta.x, y: reference.endPoint.y + delta.y)
             case .startEdge:
-                sectorGradientState.center = reference.center
-                sectorGradientState.startPoint = point
-                sectorGradientState.endPoint = reference.endPoint
+                state.center = reference.center
+                state.startPoint = point
+                state.endPoint = reference.endPoint
             case .endEdge:
-                sectorGradientState.center = reference.center
-                sectorGradientState.startPoint = reference.startPoint
-                sectorGradientState.endPoint = point
+                state.center = reference.center
+                state.startPoint = reference.startPoint
+                state.endPoint = point
             }
         case .movingWholeGradient:
             guard
-                let reference = sectorGradientState.dragReferenceGeometry,
-                let dragStartPoint = sectorGradientState.dragStartPoint
+                let reference = state.dragReferenceGeometry,
+                let dragStartPoint = state.dragStartPoint
             else { return }
             let delta = CanvasPoint(x: point.x - dragStartPoint.x, y: point.y - dragStartPoint.y)
-            sectorGradientState.center = CanvasPoint(x: reference.center.x + delta.x, y: reference.center.y + delta.y)
-            sectorGradientState.startPoint = CanvasPoint(x: reference.startPoint.x + delta.x, y: reference.startPoint.y + delta.y)
-            sectorGradientState.endPoint = CanvasPoint(x: reference.endPoint.x + delta.x, y: reference.endPoint.y + delta.y)
+            state.center = CanvasPoint(x: reference.center.x + delta.x, y: reference.center.y + delta.y)
+            state.startPoint = CanvasPoint(x: reference.startPoint.x + delta.x, y: reference.startPoint.y + delta.y)
+            state.endPoint = CanvasPoint(x: reference.endPoint.x + delta.x, y: reference.endPoint.y + delta.y)
         case .editing, .pendingPreview:
             break
+        }
         }
     }
 
     private func endSectorGradientDrag(at point: CanvasPoint) {
-        defer {
-            sectorGradientState.dragStartPoint = nil
-            sectorGradientState.dragReferenceGeometry = nil
-            sectorGradientState.hoverPoint = point
-        }
+        mutateSectorGradientState { state in
+            defer {
+                state.dragStartPoint = nil
+                state.dragReferenceGeometry = nil
+                state.hoverPoint = point
+            }
 
-        switch sectorGradientState.phase {
+            switch state.phase {
         case .idle:
             return
         case .drawingLeg1:
-            guard let center = sectorGradientState.center else {
-                sectorGradientState = .init()
+            guard let center = state.center else {
+                state = .init()
                 return
             }
-            let startPoint = sectorGradientState.startPoint ?? point
+            let startPoint = state.startPoint ?? point
             guard distanceBetween(center, startPoint) > 0.5 else {
-                sectorGradientState = .init()
+                state = .init()
                 return
             }
-            sectorGradientState.startPoint = startPoint
-            sectorGradientState.endPoint = defaultSectorGradientEndPoint(center: center, startPoint: startPoint)
-            sectorGradientState.phase = .pendingPreview
-            sectorGradientState.leg1CandidatePoint = nil
+            state.startPoint = startPoint
+            state.endPoint = defaultSectorGradientEndPoint(center: center, startPoint: startPoint)
+            state.phase = .pendingPreview
+            state.leg1CandidatePoint = nil
+            let phaseDescription = String(describing: state.phase)
             transformLogger.debug("[gradient] completedToPendingPreview=true sessionTool=sector")
-            transformLogger.debug("[gradient] sessionState=\(String(describing: self.sectorGradientState.phase), privacy: .public)")
+            transformLogger.debug("[gradient] sessionState=\(phaseDescription, privacy: .public)")
         case .drawingLeg2:
-            guard let center = sectorGradientState.center, let startPoint = sectorGradientState.startPoint else {
-                sectorGradientState = .init()
+            guard let center = state.center, let startPoint = state.startPoint else {
+                state = .init()
                 return
             }
-            sectorGradientState.endPoint = sectorGradientState.endPoint ?? defaultSectorGradientEndPoint(center: center, startPoint: startPoint)
-            sectorGradientState.phase = .pendingPreview
-            sectorGradientState.leg1CandidatePoint = nil
+            state.endPoint = state.endPoint ?? defaultSectorGradientEndPoint(center: center, startPoint: startPoint)
+            state.phase = .pendingPreview
+            state.leg1CandidatePoint = nil
+            let phaseDescription = String(describing: state.phase)
             transformLogger.debug("[gradient] completedToPendingPreview=true sessionTool=sector")
-            transformLogger.debug("[gradient] sessionState=\(String(describing: self.sectorGradientState.phase), privacy: .public)")
+            transformLogger.debug("[gradient] sessionState=\(phaseDescription, privacy: .public)")
         case .draggingHandle, .movingWholeGradient:
-            sectorGradientState.phase = .editing
+            state.phase = .editing
         case .editing:
             break
         case .pendingPreview:
             break
+        }
         }
     }
 
@@ -3832,8 +3873,14 @@ final class WorkspaceViewModel: ObservableObject {
                     selection.activeKind = nil
                 }
 
-                self.refresh()
                 self.noteCanvasContentChanged()
+                if isFreeTransform && capturedFreeTransformUsesImplicit {
+                    let latestState = self.bootstrap.workspaceStore.state
+                    self.primeWholeLayerFreeTransformIdleStateIfNeeded(for: latestState)
+                    self.refreshLightweight()
+                } else {
+                    self.refresh()
+                }
 
                 let totalDurationMs = Double(DispatchTime.now().uptimeNanoseconds - applyStart) / 1_000_000
                 self.transformLogger.debug("[apply] totalMs=\(totalDurationMs, privacy: .public)")
@@ -3924,6 +3971,22 @@ final class WorkspaceViewModel: ObservableObject {
         }
         implicitFreeTransformSelectionShape = implicitSelection
         freeTransformUsesImplicitSelection = true
+    }
+
+    private func primeWholeLayerFreeTransformIdleStateIfNeeded(for state: WorkspaceState) {
+        guard state.toolSession.activeTool == .freeTransform else { return }
+        ensureWholeLayerInteractionBoundsAvailableIfNeeded(for: state)
+        activateImplicitFreeTransformSelectionIfNeeded()
+        guard effectiveTransformOperationShape != nil else {
+            isTransformingSelection = transformState.isActive
+            return
+        }
+        if !transformState.isActive {
+            transformState.beginSession(at: .init(x: 0, y: 0))
+            transformState.dragStartPoint = nil // 只激活，不开始拖动
+            setFreeTransformPreview(.identity)
+        }
+        isTransformingSelection = transformState.isActive
     }
 
     var hidesImplicitFreeTransformSelectionOverlay: Bool {
@@ -4229,8 +4292,7 @@ final class WorkspaceViewModel: ObservableObject {
         }
 
         guard
-            let surfaceID = bootstrap.layerSurfaceStore.surfaceID(for: layerID),
-            let texture = bootstrap.layerSurfaceStore.texture(for: surfaceID)
+            let texture = bootstrap.layerSurfaceStore.surfaceID(for: layerID).flatMap(bootstrap.layerSurfaceStore.texture(for:))
         else {
             showStatus(.init(kind: .error, message: "无法访问当前图层"))
             return
@@ -4322,8 +4384,7 @@ final class WorkspaceViewModel: ObservableObject {
         }
 
         guard
-            let surfaceID = bootstrap.layerSurfaceStore.surfaceID(for: layerID),
-            let texture = bootstrap.layerSurfaceStore.texture(for: surfaceID)
+            let texture = bootstrap.layerSurfaceStore.surfaceID(for: layerID).flatMap(bootstrap.layerSurfaceStore.texture(for:))
         else {
             showStatus(.init(kind: .error, message: "无法访问当前图层"))
             return
@@ -4340,7 +4401,11 @@ final class WorkspaceViewModel: ObservableObject {
             return
         }
 
-        checkpointHistoryIfPossible()
+        checkpointHistoryIfPossible(
+            operationKind: "linearGradient.apply",
+            candidateChangedLayerIDs: [layerID],
+            captureMode: .inPlaceChangedLayers([layerID])
+        )
 
         let pointD = geometry.pointD
         let minCanvasX = min(min(pointA.x, pointB.x), min(pointC.x, pointD.x))
@@ -4357,35 +4422,13 @@ final class WorkspaceViewModel: ObservableObject {
             return
         }
 
-        guard
-            let targetTexture = bootstrap.layerSurfaceStore.makeTexture(
-                width: texture.width,
-                height: texture.height,
-                metal: bootstrap.metalContext
-            ),
-            let commandBuffer = bootstrap.metalContext.commandQueue.makeCommandBuffer(),
-            let blitEncoder = commandBuffer.makeBlitCommandEncoder()
-        else {
-            showStatus(.init(kind: .error, message: "无法创建渐变目标纹理"))
+        guard let commandBuffer = bootstrap.metalContext.commandQueue.makeCommandBuffer() else {
+            showStatus(.init(kind: .error, message: "无法创建渐变命令缓冲"))
             return
         }
 
-        let copySize = MTLSize(width: texture.width, height: texture.height, depth: 1)
-        blitEncoder.copy(
-            from: texture,
-            sourceSlice: 0,
-            sourceLevel: 0,
-            sourceOrigin: .init(x: 0, y: 0, z: 0),
-            sourceSize: copySize,
-            to: targetTexture,
-            destinationSlice: 0,
-            destinationLevel: 0,
-            destinationOrigin: .init(x: 0, y: 0, z: 0)
-        )
-        blitEncoder.endEncoding()
-
         let renderPassDescriptor = MTLRenderPassDescriptor()
-        renderPassDescriptor.colorAttachments[0].texture = targetTexture
+        renderPassDescriptor.colorAttachments[0].texture = texture
         renderPassDescriptor.colorAttachments[0].loadAction = .load
         renderPassDescriptor.colorAttachments[0].storeAction = .store
 
@@ -4405,9 +4448,9 @@ final class WorkspaceViewModel: ObservableObject {
             let gpuMs = Double(DispatchTime.now().uptimeNanoseconds - applyStart) / 1_000_000
             Task { @MainActor [weak self] in
                 guard let self else { return }
-                self.bootstrap.layerSurfaceStore.swapTexture(for: surfaceID, with: targetTexture)
-                self.refresh(invalidatedLayerIDs: [layerID])
+                self.layerThumbnailCache.removeValue(forKey: layerID)
                 self.noteCanvasContentChanged()
+                self.refreshLightweight()
                 self.linearGradientState = .init()
                 self.isApplyingGradientCommit = false
                 self.transformLogger.debug("[gradient] applyGpuMs=\(gpuMs, privacy: .public) sessionTool=linear")
@@ -4472,37 +4515,19 @@ final class WorkspaceViewModel: ObservableObject {
             return
         }
 
-        checkpointHistoryIfPossible()
+        checkpointHistoryIfPossible(
+            operationKind: "sectorGradient.apply",
+            candidateChangedLayerIDs: [layerID],
+            captureMode: .inPlaceChangedLayers([layerID])
+        )
 
-        guard
-            let targetTexture = bootstrap.layerSurfaceStore.makeTexture(
-                width: texture.width,
-                height: texture.height,
-                metal: bootstrap.metalContext
-            ),
-            let commandBuffer = bootstrap.metalContext.commandQueue.makeCommandBuffer(),
-            let blitEncoder = commandBuffer.makeBlitCommandEncoder()
-        else {
-            showStatus(.init(kind: .error, message: "无法创建渐变目标纹理"))
+        guard let commandBuffer = bootstrap.metalContext.commandQueue.makeCommandBuffer() else {
+            showStatus(.init(kind: .error, message: "无法创建渐变命令缓冲"))
             return
         }
 
-        let copySize = MTLSize(width: texture.width, height: texture.height, depth: 1)
-        blitEncoder.copy(
-            from: texture,
-            sourceSlice: 0,
-            sourceLevel: 0,
-            sourceOrigin: .init(x: 0, y: 0, z: 0),
-            sourceSize: copySize,
-            to: targetTexture,
-            destinationSlice: 0,
-            destinationLevel: 0,
-            destinationOrigin: .init(x: 0, y: 0, z: 0)
-        )
-        blitEncoder.endEncoding()
-
         let renderPassDescriptor = MTLRenderPassDescriptor()
-        renderPassDescriptor.colorAttachments[0].texture = targetTexture
+        renderPassDescriptor.colorAttachments[0].texture = texture
         renderPassDescriptor.colorAttachments[0].loadAction = .load
         renderPassDescriptor.colorAttachments[0].storeAction = .store
 
@@ -4524,9 +4549,9 @@ final class WorkspaceViewModel: ObservableObject {
             let gpuMs = Double(DispatchTime.now().uptimeNanoseconds - applyStart) / 1_000_000
             Task { @MainActor [weak self] in
                 guard let self else { return }
-                self.bootstrap.layerSurfaceStore.swapTexture(for: surfaceID, with: targetTexture)
-                self.refresh(invalidatedLayerIDs: [layerID])
+                self.layerThumbnailCache.removeValue(forKey: layerID)
                 self.noteCanvasContentChanged()
+                self.refreshLightweight()
                 self.sectorGradientState = .init()
                 self.isApplyingGradientCommit = false
                 self.transformLogger.debug("[gradient] applyGpuMs=\(gpuMs, privacy: .public) sessionTool=sector")
@@ -5831,7 +5856,12 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     private static func normalizeDisabledToolsIfNeeded(in store: WorkspaceStore) {
-        // freeTransform 已正式实现，不再强制切回 brush
+        let activeTool = store.state.toolSession.activeTool
+        let normalizedTool = normalizedAvailableTool(activeTool)
+        guard normalizedTool != activeTool else { return }
+        store.updateToolSession { session in
+            session.activeTool = normalizedTool
+        }
     }
 
     private static func normalizedViewportRotation(_ angleDegrees: Double) -> Double {
