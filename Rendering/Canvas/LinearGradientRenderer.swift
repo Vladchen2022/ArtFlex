@@ -4,35 +4,47 @@ import simd
 
 private struct LinearGradientVertex {
     var position: SIMD2<Float>
-    var gradientT: Float
 }
 
 private struct LinearGradientUniforms {
     var canvasSize: SIMD2<Float>
+    var pointA: SIMD2<Float>
+    var pointB: SIMD2<Float>
     var color: SIMD4<Float>
+    var colorJitterAmount: Float
+    var usesSelectionMask: Float
 }
 
 final class LinearGradientRenderer {
+    private let device: MTLDevice
     private let pipelineState: MTLRenderPipelineState
+    private let fallbackSelectionMaskTexture: MTLTexture
+    private var cachedSelectionMaskShape: SelectionShape?
+    private var cachedSelectionMaskCanvasSize: CanvasSize?
+    private var cachedSelectionMaskTexture: MTLTexture?
 
     init(device: MTLDevice) {
+        self.device = device
         let source = """
         #include <metal_stdlib>
         using namespace metal;
 
         struct LinearGradientVertex {
             float2 position;
-            float gradientT;
         };
 
         struct LinearGradientUniforms {
             float2 canvasSize;
+            float2 pointA;
+            float2 pointB;
             float4 color;
+            float colorJitterAmount;
+            float usesSelectionMask;
         };
 
         struct VertexOut {
             float4 position [[position]];
-            float gradientT;
+            float2 canvasPosition;
         };
 
         vertex VertexOut linearGradientVertexShader(
@@ -48,16 +60,85 @@ final class LinearGradientRenderer {
 
             VertexOut out;
             out.position = float4(normalized, 0.0, 1.0);
-            out.gradientT = clamp(inputVertex.gradientT, 0.0, 1.0);
+            out.canvasPosition = inputVertex.position;
             return out;
+        }
+
+        float3 rgbToHsv(float3 c) {
+            float4 K = float4(0.0, -1.0 / 3.0, 2.0 / 3.0, -1.0);
+            float4 p = mix(float4(c.bg, K.wz), float4(c.gb, K.xy), step(c.b, c.g));
+            float4 q = mix(float4(p.xyw, c.r), float4(c.r, p.yzx), step(p.x, c.r));
+            float d = q.x - min(q.w, q.y);
+            float e = 1.0e-10;
+            return float3(abs(q.z + (q.w - q.y) / (6.0 * d + e)), d / (q.x + e), q.x);
+        }
+
+        float3 hsvToRgb(float3 c) {
+            float4 K = float4(1.0, 2.0 / 3.0, 1.0 / 3.0, 3.0);
+            float3 p = abs(fract(c.xxx + K.xyz) * 6.0 - K.www);
+            return c.z * mix(K.xxx, clamp(p - K.xxx, 0.0, 1.0), c.y);
+        }
+
+        float hash12(float2 point) {
+            return fract(sin(dot(point, float2(127.1, 311.7))) * 43758.5453123);
+        }
+
+        float3 jitteredGradientSrgbColor(
+            float3 srgbColor,
+            float2 noiseCoord,
+            float amount
+        ) {
+            if (amount <= 0.001) {
+                return srgbColor;
+            }
+
+            float2 macroCell = floor(noiseCoord * (3.0 + amount * 5.0));
+            float2 fineCell = floor(noiseCoord * (8.0 + amount * 14.0));
+
+            float hueRandom = mix(hash12(macroCell + float2(1.0, 7.0)), hash12(fineCell + float2(17.0, 5.0)), 0.35);
+            float saturationRandom = mix(hash12(macroCell + float2(31.0, 11.0)), hash12(fineCell + float2(47.0, 19.0)), 0.45);
+            float valueRandom = mix(hash12(macroCell + float2(61.0, 23.0)), hash12(fineCell + float2(79.0, 29.0)), 0.45);
+
+            float3 hsv = rgbToHsv(srgbColor);
+            float hueOffset = ((hueRandom * 2.0) - 1.0) * (0.045 * amount);
+            float saturationOffset = ((saturationRandom * 2.0) - 1.0) * (0.22 * amount);
+            float valueOffset = ((valueRandom * 2.0) - 1.0) * (0.28 * amount);
+
+            hsv.x = fract(hsv.x + hueOffset + 1.0);
+            hsv.y = clamp(hsv.y + saturationOffset + (0.05 * amount), 0.0, 1.0);
+            hsv.z = clamp(hsv.z + valueOffset, 0.0, 1.0);
+            return hsvToRgb(hsv);
         }
 
         fragment float4 linearGradientFragmentShader(
             VertexOut in [[stage_in]],
-            constant LinearGradientUniforms &uniforms [[buffer(1)]]
+            constant LinearGradientUniforms &uniforms [[buffer(1)]],
+            texture2d<float> selectionMask [[texture(0)]]
         ) {
-            float alpha = (1.0 - in.gradientT) * uniforms.color.a;
-            float3 premultiplied = uniforms.color.rgb * alpha;
+            constexpr sampler maskSampler(coord::normalized, address::clamp_to_edge, filter::nearest);
+            float2 axis = uniforms.pointB - uniforms.pointA;
+            float axisLength = max(length(axis), 0.0001);
+            float axisLengthSquared = max(dot(axis, axis), 0.0001);
+            float t = clamp(dot(in.canvasPosition - uniforms.pointA, axis) / axisLengthSquared, 0.0, 1.0);
+            float maskAlpha = 1.0;
+            if (uniforms.usesSelectionMask > 0.5) {
+                float2 canvasSize = max(uniforms.canvasSize, float2(1.0, 1.0));
+                float2 uv = in.canvasPosition / canvasSize;
+                maskAlpha = selectionMask.sample(maskSampler, uv).r;
+            }
+            float easedAlpha = 1.0 - smoothstep(0.0, 1.0, t);
+            float alpha = easedAlpha * uniforms.color.a * maskAlpha;
+            float2 axisDirection = axis / axisLength;
+            float2 perpendicularDirection = float2(-axisDirection.y, axisDirection.x);
+            float along = dot(in.canvasPosition - uniforms.pointA, axisDirection) / axisLength;
+            float across = dot(in.canvasPosition - uniforms.pointA, perpendicularDirection) / axisLength;
+            float2 noiseCoord = float2((along * 6.0) + (across * 1.75), across * 5.0);
+            float3 jitteredColor = jitteredGradientSrgbColor(
+                uniforms.color.rgb,
+                noiseCoord,
+                clamp(uniforms.colorJitterAmount, 0.0, 1.0)
+            );
+            float3 premultiplied = jitteredColor * alpha;
             return float4(premultiplied, alpha);
         }
         """
@@ -85,6 +166,26 @@ final class LinearGradientRenderer {
         } catch {
             fatalError("Failed to create LinearGradientRenderer pipeline: \(error)")
         }
+
+        let fallbackDescriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .r8Unorm,
+            width: 1,
+            height: 1,
+            mipmapped: false
+        )
+        fallbackDescriptor.usage = .shaderRead
+        fallbackDescriptor.storageMode = .shared
+        guard let fallbackTexture = device.makeTexture(descriptor: fallbackDescriptor) else {
+            fatalError("Failed to create fallback selection mask texture.")
+        }
+        let fullMask: [UInt8] = [255]
+        fallbackTexture.replace(
+            region: MTLRegionMake2D(0, 0, 1, 1),
+            mipmapLevel: 0,
+            withBytes: fullMask,
+            bytesPerRow: 1
+        )
+        self.fallbackSelectionMaskTexture = fallbackTexture
     }
 
     func encode(
@@ -94,21 +195,27 @@ final class LinearGradientRenderer {
         pointA: CanvasPoint,
         pointB: CanvasPoint,
         pointC: CanvasPoint,
-        color: RGBAColor
+        color: RGBAColor,
+        colorJitterAmount: Float = 0,
+        selectionShape: SelectionShape? = nil
     ) {
-        let pointD = CanvasPoint(
-            x: pointA.x + (pointC.x - pointB.x),
-            y: pointA.y + (pointC.y - pointB.y)
-        )
         let vertices: [LinearGradientVertex] = [
-            .init(position: SIMD2(Float(pointA.x), Float(pointA.y)), gradientT: 0),
-            .init(position: SIMD2(Float(pointB.x), Float(pointB.y)), gradientT: 0),
-            .init(position: SIMD2(Float(pointD.x), Float(pointD.y)), gradientT: 1),
-            .init(position: SIMD2(Float(pointC.x), Float(pointC.y)), gradientT: 1)
+            .init(position: SIMD2(0, 0)),
+            .init(position: SIMD2(Float(canvasSize.width), 0)),
+            .init(position: SIMD2(0, Float(canvasSize.height))),
+            .init(position: SIMD2(Float(canvasSize.width), Float(canvasSize.height)))
         ]
+        let selectionMaskTexture = makeSelectionMaskTexture(
+            for: selectionShape,
+            canvasSize: canvasSize
+        ) ?? fallbackSelectionMaskTexture
         var uniforms = LinearGradientUniforms(
             canvasSize: SIMD2(Float(canvasSize.width), Float(canvasSize.height)),
-            color: SIMD4(color.red, color.green, color.blue, color.alpha)
+            pointA: SIMD2(Float(pointA.x), Float(pointA.y)),
+            pointB: SIMD2(Float(pointB.x), Float(pointB.y)),
+            color: SIMD4(color.red, color.green, color.blue, color.alpha),
+            colorJitterAmount: colorJitterAmount,
+            usesSelectionMask: selectionShape == nil ? 0 : 1
         )
 
         guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor) else {
@@ -119,6 +226,7 @@ final class LinearGradientRenderer {
         encoder.setVertexBytes(vertices, length: MemoryLayout<LinearGradientVertex>.stride * vertices.count, index: 0)
         encoder.setVertexBytes(&uniforms, length: MemoryLayout<LinearGradientUniforms>.stride, index: 1)
         encoder.setFragmentBytes(&uniforms, length: MemoryLayout<LinearGradientUniforms>.stride, index: 1)
+        encoder.setFragmentTexture(selectionMaskTexture, index: 0)
         encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: vertices.count)
         encoder.endEncoding()
     }
@@ -129,7 +237,9 @@ final class LinearGradientRenderer {
         pointB: CanvasPoint,
         pointC: CanvasPoint,
         color: RGBAColor,
-        commandQueue: MTLCommandQueue
+        colorJitterAmount: Float = 0,
+        commandQueue: MTLCommandQueue,
+        selectionShape: SelectionShape? = nil
     ) {
         guard let commandBuffer = commandQueue.makeCommandBuffer() else {
             return
@@ -147,8 +257,81 @@ final class LinearGradientRenderer {
             pointA: pointA,
             pointB: pointB,
             pointC: pointC,
-            color: color
+            color: color,
+            colorJitterAmount: colorJitterAmount,
+            selectionShape: selectionShape
         )
         commandBuffer.commit()
+    }
+
+    private func makeSelectionMaskTexture(
+        for selectionShape: SelectionShape?,
+        canvasSize: CanvasSize
+    ) -> MTLTexture? {
+        guard let selectionShape else {
+            cachedSelectionMaskShape = nil
+            cachedSelectionMaskCanvasSize = nil
+            cachedSelectionMaskTexture = nil
+            return nil
+        }
+
+        if
+            cachedSelectionMaskShape == selectionShape,
+            cachedSelectionMaskCanvasSize == canvasSize,
+            let cachedSelectionMaskTexture
+        {
+            return cachedSelectionMaskTexture
+        }
+
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .r8Unorm,
+            width: canvasSize.width,
+            height: canvasSize.height,
+            mipmapped: false
+        )
+        descriptor.usage = .shaderRead
+        descriptor.storageMode = .shared
+
+        guard let texture = device.makeTexture(descriptor: descriptor) else {
+            return nil
+        }
+
+        let pixels: [UInt8]
+        if let maskData = selectionShape.maskData,
+           maskData.canvasWidth == canvasSize.width,
+           maskData.canvasHeight == canvasSize.height {
+            pixels = [UInt8](maskData.alphaBytes)
+        } else {
+            var generated = [UInt8](repeating: 0, count: canvasSize.width * canvasSize.height)
+            let minX = max(Int(selectionShape.bounds.minX.rounded(.down)), 0)
+            let minY = max(Int(selectionShape.bounds.minY.rounded(.down)), 0)
+            let maxX = min(Int(selectionShape.bounds.maxX.rounded(.up)), canvasSize.width)
+            let maxY = min(Int(selectionShape.bounds.maxY.rounded(.up)), canvasSize.height)
+
+            if minX < maxX && minY < maxY {
+                for y in minY..<maxY {
+                    for x in minX..<maxX {
+                        if selectionShape.contains(
+                            CanvasPoint(x: Double(x) + 0.5, y: Double(y) + 0.5)
+                        ) {
+                            generated[(y * canvasSize.width) + x] = 255
+                        }
+                    }
+                }
+            }
+            pixels = generated
+        }
+
+        texture.replace(
+            region: MTLRegionMake2D(0, 0, canvasSize.width, canvasSize.height),
+            mipmapLevel: 0,
+            withBytes: pixels,
+            bytesPerRow: canvasSize.width
+        )
+
+        cachedSelectionMaskShape = selectionShape
+        cachedSelectionMaskCanvasSize = canvasSize
+        cachedSelectionMaskTexture = texture
+        return texture
     }
 }

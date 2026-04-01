@@ -82,6 +82,162 @@ struct WorkspaceViewModelPixelHistoryTests {
 
     @Test
     @MainActor
+    func linearGradientApplySupportsUndoRedoAndSelectionClipping() async throws {
+        let harness = try PixelHistoryHarness()
+        let layerID = harness.addLayer()
+
+        harness.makeLassoSelection([
+            .init(x: 8, y: 8),
+            .init(x: 40, y: 8),
+            .init(x: 40, y: 40),
+            .init(x: 8, y: 40),
+            .init(x: 8, y: 8)
+        ])
+
+        let outsideSelection = try harness.color(atX: 48, y: 20, layerID: layerID)
+        harness.viewModel.selectLayer(layerID)
+        harness.viewModel.selectTool(.linearGradient)
+        harness.viewModel.beginGradientDrag(at: .init(x: 12, y: 20))
+        harness.viewModel.updateGradientDrag(to: .init(x: 24, y: 20))
+        harness.viewModel.endGradientDrag(at: .init(x: 24, y: 20))
+
+        #expect(harness.viewModel.isApplyingGradientCommit == false)
+        #expect(harness.viewModel.linearGradientState.phase == .idle)
+
+        #expect(try harness.alpha(atX: 10, y: 20, layerID: layerID) > 0.7)
+        #expect(try harness.alpha(atX: 32, y: 20, layerID: layerID) < 0.05)
+        #expect(try harness.color(atX: 48, y: 20, layerID: layerID) == outsideSelection)
+
+        harness.viewModel.undo()
+        #expect(try harness.alpha(atX: 10, y: 20, layerID: layerID) < 0.05)
+        harness.viewModel.redo()
+        #expect(try harness.alpha(atX: 10, y: 20, layerID: layerID) > 0.7)
+    }
+
+    @Test
+    @MainActor
+    func linearGradientAutoApplyFinishesSynchronouslyAtDragEnd() throws {
+        let harness = try PixelHistoryHarness()
+        let layerID = harness.addLayer()
+
+        harness.viewModel.selectLayer(layerID)
+        harness.viewModel.selectTool(.linearGradient)
+        harness.viewModel.beginGradientDrag(at: .init(x: 10, y: 16))
+        harness.viewModel.updateGradientDrag(to: .init(x: 30, y: 16))
+        harness.viewModel.endGradientDrag(at: .init(x: 30, y: 16))
+
+        #expect(harness.viewModel.isApplyingGradientCommit == false)
+        #expect(harness.viewModel.linearGradientState.phase == .idle)
+        #expect(harness.viewModel.workspace.toolSession.activeTool == .linearGradient)
+        #expect(try harness.alpha(atX: 10, y: 16, layerID: layerID) > 0.7)
+        #expect(try harness.alpha(atX: 36, y: 16, layerID: layerID) < 0.05)
+    }
+
+    @Test
+    @MainActor
+    func linearGradientRespectsBrushOpacity() throws {
+        let harness = try PixelHistoryHarness()
+        let layerID = harness.addLayer()
+
+        harness.viewModel.setBrushOpacity(0.24)
+        harness.viewModel.selectLayer(layerID)
+        harness.viewModel.selectTool(.linearGradient)
+        harness.viewModel.beginGradientDrag(at: .init(x: 10, y: 16))
+        harness.viewModel.updateGradientDrag(to: .init(x: 30, y: 16))
+        harness.viewModel.endGradientDrag(at: .init(x: 30, y: 16))
+
+        let nearAlpha = try harness.alpha(atX: 10, y: 16, layerID: layerID)
+        #expect(nearAlpha > 0.18)
+        #expect(nearAlpha < 0.30)
+    }
+
+    @Test
+    @MainActor
+    func linearGradientApplyClearsRetainedBrushDisplayTexture() throws {
+        let harness = try PixelHistoryHarness()
+        let layerID = harness.addLayer()
+
+        try harness.drawBrushStroke(
+            on: layerID,
+            points: [
+                .init(location: .init(x: 8, y: 8), pressure: 1),
+                .init(location: .init(x: 20, y: 20), pressure: 1)
+            ]
+        )
+        #expect(harness.bootstrap.strokeEngine.displayTexture(for: layerID) != nil)
+
+        harness.viewModel.selectTool(.linearGradient)
+        harness.viewModel.beginGradientDrag(at: .init(x: 10, y: 16))
+        harness.viewModel.updateGradientDrag(to: .init(x: 30, y: 16))
+        harness.viewModel.endGradientDrag(at: .init(x: 30, y: 16))
+
+        #expect(harness.bootstrap.strokeEngine.displayTexture(for: layerID) == nil)
+        #expect(try harness.alpha(atX: 10, y: 16, layerID: layerID) > 0.7)
+    }
+
+    @Test
+    @MainActor
+    func sectorGradientAutoApplySupportsUndoRedoAndSelectionClipping() throws {
+        let harness = try PixelHistoryHarness()
+        let layerID = harness.addLayer()
+
+        harness.makeLassoSelection([
+            .init(x: 8, y: 8),
+            .init(x: 36, y: 8),
+            .init(x: 36, y: 36),
+            .init(x: 8, y: 36),
+            .init(x: 8, y: 8)
+        ])
+
+        harness.viewModel.selectLayer(layerID)
+        harness.viewModel.selectTool(.sectorGradient)
+        harness.viewModel.beginGradientDrag(at: .init(x: 12, y: 20))
+        harness.viewModel.updateGradientDrag(to: .init(x: 28, y: 8))
+        harness.viewModel.updateGradientDrag(to: .init(x: 44, y: 20))
+        harness.viewModel.updateGradientDrag(to: .init(x: 28, y: 38))
+        harness.viewModel.endGradientDrag(at: .init(x: 12, y: 20))
+
+        #expect(harness.viewModel.isApplyingGradientCommit == false)
+        #expect(harness.viewModel.sectorGradientState.phase == .idle)
+        #expect(harness.viewModel.workspace.toolSession.activeTool == .sectorGradient)
+
+        let nearAlpha = try harness.alpha(atX: 14, y: 20, layerID: layerID)
+        let farAlpha = try harness.alpha(atX: 30, y: 20, layerID: layerID)
+        let clippedAlpha = try harness.alpha(atX: 40, y: 20, layerID: layerID)
+
+        #expect(nearAlpha > 0.35)
+        #expect(farAlpha > 0.01)
+        #expect(farAlpha < nearAlpha)
+        #expect(clippedAlpha < 0.05)
+
+        harness.viewModel.undo()
+        #expect(try harness.alpha(atX: 14, y: 20, layerID: layerID) < 0.05)
+        harness.viewModel.redo()
+        #expect(try harness.alpha(atX: 14, y: 20, layerID: layerID) > 0.35)
+    }
+
+    @Test
+    @MainActor
+    func sectorGradientRespectsBrushOpacity() throws {
+        let harness = try PixelHistoryHarness()
+        let layerID = harness.addLayer()
+
+        harness.viewModel.setBrushOpacity(0.24)
+        harness.viewModel.selectLayer(layerID)
+        harness.viewModel.selectTool(.sectorGradient)
+        harness.viewModel.beginGradientDrag(at: .init(x: 12, y: 20))
+        harness.viewModel.updateGradientDrag(to: .init(x: 28, y: 8))
+        harness.viewModel.updateGradientDrag(to: .init(x: 44, y: 20))
+        harness.viewModel.updateGradientDrag(to: .init(x: 28, y: 38))
+        harness.viewModel.endGradientDrag(at: .init(x: 12, y: 20))
+
+        let nearAlpha = try harness.alpha(atX: 14, y: 20, layerID: layerID)
+        #expect(nearAlpha > 0.18)
+        #expect(nearAlpha < 0.30)
+    }
+
+    @Test
+    @MainActor
     func fillAtPointSupportsUndoRedo() throws {
         let harness = try PixelHistoryHarness()
         let layerID = harness.viewModel.workspace.document.activeLayerID
@@ -222,6 +378,28 @@ struct WorkspaceViewModelPixelHistoryTests {
 
         harness.viewModel.redo()
         #expect(try harness.alpha(atX: 12, y: 12, layerID: layerID) < 0.01)
+    }
+
+    @Test
+    @MainActor
+    func lassoFillRespectsBrushOpacity() throws {
+        let harness = try PixelHistoryHarness()
+        let layerID = harness.addLayer()
+
+        harness.viewModel.setBrushOpacity(0.24)
+        harness.viewModel.selectLayer(layerID)
+        harness.makeLassoSelection([
+            .init(x: 8, y: 8),
+            .init(x: 32, y: 8),
+            .init(x: 32, y: 32),
+            .init(x: 8, y: 32),
+            .init(x: 8, y: 8)
+        ])
+        harness.viewModel.fillLassoContents()
+
+        let fillAlpha = try harness.alpha(atX: 12, y: 12, layerID: layerID)
+        #expect(fillAlpha > 0.18)
+        #expect(fillAlpha < 0.30)
     }
 
     @Test

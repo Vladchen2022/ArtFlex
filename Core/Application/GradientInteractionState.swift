@@ -4,18 +4,11 @@ private let gradientLegLatchMinDistance = 10.0
 private let gradientLeg2MinDistance = 10.0
 private let gradientLegLatchAngleThresholdDegrees = 32.0
 private let gradientHandleHitRadius = 14.0
-private let sectorFallbackSweepDegrees = 30.0
 
 enum LinearGradientHandle: Sendable, Equatable {
     case pointA
     case pointB
     case pointC
-}
-
-enum SectorGradientHandle: Sendable, Equatable {
-    case center
-    case startEdge
-    case endEdge
 }
 
 enum LinearGradientPhase: Sendable, Equatable {
@@ -30,12 +23,7 @@ enum LinearGradientPhase: Sendable, Equatable {
 
 enum SectorGradientPhase: Sendable, Equatable {
     case idle
-    case drawingLeg1
-    case drawingLeg2
-    case pendingPreview
-    case editing
-    case draggingHandle(SectorGradientHandle)
-    case movingWholeGradient
+    case drawing
 }
 
 struct LinearGradientGeometry: Sendable, Equatable {
@@ -133,61 +121,38 @@ struct LinearGradientInteractionState: Sendable, Equatable {
 
 struct SectorGradientGeometry: Sendable, Equatable {
     let center: CanvasPoint
-    let startPoint: CanvasPoint
-    let endPoint: CanvasPoint
-
-    var radius: Double {
-        max(distanceBetween(center, startPoint), distanceBetween(center, endPoint))
-    }
-
-    var startAngle: Double {
-        atan2(startPoint.y - center.y, startPoint.x - center.x)
-    }
-
-    var endAngle: Double {
-        atan2(endPoint.y - center.y, endPoint.x - center.x)
-    }
-
-    var sweepAngle: Double {
-        normalizedAngleDelta(from: startAngle, to: endAngle)
-    }
-
-    var isFullCircle: Bool {
-        abs(sweepAngle) >= (.pi * 1.85)
-    }
+    let pathPoints: [CanvasPoint]
+    let bounds: CanvasRect
+    let maxRadius: Double
 }
 
 struct SectorGradientPreview: Sendable, Equatable {
     let center: CanvasPoint
-    let startPoint: CanvasPoint
-    let geometry: SectorGradientGeometry?
-    let endPoint: CanvasPoint?
+    let pathPoints: [CanvasPoint]
+    let hoverPoint: CanvasPoint?
 }
 
 struct SectorGradientInteractionState: Sendable, Equatable {
     var phase: SectorGradientPhase = .idle
     var center: CanvasPoint?
-    var startPoint: CanvasPoint?
-    var endPoint: CanvasPoint?
-    var dragStartPoint: CanvasPoint?
-    var dragReferenceGeometry: SectorGradientGeometry?
-    var leg1CandidatePoint: CanvasPoint?
+    var pathPoints: [CanvasPoint] = []
     var hoverPoint: CanvasPoint?
 
     var geometry: SectorGradientGeometry? {
-        guard let center, let startPoint, let endPoint else { return nil }
-        let geometry = SectorGradientGeometry(center: center, startPoint: startPoint, endPoint: endPoint)
-        guard geometry.radius > 1, abs(geometry.sweepAngle) > 0.001 else { return nil }
-        return geometry
+        guard let center else { return nil }
+        let smoothedPathPoints = smoothedSectorGradientPoints(
+            rawPoints: pathPoints,
+            closingTo: center
+        )
+        return resolvedSectorGradientGeometry(center: center, pathPoints: smoothedPathPoints)
     }
 
     var preview: SectorGradientPreview? {
         guard let center else { return nil }
         return SectorGradientPreview(
             center: center,
-            startPoint: startPoint ?? center,
-            geometry: geometry,
-            endPoint: endPoint
+            pathPoints: pathPoints,
+            hoverPoint: hoverPoint
         )
     }
 
@@ -196,16 +161,11 @@ struct SectorGradientInteractionState: Sendable, Equatable {
     }
 
     var isEditingSession: Bool {
-        switch phase {
-        case .editing, .draggingHandle, .movingWholeGradient:
-            return true
-        default:
-            return false
-        }
+        false
     }
 
     var isPendingPreview: Bool {
-        phase == .pendingPreview
+        false
     }
 }
 
@@ -248,13 +208,22 @@ func defaultLinearGradientPointC(pointA: CanvasPoint, pointB: CanvasPoint, canva
     )
 }
 
-func defaultSectorGradientEndPoint(center: CanvasPoint, startPoint: CanvasPoint) -> CanvasPoint {
-    let radius = max(distanceBetween(center, startPoint), 1)
-    let startAngle = atan2(startPoint.y - center.y, startPoint.x - center.x)
-    let endAngle = startAngle + (sectorFallbackSweepDegrees * .pi / 180)
-    return CanvasPoint(
-        x: center.x + (cos(endAngle) * radius),
-        y: center.y + (sin(endAngle) * radius)
+func resolvedSectorGradientGeometry(
+    center: CanvasPoint,
+    pathPoints: [CanvasPoint]
+) -> SectorGradientGeometry? {
+    guard pathPoints.count >= 3 else { return nil }
+    let bounds = CanvasRect.bounding(points: pathPoints)
+    guard !bounds.isEmpty else { return nil }
+    let maxRadius = pathPoints.reduce(0.0) { partialResult, point in
+        max(partialResult, distanceBetween(center, point))
+    }
+    guard maxRadius > 0.5 else { return nil }
+    return SectorGradientGeometry(
+        center: center,
+        pathPoints: pathPoints,
+        bounds: bounds,
+        maxRadius: maxRadius
     )
 }
 
@@ -278,18 +247,15 @@ func resolvedLinearGradientPreviewGeometry(
 func resolvedSectorGradientPreviewGeometry(
     preview: SectorGradientPreview
 ) -> SectorGradientGeometry? {
-    guard distanceBetween(preview.center, preview.startPoint) > 0.5 else { return nil }
-    let endPoint = preview.endPoint ?? defaultSectorGradientEndPoint(
-        center: preview.center,
-        startPoint: preview.startPoint
+    var pathPoints = preview.pathPoints
+    if let hoverPoint = preview.hoverPoint, pathPoints.last != hoverPoint {
+        pathPoints.append(hoverPoint)
+    }
+    let smoothedPathPoints = smoothedSectorGradientPoints(
+        rawPoints: pathPoints,
+        closingTo: preview.center
     )
-    let geometry = SectorGradientGeometry(
-        center: preview.center,
-        startPoint: preview.startPoint,
-        endPoint: endPoint
-    )
-    guard geometry.radius > 1, abs(geometry.sweepAngle) > 0.001 else { return nil }
-    return geometry
+    return resolvedSectorGradientGeometry(center: preview.center, pathPoints: smoothedPathPoints)
 }
 
 func linearGradientPreviewContains(_ geometry: LinearGradientGeometry, point: CanvasPoint) -> Bool {
@@ -304,30 +270,13 @@ func linearGradientHandleHitTest(_ geometry: LinearGradientGeometry, point: Canv
     return nil
 }
 
-func sectorGradientHandleHitTest(_ geometry: SectorGradientGeometry, point: CanvasPoint) -> SectorGradientHandle? {
-    if distanceBetween(point, geometry.center) <= gradientHandleHitRadius { return .center }
-    if distanceBetween(point, geometry.startPoint) <= gradientHandleHitRadius { return .startEdge }
-    if distanceBetween(point, geometry.endPoint) <= gradientHandleHitRadius { return .endEdge }
-    return nil
-}
-
 func sectorGradientPreviewContains(_ geometry: SectorGradientGeometry, point: CanvasPoint) -> Bool {
-    let dx = point.x - geometry.center.x
-    let dy = point.y - geometry.center.y
-    let radius = hypot(dx, dy)
-    guard radius <= geometry.radius else { return false }
-
-    if geometry.isFullCircle {
-        return true
-    }
-
-    let angle = atan2(dy, dx)
-    let relative = normalizedAngleDelta(from: geometry.startAngle, to: angle)
-    if geometry.sweepAngle >= 0 {
-        return relative >= 0 && relative <= geometry.sweepAngle
-    } else {
-        return relative <= 0 && relative >= geometry.sweepAngle
-    }
+    let shape = SelectionShape(
+        kind: .lasso,
+        bounds: geometry.bounds,
+        pathPoints: geometry.pathPoints
+    )
+    return shape.contains(point)
 }
 
 func shouldShowGradientAnnotator(phase: LinearGradientPhase) -> Bool {
@@ -340,12 +289,7 @@ func shouldShowGradientAnnotator(phase: LinearGradientPhase) -> Bool {
 }
 
 func shouldShowGradientAnnotator(phase: SectorGradientPhase) -> Bool {
-    switch phase {
-    case .editing, .draggingHandle, .movingWholeGradient:
-        return true
-    default:
-        return false
-    }
+    false
 }
 
 func shouldShowGradientDraftOverlay(phase: LinearGradientPhase) -> Bool {
@@ -361,7 +305,7 @@ func shouldShowGradientDraftOverlay(phase: SectorGradientPhase) -> Bool {
     switch phase {
     case .idle:
         return false
-    case .drawingLeg1, .drawingLeg2, .pendingPreview, .editing, .draggingHandle, .movingWholeGradient:
+    case .drawing:
         return true
     }
 }
@@ -377,9 +321,7 @@ func shouldAutoApplyGradientForToolSwitch(phase: LinearGradientPhase) -> Bool {
 
 func shouldAutoApplyGradientForToolSwitch(phase: SectorGradientPhase) -> Bool {
     switch phase {
-    case .pendingPreview, .editing, .draggingHandle, .movingWholeGradient:
-        return true
-    default:
+    case .idle, .drawing:
         return false
     }
 }

@@ -24,6 +24,7 @@ struct MetalCanvasHost: NSViewRepresentable {
     let linearGradientPreview: LinearGradientPreview?
     let sectorGradientPreview: SectorGradientPreview?
     let gradientPreviewColor: RGBAColor
+    let gradientColorJitterAmount: Float
     let onStrokeBegan: () -> Void
     let onStrokeInput: ([CanvasStrokeSample]) -> Void
     let onStrokeEnded: () -> Void
@@ -69,6 +70,7 @@ struct MetalCanvasHost: NSViewRepresentable {
             linearGradientPreview: linearGradientPreview,
             sectorGradientPreview: sectorGradientPreview,
             gradientPreviewColor: gradientPreviewColor,
+            gradientColorJitterAmount: gradientColorJitterAmount,
             onCanvasRotationChanged: onCanvasRotationChanged,
             onStrokeBegan: onStrokeBegan,
             onStrokeInput: onStrokeInput,
@@ -143,6 +145,7 @@ struct MetalCanvasHost: NSViewRepresentable {
         context.coordinator.linearGradientPreview = linearGradientPreview
         context.coordinator.sectorGradientPreview = sectorGradientPreview
         context.coordinator.gradientPreviewColor = gradientPreviewColor
+        context.coordinator.gradientColorJitterAmount = gradientColorJitterAmount
         if let view = nsView as? StrokeCaptureMTKView {
             let previousCanvasSize = view.canvasSize
             let previousViewportRotation = view.viewportRotationDegrees
@@ -156,6 +159,7 @@ struct MetalCanvasHost: NSViewRepresentable {
             let previousLinearGradientPreview = context.coordinator.previousLinearGradientPreview
             let previousSectorGradientPreview = context.coordinator.previousSectorGradientPreview
             let previousGradientPreviewColor = context.coordinator.previousGradientPreviewColor
+            let previousGradientColorJitterAmount = context.coordinator.previousGradientColorJitterAmount
 
             let nonBrushStateChanged =
                 previousCanvasContentRevision != sceneSnapshot.renderSnapshot.canvasContentRevision ||
@@ -169,6 +173,7 @@ struct MetalCanvasHost: NSViewRepresentable {
                 previousLinearGradientPreview != linearGradientPreview ||
                 previousSectorGradientPreview != sectorGradientPreview ||
                 previousGradientPreviewColor != gradientPreviewColor ||
+                previousGradientColorJitterAmount != gradientColorJitterAmount ||
                 previousCanvasSize != sceneSnapshot.renderSnapshot.document.canvasSize ||
                 previousViewportRotation != viewportRotationDegrees ||
                 previousPanMode != isPanModeActive ||
@@ -213,6 +218,7 @@ struct MetalCanvasHost: NSViewRepresentable {
                 previousLinearGradientPreview != linearGradientPreview ||
                 previousSectorGradientPreview != sectorGradientPreview ||
                 previousGradientPreviewColor != gradientPreviewColor ||
+                previousGradientColorJitterAmount != gradientColorJitterAmount ||
                 previousCanvasSize != view.canvasSize ||
                 previousViewportRotation != viewportRotationDegrees ||
                 previousPanMode != isPanModeActive ||
@@ -221,6 +227,7 @@ struct MetalCanvasHost: NSViewRepresentable {
             context.coordinator.previousLinearGradientPreview = linearGradientPreview
             context.coordinator.previousSectorGradientPreview = sectorGradientPreview
             context.coordinator.previousGradientPreviewColor = gradientPreviewColor
+            context.coordinator.previousGradientColorJitterAmount = gradientColorJitterAmount
 
             let brushSizeOnlyChanged = previousBrushSize != brushSize && !requiresCanvasRedraw
             let updateDurationMs = Double(DispatchTime.now().uptimeNanoseconds - updateStartNs) / 1_000_000
@@ -697,7 +704,7 @@ final class StrokeCaptureMTKView: MTKView {
                 didBeginGradientDragAt: sample(from: event).location,
                 modifiers: event.modifierFlags.intersection(.deviceIndependentFlagsMask)
             )
-            beginContinuousStrokeRendering()
+            beginContinuousTransformRendering()
             setNeedsDisplay(bounds)
             return
         }
@@ -977,7 +984,7 @@ final class StrokeCaptureMTKView: MTKView {
                 didEndGradientDragAt: sample(from: event).location,
                 modifiers: event.modifierFlags.intersection(.deviceIndependentFlagsMask)
             )
-            endContinuousStrokeRendering()
+            endContinuousTransformRendering()
             lastSample = nil
             lastPressure = nil
             setNeedsDisplay(bounds)
@@ -1083,7 +1090,7 @@ final class StrokeCaptureMTKView: MTKView {
         }
 
         if (event.keyCode == 36 || event.keyCode == 76) &&
-            (activeTool == .linearGradient || activeTool == .sectorGradient) {
+            activeTool == .sectorGradient {
             strokeDelegate?.strokeCaptureViewDidRequestApplyGradientSession(self)
             return
         }
@@ -1878,9 +1885,11 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
     var linearGradientPreview: LinearGradientPreview?
     var sectorGradientPreview: SectorGradientPreview?
     var gradientPreviewColor: RGBAColor = .black
+    var gradientColorJitterAmount: Float = 0
     var previousLinearGradientPreview: LinearGradientPreview?
     var previousSectorGradientPreview: SectorGradientPreview?
     var previousGradientPreviewColor: RGBAColor = .black
+    var previousGradientColorJitterAmount: Float = 0
     var transformPreview = FreeTransformPreview.identity
     private let selectionTraceLogger = Logger(subsystem: "ArtFlex", category: "SelectionTrace")
     private let transformLogger = Logger(subsystem: "ArtFlex", category: "Transform")
@@ -1901,6 +1910,7 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
         linearGradientPreview: LinearGradientPreview?,
         sectorGradientPreview: SectorGradientPreview?,
         gradientPreviewColor: RGBAColor,
+        gradientColorJitterAmount: Float,
         onCanvasRotationChanged: @escaping (Double) -> Void,
         onStrokeBegan: @escaping () -> Void,
         onStrokeInput: @escaping ([CanvasStrokeSample]) -> Void,
@@ -1953,9 +1963,11 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
         self.linearGradientPreview = linearGradientPreview
         self.sectorGradientPreview = sectorGradientPreview
         self.gradientPreviewColor = gradientPreviewColor
+        self.gradientColorJitterAmount = gradientColorJitterAmount
         self.previousLinearGradientPreview = linearGradientPreview
         self.previousSectorGradientPreview = sectorGradientPreview
         self.previousGradientPreviewColor = gradientPreviewColor
+        self.previousGradientColorJitterAmount = gradientColorJitterAmount
         self.onCanvasRotationChanged = onCanvasRotationChanged
         self.onStrokeBegan = onStrokeBegan
         self.onStrokeInput = onStrokeInput
@@ -2113,7 +2125,9 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
                         pointA: geometry.pointA,
                         pointB: geometry.pointB,
                         pointC: geometry.pointC,
-                        color: gradientPreviewColor
+                        color: gradientPreviewColor,
+                        colorJitterAmount: gradientColorJitterAmount,
+                        selectionShape: snapshot.selectionShape
                     )
                 } else if let geometry = resolvedSectorGradientGeometry {
                     sectorGradientRenderer.encode(
@@ -2121,11 +2135,12 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
                         commandBuffer: commandBuffer,
                         canvasSize: canvasSize,
                         center: geometry.center,
-                        radius: geometry.radius,
-                        startAngle: geometry.startAngle,
-                        sweepAngle: geometry.sweepAngle,
-                        isFullCircle: geometry.isFullCircle,
-                        color: gradientPreviewColor
+                        pathPoints: geometry.pathPoints,
+                        maxRadius: geometry.maxRadius,
+                        color: gradientPreviewColor,
+                        colorJitterAmount: gradientColorJitterAmount,
+                        maskQuality: .preview,
+                        selectionShape: snapshot.selectionShape
                     )
                 }
 

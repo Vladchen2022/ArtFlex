@@ -8,6 +8,7 @@ struct AppBootstrap {
     let strokeEngine: MetalStrokeEngine
     let linearGradientRenderer: LinearGradientRenderer
     let sectorGradientRenderer: SectorGradientRenderer
+    let selectionFillRenderer: SelectionFillRenderer
     let smudgeEngine: SmudgeEngine
     let eyedropperSampler: EyedropperSampler
     let bucketFillEngine: BucketFillEngine
@@ -43,6 +44,7 @@ struct AppBootstrap {
         )
         self.linearGradientRenderer = LinearGradientRenderer(device: metalContext.device)
         self.sectorGradientRenderer = SectorGradientRenderer(device: metalContext.device)
+        self.selectionFillRenderer = SelectionFillRenderer(device: metalContext.device)
         let textureSerializer = LayerTextureSerializer(metalContext: metalContext)
         self.textureSerializer = textureSerializer
         let pngExporter = PNGExporter(serializer: textureSerializer)

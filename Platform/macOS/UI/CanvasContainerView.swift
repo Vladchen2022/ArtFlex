@@ -49,6 +49,7 @@ struct CanvasContainerView: View {
                         linearGradientPreview: viewModel.linearGradientState.preview,
                         sectorGradientPreview: viewModel.sectorGradientState.preview,
                         gradientPreviewColor: viewModel.gradientPreviewColor,
+                        gradientColorJitterAmount: viewModel.workspace.toolSession.brush.colorJitterAmount,
                         onStrokeBegan: {
                             onCanvasInteraction?()
                             viewModel.beginStrokeIfNeeded()
@@ -331,36 +332,6 @@ struct CanvasContainerView: View {
                         x: geometry.size.width / 2,
                         y: 28
                     )
-                }
-
-                if viewModel.workspace.toolSession.activeTool == .linearGradient,
-                   (viewModel.linearGradientState.isEditingSession || viewModel.isApplyingGradientCommit) {
-                    GradientToolHUD(
-                        title: viewModel.isApplyingGradientCommit ? "应用中" : "直线渐变",
-                        isApplying: viewModel.isApplyingGradientCommit,
-                        onApply: {
-                            viewModel.applyActiveGradientSession()
-                        },
-                        onCancel: {
-                            viewModel.cancelLinearGradientInteraction()
-                        }
-                    )
-                    .position(x: geometry.size.width / 2, y: 28)
-                }
-
-                if viewModel.workspace.toolSession.activeTool == .sectorGradient,
-                   (viewModel.sectorGradientState.isEditingSession || viewModel.isApplyingGradientCommit) {
-                    GradientToolHUD(
-                        title: viewModel.isApplyingGradientCommit ? "应用中" : "扇形渐变",
-                        isApplying: viewModel.isApplyingGradientCommit,
-                        onApply: {
-                            viewModel.applyActiveGradientSession()
-                        },
-                        onCancel: {
-                            viewModel.cancelSectorGradientInteraction()
-                        }
-                    )
-                    .position(x: geometry.size.width / 2, y: 28)
                 }
 
                 if viewModel.isPanModeActive && !viewModel.isCanvasViewportLocked {
@@ -759,16 +730,8 @@ private struct LinearGradientToolOverlay: View {
     var body: some View {
         ZStack(alignment: .topLeading) {
             dashedSegment(from: preview.pointA, to: preview.pointB)
-            if let pointC = preview.pointC {
-                dashedSegment(from: preview.pointB, to: pointC)
-                dashedSegment(from: preview.pointA, to: preview.pointD)
-                dashedSegment(from: preview.pointD, to: pointC)
-            }
             pointMarker(preview.pointA, label: "A")
             pointMarker(preview.pointB, label: "B")
-            if let pointC = preview.pointC {
-                pointMarker(pointC, label: "C")
-            }
         }
     }
 
@@ -812,54 +775,42 @@ private struct SectorGradientToolOverlay: View {
 
     var body: some View {
         ZStack(alignment: .topLeading) {
-            dashedSegment(from: preview.center, to: preview.startPoint)
-            if let geometry = preview.geometry, let endPoint = preview.endPoint, !geometry.isFullCircle {
-                dashedSegment(from: preview.center, to: endPoint)
-            }
-            if preview.geometry != nil {
-                arcPath()
+            if let overlayPath {
+                overlayPath
                     .stroke(style: StrokeStyle(lineWidth: 2, dash: [8, 8]))
                     .foregroundStyle(Color.accentColor.opacity(0.9))
             }
+            closingGuide
+                .stroke(style: StrokeStyle(lineWidth: 1.5, dash: [5, 5]))
+                .foregroundStyle(Color.accentColor.opacity(0.65))
             pointMarker(preview.center, label: "A")
-            if preview.geometry == nil {
-                pointMarker(preview.startPoint, label: "起")
-            } else {
-                pointMarker(preview.startPoint, label: "起")
-                pointMarker(preview.endPoint ?? preview.startPoint, label: "B")
-            }
         }
     }
 
-    private func arcPath() -> Path {
-        guard let geometry = preview.geometry else { return Path() }
-        let segmentCount = max(24, Int(abs(geometry.sweepAngle) / (.pi / 24)))
-        let step = geometry.sweepAngle / Double(segmentCount)
-
+    private var overlayPath: Path? {
+        let points = displayPathPoints
+        guard points.count >= 2 else { return nil }
+        let mappedPoints = points.map { point in
+            let mapped = map(point)
+            return CanvasPoint(x: mapped.x, y: mapped.y)
+        }
+        if let smoothedPath = smoothedClosedLassoPath(points: mappedPoints) {
+            return Path(smoothedPath)
+        }
         return Path { path in
-            let firstPoint = pointOnArc(angle: geometry.startAngle, radius: geometry.radius)
-            path.move(to: map(firstPoint))
-            for index in 1...segmentCount {
-                let angle = geometry.startAngle + (Double(index) * step)
-                path.addLine(to: map(pointOnArc(angle: angle, radius: geometry.radius)))
+            path.move(to: map(points[0]))
+            for point in points.dropFirst() {
+                path.addLine(to: map(point))
             }
         }
     }
 
-    private func pointOnArc(angle: Double, radius: Double) -> CanvasPoint {
-        CanvasPoint(
-            x: preview.center.x + (cos(angle) * radius),
-            y: preview.center.y + (sin(angle) * radius)
-        )
-    }
-
-    private func dashedSegment(from start: CanvasPoint, to end: CanvasPoint) -> some View {
-        Path { path in
-            path.move(to: map(start))
-            path.addLine(to: map(end))
+    private var closingGuide: Path {
+        guard let lastPoint = displayPathPoints.last else { return Path() }
+        return Path { path in
+            path.move(to: map(lastPoint))
+            path.addLine(to: map(preview.center))
         }
-        .stroke(style: StrokeStyle(lineWidth: 2, dash: [8, 8]))
-        .foregroundStyle(Color.accentColor.opacity(0.9))
     }
 
     private func pointMarker(_ point: CanvasPoint, label: String) -> some View {
@@ -874,6 +825,17 @@ private struct SectorGradientToolOverlay: View {
                 .offset(x: 14, y: -12)
         }
         .position(mapped)
+    }
+
+    private var displayPathPoints: [CanvasPoint] {
+        if let geometry = resolvedSectorGradientPreviewGeometry(preview: preview) {
+            return geometry.pathPoints
+        }
+        var points = preview.pathPoints
+        if let hoverPoint = preview.hoverPoint, points.last != hoverPoint {
+            points.append(hoverPoint)
+        }
+        return points
     }
 
     private func map(_ point: CanvasPoint) -> CGPoint {
