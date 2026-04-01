@@ -5662,12 +5662,8 @@ final class WorkspaceViewModel: ObservableObject {
 
     private static func restorePersistedBrushLibraryIfAvailable(in bootstrap: AppBootstrap) {
         guard let restored = bootstrap.brushLibraryPersistenceController.loadResources() else { return }
-        let restoredSelectionID = restored.library.selectedPresetID
         let normalizedLibrary = Self.normalizeImportedBrushLibrary(restored.library)
             .removingLegacyDualTipPhaseOneDemoPresets()
-        let resolvedSelectedBrush = restoredSelectionID.flatMap { selectedPresetID in
-            normalizedLibrary.preset(id: selectedPresetID)?.brush
-        }
         bootstrap.workspaceStore.updateBrushLibrary { library in
             library = normalizedLibrary
             if library.selectedPresetID == nil {
@@ -5676,11 +5672,6 @@ final class WorkspaceViewModel: ObservableObject {
         }
         bootstrap.workspaceStore.updateTipImageLibrary { tipImageLibrary in
             tipImageLibrary = Self.normalizeImportedTipImageLibrary(restored.tipImageLibrary)
-        }
-        if let resolvedSelectedBrush {
-            bootstrap.workspaceStore.updateToolSession { session in
-                session.brush = resolvedSelectedBrush
-            }
         }
     }
 

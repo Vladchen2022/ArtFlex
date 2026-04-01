@@ -563,7 +563,8 @@ struct DualTipBrushSettingsTests {
         )
 
         #expect(viewModel.workspace.brushLibrary.selectedPresetID == customPreset.id)
-        #expect(viewModel.workspace.toolSession.brush == customPreset.brush)
+        #expect(viewModel.workspace.toolSession.brush.size == 60)
+        #expect(viewModel.workspace.toolSession.brush != customPreset.brush)
         #expect(
             bootstrap.workspaceStore.state.brushLibrary.preset(id: customPreset.id)?.brush == customPreset.brush
         )
