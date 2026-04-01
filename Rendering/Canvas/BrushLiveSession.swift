@@ -44,6 +44,7 @@ struct BrushLiveSession {
     let workingTexture: MTLTexture
     var displayRevision: UInt64
     var committedRevision: UInt64
+    var alphaLockTexture: MTLTexture?
     var liveEvents: [BrushLiveEvent] = []
     var currentStrokePackets: [StrokeDescriptor] = []
     var brushSamplingState: BrushStrokeSamplingState?

@@ -1727,6 +1727,7 @@ final class WorkspaceViewModel: ObservableObject {
                 layerID: layerID,
                 at: point,
                 color: workspace.toolSession.selectedColor,
+                alphaLockEnabled: layerTransparentPixelLockEnabled(layerID),
                 selectionShape: workspace.selection.committedShape,
                 layerSurfaceStore: bootstrap.layerSurfaceStore
             )
@@ -2016,6 +2017,47 @@ final class WorkspaceViewModel: ObservableObject {
             document.toggleLayerLock(layerID)
         }
         refresh()
+    }
+
+    func toggleLayerTransparentPixelLock(_ layerID: LayerID) {
+        checkpointHistoryIfPossible()
+        bootstrap.workspaceStore.updateDocument { document in
+            document.toggleLayerTransparentPixelLock(layerID)
+        }
+        refresh()
+        let isEnabled = workspace.document.layers.first(where: { $0.id == layerID })?.locksTransparentPixels == true
+        showStatus(.init(kind: .info, message: isEnabled ? "已锁定透明像素" : "已解除锁定透明像素"))
+    }
+
+    private func layerTransparentPixelLockEnabled(_ layerID: LayerID) -> Bool {
+        workspace.document.layers.first(where: { $0.id == layerID })?.locksTransparentPixels == true
+    }
+
+    private func makeAlphaLockTextureCopyIfNeeded(
+        for layerID: LayerID,
+        sourceTexture: MTLTexture
+    ) -> MTLTexture? {
+        guard layerTransparentPixelLockEnabled(layerID) else {
+            return nil
+        }
+
+        guard let alphaLockTexture = bootstrap.layerSurfaceStore.makeTexture(
+            width: sourceTexture.width,
+            height: sourceTexture.height,
+            pixelFormat: sourceTexture.pixelFormat,
+            usage: [.shaderRead],
+            storageMode: .private,
+            metal: bootstrap.metalContext
+        ) else {
+            return nil
+        }
+
+        bootstrap.layerSurfaceStore.copyTexture(
+            from: sourceTexture,
+            to: alphaLockTexture,
+            metal: bootstrap.metalContext
+        )
+        return alphaLockTexture
     }
 
     func setActiveLayerOpacity(_ opacity: Float) {
@@ -4307,6 +4349,11 @@ final class WorkspaceViewModel: ObservableObject {
         renderPassDescriptor.colorAttachments[0].storeAction = .store
 
         let applyStart = DispatchTime.now().uptimeNanoseconds
+        let alphaLockTexture = makeAlphaLockTextureCopyIfNeeded(for: layerID, sourceTexture: texture)
+        guard alphaLockTexture != nil || !layerTransparentPixelLockEnabled(layerID) else {
+            showStatus(.init(kind: .error, message: "无法创建锁定透明像素遮罩"))
+            return
+        }
         bootstrap.linearGradientRenderer.encode(
             into: renderPassDescriptor,
             commandBuffer: commandBuffer,
@@ -4316,7 +4363,8 @@ final class WorkspaceViewModel: ObservableObject {
             pointC: pointC,
             color: gradientPreviewColor,
             colorJitterAmount: workspace.toolSession.brush.colorJitterAmount,
-            selectionShape: workspace.selection.committedShape
+            selectionShape: workspace.selection.committedShape,
+            alphaLockTexture: alphaLockTexture
         )
 
         isApplyingGradientCommit = true
@@ -4351,7 +4399,8 @@ final class WorkspaceViewModel: ObservableObject {
                 StrokePoint(x: pointA.x, y: pointA.y, pressure: 1),
                 StrokePoint(x: pointB.x, y: pointB.y, pressure: 1)
             ],
-            selectionShape: workspace.selection.committedShape
+            selectionShape: workspace.selection.committedShape,
+            alphaLockEnabled: layerTransparentPixelLockEnabled(layerID)
         )
 
         bootstrap.strokeEngine.beginStrokeIfNeeded(
@@ -4395,6 +4444,12 @@ final class WorkspaceViewModel: ObservableObject {
             captureMode: .inPlaceChangedLayers([layerID])
         )
 
+        let alphaLockTexture = makeAlphaLockTextureCopyIfNeeded(for: layerID, sourceTexture: texture)
+        guard alphaLockTexture != nil || !layerTransparentPixelLockEnabled(layerID) else {
+            showStatus(.init(kind: .error, message: "无法创建锁定透明像素遮罩"))
+            return
+        }
+
         guard let commandBuffer = bootstrap.metalContext.commandQueue.makeCommandBuffer() else {
             showStatus(.init(kind: .error, message: "无法创建渐变命令缓冲"))
             return
@@ -4415,7 +4470,8 @@ final class WorkspaceViewModel: ObservableObject {
             color: gradientPreviewColor,
             colorJitterAmount: workspace.toolSession.brush.colorJitterAmount,
             maskQuality: .commit,
-            selectionShape: workspace.selection.committedShape
+            selectionShape: workspace.selection.committedShape,
+            alphaLockTexture: alphaLockTexture
         )
 
         isApplyingGradientCommit = true
@@ -4453,6 +4509,12 @@ final class WorkspaceViewModel: ObservableObject {
 
     func handleKeyDown(_ event: NSEvent) -> Bool {
         let normalizedModifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+
+        if normalizedModifiers.isEmpty,
+           event.charactersIgnoringModifiers?.lowercased() == "a" {
+            toggleLayerTransparentPixelLock(workspace.document.activeLayerID)
+            return true
+        }
 
         if normalizedModifiers == [.shift],
            event.charactersIgnoringModifiers?.uppercased() == "Z" {
@@ -6513,6 +6575,12 @@ final class WorkspaceViewModel: ObservableObject {
             return false
         }
 
+        let alphaLockTexture = makeAlphaLockTextureCopyIfNeeded(for: layerID, sourceTexture: texture)
+        guard alphaLockTexture != nil || !layerTransparentPixelLockEnabled(layerID) else {
+            showStatus(.init(kind: .error, message: "无法创建锁定透明像素遮罩"))
+            return false
+        }
+
         let clampedSelection = selectionShape.clamped(
             to: CanvasSize(width: texture.width, height: texture.height)
         )
@@ -6581,7 +6649,8 @@ final class WorkspaceViewModel: ObservableObject {
             selectionMaskAlphaBytes: selectionMaskRegion.alphaBytes,
             fillCenter: lassoFillCenter,
             color: resolvedFillToolColor(from: workspace.toolSession.selectedColor),
-            colorJitterAmount: workspace.toolSession.brush.colorJitterAmount
+            colorJitterAmount: workspace.toolSession.brush.colorJitterAmount,
+            alphaLockTexture: alphaLockTexture
         )
 
         commandBuffer.commit()
@@ -6632,6 +6701,7 @@ final class WorkspaceViewModel: ObservableObject {
         )
         let historyCheckpointMs = Double(DispatchTime.now().uptimeNanoseconds - historyCheckpointStartNs) / 1_000_000
         PerformanceAuditStore.shared.recordDuration("WorkspaceViewModel.applyPixelOperation.historyCheckpoint", ms: historyCheckpointMs)
+        let alphaLockEnabled = layerTransparentPixelLockEnabled(layerID)
 
         do {
             let clampedSelection = selectionShape.clamped(
@@ -6680,7 +6750,8 @@ final class WorkspaceViewModel: ObservableObject {
                 selectionMaskRegion: selectionMaskRegion,
                 width: snapshot.width,
                 height: snapshot.height,
-                operation: operation
+                operation: operation,
+                alphaLockEnabled: alphaLockEnabled
             )
             let mutateMs = Double(DispatchTime.now().uptimeNanoseconds - mutateStartNs) / 1_000_000
             PerformanceAuditStore.shared.recordDuration("WorkspaceViewModel.applyPixelOperation.pixelMutation", ms: mutateMs)
@@ -6726,7 +6797,8 @@ final class WorkspaceViewModel: ObservableObject {
         selectionMaskRegion: SelectionMaskRegion,
         width: Int,
         height: Int,
-        operation: SelectionPixelOperation
+        operation: SelectionPixelOperation,
+        alphaLockEnabled: Bool
     ) {
         guard
             width == selectionMaskRegion.width,
@@ -6743,6 +6815,9 @@ final class WorkspaceViewModel: ObservableObject {
                 for localX in 0..<width {
                     guard selectionMaskRegion.alphaBytes[maskRow + localX] > 0 else { continue }
                     let index = byteRow + (localX * bytesPerPixel)
+                    if alphaLockEnabled, bytes[index + 3] == 0 {
+                        continue
+                    }
                     bytes[index] = 0
                     bytes[index + 1] = 0
                     bytes[index + 2] = 0
@@ -6756,6 +6831,9 @@ final class WorkspaceViewModel: ObservableObject {
                 for localX in 0..<width {
                     guard selectionMaskRegion.alphaBytes[maskRow + localX] > 0 else { continue }
                     let index = byteRow + (localX * bytesPerPixel)
+                    if alphaLockEnabled, bytes[index + 3] == 0 {
+                        continue
+                    }
                     bytes[index] = fillPixel.blue
                     bytes[index + 1] = fillPixel.green
                     bytes[index + 2] = fillPixel.red
@@ -7838,7 +7916,8 @@ final class WorkspaceViewModel: ObservableObject {
             color: stroke.color,
             brush: stroke.brush,
             points: smoothStrokePoints(transformedPoints),
-            selectionShape: stroke.selectionShape
+            selectionShape: stroke.selectionShape,
+            alphaLockEnabled: stroke.alphaLockEnabled
         )
     }
 
@@ -7894,7 +7973,8 @@ final class WorkspaceViewModel: ObservableObject {
             color: stroke.color.withAlpha(stroke.color.alpha * Float(0.58 + (settings.branch * 0.18))),
             brush: stroke.brush,
             points: smoothStrokePoints(points),
-            selectionShape: stroke.selectionShape
+            selectionShape: stroke.selectionShape,
+            alphaLockEnabled: stroke.alphaLockEnabled
         )
     }
 
@@ -7948,7 +8028,8 @@ final class WorkspaceViewModel: ObservableObject {
                 color: stroke.color.withAlpha(stroke.color.alpha * Float(0.28 + random.double(in: 0.08...0.18))),
                 brush: stroke.brush,
                 points: smoothStrokePoints(points),
-                selectionShape: stroke.selectionShape
+                selectionShape: stroke.selectionShape,
+                alphaLockEnabled: stroke.alphaLockEnabled
             )
         }
 

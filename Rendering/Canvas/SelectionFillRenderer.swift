@@ -13,11 +13,13 @@ private struct SelectionFillUniforms {
     var fillCenter: SIMD2<Float>
     var color: SIMD4<Float>
     var colorJitterAmount: Float
+    var usesAlphaLock: Float
 }
 
 final class SelectionFillRenderer {
     private let device: MTLDevice
     private let pipelineState: MTLRenderPipelineState
+    private let fallbackAlphaLockTexture: MTLTexture
     private var reusableSelectionMaskTexture: MTLTexture?
     private var reusableSelectionMaskTextureSize: SIMD2<Int>?
 
@@ -38,6 +40,7 @@ final class SelectionFillRenderer {
             float2 fillCenter;
             float4 color;
             float colorJitterAmount;
+            float usesAlphaLock;
         };
 
         struct VertexOut {
@@ -144,7 +147,8 @@ final class SelectionFillRenderer {
         fragment float4 selectionFillFragmentShader(
             VertexOut in [[stage_in]],
             constant SelectionFillUniforms &uniforms [[buffer(1)]],
-            texture2d<float> selectionMask [[texture(0)]]
+            texture2d<float> selectionMask [[texture(0)]],
+            texture2d<float> alphaLockTexture [[texture(1)]]
         ) {
             float2 boundsSize = max(uniforms.selectionBoundsMax - uniforms.selectionBoundsMin, float2(1.0, 1.0));
             float2 localCoord = clamp((in.canvasPosition - uniforms.selectionBoundsMin) / boundsSize, 0.0, 1.0);
@@ -152,6 +156,13 @@ final class SelectionFillRenderer {
             float maskAlpha = selectionMask.sample(maskSampler, localCoord).r;
             if (maskAlpha <= 0.001) {
                 return float4(0.0);
+            }
+            if (uniforms.usesAlphaLock > 0.5) {
+                float2 canvasSize = max(uniforms.canvasSize, float2(1.0, 1.0));
+                float2 canvasUV = in.canvasPosition / canvasSize;
+                if (alphaLockTexture.sample(maskSampler, canvasUV).a <= 0.001) {
+                    return float4(0.0);
+                }
             }
 
             float angle = atan2(in.canvasPosition.y - uniforms.fillCenter.y, in.canvasPosition.x - uniforms.fillCenter.x);
@@ -194,6 +205,26 @@ final class SelectionFillRenderer {
             fatalError("Failed to create SelectionFillRenderer pipeline: \(error)")
         }
 
+        let fallbackAlphaDescriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .bgra8Unorm_srgb,
+            width: 1,
+            height: 1,
+            mipmapped: false
+        )
+        fallbackAlphaDescriptor.usage = .shaderRead
+        fallbackAlphaDescriptor.storageMode = .shared
+        guard let fallbackAlphaTexture = device.makeTexture(descriptor: fallbackAlphaDescriptor) else {
+            fatalError("Failed to create fallback alpha lock texture.")
+        }
+        let fullAlphaPixel: [UInt8] = [255, 255, 255, 255]
+        fallbackAlphaTexture.replace(
+            region: MTLRegionMake2D(0, 0, 1, 1),
+            mipmapLevel: 0,
+            withBytes: fullAlphaPixel,
+            bytesPerRow: 4
+        )
+        self.fallbackAlphaLockTexture = fallbackAlphaTexture
+
     }
 
     func encode(
@@ -207,7 +238,8 @@ final class SelectionFillRenderer {
         selectionMaskAlphaBytes: [UInt8],
         fillCenter: CanvasPoint,
         color: RGBAColor,
-        colorJitterAmount: Float = 0
+        colorJitterAmount: Float = 0,
+        alphaLockTexture: MTLTexture? = nil
     ) {
         let minX = max(selectionMaskOriginX, 0)
         let minY = max(selectionMaskOriginY, 0)
@@ -240,7 +272,8 @@ final class SelectionFillRenderer {
             selectionBoundsMax: SIMD2(Float(maxX), Float(maxY)),
             fillCenter: SIMD2(Float(fillCenter.x), Float(fillCenter.y)),
             color: SIMD4(color.red, color.green, color.blue, color.alpha),
-            colorJitterAmount: colorJitterAmount
+            colorJitterAmount: colorJitterAmount,
+            usesAlphaLock: alphaLockTexture == nil ? 0 : 1
         )
 
         guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor) else {
@@ -258,6 +291,7 @@ final class SelectionFillRenderer {
         encoder.setVertexBytes(&uniforms, length: MemoryLayout<SelectionFillUniforms>.stride, index: 1)
         encoder.setFragmentBytes(&uniforms, length: MemoryLayout<SelectionFillUniforms>.stride, index: 1)
         encoder.setFragmentTexture(selectionMaskTexture, index: 0)
+        encoder.setFragmentTexture(alphaLockTexture ?? fallbackAlphaLockTexture, index: 1)
         encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: vertices.count)
         encoder.endEncoding()
     }

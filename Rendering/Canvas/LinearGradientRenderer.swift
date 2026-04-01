@@ -13,12 +13,14 @@ private struct LinearGradientUniforms {
     var color: SIMD4<Float>
     var colorJitterAmount: Float
     var usesSelectionMask: Float
+    var usesAlphaLock: Float
 }
 
 final class LinearGradientRenderer {
     private let device: MTLDevice
     private let pipelineState: MTLRenderPipelineState
     private let fallbackSelectionMaskTexture: MTLTexture
+    private let fallbackAlphaLockTexture: MTLTexture
     private var cachedSelectionMaskShape: SelectionShape?
     private var cachedSelectionMaskCanvasSize: CanvasSize?
     private var cachedSelectionMaskTexture: MTLTexture?
@@ -40,6 +42,7 @@ final class LinearGradientRenderer {
             float4 color;
             float colorJitterAmount;
             float usesSelectionMask;
+            float usesAlphaLock;
         };
 
         struct VertexOut {
@@ -113,7 +116,8 @@ final class LinearGradientRenderer {
         fragment float4 linearGradientFragmentShader(
             VertexOut in [[stage_in]],
             constant LinearGradientUniforms &uniforms [[buffer(1)]],
-            texture2d<float> selectionMask [[texture(0)]]
+            texture2d<float> selectionMask [[texture(0)]],
+            texture2d<float> alphaLockTexture [[texture(1)]]
         ) {
             constexpr sampler maskSampler(coord::normalized, address::clamp_to_edge, filter::nearest);
             float2 axis = uniforms.pointB - uniforms.pointA;
@@ -125,6 +129,13 @@ final class LinearGradientRenderer {
                 float2 canvasSize = max(uniforms.canvasSize, float2(1.0, 1.0));
                 float2 uv = in.canvasPosition / canvasSize;
                 maskAlpha = selectionMask.sample(maskSampler, uv).r;
+            }
+            if (uniforms.usesAlphaLock > 0.5) {
+                float2 canvasSize = max(uniforms.canvasSize, float2(1.0, 1.0));
+                float2 uv = in.canvasPosition / canvasSize;
+                if (alphaLockTexture.sample(maskSampler, uv).a <= 0.001) {
+                    return float4(0.0);
+                }
             }
             float easedAlpha = 1.0 - smoothstep(0.0, 1.0, t);
             float alpha = easedAlpha * uniforms.color.a * maskAlpha;
@@ -186,6 +197,26 @@ final class LinearGradientRenderer {
             bytesPerRow: 1
         )
         self.fallbackSelectionMaskTexture = fallbackTexture
+
+        let fallbackAlphaDescriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .bgra8Unorm_srgb,
+            width: 1,
+            height: 1,
+            mipmapped: false
+        )
+        fallbackAlphaDescriptor.usage = .shaderRead
+        fallbackAlphaDescriptor.storageMode = .shared
+        guard let fallbackAlphaTexture = device.makeTexture(descriptor: fallbackAlphaDescriptor) else {
+            fatalError("Failed to create fallback alpha lock texture.")
+        }
+        let fullAlphaPixel: [UInt8] = [255, 255, 255, 255]
+        fallbackAlphaTexture.replace(
+            region: MTLRegionMake2D(0, 0, 1, 1),
+            mipmapLevel: 0,
+            withBytes: fullAlphaPixel,
+            bytesPerRow: 4
+        )
+        self.fallbackAlphaLockTexture = fallbackAlphaTexture
     }
 
     func encode(
@@ -197,7 +228,8 @@ final class LinearGradientRenderer {
         pointC: CanvasPoint,
         color: RGBAColor,
         colorJitterAmount: Float = 0,
-        selectionShape: SelectionShape? = nil
+        selectionShape: SelectionShape? = nil,
+        alphaLockTexture: MTLTexture? = nil
     ) {
         let vertices: [LinearGradientVertex] = [
             .init(position: SIMD2(0, 0)),
@@ -215,7 +247,8 @@ final class LinearGradientRenderer {
             pointB: SIMD2(Float(pointB.x), Float(pointB.y)),
             color: SIMD4(color.red, color.green, color.blue, color.alpha),
             colorJitterAmount: colorJitterAmount,
-            usesSelectionMask: selectionShape == nil ? 0 : 1
+            usesSelectionMask: selectionShape == nil ? 0 : 1,
+            usesAlphaLock: alphaLockTexture == nil ? 0 : 1
         )
 
         guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor) else {
@@ -227,6 +260,7 @@ final class LinearGradientRenderer {
         encoder.setVertexBytes(&uniforms, length: MemoryLayout<LinearGradientUniforms>.stride, index: 1)
         encoder.setFragmentBytes(&uniforms, length: MemoryLayout<LinearGradientUniforms>.stride, index: 1)
         encoder.setFragmentTexture(selectionMaskTexture, index: 0)
+        encoder.setFragmentTexture(alphaLockTexture ?? fallbackAlphaLockTexture, index: 1)
         encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: vertices.count)
         encoder.endEncoding()
     }

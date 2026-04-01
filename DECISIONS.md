@@ -615,6 +615,15 @@
 
 - `保存 / 放弃 / 取消`
 
+### 10.3 启动与新建默认笔刷大小固定为 `60`
+
+已确认：
+
+- 当前 `toolSession` 的默认 brush size 固定为 `60`
+- 新建画布时也必须把当前 brush size 重置回 `60`
+- 这条默认值只影响当前笔刷默认状态，不允许改写画笔库 preset 自己保存的 size
+- 启动恢复画笔库时，可以恢复“当前选中的 preset 高亮”，但不允许自动用该 preset 覆盖当前 brush 默认值
+
 ## 11. 当前冻结 / 不应主动再碰的部分
 
 当前已明确冻结的链路：
@@ -637,3 +646,37 @@
   - [CURRENT_TASK.md](/Users/victorcloux/Desktop/ArtFlex/CURRENT_TASK.md)
   - [CURRENT_STATUS.md](/Users/victorcloux/Desktop/ArtFlex/CURRENT_STATUS.md)
 - 当前线程默认不再从性能优化开始，而是先进入新功能定义与实现
+
+## 13. 图层与透明像素锁
+
+### 13.1 当前图层支持锁定透明像素
+
+已确认：
+
+- 这条功能是当前图层级的 `Alpha Lock`，不是 Photoshop 式图层对图层剪贴蒙版
+- 图层行必须提供 `α` 状态图标 / 按钮显示当前状态
+- `A` 用于切换当前活动图层的透明像素锁
+- 开启后，后续写入只能落在该图层原本已有非透明像素范围内
+- 当前至少覆盖：
+  - `brush`
+  - `eraser`
+  - `smudge`
+  - `straight line`
+  - `linear gradient`
+  - `sector gradient`
+  - `lasso fill`
+  - `selection fill`
+  - `selection erase`
+  - `bucket fill`
+
+## 14. 快捷 HUD 拾色器
+
+### 14.1 快捷 HUD 拾色器当前冻结为 `Shift + Z`
+
+已确认：
+
+- 按住 `Shift + Z` 弹出，松开消失
+- HUD 默认以当前光标 / 笔尖为中心显示，只有靠近边缘时才做最小避让
+- HUD 必须保持轻量，不允许引入新的 CPU 热路径、整块位图重建或画布读回
+- HUD 当前会同步右侧主拾色器的主要滑块语义
+- HUD 下方 4 个小格子当前映射画笔库前四格；点击可直接切换对应画笔

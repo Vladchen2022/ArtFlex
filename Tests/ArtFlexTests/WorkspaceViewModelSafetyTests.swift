@@ -103,6 +103,17 @@ struct WorkspaceViewModelSafetyTests {
         #expect(harness.viewModel.workspace.viewport.contentOffset == baselineViewport.contentOffset)
         #expect(harness.viewModel.workspace.viewport.rotationDegrees == baselineViewport.rotationDegrees)
     }
+
+    @Test
+    @MainActor
+    func toggleLayerTransparentPixelLockUpdatesActiveLayerState() throws {
+        let harness = try BrushEditingBoundaryHarness()
+        let activeLayerID = harness.viewModel.workspace.document.activeLayerID
+
+        #expect(harness.viewModel.workspace.document.layers.first(where: { $0.id == activeLayerID })?.locksTransparentPixels == false)
+        harness.viewModel.toggleLayerTransparentPixelLock(activeLayerID)
+        #expect(harness.viewModel.workspace.document.layers.first(where: { $0.id == activeLayerID })?.locksTransparentPixels == true)
+    }
 }
 
 @MainActor

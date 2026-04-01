@@ -2048,6 +2048,15 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
             let activeLayerSurfaceID = snapshot.activeLayerSurfaceID
             let activeLayerID = snapshot.renderSnapshot.document.activeLayerID
             let activeBrushDisplayTexture = resolveBrushDisplayTexture(activeLayerID)
+            let activeLayerAlphaLockTexture: MTLTexture? = {
+                guard
+                    let activeLayerSurfaceID,
+                    snapshot.renderSnapshot.document.layers.first(where: { $0.id == activeLayerID })?.locksTransparentPixels == true
+                else {
+                    return nil
+                }
+                return layerSurfaceStore.texture(for: activeLayerSurfaceID)
+            }()
             let hasActivePreview = isTransforming
             let resolvedLinearGradientGeometry =
                 activeTool == .linearGradient
@@ -2127,7 +2136,8 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
                         pointC: geometry.pointC,
                         color: gradientPreviewColor,
                         colorJitterAmount: gradientColorJitterAmount,
-                        selectionShape: snapshot.selectionShape
+                        selectionShape: snapshot.selectionShape,
+                        alphaLockTexture: activeLayerAlphaLockTexture
                     )
                 } else if let geometry = resolvedSectorGradientGeometry {
                     sectorGradientRenderer.encode(
@@ -2140,7 +2150,8 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
                         color: gradientPreviewColor,
                         colorJitterAmount: gradientColorJitterAmount,
                         maskQuality: .preview,
-                        selectionShape: snapshot.selectionShape
+                        selectionShape: snapshot.selectionShape,
+                        alphaLockTexture: activeLayerAlphaLockTexture
                     )
                 }
 

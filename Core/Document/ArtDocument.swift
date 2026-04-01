@@ -103,6 +103,7 @@ struct ArtDocument: Codable, Sendable, Equatable {
             name: "图层 2",
             isVisible: true,
             isLocked: false,
+            locksTransparentPixels: false,
             opacity: 1
         )
         return [backgroundLayer, drawingLayer]
@@ -115,6 +116,7 @@ struct ArtDocument: Codable, Sendable, Equatable {
             name: name ?? "图层 \(newLayerIndex)",
             isVisible: true,
             isLocked: false,
+            locksTransparentPixels: false,
             opacity: 1
         )
         layers.append(layer)
@@ -221,6 +223,11 @@ struct ArtDocument: Codable, Sendable, Equatable {
         layers[index].isLocked.toggle()
     }
 
+    mutating func toggleLayerTransparentPixelLock(_ layerID: LayerID) {
+        guard let index = layers.firstIndex(where: { $0.id == layerID }) else { return }
+        layers[index].locksTransparentPixels.toggle()
+    }
+
     mutating func duplicateActiveLayer(named name: String? = nil) -> LayerRecord? {
         guard let activeIndex = layers.firstIndex(where: { $0.id == activeLayerID }) else {
             return nil
@@ -232,6 +239,7 @@ struct ArtDocument: Codable, Sendable, Equatable {
             name: name ?? "\(source.name) Copy",
             isVisible: source.isVisible,
             isLocked: false,
+            locksTransparentPixels: source.locksTransparentPixels,
             opacity: source.opacity
         )
 

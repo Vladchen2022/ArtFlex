@@ -2204,6 +2204,21 @@ struct RightInspectorView: View {
             .help(layer.isVisible ? "隐藏图层" : "显示图层")
 
             Button {
+                viewModel.toggleLayerTransparentPixelLock(layer.id)
+            } label: {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 4)
+                        .fill(layer.locksTransparentPixels ? Color.cyan.opacity(0.95) : Color.white.opacity(0.08))
+                    Text("α")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundStyle(layer.locksTransparentPixels ? Color.black.opacity(0.88) : Color.white.opacity(0.72))
+                }
+                .frame(width: 18, height: 18)
+            }
+            .buttonStyle(.plain)
+            .help(layer.locksTransparentPixels ? "解除锁定透明像素" : "锁定透明像素")
+
+            Button {
                 viewModel.toggleLayerLock(layer.id)
             } label: {
                 Image(systemName: layer.isLocked ? "lock.fill" : "lock.open")

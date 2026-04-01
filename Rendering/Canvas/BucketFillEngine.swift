@@ -12,6 +12,7 @@ final class BucketFillEngine {
         layerID: LayerID,
         at point: CanvasPoint,
         color: RGBAColor,
+        alphaLockEnabled: Bool,
         selectionShape: SelectionShape?,
         layerSurfaceStore: StageOneLayerSurfaceStore
     ) throws {
@@ -78,6 +79,9 @@ final class BucketFillEngine {
         let replacement = makePremultipliedBGRA(color: color)
 
         guard target != replacement else { return }
+        if alphaLockEnabled && target.alpha == 0 {
+            return
+        }
 
         let selectionMaskBytes = makeSelectionMaskBytes(
             for: boundedSelection,
@@ -120,6 +124,9 @@ final class BucketFillEngine {
             )
 
             guard currentPixel == target else { continue }
+            if alphaLockEnabled && currentPixel.alpha == 0 {
+                continue
+            }
 
             bytes[index] = replacement.blue
             bytes[index + 1] = replacement.green

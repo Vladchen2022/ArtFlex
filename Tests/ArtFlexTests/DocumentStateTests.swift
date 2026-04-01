@@ -154,4 +154,16 @@ struct DocumentStateTests {
         #expect(document.layers.map(\.id) == [secondLayer.id, thirdLayer.id])
         #expect(document.layers.first(where: { $0.id == thirdLayer.id })?.opacity == 1)
     }
+
+    @Test
+    func duplicateActiveLayerPreservesTransparentPixelLockState() {
+        var document = ArtDocument.stageOneDefault()
+        let activeLayerID = document.activeLayerID
+        document.toggleLayerTransparentPixelLock(activeLayerID)
+
+        let duplicated = document.duplicateActiveLayer()
+
+        #expect(document.layers.first(where: { $0.id == activeLayerID })?.locksTransparentPixels == true)
+        #expect(duplicated?.locksTransparentPixels == true)
+    }
 }

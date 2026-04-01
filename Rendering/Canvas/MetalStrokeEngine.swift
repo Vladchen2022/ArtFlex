@@ -137,6 +137,8 @@ final class MetalStrokeEngine: StrokeEngine {
                 return enqueuedAt
             }
         }.min() ?? flushStartNs
+        let liveAlphaLockTexture = layerSurfaceStore.surfaceID(for: session.layerID)
+            .flatMap(layerSurfaceStore.texture(for:))
 
         var flushedPacketCount = 0
         debugLastFlushSmudgeFullSizeCopyCount = 0
@@ -164,6 +166,7 @@ final class MetalStrokeEngine: StrokeEngine {
                         session: opacityCapSession,
                         into: session.workingTexture,
                         commandBuffer: commandBuffer,
+                        alphaLockTexture: stroke.alphaLockEnabled ? liveAlphaLockTexture : nil,
                         samplingState: &session.brushSamplingState
                     )
                 } else {
@@ -172,6 +175,7 @@ final class MetalStrokeEngine: StrokeEngine {
                         into: session.workingTexture,
                         commandQueue: metalContext.commandQueue,
                         commandBuffer: commandBuffer,
+                        alphaLockTexture: stroke.alphaLockEnabled ? liveAlphaLockTexture : nil,
                         samplingState: &session.brushSamplingState
                     )
                 }
@@ -205,6 +209,7 @@ final class MetalStrokeEngine: StrokeEngine {
                     brush: lastStroke.brush,
                     points: [],
                     selectionShape: lastStroke.selectionShape,
+                    alphaLockEnabled: lastStroke.alphaLockEnabled,
                     skipLeadingStamp: true
                 )
 
@@ -214,6 +219,7 @@ final class MetalStrokeEngine: StrokeEngine {
                         session: opacityCapSession,
                         into: session.workingTexture,
                         commandBuffer: commandBuffer,
+                        alphaLockTexture: lastStroke.alphaLockEnabled ? liveAlphaLockTexture : nil,
                         samplingState: &flushSamplingState
                     )
                 } else {
@@ -222,6 +228,7 @@ final class MetalStrokeEngine: StrokeEngine {
                         into: session.workingTexture,
                         commandQueue: metalContext.commandQueue,
                         commandBuffer: commandBuffer,
+                        alphaLockTexture: lastStroke.alphaLockEnabled ? liveAlphaLockTexture : nil,
                         samplingState: &flushSamplingState
                     )
                 }
@@ -471,6 +478,8 @@ final class MetalStrokeEngine: StrokeEngine {
         var samplingState: BrushStrokeSamplingState?
         var opacityCapSession: OpacityCapSessionResources?
         debugLastCommitSmudgeFullSizeCopyCount = 0
+        let usesAlphaLock = job.packets.contains(where: \.alphaLockEnabled)
+        let commitAlphaLockTexture = usesAlphaLock ? makeAlphaLockTextureCopy(from: texture) : nil
 
         for packet in job.packets {
             if requiresOpacityCap(packet), opacityCapSession == nil {
@@ -486,6 +495,7 @@ final class MetalStrokeEngine: StrokeEngine {
                     session: opacityCapSession,
                     into: texture,
                     commandBuffer: commandBuffer,
+                    alphaLockTexture: packet.alphaLockEnabled ? commitAlphaLockTexture : nil,
                     samplingState: &samplingState
                 )
             } else {
@@ -494,6 +504,7 @@ final class MetalStrokeEngine: StrokeEngine {
                     into: texture,
                     commandQueue: metalContext.commandQueue,
                     commandBuffer: commandBuffer,
+                    alphaLockTexture: packet.alphaLockEnabled ? commitAlphaLockTexture : nil,
                     samplingState: &samplingState
                 )
             }
@@ -508,6 +519,7 @@ final class MetalStrokeEngine: StrokeEngine {
                 brush: lastStroke.brush,
                 points: [],
                 selectionShape: lastStroke.selectionShape,
+                alphaLockEnabled: lastStroke.alphaLockEnabled,
                 skipLeadingStamp: true
             )
 
@@ -517,6 +529,7 @@ final class MetalStrokeEngine: StrokeEngine {
                     session: opacityCapSession,
                     into: texture,
                     commandBuffer: commandBuffer,
+                    alphaLockTexture: lastStroke.alphaLockEnabled ? commitAlphaLockTexture : nil,
                     samplingState: &flushSamplingState
                 )
             } else {
@@ -525,6 +538,7 @@ final class MetalStrokeEngine: StrokeEngine {
                     into: texture,
                     commandQueue: metalContext.commandQueue,
                     commandBuffer: commandBuffer,
+                    alphaLockTexture: lastStroke.alphaLockEnabled ? commitAlphaLockTexture : nil,
                     samplingState: &flushSamplingState
                 )
             }
@@ -540,5 +554,25 @@ final class MetalStrokeEngine: StrokeEngine {
 
     private func requiresOpacityCap(_ stroke: StrokeDescriptor) -> Bool {
         (stroke.tool == .brush || stroke.tool == .eraser) && stroke.brush.buildMode == .opacityCap
+    }
+
+    private func makeAlphaLockTextureCopy(from sourceTexture: MTLTexture) -> MTLTexture? {
+        guard let alphaLockTexture = layerSurfaceStore.makeTexture(
+            width: sourceTexture.width,
+            height: sourceTexture.height,
+            pixelFormat: sourceTexture.pixelFormat,
+            usage: [.shaderRead],
+            storageMode: .private,
+            metal: metalContext
+        ) else {
+            return nil
+        }
+
+        layerSurfaceStore.copyTexture(
+            from: sourceTexture,
+            to: alphaLockTexture,
+            metal: metalContext
+        )
+        return alphaLockTexture
     }
 }

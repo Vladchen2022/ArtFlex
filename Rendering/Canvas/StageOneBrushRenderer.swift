@@ -24,6 +24,7 @@ private struct BrushUniforms {
     var selectionMode: UInt32
     var selectionMin: SIMD2<Float>
     var selectionMax: SIMD2<Float>
+    var usesAlphaLock: UInt32
     var dualTipPhase1Enabled: UInt32
     var dualTipSubtractEnabled: UInt32
     var dualTipIntersectEnabled: UInt32
@@ -131,6 +132,7 @@ final class StageOneBrushRenderer {
     private let compositeSamplerState: MTLSamplerState
     private let tipSamplerState: MTLSamplerState
     private let defaultTipTexture: MTLTexture
+    private let fallbackAlphaLockTexture: MTLTexture
     private var cachedSelectionMaskShape: SelectionShape?
     private var cachedSelectionMaskCanvasSize: CanvasSize?
     private var cachedSelectionMaskTexture: MTLTexture?
@@ -166,6 +168,7 @@ final class StageOneBrushRenderer {
             uint selectionMode;
             float2 selectionMin;
             float2 selectionMax;
+            uint usesAlphaLock;
             uint dualTipPhase1Enabled;
             uint dualTipSubtractEnabled;
             uint dualTipIntersectEnabled;
@@ -499,6 +502,7 @@ final class StageOneBrushRenderer {
             VertexOut in [[stage_in]],
             constant BrushUniforms &uniforms [[buffer(1)]],
             texture2d<float, access::read> selectionMask [[texture(0)]],
+            texture2d<float, access::read> alphaLockTexture [[texture(1)]],
             texture2d<float, access::sample> customTipMask [[texture(2)]],
             texture2d<float, access::sample> secondaryCustomTipMask [[texture(3)]]
         ) {
@@ -533,6 +537,14 @@ final class StageOneBrushRenderer {
                     if (selectionMask.read(uint2(x, y)).r < 0.5) {
                         discard_fragment();
                     }
+                }
+            }
+
+            if (uniforms.usesAlphaLock != 0) {
+                uint x = uint(clamp(in.pixelPoint.x, 0.0, uniforms.canvasSize.x - 1.0));
+                uint y = uint(clamp(in.pixelPoint.y, 0.0, uniforms.canvasSize.y - 1.0));
+                if (alphaLockTexture.read(uint2(x, y)).a <= 0.001) {
+                    discard_fragment();
                 }
             }
 
@@ -554,7 +566,8 @@ final class StageOneBrushRenderer {
             constant BrushUniforms &uniforms [[buffer(1)]],
             constant SmudgeFragmentUniforms &smudgeUniforms [[buffer(3)]],
             texture2d<float, access::read> selectionMask [[texture(0)]],
-            texture2d<float, access::read> gatheredColors [[texture(1)]],
+            texture2d<float, access::read> alphaLockTexture [[texture(1)]],
+            texture2d<float, access::read> gatheredColors [[texture(4)]],
             texture2d<float, access::sample> customTipMask [[texture(2)]],
             texture2d<float, access::sample> secondaryCustomTipMask [[texture(3)]]
         ) {
@@ -589,6 +602,14 @@ final class StageOneBrushRenderer {
                     if (selectionMask.read(uint2(x, y)).r < 0.5) {
                         discard_fragment();
                     }
+                }
+            }
+
+            if (uniforms.usesAlphaLock != 0) {
+                uint x = uint(clamp(in.pixelPoint.x, 0.0, uniforms.canvasSize.x - 1.0));
+                uint y = uint(clamp(in.pixelPoint.y, 0.0, uniforms.canvasSize.y - 1.0));
+                if (alphaLockTexture.read(uint2(x, y)).a <= 0.001) {
+                    discard_fragment();
                 }
             }
 
@@ -606,7 +627,8 @@ final class StageOneBrushRenderer {
             VertexOut in [[stage_in]],
             constant BrushUniforms &uniforms [[buffer(1)]],
             texture2d<float, access::read> selectionMask [[texture(0)]],
-            texture2d<float, access::sample> sourceTexture [[texture(1)]],
+            texture2d<float, access::read> alphaLockTexture [[texture(1)]],
+            texture2d<float, access::sample> sourceTexture [[texture(4)]],
             texture2d<float, access::sample> customTipMask [[texture(2)]],
             texture2d<float, access::sample> secondaryCustomTipMask [[texture(3)]]
         ) {
@@ -641,6 +663,14 @@ final class StageOneBrushRenderer {
                     if (selectionMask.read(uint2(x, y)).r < 0.5) {
                         discard_fragment();
                     }
+                }
+            }
+
+            if (uniforms.usesAlphaLock != 0) {
+                uint x = uint(clamp(in.pixelPoint.x, 0.0, uniforms.canvasSize.x - 1.0));
+                uint y = uint(clamp(in.pixelPoint.y, 0.0, uniforms.canvasSize.y - 1.0));
+                if (alphaLockTexture.read(uint2(x, y)).a <= 0.001) {
+                    discard_fragment();
                 }
             }
 
@@ -691,6 +721,7 @@ final class StageOneBrushRenderer {
             VertexOut in [[stage_in]],
             constant BrushUniforms &uniforms [[buffer(1)]],
             texture2d<float, access::read> selectionMask [[texture(0)]],
+            texture2d<float, access::read> alphaLockTexture [[texture(1)]],
             texture2d<float, access::sample> customTipMask [[texture(2)]],
             texture2d<float, access::sample> secondaryCustomTipMask [[texture(3)]]
         ) {
@@ -725,6 +756,14 @@ final class StageOneBrushRenderer {
                     if (selectionMask.read(uint2(x, y)).r < 0.5) {
                         discard_fragment();
                     }
+                }
+            }
+
+            if (uniforms.usesAlphaLock != 0) {
+                uint x = uint(clamp(in.pixelPoint.x, 0.0, uniforms.canvasSize.x - 1.0));
+                uint y = uint(clamp(in.pixelPoint.y, 0.0, uniforms.canvasSize.y - 1.0));
+                if (alphaLockTexture.read(uint2(x, y)).a <= 0.001) {
+                    discard_fragment();
                 }
             }
 
@@ -950,6 +989,7 @@ final class StageOneBrushRenderer {
             bytesPerRow: 1
         )
         self.defaultTipTexture = defaultTipTexture
+        self.fallbackAlphaLockTexture = defaultTipTexture
 
     }
 
@@ -958,6 +998,7 @@ final class StageOneBrushRenderer {
         stroke: StrokeDescriptor,
         into texture: MTLTexture,
         commandQueue: MTLCommandQueue,
+        alphaLockTexture: MTLTexture? = nil,
         samplingState: inout BrushStrokeSamplingState?,
         completion: (() -> Void)? = nil
     ) -> Int {
@@ -970,6 +1011,7 @@ final class StageOneBrushRenderer {
             into: texture,
             commandQueue: commandQueue,
             commandBuffer: commandBuffer,
+            alphaLockTexture: alphaLockTexture,
             samplingState: &samplingState
         )
 
@@ -1030,6 +1072,7 @@ final class StageOneBrushRenderer {
         session: OpacityCapSessionResources,
         into texture: MTLTexture,
         commandQueue: MTLCommandQueue,
+        alphaLockTexture: MTLTexture? = nil,
         samplingState: inout BrushStrokeSamplingState?,
         completion: (() -> Void)? = nil
     ) -> Int {
@@ -1043,6 +1086,7 @@ final class StageOneBrushRenderer {
             session: session,
             into: texture,
             commandBuffer: commandBuffer,
+            alphaLockTexture: alphaLockTexture,
             samplingState: &samplingState
         )
 
@@ -1061,6 +1105,7 @@ final class StageOneBrushRenderer {
         into texture: MTLTexture,
         commandQueue: MTLCommandQueue,
         commandBuffer: MTLCommandBuffer,
+        alphaLockTexture: MTLTexture? = nil,
         samplingState: inout BrushStrokeSamplingState?
     ) -> Int {
         let samples = interpolatedPoints(for: stroke, samplingState: &samplingState)
@@ -1081,6 +1126,7 @@ final class StageOneBrushRenderer {
                 stroke: stroke,
                 into: texture,
                 commandBuffer: commandBuffer,
+                alphaLockTexture: alphaLockTexture,
                 gatheredColorsTexture: smudgeGatheredColorsTexture,
                 frozenSourceTexture: nil
             )
@@ -1123,6 +1169,7 @@ final class StageOneBrushRenderer {
         let secondaryCustomTipTexture =
             customTipTexture(for: secondaryCustomTipMaskData(for: stroke), role: .secondary) ?? defaultTipTexture
         encoder.setFragmentTexture(selectionMaskTexture, index: 0)
+        encoder.setFragmentTexture(alphaLockTexture ?? fallbackAlphaLockTexture, index: 1)
         encoder.setFragmentTexture(primaryCustomTipTexture, index: 2)
         encoder.setFragmentTexture(secondaryCustomTipTexture, index: 3)
         encoder.setFragmentSamplerState(tipSamplerState, index: 1)
@@ -1150,6 +1197,7 @@ final class StageOneBrushRenderer {
         session: OpacityCapSessionResources,
         into texture: MTLTexture,
         commandBuffer: MTLCommandBuffer,
+        alphaLockTexture: MTLTexture? = nil,
         samplingState: inout BrushStrokeSamplingState?
     ) -> Int {
         let samples = interpolatedPoints(for: stroke, samplingState: &samplingState)
@@ -1183,6 +1231,7 @@ final class StageOneBrushRenderer {
             let secondaryCustomTipTexture =
                 customTipTexture(for: secondaryCustomTipMaskData(for: stroke), role: .secondary) ?? defaultTipTexture
             encoder.setFragmentTexture(selectionMaskTexture, index: 0)
+            encoder.setFragmentTexture(alphaLockTexture ?? fallbackAlphaLockTexture, index: 1)
             encoder.setFragmentTexture(primaryCustomTipTexture, index: 2)
             encoder.setFragmentTexture(secondaryCustomTipTexture, index: 3)
             encoder.setFragmentSamplerState(tipSamplerState, index: 1)
@@ -1363,6 +1412,7 @@ final class StageOneBrushRenderer {
             selectionMode: selectionMode,
             selectionMin: selectionMin,
             selectionMax: selectionMax,
+            usesAlphaLock: stroke.alphaLockEnabled ? 1 : 0,
             dualTipPhase1Enabled: stroke.brush.supportsPhaseOneDualTipRealDrawing(for: stroke.tool) ? 1 : 0,
             dualTipSubtractEnabled: stroke.brush.supportsPhaseTwoDualTipSubtractRealDrawing(for: stroke.tool) ? 1 : 0,
             dualTipIntersectEnabled: stroke.brush.supportsPhaseTwoDualTipIntersectRealDrawing(for: stroke.tool) ? 1 : 0,
@@ -2137,6 +2187,7 @@ final class StageOneBrushRenderer {
             stroke: stroke,
             into: texture,
             commandBuffer: commandBuffer,
+            alphaLockTexture: nil,
             gatheredColorsTexture: nil,
             frozenSourceTexture: frozenSourceTexture
         )
@@ -2227,6 +2278,7 @@ final class StageOneBrushRenderer {
         stroke: StrokeDescriptor,
         into texture: MTLTexture,
         commandBuffer: MTLCommandBuffer,
+        alphaLockTexture: MTLTexture?,
         gatheredColorsTexture: MTLTexture?,
         frozenSourceTexture: MTLTexture?
     ) -> Int {
@@ -2261,10 +2313,11 @@ final class StageOneBrushRenderer {
             canvasSize: CanvasSize(width: texture.width, height: texture.height)
         )
         encoder.setFragmentTexture(selectionMaskTexture, index: 0)
+        encoder.setFragmentTexture(alphaLockTexture ?? fallbackAlphaLockTexture, index: 1)
         if let frozenSourceTexture {
-            encoder.setFragmentTexture(frozenSourceTexture, index: 1)
+            encoder.setFragmentTexture(frozenSourceTexture, index: 4)
         } else if let gatheredColorsTexture {
-            encoder.setFragmentTexture(gatheredColorsTexture, index: 1)
+            encoder.setFragmentTexture(gatheredColorsTexture, index: 4)
         }
         let primaryCustomTipTexture =
             customTipTexture(for: primaryCustomTipMaskData(for: stroke), role: .primary) ?? defaultTipTexture

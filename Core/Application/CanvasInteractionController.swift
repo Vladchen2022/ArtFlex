@@ -39,6 +39,7 @@ final class CanvasInteractionController {
                 StrokePoint(x: $0.location.x, y: $0.location.y, pressure: $0.pressure)
             },
             selectionShape: workspaceStore.state.selection.committedShape,
+            alphaLockEnabled: activeLayer.locksTransparentPixels,
             skipLeadingStamp: skipLeadingStamp
         )
 
