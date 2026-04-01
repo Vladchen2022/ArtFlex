@@ -1,5 +1,6 @@
 import Combine
 import Foundation
+@preconcurrency import Metal
 
 struct IdeationEditingContext: Equatable {
     var toolSession: ToolSessionState
@@ -56,7 +57,7 @@ final class IdeationSessionState: ObservableObject {
     }
 
     let branches: [Branch]
-    let baseCompositeSnapshot: LayerTextureSnapshot
+    let baseCompositeTexture: MTLTexture
 
     var activeBranchViewModel: WorkspaceViewModel {
         branches[selectedBranchIndex].viewModel
@@ -70,29 +71,35 @@ final class IdeationSessionState: ObservableObject {
 
     init(
         hostViewModel: WorkspaceViewModel,
-        sourceSnapshot: WorkspaceHistoryEntry,
-        baseCompositeSnapshot: LayerTextureSnapshot,
-        metalContext: MetalDeviceContext
+        sourceWorkspace: WorkspaceState,
+        sourceLayerSurfaceStore: StageOneLayerSurfaceStore,
+        baseCompositeTexture: MTLTexture,
+        metalContext: MetalDeviceContext,
+        sharedMetalServices: AppSharedMetalServices
     ) throws {
         self.hostViewModel = hostViewModel
-        self.baseCompositeSnapshot = baseCompositeSnapshot
+        self.baseCompositeTexture = baseCompositeTexture
         var createdBranches: [Branch] = []
         createdBranches.reserveCapacity(4)
 
         for index in 0..<4 {
-            let store = WorkspaceStore(state: sourceSnapshot.workspace)
+            let store = WorkspaceStore(state: sourceWorkspace)
             let surfaceStore = StageOneLayerSurfaceStore()
             let bootstrap = try AppBootstrap(
                 workspaceStore: store,
                 metalContext: metalContext,
-                layerSurfaceStore: surfaceStore
+                layerSurfaceStore: surfaceStore,
+                sharedMetalServices: sharedMetalServices
             )
             let branchViewModel = WorkspaceViewModel(
                 bootstrap: bootstrap,
                 installsZoomKeyboardMonitor: false,
                 preparesInitialTextures: false
             )
-            try branchViewModel.restoreWorkspaceSnapshot(sourceSnapshot)
+            branchViewModel.cloneWorkspaceForIdeation(
+                from: sourceWorkspace,
+                sourceLayerSurfaceStore: sourceLayerSurfaceStore
+            )
             createdBranches.append(
                 Branch(index: index, viewModel: branchViewModel)
             )

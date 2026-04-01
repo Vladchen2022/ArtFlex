@@ -71,7 +71,7 @@ struct SavedSnapshotSessionTests {
         harness.viewModel.applySelectedSavedSnapshotToMainCanvas()
 
         #expect(harness.viewModel.snapshotCompareSession == nil)
-        #expect(harness.viewModel.workspace.document.layers.count == 2)
+        #expect(harness.viewModel.workspace.document.layers.count == 3)
 
         let appendedLayerID = harness.viewModel.workspace.document.activeLayerID
         #expect(appendedLayerID != baseLayerID)
@@ -81,6 +81,28 @@ struct SavedSnapshotSessionTests {
         #expect(appendedPixel.red < 0.05)
         #expect(appendedPixel.green < 0.05)
         #expect(appendedPixel.blue < 0.05)
+    }
+
+    @Test
+    @MainActor
+    func visibleCompositeSnapshotPreservesVisibleLayerOpacity() throws {
+        let harness = try SavedSnapshotHarness()
+
+        harness.viewModel.setSelectedColor(.black)
+        harness.viewModel.fillAtPoint(.init(x: 4, y: 4))
+        harness.viewModel.setActiveLayerOpacity(0.5)
+
+        let snapshot = try harness.viewModel.makeVisibleCompositeSnapshot()
+        let sampled = try harness.samplePixel(in: snapshot, x: 8, y: 8)
+        let expected = LinearPremultipliedColor.black
+            .applyingOpacity(0.5)
+            .composited(over: .white)
+            .srgbUnpremultipliedOverOpaqueBackground
+
+        #expect(abs(sampled.red - expected.red) < 0.03)
+        #expect(abs(sampled.green - expected.green) < 0.03)
+        #expect(abs(sampled.blue - expected.blue) < 0.03)
+        #expect(sampled.alpha > 0.99)
     }
 
     @Test
@@ -147,6 +169,22 @@ private struct SavedSnapshotHarness {
         else {
             throw SavedSnapshotHarnessError.textureUnavailable
         }
+        return try bootstrap.textureSerializer.samplePixel(texture: texture, x: x, y: y)
+    }
+
+    func samplePixel(
+        in snapshot: LayerTextureSnapshot,
+        x: Int,
+        y: Int
+    ) throws -> RGBAColor {
+        guard let texture = bootstrap.layerSurfaceStore.makeTexture(
+            width: snapshot.width,
+            height: snapshot.height,
+            metal: bootstrap.metalContext
+        ) else {
+            throw SavedSnapshotHarnessError.textureUnavailable
+        }
+        try bootstrap.textureSerializer.restore(snapshot: snapshot, into: texture)
         return try bootstrap.textureSerializer.samplePixel(texture: texture, x: x, y: y)
     }
 }

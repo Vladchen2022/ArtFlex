@@ -1,14 +1,46 @@
 import Foundation
 
+final class AppSharedMetalServices {
+    let canvasPresenter: StageOneCanvasPresenter
+    let linearGradientRenderer: LinearGradientRenderer
+    let sectorGradientRenderer: SectorGradientRenderer
+    let selectionFillRenderer: SelectionFillRenderer
+    let visibleDeltaRenderer: VisibleDeltaRenderer
+    let textureSerializer: LayerTextureSerializer
+    let pngExporter: PNGExporter
+    let smudgeEngine: SmudgeEngine
+    let eyedropperSampler: EyedropperSampler
+    let bucketFillEngine: BucketFillEngine
+    let layerMergeController: LayerMergeController
+
+    init(metalContext: MetalDeviceContext) throws {
+        self.canvasPresenter = try StageOneCanvasPresenter(device: metalContext.device)
+        self.linearGradientRenderer = LinearGradientRenderer(device: metalContext.device)
+        self.sectorGradientRenderer = SectorGradientRenderer(device: metalContext.device)
+        self.selectionFillRenderer = SelectionFillRenderer(device: metalContext.device)
+        self.visibleDeltaRenderer = try VisibleDeltaRenderer(device: metalContext.device)
+        let textureSerializer = LayerTextureSerializer(metalContext: metalContext)
+        self.textureSerializer = textureSerializer
+        self.pngExporter = PNGExporter(serializer: textureSerializer)
+        self.smudgeEngine = SmudgeEngine(serializer: textureSerializer)
+        self.eyedropperSampler = EyedropperSampler(serializer: textureSerializer)
+        self.bucketFillEngine = BucketFillEngine(serializer: textureSerializer)
+        self.layerMergeController = LayerMergeController(serializer: textureSerializer)
+    }
+}
+
 struct AppBootstrap {
     let workspaceStore: WorkspaceStore
     let metalContext: MetalDeviceContext
     let layerSurfaceStore: StageOneLayerSurfaceStore
+    let sharedMetalServices: AppSharedMetalServices
+    let canvasPresenter: StageOneCanvasPresenter
     let interactionController: CanvasInteractionController
     let strokeEngine: MetalStrokeEngine
     let linearGradientRenderer: LinearGradientRenderer
     let sectorGradientRenderer: SectorGradientRenderer
     let selectionFillRenderer: SelectionFillRenderer
+    let visibleDeltaRenderer: VisibleDeltaRenderer
     let smudgeEngine: SmudgeEngine
     let eyedropperSampler: EyedropperSampler
     let bucketFillEngine: BucketFillEngine
@@ -28,31 +60,36 @@ struct AppBootstrap {
         workspaceStore: WorkspaceStore = WorkspaceStore(),
         metalContext: MetalDeviceContext? = MetalDeviceContext(),
         layerSurfaceStore: StageOneLayerSurfaceStore = StageOneLayerSurfaceStore(),
-        brushLibraryPersistenceController: BrushLibraryPersistenceController? = nil
+        brushLibraryPersistenceController: BrushLibraryPersistenceController? = nil,
+        sharedMetalServices: AppSharedMetalServices? = nil
     ) throws {
         guard let metalContext else {
             fatalError("Metal is required to launch ArtFlex.")
         }
 
+        let resolvedSharedMetalServices = try sharedMetalServices ?? AppSharedMetalServices(metalContext: metalContext)
         self.workspaceStore = workspaceStore
         self.metalContext = metalContext
         self.layerSurfaceStore = layerSurfaceStore
+        self.sharedMetalServices = resolvedSharedMetalServices
+        self.canvasPresenter = resolvedSharedMetalServices.canvasPresenter
         self.interactionController = CanvasInteractionController(workspaceStore: workspaceStore)
         self.strokeEngine = try MetalStrokeEngine(
             metalContext: metalContext,
             layerSurfaceStore: layerSurfaceStore
         )
-        self.linearGradientRenderer = LinearGradientRenderer(device: metalContext.device)
-        self.sectorGradientRenderer = SectorGradientRenderer(device: metalContext.device)
-        self.selectionFillRenderer = SelectionFillRenderer(device: metalContext.device)
-        let textureSerializer = LayerTextureSerializer(metalContext: metalContext)
+        self.linearGradientRenderer = resolvedSharedMetalServices.linearGradientRenderer
+        self.sectorGradientRenderer = resolvedSharedMetalServices.sectorGradientRenderer
+        self.selectionFillRenderer = resolvedSharedMetalServices.selectionFillRenderer
+        self.visibleDeltaRenderer = resolvedSharedMetalServices.visibleDeltaRenderer
+        let textureSerializer = resolvedSharedMetalServices.textureSerializer
         self.textureSerializer = textureSerializer
-        let pngExporter = PNGExporter(serializer: textureSerializer)
+        let pngExporter = resolvedSharedMetalServices.pngExporter
         self.pngExporter = pngExporter
-        self.smudgeEngine = SmudgeEngine(serializer: textureSerializer)
-        self.eyedropperSampler = EyedropperSampler(serializer: textureSerializer)
-        self.bucketFillEngine = BucketFillEngine(serializer: textureSerializer)
-        self.layerMergeController = LayerMergeController(serializer: textureSerializer)
+        self.smudgeEngine = resolvedSharedMetalServices.smudgeEngine
+        self.eyedropperSampler = resolvedSharedMetalServices.eyedropperSampler
+        self.bucketFillEngine = resolvedSharedMetalServices.bucketFillEngine
+        self.layerMergeController = resolvedSharedMetalServices.layerMergeController
         self.exportController = ExportController(
             workspaceStore: workspaceStore,
             layerSurfaceStore: layerSurfaceStore,

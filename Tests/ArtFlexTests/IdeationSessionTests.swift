@@ -82,7 +82,7 @@ struct IdeationSessionTests {
         harness.viewModel.applySelectedIdeationVariantToMainCanvas()
 
         #expect(harness.viewModel.ideationSession == nil)
-        #expect(harness.viewModel.workspace.document.layers.count == 2)
+        #expect(harness.viewModel.workspace.document.layers.count == 3)
 
         let appendedLayerID = harness.viewModel.workspace.document.activeLayerID
         #expect(appendedLayerID != baseLayerID)
@@ -128,7 +128,7 @@ struct IdeationSessionTests {
         harness.viewModel.applySelectedIdeationVariantToMainCanvas()
 
         #expect(harness.viewModel.ideationSession == nil)
-        #expect(harness.viewModel.workspace.document.layers.count == 2)
+        #expect(harness.viewModel.workspace.document.layers.count == 3)
 
         let appendedLayerID = harness.viewModel.workspace.document.activeLayerID
         let pixel = try harness.samplePixel(in: harness.viewModel, x: 16, y: 16, layerID: appendedLayerID)

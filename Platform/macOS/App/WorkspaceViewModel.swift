@@ -4876,6 +4876,7 @@ final class WorkspaceViewModel: ObservableObject {
             let snapshot = try makeVisibleCompositeSnapshot()
             let savedSnapshot = makeSavedCanvasSnapshot(from: snapshot, includesPreviewImage: false)
             savedSnapshots.append(savedSnapshot)
+            prepareSavedSnapshotPreviewIfNeeded(for: savedSnapshot.id)
 
             if savedSnapshots.count >= Self.maxSavedSnapshotCount {
                 openSnapshotCompare(frozenSnapshotOverride: savedSnapshot)
@@ -4914,6 +4915,9 @@ final class WorkspaceViewModel: ObservableObject {
                 )
             }
             snapshotCompareSession = SnapshotCompareSessionState(frozenCurrentSnapshot: frozenSnapshot)
+            for savedSnapshot in savedSnapshots {
+                prepareSavedSnapshotPreviewIfNeeded(for: savedSnapshot.id)
+            }
             prepareFrozenSnapshotPreviewIfNeeded(for: frozenSnapshot)
             showStatus(.init(kind: .success, message: "已进入快照对比"))
         } catch {
@@ -5057,13 +5061,15 @@ final class WorkspaceViewModel: ObservableObject {
         do {
             _ = flushBrushEditingBoundary(reason: "startIdeationSession")
             suspendTimelapseForIdeationIfNeeded()
-            let snapshot = try bootstrap.historyController.captureCurrentEntry()
-            let baseCompositeSnapshot = try makeVisibleCompositeSnapshot()
+            let sourceWorkspace = bootstrap.workspaceStore.state
+            let baseCompositeTexture = try makeVisibleCompositeTexture()
             ideationSession = try IdeationSessionState(
                 hostViewModel: self,
-                sourceSnapshot: snapshot,
-                baseCompositeSnapshot: baseCompositeSnapshot,
-                metalContext: bootstrap.metalContext
+                sourceWorkspace: sourceWorkspace,
+                sourceLayerSurfaceStore: bootstrap.layerSurfaceStore,
+                baseCompositeTexture: baseCompositeTexture,
+                metalContext: bootstrap.metalContext,
+                sharedMetalServices: bootstrap.sharedMetalServices
             )
             showStatus(.init(kind: .success, message: "已进入方案试探"))
         } catch {
@@ -5085,10 +5091,10 @@ final class WorkspaceViewModel: ObservableObject {
             _ = ideationSession.activeBranchViewModel.flushBrushEditingBoundary(
                 reason: "applySelectedIdeationVariantToMainCanvas.ideationBranch"
             )
-            let snapshot = try ideationSession.activeBranchViewModel.makeVisibleCompositeSnapshot()
+            let snapshot = try ideationSession.activeBranchViewModel.makeVisibleCompositeTexture()
             guard let deltaSnapshot = try ideationDeltaSnapshot(
-                variantSnapshot: snapshot,
-                baseSnapshot: ideationSession.baseCompositeSnapshot
+                variantTexture: snapshot,
+                baseTexture: ideationSession.baseCompositeTexture
             ) else {
                 showStatus(.init(kind: .info, message: "当前方案没有可附加到新图层的可见差异"))
                 return
@@ -6155,6 +6161,38 @@ final class WorkspaceViewModel: ObservableObject {
         refresh()
     }
 
+    func cloneWorkspaceForIdeation(
+        from sourceWorkspace: WorkspaceState,
+        sourceLayerSurfaceStore: StageOneLayerSurfaceStore
+    ) {
+        bootstrap.workspaceStore.replaceState(sourceWorkspace)
+        bootstrap.layerSurfaceStore.reset()
+        bootstrap.layerSurfaceStore.prepareTextures(
+            for: sourceWorkspace.document,
+            metal: bootstrap.metalContext
+        )
+
+        for layer in sourceWorkspace.document.layers {
+            guard
+                let sourceSurfaceID = sourceLayerSurfaceStore.surfaceID(for: layer.id),
+                let sourceTexture = sourceLayerSurfaceStore.texture(for: sourceSurfaceID),
+                let destinationSurfaceID = bootstrap.layerSurfaceStore.surfaceID(for: layer.id),
+                let destinationTexture = bootstrap.layerSurfaceStore.texture(for: destinationSurfaceID)
+            else {
+                continue
+            }
+
+            bootstrap.layerSurfaceStore.copyTexture(
+                from: sourceTexture,
+                to: destinationTexture,
+                metal: bootstrap.metalContext
+            )
+        }
+
+        bootstrap.historyController.resetHistory()
+        refresh()
+    }
+
     @discardableResult
     func flushBrushEditingBoundary(reason: String) -> Bool {
         _ = reason
@@ -6236,8 +6274,14 @@ final class WorkspaceViewModel: ObservableObject {
         )
     }
 
-    func makeVisibleCompositeSnapshot() throws -> LayerTextureSnapshot {
-        let visibleLayers = workspace.document.layers.filter(\.isVisible)
+    func makeVisibleCompositeTexture() throws -> MTLTexture {
+        let state = bootstrap.workspaceStore.state
+        bootstrap.layerSurfaceStore.prepareTextures(
+            for: state.document,
+            metal: bootstrap.metalContext
+        )
+
+        let visibleLayers = state.document.layers.filter(\.isVisible)
         guard let firstLayer = visibleLayers.first,
               let firstSurfaceID = bootstrap.layerSurfaceStore.surfaceID(for: firstLayer.id),
               let firstTexture = bootstrap.layerSurfaceStore.texture(for: firstSurfaceID)
@@ -6245,7 +6289,7 @@ final class WorkspaceViewModel: ObservableObject {
             throw CocoaError(.fileReadCorruptFile)
         }
 
-        let textureEntries: [(texture: MTLTexture, opacity: Float, isVisible: Bool)] = visibleLayers.compactMap { layer in
+        let textureEntries: [(texture: MTLTexture, opacity: Float)] = visibleLayers.compactMap { layer in
             guard
                 let surfaceID = bootstrap.layerSurfaceStore.surfaceID(for: layer.id),
                 let texture = bootstrap.layerSurfaceStore.texture(for: surfaceID)
@@ -6253,7 +6297,11 @@ final class WorkspaceViewModel: ObservableObject {
                 return nil
             }
 
-            return (texture: texture, opacity: layer.opacity, isVisible: layer.isVisible)
+            return (texture: texture, opacity: layer.opacity)
+        }
+
+        guard textureEntries.count == visibleLayers.count else {
+            throw CocoaError(.fileReadCorruptFile)
         }
 
         let descriptor = MTLTextureDescriptor.texture2DDescriptor(
@@ -6269,11 +6317,32 @@ final class WorkspaceViewModel: ObservableObject {
             throw CocoaError(.fileWriteUnknown)
         }
 
-        try bootstrap.layerMergeController.mergeVisible(
-            layers: textureEntries,
-            into: targetTexture
+        let renderPassDescriptor = MTLRenderPassDescriptor()
+        renderPassDescriptor.colorAttachments[0].texture = targetTexture
+        renderPassDescriptor.colorAttachments[0].loadAction = .clear
+        renderPassDescriptor.colorAttachments[0].storeAction = .store
+        renderPassDescriptor.colorAttachments[0].clearColor = MTLClearColor(
+            red: 0,
+            green: 0,
+            blue: 0,
+            alpha: 0
         )
+        guard let commandBuffer = bootstrap.metalContext.commandQueue.makeCommandBuffer() else {
+            throw CocoaError(.fileWriteUnknown)
+        }
+        bootstrap.canvasPresenter.encode(
+            layerTextures: textureEntries,
+            into: renderPassDescriptor,
+            commandBuffer: commandBuffer
+        )
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
 
+        return targetTexture
+    }
+
+    func makeVisibleCompositeSnapshot() throws -> LayerTextureSnapshot {
+        let targetTexture = try makeVisibleCompositeTexture()
         return try bootstrap.textureSerializer.snapshot(texture: targetTexture)
     }
 
@@ -6286,7 +6355,12 @@ final class WorkspaceViewModel: ObservableObject {
         bootstrap.workspaceStore.updateDocument { document in
             createdLayerID = document.addLayer(named: layerName).id
         }
-        refresh()
+
+        let state = bootstrap.workspaceStore.state
+        bootstrap.layerSurfaceStore.prepareTextures(
+            for: state.document,
+            metal: bootstrap.metalContext
+        )
 
         guard
             let createdLayerID,
@@ -6297,54 +6371,57 @@ final class WorkspaceViewModel: ObservableObject {
         }
 
         try bootstrap.textureSerializer.restore(snapshot: snapshot, into: texture)
-        refresh()
+        refresh(invalidatedLayerIDs: [createdLayerID])
         noteCanvasContentChanged()
     }
 
     private func ideationDeltaSnapshot(
-        variantSnapshot: LayerTextureSnapshot,
-        baseSnapshot: LayerTextureSnapshot
+        variantTexture: MTLTexture,
+        baseTexture: MTLTexture
     ) throws -> LayerTextureSnapshot? {
         guard
-            variantSnapshot.width == baseSnapshot.width,
-            variantSnapshot.height == baseSnapshot.height,
-            variantSnapshot.bytesPerRow == baseSnapshot.bytesPerRow,
-            variantSnapshot.pixelData.count == baseSnapshot.pixelData.count
+            variantTexture.width == baseTexture.width,
+            variantTexture.height == baseTexture.height,
+            variantTexture.pixelFormat == baseTexture.pixelFormat
         else {
             throw CocoaError(.fileReadCorruptFile)
         }
 
-        let variantBytes = [UInt8](variantSnapshot.pixelData)
-        let baseBytes = [UInt8](baseSnapshot.pixelData)
-        var deltaBytes = [UInt8](repeating: 0, count: variantBytes.count)
-        var hasVisibleDelta = false
-
-        for index in stride(from: 0, to: variantBytes.count, by: 4) {
-            let pixelsMatch =
-                variantBytes[index] == baseBytes[index] &&
-                variantBytes[index + 1] == baseBytes[index + 1] &&
-                variantBytes[index + 2] == baseBytes[index + 2] &&
-                variantBytes[index + 3] == baseBytes[index + 3]
-            guard !pixelsMatch else { continue }
-
-            let alpha = variantBytes[index + 3]
-            guard alpha > 0 else { continue }
-
-            deltaBytes[index] = variantBytes[index]
-            deltaBytes[index + 1] = variantBytes[index + 1]
-            deltaBytes[index + 2] = variantBytes[index + 2]
-            deltaBytes[index + 3] = alpha
-            hasVisibleDelta = true
+        guard let deltaTexture = bootstrap.layerSurfaceStore.makeTexture(
+            width: variantTexture.width,
+            height: variantTexture.height,
+            pixelFormat: variantTexture.pixelFormat,
+            metal: bootstrap.metalContext
+        ) else {
+            throw CocoaError(.fileWriteUnknown)
         }
 
-        guard hasVisibleDelta else { return nil }
-
-        return LayerTextureSnapshot(
-            width: variantSnapshot.width,
-            height: variantSnapshot.height,
-            bytesPerRow: variantSnapshot.bytesPerRow,
-            pixelData: Data(deltaBytes)
+        let renderPassDescriptor = MTLRenderPassDescriptor()
+        renderPassDescriptor.colorAttachments[0].texture = deltaTexture
+        renderPassDescriptor.colorAttachments[0].loadAction = .clear
+        renderPassDescriptor.colorAttachments[0].storeAction = .store
+        renderPassDescriptor.colorAttachments[0].clearColor = MTLClearColor(
+            red: 0,
+            green: 0,
+            blue: 0,
+            alpha: 0
         )
+        guard let commandBuffer = bootstrap.metalContext.commandQueue.makeCommandBuffer() else {
+            throw CocoaError(.fileWriteUnknown)
+        }
+        bootstrap.visibleDeltaRenderer.encode(
+            variantTexture: variantTexture,
+            baseTexture: baseTexture,
+            into: renderPassDescriptor,
+            commandBuffer: commandBuffer
+        )
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+
+        let snapshot = try bootstrap.textureSerializer.snapshot(texture: deltaTexture)
+        let bytes = [UInt8](snapshot.pixelData)
+        let hasVisibleDelta = stride(from: 3, to: bytes.count, by: 4).contains { bytes[$0] > 0 }
+        return hasVisibleDelta ? snapshot : nil
     }
 
     private func syncTimelapseDocumentContext() {

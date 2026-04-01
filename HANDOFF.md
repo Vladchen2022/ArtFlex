@@ -20,7 +20,11 @@ ArtFlex 是旧版 `BrushCanvas` 的 Metal-first 重构版 macOS 绘图软件；�
 
 `方案试探` 当前也新增了一条已冻结的视口规则：四宫格模式下，4 个分支画布会统一使用默认 fit 视口，并临时锁定视口交互；因此不再继承主画布进入方案试探前的平移/旋转偏移，也不会在四宫格里继续被移动。若临时切到“放大单画布”模式，则该分支会恢复正常视口交互；返回四宫格时再次统一回正并锁定。
 
+`方案试探` 当前还新增了一条 GPU-first 性能基线：进入方案试探时，不再先抓 CPU history snapshot 再把同一份 snapshot 恢复到 4 个分支，而是直接从当前 `WorkspaceState` 起步，并通过 GPU texture copy 克隆图层纹理到 4 个 branch。与此同时，“应用于主画布”时也不再走 CPU per-pixel diff，而是通过新的 `VisibleDeltaRenderer` 在 GPU 上生成可见差异，再落成单张 delta snapshot 追加回主画布。这一刀只改性能主链，不改四宫格 / 同步推进 / 差异推进 / 应用结果的产品语义。
+
 `快照对比` 当前也新增了一条已冻结的布局规则：右侧 2x2 对比卡片必须以完整画布为目标显示，不允许因为卡片内部额外留白和高度估算误差，让底部两格被裁掉。当前实现已按卡片总高度反推可用预览高度，并去掉对比卡片里不必要的纵向留白。
+
+`快照对比` 当前还新增了一条 GPU-first 性能基线：保存快照时的可见图层合成已改走 `StageOneCanvasPresenter` 的 GPU 合成链，而不是旧的 CPU `mergeVisible` 路径；保存后和进入对比界面时，已保存快照的大预览会后台预热，减少首次进入对比和首次拖入对比位时的等待。当前这条工具线先定住，不再主动继续改动。
 
 `移动变形` 当前也新增了一条已冻结的预览规则：无选区 whole-layer 自由变形在拖动预览阶段，就必须围绕被移动像素的内容中心旋转，不允许预览先按整张画布中心旋转、回车确认后才变对。当前预览链与最终提交链已经对齐到同一个内容中心 pivot。
 
@@ -31,6 +35,11 @@ ArtFlex 是旧版 `BrushCanvas` 的 Metal-first 重构版 macOS 绘图软件；�
 3. 旧的 `selection.fill / lasso.fill` 合并性能结论已过时：当前 `lasso.fill` 已切到 GPU local-mask 填色链，不再按旧 deferred limitation 对待
 
 当前这一轮性能优化与小范围 UX/perf follow-up 已收尾。下一阶段默认转入新功能开发，不要回头重开旧性能项目；如果未来必须重开填充性能问题，`selection.fill`、`lasso.fill` 与 `fillAtPoint` 必须分开看，不再沿用旧的合并 profiling 结论。
+
+如果未来必须继续重开 `方案试探` 性能问题，先从这两条已经落地的 GPU-first 基线往下看，而不是回头把分支初始化或差异生成重新拉回 CPU：
+
+1. 分支初始化：`WorkspaceState` + GPU texture copy clone
+2. 应用主画布：GPU visible delta render
 
 ## 1.1 Dual Tip / 复合笔尖当前状态
 

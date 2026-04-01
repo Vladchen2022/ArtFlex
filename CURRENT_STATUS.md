@@ -11,6 +11,8 @@
 - 画笔库当前已收口为：不再通过格子右上角小叉删除笔刷预设；删除入口改为“先选中格子，再右键菜单删除”，以降低误点
 - `方案试探` 当前也已收口一条视口规则：四宫格模式下 4 个分支画布会统一回到默认 fit 视口，并临时锁定视口交互；因此不再继承主画布的平移/旋转偏移，也不会在四宫格里被继续拖动
 - `快照对比` 当前也已收口一条布局规则：右侧 2x2 对比卡片会按卡片总高度反推预览可用高度，不再让底部两格因为额外留白和高度估算偏差而被裁掉；4 个预览位现在都以完整画布为目标
+- `快照对比` 当前还已切到更轻的 GPU-first 基线：保存快照时的可见图层合成已改走 `StageOneCanvasPresenter` 的 GPU 合成链，而不是旧的 CPU mergeVisible 路径；保存后和进入对比界面时，已保存快照的大预览也会后台预热，减少首次拖入对比位时的等待
+- `方案试探` 当前也已切到更轻的 GPU-first 基线：进入方案试探时，不再先抓 CPU history snapshot 再恢复到 4 个分支，而是直接从当前 `WorkspaceState` 起步，并通过 GPU texture copy 克隆各图层纹理到 4 个 branch；“应用于主画布”时，也不再做 CPU per-pixel diff，而是改成 GPU visible delta render 后再生成 delta snapshot
 - `移动变形` 当前也已收口一条预览规则：无选区 whole-layer 自由变形在预览阶段会直接围绕被移动像素的内容中心旋转，不再临时按整张画布中心旋转；预览与回车确认后的最终提交当前已对齐
 - 当前范围判断已调整：组合笔尖后续默认只继续推进“明显影响画笔效果”的能力，以及“预览 / 保存恢复 / 资料库稳定性”这类必做收口；轻微影响画笔效果的新随机 / `spacing` 小参数默认暂停
 - 当前代码状态：`multiply`、`subtract`、`intersect` 已可用；`secondary scatter`、`secondary scatter jitter`、`secondary angle offset`、`secondary invert`、`secondary size jitter`、`secondary angle jitter`、`secondary spacing phase`、`secondary spacing phase jitter` 已进入真实绘制；当前基线和主绘制路径未被打坏

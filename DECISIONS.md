@@ -314,6 +314,29 @@
 - 删除图层垃圾桶按钮必须保持红色，并固定在第三个位置
 - `不透明度封顶` 右侧 3 个按钮的前两个顺序当前已对调，并按现状冻结
 
+### 0.16 快照对比当前冻结为“GPU composite + preview prewarm”
+
+已确认：
+
+- `快照保存 / 快照对比` 当前保存快照时的可见图层合成，必须优先走 `StageOneCanvasPresenter` 的 GPU 合成链
+- 不允许再把这条主链默认退回旧的 CPU `mergeVisible` 路径
+- 保存快照后，已保存快照的大预览可以后台预热
+- 进入 `快照对比` 时，也可以后台预热所有已保存快照的大预览
+- 当前这条工具线先定住，不再主动继续扩大优化范围；后续若重开，只能在不改产品语义前提下继续收口
+
+### 0.17 方案试探当前冻结为“GPU branch clone + GPU visible delta”
+
+已确认：
+
+- 进入 `方案试探` 时，不再先抓 CPU history snapshot 再把同一份 snapshot 恢复到 4 个分支
+- 当前正确基线是：
+  - 直接从当前 `WorkspaceState` 起步
+  - 通过 GPU texture copy 克隆图层纹理到 4 个 branch
+- `方案试探` 分支当前应共享一组 device-level Metal 服务，不再为 4 个 branch 重复初始化相同 renderer / serializer / sampler
+- “应用于主画布”时，不再走 CPU per-pixel diff
+- 当前正确基线是通过 `VisibleDeltaRenderer` 在 GPU 上生成可见差异，再落成单张 delta snapshot 追加回主画布
+- 以上改动只允许优化性能主链，不允许改变四宫格 / 同步推进 / 差异推进 / 应用结果的产品语义
+
 ## 1. 总体架构
 
 ### 1.1 Metal-first，不回退旧 CPU 画布
