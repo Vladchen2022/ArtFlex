@@ -1,6 +1,6 @@
 # DECISIONS
 
-最后更新：2026-03-31
+最后更新：2026-04-01
 
 本文件记录：**当前代码和产品层已经确认的关键决策。**  
 如果后续改动与这些点冲突，应先重新讨论，而不是直接改代码。
@@ -33,13 +33,13 @@
   - `maxEntries = 24`
   - `maxResidentBytes = 768 MiB`
 
-### 0.4 `selection.fill / lasso.fill` 当前接受为 deferred known limitation
+### 0.4 旧的 `selection.fill / lasso.fill` 合并性能限制已失效
 
 已确认：
 
-- `selection.fill / lasso.fill` 仍慢，但因当前不是高频刚需工具，暂时接受为 deferred known limitation
-- 当前不再继续围绕它做优化
-- 如果未来必须重开，只允许先检查 [mutateSelectionPixels(...)](/Users/victorcloux/Desktop/ArtFlex/Platform/macOS/App/WorkspaceViewModel.swift#L5389)
+- 旧文档里把 `selection.fill / lasso.fill` 一起视为 deferred known limitation 的结论已过时
+- `lasso.fill` 当前已切到 GPU local-mask 填色链，不再按旧的慢确认限制对待
+- 如果未来必须重开填充性能问题，`selection.fill`、`lasso.fill` 与 `fillAtPoint` 必须分开看，不允许继续沿用旧的合并 profiling 结论
 - 不允许借这个问题重开新的大范围性能项目
 
 ### 0.5 dirty history 仍然是试点，不是通用 partial history
@@ -277,12 +277,42 @@
   - 渐变方向为从 `A` 向外的径向衰减
   - 拖拽结束后自动确认，不依赖手动应用或 `Enter`
   - preview / commit 两条链都必须支持当前选区裁剪
+- `直线渐变 / 扇形渐变` 当前都必须受顶部工具栏 `不透明度` 滑块影响
+- `直线渐变 / 扇形渐变` 当前都继续吃 `杂色` 滑块
+- `直线渐变` 当前透明度分布已切到更柔和的 eased alpha 曲线，不再使用过陡的纯线性衰减
+- `扇形渐变` 当前 renderer 已切到 GPU triangle-fan 填充主链
+- `扇形渐变` 的杂色当前冻结为“以 A 点为中心的纯角度放射状条纹”，不允许回退成颗粒噪声、平行条纹或半径分层条纹
 - 后续若继续调整这两个工具，默认继续走“重建主线”，不要回头补旧的二段式扇区角度实现
 
 - 无选区 whole-layer `移动变形` 在预览阶段与最终提交阶段，都必须围绕被移动像素的内容中心旋转
 - 不允许预览阶段临时退回整张画布中心旋转，再在按 `Enter` 确认后才变成正确结果
 - 进入无选区自由变形时，whole-layer 内容 bounds 必须在第一帧预览前准备好；只要能同步拿到内容 bounds，就不允许再回退到 full canvas pivot
 - 变形框与像素预览在旋转、缩放、移动过程中必须继续共读同一套 interaction bounds / pivot 真相源
+
+### 0.14 套索填充当前冻结为“GPU local-mask 填色 + 起点放射杂色”
+
+已确认：
+
+- `lasso.fill` 当前已切到 GPU local-mask 填色链，不再按旧 CPU 热点路径维护
+- `lasso.fill` 当前必须受顶部工具栏 `不透明度` 滑块影响
+- `lasso.fill` 当前也继续吃 `杂色` 滑块
+- `lasso.fill` 的杂色当前冻结为“以最初接触点为中心的放射状条纹”，不允许回退成平行线
+
+### 0.15 默认新建画布与图层面板当前冻结为新基线
+
+已确认：
+
+- 新建画布当前必须默认生成 2 层：
+  - 底部白色 `背景`
+  - 顶部透明 `图层 2`
+- 默认活动层必须是顶部透明层
+- 新建画布时，顶部工具栏 `不透明度` 必须重置回 `100%`
+- 图层面板底部按钮顺序当前冻结为：
+  - `新建`
+  - `复制`
+  - `删除`
+- 删除图层垃圾桶按钮必须保持红色，并固定在第三个位置
+- `不透明度封顶` 右侧 3 个按钮的前两个顺序当前已对调，并按现状冻结
 
 ## 1. 总体架构
 

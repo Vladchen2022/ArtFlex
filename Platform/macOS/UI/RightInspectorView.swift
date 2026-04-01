@@ -365,6 +365,14 @@ struct RightInspectorView: View {
                     .toggleStyle(.switch)
                 }
 
+                compactIconButton(
+                    systemImage: "location.north.line.fill",
+                    tooltip: viewModel.workspace.toolSession.brush.followsStrokeDirection ? "关闭跟随笔迹方向" : "开启跟随笔迹方向",
+                    isSelected: viewModel.workspace.toolSession.brush.followsStrokeDirection
+                ) {
+                    viewModel.setBrushFollowsStrokeDirection(!viewModel.workspace.toolSession.brush.followsStrokeDirection)
+                }
+
                 compactIconButton(systemImage: "waveform.path.ecg", tooltip: "尺寸压感曲线") {
                     showsPressureSizeCurveEditor.toggle()
                 }
@@ -373,14 +381,6 @@ struct RightInspectorView: View {
                         .padding(14)
                         .frame(width: 280)
                         .background(Color(nsColor: .windowBackgroundColor))
-                }
-
-                compactIconButton(
-                    systemImage: "location.north.line.fill",
-                    tooltip: viewModel.workspace.toolSession.brush.followsStrokeDirection ? "关闭跟随笔迹方向" : "开启跟随笔迹方向",
-                    isSelected: viewModel.workspace.toolSession.brush.followsStrokeDirection
-                ) {
-                    viewModel.setBrushFollowsStrokeDirection(!viewModel.workspace.toolSession.brush.followsStrokeDirection)
                 }
 
                 compactIconButton(systemImage: "drop", tooltip: "透明度压感曲线") {
@@ -656,7 +656,7 @@ struct RightInspectorView: View {
                     viewModel.duplicateActiveLayer()
                 }
 
-                layerActionButton(systemImage: "trash", tooltip: "删除图层") {
+                layerActionButton(systemImage: "trash", tooltip: "删除图层", tint: Color.red.opacity(0.95)) {
                     viewModel.removeActiveLayer()
                 }
 
@@ -2262,12 +2262,13 @@ struct RightInspectorView: View {
     private func layerActionButton(
         systemImage: String,
         tooltip: String,
+        tint: Color = Color.white.opacity(0.92),
         action: @escaping () -> Void
     ) -> some View {
         Button(action: action) {
             Image(systemName: systemImage)
                 .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(Color.white.opacity(0.92))
+                .foregroundStyle(tint)
                 .frame(width: 28, height: 28)
                 .background(
                     RoundedRectangle(cornerRadius: 8)

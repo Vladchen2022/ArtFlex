@@ -81,7 +81,7 @@ struct ArtDocument: Codable, Sendable, Equatable {
     }
 
     static func stageOneDefault(name: String = "未命名") -> ArtDocument {
-        let layer = LayerRecord.stageOneDefault()
+        let layers = stageOneDefaultLayers()
         let now = Date()
 
         return ArtDocument(
@@ -91,9 +91,21 @@ struct ArtDocument: Codable, Sendable, Equatable {
                 updatedAt: now
             ),
             canvasSize: .stageOneDefault,
-            layers: [layer],
-            activeLayerID: layer.id
+            layers: layers,
+            activeLayerID: layers.last?.id ?? layers[0].id
         )
+    }
+
+    static func stageOneDefaultLayers() -> [LayerRecord] {
+        let backgroundLayer = LayerRecord.stageOneDefault()
+        let drawingLayer = LayerRecord(
+            id: LayerID(),
+            name: "图层 2",
+            isVisible: true,
+            isLocked: false,
+            opacity: 1
+        )
+        return [backgroundLayer, drawingLayer]
     }
 
     mutating func addLayer(named name: String? = nil) -> LayerRecord {

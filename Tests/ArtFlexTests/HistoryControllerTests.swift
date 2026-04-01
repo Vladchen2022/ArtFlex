@@ -435,28 +435,28 @@ struct HistoryControllerTests {
         )
         try harness.history.captureCheckpoint()
         let thirdLayerID = harness.addLayer()
-        #expect(harness.workspaceStore.state.document.layers.count == 3)
+        #expect(harness.workspaceStore.state.document.layers.count == 4)
 
         #expect(try harness.history.undo())
-        #expect(harness.workspaceStore.state.document.layers.count == 2)
+        #expect(harness.workspaceStore.state.document.layers.count == 3)
         #expect(try harness.alpha(atX: 12, y: 12, layerID: firstLayerID) > 0.01)
         #expect(try harness.alpha(atX: 40, y: 24, layerID: firstLayerID) > 0.01)
         #expect(try harness.alpha(atX: 46, y: 46, layerID: secondLayerID) > 0.01)
 
         #expect(try harness.history.undo())
-        #expect(harness.workspaceStore.state.document.layers.count == 2)
+        #expect(harness.workspaceStore.state.document.layers.count == 3)
         #expect(try harness.alpha(atX: 12, y: 12, layerID: firstLayerID) > 0.01)
         #expect(try harness.alpha(atX: 40, y: 24, layerID: firstLayerID) < 0.01)
         #expect(try harness.alpha(atX: 46, y: 46, layerID: secondLayerID) > 0.01)
 
         #expect(try harness.history.redo())
-        #expect(harness.workspaceStore.state.document.layers.count == 2)
+        #expect(harness.workspaceStore.state.document.layers.count == 3)
         #expect(try harness.alpha(atX: 12, y: 12, layerID: firstLayerID) > 0.01)
         #expect(try harness.alpha(atX: 40, y: 24, layerID: firstLayerID) > 0.01)
         #expect(try harness.alpha(atX: 46, y: 46, layerID: secondLayerID) > 0.01)
 
         #expect(try harness.history.redo())
-        #expect(harness.workspaceStore.state.document.layers.count == 3)
+        #expect(harness.workspaceStore.state.document.layers.count == 4)
         #expect(try harness.alpha(atX: 12, y: 12, layerID: firstLayerID) > 0.01)
         #expect(try harness.alpha(atX: 40, y: 24, layerID: firstLayerID) > 0.01)
         #expect(try harness.alpha(atX: 46, y: 46, layerID: secondLayerID) > 0.01)
@@ -467,7 +467,7 @@ struct HistoryControllerTests {
     @Test
     @MainActor
     func singleLayerBrushHistoryStillUsesFullEntries() throws {
-        let harness = try BrushHistoryHarness(canvasSize: .init(width: 64, height: 64))
+        let harness = try BrushHistoryHarness(canvasSize: .init(width: 64, height: 64), startsWithSingleLayer: true)
         let layerID = harness.workspaceStore.state.document.activeLayerID
 
         try harness.drawBrushStroke(
@@ -766,22 +766,22 @@ struct HistoryControllerTests {
         let thirdLayerID = harness.addLayer()
 
         #expect(try harness.history.undo())
-        #expect(harness.workspaceStore.state.document.layers.count == 2)
+        #expect(harness.workspaceStore.state.document.layers.count == 3)
         #expect(try harness.alpha(atX: 12, y: 12, layerID: firstLayerID) < 0.01)
         #expect(try harness.alpha(atX: 46, y: 46, layerID: secondLayerID) > 0.01)
 
         #expect(try harness.history.undo())
-        #expect(harness.workspaceStore.state.document.layers.count == 2)
+        #expect(harness.workspaceStore.state.document.layers.count == 3)
         #expect(try harness.alpha(atX: 12, y: 12, layerID: firstLayerID) > 0.01)
         #expect(try harness.alpha(atX: 46, y: 46, layerID: secondLayerID) > 0.01)
 
         #expect(try harness.history.redo())
-        #expect(harness.workspaceStore.state.document.layers.count == 2)
+        #expect(harness.workspaceStore.state.document.layers.count == 3)
         #expect(try harness.alpha(atX: 12, y: 12, layerID: firstLayerID) < 0.01)
         #expect(try harness.alpha(atX: 46, y: 46, layerID: secondLayerID) > 0.01)
 
         #expect(try harness.history.redo())
-        #expect(harness.workspaceStore.state.document.layers.count == 3)
+        #expect(harness.workspaceStore.state.document.layers.count == 4)
         #expect(try harness.alpha(atX: 12, y: 12, layerID: firstLayerID) < 0.01)
         #expect(try harness.alpha(atX: 46, y: 46, layerID: secondLayerID) > 0.01)
         #expect(try harness.alpha(atX: 12, y: 12, layerID: thirdLayerID) < 0.01)
@@ -875,12 +875,22 @@ private struct BrushHistoryHarness {
     let history: HistoryController
     let engine: MetalStrokeEngine
 
-    init(canvasSize: CanvasSize) throws {
+    init(canvasSize: CanvasSize, startsWithSingleLayer: Bool = false) throws {
         guard let metalContext = MetalDeviceContext() else {
             throw BrushHistoryHarnessError.metalUnavailable
         }
 
         var workspaceState = WorkspaceState.stageOneDefault
+        if startsWithSingleLayer {
+            let backgroundLayer = LayerRecord.stageOneDefault()
+            workspaceState.document = ArtDocument(
+                metadata: workspaceState.document.metadata,
+                canvasSize: workspaceState.document.canvasSize,
+                colorStandard: workspaceState.document.colorStandard,
+                layers: [backgroundLayer],
+                activeLayerID: backgroundLayer.id
+            )
+        }
         workspaceState.document.canvasSize = canvasSize
         workspaceState.document.metadata.updatedAt = Date()
 

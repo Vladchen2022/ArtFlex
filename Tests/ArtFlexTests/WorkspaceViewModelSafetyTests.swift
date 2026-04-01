@@ -8,13 +8,15 @@ struct WorkspaceViewModelSafetyTests {
     @MainActor
     func initialWorkspaceStartsWithOpaqueWhiteBackgroundLayer() throws {
         let harness = try BrushEditingBoundaryHarness()
+        let backgroundLayerID = try #require(harness.viewModel.workspace.document.layers.first?.id)
 
-        #expect(harness.viewModel.workspace.document.layers.count == 1)
+        #expect(harness.viewModel.workspace.document.layers.count == 2)
         #expect(harness.viewModel.workspace.document.layers.first?.name == LayerRecord.defaultBackgroundLayerName)
-        #expect(try harness.color(atX: 0, y: 0).alpha > 0.99)
-        #expect(try harness.color(atX: 0, y: 0).red > 0.99)
-        #expect(try harness.color(atX: 0, y: 0).green > 0.99)
-        #expect(try harness.color(atX: 0, y: 0).blue > 0.99)
+        #expect(harness.viewModel.workspace.document.activeLayerID == harness.viewModel.workspace.document.layers.last?.id)
+        #expect(try harness.color(atX: 0, y: 0, layerID: backgroundLayerID).alpha > 0.99)
+        #expect(try harness.color(atX: 0, y: 0, layerID: backgroundLayerID).red > 0.99)
+        #expect(try harness.color(atX: 0, y: 0, layerID: backgroundLayerID).green > 0.99)
+        #expect(try harness.color(atX: 0, y: 0, layerID: backgroundLayerID).blue > 0.99)
     }
 
     @Test
@@ -43,6 +45,7 @@ struct WorkspaceViewModelSafetyTests {
         let harness = try BrushEditingBoundaryHarness()
         try harness.makePendingBrushCommit()
         PerformanceAuditStore.shared.reset()
+        harness.viewModel.setBrushOpacity(0.42)
 
         harness.viewModel.createNewCanvasDiscardingUnsavedChanges(
             name: "Safety Test",
@@ -50,14 +53,18 @@ struct WorkspaceViewModelSafetyTests {
             resolutionDPI: 72
         )
 
+        let backgroundLayerID = try #require(harness.viewModel.workspace.document.layers.first?.id)
         #expect(harness.bootstrap.strokeEngine.hasPendingBrushCommitJobs == false)
         #expect(harness.viewModel.workspace.document.canvasSize == .init(width: 32, height: 32))
         #expect(harness.viewModel.workspace.document.layers.first?.name == LayerRecord.defaultBackgroundLayerName)
+        #expect(harness.viewModel.workspace.document.layers.count == 2)
+        #expect(harness.viewModel.workspace.document.activeLayerID == harness.viewModel.workspace.document.layers.last?.id)
+        #expect(harness.viewModel.workspace.toolSession.brush.opacity == 1)
         #expect(PerformanceAuditStore.shared.snapshot().latestDuration("HistoryController.captureCheckpoint") != nil)
-        #expect(try harness.color(atX: 0, y: 0).alpha > 0.99)
-        #expect(try harness.color(atX: 0, y: 0).red > 0.99)
-        #expect(try harness.color(atX: 0, y: 0).green > 0.99)
-        #expect(try harness.color(atX: 0, y: 0).blue > 0.99)
+        #expect(try harness.color(atX: 0, y: 0, layerID: backgroundLayerID).alpha > 0.99)
+        #expect(try harness.color(atX: 0, y: 0, layerID: backgroundLayerID).red > 0.99)
+        #expect(try harness.color(atX: 0, y: 0, layerID: backgroundLayerID).green > 0.99)
+        #expect(try harness.color(atX: 0, y: 0, layerID: backgroundLayerID).blue > 0.99)
     }
 
     @Test
@@ -140,10 +147,10 @@ private struct BrushEditingBoundaryHarness {
         try color(atX: x, y: y).alpha
     }
 
-    func color(atX x: Int, y: Int) throws -> RGBAColor {
-        let layerID = viewModel.workspace.document.activeLayerID
+    func color(atX x: Int, y: Int, layerID: LayerID? = nil) throws -> RGBAColor {
+        let resolvedLayerID = layerID ?? viewModel.workspace.document.activeLayerID
         guard
-            let surfaceID = bootstrap.layerSurfaceStore.surfaceID(for: layerID),
+            let surfaceID = bootstrap.layerSurfaceStore.surfaceID(for: resolvedLayerID),
             let texture = bootstrap.layerSurfaceStore.texture(for: surfaceID)
         else {
             throw BoundaryHarnessError.textureUnavailable

@@ -3,14 +3,15 @@ import Testing
 
 struct DocumentStateTests {
     @Test
-    func stageOneDocumentStartsWithSingleLayerAndDefaultCanvas() {
+    func stageOneDocumentStartsWithBackgroundAndTransparentDrawingLayer() {
         let document = ArtDocument.stageOneDefault()
 
         #expect(document.canvasSize == .stageOneDefault)
-        #expect(document.layers.count == 1)
+        #expect(document.layers.count == 2)
         #expect(document.layers.first?.name == LayerRecord.defaultBackgroundLayerName)
         #expect(document.layers.first?.isLocked == false)
-        #expect(document.activeLayerID == document.layers.first?.id)
+        #expect(document.layers.last?.isLocked == false)
+        #expect(document.activeLayerID == document.layers.last?.id)
         #expect(document.colorStandard == .stageOneDefault)
     }
 
@@ -18,8 +19,9 @@ struct DocumentStateTests {
     func workspaceStateIncludesDocumentToolSessionAndViewport() {
         let workspace = WorkspaceState.stageOneDefault
 
-        #expect(workspace.document.layers.count == 1)
+        #expect(workspace.document.layers.count == 2)
         #expect(workspace.toolSession.activeTool == .brush)
+        #expect(workspace.toolSession.brush.opacity == 1)
         #expect(workspace.viewport == .stageOneDefault)
     }
 
@@ -107,7 +109,7 @@ struct DocumentStateTests {
         )
 
         #expect(merged)
-        #expect(document.layers.count == 2)
+        #expect(document.layers.count == 3)
         #expect(document.activeLayerID == secondLayer.id)
         #expect(document.layers.contains(where: { $0.id == context.source.id }) == false)
         #expect(document.layers.first(where: { $0.id == secondLayer.id })?.isVisible == false)
@@ -123,7 +125,7 @@ struct DocumentStateTests {
 
         let context = document.mergeVisibleContext
 
-        #expect(context?.visibleLayers.map(\.id) == [document.layers[0].id, thirdLayer.id])
+        #expect(context?.visibleLayers.map(\.id) == [document.layers[0].id, document.layers[1].id, thirdLayer.id])
         #expect(context?.target.id == thirdLayer.id)
     }
 

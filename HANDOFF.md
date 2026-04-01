@@ -10,6 +10,12 @@ ArtFlex 是旧版 `BrushCanvas` 的 Metal-first 重构版 macOS 绘图软件；�
 
 `直线渐变 / 扇形渐变` 当前都已切到重建主线：入口恢复到 `油漆桶` 子菜单，`Shift + G` 可在 `油漆桶 / 直线渐变 / 扇形渐变` 之间切换。`直线渐变` 当前采用单段 `A→B` 拖拽、拉完自动确认的线性投影模型：A 前保持前景色实色，A→B 渐变到透明，B 后保持透明。`扇形渐变` 当前则按新产品定义重建为“以 A 为圆心、用户画出一个不可见 lasso 区域、并只在这个区域内生成径向渐变”的工具；同样是松手自动确认，不依赖手动应用或 `Enter`。两者当前都已支持 preview / commit 同源，以及当前选区裁剪。
 
+`直线渐变 / 扇形渐变 / 套索填充` 当前都已接通顶部工具栏 `不透明度` 滑块；滑块值会直接乘进填充 alpha。三者当前也都继续吃 `杂色` 滑块；其中 `扇形渐变` 的杂色已收口为“以 A 点为中心的放射状条纹”，`套索填充` 的杂色则已收口为“以最初接触点为中心的放射状条纹”。
+
+`套索填充` 当前已切到 GPU local-mask 填色链，不应再按旧文档里“selection.fill / lasso.fill 一起视为慢确认 deferred limitation”的结论理解。`油漆桶` 当前也已补了局部范围优化，并新增了只在油漆桶工具下生效的 `option + delete / option + forward delete` 当前选区填充快捷键。
+
+默认新建画布当前已改成双图层基线：底部白色 `背景` + 顶部透明 `图层 2`；默认活动层固定为顶部透明层。新建画布时，顶部工具栏 `不透明度` 会重置回 `100%`。图层面板底部按钮顺序当前冻结为“新建 / 复制 / 删除”，删除按钮固定为红色并位于第三个位置；`不透明度封顶` 右侧 3 个按钮的前两个顺序也已对调。
+
 画笔库交互当前也有一条已冻结的小规则：笔刷预设不再通过格子右上角小叉删除；删除统一走“先选中格子，再右键菜单删除”，以减少误点。
 
 `方案试探` 当前也新增了一条已冻结的视口规则：四宫格模式下，4 个分支画布会统一使用默认 fit 视口，并临时锁定视口交互；因此不再继承主画布进入方案试探前的平移/旋转偏移，也不会在四宫格里继续被移动。若临时切到“放大单画布”模式，则该分支会恢复正常视口交互；返回四宫格时再次统一回正并锁定。
@@ -22,9 +28,9 @@ ArtFlex 是旧版 `BrushCanvas` 的 Metal-first 重构版 macOS 绘图软件；�
 
 1. history retention policy：先接受
 2. brush size indicator 的最小 fast-path 修复：先接受
-3. `selection.fill / lasso.fill`：两轮最小优化先接受，hotspot 基本收口
+3. 旧的 `selection.fill / lasso.fill` 合并性能结论已过时：当前 `lasso.fill` 已切到 GPU local-mask 填色链，不再按旧 deferred limitation 对待
 
-当前这一轮性能优化与小范围 UX/perf follow-up 已收尾。下一阶段默认转入新功能开发，不要回头重开旧性能项目；如果未来必须重开 `selection/lasso fill`，唯一允许优先检查的点仍然是 `mutateSelectionPixels(...)`。
+当前这一轮性能优化与小范围 UX/perf follow-up 已收尾。下一阶段默认转入新功能开发，不要回头重开旧性能项目；如果未来必须重开填充性能问题，`selection.fill`、`lasso.fill` 与 `fillAtPoint` 必须分开看，不再沿用旧的合并 profiling 结论。
 
 ## 1.1 Dual Tip / 复合笔尖当前状态
 
@@ -360,7 +366,7 @@ ArtFlex 是旧版 `BrushCanvas` 的 Metal-first 重构版 macOS 绘图软件；�
 - hidden / locked / opacity 非变更 layer 内容保持正确
 - transaction failure 保护测试通过
 - brush size local preview 不会被旧 model 值回踩
-- `selection.fill / lasso.fill` 两轮热点优化后，确认耗时已由约 `2s` 量级降到约 `1s` 量级
+- 旧的 `selection.fill / lasso.fill` 合并热点记录当前只保留为历史背景；其中 `lasso.fill` 现已切到 GPU local-mask 填色链，不再按这组旧数值理解
 
 ### 存疑项
 
@@ -377,7 +383,7 @@ ArtFlex 是旧版 `BrushCanvas` 的 Metal-first 重构版 macOS 绘图软件；�
 
 1. history retention policy 已按典型 `3000 px` 场景提升，但连续撤销体感仍有卡顿，仍需按真实文档继续验证
 2. brush size indicator / 笔头缩放响应仍有延迟风险；这是 UI 指示器延迟，不是笔迹延迟
-3. `selection.fill / lasso.fill` 已从约 `2.0s` 降到约 `1.0s`，但仍偏慢；当前接受为 deferred known limitation，不继续优化
+3. 旧的 `selection.fill / lasso.fill` 合并慢确认结论当前已失效；`lasso.fill` 已切到 GPU local-mask 填色链，如未来还要重开填充性能，应单独评估 `selection.fill`
 
 ### 这三项的当前事实
 
@@ -388,7 +394,7 @@ ArtFlex 是旧版 `BrushCanvas` 的 Metal-first 重构版 macOS 绘图软件；�
 - brush size indicator 延迟目前定位在：
   - `updateNSView(...)` 的 brush-size-only 更新仍会走一段主线程重路径
   - 不是笔迹渲染本身慢
-- `selection.fill / lasso.fill` 的当前热点分解结果：
+- `selection.fill / lasso.fill` 的旧热点分解结果当前只保留为历史背景：
   - 第一轮优化前：
     - `selection.fill`: `historyCheckpoint=33.918ms`, `maskPreparation=700.719ms`, `snapshot=29.861ms`, `pixelMutation=1238.055ms`, `restore=9.765ms`, `uiConfirm=0.094ms`, `total=2014.932ms`
     - `lasso.fill`: `historyCheckpoint=30.582ms`, `maskPreparation=697.487ms`, `snapshot=31.106ms`, `pixelMutation=1237.757ms`, `restore=12.771ms`, `uiConfirm=0.100ms`, `total=2011.204ms`
@@ -404,9 +410,8 @@ ArtFlex 是旧版 `BrushCanvas` 的 Metal-first 重构版 macOS 绘图软件；�
     - full `swift test`：本轮未拿到最终 passed 结论，不能宣称完整通过
   - 当前结论：
     - `maskPreparation` 已不再是主要剩余热点
-    - 当前重新回到 `pixelMutation` 是最大段，但它已经做过一轮最小优化，不应默认立刻重开大改
-    - 以当前约 `1.0s` 的确认时间，`selection/lasso fill hotspot` 本轮先按“基本收口”处理
-    - 当前问题正式标记为 deferred known limitation
+    - 这些数值当前只对旧的 `selection.fill` 路径仍有一定参考价值
+    - `lasso.fill` 当前已切到 GPU local-mask 填色链，不再沿用这组旧 profiling 结论
 
 ## 6. 下一阶段默认任务
 
@@ -424,8 +429,8 @@ ArtFlex 是旧版 `BrushCanvas` 的 Metal-first 重构版 macOS 绘图软件；�
 - 不碰 trim / smudge 主线
 - 不重复做 performance closure audit
 - 不要扩大范围到新的大重构
-- `selection.fill / lasso.fill` 慢确认当前视为 deferred known limitation
-- 如果未来必须重开，只允许先检查 [mutateSelectionPixels(...)](/Users/victorcloux/Desktop/ArtFlex/Platform/macOS/App/WorkspaceViewModel.swift#L5389)
+- 不要再把 `lasso.fill` 视为旧的 deferred known limitation
+- 如果未来必须重开填充性能问题，`selection.fill`、`lasso.fill` 与 `fillAtPoint` 必须分开看
 
 ## 8. 关键文件与入口
 
@@ -449,7 +454,7 @@ ArtFlex 是旧版 `BrushCanvas` 的 Metal-first 重构版 macOS 绘图软件；�
   - [StrokeCaptureMTKView.keyDown(with:)](/Users/victorcloux/Desktop/ArtFlex/Platform/macOS/Canvas/MetalCanvasHost.swift#L1044)
   - [previewAdjustBrushSize(by:)](/Users/victorcloux/Desktop/ArtFlex/Platform/macOS/Canvas/MetalCanvasHost.swift#L1751)
 
-### selection.fill / lasso.fill
+### selection.fill / lasso.fill（历史背景 + 当前分流）
 
 - [WorkspaceViewModel.swift](/Users/victorcloux/Desktop/ArtFlex/Platform/macOS/App/WorkspaceViewModel.swift)
   - [fillAtPoint(_:)](/Users/victorcloux/Desktop/ArtFlex/Platform/macOS/App/WorkspaceViewModel.swift#L1168)
@@ -461,6 +466,8 @@ ArtFlex 是旧版 `BrushCanvas` 的 Metal-first 重构版 macOS 绘图软件；�
   - `selection.fill` 的 profiling 场景里，刚 commit 的 lasso 选区通常还是 `immediateShape(.lasso)`，不会立刻命中 `maskData` 快路径
   - `maskPreparation` 的第二轮热点主要不是 history，也不是 committed `maskData` row copy，而是局部 rasterize 后的 Swift 级结果拷贝和点重映射
   - 当前已把这两块压掉，局部 rasterize 成本已明显下降
+  - 以上 inspection 结论当前主要只对旧的 `selection.fill` 路径仍有参考价值
+  - `lasso.fill` 当前已切到 GPU local-mask 填色链，并已接通顶部 `不透明度` 与起点放射杂色语义，不再按上面这套旧路径理解
 
 ### 基线与 profiling
 
@@ -485,7 +492,7 @@ ArtFlex 是旧版 `BrushCanvas` 的 Metal-first 重构版 macOS 绘图软件；�
 
 - 连续 `undo / redo` 体感是否仍卡
 - `[` `]` 调笔刷大小时，笔头圈尺寸是否即时变化
-- `selection.fill / lasso.fill` 点击确认后的主观等待时间
+- `selection.fill` 点击确认后的主观等待时间；`lasso.fill` 需按新的 GPU local-mask 基线单独观察
 - dirty history 路径下不同图层交替操作后，未变更图层是否保持正确
 
 ## 10. Stop line

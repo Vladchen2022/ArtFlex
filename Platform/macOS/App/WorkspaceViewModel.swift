@@ -5286,7 +5286,9 @@ final class WorkspaceViewModel: ObservableObject {
         resetSnapshotToolState(resumeTimelapseIfNeeded: false)
 
         let now = Date()
-        let layer = LayerRecord.stageOneDefault()
+        let layers = ArtDocument.stageOneDefaultLayers()
+        var resetToolSession = workspace.toolSession
+        resetToolSession.brush.opacity = BrushSettings.stageOneDefault.opacity
         let document = ArtDocument(
             metadata: DocumentMetadata(
                 name: name,
@@ -5295,13 +5297,13 @@ final class WorkspaceViewModel: ObservableObject {
                 resolutionDPI: resolutionDPI
             ),
             canvasSize: canvasSize,
-            layers: [layer],
-            activeLayerID: layer.id
+            layers: layers,
+            activeLayerID: layers.last?.id ?? layers[0].id
         )
 
         let newWorkspace = WorkspaceState(
             document: document,
-            toolSession: workspace.toolSession,
+            toolSession: resetToolSession,
             colorPanel: workspace.colorPanel,
             brushLibrary: workspace.brushLibrary,
             tipImageLibrary: workspace.tipImageLibrary,
@@ -5330,8 +5332,7 @@ final class WorkspaceViewModel: ObservableObject {
 
     private func seedDefaultBackgroundLayerIfNeeded(for document: ArtDocument) {
         guard
-            document.layers.count == 1,
-            let backgroundLayer = document.layers.first,
+            let backgroundLayer = document.layers.first(where: { $0.name == LayerRecord.defaultBackgroundLayerName }),
             backgroundLayer.name == LayerRecord.defaultBackgroundLayerName,
             let surfaceID = bootstrap.layerSurfaceStore.surfaceID(for: backgroundLayer.id),
             let texture = bootstrap.layerSurfaceStore.texture(for: surfaceID)
