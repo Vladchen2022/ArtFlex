@@ -59,6 +59,7 @@ struct WorkspaceViewModelSafetyTests {
         #expect(harness.viewModel.workspace.document.layers.first?.name == LayerRecord.defaultBackgroundLayerName)
         #expect(harness.viewModel.workspace.document.layers.count == 2)
         #expect(harness.viewModel.workspace.document.activeLayerID == harness.viewModel.workspace.document.layers.last?.id)
+        #expect(harness.viewModel.workspace.toolSession.brush.size == 60)
         #expect(harness.viewModel.workspace.toolSession.brush.opacity == 1)
         #expect(PerformanceAuditStore.shared.snapshot().latestDuration("HistoryController.captureCheckpoint") != nil)
         #expect(try harness.color(atX: 0, y: 0, layerID: backgroundLayerID).alpha > 0.99)

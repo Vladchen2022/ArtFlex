@@ -823,9 +823,13 @@ struct ToolSessionState: Codable, Sendable, Equatable {
     var brush: BrushSettings
     var selectedColor: RGBAColor
 
-    static let stageOneDefault = ToolSessionState(
-        activeTool: .brush,
-        brush: .stageOneDefault,
-        selectedColor: .black
-    )
+    static let stageOneDefault: ToolSessionState = {
+        var brush = BrushSettings.stageOneDefault
+        brush.size = 60
+        return ToolSessionState(
+            activeTool: .brush,
+            brush: brush,
+            selectedColor: .black
+        )
+    }()
 }

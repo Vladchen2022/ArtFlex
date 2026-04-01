@@ -12,6 +12,9 @@ struct WindowKeyboardBridge: NSViewRepresentable {
         view.keyUpHandler = { [weak viewModel] event in
             viewModel?.handleKeyUp(event) ?? false
         }
+        view.flagsChangedHandler = { [weak viewModel] event in
+            viewModel?.handleModifierFlagsChanged(event.modifierFlags) ?? false
+        }
         return view
     }
 
@@ -22,6 +25,9 @@ struct WindowKeyboardBridge: NSViewRepresentable {
         nsView.keyUpHandler = { [weak viewModel] event in
             viewModel?.handleKeyUp(event) ?? false
         }
+        nsView.flagsChangedHandler = { [weak viewModel] event in
+            viewModel?.handleModifierFlagsChanged(event.modifierFlags) ?? false
+        }
         nsView.activateIfNeeded()
     }
 }
@@ -29,6 +35,7 @@ struct WindowKeyboardBridge: NSViewRepresentable {
 final class KeyboardBridgeView: NSView {
     var keyDownHandler: ((NSEvent) -> Bool)?
     var keyUpHandler: ((NSEvent) -> Bool)?
+    var flagsChangedHandler: ((NSEvent) -> Bool)?
 
     override var acceptsFirstResponder: Bool { true }
 
@@ -52,6 +59,13 @@ final class KeyboardBridgeView: NSView {
             return
         }
         super.keyUp(with: event)
+    }
+
+    override func flagsChanged(with event: NSEvent) {
+        if flagsChangedHandler?(event) == true {
+            return
+        }
+        super.flagsChanged(with: event)
     }
 
     func activateIfNeeded() {

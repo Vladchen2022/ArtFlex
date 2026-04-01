@@ -357,6 +357,35 @@ struct CanvasContainerView: View {
                     )
                 }
 
+                if let quickColorPickerState = viewModel.quickColorPickerState {
+                    let quickPickerBrushSlots = (0..<4).map { slotIndex in
+                        viewModel.workspace.brushLibrary.preset(atSlot: slotIndex)
+                    }
+                    QuickColorPickerHUD(
+                        state: resolvedQuickColorPickerState(
+                            baseState: quickColorPickerState,
+                            panel: viewModel.workspace.colorPanel
+                        ),
+                        presentation: presentation,
+                        canvasSize: viewModel.workspace.document.canvasSize,
+                        viewportRotationDegrees: viewModel.workspace.viewport.rotationDegrees,
+                        viewportSize: geometry.size,
+                        brushSlots: quickPickerBrushSlots,
+                        selectedBrushPresetID: viewModel.workspace.brushLibrary.selectedPresetID,
+                        onSetPoint: { x, y in
+                            viewModel.setQuickColorPickerPoint(x: x, y: y)
+                        },
+                        onSetHue: { hue in
+                            viewModel.setQuickColorPickerHue(hue)
+                        },
+                        onSelectBrushSlot: { slotIndex in
+                            if let preset = viewModel.workspace.brushLibrary.preset(atSlot: slotIndex) {
+                                viewModel.applyBrushPreset(preset.id)
+                            }
+                        }
+                    )
+                }
+
             }
             .clipped()
             .contentShape(Rectangle())
@@ -370,6 +399,19 @@ struct CanvasContainerView: View {
         }
         .clipped()
     }
+}
+
+private func resolvedQuickColorPickerState(
+    baseState: QuickColorPickerState,
+    panel: ColorPanelState
+) -> QuickColorPickerState {
+    var resolved = baseState
+    resolved.panel.pickerLightness = panel.pickerLightness
+    resolved.panel.pickerSaturation = panel.pickerSaturation
+    resolved.panel.lightingHue = panel.lightingHue
+    resolved.panel.lightingStrength = panel.lightingStrength
+    resolved.panel.snapThreeStops = panel.snapThreeStops
+    return resolved
 }
 
 // viewport 状态隔离容器：只有 zoom/pan/rotation 变化时这个 View 才重新 layout

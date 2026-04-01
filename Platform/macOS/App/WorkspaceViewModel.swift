@@ -136,6 +136,7 @@ final class WorkspaceViewModel: ObservableObject {
     @Published private(set) var savedSnapshots: [CanvasSavedSnapshot] = []
     @Published private(set) var ideationSession: IdeationSessionState?
     @Published private(set) var snapshotCompareSession: SnapshotCompareSessionState?
+    @Published private(set) var quickColorPickerState: QuickColorPickerState?
     private var currentProjectURL: URL?
     private var shouldResumeTimelapseAfterIdeation = false
     private var shouldResumeTimelapseAfterSnapshotCompare = false
@@ -147,6 +148,7 @@ final class WorkspaceViewModel: ObservableObject {
     private let transformLogger = Logger(subsystem: "ArtFlex", category: "Transform")
     private var latestCanvasViewportSize: CGSize = .zero
     private var lastCanvasHoverPoint: CanvasPoint?
+    private var isQuickColorPickerShortcutActive = false
     private var documentChangeRevision: UInt64 = 0
     private var strokePacketCount = 0
 #if DEBUG
@@ -1519,6 +1521,19 @@ final class WorkspaceViewModel: ObservableObject {
         applyPickerColorFromPanel()
     }
 
+    func setQuickColorPickerHue(_ hue: Float) {
+        guard var state = quickColorPickerState else { return }
+        state.panel.pickerHue = ColorBlocksEngine.wrapHue(hue)
+        previewQuickColorPickerState(state)
+    }
+
+    func setQuickColorPickerPoint(x: Float, y: Float) {
+        guard var state = quickColorPickerState else { return }
+        state.panel.pickerX = min(max(x, 0), 1)
+        state.panel.pickerY = min(max(y, 0), 1)
+        previewQuickColorPickerState(state)
+    }
+
     func resetColorPanel() {
         bootstrap.workspaceStore.updateColorPanel { state in
             if state.mode == .picker {
@@ -2331,6 +2346,10 @@ final class WorkspaceViewModel: ObservableObject {
 
     func updateCanvasToolHover(to point: CanvasPoint) {
         lastCanvasHoverPoint = point
+        if quickColorPickerState == nil,
+           isQuickColorPickerShortcutActive {
+            presentQuickColorPickerIfPossible()
+        }
         switch workspace.toolSession.activeTool {
         case .straightLine:
             updateStraightLineHover(to: point)
@@ -4435,6 +4454,12 @@ final class WorkspaceViewModel: ObservableObject {
     func handleKeyDown(_ event: NSEvent) -> Bool {
         let normalizedModifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
 
+        if normalizedModifiers == [.shift],
+           event.charactersIgnoringModifiers?.uppercased() == "Z" {
+            armQuickColorPickerShortcutIfNeeded()
+            return true
+        }
+
         if event.keyCode == 53,
            workspace.toolSession.activeTool == .straightLine,
            straightLineState.phase != .idle {
@@ -4578,11 +4603,26 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func handleKeyUp(_ event: NSEvent) -> Bool {
+        if event.charactersIgnoringModifiers?.uppercased() == "Z",
+           isQuickColorPickerShortcutActive {
+            cancelQuickColorPickerShortcut()
+            return true
+        }
+
         guard event.keyCode == 49 else { return false }
         if isPanModeActive {
             setPanModeActive(false)
         }
         return true
+    }
+
+    func handleModifierFlagsChanged(_ modifierFlags: NSEvent.ModifierFlags) -> Bool {
+        let normalizedModifiers = modifierFlags.intersection(.deviceIndependentFlagsMask)
+        if isQuickColorPickerShortcutActive,
+           !normalizedModifiers.contains(.shift) {
+            cancelQuickColorPickerShortcut()
+        }
+        return false
     }
 
     private func refresh(
@@ -5294,6 +5334,7 @@ final class WorkspaceViewModel: ObservableObject {
         let now = Date()
         let layers = ArtDocument.stageOneDefaultLayers()
         var resetToolSession = workspace.toolSession
+        resetToolSession.brush.size = ToolSessionState.stageOneDefault.brush.size
         resetToolSession.brush.opacity = BrushSettings.stageOneDefault.opacity
         let document = ArtDocument(
             metadata: DocumentMetadata(
@@ -8262,6 +8303,63 @@ final class WorkspaceViewModel: ObservableObject {
         let color = ColorBlocksEngine.pickerColor(from: bootstrap.workspaceStore.state.colorPanel)
         bootstrap.workspaceStore.updateToolSession { session in
             session.selectedColor = color
+        }
+        refreshColorPanelOnly(includeSelectedColor: true)
+    }
+
+    private func armQuickColorPickerShortcutIfNeeded() {
+        isQuickColorPickerShortcutActive = true
+        guard quickColorPickerState == nil else { return }
+        presentQuickColorPickerIfPossible()
+    }
+
+    private func cancelQuickColorPickerShortcut() {
+        isQuickColorPickerShortcutActive = false
+        if quickColorPickerState != nil {
+            commitQuickColorPickerSelectionIfNeeded()
+            quickColorPickerState = nil
+        }
+    }
+
+    private func presentQuickColorPickerIfPossible() {
+        guard let anchorPoint = lastCanvasHoverPoint else { return }
+
+        var panel = workspace.colorPanel
+        panel.mode = .picker
+        let selectedColor = workspace.toolSession.selectedColor
+        ColorBlocksEngine.syncPicker(to: selectedColor, state: &panel)
+        panel.baseHSV = ColorBlocksEngine.rgbToHsv(selectedColor)
+
+        quickColorPickerState = QuickColorPickerState(
+            anchorPoint: anchorPoint,
+            panel: panel
+        )
+    }
+
+    private func previewQuickColorPickerState(_ state: QuickColorPickerState) {
+        quickColorPickerState = state
+        let color = ColorBlocksEngine.pickerColor(from: state.panel)
+        var updated = workspace
+        updated.toolSession.selectedColor = color
+        workspace = updated
+        colorPanelProxy.selectedColor = color
+    }
+
+    private func commitQuickColorPickerSelectionIfNeeded() {
+        guard let state = quickColorPickerState else { return }
+        let color = ColorBlocksEngine.pickerColor(from: state.panel)
+
+        bootstrap.workspaceStore.updateToolSession { session in
+            session.selectedColor = color
+        }
+        bootstrap.workspaceStore.updateColorPanel { panel in
+            guard panel.mode == .picker else { return }
+            panel.pickerHue = state.panel.pickerHue
+            panel.pickerX = state.panel.pickerX
+            panel.pickerY = state.panel.pickerY
+            panel.baseHSV = ColorBlocksEngine.rgbToHsv(color)
+            panel.baseSource = .synced
+            panel.baseName = ""
         }
         refreshColorPanelOnly(includeSelectedColor: true)
     }

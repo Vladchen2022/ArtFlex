@@ -21,6 +21,7 @@ struct DocumentStateTests {
 
         #expect(workspace.document.layers.count == 2)
         #expect(workspace.toolSession.activeTool == .brush)
+        #expect(workspace.toolSession.brush.size == 60)
         #expect(workspace.toolSession.brush.opacity == 1)
         #expect(workspace.viewport == .stageOneDefault)
     }
@@ -40,6 +41,7 @@ struct DocumentStateTests {
         #expect(workspace.brushLibrary.presets.isEmpty)
         #expect(workspace.brushLibrary.selectedPresetID == nil)
         #expect(workspace.toolSession.brush.tipShape == .hardRound)
+        #expect(workspace.toolSession.brush.size == 60)
         #expect(workspace.toolSession.brush.dualTipEnabled == false)
         #expect(workspace.toolSession.brush.secondaryTipDescriptor.tipShape == .hardRound)
         #expect(workspace.toolSession.brush.secondaryTipDescriptor.sourceSemantic == .procedural)
