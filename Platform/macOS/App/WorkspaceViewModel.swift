@@ -198,6 +198,7 @@ final class WorkspaceViewModel: ObservableObject {
             seedDefaultBackgroundLayerIfNeeded(for: state.document)
         }
         syncTimelapseDocumentContext()
+        syncDrawingStatsDocumentContext()
         if installsZoomKeyboardMonitor {
             setupZoomKeyboardMonitor()
         }
@@ -292,6 +293,10 @@ final class WorkspaceViewModel: ObservableObject {
 
     var timelapseRecorder: TimelapseRecorderController {
         bootstrap.timelapseRecorder
+    }
+
+    var drawingStatsController: DrawingStatsController {
+        bootstrap.drawingStatsController
     }
 
     var savedSnapshotCount: Int {
@@ -4771,6 +4776,9 @@ final class WorkspaceViewModel: ObservableObject {
         if isGeneratorStrokeModeEnabled,
            strokePayload.stroke.tool == .brush,
            applyGeneratorStroke(samples: samples, layerID: strokePayload.layerID, baseStroke: strokePayload.stroke) {
+            if !isApplyingMirroredIdeationOperation {
+                drawingStatsController.recordPaintingActivity()
+            }
             strokePacketCount += 1
             let applyDurationMs = Double(DispatchTime.now().uptimeNanoseconds - applyStartNs) / 1_000_000
             brushStrokeLogger.debug("[brush-feel] applyStrokeMainThreadMs=\(applyDurationMs, privacy: .public)")
@@ -4786,6 +4794,9 @@ final class WorkspaceViewModel: ObservableObject {
         )
         let applyDurationMs = Double(DispatchTime.now().uptimeNanoseconds - applyStartNs) / 1_000_000
         brushStrokeLogger.debug("[brush-feel] applyStrokeMainThreadMs=\(applyDurationMs, privacy: .public)")
+        if !isApplyingMirroredIdeationOperation {
+            drawingStatsController.recordPaintingActivity()
+        }
         strokePacketCount += 1
         relayIdeationOperation(.applyStroke(samples))
     }
@@ -5272,6 +5283,7 @@ final class WorkspaceViewModel: ObservableObject {
     @discardableResult
     func saveProject() -> Bool {
         _ = drainPendingBrushCommitsIfNeeded(resetLiveSession: false)
+        pauseDrawingStatsTracking()
         let documentName = workspace.document.metadata.name
         let url: URL
         if let existingURL = currentProjectURL {
@@ -5290,6 +5302,7 @@ final class WorkspaceViewModel: ObservableObject {
             hasUnsavedChanges = false
             persistBrushLibrary()
             syncTimelapseDocumentContext()
+            syncDrawingStatsDocumentContext()
             showStatus(.init(kind: .success, message: "已保存工程：\(url.lastPathComponent)"))
             return true
         } catch {
@@ -5300,6 +5313,7 @@ final class WorkspaceViewModel: ObservableObject {
 
     func openProject() {
         _ = drainPendingBrushCommitsIfNeeded(resetLiveSession: true)
+        pauseDrawingStatsTracking()
         resolveTransformSession(reason: .documentOpen)
         timelapseRecorder.stopRecording()
         guard let url = bootstrap.filePanelService.presentProjectOpenPanel() else {
@@ -5344,6 +5358,7 @@ final class WorkspaceViewModel: ObservableObject {
             hasUnsavedChanges = false
             persistBrushLibrary()
             syncTimelapseDocumentContext()
+            syncDrawingStatsDocumentContext()
             showStatus(.init(kind: .success, message: "已打开工程：\(url.lastPathComponent)"))
             refresh()
         } catch {
@@ -5383,6 +5398,7 @@ final class WorkspaceViewModel: ObservableObject {
         resolutionDPI: Int,
         decisionOverride: NewCanvasCreationDecision?
     ) {
+        pauseDrawingStatsTracking()
         resolveTransformSession(reason: .documentOpen)
         timelapseRecorder.stopRecording()
 
@@ -5440,6 +5456,7 @@ final class WorkspaceViewModel: ObservableObject {
         hasUnsavedChanges = true
         isNewCanvasSheetPresented = false
         syncTimelapseDocumentContext()
+        syncDrawingStatsDocumentContext()
         showStatus(.init(kind: .success, message: "已创建新画布：\(canvasSize.width)×\(canvasSize.height)"))
         refresh()
     }
@@ -5780,6 +5797,7 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func confirmCloseOrQuitIfNeeded() -> Bool {
+        pauseDrawingStatsTracking()
         switch confirmUnsavedChangesIfNeeded(
             messageText: "当前画布有未保存内容",
             informativeText: "退出前，要先保存当前内容吗？"
@@ -6528,6 +6546,35 @@ final class WorkspaceViewModel: ObservableObject {
             documentName: workspace.document.metadata.name,
             documentFileURL: currentProjectURL
         )
+    }
+
+    private func syncDrawingStatsDocumentContext() {
+        drawingStatsController.syncCurrentDocument(
+            id: workspace.document.metadata.drawingStatsID,
+            name: workspace.document.metadata.name,
+            accumulatedPaintingTime: workspace.document.metadata.accumulatedPaintingTime
+        )
+    }
+
+    private func syncCommittedDrawingStatsIntoActiveDocumentMetadata() {
+        let committedTime = drawingStatsController.currentDocumentAccumulatedPaintingTime
+        guard workspace.document.metadata.accumulatedPaintingTime != committedTime else {
+            return
+        }
+
+        bootstrap.workspaceStore.updateDocument { document in
+            document.metadata.accumulatedPaintingTime = committedTime
+        }
+        workspace.document.metadata = bootstrap.workspaceStore.state.document.metadata
+    }
+
+    func pauseDrawingStatsTracking() {
+        drawingStatsController.pauseTracking()
+        syncCommittedDrawingStatsIntoActiveDocumentMetadata()
+    }
+
+    func showDrawingStatsMilestone(_ milestone: DrawingStatsMilestone) {
+        showStatus(.init(kind: .success, message: "绘画里程碑：\(milestone.title)"))
     }
 
     private func checkpointSelectionChangeIfPossible(previousCommittedShape: SelectionShape?) {

@@ -11,9 +11,11 @@ struct ArtFlexApp: App {
     init() {
         do {
             let bootstrap = try AppBootstrap()
-            _viewModel = StateObject(
-                wrappedValue: WorkspaceViewModel(bootstrap: bootstrap)
-            )
+            let viewModel = WorkspaceViewModel(bootstrap: bootstrap)
+            bootstrap.drawingStatsController.milestoneHandler = { [weak viewModel] milestone in
+                viewModel?.showDrawingStatsMilestone(milestone)
+            }
+            _viewModel = StateObject(wrappedValue: viewModel)
         } catch {
             fatalError("Failed to initialize ArtFlex: \(error.localizedDescription)")
         }
@@ -153,6 +155,10 @@ final class ArtFlexApplicationDelegate: NSObject, NSApplicationDelegate, NSWindo
         }
     }
 
+    func applicationDidResignActive(_ notification: Notification) {
+        viewModel?.pauseDrawingStatsTracking()
+    }
+
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard let viewModel else {
             return .terminateNow
@@ -176,6 +182,10 @@ final class ArtFlexApplicationDelegate: NSObject, NSApplicationDelegate, NSWindo
         }
 
         return viewModel.confirmCloseOrQuitIfNeeded()
+    }
+
+    func windowDidResignKey(_ notification: Notification) {
+        viewModel?.pauseDrawingStatsTracking()
     }
 
     @MainActor

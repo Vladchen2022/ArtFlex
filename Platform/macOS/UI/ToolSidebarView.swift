@@ -18,6 +18,7 @@ struct ToolSidebarView: View {
     @ObservedObject var hostViewModel: WorkspaceViewModel
     @State private var showsSnapshotPopover = false
     @State private var suppressSnapshotPrimaryAction = false
+    @State private var showsDrawingStatsPopover = false
     @State private var showsRecorderPopover = false
     @State private var recorderExportFPS = 12.0
 
@@ -64,6 +65,7 @@ struct ToolSidebarView: View {
             VStack(spacing: sidebarUtilityButtonSpacing) {
                 snapshotButton
                 ideationButton
+                drawingStatsButton
                 recorderButton
             }
             .padding(.vertical, 8)
@@ -81,6 +83,7 @@ struct ToolSidebarView: View {
                 suppressSnapshotPrimaryAction = false
                 return
             }
+            showsDrawingStatsPopover = false
             showsRecorderPopover = false
             hostViewModel.handleSnapshotSavePrimaryAction()
         } label: {
@@ -140,6 +143,7 @@ struct ToolSidebarView: View {
                     guard hostViewModel.ideationSession == nil else { return }
                     guard hostViewModel.snapshotCompareSession == nil else { return }
                     suppressSnapshotPrimaryAction = true
+                    showsDrawingStatsPopover = false
                     showsRecorderPopover = false
                     showsSnapshotPopover = true
                 }
@@ -207,6 +211,7 @@ struct ToolSidebarView: View {
             }
             if hostViewModel.ideationSession == nil {
                 showsSnapshotPopover = false
+                showsDrawingStatsPopover = false
                 showsRecorderPopover = false
                 hostViewModel.startIdeationSession()
             } else {
@@ -259,13 +264,49 @@ struct ToolSidebarView: View {
         )
     }
 
+    private var drawingStatsButton: some View {
+        Button {
+            showsSnapshotPopover = false
+            showsRecorderPopover = false
+            showsDrawingStatsPopover.toggle()
+        } label: {
+            HStack(spacing: sidebarButtonContentSpacing) {
+                Image(systemName: "chart.bar.xaxis")
+                    .font(.system(size: sidebarButtonIconFontSize, weight: .semibold))
+                    .frame(width: sidebarButtonLeadingIconWidth)
+                    .foregroundStyle(Color.white.opacity(0.9))
+
+                Text("绘画数据")
+                    .font(.system(size: sidebarButtonLabelFontSize, weight: .semibold))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.95)
+                    .foregroundStyle(Color.white.opacity(0.9))
+
+                Spacer(minLength: sidebarButtonTrailingGap)
+            }
+            .padding(.horizontal, sidebarButtonHorizontalPadding)
+            .frame(width: sidebarButtonWidth, height: sidebarButtonHeight)
+            .background(
+                RoundedRectangle(cornerRadius: sidebarButtonCornerRadius)
+                    .fill(showsDrawingStatsPopover ? Color.accentColor.opacity(0.22) : Color.white.opacity(0.08))
+            )
+        }
+        .buttonStyle(.plain)
+        .help("绘画数据")
+        .popover(isPresented: $showsDrawingStatsPopover, arrowEdge: .leading) {
+            DrawingStatsPanelView(controller: hostViewModel.drawingStatsController)
+        }
+    }
+
     private var recorderButton: some View {
         Button {
             guard hostViewModel.ideationSession == nil, hostViewModel.snapshotCompareSession == nil else {
                 showsSnapshotPopover = false
+                showsDrawingStatsPopover = false
                 showsRecorderPopover = false
                 return
             }
+            showsDrawingStatsPopover = false
             showsRecorderPopover.toggle()
         } label: {
             HStack(spacing: sidebarButtonContentSpacing) {

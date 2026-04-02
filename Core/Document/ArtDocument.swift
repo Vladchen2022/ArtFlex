@@ -12,17 +12,23 @@ struct DocumentMetadata: Codable, Sendable, Equatable {
     var createdAt: Date
     var updatedAt: Date
     var resolutionDPI: Int
+    var drawingStatsID: UUID
+    var accumulatedPaintingTime: TimeInterval
 
     init(
         name: String,
         createdAt: Date,
         updatedAt: Date,
-        resolutionDPI: Int = 300
+        resolutionDPI: Int = 300,
+        drawingStatsID: UUID = UUID(),
+        accumulatedPaintingTime: TimeInterval = 0
     ) {
         self.name = name
         self.createdAt = createdAt
         self.updatedAt = updatedAt
         self.resolutionDPI = resolutionDPI
+        self.drawingStatsID = drawingStatsID
+        self.accumulatedPaintingTime = accumulatedPaintingTime
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -30,6 +36,8 @@ struct DocumentMetadata: Codable, Sendable, Equatable {
         case createdAt
         case updatedAt
         case resolutionDPI
+        case drawingStatsID
+        case accumulatedPaintingTime
     }
 
     init(from decoder: Decoder) throws {
@@ -38,6 +46,8 @@ struct DocumentMetadata: Codable, Sendable, Equatable {
         createdAt = try container.decode(Date.self, forKey: .createdAt)
         updatedAt = try container.decode(Date.self, forKey: .updatedAt)
         resolutionDPI = try container.decodeIfPresent(Int.self, forKey: .resolutionDPI) ?? 300
+        drawingStatsID = try container.decodeIfPresent(UUID.self, forKey: .drawingStatsID) ?? UUID()
+        accumulatedPaintingTime = try container.decodeIfPresent(TimeInterval.self, forKey: .accumulatedPaintingTime) ?? 0
     }
 
     func encode(to encoder: Encoder) throws {
@@ -46,6 +56,8 @@ struct DocumentMetadata: Codable, Sendable, Equatable {
         try container.encode(createdAt, forKey: .createdAt)
         try container.encode(updatedAt, forKey: .updatedAt)
         try container.encode(resolutionDPI, forKey: .resolutionDPI)
+        try container.encode(drawingStatsID, forKey: .drawingStatsID)
+        try container.encode(accumulatedPaintingTime, forKey: .accumulatedPaintingTime)
     }
 }
 

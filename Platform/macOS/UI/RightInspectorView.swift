@@ -3739,7 +3739,7 @@ private struct ColorSectionView: View {
             .frame(height: 6)
 
             bufferedCompactParameterSlider(
-                title: "色强度",
+                title: "光色",
                 valueText: "\(Int(proxy.colorPanel.lightingStrength))",
                 value: Double(proxy.colorPanel.lightingStrength),
                 range: 0...100,
@@ -3771,7 +3771,7 @@ private struct ColorSectionView: View {
                 onCommit: { viewModel.setColorPanelLightness(Float($0)) }
             )
             bufferedCompactParameterSlider(
-                title: "饱和度",
+                title: "纯度",
                 valueText: "\(Int(proxy.colorPanel.activeSaturation))",
                 value: Double(proxy.colorPanel.activeSaturation),
                 range: 0...100,
@@ -3803,7 +3803,7 @@ private struct ColorSectionView: View {
             .allowsHitTesting(proxy.colorPanel.mode == .blocks)
 
             bufferedCompactParameterSlider(
-                title: "对比色",
+                title: "补色",
                 valueText: "\(Int(proxy.colorPanel.contrastHue))",
                 value: Double(proxy.colorPanel.contrastHue),
                 range: 0...100,

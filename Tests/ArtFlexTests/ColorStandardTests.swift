@@ -45,4 +45,38 @@ struct ColorStandardTests {
         #expect(composited.green < 0.01)
         #expect(composited.blue < 0.01)
     }
+
+    @Test
+    func complementaryPaletteEntriesReduceSaturationByHalf() throws {
+        let baseHSV = HSVColor(h: 12, s: 0.9, v: 0.7)
+        let state = ColorPanelState(
+            mode: .blocks,
+            baseHSV: baseHSV,
+            basePaletteHSV: [baseHSV, baseHSV],
+            baseSource: .synced,
+            baseName: "",
+            contrast: 50,
+            contrastHue: 100,
+            snapThreeStops: false,
+            blocksLightness: 50,
+            blocksSaturation: 100,
+            pickerLightness: 50,
+            pickerSaturation: 100,
+            pickerHue: 0,
+            pickerX: 0,
+            pickerY: 1,
+            lightingHue: 0,
+            lightingStrength: 0
+        )
+
+        let renderedPalette = ColorBlocksEngine.renderPalette(for: state)
+        let minimumRenderedSaturation = try #require(
+            renderedPalette
+                .map { ColorBlocksEngine.rgbToHsv($0).s }
+                .min()
+        )
+
+        #expect(minimumRenderedSaturation <= baseHSV.s * 0.62)
+        #expect(minimumRenderedSaturation >= baseHSV.s * 0.48)
+    }
 }

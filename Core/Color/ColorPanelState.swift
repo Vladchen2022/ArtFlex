@@ -363,6 +363,8 @@ enum ColorBlocksEngine {
                     let offset = (pseudoRandom(seed * 1.91) - 0.5) * 50 * xN
                     let targetHue = wrapHue(baseHue + 180 + offset)
                     hsv.h = blendHue(from: hsv.h, to: targetHue, amount: 0.25 + xN * 0.55)
+                    // 补色块保持更柔和的色彩强度，避免和主色块一样过饱和。
+                    hsv.s = clamp(hsv.s * 0.5, saturationBand.lowerBound * 0.5, saturationBand.upperBound)
                 }
             }
 

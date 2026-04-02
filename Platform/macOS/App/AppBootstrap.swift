@@ -54,6 +54,7 @@ struct AppBootstrap {
     let brushLibraryPersistenceController: BrushLibraryPersistenceController
     let imagePaletteExtractor: ImagePaletteExtractor
     let timelapseRecorder: TimelapseRecorderController
+    let drawingStatsController: DrawingStatsController
 
     @MainActor
     init(
@@ -61,7 +62,8 @@ struct AppBootstrap {
         metalContext: MetalDeviceContext? = MetalDeviceContext(),
         layerSurfaceStore: StageOneLayerSurfaceStore = StageOneLayerSurfaceStore(),
         brushLibraryPersistenceController: BrushLibraryPersistenceController? = nil,
-        sharedMetalServices: AppSharedMetalServices? = nil
+        sharedMetalServices: AppSharedMetalServices? = nil,
+        drawingStatsController: DrawingStatsController? = nil
     ) throws {
         guard let metalContext else {
             fatalError("Metal is required to launch ArtFlex.")
@@ -114,5 +116,6 @@ struct AppBootstrap {
             layerSurfaceStore: layerSurfaceStore,
             serializer: textureSerializer
         )
+        self.drawingStatsController = drawingStatsController ?? DrawingStatsController()
     }
 }

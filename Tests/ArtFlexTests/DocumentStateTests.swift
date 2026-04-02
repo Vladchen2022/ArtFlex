@@ -7,6 +7,7 @@ struct DocumentStateTests {
         let document = ArtDocument.stageOneDefault()
 
         #expect(document.canvasSize == .stageOneDefault)
+        #expect(document.metadata.accumulatedPaintingTime == 0)
         #expect(document.layers.count == 2)
         #expect(document.layers.first?.name == LayerRecord.defaultBackgroundLayerName)
         #expect(document.layers.first?.isLocked == false)

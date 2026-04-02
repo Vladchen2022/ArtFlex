@@ -89,7 +89,8 @@ final class IdeationSessionState: ObservableObject {
                 workspaceStore: store,
                 metalContext: metalContext,
                 layerSurfaceStore: surfaceStore,
-                sharedMetalServices: sharedMetalServices
+                sharedMetalServices: sharedMetalServices,
+                drawingStatsController: hostViewModel.drawingStatsController
             )
             let branchViewModel = WorkspaceViewModel(
                 bootstrap: bootstrap,
