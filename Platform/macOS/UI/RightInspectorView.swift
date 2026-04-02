@@ -164,6 +164,7 @@ struct RightInspectorView: View {
     @State private var draggedLayerID: LayerID?
     @State private var editingLayerID: LayerID?
     @State private var editingLayerName = ""
+    @State private var showsLayerOpacityPopover = false
     @State private var layerDropInsertionIndex: Int?
     @FocusState private var focusedLayerNameFieldID: LayerID?
     @State private var isTipImageDropTarget = false
@@ -264,12 +265,6 @@ struct RightInspectorView: View {
 
     private var brushSection: some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 8) {
-                inspectorButton("存为笔刷") {
-                    viewModel.saveCurrentBrushPreset()
-                }
-            }
-
             // ⚡️ 优化：使用防抖滑块，拖动结束时才更新
             OptimizedCompactSlider(
                 title: "间距",
@@ -349,20 +344,18 @@ struct RightInspectorView: View {
             )
 
             HStack(spacing: 8) {
-                HStack(spacing: 8) {
-                    Text("不透明度封顶")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(Color.white.opacity(0.88))
-
-                    Toggle(
-                        "",
-                        isOn: Binding(
-                            get: { viewModel.workspace.toolSession.brush.buildMode == .opacityCap },
-                            set: { viewModel.setBrushBuildMode($0 ? .opacityCap : .buildUp) }
-                        )
+                compactIconButton(
+                    systemImage: "square.3.layers.3d.top.filled",
+                    tooltip: viewModel.workspace.toolSession.brush.buildMode == .opacityCap
+                        ? "关闭不透明度封顶"
+                        : "开启不透明度封顶",
+                    isSelected: viewModel.workspace.toolSession.brush.buildMode == .opacityCap
+                ) {
+                    viewModel.setBrushBuildMode(
+                        viewModel.workspace.toolSession.brush.buildMode == .opacityCap
+                            ? .buildUp
+                            : .opacityCap
                     )
-                    .labelsHidden()
-                    .toggleStyle(.switch)
                 }
 
                 compactIconButton(
@@ -391,6 +384,12 @@ struct RightInspectorView: View {
                         .padding(14)
                         .frame(width: 280)
                         .background(Color(nsColor: .windowBackgroundColor))
+                }
+
+                Spacer(minLength: 0)
+
+                compactIconButton(systemImage: "square.and.arrow.down", tooltip: "存为笔刷") {
+                    viewModel.saveCurrentBrushPreset()
                 }
             }
         }
@@ -617,25 +616,8 @@ struct RightInspectorView: View {
 
     private var layersSection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            if let activeLayer = activeLayer {
-                // ⚡️ 优化：图层透明度需要实时预览，使用专用组件
-                OptimizedLabeledSlider(
-                    title: "不透明度",
-                    valueText: "\(Int(activeLayer.opacity * 100))%",
-                    value: Binding(
-                        get: { Double(activeLayer.opacity) },
-                        set: { _ in }  // 通过 onCommit 处理
-                    ),
-                    range: 0...1,
-                    onCommit: { newOpacity in
-                        viewModel.setActiveLayerOpacity(Float(newOpacity))
-                        viewModel.endActiveLayerOpacityChange()
-                    }
-                )
-            }
-
             ScrollView {
-                VStack(alignment: .leading, spacing: 8) {
+                VStack(alignment: .leading, spacing: 6) {
                     layerDropInsertionStrip(at: 0)
 
                     ForEach(Array(displayLayers.enumerated()), id: \.element.id) { index, layer in
@@ -662,6 +644,21 @@ struct RightInspectorView: View {
 
                 Spacer(minLength: 0)
 
+                layerActionButton(
+                    systemImage: "circle.lefthalf.filled",
+                    tooltip: activeLayerOpacityButtonTooltip
+                ) {
+                    showsLayerOpacityPopover.toggle()
+                }
+                .popover(isPresented: $showsLayerOpacityPopover, arrowEdge: .bottom) {
+                    layerOpacityPopover
+                        .padding(14)
+                        .frame(width: 250)
+                        .background(Color(nsColor: .windowBackgroundColor))
+                }
+
+                Spacer(minLength: 0)
+
                 layerActionButton(systemImage: "arrow.down.doc", tooltip: "向下合并") {
                     viewModel.mergeActiveLayerDown()
                 }
@@ -682,19 +679,11 @@ struct RightInspectorView: View {
 
             HStack(spacing: 8) {
                 compactToolButton(
-                    systemImage: "circle.fill",
-                    tooltip: "圆形绘制",
-                    isSelected: tipPaintMode == .round
+                    systemImage: tipPaintMode == .round ? "circle.fill" : "eraser.fill",
+                    tooltip: tipPaintMode == .round ? "切换到擦除笔尖" : "切换到圆形绘制",
+                    isSelected: true
                 ) {
-                    tipPaintMode = .round
-                }
-
-                compactToolButton(
-                    systemImage: "eraser.fill",
-                    tooltip: "擦除笔尖",
-                    isSelected: tipPaintMode == .eraser
-                ) {
-                    tipPaintMode = .eraser
+                    tipPaintMode = tipPaintMode == .round ? .eraser : .round
                 }
 
                 compactToolButton(
@@ -715,8 +704,9 @@ struct RightInspectorView: View {
                 }
 
                 compactTextActionButton(
-                    title: "组合笔尖…",
-                    tooltip: "打开组合笔尖参数"
+                    title: "组合笔尖",
+                    tooltip: "打开组合笔尖参数",
+                    minWidth: 92
                 ) {
                     let brush = viewModel.workspace.toolSession.brush
                     let activeTool = viewModel.workspace.toolSession.activeTool
@@ -2051,6 +2041,7 @@ struct RightInspectorView: View {
     private func compactTextActionButton(
         title: String,
         tooltip: String,
+        minWidth: CGFloat? = nil,
         action: @escaping () -> Void
     ) -> some View {
         Button(action: action) {
@@ -2058,7 +2049,9 @@ struct RightInspectorView: View {
                 .font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(Color.white.opacity(0.96))
                 .lineLimit(1)
+                .minimumScaleFactor(0.95)
                 .frame(maxWidth: .infinity, minHeight: 30)
+                .frame(minWidth: minWidth)
                 .padding(.horizontal, 10)
                 .background(
                     RoundedRectangle(cornerRadius: 8)
@@ -2157,12 +2150,12 @@ struct RightInspectorView: View {
         let isActive = layer.id == viewModel.workspace.document.activeLayerID
         let isEditing = editingLayerID == layer.id
 
-        return HStack {
+        return HStack(spacing: 7) {
             layerThumbnailView(for: layer)
 
             Circle()
                 .fill(isActive ? Color.accentColor : Color.white.opacity(0.25))
-                .frame(width: 8, height: 8)
+                .frame(width: 6, height: 6)
 
             if isEditing {
                 TextField("", text: Binding(
@@ -2170,7 +2163,7 @@ struct RightInspectorView: View {
                     set: { editingLayerName = $0 }
                 ))
                 .textFieldStyle(.plain)
-                .font(.system(size: 13, weight: .semibold))
+                .font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(Color.white.opacity(0.92))
                 .focused($focusedLayerNameFieldID, equals: layer.id)
                 .onSubmit {
@@ -2183,6 +2176,7 @@ struct RightInspectorView: View {
                 }
             } else {
                 Text(layer.name)
+                    .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(Color.white.opacity(0.92))
                     .lineLimit(1)
                     .onTapGesture(count: 2) {
@@ -2196,9 +2190,9 @@ struct RightInspectorView: View {
                 viewModel.setLayerVisibility(layer.id, isVisible: !layer.isVisible)
             } label: {
                 Image(systemName: layer.isVisible ? "eye" : "eye.slash")
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(layer.isVisible ? Color.white.opacity(0.72) : Color.accentColor)
-                    .frame(width: 18, height: 18)
+                    .frame(width: 16, height: 16)
             }
             .buttonStyle(.plain)
             .help(layer.isVisible ? "隐藏图层" : "显示图层")
@@ -2210,10 +2204,10 @@ struct RightInspectorView: View {
                     RoundedRectangle(cornerRadius: 4)
                         .fill(layer.locksTransparentPixels ? Color.cyan.opacity(0.95) : Color.white.opacity(0.08))
                     Text("α")
-                        .font(.system(size: 11, weight: .bold))
+                        .font(.system(size: 10, weight: .bold))
                         .foregroundStyle(layer.locksTransparentPixels ? Color.black.opacity(0.88) : Color.white.opacity(0.72))
                 }
-                .frame(width: 18, height: 18)
+                .frame(width: 16, height: 16)
             }
             .buttonStyle(.plain)
             .help(layer.locksTransparentPixels ? "解除锁定透明像素" : "锁定透明像素")
@@ -2222,20 +2216,20 @@ struct RightInspectorView: View {
                 viewModel.toggleLayerLock(layer.id)
             } label: {
                 Image(systemName: layer.isLocked ? "lock.fill" : "lock.open")
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(layer.isLocked ? Color.orange : Color.white.opacity(0.72))
-                    .frame(width: 18, height: 18)
+                    .frame(width: 16, height: 16)
             }
             .buttonStyle(.plain)
             .help(layer.isLocked ? "解锁图层" : "锁定图层")
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 8)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
         .background(
             (isActive ? Color.accentColor.opacity(0.18) : Color.clear),
-            in: RoundedRectangle(cornerRadius: 8)
+            in: RoundedRectangle(cornerRadius: 7)
         )
-        .contentShape(RoundedRectangle(cornerRadius: 8))
+        .contentShape(RoundedRectangle(cornerRadius: 7))
         .onTapGesture {
             viewModel.selectLayer(layer.id)
         }
@@ -2249,7 +2243,7 @@ struct RightInspectorView: View {
     private func layerDropInsertionStrip(at insertionIndex: Int) -> some View {
         Rectangle()
             .fill(Color.clear)
-            .frame(height: 12)
+            .frame(height: 8)
             .overlay(alignment: .center) {
                 RoundedRectangle(cornerRadius: 2)
                     .fill(Color.accentColor.opacity(layerDropInsertionIndex == insertionIndex ? 0.95 : 0))
@@ -2299,23 +2293,61 @@ struct RightInspectorView: View {
     }
 
     @ViewBuilder
+    private var layerOpacityPopover: some View {
+        if let activeLayer {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack {
+                    Text("图层不透明度")
+                        .font(.system(size: 13, weight: .bold))
+                    Spacer()
+                    Text("\(Int(activeLayer.opacity * 100))%")
+                        .font(.system(size: 12, weight: .bold).monospacedDigit())
+                        .foregroundStyle(Color.secondary)
+                }
+
+                LayerOpacitySlider(
+                    layer: activeLayer,
+                    onPreview: { newOpacity in
+                        viewModel.beginActiveLayerOpacityChange()
+                        viewModel.setActiveLayerOpacity(newOpacity)
+                    },
+                    onCommit: { newOpacity in
+                        viewModel.beginActiveLayerOpacityChange()
+                        viewModel.setActiveLayerOpacity(newOpacity)
+                        viewModel.endActiveLayerOpacityChange()
+                    }
+                )
+            }
+        } else {
+            Text("没有可调整的不透明度图层")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(Color.secondary)
+        }
+    }
+
+    private var activeLayerOpacityButtonTooltip: String {
+        guard let activeLayer else { return "图层不透明度" }
+        return "图层不透明度 \(Int(activeLayer.opacity * 100))%"
+    }
+
+    @ViewBuilder
     private func layerThumbnailView(for layer: LayerRecord) -> some View {
         ZStack {
             RoundedRectangle(cornerRadius: 6)
                 .fill(Color.white.opacity(0.06))
-                .frame(width: 30, height: 30)
+                .frame(width: 24, height: 24)
 
             if let image = viewModel.layerThumbnail(for: layer.id, maxDimension: 36) {
                 Image(decorative: image, scale: 1)
                     .resizable()
                     .interpolation(.high)
                     .scaledToFit()
-                    .frame(width: 26, height: 26)
+                    .frame(width: 20, height: 20)
                     .clipShape(RoundedRectangle(cornerRadius: 4))
             } else {
                 RoundedRectangle(cornerRadius: 4)
                     .fill(Color.white.opacity(0.18))
-                    .frame(width: 18, height: 18)
+                    .frame(width: 14, height: 14)
             }
         }
     }
