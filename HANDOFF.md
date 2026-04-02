@@ -2,7 +2,7 @@
 
 ## 1. 项目一句话说明
 
-ArtFlex 是旧版 `BrushCanvas` 的 Metal-first 重构版 macOS 绘图软件；当前一轮性能主线与小范围 UX/perf follow-up 已经收尾，项目已转入新功能开发。当前最新已完成的新功能节点是 Dual Tip / 复合笔尖到 `invert`，并继续补齐了主/次笔尖来源语义、三格示意同源性收口，以及最近一轮“普通画笔卡顿 / 偶发不出笔 / 导入笔尖白边”修复；当前下一阶段范围已经确认，将继续推进共享 `tip image library` / `secondary image tip` 资产系统、`renderer-backed preview`、更复杂随机 / `spacing`、以及更宽真实绘制 gate，`smudge` 明确不在本轮范围内。`secondary image tip` 目前已完成三步：archive-backed 资产边界、imported-image 来源说明与 preview fit 的 model-driven 收口，以及共享 `tip image library` 当前基线；`renderer-backed preview` 第一刀也已落地；更复杂随机 / `spacing` 的前五刀 `secondary size jitter`、`secondary angle jitter`、`secondary spacing phase`、`secondary spacing phase jitter` 与 `secondary scatter jitter` 也已落地。
+ArtFlex 是旧版 `BrushCanvas` 的 Metal-first 重构版 macOS 绘图软件；当前一轮性能主线与小范围 UX/perf follow-up 已经收尾，项目已转入新功能开发。当前最新已完成并定住的小功能是 `绘画数据` 工具；较大的阶段性能力仍是 Dual Tip / 复合笔尖到 `invert`，并继续补齐了主/次笔尖来源语义、三格示意同源性收口，以及最近一轮“普通画笔卡顿 / 偶发不出笔 / 导入笔尖白边”修复。当前下一阶段范围已经确认，将继续推进共享 `tip image library` / `secondary image tip` 资产系统、`renderer-backed preview`、更复杂随机 / `spacing`、以及更宽真实绘制 gate，`smudge` 明确不在本轮范围内。`secondary image tip` 目前已完成三步：archive-backed 资产边界、imported-image 来源说明与 preview fit 的 model-driven 收口，以及共享 `tip image library` 当前基线；`renderer-backed preview` 第一刀也已落地；更复杂随机 / `spacing` 的前五刀 `secondary size jitter`、`secondary angle jitter`、`secondary spacing phase`、`secondary spacing phase jitter` 与 `secondary scatter jitter` 也已落地。
 
 本轮范围判断已收缩：组合笔尖后续默认只继续推进“明显影响画笔效果”的能力，以及“预览 / 保存恢复 / 资料库稳定性”这类必做收口；轻微影响画笔效果的新随机 / `spacing` 小参数默认暂停。
 
@@ -31,6 +31,10 @@ ArtFlex 是旧版 `BrushCanvas` 的 Metal-first 重构版 macOS 绘图软件；�
 `快照对比` 当前也新增了一条已冻结的布局规则：右侧 2x2 对比卡片必须以完整画布为目标显示，不允许因为卡片内部额外留白和高度估算误差，让底部两格被裁掉。当前实现已按卡片总高度反推可用预览高度，并去掉对比卡片里不必要的纵向留白。
 
 `快照对比` 当前还新增了一条 GPU-first 性能基线：保存快照时的可见图层合成已改走 `StageOneCanvasPresenter` 的 GPU 合成链，而不是旧的 CPU `mergeVisible` 路径；保存后和进入对比界面时，已保存快照的大预览会后台预热，减少首次进入对比和首次拖入对比位时的等待。当前这条工具线先定住，不再主动继续改动。
+
+当前还新增了一个轻量 `绘画数据` 工具。左侧工具栏会提供 `绘画数据` 按钮，点击后弹出一个较大的 popover，而不是常驻侧板。面板当前显示：`总绘画时长 / 当前作品用时 / 今日绘画时长 / streak / 最近里程碑 / 过去 12 周热力图`。计时策略当前冻结为 `活跃笔触计时 + 60 秒宽限期`：只有 `画笔 / 橡皮 / 涂抹` 产生真实笔触输入时才会开始或继续计时；停笔后 60 秒无新笔触才正式结算。切图层、缩放、拖面板等非绘画操作不计时；应用进入后台或窗口失去焦点会立即暂停，不再继续吃宽限期。
+
+这条 `绘画数据` 功能当前刻意避开渲染热路径：不读纹理、不做快照、不碰 Metal 绘制主链。全局统计会写入 `Application Support/ArtFlex/drawing-stats.json`；当前作品时长则写进文档 metadata 的 `drawingStatsID + accumulatedPaintingTime`。因此用户即使先在未命名画布上画一段时间、之后才第一次保存，这段未保存时期的时长也会在保存后并入同一作品；下次打开继续画时，会继续沿这份累计时长往上加。`方案试探` 分支当前也会共享同一个 drawing stats service，避免四分支同步推进时把同一段创作时间重复记多次。
 
 `移动变形` 当前也新增了一条已冻结的预览规则：无选区 whole-layer 自由变形在拖动预览阶段，就必须围绕被移动像素的内容中心旋转，不允许预览先按整张画布中心旋转、回车确认后才变对。当前预览链与最终提交链已经对齐到同一个内容中心 pivot。
 

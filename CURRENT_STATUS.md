@@ -1,6 +1,6 @@
 # ArtFlex 当前状态
 
-- 当前阶段：Dual Tip 已完成到 `invert`，并补齐了主/次笔尖来源语义、preview 收口，以及最近一轮普通画笔卡顿 / 偶发不出笔 / 导入笔尖白边修复；下一阶段已开始推进，其中 `secondary image tip` 已先完成 archive / persistence 边界、imported-image model-driven 收口，以及共享 `tip image library` 当前基线；`renderer-backed preview` 第一刀也已落地；更复杂随机 / `spacing` 的前五刀 `secondary size jitter`、`secondary angle jitter`、`secondary spacing phase`、`secondary spacing phase jitter` 与 `secondary scatter jitter` 也已落地
+- 当前阶段：Dual Tip 已完成到 `invert`，并补齐了主/次笔尖来源语义、preview 收口，以及最近一轮普通画笔卡顿 / 偶发不出笔 / 导入笔尖白边修复；下一阶段已开始推进，其中 `secondary image tip` 已先完成 archive / persistence 边界、imported-image model-driven 收口，以及共享 `tip image library` 当前基线；`renderer-backed preview` 第一刀也已落地；更复杂随机 / `spacing` 的前五刀 `secondary size jitter`、`secondary angle jitter`、`secondary spacing phase`、`secondary spacing phase jitter` 与 `secondary scatter jitter` 也已落地。当前最新补入并已定住的小功能是 `绘画数据` 工具
 - 当前画布视口交互新增两项：顶部工具栏已提供 `锁定画布` 切换；开启后主画布不能缩放、旋转或移动。当前缩放也已改为优先围绕最近一次笔尖 / hover 所在的画布位置进行，而不是固定围绕画布中心
 - `直线渐变 / 扇形渐变` 当前都已按新主线重建：入口恢复到 `油漆桶` 子菜单，`Shift + G` 可在 `油漆桶 / 直线渐变 / 扇形渐变` 之间切换；其中 `直线渐变` 采用单段 `A→B` 拖拽、拉完自动确认的线性投影模型，`扇形渐变` 则采用“用户从 A 点出发画出一个不可见 lasso 区域，再在该区域内以 A 为圆心生成径向渐变”的模型；两者当前都已支持当前选区裁剪并在松手后自动确认
 - `直线渐变 / 扇形渐变 / 套索填充` 当前都已接通顶部工具栏 `不透明度` 滑块；当前滑块值会直接乘进填充 alpha，不再各自维护单独的不透明度默认
@@ -16,6 +16,9 @@
 - `快照对比` 当前也已收口一条布局规则：右侧 2x2 对比卡片会按卡片总高度反推预览可用高度，不再让底部两格因为额外留白和高度估算偏差而被裁掉；4 个预览位现在都以完整画布为目标
 - `快照对比` 当前还已切到更轻的 GPU-first 基线：保存快照时的可见图层合成已改走 `StageOneCanvasPresenter` 的 GPU 合成链，而不是旧的 CPU mergeVisible 路径；保存后和进入对比界面时，已保存快照的大预览也会后台预热，减少首次拖入对比位时的等待
 - `方案试探` 当前也已切到更轻的 GPU-first 基线：进入方案试探时，不再先抓 CPU history snapshot 再恢复到 4 个分支，而是直接从当前 `WorkspaceState` 起步，并通过 GPU texture copy 克隆各图层纹理到 4 个 branch；“应用于主画布”时，也不再做 CPU per-pixel diff，而是改成 GPU visible delta render 后再生成 delta snapshot
+- 当前已新增 `绘画数据` 工具：左侧工具栏会提供一个 `绘画数据` 按钮，点击后弹出较大的统计 popover，显示 `总绘画时长 / 当前作品用时 / 今日绘画时长 / streak / 最近里程碑 / 过去 12 周热力图`
+- `绘画数据` 当前采用 `活跃笔触计时 + 60 秒宽限期`：只要 `画笔 / 橡皮 / 涂抹` 产生真实笔触输入，就会进入活跃计时；停笔后 60 秒内若无新笔触则结算并写入统计；切图层、缩放、平移等非绘画操作不会计时，应用失焦或窗口失去焦点会立即暂停
+- `绘画数据` 当前持久化分为两层：全局累计数据写入 `Application Support/ArtFlex/drawing-stats.json`；当前作品用时写入文档 metadata 的 `drawingStatsID + accumulatedPaintingTime`，因此未保存画布在第一次保存前的绘画时间也会在保存后继续归入同一作品
 - `移动变形` 当前也已收口一条预览规则：无选区 whole-layer 自由变形在预览阶段会直接围绕被移动像素的内容中心旋转，不再临时按整张画布中心旋转；预览与回车确认后的最终提交当前已对齐
 - 当前范围判断已调整：组合笔尖后续默认只继续推进“明显影响画笔效果”的能力，以及“预览 / 保存恢复 / 资料库稳定性”这类必做收口；轻微影响画笔效果的新随机 / `spacing` 小参数默认暂停
 - 当前代码状态：`multiply`、`subtract`、`intersect` 已可用；`secondary scatter`、`secondary scatter jitter`、`secondary angle offset`、`secondary invert`、`secondary size jitter`、`secondary angle jitter`、`secondary spacing phase`、`secondary spacing phase jitter` 已进入真实绘制；当前基线和主绘制路径未被打坏
