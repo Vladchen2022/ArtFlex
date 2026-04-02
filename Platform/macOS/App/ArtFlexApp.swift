@@ -135,6 +135,7 @@ final class ArtFlexApplicationDelegate: NSObject, NSApplicationDelegate, NSWindo
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
+        applyApplicationIconIfAvailable()
 
         DispatchQueue.main.async {
             if let window = NSApp.windows.first {
@@ -183,5 +184,17 @@ final class ArtFlexApplicationDelegate: NSObject, NSApplicationDelegate, NSWindo
         window.titlebarAppearsTransparent = true
         window.backgroundColor = chromeColor
         window.isOpaque = true
+    }
+
+    @MainActor
+    private func applyApplicationIconIfAvailable() {
+        guard
+            let iconURL = Bundle.module.url(forResource: "AppIcon", withExtension: "png"),
+            let iconImage = NSImage(contentsOf: iconURL)
+        else {
+            return
+        }
+
+        NSApp.applicationIconImage = iconImage
     }
 }

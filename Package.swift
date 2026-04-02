@@ -31,6 +31,9 @@ let package = Package(
                 "STAGE1_STATUS.md",
                 "README.md",
                 "Tests"
+            ],
+            resources: [
+                .process("Platform/macOS/Resources")
             ]
         )
     ]
