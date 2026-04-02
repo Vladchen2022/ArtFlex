@@ -137,6 +137,7 @@ final class WorkspaceViewModel: ObservableObject {
     @Published private(set) var ideationSession: IdeationSessionState?
     @Published private(set) var snapshotCompareSession: SnapshotCompareSessionState?
     @Published private(set) var quickColorPickerState: QuickColorPickerState?
+    @Published private(set) var isWorkspaceChromeHidden = false
     private var currentProjectURL: URL?
     private var shouldResumeTimelapseAfterIdeation = false
     private var shouldResumeTimelapseAfterSnapshotCompare = false
@@ -4955,6 +4956,10 @@ final class WorkspaceViewModel: ObservableObject {
         try bootstrap.exportController.exportPNG(
             request: ExportRequest(fileURL: fileURL)
         )
+    }
+
+    func toggleWorkspaceChromeVisibility() {
+        isWorkspaceChromeHidden.toggle()
     }
 
     var ideationActiveBranchViewModel: WorkspaceViewModel? {

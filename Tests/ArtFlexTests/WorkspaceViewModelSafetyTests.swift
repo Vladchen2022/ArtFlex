@@ -114,6 +114,18 @@ struct WorkspaceViewModelSafetyTests {
         harness.viewModel.toggleLayerTransparentPixelLock(activeLayerID)
         #expect(harness.viewModel.workspace.document.layers.first(where: { $0.id == activeLayerID })?.locksTransparentPixels == true)
     }
+
+    @Test
+    @MainActor
+    func toggleWorkspaceChromeVisibilityUpdatesUIState() throws {
+        let harness = try BrushEditingBoundaryHarness()
+
+        #expect(harness.viewModel.isWorkspaceChromeHidden == false)
+        harness.viewModel.toggleWorkspaceChromeVisibility()
+        #expect(harness.viewModel.isWorkspaceChromeHidden == true)
+        harness.viewModel.toggleWorkspaceChromeVisibility()
+        #expect(harness.viewModel.isWorkspaceChromeHidden == false)
+    }
 }
 
 @MainActor

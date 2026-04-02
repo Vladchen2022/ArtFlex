@@ -2,32 +2,44 @@ import AppKit
 import SwiftUI
 
 struct WindowKeyboardBridge: NSViewRepresentable {
-    @ObservedObject var viewModel: WorkspaceViewModel
+    private let keyDownEventHandler: (NSEvent) -> Bool
+    private let keyUpEventHandler: (NSEvent) -> Bool
+    private let flagsChangedEventHandler: (NSEvent) -> Bool
+
+    init(viewModel: WorkspaceViewModel) {
+        self.keyDownEventHandler = { [weak viewModel] event in
+            viewModel?.handleKeyDown(event) ?? false
+        }
+        self.keyUpEventHandler = { [weak viewModel] event in
+            viewModel?.handleKeyUp(event) ?? false
+        }
+        self.flagsChangedEventHandler = { [weak viewModel] event in
+            viewModel?.handleModifierFlagsChanged(event.modifierFlags) ?? false
+        }
+    }
+
+    init(
+        keyDownHandler: @escaping (NSEvent) -> Bool,
+        keyUpHandler: @escaping (NSEvent) -> Bool,
+        flagsChangedHandler: @escaping (NSEvent) -> Bool
+    ) {
+        self.keyDownEventHandler = keyDownHandler
+        self.keyUpEventHandler = keyUpHandler
+        self.flagsChangedEventHandler = flagsChangedHandler
+    }
 
     func makeNSView(context: Context) -> KeyboardBridgeView {
         let view = KeyboardBridgeView()
-        view.keyDownHandler = { [weak viewModel] event in
-            viewModel?.handleKeyDown(event) ?? false
-        }
-        view.keyUpHandler = { [weak viewModel] event in
-            viewModel?.handleKeyUp(event) ?? false
-        }
-        view.flagsChangedHandler = { [weak viewModel] event in
-            viewModel?.handleModifierFlagsChanged(event.modifierFlags) ?? false
-        }
+        view.keyDownHandler = keyDownEventHandler
+        view.keyUpHandler = keyUpEventHandler
+        view.flagsChangedHandler = flagsChangedEventHandler
         return view
     }
 
     func updateNSView(_ nsView: KeyboardBridgeView, context: Context) {
-        nsView.keyDownHandler = { [weak viewModel] event in
-            viewModel?.handleKeyDown(event) ?? false
-        }
-        nsView.keyUpHandler = { [weak viewModel] event in
-            viewModel?.handleKeyUp(event) ?? false
-        }
-        nsView.flagsChangedHandler = { [weak viewModel] event in
-            viewModel?.handleModifierFlagsChanged(event.modifierFlags) ?? false
-        }
+        nsView.keyDownHandler = keyDownEventHandler
+        nsView.keyUpHandler = keyUpEventHandler
+        nsView.flagsChangedHandler = flagsChangedEventHandler
         nsView.activateIfNeeded()
     }
 }
