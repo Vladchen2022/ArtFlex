@@ -129,6 +129,31 @@ struct WorkspaceViewModelSafetyTests {
 
     @Test
     @MainActor
+    func fillAtPointStartsDrawingStatsTracking() throws {
+        let harness = try BrushEditingBoundaryHarness()
+
+        #expect(harness.viewModel.drawingStatsController.snapshot.isActiveSessionRunning == false)
+        harness.viewModel.fillAtPoint(.init(x: 12, y: 12))
+        #expect(harness.viewModel.drawingStatsController.snapshot.isActiveSessionRunning == true)
+    }
+
+    @Test
+    @MainActor
+    func rectangleSelectionStartsDrawingStatsTracking() throws {
+        let harness = try BrushEditingBoundaryHarness()
+
+        harness.viewModel.selectTool(.rectangleSelection)
+        #expect(harness.viewModel.drawingStatsController.snapshot.isActiveSessionRunning == false)
+
+        harness.viewModel.beginSelection(kind: .rectangle, at: .init(x: 8, y: 8))
+        harness.viewModel.updateSelection(to: .init(x: 24, y: 24))
+        harness.viewModel.commitSelection(at: .init(x: 24, y: 24))
+
+        #expect(harness.viewModel.drawingStatsController.snapshot.isActiveSessionRunning == true)
+    }
+
+    @Test
+    @MainActor
     func selectingCreativeShapeGeneratorSourceSwitchesToLassoTool() throws {
         let harness = try BrushEditingBoundaryHarness()
 
@@ -149,6 +174,18 @@ struct WorkspaceViewModelSafetyTests {
         harness.viewModel.setSelectedColor(.init(red: 0.2, green: 0.6, blue: 0.9, alpha: 1))
 
         #expect(harness.viewModel.workspace.creativeShapeGenerator.selectedSource == .currentColor)
+    }
+
+    @Test
+    @MainActor
+    func togglingCreativeGeneratorTipImageModeUpdatesWorkspaceState() throws {
+        let harness = try BrushEditingBoundaryHarness()
+
+        #expect(harness.viewModel.workspace.creativeShapeGenerator.usesTipImageShapes == false)
+        harness.viewModel.setCreativeShapeGeneratorUsesTipImageShapes(true)
+        #expect(harness.viewModel.workspace.creativeShapeGenerator.usesTipImageShapes == true)
+        harness.viewModel.setCreativeShapeGeneratorUsesTipImageShapes(false)
+        #expect(harness.viewModel.workspace.creativeShapeGenerator.usesTipImageShapes == false)
     }
 
     @Test

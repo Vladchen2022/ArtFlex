@@ -1462,6 +1462,13 @@ final class WorkspaceViewModel: ObservableObject {
         refreshLightweight()
     }
 
+    func setCreativeShapeGeneratorUsesTipImageShapes(_ isEnabled: Bool) {
+        bootstrap.workspaceStore.updateCreativeShapeGenerator { generator in
+            generator.usesTipImageShapes = isEnabled
+        }
+        refreshLightweight()
+    }
+
     func setCreativeShapeGeneratorFeatherProbability(_ value: Float) {
         bootstrap.workspaceStore.updateCreativeShapeGenerator { generator in
             generator.featherProbability = min(max(value, 0), 1)
@@ -1926,6 +1933,7 @@ final class WorkspaceViewModel: ObservableObject {
             bootstrap.strokeEngine.resetBrushPipelineState()
             refresh(invalidatedLayerIDs: [layerID])
             noteCanvasContentChanged()
+            recordDrawingActivityIfNeeded()
             showStatus(.init(kind: .success, message: "已填充区域"))
             relayIdeationOperation(.fillAtPoint(point))
         } catch {
@@ -3266,6 +3274,7 @@ final class WorkspaceViewModel: ObservableObject {
             samePathPreviewDebugShape = nil
             samePathCommittedDebugShape = nil
             refreshLightweight()
+            recordDrawingActivityIfNeeded()
             showStatus(.init(kind: .success, message: "已更新选区"))
             triggerCreativeShapeGeneratorIfNeeded(for: preferredShape)
 
@@ -3337,6 +3346,7 @@ final class WorkspaceViewModel: ObservableObject {
             samePathPreviewDebugShape = nil
             samePathCommittedDebugShape = nil
             refreshLightweight()
+            recordDrawingActivityIfNeeded()
             showStatus(.init(kind: .success, message: "已更新选区"))
             triggerCreativeShapeGeneratorIfNeeded(for: preferredShape)
 
@@ -3425,6 +3435,7 @@ final class WorkspaceViewModel: ObservableObject {
         if nextCommittedShape == nil {
             showStatus(.init(kind: .info, message: "选区为空"))
         } else {
+            recordDrawingActivityIfNeeded()
             showStatus(.init(kind: .success, message: "已更新选区"))
         }
     }
@@ -4571,6 +4582,7 @@ final class WorkspaceViewModel: ObservableObject {
         noteCanvasContentChanged()
         refresh(invalidatedLayerIDs: [layerID])
         isApplyingGradientCommit = false
+        recordDrawingActivityIfNeeded()
         transformLogger.debug("[gradient] applyGpuMs=\(gpuMs, privacy: .public) sessionTool=linear")
         showStatus(.init(kind: .success, message: "已应用直线渐变"))
         handleDeferredGradientActionIfNeeded()
@@ -4608,6 +4620,7 @@ final class WorkspaceViewModel: ObservableObject {
         bootstrap.strokeEngine.endStroke()
         refresh(invalidatedLayerIDs: [layerID])
         noteCanvasContentChanged()
+        recordDrawingActivityIfNeeded()
         showStatus(.init(kind: .success, message: "已应用直线"))
         return true
     }
@@ -4677,6 +4690,7 @@ final class WorkspaceViewModel: ObservableObject {
         noteCanvasContentChanged()
         refresh(invalidatedLayerIDs: [layerID])
         isApplyingGradientCommit = false
+        recordDrawingActivityIfNeeded()
         showStatus(.init(kind: .success, message: "已应用扇形渐变"))
         handleDeferredGradientActionIfNeeded()
     }
@@ -6763,6 +6777,11 @@ final class WorkspaceViewModel: ObservableObject {
         syncCommittedDrawingStatsIntoActiveDocumentMetadata()
     }
 
+    private func recordDrawingActivityIfNeeded() {
+        guard !isApplyingMirroredIdeationOperation else { return }
+        drawingStatsController.recordPaintingActivity()
+    }
+
     func showDrawingStatsMilestone(_ milestone: DrawingStatsMilestone) {
         showStatus(.init(kind: .success, message: "绘画里程碑：\(milestone.title)"))
     }
@@ -6834,6 +6853,7 @@ final class WorkspaceViewModel: ObservableObject {
         )
         let capturedSelection = selectionShape
         let capturedState = generatorState
+        let capturedTipImageLibrary = workspace.tipImageLibrary
         let runtimeSeed = UInt64(DispatchTime.now().uptimeNanoseconds)
 
         Task.detached(priority: .userInitiated) { [weak self] in
@@ -6842,6 +6862,7 @@ final class WorkspaceViewModel: ObservableObject {
                 selectionShape: capturedSelection,
                 state: capturedState,
                 colorContext: colorContext,
+                tipImageLibrary: capturedTipImageLibrary,
                 runtimeSeed: runtimeSeed
             ) else {
                 return
@@ -6911,7 +6932,7 @@ final class WorkspaceViewModel: ObservableObject {
             into: renderPassDescriptor,
             commandBuffer: commandBuffer,
             canvasSize: CanvasSize(width: texture.width, height: texture.height),
-            shapes: plan.shapes,
+            plan: plan,
             alphaLockTexture: alphaLockTexture
         )
 
@@ -6931,6 +6952,7 @@ final class WorkspaceViewModel: ObservableObject {
                 self.bootstrap.strokeEngine.resetBrushPipelineState()
                 self.noteCanvasContentChanged()
                 self.refresh(invalidatedLayerIDs: [layerID])
+                self.recordDrawingActivityIfNeeded()
                 self.showStatus(.init(kind: .success, message: "已生成创意图形"))
             }
         }
@@ -7041,6 +7063,7 @@ final class WorkspaceViewModel: ObservableObject {
         bootstrap.strokeEngine.resetBrushPipelineState()
         noteCanvasContentChanged()
         refresh(invalidatedLayerIDs: [layerID])
+        recordDrawingActivityIfNeeded()
         showStatus(.init(kind: .success, message: successMessage))
         return true
     }
@@ -7155,6 +7178,7 @@ final class WorkspaceViewModel: ObservableObject {
             let uiConfirmStartNs = DispatchTime.now().uptimeNanoseconds
             refresh()
             noteCanvasContentChanged()
+            recordDrawingActivityIfNeeded()
             showStatus(.init(kind: .success, message: successMessage))
             let uiConfirmMs = Double(DispatchTime.now().uptimeNanoseconds - uiConfirmStartNs) / 1_000_000
             PerformanceAuditStore.shared.recordDuration("WorkspaceViewModel.applyPixelOperation.uiConfirm", ms: uiConfirmMs)

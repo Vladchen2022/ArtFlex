@@ -266,7 +266,6 @@ struct RightInspectorView: View {
             HStack(spacing: 8) {
                 generatorSourceButton(
                     title: CreativeShapeGeneratorColorSource.currentColor.title,
-                    systemImage: "paintpalette.fill",
                     isSelected: generator.selectedSource == .currentColor
                 ) {
                     viewModel.selectCreativeShapeGeneratorSource(.currentColor)
@@ -274,7 +273,6 @@ struct RightInspectorView: View {
 
                 generatorSourceButton(
                     title: CreativeShapeGeneratorColorSource.paletteBlocks.title,
-                    systemImage: "square.grid.3x3.fill",
                     isSelected: generator.selectedSource == .paletteBlocks
                 ) {
                     viewModel.selectCreativeShapeGeneratorSource(.paletteBlocks)
@@ -340,6 +338,26 @@ struct RightInspectorView: View {
                 range: 0...1,
                 onCommit: { viewModel.setCreativeShapeGeneratorColorJitter(Float($0)) }
             )
+
+            HStack(spacing: 8) {
+                Text("笔尖图形模式")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(Color.white.opacity(0.82))
+
+                Spacer(minLength: 8)
+
+                Toggle(
+                    "",
+                    isOn: Binding(
+                        get: { generator.usesTipImageShapes },
+                        set: { viewModel.setCreativeShapeGeneratorUsesTipImageShapes($0) }
+                    )
+                )
+                .labelsHidden()
+                .toggleStyle(.switch)
+                .scaleEffect(0.82, anchor: .trailing)
+            }
+            .padding(.top, 2)
         }
         .frame(maxWidth: .infinity, alignment: .topLeading)
     }
@@ -348,7 +366,6 @@ struct RightInspectorView: View {
         let generator = viewModel.workspace.creativeShapeGenerator
         return generatorSourceButton(
             title: viewModel.isCreativeShapeGeneratorImageLoading ? "分析中…" : CreativeShapeGeneratorColorSource.externalImage.title,
-            systemImage: generator.importedImage == nil ? "photo.badge.plus" : "photo.on.rectangle.angled",
             isSelected: generator.selectedSource == .externalImage,
             isDisabled: viewModel.isCreativeShapeGeneratorImageLoading
         ) {
@@ -358,26 +375,19 @@ struct RightInspectorView: View {
 
     private func generatorSourceButton(
         title: String,
-        systemImage: String,
         isSelected: Bool,
         isDisabled: Bool = false,
         action: @escaping () -> Void
     ) -> some View {
         Button(action: action) {
-            VStack(spacing: 6) {
-                Image(systemName: systemImage)
-                    .font(.system(size: 12, weight: .bold))
-                    .foregroundStyle(isSelected ? Color.white : Color.white.opacity(isDisabled ? 0.42 : 0.92))
-
-                Text(title)
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(Color.white.opacity(isDisabled ? 0.42 : 0.92))
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.82)
-            }
-            .frame(maxWidth: .infinity, minHeight: 46)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 6)
+            Text(title)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(Color.white.opacity(isDisabled ? 0.42 : 0.92))
+                .lineLimit(1)
+                .minimumScaleFactor(0.82)
+                .frame(maxWidth: .infinity, minHeight: 30)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 2)
             .background(
                 RoundedRectangle(cornerRadius: 10)
                     .fill(isSelected ? Color.accentColor.opacity(0.16) : Color.white.opacity(0.05))

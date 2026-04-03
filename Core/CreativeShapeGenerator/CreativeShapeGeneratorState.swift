@@ -36,6 +36,7 @@ struct CreativeShapeGeneratorImageSource: Codable, Sendable, Equatable {
 
 struct CreativeShapeGeneratorState: Codable, Sendable, Equatable {
     var selectedSource: CreativeShapeGeneratorColorSource?
+    var usesTipImageShapes: Bool
     var featherProbability: Float
     var shapeCharacteristic: Float
     var shapeSize: Float
@@ -45,6 +46,7 @@ struct CreativeShapeGeneratorState: Codable, Sendable, Equatable {
 
     static let stageOneDefault = CreativeShapeGeneratorState(
         selectedSource: nil,
+        usesTipImageShapes: false,
         featherProbability: 0.2,
         shapeCharacteristic: 0.4,
         shapeSize: 0.45,
@@ -55,6 +57,7 @@ struct CreativeShapeGeneratorState: Codable, Sendable, Equatable {
 
     enum CodingKeys: String, CodingKey {
         case selectedSource
+        case usesTipImageShapes
         case featherProbability
         case shapeCharacteristic
         case shapeSize
@@ -65,6 +68,7 @@ struct CreativeShapeGeneratorState: Codable, Sendable, Equatable {
 
     init(
         selectedSource: CreativeShapeGeneratorColorSource?,
+        usesTipImageShapes: Bool = false,
         featherProbability: Float = 0.2,
         shapeCharacteristic: Float,
         shapeSize: Float,
@@ -73,6 +77,7 @@ struct CreativeShapeGeneratorState: Codable, Sendable, Equatable {
         importedImage: CreativeShapeGeneratorImageSource?
     ) {
         self.selectedSource = selectedSource
+        self.usesTipImageShapes = usesTipImageShapes
         self.featherProbability = featherProbability
         self.shapeCharacteristic = shapeCharacteristic
         self.shapeSize = shapeSize
@@ -85,6 +90,7 @@ struct CreativeShapeGeneratorState: Codable, Sendable, Equatable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         let defaults = Self.stageOneDefault
         selectedSource = try container.decodeIfPresent(CreativeShapeGeneratorColorSource.self, forKey: .selectedSource)
+        usesTipImageShapes = try container.decodeIfPresent(Bool.self, forKey: .usesTipImageShapes) ?? defaults.usesTipImageShapes
         featherProbability = try container.decodeIfPresent(Float.self, forKey: .featherProbability) ?? defaults.featherProbability
         shapeCharacteristic = try container.decodeIfPresent(Float.self, forKey: .shapeCharacteristic) ?? defaults.shapeCharacteristic
         shapeSize = try container.decodeIfPresent(Float.self, forKey: .shapeSize) ?? defaults.shapeSize

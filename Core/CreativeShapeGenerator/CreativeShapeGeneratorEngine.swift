@@ -1,14 +1,31 @@
 import Foundation
 
+struct CreativeShapeGeneratorTipMaterial: Sendable, Equatable {
+    var id: BrushTipImageAssetID
+    var maskData: Data
+}
+
+struct CreativeShapeGeneratedTipStamp: Sendable, Equatable {
+    var materialID: BrushTipImageAssetID
+    var size: CanvasPoint
+    var rotationDegrees: Float
+}
+
+enum CreativeShapeGeneratedGeometry: Sendable, Equatable {
+    case polygon([CanvasPoint])
+    case tipStamp(CreativeShapeGeneratedTipStamp)
+}
+
 struct CreativeShapeGeneratedShape: Sendable, Equatable {
     var center: CanvasPoint
-    var boundaryPoints: [CanvasPoint]
+    var geometry: CreativeShapeGeneratedGeometry
     var color: RGBAColor
     var featherAmount: Float
 }
 
 struct CreativeShapeGeneratorPlan: Sendable, Equatable {
     var shapes: [CreativeShapeGeneratedShape]
+    var tipMaterials: [CreativeShapeGeneratorTipMaterial]
     var seed: UInt64
 }
 
@@ -98,11 +115,17 @@ private struct CreativeShapeGeneratorRandom {
     }
 }
 
+private struct CreativeShapeSamplingContext {
+    var candidatePoints: [CanvasPoint]
+    var jitterRadius: CanvasPoint
+}
+
 enum CreativeShapeGeneratorEngine {
     static func makePlan(
         selectionShape: SelectionShape,
         state: CreativeShapeGeneratorState,
         colorContext: CreativeShapeGeneratorColorContext,
+        tipImageLibrary: TipImageLibraryState = .empty,
         runtimeSeed: UInt64
     ) -> CreativeShapeGeneratorPlan? {
         guard state.isEnabled else { return nil }
@@ -113,6 +136,7 @@ enum CreativeShapeGeneratorEngine {
             selectionShape: clampedShape,
             state: state,
             colorContext: colorContext,
+            tipImageLibrary: tipImageLibrary,
             runtimeSeed: runtimeSeed
         )
         var random = CreativeShapeGeneratorRandom(seed: seed)
@@ -122,9 +146,21 @@ enum CreativeShapeGeneratorEngine {
         let baseCount = resolvedBaseCount(shapeSize: state.shapeSize)
         let countVariation = resolvedCountVariation(shapeJitter: state.shapeJitter, random: &random)
         let resolvedCount = max(1, Int((Double(baseCount) * countVariation).rounded()))
+        let samplingContext = makeSamplingContext(
+            for: clampedShape,
+            targetPointBudget: max(256, min(2_304, resolvedCount * 48))
+        )
+        let tipMaterials = state.usesTipImageShapes
+            ? resolvedTipMaterials(
+                from: tipImageLibrary,
+                shapeCharacteristic: state.shapeCharacteristic,
+                random: &random
+            )
+            : []
+        let usesTipMaterials = tipMaterials.isEmpty == false
         let clusterAnchors = resolvedClusterAnchors(
             count: resolvedCount,
-            selectionShape: clampedShape,
+            samplingContext: samplingContext,
             shapeJitter: state.shapeJitter,
             random: &random
         )
@@ -137,29 +173,58 @@ enum CreativeShapeGeneratorEngine {
                 index: index,
                 totalCount: resolvedCount,
                 selectionShape: clampedShape,
+                samplingContext: samplingContext,
                 clusterAnchors: clusterAnchors,
                 shapeJitter: state.shapeJitter,
                 random: &random
             ) else { continue }
-            let feature = clamp(
-                state.shapeCharacteristic + (random.float(in: -0.55...0.55) * state.shapeJitter),
-                0,
-                1
-            )
+
             let diameter = resolvedDiameter(
                 shortestSide: shortestSide,
                 shapeSize: state.shapeSize,
                 shapeJitter: state.shapeJitter,
                 random: &random
             )
-            let boundaryPoints = organicShapePoints(
-                center: center,
-                diameter: diameter,
-                organicity: feature,
+
+            let geometry: CreativeShapeGeneratedGeometry
+            if usesTipMaterials,
+               let tipMaterial = resolvedTipMaterial(
+                forShapeAt: index,
+                from: tipMaterials,
                 shapeJitter: state.shapeJitter,
                 random: &random
-            )
-            guard boundaryPoints.count >= 3 else { continue }
+               ) {
+                geometry = .tipStamp(
+                    CreativeShapeGeneratedTipStamp(
+                        materialID: tipMaterial.id,
+                        size: resolvedTipStampSize(
+                            diameter: diameter,
+                            shapeJitter: state.shapeJitter,
+                            random: &random
+                        ),
+                        rotationDegrees: resolvedTipStampRotation(
+                            shapeJitter: state.shapeJitter,
+                            random: &random
+                        )
+                    )
+                )
+            } else {
+                let feature = clamp(
+                    state.shapeCharacteristic + (random.float(in: -0.55...0.55) * state.shapeJitter),
+                    0,
+                    1
+                )
+                let boundaryPoints = organicShapePoints(
+                    center: center,
+                    diameter: diameter,
+                    organicity: feature,
+                    shapeJitter: state.shapeJitter,
+                    random: &random
+                )
+                guard boundaryPoints.count >= 3 else { continue }
+                geometry = .polygon(boundaryPoints)
+            }
+
             let selectionRelativePoint = normalizedPoint(center, in: bounds)
             let color = resolvedColor(
                 for: state,
@@ -173,7 +238,7 @@ enum CreativeShapeGeneratorEngine {
             shapes.append(
                 CreativeShapeGeneratedShape(
                     center: center,
-                    boundaryPoints: boundaryPoints,
+                    geometry: geometry,
                     color: color,
                     featherAmount: resolvedFeatherAmount(
                         featherProbability: state.featherProbability,
@@ -190,8 +255,86 @@ enum CreativeShapeGeneratorEngine {
         guard shapes.isEmpty == false else { return nil }
         return CreativeShapeGeneratorPlan(
             shapes: reordered(shapes: shapes, shapeJitter: state.shapeJitter, random: &random),
+            tipMaterials: tipMaterials,
             seed: seed
         )
+    }
+
+    private static func resolvedTipMaterials(
+        from tipImageLibrary: TipImageLibraryState,
+        shapeCharacteristic: Float,
+        random: inout CreativeShapeGeneratorRandom
+    ) -> [CreativeShapeGeneratorTipMaterial] {
+        var available = tipImageLibrary.items.compactMap { item -> CreativeShapeGeneratorTipMaterial? in
+            guard let maskData = item.maskData, isRenderableTipMaskData(maskData) else { return nil }
+            return CreativeShapeGeneratorTipMaterial(id: item.id, maskData: maskData)
+        }
+        available.sort { $0.id < $1.id }
+        guard available.isEmpty == false else { return [] }
+
+        let maxMaterialCount = min(10, available.count)
+        let clampedCharacteristic = clamp(shapeCharacteristic, 0, 1)
+        let desiredMaterialCount = max(
+            1,
+            Int((1 + (clampedCharacteristic * Float(maxMaterialCount - 1))).rounded())
+        )
+
+        for index in 0..<available.count {
+            let swapIndex = random.int(in: index...(available.count - 1))
+            if swapIndex != index {
+                available.swapAt(index, swapIndex)
+            }
+        }
+        return Array(available.prefix(desiredMaterialCount))
+    }
+
+    private static func resolvedTipMaterial(
+        forShapeAt index: Int,
+        from materials: [CreativeShapeGeneratorTipMaterial],
+        shapeJitter: Float,
+        random: inout CreativeShapeGeneratorRandom
+    ) -> CreativeShapeGeneratorTipMaterial? {
+        guard materials.isEmpty == false else { return nil }
+        if materials.count == 1 {
+            return materials[0]
+        }
+
+        let baseIndex = index % materials.count
+        let jitter = clamp(shapeJitter, 0, 1)
+        if jitter > 0.0001,
+           random.bool(probability: lerp(0.12, 0.46, jitter)) {
+            return materials[random.int(in: 0...(materials.count - 1))]
+        }
+
+        return materials[baseIndex]
+    }
+
+    private static func isRenderableTipMaskData(_ data: Data) -> Bool {
+        guard data.isEmpty == false else { return false }
+        let side = Int(Double(data.count).squareRoot())
+        return side > 1 && side * side == data.count
+    }
+
+    private static func resolvedTipStampSize(
+        diameter: Float,
+        shapeJitter: Float,
+        random: inout CreativeShapeGeneratorRandom
+    ) -> CanvasPoint {
+        let jitter = clamp(shapeJitter, 0, 1)
+        let widthScale = lerp(1, random.float(in: 0.84...1.28), jitter)
+        let heightScale = lerp(1, random.float(in: 0.84...1.28), jitter)
+        return CanvasPoint(
+            x: Double(max(diameter * widthScale, 1)),
+            y: Double(max(diameter * heightScale, 1))
+        )
+    }
+
+    private static func resolvedTipStampRotation(
+        shapeJitter: Float,
+        random: inout CreativeShapeGeneratorRandom
+    ) -> Float {
+        let range = lerp(36, 180, clamp(shapeJitter, 0, 1))
+        return random.float(in: -range...range)
     }
 
     private static func resolvedFeatherAmount(
@@ -213,6 +356,7 @@ enum CreativeShapeGeneratorEngine {
         selectionShape: SelectionShape,
         state: CreativeShapeGeneratorState,
         colorContext: CreativeShapeGeneratorColorContext,
+        tipImageLibrary: TipImageLibraryState,
         runtimeSeed: UInt64
     ) -> UInt64 {
         if state.shapeJitter > 0.0001 {
@@ -252,6 +396,18 @@ enum CreativeShapeGeneratorEngine {
             builder.mix(importedImage.width)
             builder.mix(importedImage.height)
             builder.mix(importedImage.rgbaPixels)
+        }
+        if state.usesTipImageShapes {
+            let sortedTipIDs = tipImageLibrary.items
+                .compactMap { item -> BrushTipImageAssetID? in
+                    guard let maskData = item.maskData, isRenderableTipMaskData(maskData) else { return nil }
+                    return item.id
+                }
+                .sorted()
+            builder.mix(sortedTipIDs.count)
+            for id in sortedTipIDs.prefix(64) {
+                builder.mix(id.rawValue)
+            }
         }
         return builder.state
     }
@@ -303,7 +459,7 @@ enum CreativeShapeGeneratorEngine {
 
     private static func resolvedClusterAnchors(
         count: Int,
-        selectionShape: SelectionShape,
+        samplingContext: CreativeShapeSamplingContext,
         shapeJitter: Float,
         random: inout CreativeShapeGeneratorRandom
     ) -> [CanvasPoint] {
@@ -312,7 +468,11 @@ enum CreativeShapeGeneratorEngine {
         var anchors: [CanvasPoint] = []
         anchors.reserveCapacity(clusterCount)
         for _ in 0..<clusterCount {
-            if let point = randomPoint(in: selectionShape, random: &random) {
+            if let point = randomPoint(
+                in: samplingContext,
+                validatingWith: nil,
+                random: &random
+            ) {
                 anchors.append(point)
             }
         }
@@ -323,6 +483,7 @@ enum CreativeShapeGeneratorEngine {
         index: Int,
         totalCount: Int,
         selectionShape: SelectionShape,
+        samplingContext: CreativeShapeSamplingContext,
         clusterAnchors: [CanvasPoint],
         shapeJitter: Float,
         random: inout CreativeShapeGeneratorRandom
@@ -333,7 +494,11 @@ enum CreativeShapeGeneratorEngine {
             totalCount > 1,
             random.bool(probability: lerp(0.18, 0.86, shapeJitter))
         else {
-            return randomPoint(in: selectionShape, random: &random)
+            return randomPoint(
+                in: samplingContext,
+                validatingWith: selectionShape,
+                random: &random
+            )
         }
 
         let anchor = clusterAnchors[min(index % clusterAnchors.count, clusterAnchors.count - 1)]
@@ -351,29 +516,131 @@ enum CreativeShapeGeneratorEngine {
             }
         }
 
-        return randomPoint(in: selectionShape, random: &random)
+        return randomPoint(
+            in: samplingContext,
+            validatingWith: selectionShape,
+            random: &random
+        )
     }
 
     private static func randomPoint(
-        in selectionShape: SelectionShape,
+        in samplingContext: CreativeShapeSamplingContext,
+        validatingWith selectionShape: SelectionShape?,
         random: inout CreativeShapeGeneratorRandom
     ) -> CanvasPoint? {
-        let bounds = selectionShape.bounds
-        for _ in 0..<36 {
-            let point = CanvasPoint(
-                x: random.double(in: bounds.minX...bounds.maxX),
-                y: random.double(in: bounds.minY...bounds.maxY)
-            )
-            if selectionShape.contains(point) {
-                return point
+        guard samplingContext.candidatePoints.isEmpty == false else { return nil }
+
+        let candidateIndex = random.int(in: 0...(samplingContext.candidatePoints.count - 1))
+        let candidate = samplingContext.candidatePoints[candidateIndex]
+        if let selectionShape {
+            for _ in 0..<12 {
+                let point = CanvasPoint(
+                    x: candidate.x + random.double(in: -samplingContext.jitterRadius.x...samplingContext.jitterRadius.x),
+                    y: candidate.y + random.double(in: -samplingContext.jitterRadius.y...samplingContext.jitterRadius.y)
+                )
+                if selectionShape.contains(point) {
+                    return point
+                }
             }
         }
 
-        let fallback = CanvasPoint(
-            x: bounds.origin.x + (bounds.size.x * 0.5),
-            y: bounds.origin.y + (bounds.size.y * 0.5)
+        return candidate
+    }
+
+    private static func makeSamplingContext(
+        for selectionShape: SelectionShape,
+        targetPointBudget: Int
+    ) -> CreativeShapeSamplingContext {
+        let bounds = selectionShape.bounds
+        guard bounds.isEmpty == false else {
+            return CreativeShapeSamplingContext(
+                candidatePoints: [],
+                jitterRadius: CanvasPoint(x: 0, y: 0)
+            )
+        }
+
+        let normalizedBudget = max(144, min(targetPointBudget, 2_304))
+        let aspectRatio = max(bounds.size.x, 1) / max(bounds.size.y, 1)
+        let estimatedColumns = Int((sqrt(Double(normalizedBudget) * aspectRatio)).rounded(.up))
+        let estimatedRows = Int((Double(normalizedBudget) / Double(max(estimatedColumns, 1))).rounded(.up))
+        let sampleColumns = min(max(estimatedColumns, 12), 48)
+        let sampleRows = min(max(estimatedRows, 12), 48)
+        let stepX = max(bounds.size.x / Double(sampleColumns), 0.5)
+        let stepY = max(bounds.size.y / Double(sampleRows), 0.5)
+        var candidatePoints: [CanvasPoint] = []
+        candidatePoints.reserveCapacity(sampleColumns * sampleRows / 3)
+
+        for row in 0..<sampleRows {
+            for column in 0..<sampleColumns {
+                let point = CanvasPoint(
+                    x: bounds.minX + ((Double(column) + 0.5) * stepX),
+                    y: bounds.minY + ((Double(row) + 0.5) * stepY)
+                )
+                if selectionShape.contains(point) {
+                    candidatePoints.append(point)
+                }
+            }
+        }
+
+        if candidatePoints.isEmpty,
+           let centroid = interiorCentroid(for: selectionShape),
+           selectionShape.contains(centroid) {
+            candidatePoints.append(centroid)
+        }
+
+        if candidatePoints.isEmpty {
+            let fallback = CanvasPoint(
+                x: bounds.origin.x + (bounds.size.x * 0.5),
+                y: bounds.origin.y + (bounds.size.y * 0.5)
+            )
+            if selectionShape.contains(fallback) {
+                candidatePoints.append(fallback)
+            }
+        }
+
+        return CreativeShapeSamplingContext(
+            candidatePoints: candidatePoints,
+            jitterRadius: CanvasPoint(x: stepX * 0.45, y: stepY * 0.45)
         )
-        return selectionShape.contains(fallback) ? fallback : nil
+    }
+
+    private static func interiorCentroid(for selectionShape: SelectionShape) -> CanvasPoint? {
+        switch selectionShape.kind {
+        case .rectangle, .ellipse:
+            return CanvasPoint(
+                x: selectionShape.bounds.origin.x + (selectionShape.bounds.size.x * 0.5),
+                y: selectionShape.bounds.origin.y + (selectionShape.bounds.size.y * 0.5)
+            )
+        case .lasso:
+            return polygonCentroid(points: selectionShape.pathPoints)
+        case .mask, .composite:
+            return nil
+        }
+    }
+
+    private static func polygonCentroid(points: [CanvasPoint]) -> CanvasPoint? {
+        guard points.count >= 3 else { return nil }
+
+        var signedArea = 0.0
+        var centroidX = 0.0
+        var centroidY = 0.0
+
+        for index in 0..<points.count {
+            let current = points[index]
+            let next = points[(index + 1) % points.count]
+            let cross = (current.x * next.y) - (next.x * current.y)
+            signedArea += cross
+            centroidX += (current.x + next.x) * cross
+            centroidY += (current.y + next.y) * cross
+        }
+
+        signedArea *= 0.5
+        guard abs(signedArea) > 0.000001 else { return nil }
+        let factor = 1.0 / (6.0 * signedArea)
+        return CanvasPoint(
+            x: centroidX * factor,
+            y: centroidY * factor
+        )
     }
 
     private static func normalizedPoint(_ point: CanvasPoint, in bounds: CanvasRect) -> CanvasPoint {
