@@ -178,6 +178,34 @@ struct WorkspaceViewModelSafetyTests {
 
     @Test
     @MainActor
+    func navigatorZoomPercentUpdatesViewportScale() throws {
+        let harness = try BrushEditingBoundaryHarness()
+
+        harness.viewModel.setNavigatorZoomPercent(250)
+
+        #expect(abs(harness.viewModel.workspace.viewport.zoomScale - 2.5) < 0.0001)
+        #expect(abs(harness.viewModel.navigatorZoomPercent - 250) < 0.0001)
+    }
+
+    @Test
+    @MainActor
+    func navigatorSceneSnapshotUsesDefaultViewportAndHidesSelection() throws {
+        let harness = try BrushEditingBoundaryHarness()
+
+        harness.viewModel.updateCanvasViewportSize(.init(width: 1200, height: 900))
+        harness.viewModel.setNavigatorZoomPercent(180)
+        harness.viewModel.selectTool(.rectangleSelection)
+        harness.viewModel.beginSelection(kind: .rectangle, at: .init(x: 8, y: 8))
+        harness.viewModel.updateSelection(to: .init(x: 24, y: 24))
+        harness.viewModel.commitSelection(at: .init(x: 24, y: 24))
+
+        let snapshot = harness.viewModel.navigatorSceneSnapshot
+        #expect(snapshot.renderSnapshot.viewport == .stageOneDefault)
+        #expect(snapshot.selectionShape == nil)
+    }
+
+    @Test
+    @MainActor
     func togglingCreativeGeneratorTipImageModeUpdatesWorkspaceState() throws {
         let harness = try BrushEditingBoundaryHarness()
 

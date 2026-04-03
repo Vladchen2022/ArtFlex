@@ -1961,6 +1961,86 @@ final class WorkspaceViewModel: ObservableObject {
         latestCanvasViewportSize = size
     }
 
+    var navigatorSceneSnapshot: CanvasSceneSnapshot {
+        var snapshot = sceneSnapshot
+        snapshot.renderSnapshot.viewport = .stageOneDefault
+        snapshot.renderSnapshot.viewportRevision = 0
+        snapshot.selectionShape = nil
+        snapshot.selectionRevision = 0
+        return snapshot
+    }
+
+    var navigatorZoomPercent: Double {
+        workspace.viewport.zoomScale * 100
+    }
+
+    func setNavigatorZoomPercent(_ percent: Double) {
+        let clampedPercent = min(max(percent, 5), 3200)
+        setViewportZoomScale(clampedPercent / 100)
+    }
+
+    func navigatorVisibleCanvasPolygon() -> [CanvasPoint]? {
+        guard
+            latestCanvasViewportSize.width > 0,
+            latestCanvasViewportSize.height > 0,
+            workspace.document.canvasSize.width > 0,
+            workspace.document.canvasSize.height > 0
+        else {
+            return nil
+        }
+
+        let canvasSize = workspace.document.canvasSize
+        let presentation = CanvasPresentationBuilder.makePresentation(
+            canvasSize: canvasSize,
+            viewport: workspace.viewport,
+            availableWidth: latestCanvasViewportSize.width,
+            availableHeight: latestCanvasViewportSize.height
+        )
+
+        let displayWidth = presentation.documentDisplaySize.x
+        let displayHeight = presentation.documentDisplaySize.y
+        let zoomScale = max(presentation.documentZoomScale, 0.01)
+        guard displayWidth > 0, displayHeight > 0 else { return nil }
+
+        let documentCenter = CanvasPoint(
+            x: presentation.documentOrigin.x + (displayWidth / 2),
+            y: presentation.documentOrigin.y + (displayHeight / 2)
+        )
+        let rotationRadians = workspace.viewport.rotationDegrees * .pi / 180
+        let inverseRotation = -rotationRadians
+        let cosRotation = cos(inverseRotation)
+        let sinRotation = sin(inverseRotation)
+
+        let viewportCorners = [
+            CanvasPoint(x: 0, y: 0),
+            CanvasPoint(x: latestCanvasViewportSize.width, y: 0),
+            CanvasPoint(x: latestCanvasViewportSize.width, y: latestCanvasViewportSize.height),
+            CanvasPoint(x: 0, y: latestCanvasViewportSize.height)
+        ]
+
+        return viewportCorners.map { point in
+            let translatedX = point.x - documentCenter.x
+            let translatedY = point.y - documentCenter.y
+
+            let unrotatedX = (translatedX * cosRotation) - (translatedY * sinRotation)
+            let unrotatedY = (translatedX * sinRotation) + (translatedY * cosRotation)
+
+            let unscaledX = unrotatedX / zoomScale
+            let unscaledY = unrotatedY / zoomScale
+
+            let localX = unscaledX + (displayWidth / 2)
+            let localY = unscaledY + (displayHeight / 2)
+
+            let canvasX = (localX / displayWidth) * Double(canvasSize.width)
+            let canvasY = (localY / displayHeight) * Double(canvasSize.height)
+
+            return CanvasPoint(
+                x: min(max(canvasX, 0), Double(canvasSize.width)),
+                y: min(max(canvasY, 0), Double(canvasSize.height))
+            )
+        }
+    }
+
     func zoomIn() {
         setViewportZoomScale(workspace.viewport.zoomScale * 1.2)
     }

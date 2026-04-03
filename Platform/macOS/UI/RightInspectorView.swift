@@ -151,6 +151,11 @@ private enum TipImageLibrarySheetTarget: String, Identifiable {
 }
 
 struct RightInspectorView: View {
+    private enum TopInspectorTab: String {
+        case tipShape = "笔尖形状设计"
+        case navigator = "导航器"
+    }
+
     @ObservedObject var viewModel: WorkspaceViewModel
     @State private var showsPressureCurveEditor = false
     @State private var showsPressureSizeCurveEditor = false
@@ -187,6 +192,8 @@ struct RightInspectorView: View {
     @State private var dualTipPopoverPreviewRequestKey: String = ""
     @State private var secondaryTipEditorPreviewImage: CGImage?
     @State private var secondaryTipEditorPreviewRequestKey: String = ""
+    @State private var topInspectorTab: TopInspectorTab = .tipShape
+    @State private var navigatorZoomPercentText = "100"
 
     var body: some View {
         GeometryReader { proxy in
@@ -216,9 +223,7 @@ struct RightInspectorView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
 
                     VStack(spacing: 12) {
-                        InspectorPanel(title: "笔尖形状设计") {
-                            tipShapeSection
-                        }
+                        tipNavigatorPanel
                         .overlay {
                             RoundedRectangle(cornerRadius: 12)
                                 .stroke(
@@ -250,6 +255,12 @@ struct RightInspectorView: View {
         .frame(width: 560)
         .frame(maxHeight: .infinity)
         .background(Color(red: 0.12, green: 0.12, blue: 0.13))
+        .onAppear {
+            syncNavigatorZoomPercentText()
+        }
+        .onChange(of: viewModel.workspace.viewport.zoomScale) { _, _ in
+            syncNavigatorZoomPercentText()
+        }
         .sheet(isPresented: $showsSecondaryTipEditor) {
             secondaryTipEditorSheet
         }
@@ -360,6 +371,141 @@ struct RightInspectorView: View {
             .padding(.top, 2)
         }
         .frame(maxWidth: .infinity, alignment: .topLeading)
+    }
+
+    private var tipNavigatorPanel: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                topInspectorTabButton(.tipShape)
+                topInspectorTabButton(.navigator)
+            }
+
+            Group {
+                if topInspectorTab == .tipShape {
+                    tipShapeSection
+                } else {
+                    navigatorSection
+                }
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity)
+        .background(
+            RoundedRectangle(cornerRadius: 12)
+                .fill(Color.white.opacity(0.06))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12)
+                        .stroke(Color.white.opacity(0.06), lineWidth: 1)
+                )
+        )
+    }
+
+    private func topInspectorTabButton(_ tab: TopInspectorTab) -> some View {
+        let isSelected = topInspectorTab == tab
+        return Button {
+            topInspectorTab = tab
+        } label: {
+            Text(tab.rawValue)
+                .font(.system(size: 12, weight: .bold))
+                .foregroundStyle(Color.white.opacity(isSelected ? 0.96 : 0.72))
+                .frame(maxWidth: .infinity, minHeight: 28)
+                .padding(.horizontal, 10)
+                .background(
+                    RoundedRectangle(cornerRadius: 10)
+                        .fill(isSelected ? Color.accentColor.opacity(0.24) : Color.white.opacity(0.04))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10)
+                        .stroke(
+                            isSelected ? Color.accentColor.opacity(0.86) : Color.white.opacity(0.08),
+                            lineWidth: 1
+                        )
+                )
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var navigatorSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            NavigatorPreviewPanel(
+                sceneSnapshot: viewModel.navigatorSceneSnapshot,
+                visibleCanvasPolygon: viewModel.navigatorVisibleCanvasPolygon(),
+                canvasSize: viewModel.workspace.document.canvasSize,
+                metalContext: viewModel.metalContext,
+                layerSurfaceStore: viewModel.layerSurfaceStore
+            )
+
+            HStack(spacing: 8) {
+                Button {
+                    viewModel.setNavigatorZoomPercent(100)
+                    syncNavigatorZoomPercentText()
+                } label: {
+                    Image(systemName: "arrow.counterclockwise")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundStyle(Color.white.opacity(0.92))
+                        .frame(width: 28, height: 24)
+                        .background(
+                            RoundedRectangle(cornerRadius: 8)
+                                .fill(Color.white.opacity(0.10))
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8)
+                                .stroke(Color.white.opacity(0.08), lineWidth: 1)
+                        )
+                }
+                .buttonStyle(.plain)
+                .help("恢复 100%")
+
+                Slider(
+                    value: Binding(
+                        get: { viewModel.navigatorZoomPercent },
+                        set: { viewModel.setNavigatorZoomPercent($0) }
+                    ),
+                    in: 5...3200
+                )
+
+                HStack(spacing: 4) {
+                    TextField("", text: $navigatorZoomPercentText)
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(Color.white.opacity(0.92))
+                        .multilineTextAlignment(.trailing)
+                        .frame(width: 44)
+                        .onSubmit {
+                            commitNavigatorZoomPercentText()
+                        }
+
+                    Text("%")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(Color.white.opacity(0.66))
+                }
+                .padding(.horizontal, 8)
+                .frame(height: 24)
+                .background(
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(Color.black.opacity(0.18))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8)
+                        .stroke(Color.white.opacity(0.08), lineWidth: 1)
+                )
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func syncNavigatorZoomPercentText() {
+        navigatorZoomPercentText = "\(Int(viewModel.navigatorZoomPercent.rounded()))"
+    }
+
+    private func commitNavigatorZoomPercentText() {
+        let trimmed = navigatorZoomPercentText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let parsed = Double(trimmed), parsed.isFinite else {
+            syncNavigatorZoomPercentText()
+            return
+        }
+        viewModel.setNavigatorZoomPercent(parsed)
+        syncNavigatorZoomPercentText()
     }
 
     private var creativeShapeGeneratorExternalImageButton: some View {
@@ -4141,6 +4287,136 @@ private struct InspectorPanel<Content: View>: View {
                         .stroke(Color.white.opacity(0.06), lineWidth: 1)
                 )
         )
+    }
+}
+
+private struct NavigatorPreviewPanel: View {
+    let sceneSnapshot: CanvasSceneSnapshot
+    let visibleCanvasPolygon: [CanvasPoint]?
+    let canvasSize: CanvasSize
+    let metalContext: MetalDeviceContext
+    let layerSurfaceStore: StageOneLayerSurfaceStore
+
+    var body: some View {
+        GeometryReader { proxy in
+            let presentation = CanvasPresentationBuilder.makePresentation(
+                canvasSize: canvasSize,
+                viewport: .stageOneDefault,
+                availableWidth: proxy.size.width,
+                availableHeight: proxy.size.height,
+                padding: 10
+            )
+            let documentCenter = CanvasPoint(
+                x: presentation.documentOrigin.x + (presentation.documentDisplaySize.x / 2),
+                y: presentation.documentOrigin.y + (presentation.documentDisplaySize.y / 2)
+            )
+
+            ZStack(alignment: .topLeading) {
+                RoundedRectangle(cornerRadius: 10)
+                    .fill(Color.black.opacity(0.14))
+
+                MetalCanvasHost(
+                    sceneSnapshot: sceneSnapshot,
+                    transformSelectionShape: nil,
+                    metalContext: metalContext,
+                    layerSurfaceStore: layerSurfaceStore,
+                    activeTool: .brush,
+                    viewportRotationDegrees: 0,
+                    strokeResetToken: 0,
+                    brushSize: 1,
+                    isPanModeActive: false,
+                    isTransformingSelection: false,
+                    isFreeTransformDragging: false,
+                    activeFreeTransformInteractionMode: nil,
+                    transformPreview: .identity,
+                    linearGradientPreview: nil,
+                    sectorGradientPreview: nil,
+                    gradientPreviewColor: .white,
+                    gradientColorJitterAmount: 0,
+                    onStrokeBegan: {},
+                    onStrokeInput: { _ in },
+                    onStrokeEnded: {},
+                    onFlushPendingBrushWork: { _ in nil },
+                    onDrainPendingBrushCommitsInteractively: { _ in },
+                    resolveBrushDisplayTexture: { _ in nil },
+                    onEyedropperSample: { _ in },
+                    onBucketFill: { _ in },
+                    onCanvasClick: { _, _, _ in },
+                    onCanvasHover: { _ in },
+                    onSelectionBegan: { _, _ in },
+                    onSelectionChanged: { _, _ in },
+                    onSelectionEnded: { _, _ in },
+                    onSelectionMouseDown: { _, _ in .idle },
+                    onMoveSelectionPreview: { _, _ in },
+                    onCommitSelectionMove: {},
+                    onTransformBegan: { _, _, _ in },
+                    onTransformChanged: { _, _ in },
+                    onTransformEnded: { _, _ in },
+                    onTransformOffsetChanged: { _ in },
+                    onCanvasRotationChanged: { _ in },
+                    onPanModeChanged: { _ in },
+                    onToolShortcut: { _, _ in },
+                    onGradientDragBegan: { _, _ in },
+                    onGradientDragChanged: { _, _ in },
+                    onGradientDragEnded: { _, _ in },
+                    onEnterGradientEditing: {},
+                    onCancelCanvasTool: {},
+                    onApplyGradientSession: {},
+                    onClearSelection: {},
+                    onApplyTransform: {},
+                    onCancelTransform: {},
+                    onAdjustBrushSize: { _ in }
+                )
+                .frame(
+                    width: presentation.documentDisplaySize.x,
+                    height: presentation.documentDisplaySize.y
+                )
+                .position(
+                    x: documentCenter.x,
+                    y: documentCenter.y
+                )
+                .allowsHitTesting(false)
+
+                if let polygon = visibleCanvasPolygon, polygon.count >= 3 {
+                    NavigatorVisibleRegionOverlay(
+                        polygon: polygon,
+                        presentation: presentation,
+                        canvasSize: canvasSize
+                    )
+                    .allowsHitTesting(false)
+                }
+            }
+        }
+        .frame(height: 168)
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .overlay(
+            RoundedRectangle(cornerRadius: 10)
+                .stroke(Color.white.opacity(0.08), lineWidth: 1)
+        )
+    }
+}
+
+private struct NavigatorVisibleRegionOverlay: View {
+    let polygon: [CanvasPoint]
+    let presentation: CanvasPresentation
+    let canvasSize: CanvasSize
+
+    var body: some View {
+        Path { path in
+            guard let first = polygon.first else { return }
+            path.move(to: mappedPoint(for: first))
+            for point in polygon.dropFirst() {
+                path.addLine(to: mappedPoint(for: point))
+            }
+            path.closeSubpath()
+        }
+        .stroke(Color.accentColor.opacity(0.96), lineWidth: 1.5)
+    }
+
+    private func mappedPoint(for point: CanvasPoint) -> CGPoint {
+        let x = presentation.documentOrigin.x + (point.x / Double(canvasSize.width)) * presentation.documentDisplaySize.x
+        let y = presentation.documentOrigin.y + (point.y / Double(canvasSize.height)) * presentation.documentDisplaySize.y
+        return CGPoint(x: x, y: y)
     }
 }
 
