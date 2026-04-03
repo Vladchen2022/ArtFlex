@@ -77,6 +77,11 @@ final class WorkspaceViewModel: ObservableObject {
     private static let maxSavedSnapshotCount = 6
     private static let savedSnapshotThumbnailDimension = 92
     private static let snapshotComparePreviewDimension = 960
+    private static let maxReferenceImageSlotCount = 5
+
+    private static func makeDefaultReferenceImageSlots() -> [ReferenceImageSlotState] {
+        (0..<maxReferenceImageSlotCount).map { ReferenceImageSlotState(id: $0) }
+    }
 
     private static func normalizedAvailableTool(_ tool: ToolKind) -> ToolKind {
         tool
@@ -140,6 +145,11 @@ final class WorkspaceViewModel: ObservableObject {
     @Published private(set) var snapshotCompareSession: SnapshotCompareSessionState?
     @Published private(set) var quickColorPickerState: QuickColorPickerState?
     @Published private(set) var isWorkspaceChromeHidden = false
+    @Published private(set) var referenceImageSlots = WorkspaceViewModel.makeDefaultReferenceImageSlots()
+    @Published private(set) var selectedReferenceImageSlotID: Int?
+    @Published private(set) var referenceImagePreviewColor: RGBAColor?
+    @Published private(set) var referenceImageLoadingSlotID: Int?
+    @Published private(set) var isReferenceImageFloatingPanelPresented = false
     private var currentProjectURL: URL?
     private var shouldResumeTimelapseAfterIdeation = false
     private var shouldResumeTimelapseAfterSnapshotCompare = false
@@ -168,6 +178,7 @@ final class WorkspaceViewModel: ObservableObject {
     private lazy var transformGPUCompositorResult: Result<TransformGPUCompositor, Error> = Result {
         try TransformGPUCompositor(device: bootstrap.metalContext.device)
     }
+    private lazy var referenceImageFloatingPanelController = ReferenceImageFloatingPanelController()
     init(
         bootstrap: AppBootstrap,
         installsZoomKeyboardMonitor: Bool = true,
@@ -1314,6 +1325,173 @@ final class WorkspaceViewModel: ObservableObject {
         }
         activateCreativeShapeGeneratorCurrentColorSourceIfNeeded()
         refreshLightweight()
+    }
+
+    var selectedReferenceImageSlot: ReferenceImageSlotState? {
+        guard let selectedReferenceImageSlotID else { return nil }
+        return referenceImageSlots.first(where: { $0.id == selectedReferenceImageSlotID })
+    }
+
+    var referenceImagePreviewSwiftUIColor: Color {
+        let resolved = referenceImagePreviewColor ?? workspace.toolSession.selectedColor
+        return Color(
+            red: Double(resolved.red),
+            green: Double(resolved.green),
+            blue: Double(resolved.blue),
+            opacity: Double(resolved.alpha)
+        )
+    }
+
+    func activateReferenceImageSlot(_ slotID: Int) {
+        guard referenceImageSlots.indices.contains(slotID) else { return }
+
+        if referenceImageSlots[slotID].asset != nil {
+            selectReferenceImageSlot(slotID)
+            return
+        }
+
+        importReferenceImageIntoSlot(slotID)
+    }
+
+    func clearReferenceImageSlot(_ slotID: Int) {
+        guard referenceImageSlots.indices.contains(slotID) else { return }
+        guard referenceImageSlots[slotID].asset != nil else { return }
+
+        let nextSelectedSlotID: Int?
+        if selectedReferenceImageSlotID == slotID {
+            nextSelectedSlotID = nextLoadedReferenceImageSlotID(afterClearing: slotID)
+        } else {
+            nextSelectedSlotID = selectedReferenceImageSlotID
+        }
+
+        replaceReferenceImageSlotAsset(nil, at: slotID)
+        referenceImagePreviewColor = nil
+        selectedReferenceImageSlotID = nextSelectedSlotID
+
+        if nextSelectedSlotID == nil, isReferenceImageFloatingPanelPresented {
+            closeReferenceImageFloatingPanel()
+        }
+    }
+
+    func clearSelectedReferenceImage() {
+        guard let selectedReferenceImageSlotID else { return }
+        clearReferenceImageSlot(selectedReferenceImageSlotID)
+    }
+
+    func updateSelectedReferenceImageViewport(_ viewport: ReferenceImageViewportState) {
+        guard let selectedReferenceImageSlotID else { return }
+        updateReferenceImageViewport(viewport, for: selectedReferenceImageSlotID)
+    }
+
+    func resetSelectedReferenceImageViewportToFit() {
+        updateSelectedReferenceImageViewport(.fit)
+    }
+
+    func updateReferenceImagePreviewColor(_ color: RGBAColor?) {
+        referenceImagePreviewColor = color
+    }
+
+    func confirmReferenceImagePickedColor(_ color: RGBAColor) {
+        setSelectedColor(color)
+        referenceImagePreviewColor = color
+    }
+
+    func openReferenceImageFloatingPanel() {
+        guard selectedReferenceImageSlot?.asset != nil else {
+            showStatus(.init(kind: .info, message: "请先载入参考图"))
+            return
+        }
+
+        isReferenceImageFloatingPanelPresented = true
+        referenceImageFloatingPanelController.show(for: self)
+    }
+
+    func closeReferenceImageFloatingPanel() {
+        isReferenceImageFloatingPanelPresented = false
+        referenceImageFloatingPanelController.close()
+    }
+
+    func referenceImageFloatingPanelDidClose() {
+        isReferenceImageFloatingPanelPresented = false
+    }
+
+    func replaceReferenceImageSlotAsset(
+        _ asset: ReferenceImageAsset?,
+        at slotID: Int,
+        selectAfterUpdate: Bool = false
+    ) {
+        guard referenceImageSlots.indices.contains(slotID) else { return }
+
+        var updated = referenceImageSlots
+        updated[slotID].asset = asset
+        updated[slotID].viewport = .fit
+        referenceImageSlots = updated
+
+        if selectAfterUpdate {
+            selectReferenceImageSlot(slotID)
+        }
+    }
+
+    private func selectReferenceImageSlot(_ slotID: Int) {
+        guard referenceImageSlots.indices.contains(slotID) else { return }
+        guard referenceImageSlots[slotID].asset != nil else { return }
+        selectedReferenceImageSlotID = slotID
+        referenceImagePreviewColor = nil
+    }
+
+    private func updateReferenceImageViewport(_ viewport: ReferenceImageViewportState, for slotID: Int) {
+        guard referenceImageSlots.indices.contains(slotID) else { return }
+
+        var updated = referenceImageSlots
+        updated[slotID].viewport = viewport
+        referenceImageSlots = updated
+    }
+
+    private func importReferenceImageIntoSlot(_ slotID: Int) {
+        guard let url = bootstrap.filePanelService.presentImageOpenPanel() else {
+            return
+        }
+
+        loadReferenceImage(from: url, into: slotID)
+    }
+
+    private func loadReferenceImage(from url: URL, into slotID: Int) {
+        referenceImageLoadingSlotID = slotID
+        let fileName = url.lastPathComponent
+
+        Task.detached(priority: .userInitiated) { [weak self] in
+            let asset = ReferenceImageAsset.decode(from: url, maxDimension: 2048)
+
+            await MainActor.run {
+                guard let self else { return }
+                self.referenceImageLoadingSlotID = nil
+
+                guard let asset else {
+                    self.showStatus(.init(kind: .error, message: "无法读取参考图"))
+                    return
+                }
+
+                self.replaceReferenceImageSlotAsset(asset, at: slotID, selectAfterUpdate: true)
+                self.showStatus(.init(kind: .success, message: "已载入\(fileName)"))
+            }
+        }
+    }
+
+    private func nextLoadedReferenceImageSlotID(afterClearing slotID: Int) -> Int? {
+        guard referenceImageSlots.isEmpty == false else { return nil }
+
+        let allIDs = referenceImageSlots.map(\.id)
+        guard let startIndex = allIDs.firstIndex(of: slotID) else { return nil }
+
+        for offset in 1..<allIDs.count {
+            let candidateIndex = (startIndex + offset) % allIDs.count
+            let candidateSlot = referenceImageSlots[candidateIndex]
+            if candidateSlot.asset != nil, candidateSlot.id != slotID {
+                return candidateSlot.id
+            }
+        }
+
+        return nil
     }
 
     func setColorPanelMode(_ mode: ColorPanelMode) {

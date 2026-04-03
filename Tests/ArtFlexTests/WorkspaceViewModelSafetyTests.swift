@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import Metal
 import Testing
@@ -238,6 +239,40 @@ struct WorkspaceViewModelSafetyTests {
         #expect(harness.viewModel.workspace.creativeShapeGenerator.importedImage == nil)
         #expect(harness.viewModel.workspace.creativeShapeGenerator.selectedSource == nil)
     }
+
+    @Test
+    @MainActor
+    func clearingSelectedReferenceImageSwitchesToNextLoadedSlotWithoutReorderingSlots() throws {
+        let harness = try BrushEditingBoundaryHarness()
+
+        harness.viewModel.replaceReferenceImageSlotAsset(makeReferenceImageAsset(fileName: "one.png"), at: 0)
+        harness.viewModel.replaceReferenceImageSlotAsset(makeReferenceImageAsset(fileName: "three.png"), at: 2)
+        harness.viewModel.replaceReferenceImageSlotAsset(makeReferenceImageAsset(fileName: "five.png"), at: 4)
+
+        harness.viewModel.activateReferenceImageSlot(2)
+        #expect(harness.viewModel.selectedReferenceImageSlotID == 2)
+
+        harness.viewModel.clearSelectedReferenceImage()
+
+        #expect(harness.viewModel.referenceImageSlots[0].asset != nil)
+        #expect(harness.viewModel.referenceImageSlots[2].asset == nil)
+        #expect(harness.viewModel.referenceImageSlots[4].asset != nil)
+        #expect(harness.viewModel.selectedReferenceImageSlotID == 4)
+    }
+
+    @Test
+    @MainActor
+    func referenceImageColorPickUpdatesSelectedColorWithoutChangingActiveTool() throws {
+        let harness = try BrushEditingBoundaryHarness()
+        let pickedColor = RGBAColor(red: 0.82, green: 0.31, blue: 0.18, alpha: 1)
+
+        harness.viewModel.selectTool(.smudge)
+        harness.viewModel.confirmReferenceImagePickedColor(pickedColor)
+
+        #expect(harness.viewModel.workspace.toolSession.activeTool == .smudge)
+        #expect(harness.viewModel.workspace.toolSession.selectedColor == pickedColor)
+        #expect(harness.viewModel.referenceImagePreviewColor == pickedColor)
+    }
 }
 
 @MainActor
@@ -299,4 +334,49 @@ private enum BoundaryHarnessError: Error {
     case metalUnavailable
     case commandBufferUnavailable
     case textureUnavailable
+}
+
+@MainActor
+private func makeReferenceImageAsset(
+    fileName: String,
+    color: RGBAColor = .init(red: 0.25, green: 0.55, blue: 0.85, alpha: 1)
+) -> ReferenceImageAsset {
+    let width = 2
+    let height = 2
+    let red = UInt8(clamping: Int((color.red * color.alpha * 255).rounded()))
+    let green = UInt8(clamping: Int((color.green * color.alpha * 255).rounded()))
+    let blue = UInt8(clamping: Int((color.blue * color.alpha * 255).rounded()))
+    let alpha = UInt8(clamping: Int((color.alpha * 255).rounded()))
+    var bytes = [UInt8](repeating: 0, count: width * height * 4)
+    for index in stride(from: 0, to: bytes.count, by: 4) {
+        bytes[index] = red
+        bytes[index + 1] = green
+        bytes[index + 2] = blue
+        bytes[index + 3] = alpha
+    }
+    let rgbaPixels = Data(bytes)
+
+    let colorSpace = CGColorSpace(name: CGColorSpace.sRGB)!
+    let provider = CGDataProvider(data: rgbaPixels as CFData)!
+    let cgImage = CGImage(
+        width: width,
+        height: height,
+        bitsPerComponent: 8,
+        bitsPerPixel: 32,
+        bytesPerRow: width * 4,
+        space: colorSpace,
+        bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
+        provider: provider,
+        decode: nil,
+        shouldInterpolate: true,
+        intent: .defaultIntent
+    )!
+
+    return ReferenceImageAsset(
+        fileName: fileName,
+        width: width,
+        height: height,
+        rgbaPixels: rgbaPixels,
+        cgImage: cgImage
+    )
 }

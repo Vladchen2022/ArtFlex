@@ -593,6 +593,7 @@ final class StrokeCaptureMTKView: MTKView {
     }()
 
     override var acceptsFirstResponder: Bool { true }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
     private let debugDisableMouseCoalescingDuringStroke = true
     private let debugForceConstantPressure = false
     private let debugBypassStartupPressureSmoothing = false

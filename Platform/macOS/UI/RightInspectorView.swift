@@ -151,6 +151,11 @@ private enum TipImageLibrarySheetTarget: String, Identifiable {
 }
 
 struct RightInspectorView: View {
+    private enum LeftInspectorTab: String {
+        case generator = "图形生成器"
+        case referenceImages = "参考图"
+    }
+
     private enum TopInspectorTab: String {
         case tipShape = "笔尖形状设计"
         case navigator = "导航器"
@@ -192,21 +197,17 @@ struct RightInspectorView: View {
     @State private var dualTipPopoverPreviewRequestKey: String = ""
     @State private var secondaryTipEditorPreviewImage: CGImage?
     @State private var secondaryTipEditorPreviewRequestKey: String = ""
+    @State private var leftInspectorTab: LeftInspectorTab = .generator
     @State private var topInspectorTab: TopInspectorTab = .tipShape
     @State private var navigatorZoomPercentText = "100"
 
     var body: some View {
         GeometryReader { proxy in
-            let generatorPanelMaxHeight = max(182.0, min(proxy.size.height * 0.40, 318.0))
+            let leftTopPanelMaxHeight = max(280.0, min(proxy.size.height * 0.48, 440.0))
             ScrollView(.vertical, showsIndicators: true) {
                 HStack(alignment: .top, spacing: 12) {
                     VStack(spacing: 12) {
-                        InspectorPanel(title: "图形生成器") {
-                            ScrollView(.vertical, showsIndicators: true) {
-                                generatorSection
-                            }
-                            .frame(maxHeight: generatorPanelMaxHeight)
-                        }
+                        generatorReferencePanel(maxHeight: leftTopPanelMaxHeight)
 
                         InspectorPanel(title: "颜色") {
                             ColorSectionView(
@@ -371,6 +372,209 @@ struct RightInspectorView: View {
             .padding(.top, 2)
         }
         .frame(maxWidth: .infinity, alignment: .topLeading)
+    }
+
+    private func generatorReferencePanel(maxHeight: CGFloat) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                leftInspectorTabButton(.generator)
+                leftInspectorTabButton(.referenceImages)
+            }
+
+            Group {
+                if leftInspectorTab == .generator {
+                    ScrollView(.vertical, showsIndicators: true) {
+                        generatorSection
+                            .frame(maxWidth: .infinity, alignment: .topLeading)
+                    }
+                    .frame(maxHeight: maxHeight)
+                } else {
+                    referenceImageSection
+                        .frame(maxWidth: .infinity, alignment: .topLeading)
+                }
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity)
+        .background(
+            RoundedRectangle(cornerRadius: 12)
+                .fill(Color.white.opacity(0.06))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12)
+                        .stroke(Color.white.opacity(0.06), lineWidth: 1)
+                )
+        )
+    }
+
+    private func leftInspectorTabButton(_ tab: LeftInspectorTab) -> some View {
+        let isSelected = leftInspectorTab == tab
+        return Button {
+            leftInspectorTab = tab
+        } label: {
+            Text(tab.rawValue)
+                .font(.system(size: 12, weight: .bold))
+                .foregroundStyle(Color.white.opacity(isSelected ? 0.96 : 0.72))
+                .frame(maxWidth: .infinity, minHeight: 28)
+                .padding(.horizontal, 10)
+                .background(
+                    RoundedRectangle(cornerRadius: 10)
+                        .fill(isSelected ? Color.accentColor.opacity(0.24) : Color.white.opacity(0.04))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10)
+                        .stroke(
+                            isSelected ? Color.accentColor.opacity(0.86) : Color.white.opacity(0.08),
+                            lineWidth: 1
+                        )
+                )
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var referenceImageSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                ForEach(viewModel.referenceImageSlots) { slot in
+                    referenceImageSlotButton(slot)
+                }
+            }
+
+            referenceImagePreviewArea
+
+            HStack(spacing: 10) {
+                Button {
+                    viewModel.openReferenceImageFloatingPanel()
+                } label: {
+                    Image(systemName: "arrow.up.left.and.arrow.down.right")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundStyle(Color.white.opacity(viewModel.selectedReferenceImageSlot?.asset == nil ? 0.42 : 0.92))
+                        .frame(width: 30, height: 26)
+                        .background(
+                            RoundedRectangle(cornerRadius: 8)
+                                .fill(Color.white.opacity(0.10))
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8)
+                                .stroke(Color.white.opacity(0.08), lineWidth: 1)
+                        )
+                }
+                .buttonStyle(.plain)
+                .disabled(viewModel.selectedReferenceImageSlot?.asset == nil)
+                .help("放大参考图")
+
+                RoundedRectangle(cornerRadius: 9)
+                    .fill(viewModel.referenceImagePreviewSwiftUIColor)
+                    .frame(maxWidth: .infinity, minHeight: 26, maxHeight: 26)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 9)
+                            .stroke(Color.white.opacity(0.08), lineWidth: 1)
+                    )
+
+                Button {
+                    viewModel.clearSelectedReferenceImage()
+                } label: {
+                    Image(systemName: "trash")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundStyle(Color.white.opacity(viewModel.selectedReferenceImageSlot?.asset == nil ? 0.42 : 0.92))
+                        .frame(width: 30, height: 26)
+                        .background(
+                            RoundedRectangle(cornerRadius: 8)
+                                .fill(Color.white.opacity(0.10))
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8)
+                                .stroke(Color.white.opacity(0.08), lineWidth: 1)
+                        )
+                }
+                .buttonStyle(.plain)
+                .disabled(viewModel.selectedReferenceImageSlot?.asset == nil)
+                .help("清除当前参考图")
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+    }
+
+    private var referenceImagePreviewArea: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 12)
+                .fill(Color.black.opacity(0.20))
+
+            ReferenceImageViewer(
+                asset: viewModel.selectedReferenceImageSlot?.asset,
+                viewport: viewModel.selectedReferenceImageSlot?.viewport ?? .fit,
+                backgroundColor: NSColor(calibratedWhite: 0.08, alpha: 1),
+                onViewportChanged: { next in
+                    viewModel.updateSelectedReferenceImageViewport(next)
+                },
+                onHoverColorChanged: { color in
+                    viewModel.updateReferenceImagePreviewColor(color)
+                },
+                onPickColor: { color in
+                    viewModel.confirmReferenceImagePickedColor(color)
+                }
+            )
+            .clipShape(RoundedRectangle(cornerRadius: 12))
+
+            if viewModel.selectedReferenceImageSlot?.asset == nil {
+                Text(viewModel.referenceImageLoadingSlotID != nil ? "载入中…" : "点击 1 - 5 载入参考图")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(Color.white.opacity(0.52))
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .frame(height: 232)
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(Color.white.opacity(0.08), lineWidth: 1)
+        )
+    }
+
+    private func referenceImageSlotButton(_ slot: ReferenceImageSlotState) -> some View {
+        let isSelected = viewModel.selectedReferenceImageSlotID == slot.id
+        let isLoading = viewModel.referenceImageLoadingSlotID == slot.id
+        let isLoaded = slot.asset != nil
+
+        return Button {
+            viewModel.activateReferenceImageSlot(slot.id)
+        } label: {
+            Group {
+                if isLoading {
+                    ProgressView()
+                        .controlSize(.mini)
+                        .tint(.white.opacity(0.82))
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    Text(slot.labelText)
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundStyle(Color.white.opacity(isLoaded ? 0.96 : 0.62))
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+            }
+            .frame(height: 28)
+            .background(
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(
+                        isSelected ? Color.accentColor.opacity(0.20) :
+                            (isLoaded ? Color.white.opacity(0.10) : Color.white.opacity(0.05))
+                    )
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 8)
+                    .stroke(
+                        isSelected ? Color.accentColor.opacity(0.90) :
+                            (isLoaded ? Color.white.opacity(0.14) : Color.white.opacity(0.08)),
+                        lineWidth: 1
+                    )
+            )
+        }
+        .buttonStyle(.plain)
+        .contextMenu {
+            if isLoaded {
+                Button("清除") {
+                    viewModel.clearReferenceImageSlot(slot.id)
+                }
+            }
+        }
     }
 
     private var tipNavigatorPanel: some View {
