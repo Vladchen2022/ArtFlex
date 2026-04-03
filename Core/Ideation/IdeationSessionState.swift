@@ -8,6 +8,7 @@ struct IdeationEditingContext: Equatable {
     var brushLibrary: BrushLibraryState
     var tipImageLibrary: TipImageLibraryState
     var generator: GeneratorSettings
+    var creativeShapeGenerator: CreativeShapeGeneratorState
 }
 
 @MainActor
@@ -153,7 +154,8 @@ final class IdeationSessionState: ObservableObject {
                         colorPanel: workspace.colorPanel,
                         brushLibrary: workspace.brushLibrary,
                         tipImageLibrary: workspace.tipImageLibrary,
-                        generator: workspace.generator
+                        generator: workspace.generator,
+                        creativeShapeGenerator: workspace.creativeShapeGenerator
                     )
                 }
                 .removeDuplicates()

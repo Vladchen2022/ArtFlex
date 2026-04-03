@@ -98,6 +98,19 @@ struct ProjectPackageTests {
             branch: 0.63,
             opacity: 0.45
         )
+        workspace.creativeShapeGenerator = CreativeShapeGeneratorState(
+            selectedSource: .externalImage,
+            shapeCharacteristic: 0.77,
+            shapeSize: 0.24,
+            shapeJitter: 0.0,
+            colorJitter: 0.58,
+            importedImage: CreativeShapeGeneratorImageSource(
+                fileName: "reference.jpg",
+                width: 128,
+                height: 128,
+                rgbaPixels: Data(repeating: 127, count: 128 * 128 * 4)
+            )
+        )
         let snapshot = LayerTextureSnapshot(
             width: 8,
             height: 8,
@@ -136,6 +149,8 @@ struct ProjectPackageTests {
         #expect(package.workspaceState.brushLibrary.presets.first?.brush.secondaryTipDescriptor.importedSourceInfo == workspace.brushLibrary.presets.first?.brush.secondaryTipDescriptor.importedSourceInfo)
         #expect(package.workspaceState.tipImageLibrary == workspace.tipImageLibrary)
         #expect(package.workspaceState.brushLibrary.selectedPresetID == workspace.brushLibrary.selectedPresetID)
+        #expect(package.creativeShapeGenerator == workspace.creativeShapeGenerator)
+        #expect(package.workspaceState.creativeShapeGenerator == workspace.creativeShapeGenerator)
         #expect(package.layerSnapshots == layerSnapshots)
     }
 

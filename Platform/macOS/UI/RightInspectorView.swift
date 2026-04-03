@@ -190,14 +190,16 @@ struct RightInspectorView: View {
 
     var body: some View {
         GeometryReader { proxy in
+            let generatorPanelMaxHeight = max(182.0, min(proxy.size.height * 0.40, 318.0))
             ScrollView(.vertical, showsIndicators: true) {
                 HStack(alignment: .top, spacing: 12) {
                     VStack(spacing: 12) {
-                        InspectorPanel(title: "创意图形生成器") {
-                            generatorSection
+                        InspectorPanel(title: "图形生成器") {
+                            ScrollView(.vertical, showsIndicators: true) {
+                                generatorSection
+                            }
+                            .frame(maxHeight: generatorPanelMaxHeight)
                         }
-
-                        .frame(maxHeight: .infinity, alignment: .top)
 
                         InspectorPanel(title: "颜色") {
                             ColorSectionView(
@@ -259,8 +261,139 @@ struct RightInspectorView: View {
     }
 
     private var generatorSection: some View {
-        Spacer(minLength: 160)
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        let generator = viewModel.workspace.creativeShapeGenerator
+        return VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                generatorSourceButton(
+                    title: CreativeShapeGeneratorColorSource.currentColor.title,
+                    systemImage: "paintpalette.fill",
+                    isSelected: generator.selectedSource == .currentColor
+                ) {
+                    viewModel.selectCreativeShapeGeneratorSource(.currentColor)
+                }
+
+                generatorSourceButton(
+                    title: CreativeShapeGeneratorColorSource.paletteBlocks.title,
+                    systemImage: "square.grid.3x3.fill",
+                    isSelected: generator.selectedSource == .paletteBlocks
+                ) {
+                    viewModel.selectCreativeShapeGeneratorSource(.paletteBlocks)
+                }
+
+                creativeShapeGeneratorExternalImageButton
+            }
+
+            Divider()
+                .overlay(Color.white.opacity(0.08))
+
+            OptimizedCompactSlider(
+                title: "羽化概率",
+                valueText: "\(Int(generator.featherProbability * 100))%",
+                value: Binding(
+                    get: { Double(generator.featherProbability) },
+                    set: { _ in }
+                ),
+                range: 0...1,
+                onCommit: { viewModel.setCreativeShapeGeneratorFeatherProbability(Float($0)) }
+            )
+
+            OptimizedCompactSlider(
+                title: "形状特征",
+                valueText: "\(Int(generator.shapeCharacteristic * 100))%",
+                value: Binding(
+                    get: { Double(generator.shapeCharacteristic) },
+                    set: { _ in }
+                ),
+                range: 0...1,
+                onCommit: { viewModel.setCreativeShapeGeneratorShapeCharacteristic(Float($0)) }
+            )
+
+            OptimizedCompactSlider(
+                title: "形状大小",
+                valueText: "\(Int(generator.shapeSize * 100))%",
+                value: Binding(
+                    get: { Double(generator.shapeSize) },
+                    set: { _ in }
+                ),
+                range: 0...1,
+                onCommit: { viewModel.setCreativeShapeGeneratorShapeSize(Float($0)) }
+            )
+
+            OptimizedCompactSlider(
+                title: "形状抖动",
+                valueText: "\(Int(generator.shapeJitter * 100))%",
+                value: Binding(
+                    get: { Double(generator.shapeJitter) },
+                    set: { _ in }
+                ),
+                range: 0...1,
+                onCommit: { viewModel.setCreativeShapeGeneratorShapeJitter(Float($0)) }
+            )
+
+            OptimizedCompactSlider(
+                title: "色彩抖动",
+                valueText: "\(Int(generator.colorJitter * 100))%",
+                value: Binding(
+                    get: { Double(generator.colorJitter) },
+                    set: { _ in }
+                ),
+                range: 0...1,
+                onCommit: { viewModel.setCreativeShapeGeneratorColorJitter(Float($0)) }
+            )
+        }
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+    }
+
+    private var creativeShapeGeneratorExternalImageButton: some View {
+        let generator = viewModel.workspace.creativeShapeGenerator
+        return generatorSourceButton(
+            title: viewModel.isCreativeShapeGeneratorImageLoading ? "分析中…" : CreativeShapeGeneratorColorSource.externalImage.title,
+            systemImage: generator.importedImage == nil ? "photo.badge.plus" : "photo.on.rectangle.angled",
+            isSelected: generator.selectedSource == .externalImage,
+            isDisabled: viewModel.isCreativeShapeGeneratorImageLoading
+        ) {
+            viewModel.selectCreativeShapeGeneratorSource(.externalImage)
+        }
+    }
+
+    private func generatorSourceButton(
+        title: String,
+        systemImage: String,
+        isSelected: Bool,
+        isDisabled: Bool = false,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            VStack(spacing: 6) {
+                Image(systemName: systemImage)
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundStyle(isSelected ? Color.white : Color.white.opacity(isDisabled ? 0.42 : 0.92))
+
+                Text(title)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(Color.white.opacity(isDisabled ? 0.42 : 0.92))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.82)
+            }
+            .frame(maxWidth: .infinity, minHeight: 46)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 6)
+            .background(
+                RoundedRectangle(cornerRadius: 10)
+                    .fill(isSelected ? Color.accentColor.opacity(0.16) : Color.white.opacity(0.05))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 10)
+                    .stroke(
+                        isSelected ? Color.accentColor.opacity(0.9) : Color.white.opacity(0.08),
+                        lineWidth: 1
+                    )
+            )
+        }
+        .buttonStyle(.plain)
+        .disabled(isDisabled)
+        .opacity(isDisabled ? 0.7 : 1)
+        .frame(maxWidth: .infinity)
     }
 
     private var brushSection: some View {

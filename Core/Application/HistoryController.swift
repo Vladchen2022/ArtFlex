@@ -172,6 +172,7 @@ final class HistoryController {
             brushLibrary: current.brushLibrary,
             tipImageLibrary: current.tipImageLibrary,
             generator: current.generator,
+            creativeShapeGenerator: current.creativeShapeGenerator,
             viewport: current.viewport,
             selection: restored.selection
         )

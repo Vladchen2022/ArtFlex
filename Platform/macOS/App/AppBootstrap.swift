@@ -5,6 +5,7 @@ final class AppSharedMetalServices {
     let linearGradientRenderer: LinearGradientRenderer
     let sectorGradientRenderer: SectorGradientRenderer
     let selectionFillRenderer: SelectionFillRenderer
+    let creativeShapeGeneratorRenderer: CreativeShapeGeneratorRenderer
     let visibleDeltaRenderer: VisibleDeltaRenderer
     let textureSerializer: LayerTextureSerializer
     let pngExporter: PNGExporter
@@ -18,6 +19,7 @@ final class AppSharedMetalServices {
         self.linearGradientRenderer = LinearGradientRenderer(device: metalContext.device)
         self.sectorGradientRenderer = SectorGradientRenderer(device: metalContext.device)
         self.selectionFillRenderer = SelectionFillRenderer(device: metalContext.device)
+        self.creativeShapeGeneratorRenderer = CreativeShapeGeneratorRenderer(device: metalContext.device)
         self.visibleDeltaRenderer = try VisibleDeltaRenderer(device: metalContext.device)
         let textureSerializer = LayerTextureSerializer(metalContext: metalContext)
         self.textureSerializer = textureSerializer
@@ -40,6 +42,7 @@ struct AppBootstrap {
     let linearGradientRenderer: LinearGradientRenderer
     let sectorGradientRenderer: SectorGradientRenderer
     let selectionFillRenderer: SelectionFillRenderer
+    let creativeShapeGeneratorRenderer: CreativeShapeGeneratorRenderer
     let visibleDeltaRenderer: VisibleDeltaRenderer
     let smudgeEngine: SmudgeEngine
     let eyedropperSampler: EyedropperSampler
@@ -83,6 +86,7 @@ struct AppBootstrap {
         self.linearGradientRenderer = resolvedSharedMetalServices.linearGradientRenderer
         self.sectorGradientRenderer = resolvedSharedMetalServices.sectorGradientRenderer
         self.selectionFillRenderer = resolvedSharedMetalServices.selectionFillRenderer
+        self.creativeShapeGeneratorRenderer = resolvedSharedMetalServices.creativeShapeGeneratorRenderer
         self.visibleDeltaRenderer = resolvedSharedMetalServices.visibleDeltaRenderer
         let textureSerializer = resolvedSharedMetalServices.textureSerializer
         self.textureSerializer = textureSerializer

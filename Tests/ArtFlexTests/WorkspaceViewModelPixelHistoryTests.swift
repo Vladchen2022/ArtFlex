@@ -566,6 +566,62 @@ struct WorkspaceViewModelPixelHistoryTests {
             #expect(Set(changedLayerIDs) == [layerID])
         }
     }
+
+    @Test
+    @MainActor
+    func creativeShapeGeneratorUndoDoesNotRestoreLassoSelection() async throws {
+        let harness = try PixelHistoryHarness()
+        let layerID = harness.viewModel.workspace.document.activeLayerID
+
+        harness.viewModel.selectCreativeShapeGeneratorSource(.currentColor)
+        harness.viewModel.setCreativeShapeGeneratorFeatherProbability(0)
+        harness.viewModel.setCreativeShapeGeneratorShapeCharacteristic(0.42)
+        harness.viewModel.setCreativeShapeGeneratorShapeSize(0)
+        harness.viewModel.setCreativeShapeGeneratorShapeJitter(0)
+        harness.viewModel.setCreativeShapeGeneratorColorJitter(0)
+
+        harness.makeLassoSelection([
+            .init(x: 8, y: 8),
+            .init(x: 40, y: 8),
+            .init(x: 40, y: 40),
+            .init(x: 8, y: 40),
+            .init(x: 8, y: 8)
+        ])
+
+        var hasGeneratedPixels = false
+        for _ in 0..<80 {
+            hasGeneratedPixels = try regionHasVisiblePixels(
+                harness: harness,
+                layerID: layerID,
+                minX: 12,
+                maxX: 36,
+                minY: 12,
+                maxY: 36
+            )
+            if harness.viewModel.workspace.selection.committedShape == nil, hasGeneratedPixels {
+                break
+            }
+            await Task.yield()
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+
+        #expect(hasGeneratedPixels)
+        #expect(harness.viewModel.workspace.selection.committedShape == nil)
+
+        harness.viewModel.undo()
+
+        #expect(
+            try regionHasVisiblePixels(
+                harness: harness,
+                layerID: layerID,
+                minX: 12,
+                maxX: 36,
+                minY: 12,
+                maxY: 36
+            ) == false
+        )
+        #expect(harness.viewModel.workspace.selection.committedShape == nil)
+    }
 }
 
 @MainActor
@@ -648,4 +704,28 @@ private enum PixelHistoryHarnessError: Error {
     case metalUnavailable
     case textureUnavailable
     case commandBufferUnavailable
+}
+
+@MainActor
+private func regionHasVisiblePixels(
+    harness: PixelHistoryHarness,
+    layerID: LayerID,
+    minX: Int,
+    maxX: Int,
+    minY: Int,
+    maxY: Int,
+    step: Int = 4
+) throws -> Bool {
+    var y = minY
+    while y <= maxY {
+        var x = minX
+        while x <= maxX {
+            if try harness.alpha(atX: x, y: y, layerID: layerID) > 0.05 {
+                return true
+            }
+            x += step
+        }
+        y += step
+    }
+    return false
 }

@@ -126,6 +126,53 @@ struct WorkspaceViewModelSafetyTests {
         harness.viewModel.toggleWorkspaceChromeVisibility()
         #expect(harness.viewModel.isWorkspaceChromeHidden == false)
     }
+
+    @Test
+    @MainActor
+    func selectingCreativeShapeGeneratorSourceSwitchesToLassoTool() throws {
+        let harness = try BrushEditingBoundaryHarness()
+
+        harness.viewModel.selectTool(.brush)
+        harness.viewModel.selectCreativeShapeGeneratorSource(.currentColor)
+
+        #expect(harness.viewModel.workspace.toolSession.activeTool == .lassoSelection)
+    }
+
+    @Test
+    @MainActor
+    func changingSelectedColorSwitchesCreativeGeneratorBackToCurrentColorSource() throws {
+        let harness = try BrushEditingBoundaryHarness()
+
+        harness.viewModel.selectCreativeShapeGeneratorSource(.paletteBlocks)
+        #expect(harness.viewModel.workspace.creativeShapeGenerator.selectedSource == .paletteBlocks)
+
+        harness.viewModel.setSelectedColor(.init(red: 0.2, green: 0.6, blue: 0.9, alpha: 1))
+
+        #expect(harness.viewModel.workspace.creativeShapeGenerator.selectedSource == .currentColor)
+    }
+
+    @Test
+    @MainActor
+    func selectingExternalImageSourceTwiceClearsLoadedImage() throws {
+        let harness = try BrushEditingBoundaryHarness()
+
+        harness.bootstrap.workspaceStore.updateCreativeShapeGenerator { generator in
+            generator.importedImage = CreativeShapeGeneratorImageSource(
+                fileName: "test.png",
+                width: CreativeShapeGeneratorImageSource.targetDimension,
+                height: CreativeShapeGeneratorImageSource.targetDimension,
+                rgbaPixels: Data(repeating: 255, count: CreativeShapeGeneratorImageSource.targetDimension * CreativeShapeGeneratorImageSource.targetDimension * 4)
+            )
+        }
+        harness.viewModel.selectTool(.brush)
+
+        harness.viewModel.selectCreativeShapeGeneratorSource(.externalImage)
+        #expect(harness.viewModel.workspace.creativeShapeGenerator.selectedSource == .externalImage)
+
+        harness.viewModel.selectCreativeShapeGeneratorSource(.externalImage)
+        #expect(harness.viewModel.workspace.creativeShapeGenerator.importedImage == nil)
+        #expect(harness.viewModel.workspace.creativeShapeGenerator.selectedSource == nil)
+    }
 }
 
 @MainActor

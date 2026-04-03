@@ -7,6 +7,7 @@ struct WorkspaceState: Codable, Sendable, Equatable {
     var brushLibrary: BrushLibraryState
     var tipImageLibrary: TipImageLibraryState
     var generator: GeneratorSettings
+    var creativeShapeGenerator: CreativeShapeGeneratorState
     var viewport: CanvasViewport
     var selection: SelectionState
 
@@ -17,6 +18,7 @@ struct WorkspaceState: Codable, Sendable, Equatable {
         brushLibrary: BrushLibraryState,
         tipImageLibrary: TipImageLibraryState = .empty,
         generator: GeneratorSettings,
+        creativeShapeGenerator: CreativeShapeGeneratorState = .stageOneDefault,
         viewport: CanvasViewport,
         selection: SelectionState
     ) {
@@ -26,6 +28,7 @@ struct WorkspaceState: Codable, Sendable, Equatable {
         self.brushLibrary = brushLibrary
         self.tipImageLibrary = tipImageLibrary
         self.generator = generator
+        self.creativeShapeGenerator = creativeShapeGenerator
         self.viewport = viewport
         self.selection = selection
     }
@@ -37,6 +40,7 @@ struct WorkspaceState: Codable, Sendable, Equatable {
         brushLibrary: .stageOneDefault,
         tipImageLibrary: .empty,
         generator: .stageOneDefault,
+        creativeShapeGenerator: .stageOneDefault,
         viewport: .stageOneDefault,
         selection: .empty
     )
@@ -76,6 +80,10 @@ final class WorkspaceStore {
 
     func updateGenerator(_ transform: (inout GeneratorSettings) -> Void) {
         transform(&state.generator)
+    }
+
+    func updateCreativeShapeGenerator(_ transform: (inout CreativeShapeGeneratorState) -> Void) {
+        transform(&state.creativeShapeGenerator)
     }
 
     func updateSelection(_ transform: (inout SelectionState) -> Void) {
