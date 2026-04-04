@@ -4214,6 +4214,7 @@ private struct ColorSectionView: View {
     @ObservedObject var proxy: WorkspaceViewModel.ColorPanelProxy
     let viewModel: WorkspaceViewModel
     @State private var isColorPaletteDropTarget = false
+    @State private var isAdvancedControlsExpanded = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -4257,99 +4258,133 @@ private struct ColorSectionView: View {
             )
             .clipShape(RoundedRectangle(cornerRadius: 12))
 
-            ColorLightingHueBarView(
-                hue: proxy.colorPanel.lightingHue,
-                onUpdateHue: { hue in
-                    var updated = proxy.colorPanel
-                    updated.lightingHue = ColorBlocksEngine.wrapHue(hue)
-                    proxy.colorPanel = updated
-                    if updated.mode == .picker {
-                        proxy.selectedColor = ColorBlocksEngine.pickerColor(from: updated)
-                    }
-                },
-                onDragEnded: { viewModel.setColorPanelLightingHue($0) }
-            )
-            .frame(height: 6)
+            colorPanelCollapseHandle
 
-            bufferedCompactParameterSlider(
-                title: "光色",
-                valueText: "\(Int(proxy.colorPanel.lightingStrength))",
-                value: Double(proxy.colorPanel.lightingStrength),
-                range: 0...100,
-                onUpdate: { value in
-                    var updated = proxy.colorPanel
-                    updated.lightingStrength = Float(value)
-                    proxy.colorPanel = updated
-                    if updated.mode == .picker {
-                        proxy.selectedColor = ColorBlocksEngine.pickerColor(from: updated)
-                    }
-                },
-                onCommit: { viewModel.setColorPanelLightingStrength(Float($0)) }
-            )
-            bufferedCompactParameterSlider(
-                title: "明度",
-                valueText: "\(Int(proxy.colorPanel.activeLightness))",
-                value: Double(proxy.colorPanel.activeLightness),
-                range: 0...100,
-                onUpdate: { value in
-                    var updated = proxy.colorPanel
-                    if updated.mode == .picker {
-                        updated.pickerLightness = Float(value)
-                        proxy.selectedColor = ColorBlocksEngine.pickerColor(from: updated)
-                    } else {
-                        updated.blocksLightness = Float(value)
-                    }
-                    proxy.colorPanel = updated
-                },
-                onCommit: { viewModel.setColorPanelLightness(Float($0)) }
-            )
-            bufferedCompactParameterSlider(
-                title: "纯度",
-                valueText: "\(Int(proxy.colorPanel.activeSaturation))",
-                value: Double(proxy.colorPanel.activeSaturation),
-                range: 0...100,
-                onUpdate: { value in
-                    var updated = proxy.colorPanel
-                    if updated.mode == .picker {
-                        updated.pickerSaturation = Float(value)
-                        proxy.selectedColor = ColorBlocksEngine.pickerColor(from: updated)
-                    } else {
-                        updated.blocksSaturation = Float(value)
-                    }
-                    proxy.colorPanel = updated
-                },
-                onCommit: { viewModel.setColorPanelSaturation(Float($0)) }
-            )
-            bufferedCompactParameterSlider(
-                title: "对比",
-                valueText: "\(Int(proxy.colorPanel.contrast))",
-                value: Double(proxy.colorPanel.contrast),
-                range: 0...100,
-                onUpdate: { value in
-                    var updated = proxy.colorPanel
-                    updated.contrast = Float(value)
-                    proxy.colorPanel = updated
-                },
-                onCommit: { viewModel.setColorPanelContrast(Float($0)) }
-            )
-            .opacity(proxy.colorPanel.mode == .blocks ? 1 : 0.35)
-            .allowsHitTesting(proxy.colorPanel.mode == .blocks)
+            if isAdvancedControlsExpanded {
+                VStack(alignment: .leading, spacing: 8) {
+                    ColorLightingHueBarView(
+                        hue: proxy.colorPanel.lightingHue,
+                        onUpdateHue: { hue in
+                            var updated = proxy.colorPanel
+                            updated.lightingHue = ColorBlocksEngine.wrapHue(hue)
+                            proxy.colorPanel = updated
+                            if updated.mode == .picker {
+                                proxy.selectedColor = ColorBlocksEngine.pickerColor(from: updated)
+                            }
+                        },
+                        onDragEnded: { viewModel.setColorPanelLightingHue($0) }
+                    )
+                    .frame(height: 6)
 
-            bufferedCompactParameterSlider(
-                title: "补色",
-                valueText: "\(Int(proxy.colorPanel.contrastHue))",
-                value: Double(proxy.colorPanel.contrastHue),
-                range: 0...100,
-                onUpdate: { value in
-                    var updated = proxy.colorPanel
-                    updated.contrastHue = Float(value)
-                    proxy.colorPanel = updated
-                },
-                onCommit: { viewModel.setColorPanelContrastHue(Float($0)) }
-            )
-            .opacity(proxy.colorPanel.mode == .blocks ? 1 : 0.35)
-            .allowsHitTesting(proxy.colorPanel.mode == .blocks)
+                    bufferedCompactParameterSlider(
+                        title: "光色",
+                        valueText: "\(Int(proxy.colorPanel.lightingStrength))",
+                        value: Double(proxy.colorPanel.lightingStrength),
+                        range: 0...100,
+                        onUpdate: { value in
+                            var updated = proxy.colorPanel
+                            updated.lightingStrength = Float(value)
+                            proxy.colorPanel = updated
+                            if updated.mode == .picker {
+                                proxy.selectedColor = ColorBlocksEngine.pickerColor(from: updated)
+                            }
+                        },
+                        onCommit: { viewModel.setColorPanelLightingStrength(Float($0)) }
+                    )
+                    bufferedCompactParameterSlider(
+                        title: "明度",
+                        valueText: "\(Int(proxy.colorPanel.activeLightness))",
+                        value: Double(proxy.colorPanel.activeLightness),
+                        range: 0...100,
+                        onUpdate: { value in
+                            var updated = proxy.colorPanel
+                            if updated.mode == .picker {
+                                updated.pickerLightness = Float(value)
+                                proxy.selectedColor = ColorBlocksEngine.pickerColor(from: updated)
+                            } else {
+                                updated.blocksLightness = Float(value)
+                            }
+                            proxy.colorPanel = updated
+                        },
+                        onCommit: { viewModel.setColorPanelLightness(Float($0)) }
+                    )
+                    bufferedCompactParameterSlider(
+                        title: "纯度",
+                        valueText: "\(Int(proxy.colorPanel.activeSaturation))",
+                        value: Double(proxy.colorPanel.activeSaturation),
+                        range: 0...100,
+                        onUpdate: { value in
+                            var updated = proxy.colorPanel
+                            if updated.mode == .picker {
+                                updated.pickerSaturation = Float(value)
+                                proxy.selectedColor = ColorBlocksEngine.pickerColor(from: updated)
+                            } else {
+                                updated.blocksSaturation = Float(value)
+                            }
+                            proxy.colorPanel = updated
+                        },
+                        onCommit: { viewModel.setColorPanelSaturation(Float($0)) }
+                    )
+                    bufferedCompactParameterSlider(
+                        title: "对比",
+                        valueText: "\(Int(proxy.colorPanel.contrast))",
+                        value: Double(proxy.colorPanel.contrast),
+                        range: 0...100,
+                        onUpdate: { value in
+                            var updated = proxy.colorPanel
+                            updated.contrast = Float(value)
+                            proxy.colorPanel = updated
+                        },
+                        onCommit: { viewModel.setColorPanelContrast(Float($0)) }
+                    )
+                    .opacity(proxy.colorPanel.mode == .blocks ? 1 : 0.35)
+                    .allowsHitTesting(proxy.colorPanel.mode == .blocks)
+
+                    bufferedCompactParameterSlider(
+                        title: "补色",
+                        valueText: "\(Int(proxy.colorPanel.contrastHue))",
+                        value: Double(proxy.colorPanel.contrastHue),
+                        range: 0...100,
+                        onUpdate: { value in
+                            var updated = proxy.colorPanel
+                            updated.contrastHue = Float(value)
+                            proxy.colorPanel = updated
+                        },
+                        onCommit: { viewModel.setColorPanelContrastHue(Float($0)) }
+                    )
+                    .opacity(proxy.colorPanel.mode == .blocks ? 1 : 0.35)
+                    .allowsHitTesting(proxy.colorPanel.mode == .blocks)
+                }
+                .transition(.move(edge: .top).combined(with: .opacity))
+            }
         }
+        .animation(.easeInOut(duration: 0.18), value: isAdvancedControlsExpanded)
+    }
+
+    private var colorPanelCollapseHandle: some View {
+        Button {
+            isAdvancedControlsExpanded.toggle()
+        } label: {
+            HStack(spacing: 0) {
+                Spacer(minLength: 0)
+
+                VStack(spacing: 4) {
+                    Image(systemName: isAdvancedControlsExpanded ? "chevron.up" : "chevron.down")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundStyle(Color.white.opacity(0.78))
+
+                    Capsule()
+                        .fill(Color.white.opacity(0.22))
+                        .frame(width: 44, height: 4)
+                }
+
+                Spacer(minLength: 0)
+            }
+            .frame(height: 18)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(isAdvancedControlsExpanded ? "收起颜色参数" : "展开颜色参数")
     }
 
     private var pickerStageSection: some View {
