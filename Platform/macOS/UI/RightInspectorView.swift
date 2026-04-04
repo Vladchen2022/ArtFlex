@@ -200,8 +200,6 @@ struct RightInspectorView: View {
     @State private var leftInspectorTab: LeftInspectorTab = .referenceImages
     @State private var topInspectorTab: TopInspectorTab = .navigator
     @State private var navigatorZoomPercentText = "100"
-    @State private var armedBrushPresetDragID: String?
-
     var body: some View {
         GeometryReader { proxy in
             let leftTopPanelMaxHeight = max(280.0, min(proxy.size.height * 0.48, 440.0))
@@ -1095,32 +1093,10 @@ struct RightInspectorView: View {
         let preset = viewModel.workspace.brushLibrary.preset(atSlot: slotIndex)
 
         if let preset {
-            let baseCell = brushPresetCell(preset, slotIndex: slotIndex)
-                .simultaneousGesture(
-                    LongPressGesture(minimumDuration: 0.22)
-                        .onEnded { _ in
-                            armedBrushPresetDragID = preset.id
-                        }
-                )
-                .onHover { isHovering in
-                    if !isHovering, armedBrushPresetDragID == preset.id {
-                        armedBrushPresetDragID = nil
-                    }
-                }
+            brushPresetCell(preset, slotIndex: slotIndex)
                 .onDrop(of: [UTType.plainText.identifier], isTargeted: nil) { providers in
                     moveBrushPresetFromDrop(providers: providers, toSlot: slotIndex)
                 }
-
-            if armedBrushPresetDragID == preset.id {
-                baseCell
-                    .onDrag {
-                        draggedBrushPresetID = preset.id
-                        armedBrushPresetDragID = nil
-                        return NSItemProvider(object: preset.id as NSString)
-                    }
-            } else {
-                baseCell
-            }
         } else {
             let emptyCell = RoundedRectangle(cornerRadius: 10)
                 .fill(Color.white.opacity(0.03))
@@ -3635,10 +3611,18 @@ struct RightInspectorView: View {
         let strokeColor: Color = isSelected ? Color.accentColor.opacity(0.9) : Color.white.opacity(0.06)
         let strokeWidth: CGFloat = isSelected ? 1.5 : 1.0
 
-        return Button {
-            armedBrushPresetDragID = nil
-            viewModel.applyBrushPreset(preset.id)
-        } label: {
+        return LongPressDraggableCell(
+            dragPayload: preset.id,
+            onActivate: {
+                viewModel.applyBrushPreset(preset.id)
+            },
+            onDragBegan: {
+                draggedBrushPresetID = preset.id
+            },
+            onDragEnded: {
+                draggedBrushPresetID = nil
+            }
+        ) {
             ZStack {
                 RoundedRectangle(cornerRadius: 10)
                     .fill(isSelected ? Color.accentColor.opacity(0.18) : Color.white.opacity(0.03))
@@ -3676,12 +3660,9 @@ struct RightInspectorView: View {
             }
             .aspectRatio(1, contentMode: .fit)
         }
-        .buttonStyle(.plain)
-        .contentShape(Rectangle())
         .help(preset.name)
         .contextMenu {
             Button("应用") {
-                armedBrushPresetDragID = nil
                 viewModel.applyBrushPreset(preset.id)
             }
 
@@ -3709,7 +3690,6 @@ struct RightInspectorView: View {
         if let draggedBrushPresetID {
             viewModel.moveBrushPreset(draggedBrushPresetID, toSlot: slotIndex)
             self.draggedBrushPresetID = nil
-            self.armedBrushPresetDragID = nil
             return true
         }
 
@@ -3723,7 +3703,6 @@ struct RightInspectorView: View {
             }
             let presetIDString = String(presetID)
             DispatchQueue.main.async {
-                armedBrushPresetDragID = nil
                 viewModel.moveBrushPreset(presetIDString, toSlot: slotIndex)
             }
         }
@@ -4218,28 +4197,6 @@ private struct ColorSectionView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 8) {
-                compactIconButton(systemImage: "arrow.triangle.2.circlepath", tooltip: "同步当前颜色到色块") {
-                    viewModel.syncColorPanelFromSelectedColor()
-                }
-                compactIconButton(systemImage: "shuffle", tooltip: "刷新色块组合") {
-                    viewModel.refreshColorPanelBlocks()
-                }
-                compactIconButton(systemImage: "photo.badge.plus", tooltip: "从图片提取色块") {
-                    viewModel.loadColorPanelPaletteFromImage()
-                }
-                compactIconButton(systemImage: "arrow.counterclockwise", tooltip: "重置颜色面板") {
-                    viewModel.resetColorPanel()
-                }
-                compactIconButton(
-                    systemImage: proxy.colorPanel.mode == .picker ? "square.grid.3x3.fill" : "eyedropper.full",
-                    tooltip: proxy.colorPanel.mode == .picker ? "切换到色块模式" : "切换到拾色器模式",
-                    isSelected: true
-                ) {
-                    viewModel.toggleColorPanelMode()
-                }
-            }
-
             Group {
                 if proxy.colorPanel.mode == .picker {
                     pickerStageSection
@@ -4262,6 +4219,28 @@ private struct ColorSectionView: View {
 
             if isAdvancedControlsExpanded {
                 VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 8) {
+                        compactIconButton(systemImage: "arrow.triangle.2.circlepath", tooltip: "同步当前颜色到色块") {
+                            viewModel.syncColorPanelFromSelectedColor()
+                        }
+                        compactIconButton(systemImage: "shuffle", tooltip: "刷新色块组合") {
+                            viewModel.refreshColorPanelBlocks()
+                        }
+                        compactIconButton(systemImage: "photo.badge.plus", tooltip: "从图片提取色块") {
+                            viewModel.loadColorPanelPaletteFromImage()
+                        }
+                        compactIconButton(systemImage: "arrow.counterclockwise", tooltip: "重置颜色面板") {
+                            viewModel.resetColorPanel()
+                        }
+                        compactIconButton(
+                            systemImage: proxy.colorPanel.mode == .picker ? "square.grid.3x3.fill" : "eyedropper.full",
+                            tooltip: proxy.colorPanel.mode == .picker ? "切换到色块模式" : "切换到拾色器模式",
+                            isSelected: true
+                        ) {
+                            viewModel.toggleColorPanelMode()
+                        }
+                    }
+
                     ColorLightingHueBarView(
                         hue: proxy.colorPanel.lightingHue,
                         onUpdateHue: { hue in
@@ -4729,6 +4708,186 @@ private struct ColorSVPickerView: NSViewRepresentable {
             self.panel = panel
             self.onUpdatePoint = onUpdatePoint
             self.onDragEnded = onDragEnded
+        }
+    }
+}
+
+private struct LongPressDraggableCell<Content: View>: NSViewRepresentable {
+    let dragPayload: String
+    let onActivate: () -> Void
+    let onDragBegan: () -> Void
+    let onDragEnded: () -> Void
+    let content: Content
+
+    init(
+        dragPayload: String,
+        onActivate: @escaping () -> Void,
+        onDragBegan: @escaping () -> Void,
+        onDragEnded: @escaping () -> Void,
+        @ViewBuilder content: () -> Content
+    ) {
+        self.dragPayload = dragPayload
+        self.onActivate = onActivate
+        self.onDragBegan = onDragBegan
+        self.onDragEnded = onDragEnded
+        self.content = content()
+    }
+
+    func makeNSView(context: Context) -> LongPressDraggableCellNSView {
+        let view = LongPressDraggableCellNSView()
+        view.update(
+            rootView: AnyView(content),
+            dragPayload: dragPayload,
+            onActivate: onActivate,
+            onDragBegan: onDragBegan,
+            onDragEnded: onDragEnded
+        )
+        return view
+    }
+
+    func updateNSView(_ nsView: LongPressDraggableCellNSView, context: Context) {
+        nsView.update(
+            rootView: AnyView(content),
+            dragPayload: dragPayload,
+            onActivate: onActivate,
+            onDragBegan: onDragBegan,
+            onDragEnded: onDragEnded
+        )
+    }
+}
+
+final class LongPressDraggableCellNSView: NSView, NSDraggingSource {
+    private let longPressDuration: TimeInterval = 0.22
+    private let dragThreshold: CGFloat = 3
+
+    private let hostingView = NSHostingView(rootView: AnyView(EmptyView()))
+    private var dragPayload = ""
+    private var onActivate: (() -> Void)?
+    private var onDragBegan: (() -> Void)?
+    private var onDragEnded: (() -> Void)?
+
+    private var pressWorkItem: DispatchWorkItem?
+    private var mouseDownLocation: CGPoint?
+    private var isMousePressed = false
+    private var isLongPressArmed = false
+    private var didStartDragging = false
+
+    override var isFlipped: Bool { true }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        layer?.backgroundColor = NSColor.clear.cgColor
+        hostingView.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(hostingView)
+        NSLayoutConstraint.activate([
+            hostingView.leadingAnchor.constraint(equalTo: leadingAnchor),
+            hostingView.trailingAnchor.constraint(equalTo: trailingAnchor),
+            hostingView.topAnchor.constraint(equalTo: topAnchor),
+            hostingView.bottomAnchor.constraint(equalTo: bottomAnchor)
+        ])
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    func update(
+        rootView: AnyView,
+        dragPayload: String,
+        onActivate: @escaping () -> Void,
+        onDragBegan: @escaping () -> Void,
+        onDragEnded: @escaping () -> Void
+    ) {
+        hostingView.rootView = rootView
+        self.dragPayload = dragPayload
+        self.onActivate = onActivate
+        self.onDragBegan = onDragBegan
+        self.onDragEnded = onDragEnded
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        window?.makeFirstResponder(self)
+        resetPressState(keepingMousePressed: true)
+        isMousePressed = true
+        mouseDownLocation = convert(event.locationInWindow, from: nil)
+
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self, self.isMousePressed, !self.didStartDragging else { return }
+            self.isLongPressArmed = true
+        }
+        pressWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + longPressDuration, execute: workItem)
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard isMousePressed, isLongPressArmed, !didStartDragging,
+              let mouseDownLocation else {
+            return
+        }
+
+        let location = convert(event.locationInWindow, from: nil)
+        let dx = location.x - mouseDownLocation.x
+        let dy = location.y - mouseDownLocation.y
+        guard hypot(dx, dy) >= dragThreshold else { return }
+
+        beginDragSession(with: event)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        let shouldActivate = isMousePressed && !didStartDragging && !isLongPressArmed
+        resetPressState()
+
+        if shouldActivate {
+            onActivate?()
+        }
+    }
+
+    func draggingSession(_ session: NSDraggingSession, sourceOperationMaskFor context: NSDraggingContext) -> NSDragOperation {
+        .move
+    }
+
+    func draggingSession(_ session: NSDraggingSession, endedAt screenPoint: NSPoint, operation: NSDragOperation) {
+        resetPressState()
+        onDragEnded?()
+    }
+
+    private func beginDragSession(with event: NSEvent) {
+        guard !dragPayload.isEmpty else { return }
+
+        let pasteboardItem = NSPasteboardItem()
+        pasteboardItem.setString(dragPayload, forType: .string)
+        pasteboardItem.setString(dragPayload, forType: NSPasteboard.PasteboardType(UTType.plainText.identifier))
+
+        let draggingItem = NSDraggingItem(pasteboardWriter: pasteboardItem)
+        draggingItem.setDraggingFrame(bounds, contents: dragPreviewImage())
+
+        didStartDragging = true
+        onDragBegan?()
+        beginDraggingSession(with: [draggingItem], event: event, source: self)
+    }
+
+    private func dragPreviewImage() -> NSImage {
+        let image = NSImage(size: bounds.size)
+        guard let representation = bitmapImageRepForCachingDisplay(in: bounds) else {
+            return image
+        }
+
+        cacheDisplay(in: bounds, to: representation)
+        image.addRepresentation(representation)
+        return image
+    }
+
+    private func resetPressState(keepingMousePressed: Bool = false) {
+        pressWorkItem?.cancel()
+        pressWorkItem = nil
+        mouseDownLocation = nil
+        isLongPressArmed = false
+        didStartDragging = false
+        if !keepingMousePressed {
+            isMousePressed = false
         }
     }
 }

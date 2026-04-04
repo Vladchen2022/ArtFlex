@@ -44,15 +44,18 @@ struct WindowKeyboardBridge: NSViewRepresentable {
     }
 }
 
+@MainActor
 final class KeyboardBridgeView: NSView {
     var keyDownHandler: ((NSEvent) -> Bool)?
     var keyUpHandler: ((NSEvent) -> Bool)?
     var flagsChangedHandler: ((NSEvent) -> Bool)?
+    private var tabKeyMonitor: Any?
 
     override var acceptsFirstResponder: Bool { true }
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
+        installTabMonitorIfNeeded()
         activateIfNeeded()
     }
 
@@ -90,8 +93,42 @@ final class KeyboardBridgeView: NSView {
         }
     }
 
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        if newWindow == nil, let tabKeyMonitor {
+            NSEvent.removeMonitor(tabKeyMonitor)
+            self.tabKeyMonitor = nil
+        }
+        super.viewWillMove(toWindow: newWindow)
+    }
+
+    private func installTabMonitorIfNeeded() {
+        guard tabKeyMonitor == nil else { return }
+        tabKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self, let window = self.window else { return event }
+            guard NSApp.keyWindow === window else { return event }
+            guard event.keyCode == 48 else { return event }
+
+            let normalizedModifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            guard normalizedModifiers.isEmpty else { return event }
+            guard self.shouldAllowTabWorkspaceChromeToggle(for: window.firstResponder) else { return event }
+
+            if self.keyDownHandler?(event) == true {
+                return nil
+            }
+            return event
+        }
+    }
+
     private func shouldPreserveCurrentFirstResponder(_ responder: Any?) -> Bool {
         false
+    }
+
+    private func shouldAllowTabWorkspaceChromeToggle(for responder: Any?) -> Bool {
+        guard let responder else { return true }
+        if let textView = responder as? NSTextView, textView.isEditable {
+            return false
+        }
+        return true
     }
 
     private func brushSizeShortcutDelta(for event: NSEvent) -> Float? {
