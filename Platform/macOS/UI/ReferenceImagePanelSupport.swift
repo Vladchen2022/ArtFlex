@@ -2,14 +2,22 @@ import AppKit
 import SwiftUI
 import ImageIO
 
-struct ReferenceImageViewportState: Equatable, Sendable {
-    var zoomScale: Double
-    var contentOffset: CanvasPoint
+@MainActor
+private let referenceImageEyedropperCursor: NSCursor = {
+    guard let symbol = NSImage(
+        systemSymbolName: "eyedropper",
+        accessibilityDescription: nil
+    ) else {
+        return .crosshair
+    }
 
-    static let fit = ReferenceImageViewportState(
-        zoomScale: 1,
-        contentOffset: .init(x: 0, y: 0)
-    )
+    symbol.isTemplate = false
+    symbol.size = NSSize(width: 18, height: 18)
+    return NSCursor(image: symbol, hotSpot: NSPoint(x: 2, y: 15))
+}()
+
+private final class FirstMouseHostingView<Content: View>: NSHostingView<Content> {
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 }
 
 final class ReferenceImageAsset: @unchecked Sendable {
@@ -18,19 +26,25 @@ final class ReferenceImageAsset: @unchecked Sendable {
     let height: Int
     let rgbaPixels: Data
     let cgImage: CGImage
+    let sourceURL: URL?
+    let decodedMaxDimension: Int
 
     init(
         fileName: String,
         width: Int,
         height: Int,
         rgbaPixels: Data,
-        cgImage: CGImage
+        cgImage: CGImage,
+        sourceURL: URL? = nil,
+        decodedMaxDimension: Int = 0
     ) {
         self.fileName = fileName
         self.width = width
         self.height = height
         self.rgbaPixels = rgbaPixels
         self.cgImage = cgImage
+        self.sourceURL = sourceURL
+        self.decodedMaxDimension = decodedMaxDimension
     }
 
     func sampledColor(normalizedX: Double, normalizedY: Double) -> RGBAColor? {
@@ -128,7 +142,9 @@ final class ReferenceImageAsset: @unchecked Sendable {
             width: width,
             height: height,
             rgbaPixels: rgbaPixels,
-            cgImage: previewImage
+            cgImage: previewImage,
+            sourceURL: url,
+            decodedMaxDimension: maxDimension
         )
     }
 
@@ -159,7 +175,6 @@ final class ReferenceImageAsset: @unchecked Sendable {
 struct ReferenceImageSlotState: Identifiable {
     let id: Int
     var asset: ReferenceImageAsset?
-    var viewport: ReferenceImageViewportState = .fit
 
     var labelText: String {
         "\(id + 1)"
@@ -172,9 +187,7 @@ struct ReferenceImageSlotState: Identifiable {
 
 struct ReferenceImageViewer: NSViewRepresentable {
     let asset: ReferenceImageAsset?
-    let viewport: ReferenceImageViewportState
     let backgroundColor: NSColor
-    let onViewportChanged: (ReferenceImageViewportState) -> Void
     let onHoverColorChanged: (RGBAColor?) -> Void
     let onPickColor: (RGBAColor) -> Void
 
@@ -186,9 +199,7 @@ struct ReferenceImageViewer: NSViewRepresentable {
 
     func updateNSView(_ nsView: ReferenceImageViewerNSView, context: Context) {
         nsView.asset = asset
-        nsView.viewport = viewport
         nsView.backgroundColor = backgroundColor
-        nsView.onViewportChanged = onViewportChanged
         nsView.onHoverColorChanged = onHoverColorChanged
         nsView.onPickColor = onPickColor
     }
@@ -203,34 +214,18 @@ final class ReferenceImageViewerNSView: NSView {
         }
     }
 
-    var viewport: ReferenceImageViewportState = .fit {
-        didSet {
-            guard viewport != oldValue else { return }
-            needsLayout = true
-        }
-    }
-
     var backgroundColor: NSColor = NSColor(calibratedWhite: 0.10, alpha: 1) {
         didSet {
             layer?.backgroundColor = backgroundColor.cgColor
         }
     }
 
-    var onViewportChanged: ((ReferenceImageViewportState) -> Void)?
     var onHoverColorChanged: ((RGBAColor?) -> Void)?
     var onPickColor: ((RGBAColor) -> Void)?
 
     private let imageLayer = CALayer()
     private var trackingAreaRef: NSTrackingArea?
-    private var isSpacePressed = false
-    private var isMouseInside = false
-    private var isPanning = false
-    private var panStartLocation: CGPoint = .zero
-    private var panStartOffset = CanvasPoint(x: 0, y: 0)
-    private var keyDownMonitor: Any?
-    private var keyUpMonitor: Any?
-
-    override var acceptsFirstResponder: Bool { true }
+    override var acceptsFirstResponder: Bool { false }
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -252,13 +247,6 @@ final class ReferenceImageViewerNSView: NSView {
         imageLayer.frame = displayedImageRect()
     }
 
-    override func viewWillMove(toWindow newWindow: NSWindow?) {
-        super.viewWillMove(toWindow: newWindow)
-        if newWindow == nil {
-            tearDownEventMonitors()
-        }
-    }
-
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
         if let trackingAreaRef {
@@ -277,26 +265,17 @@ final class ReferenceImageViewerNSView: NSView {
 
     override func resetCursorRects() {
         discardCursorRects()
-        let cursor = isSpacePressed ? NSCursor.openHand : Self.eyedropperCursor
-        addCursorRect(bounds, cursor: cursor)
+        addCursorRect(bounds, cursor: referenceImageEyedropperCursor)
     }
 
     override func mouseEntered(with event: NSEvent) {
         super.mouseEntered(with: event)
-        isMouseInside = true
-        window?.makeFirstResponder(self)
-        setUpEventMonitorsIfNeeded()
         updateHoverColor(at: convert(event.locationInWindow, from: nil))
-        resetCursorRects()
     }
 
     override func mouseExited(with event: NSEvent) {
         super.mouseExited(with: event)
-        isMouseInside = false
-        isPanning = false
-        isSpacePressed = false
         onHoverColorChanged?(nil)
-        resetCursorRects()
     }
 
     override func mouseMoved(with event: NSEvent) {
@@ -305,68 +284,11 @@ final class ReferenceImageViewerNSView: NSView {
     }
 
     override func mouseDown(with event: NSEvent) {
-        window?.makeFirstResponder(self)
-        setUpEventMonitorsIfNeeded()
         let location = convert(event.locationInWindow, from: nil)
-
-        if isSpacePressed {
-            isPanning = true
-            panStartLocation = location
-            panStartOffset = viewport.contentOffset
-            NSCursor.closedHand.set()
-            return
-        }
-
         if let color = sampledColor(at: location) {
             onHoverColorChanged?(color)
             onPickColor?(color)
         }
-    }
-
-    override func mouseDragged(with event: NSEvent) {
-        let location = convert(event.locationInWindow, from: nil)
-
-        if isSpacePressed || isPanning {
-            var next = viewport
-            next.contentOffset = CanvasPoint(
-                x: panStartOffset.x + (location.x - panStartLocation.x),
-                y: panStartOffset.y + (location.y - panStartLocation.y)
-            )
-            onViewportChanged?(next)
-            return
-        }
-
-        updateHoverColor(at: location)
-    }
-
-    override func mouseUp(with event: NSEvent) {
-        super.mouseUp(with: event)
-        isPanning = false
-        resetCursorRects()
-    }
-
-    override func keyDown(with event: NSEvent) {
-        if handleLocalKeyDown(event) {
-            return
-        }
-        super.keyDown(with: event)
-    }
-
-    override func keyUp(with event: NSEvent) {
-        if handleLocalKeyUp(event) {
-            return
-        }
-
-        super.keyUp(with: event)
-    }
-
-    private func updateZoom(by multiplier: Double) {
-        var next = viewport
-        next.zoomScale = min(max(next.zoomScale * multiplier, 0.2), 16)
-        if abs(next.zoomScale - 1) < 0.0001 {
-            next = .fit
-        }
-        onViewportChanged?(next)
     }
 
     private func updateHoverColor(at location: CGPoint) {
@@ -386,17 +308,13 @@ final class ReferenceImageViewerNSView: NSView {
         let imageSize = CGSize(width: asset.width, height: asset.height)
         let fitScale = min(boundsSize.width / imageSize.width, boundsSize.height / imageSize.height)
         let displaySize = CGSize(
-            width: imageSize.width * fitScale * viewport.zoomScale,
-            height: imageSize.height * fitScale * viewport.zoomScale
-        )
-        let center = CGPoint(
-            x: bounds.midX + viewport.contentOffset.x,
-            y: bounds.midY + viewport.contentOffset.y
+            width: imageSize.width * fitScale,
+            height: imageSize.height * fitScale
         )
 
         return CGRect(
-            x: center.x - displaySize.width * 0.5,
-            y: center.y - displaySize.height * 0.5,
+            x: bounds.midX - displaySize.width * 0.5,
+            y: bounds.midY - displaySize.height * 0.5,
             width: displaySize.width,
             height: displaySize.height
         )
@@ -417,93 +335,531 @@ final class ReferenceImageViewerNSView: NSView {
         )
     }
 
-    private func setUpEventMonitorsIfNeeded() {
-        guard keyDownMonitor == nil else { return }
+}
 
-        keyDownMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            guard let self else { return event }
-            return self.handleLocalKeyDown(event) ? nil : event
-        }
+private struct ReferenceImageBrowser: NSViewRepresentable {
+    let asset: ReferenceImageAsset?
+    let backgroundColor: NSColor
+    let resetToFitToken: Int
+    let onHoverColorChanged: (RGBAColor?) -> Void
+    let onPickColor: (RGBAColor) -> Void
 
-        keyUpMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyUp) { [weak self] event in
-            guard let self else { return event }
-            return self.handleLocalKeyUp(event) ? nil : event
+    func makeNSView(context: Context) -> ReferenceImageBrowserScrollView {
+        let view = ReferenceImageBrowserScrollView()
+        view.backgroundPanelColor = backgroundColor
+        view.lastResetToFitToken = resetToFitToken
+        return view
+    }
+
+    func updateNSView(_ nsView: ReferenceImageBrowserScrollView, context: Context) {
+        nsView.backgroundPanelColor = backgroundColor
+        nsView.onHoverColorChanged = onHoverColorChanged
+        nsView.onPickColor = onPickColor
+        nsView.update(asset: asset, resetToFitToken: resetToFitToken)
+    }
+}
+
+private final class ReferenceImageBrowserScrollView: NSScrollView {
+    var onHoverColorChanged: ((RGBAColor?) -> Void)? {
+        didSet { documentImageView.onHoverColorChanged = onHoverColorChanged }
+    }
+    var onPickColor: ((RGBAColor) -> Void)? {
+        didSet { documentImageView.onPickColor = onPickColor }
+    }
+    var backgroundPanelColor: NSColor = NSColor(calibratedWhite: 0.10, alpha: 1) {
+        didSet {
+            layer?.backgroundColor = backgroundPanelColor.cgColor
+            contentView.wantsLayer = true
+            contentView.layer?.backgroundColor = backgroundPanelColor.cgColor
         }
     }
 
-    private func tearDownEventMonitors() {
-        if let keyDownMonitor {
-            NSEvent.removeMonitor(keyDownMonitor)
-            self.keyDownMonitor = nil
-        }
-
-        if let keyUpMonitor {
-            NSEvent.removeMonitor(keyUpMonitor)
-            self.keyUpMonitor = nil
+    private let documentImageView = ReferenceImageBrowserDocumentView()
+    private var currentAsset: ReferenceImageAsset?
+    private var isApplyingViewportState = false
+    private var currentZoomScale: Double = 1
+    private var lastFitViewportSize: CGSize = .zero
+    var lastResetToFitToken: Int = 0
+    private var isPanModifierActive = false {
+        didSet {
+            documentImageView.isPanModifierActive = isPanModifierActive
         }
     }
 
-    private func handleLocalKeyDown(_ event: NSEvent) -> Bool {
-        guard isMouseInside else { return false }
-        let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+    override var acceptsFirstResponder: Bool { true }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
-        if modifiers == .command {
-            let chars = event.charactersIgnoringModifiers ?? ""
-            switch chars {
-            case "+", "=":
-                updateZoom(by: 1.2)
-                return true
-            case "-", "_":
-                updateZoom(by: 1.0 / 1.2)
-                return true
-            case "0":
-                onViewportChanged?(.fit)
-                return true
-            default:
-                break
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        layer?.cornerRadius = 12
+        layer?.masksToBounds = true
+        layer?.backgroundColor = backgroundPanelColor.cgColor
+        borderType = .noBorder
+        drawsBackground = false
+        hasVerticalScroller = false
+        hasHorizontalScroller = false
+        autohidesScrollers = true
+        scrollerStyle = .overlay
+        allowsMagnification = true
+        minMagnification = 1
+        maxMagnification = 16
+        contentView = NSClipView()
+        contentView.wantsLayer = true
+        contentView.layer?.backgroundColor = backgroundPanelColor.cgColor
+        documentView = documentImageView
+        documentImageView.onPan = { [weak self] delta in
+            self?.pan(by: delta)
+        }
+    }
+
+    required init?(coder: NSCoder) {
+        nil
+    }
+
+    override func layout() {
+        super.layout()
+        guard isApplyingViewportState == false else { return }
+        guard currentAsset != nil else { return }
+        let viewportSize = contentSize
+        guard viewportSize.width > 1, viewportSize.height > 1 else { return }
+        applyCurrentLayout(centeredAt: currentVisibleDocumentCenter(), forceFitRebuild: false)
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.window?.contentView != nil else { return }
+            self.window?.makeFirstResponder(self)
+        }
+    }
+
+    override func resignFirstResponder() -> Bool {
+        isPanModifierActive = false
+        return super.resignFirstResponder()
+    }
+
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if handleCommandKeyEquivalent(event) {
+            return true
+        }
+        return super.performKeyEquivalent(with: event)
+    }
+
+    override func keyDown(with event: NSEvent) {
+        if handleSpaceKeyDown(event) {
+            return
+        }
+        super.keyDown(with: event)
+    }
+
+    override func keyUp(with event: NSEvent) {
+        if handleSpaceKeyUp(event) {
+            return
+        }
+        super.keyUp(with: event)
+    }
+
+    override func magnify(with event: NSEvent) {
+        updateZoom(
+            by: max(0.25, 1 + event.magnification),
+            centeredAt: resolvedZoomAnchor(from: event)
+        )
+    }
+
+    override func scrollWheel(with event: NSEvent) {
+        let modifiers = normalizedZoomModifiers(from: event)
+        if shouldHandleZoomShortcutModifiers(modifiers) {
+            let delta = event.hasPreciseScrollingDeltas ? event.scrollingDeltaY : event.deltaY * 10
+            guard abs(delta) > 0.0001 else {
+                return
+            }
+
+            let multiplier = exp(-delta * 0.01)
+            updateZoom(by: multiplier, centeredAt: resolvedZoomAnchor(from: event))
+            return
+        }
+
+        super.scrollWheel(with: event)
+    }
+
+    func update(asset: ReferenceImageAsset?, resetToFitToken: Int) {
+        let assetChanged = currentAsset !== asset
+        let resetRequested = resetToFitToken != lastResetToFitToken
+        guard assetChanged || resetRequested else {
+            return
+        }
+
+        let previousAsset = currentAsset
+        currentAsset = asset
+        lastResetToFitToken = resetToFitToken
+
+        if assetChanged {
+            documentImageView.asset = asset
+            onHoverColorChanged?(nil)
+        }
+
+        guard asset != nil else {
+            lastFitViewportSize = .zero
+            currentZoomScale = 1
+            if documentImageView.frame != .zero {
+                documentImageView.frame = .zero
+            }
+            return
+        }
+
+        let sourceChanged = previousAsset?.sourceURL?.standardizedFileURL != asset?.sourceURL?.standardizedFileURL
+        let preservedCenter = sourceChanged ? nil : currentVisibleDocumentCenter()
+        if sourceChanged || resetRequested {
+            currentZoomScale = 1
+        }
+        applyCurrentLayout(centeredAt: sourceChanged ? nil : preservedCenter, forceFitRebuild: true)
+
+        if assetChanged {
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.window?.makeFirstResponder(self)
+            }
+        }
+    }
+
+    func resetToFit() {
+        currentZoomScale = 1
+        applyCurrentLayout(centeredAt: nil, forceFitRebuild: true)
+    }
+
+    func handleCommandKeyEquivalent(_ event: NSEvent) -> Bool {
+        let modifiers = normalizedZoomModifiers(from: event)
+        guard shouldHandleZoomShortcutModifiers(modifiers) else { return false }
+
+        switch event.charactersIgnoringModifiers {
+        case "+", "=":
+            updateZoom(by: 1.2, centeredAt: resolvedZoomAnchor(from: event))
+            return true
+        case "-", "_":
+            updateZoom(by: 1.0 / 1.2, centeredAt: resolvedZoomAnchor(from: event))
+            return true
+        case "0":
+            resetToFit()
+            return true
+        default:
+            return false
+        }
+    }
+
+    func handleSpaceKeyDown(_ event: NSEvent) -> Bool {
+        guard event.charactersIgnoringModifiers == " " else { return false }
+        isPanModifierActive = true
+        return true
+    }
+
+    func handleSpaceKeyUp(_ event: NSEvent) -> Bool {
+        guard event.charactersIgnoringModifiers == " " else { return false }
+        isPanModifierActive = false
+        return true
+    }
+
+    private func applyCurrentLayout(centeredAt point: CGPoint?, forceFitRebuild: Bool) {
+        guard let currentAsset else { return }
+
+        let viewportSize = contentSize
+        guard viewportSize.width > 1, viewportSize.height > 1 else { return }
+
+        let viewportChanged = abs(viewportSize.width - lastFitViewportSize.width) > 0.5
+            || abs(viewportSize.height - lastFitViewportSize.height) > 0.5
+
+        if forceFitRebuild || viewportChanged {
+            lastFitViewportSize = viewportSize
+            let baseSize = fitDisplaySize(for: currentAsset, viewportSize: viewportSize)
+            documentImageView.frame = CGRect(origin: .zero, size: baseSize)
+        }
+
+        minMagnification = 1
+        maxMagnification = 16
+        let anchor = point ?? CGPoint(x: documentImageView.bounds.midX, y: documentImageView.bounds.midY)
+        applyZoomScale(currentZoomScale, centeredAt: anchor)
+    }
+
+    private func applyZoomScale(_ scale: Double, centeredAt point: CGPoint) {
+        let resolvedZoomScale = min(max(scale, 1), 16)
+        let anchorInContentView = contentView.convert(point, from: documentImageView)
+        isApplyingViewportState = true
+        currentZoomScale = resolvedZoomScale
+        setMagnification(CGFloat(resolvedZoomScale), centeredAt: anchorInContentView)
+        updateContentInsetsForCurrentState()
+        reflectScrolledClipView(contentView)
+        isApplyingViewportState = false
+    }
+
+    private func updateZoom(by multiplier: Double, centeredAt point: CGPoint) {
+        guard currentAsset != nil else { return }
+
+        let nextZoomScale = min(max(currentZoomScale * multiplier, 1), 16)
+        let resolvedZoomScale = abs(nextZoomScale - 1) < 0.0001 ? 1 : nextZoomScale
+        guard abs(resolvedZoomScale - currentZoomScale) > 0.0001 else { return }
+
+        applyZoomScale(resolvedZoomScale, centeredAt: point)
+    }
+
+    private func pan(by delta: CGPoint) {
+        guard currentAsset != nil else { return }
+
+        let visibleRect = contentView.bounds
+        let documentSize = documentImageView.frame.size
+        var nextOrigin = CGPoint(
+            x: visibleRect.origin.x - delta.x,
+            y: visibleRect.origin.y - delta.y
+        )
+        nextOrigin = clampedOrigin(nextOrigin, visibleSize: visibleRect.size, documentSize: documentSize)
+        contentView.scroll(to: nextOrigin)
+        reflectScrolledClipView(contentView)
+    }
+
+    private func fitDisplaySize(for asset: ReferenceImageAsset, viewportSize: CGSize) -> CGSize {
+        let imageSize = CGSize(width: asset.width, height: asset.height)
+        let fitScale = min(viewportSize.width / imageSize.width, viewportSize.height / imageSize.height)
+        return CGSize(
+            width: max((imageSize.width * fitScale).rounded(.toNearestOrAwayFromZero), 1),
+            height: max((imageSize.height * fitScale).rounded(.toNearestOrAwayFromZero), 1)
+        )
+    }
+
+    private func updateContentInsetsForCurrentState() {
+        let viewportSize = contentSize
+        let documentSize = CGSize(
+            width: documentImageView.frame.size.width * magnification,
+            height: documentImageView.frame.size.height * magnification
+        )
+        let shouldCenter = abs(currentZoomScale - 1) < 0.0001
+        contentInsets = NSEdgeInsets(
+            top: shouldCenter ? max((viewportSize.height - documentSize.height) * 0.5, 0) : 0,
+            left: shouldCenter ? max((viewportSize.width - documentSize.width) * 0.5, 0) : 0,
+            bottom: shouldCenter ? max((viewportSize.height - documentSize.height) * 0.5, 0) : 0,
+            right: shouldCenter ? max((viewportSize.width - documentSize.width) * 0.5, 0) : 0
+        )
+    }
+
+    private func clampedOrigin(_ proposed: CGPoint, visibleSize: CGSize, documentSize: CGSize) -> CGPoint {
+        let maxX = max(documentSize.width - visibleSize.width, 0)
+        let maxY = max(documentSize.height - visibleSize.height, 0)
+        return CGPoint(
+            x: min(max(proposed.x, 0), maxX),
+            y: min(max(proposed.y, 0), maxY)
+        )
+    }
+
+    private func resolvedZoomAnchor(from event: NSEvent?) -> CGPoint {
+        if let event {
+            let eventPoint = documentImageView.convert(event.locationInWindow, from: nil)
+            if documentImageView.bounds.contains(eventPoint) {
+                return eventPoint
             }
         }
 
-        if modifiers.isEmpty, event.keyCode == 49 {
-            isSpacePressed = true
-            resetCursorRects()
-            return true
+        if let window {
+            let pointer = documentImageView.convert(window.mouseLocationOutsideOfEventStream, from: nil)
+            if documentImageView.bounds.contains(pointer) {
+                return pointer
+            }
         }
 
-        return false
+        let visibleRect = currentVisibleDocumentRect()
+        if visibleRect.isEmpty == false {
+            return CGPoint(x: visibleRect.midX, y: visibleRect.midY)
+        }
+
+        if documentImageView.bounds.isEmpty == false {
+            return CGPoint(x: documentImageView.bounds.midX, y: documentImageView.bounds.midY)
+        }
+
+        return .zero
     }
 
-    private func handleLocalKeyUp(_ event: NSEvent) -> Bool {
-        guard isMouseInside || isSpacePressed || isPanning else { return false }
-
-        if event.keyCode == 49 {
-            isSpacePressed = false
-            isPanning = false
-            resetCursorRects()
-            return true
-        }
-
-        return false
+    private func currentVisibleDocumentRect() -> CGRect {
+        contentView.bounds
     }
 
-    private static let eyedropperCursor: NSCursor = {
-        guard let symbol = NSImage(
-            systemSymbolName: "eyedropper",
-            accessibilityDescription: nil
-        ) else {
-            return .crosshair
+    private func currentVisibleDocumentCenter() -> CGPoint? {
+        let visibleRect = currentVisibleDocumentRect()
+        guard visibleRect.isEmpty == false else { return nil }
+        return CGPoint(x: visibleRect.midX, y: visibleRect.midY)
+    }
+
+    private func normalizedZoomModifiers(from event: NSEvent) -> NSEvent.ModifierFlags {
+        event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+    }
+
+    private func shouldHandleZoomShortcutModifiers(_ modifiers: NSEvent.ModifierFlags) -> Bool {
+        guard modifiers.contains(.command) else { return false }
+        guard modifiers.contains(.control) == false else { return false }
+        guard modifiers.contains(.option) == false else { return false }
+        let unexpected = modifiers.subtracting([.command, .shift])
+        return unexpected.isEmpty
+    }
+}
+
+private final class ReferenceImageBrowserDocumentView: NSView {
+    var asset: ReferenceImageAsset? {
+        didSet {
+            imageLayer.contents = asset?.cgImage
+            imageLayer.isHidden = asset == nil
+            needsLayout = true
+            needsDisplay = true
+        }
+    }
+    var onHoverColorChanged: ((RGBAColor?) -> Void)?
+    var onPickColor: ((RGBAColor) -> Void)?
+    var onPan: ((CGPoint) -> Void)?
+    var isPanModifierActive = false {
+        didSet {
+            if isPanModifierActive == false {
+                draggedDuringCurrentGesture = false
+            }
+            resetCursorRects()
+        }
+    }
+
+    private let imageLayer = CALayer()
+    private var trackingAreaRef: NSTrackingArea?
+    private var dragStartLocation: CGPoint = .zero
+    private var lastDragLocation: CGPoint = .zero
+    private var draggedDuringCurrentGesture = false
+    private let dragThreshold: CGFloat = 6
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        layer?.backgroundColor = NSColor.clear.cgColor
+        imageLayer.contentsGravity = .resize
+        imageLayer.isHidden = true
+        layer?.addSublayer(imageLayer)
+    }
+
+    required init?(coder: NSCoder) {
+        nil
+    }
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
+        true
+    }
+
+    override func layout() {
+        super.layout()
+        imageLayer.frame = bounds
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let trackingAreaRef {
+            removeTrackingArea(trackingAreaRef)
         }
 
-        symbol.isTemplate = false
-        symbol.size = NSSize(width: 18, height: 18)
-        return NSCursor(image: symbol, hotSpot: NSPoint(x: 2, y: 15))
-    }()
+        let trackingArea = NSTrackingArea(
+            rect: bounds,
+            options: [.mouseEnteredAndExited, .mouseMoved, .activeAlways, .inVisibleRect],
+            owner: self,
+            userInfo: nil
+        )
+        addTrackingArea(trackingArea)
+        trackingAreaRef = trackingArea
+    }
+
+    override func resetCursorRects() {
+        discardCursorRects()
+        let cursor: NSCursor
+        if isPanModifierActive {
+            cursor = draggedDuringCurrentGesture ? .closedHand : .openHand
+        } else {
+            cursor = referenceImageEyedropperCursor
+        }
+        addCursorRect(bounds, cursor: cursor)
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        super.mouseEntered(with: event)
+        updateHoverColor(at: convert(event.locationInWindow, from: nil))
+        resetCursorRects()
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        super.mouseExited(with: event)
+        onHoverColorChanged?(nil)
+        draggedDuringCurrentGesture = false
+        resetCursorRects()
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        super.mouseMoved(with: event)
+        updateHoverColor(at: convert(event.locationInWindow, from: nil))
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        window?.makeFirstResponder(enclosingScrollView)
+        dragStartLocation = convert(event.locationInWindow, from: nil)
+        lastDragLocation = dragStartLocation
+        draggedDuringCurrentGesture = false
+        resetCursorRects()
+        if let color = sampledColor(at: dragStartLocation) {
+            onHoverColorChanged?(color)
+        }
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        let location = convert(event.locationInWindow, from: nil)
+        if isPanModifierActive && draggedDuringCurrentGesture == false {
+            let distance = hypot(location.x - dragStartLocation.x, location.y - dragStartLocation.y)
+            if distance > dragThreshold {
+                draggedDuringCurrentGesture = true
+                resetCursorRects()
+            }
+        }
+
+        if isPanModifierActive && draggedDuringCurrentGesture {
+            let delta = CGPoint(x: location.x - lastDragLocation.x, y: location.y - lastDragLocation.y)
+            onPan?(delta)
+        } else {
+            updateHoverColor(at: location)
+        }
+
+        lastDragLocation = location
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        let location = convert(event.locationInWindow, from: nil)
+        let totalDistance = hypot(location.x - dragStartLocation.x, location.y - dragStartLocation.y)
+        if isPanModifierActive == false,
+           let color = sampledColor(at: location),
+           totalDistance <= dragThreshold {
+            onHoverColorChanged?(color)
+            onPickColor?(color)
+        } else {
+            updateHoverColor(at: location)
+        }
+        draggedDuringCurrentGesture = false
+        resetCursorRects()
+    }
+
+    private func updateHoverColor(at location: CGPoint) {
+        onHoverColorChanged?(sampledColor(at: location))
+    }
+
+    private func sampledColor(at location: CGPoint) -> RGBAColor? {
+        guard let asset, bounds.width > 0, bounds.height > 0, bounds.contains(location) else {
+            return nil
+        }
+
+        let normalizedX = location.x / bounds.width
+        let normalizedY = 1 - (location.y / bounds.height)
+        return asset.sampledColor(normalizedX: normalizedX, normalizedY: normalizedY)
+    }
 }
 
 @MainActor
 final class ReferenceImageFloatingPanelController: NSObject, NSWindowDelegate {
     private weak var viewModel: WorkspaceViewModel?
     private var panel: ReferenceImageFloatingPanel?
+    private var spaceKeyDownMonitor: Any?
+    private var spaceKeyUpMonitor: Any?
 
     func show(for viewModel: WorkspaceViewModel) {
         self.viewModel = viewModel
@@ -513,52 +869,85 @@ final class ReferenceImageFloatingPanelController: NSObject, NSWindowDelegate {
         }
 
         if let panel {
-            panel.contentView = NSHostingView(
-                rootView: ReferenceImageFloatingPanelContent(
-                    viewModel: viewModel,
-                    onClose: { [weak self] in
-                        self?.close()
-                    }
-                )
+            panel.contentView = FirstMouseHostingView(
+                rootView: ReferenceImageFloatingPanelContent(viewModel: viewModel)
             )
             panel.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
+            panel.focusBrowserIfAvailable()
+            installSpaceKeyMonitorsIfNeeded()
         }
     }
 
     func close() {
+        removeSpaceKeyMonitors()
         panel?.orderOut(nil)
         panel?.close()
         panel = nil
     }
 
     func windowWillClose(_ notification: Notification) {
+        removeSpaceKeyMonitors()
         panel = nil
         viewModel?.referenceImageFloatingPanelDidClose()
+    }
+
+    private func installSpaceKeyMonitorsIfNeeded() {
+        if spaceKeyDownMonitor == nil {
+            spaceKeyDownMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+                guard let self, let panel = self.panel, panel.isKeyWindow else {
+                    return event
+                }
+                return panel.handleSpaceKeyDown(event) ? nil : event
+            }
+        }
+
+        if spaceKeyUpMonitor == nil {
+            spaceKeyUpMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyUp) { [weak self] event in
+                guard let self, let panel = self.panel, panel.isKeyWindow else {
+                    return event
+                }
+                return panel.handleSpaceKeyUp(event) ? nil : event
+            }
+        }
+    }
+
+    private func removeSpaceKeyMonitors() {
+        if let spaceKeyDownMonitor {
+            NSEvent.removeMonitor(spaceKeyDownMonitor)
+            self.spaceKeyDownMonitor = nil
+        }
+        if let spaceKeyUpMonitor {
+            NSEvent.removeMonitor(spaceKeyUpMonitor)
+            self.spaceKeyUpMonitor = nil
+        }
     }
 
     private func makePanel(for viewModel: WorkspaceViewModel) -> ReferenceImageFloatingPanel {
         let panel = ReferenceImageFloatingPanel(
             contentRect: CGRect(x: 200, y: 180, width: 760, height: 560),
-            styleMask: [.borderless, .resizable, .fullSizeContentView],
+            styleMask: [.titled, .closable, .resizable],
             backing: .buffered,
             defer: false
         )
+        panel.identifier = NSUserInterfaceItemIdentifier("ReferenceImageFloatingPanel")
         panel.level = .floating
+        panel.becomesKeyOnlyIfNeeded = false
         panel.isOpaque = false
-        panel.backgroundColor = .clear
+        panel.backgroundColor = NSColor.windowBackgroundColor
         panel.hasShadow = true
         panel.collectionBehavior = [.fullScreenAuxiliary]
-        panel.isMovableByWindowBackground = true
+        panel.isMovableByWindowBackground = false
+        panel.acceptsMouseMovedEvents = true
+        panel.titleVisibility = .visible
+        panel.titlebarAppearsTransparent = false
+        panel.title = "参考图"
         panel.minSize = CGSize(width: 420, height: 320)
+        panel.standardWindowButton(.miniaturizeButton)?.isHidden = true
+        panel.standardWindowButton(.zoomButton)?.isHidden = true
         panel.delegate = self
-        panel.contentView = NSHostingView(
-            rootView: ReferenceImageFloatingPanelContent(
-                viewModel: viewModel,
-                onClose: { [weak self] in
-                    self?.close()
-                }
-            )
+        panel.contentView = FirstMouseHostingView(
+            rootView: ReferenceImageFloatingPanelContent(viewModel: viewModel)
         )
         return panel
     }
@@ -567,83 +956,131 @@ final class ReferenceImageFloatingPanelController: NSObject, NSWindowDelegate {
 private final class ReferenceImageFloatingPanel: NSPanel {
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { true }
+
+    override func becomeKey() {
+        super.becomeKey()
+        focusBrowserIfAvailable()
+        DispatchQueue.main.async { [weak self] in
+            self?.focusBrowserIfAvailable()
+        }
+    }
+
+    func focusBrowserIfAvailable() {
+        guard let browser = firstBrowserScrollView(in: contentView) else { return }
+        makeFirstResponder(browser)
+    }
+
+    func handleSpaceKeyDown(_ event: NSEvent) -> Bool {
+        guard let browser = firstBrowserScrollView(in: contentView) else { return false }
+        if firstResponder !== browser {
+            makeFirstResponder(browser)
+        }
+        return browser.handleSpaceKeyDown(event)
+    }
+
+    func handleSpaceKeyUp(_ event: NSEvent) -> Bool {
+        guard let browser = firstBrowserScrollView(in: contentView) else { return false }
+        return browser.handleSpaceKeyUp(event)
+    }
+
+    private func firstBrowserScrollView(in view: NSView?) -> ReferenceImageBrowserScrollView? {
+        guard let view else { return nil }
+        if let browser = view as? ReferenceImageBrowserScrollView {
+            return browser
+        }
+        for subview in view.subviews {
+            if let browser = firstBrowserScrollView(in: subview) {
+                return browser
+            }
+        }
+        return nil
+    }
 }
 
 private struct ReferenceImageFloatingPanelContent: View {
     @ObservedObject var viewModel: WorkspaceViewModel
-    let onClose: () -> Void
+    @State private var floatingHoverColor: RGBAColor?
+    @State private var resetToFitToken: Int = 0
+
+    private var floatingPreviewColor: Color {
+        let resolved = floatingHoverColor ?? viewModel.workspace.toolSession.selectedColor
+        return Color(
+            red: Double(resolved.red),
+            green: Double(resolved.green),
+            blue: Double(resolved.blue),
+            opacity: Double(resolved.alpha)
+        )
+    }
+
+    private var floatingPreviousColor: Color {
+        viewModel.referenceImagePreviousSwiftUIColor
+    }
 
     var body: some View {
-        ZStack(alignment: .topTrailing) {
-            VStack(spacing: 10) {
-                ReferenceImageViewer(
-                    asset: viewModel.selectedReferenceImageSlot?.asset,
-                    viewport: viewModel.selectedReferenceImageSlot?.viewport ?? .fit,
-                    backgroundColor: NSColor(calibratedWhite: 0.08, alpha: 1),
-                    onViewportChanged: { next in
-                        viewModel.updateSelectedReferenceImageViewport(next)
-                    },
-                    onHoverColorChanged: { color in
-                        viewModel.updateReferenceImagePreviewColor(color)
-                    },
-                    onPickColor: { color in
-                        viewModel.confirmReferenceImagePickedColor(color)
-                    }
+        VStack(spacing: 10) {
+            ReferenceImageBrowser(
+                asset: viewModel.selectedReferenceImageSlot?.asset,
+                backgroundColor: NSColor(calibratedWhite: 0.045, alpha: 1),
+                resetToFitToken: resetToFitToken,
+                onHoverColorChanged: { color in
+                    floatingHoverColor = color
+                },
+                onPickColor: { color in
+                    floatingHoverColor = color
+                    viewModel.confirmReferenceImagePickedColor(color)
+                }
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 12)
+                    .stroke(Color.white.opacity(0.08), lineWidth: 1)
+                    .allowsHitTesting(false)
+            )
+
+            HStack(spacing: 10) {
+                Button("适合") {
+                    resetToFitToken += 1
+                }
+                .buttonStyle(.plain)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(Color.white.opacity(0.92))
+                .padding(.horizontal, 12)
+                .frame(height: 28)
+                .background(
+                    RoundedRectangle(cornerRadius: 9)
+                        .fill(Color.white.opacity(0.10))
                 )
+
+                ZStack {
+                    HStack(spacing: 0) {
+                        Rectangle()
+                            .fill(floatingPreviousColor)
+                        Rectangle()
+                            .fill(floatingPreviewColor)
+                    }
+
+                    Rectangle()
+                        .fill(Color.white.opacity(0.10))
+                        .frame(width: 1)
+                }
+                .frame(width: 92, height: 28)
+                .clipShape(RoundedRectangle(cornerRadius: 9))
                 .overlay(
-                    RoundedRectangle(cornerRadius: 12)
+                    RoundedRectangle(cornerRadius: 9)
                         .stroke(Color.white.opacity(0.08), lineWidth: 1)
                 )
 
-                HStack(spacing: 10) {
-                    Button("适合") {
-                        viewModel.resetSelectedReferenceImageViewportToFit()
-                    }
-                    .buttonStyle(.plain)
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(Color.white.opacity(0.92))
-                    .padding(.horizontal, 12)
-                    .frame(height: 28)
-                    .background(
-                        RoundedRectangle(cornerRadius: 9)
-                            .fill(Color.white.opacity(0.10))
-                    )
-
-                    RoundedRectangle(cornerRadius: 9)
-                        .fill(viewModel.referenceImagePreviewSwiftUIColor)
-                        .frame(width: 92, height: 28)
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 9)
-                                .stroke(Color.white.opacity(0.08), lineWidth: 1)
-                        )
-
-                    Spacer(minLength: 0)
-                }
+                Spacer(minLength: 0)
             }
-            .padding(14)
-            .background(
-                RoundedRectangle(cornerRadius: 14)
-                    .fill(Color(red: 0.12, green: 0.12, blue: 0.13).opacity(0.98))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 14)
-                    .stroke(Color.white.opacity(0.08), lineWidth: 1)
-            )
-
-            Button(action: onClose) {
-                Image(systemName: "xmark")
-                    .font(.system(size: 11, weight: .bold))
-                    .foregroundStyle(Color.white.opacity(0.92))
-                    .frame(width: 24, height: 24)
-                    .background(
-                        Circle()
-                            .fill(Color.black.opacity(0.28))
-                    )
-            }
-            .buttonStyle(.plain)
-            .padding(12)
         }
-        .padding(10)
-        .background(Color.clear)
+        .padding(14)
+        .background(Color(red: 0.12, green: 0.12, blue: 0.13))
+        .onAppear {
+            resetToFitToken += 1
+            floatingHoverColor = nil
+        }
+        .onChange(of: viewModel.selectedReferenceImageSlotID) { _, _ in
+            resetToFitToken += 1
+            floatingHoverColor = nil
+        }
     }
 }

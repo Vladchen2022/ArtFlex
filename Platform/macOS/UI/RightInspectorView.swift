@@ -197,9 +197,10 @@ struct RightInspectorView: View {
     @State private var dualTipPopoverPreviewRequestKey: String = ""
     @State private var secondaryTipEditorPreviewImage: CGImage?
     @State private var secondaryTipEditorPreviewRequestKey: String = ""
-    @State private var leftInspectorTab: LeftInspectorTab = .generator
+    @State private var leftInspectorTab: LeftInspectorTab = .referenceImages
     @State private var topInspectorTab: TopInspectorTab = .tipShape
     @State private var navigatorZoomPercentText = "100"
+    @State private var armedBrushPresetDragID: String?
 
     var body: some View {
         GeometryReader { proxy in
@@ -462,13 +463,7 @@ struct RightInspectorView: View {
                 .disabled(viewModel.selectedReferenceImageSlot?.asset == nil)
                 .help("放大参考图")
 
-                RoundedRectangle(cornerRadius: 9)
-                    .fill(viewModel.referenceImagePreviewSwiftUIColor)
-                    .frame(maxWidth: .infinity, minHeight: 26, maxHeight: 26)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 9)
-                            .stroke(Color.white.opacity(0.08), lineWidth: 1)
-                    )
+                referenceImagePickedColorSwatch
 
                 Button {
                     viewModel.clearSelectedReferenceImage()
@@ -494,6 +489,28 @@ struct RightInspectorView: View {
         .frame(maxWidth: .infinity, alignment: .topLeading)
     }
 
+    private var referenceImagePickedColorSwatch: some View {
+        ZStack {
+            HStack(spacing: 0) {
+                Rectangle()
+                    .fill(viewModel.referenceImagePreviousSwiftUIColor)
+                Rectangle()
+                    .fill(viewModel.referenceImagePreviewSwiftUIColor)
+            }
+
+            Rectangle()
+                .fill(Color.white.opacity(0.10))
+                .frame(width: 1)
+        }
+        .frame(maxWidth: .infinity, minHeight: 26, maxHeight: 26)
+        .clipShape(RoundedRectangle(cornerRadius: 9))
+        .overlay(
+            RoundedRectangle(cornerRadius: 9)
+                .stroke(Color.white.opacity(0.08), lineWidth: 1)
+        )
+        .help("左侧为上一次确认颜色，右侧为当前预览/选择颜色")
+    }
+
     private var referenceImagePreviewArea: some View {
         ZStack {
             RoundedRectangle(cornerRadius: 12)
@@ -501,11 +518,7 @@ struct RightInspectorView: View {
 
             ReferenceImageViewer(
                 asset: viewModel.selectedReferenceImageSlot?.asset,
-                viewport: viewModel.selectedReferenceImageSlot?.viewport ?? .fit,
                 backgroundColor: NSColor(calibratedWhite: 0.08, alpha: 1),
-                onViewportChanged: { next in
-                    viewModel.updateSelectedReferenceImageViewport(next)
-                },
                 onHoverColorChanged: { color in
                     viewModel.updateReferenceImagePreviewColor(color)
                 },
@@ -1082,16 +1095,34 @@ struct RightInspectorView: View {
         let preset = viewModel.workspace.brushLibrary.preset(atSlot: slotIndex)
 
         if let preset {
-            brushPresetCell(preset, slotIndex: slotIndex)
-                .onDrag {
-                    draggedBrushPresetID = preset.id
-                    return NSItemProvider(object: preset.id as NSString)
+            let baseCell = brushPresetCell(preset, slotIndex: slotIndex)
+                .simultaneousGesture(
+                    LongPressGesture(minimumDuration: 0.22)
+                        .onEnded { _ in
+                            armedBrushPresetDragID = preset.id
+                        }
+                )
+                .onHover { isHovering in
+                    if !isHovering, armedBrushPresetDragID == preset.id {
+                        armedBrushPresetDragID = nil
+                    }
                 }
                 .onDrop(of: [UTType.plainText.identifier], isTargeted: nil) { providers in
                     moveBrushPresetFromDrop(providers: providers, toSlot: slotIndex)
                 }
+
+            if armedBrushPresetDragID == preset.id {
+                baseCell
+                    .onDrag {
+                        draggedBrushPresetID = preset.id
+                        armedBrushPresetDragID = nil
+                        return NSItemProvider(object: preset.id as NSString)
+                    }
+            } else {
+                baseCell
+            }
         } else {
-            RoundedRectangle(cornerRadius: 10)
+            let emptyCell = RoundedRectangle(cornerRadius: 10)
                 .fill(Color.white.opacity(0.03))
                 .overlay {
                     RoundedRectangle(cornerRadius: 10)
@@ -1104,6 +1135,8 @@ struct RightInspectorView: View {
                 .onDrop(of: [UTType.plainText.identifier], isTargeted: nil) { providers in
                     moveBrushPresetFromDrop(providers: providers, toSlot: slotIndex)
                 }
+
+            emptyCell
         }
     }
 
@@ -3603,6 +3636,7 @@ struct RightInspectorView: View {
         let strokeWidth: CGFloat = isSelected ? 1.5 : 1.0
 
         return Button {
+            armedBrushPresetDragID = nil
             viewModel.applyBrushPreset(preset.id)
         } label: {
             ZStack {
@@ -3634,16 +3668,20 @@ struct RightInspectorView: View {
                     }
                     .frame(width: geometry.size.width, height: geometry.size.height)
                     .clipped()
+                    .allowsHitTesting(false)
                 }
 
                 shortcutSlotLabel(for: slotIndex)
+                    .allowsHitTesting(false)
             }
             .aspectRatio(1, contentMode: .fit)
         }
         .buttonStyle(.plain)
+        .contentShape(Rectangle())
         .help(preset.name)
         .contextMenu {
             Button("应用") {
+                armedBrushPresetDragID = nil
                 viewModel.applyBrushPreset(preset.id)
             }
 
@@ -3671,6 +3709,7 @@ struct RightInspectorView: View {
         if let draggedBrushPresetID {
             viewModel.moveBrushPreset(draggedBrushPresetID, toSlot: slotIndex)
             self.draggedBrushPresetID = nil
+            self.armedBrushPresetDragID = nil
             return true
         }
 
@@ -3684,6 +3723,7 @@ struct RightInspectorView: View {
             }
             let presetIDString = String(presetID)
             DispatchQueue.main.async {
+                armedBrushPresetDragID = nil
                 viewModel.moveBrushPreset(presetIDString, toSlot: slotIndex)
             }
         }

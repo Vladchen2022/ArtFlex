@@ -82,9 +82,16 @@ final class KeyboardBridgeView: NSView {
 
     func activateIfNeeded() {
         guard let window else { return }
+        if shouldPreserveCurrentFirstResponder(window.firstResponder) {
+            return
+        }
         if window.firstResponder !== self {
             window.makeFirstResponder(self)
         }
+    }
+
+    private func shouldPreserveCurrentFirstResponder(_ responder: Any?) -> Bool {
+        false
     }
 
     private func brushSizeShortcutDelta(for event: NSEvent) -> Float? {

@@ -148,6 +148,7 @@ final class WorkspaceViewModel: ObservableObject {
     @Published private(set) var referenceImageSlots = WorkspaceViewModel.makeDefaultReferenceImageSlots()
     @Published private(set) var selectedReferenceImageSlotID: Int?
     @Published private(set) var referenceImagePreviewColor: RGBAColor?
+    @Published private(set) var referenceImagePreviousPickedColor: RGBAColor?
     @Published private(set) var referenceImageLoadingSlotID: Int?
     @Published private(set) var isReferenceImageFloatingPanelPresented = false
     private var currentProjectURL: URL?
@@ -155,6 +156,7 @@ final class WorkspaceViewModel: ObservableObject {
     private var shouldResumeTimelapseAfterSnapshotCompare = false
     private var snapshotPreviewPreparationTasks: [UUID: Task<Void, Never>] = [:]
     private var frozenSnapshotPreviewPreparationTask: Task<Void, Never>?
+    private var referenceImageUpgradeTasks: [Int: Task<Void, Never>] = [:]
     private var deferredGradientAction: DeferredGradientAction?
     private let selectionTraceLogger = Logger(subsystem: "ArtFlex", category: "SelectionTrace")
     private let brushStrokeLogger = Logger(subsystem: "ArtFlex", category: "BrushStroke")
@@ -223,8 +225,11 @@ final class WorkspaceViewModel: ObservableObject {
     private func setupZoomKeyboardMonitor() {
         NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self else { return event }
+            if NSApp.keyWindow?.identifier?.rawValue == "ReferenceImageFloatingPanel" {
+                return event
+            }
             let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-            guard modifiers == .command else { return event }
+            guard modifiers == .command || modifiers == [.command, .shift] else { return event }
             let chars = event.charactersIgnoringModifiers
             if chars == "=" || chars == "+" {
                 self.zoomIn()
@@ -1342,6 +1347,16 @@ final class WorkspaceViewModel: ObservableObject {
         )
     }
 
+    var referenceImagePreviousSwiftUIColor: Color {
+        let resolved = referenceImagePreviousPickedColor ?? workspace.toolSession.selectedColor
+        return Color(
+            red: Double(resolved.red),
+            green: Double(resolved.green),
+            blue: Double(resolved.blue),
+            opacity: Double(resolved.alpha)
+        )
+    }
+
     func activateReferenceImageSlot(_ slotID: Int) {
         guard referenceImageSlots.indices.contains(slotID) else { return }
 
@@ -1356,6 +1371,9 @@ final class WorkspaceViewModel: ObservableObject {
     func clearReferenceImageSlot(_ slotID: Int) {
         guard referenceImageSlots.indices.contains(slotID) else { return }
         guard referenceImageSlots[slotID].asset != nil else { return }
+
+        referenceImageUpgradeTasks[slotID]?.cancel()
+        referenceImageUpgradeTasks[slotID] = nil
 
         let nextSelectedSlotID: Int?
         if selectedReferenceImageSlotID == slotID {
@@ -1378,20 +1396,12 @@ final class WorkspaceViewModel: ObservableObject {
         clearReferenceImageSlot(selectedReferenceImageSlotID)
     }
 
-    func updateSelectedReferenceImageViewport(_ viewport: ReferenceImageViewportState) {
-        guard let selectedReferenceImageSlotID else { return }
-        updateReferenceImageViewport(viewport, for: selectedReferenceImageSlotID)
-    }
-
-    func resetSelectedReferenceImageViewportToFit() {
-        updateSelectedReferenceImageViewport(.fit)
-    }
-
     func updateReferenceImagePreviewColor(_ color: RGBAColor?) {
         referenceImagePreviewColor = color
     }
 
     func confirmReferenceImagePickedColor(_ color: RGBAColor) {
+        rememberReferenceImagePreviousColor(before: color)
         setSelectedColor(color)
         referenceImagePreviewColor = color
     }
@@ -1404,6 +1414,7 @@ final class WorkspaceViewModel: ObservableObject {
 
         isReferenceImageFloatingPanelPresented = true
         referenceImageFloatingPanelController.show(for: self)
+        promoteSelectedReferenceImageForFloatingPanelIfNeeded()
     }
 
     func closeReferenceImageFloatingPanel() {
@@ -1424,7 +1435,6 @@ final class WorkspaceViewModel: ObservableObject {
 
         var updated = referenceImageSlots
         updated[slotID].asset = asset
-        updated[slotID].viewport = .fit
         referenceImageSlots = updated
 
         if selectAfterUpdate {
@@ -1439,14 +1449,6 @@ final class WorkspaceViewModel: ObservableObject {
         referenceImagePreviewColor = nil
     }
 
-    private func updateReferenceImageViewport(_ viewport: ReferenceImageViewportState, for slotID: Int) {
-        guard referenceImageSlots.indices.contains(slotID) else { return }
-
-        var updated = referenceImageSlots
-        updated[slotID].viewport = viewport
-        referenceImageSlots = updated
-    }
-
     private func importReferenceImageIntoSlot(_ slotID: Int) {
         guard let url = bootstrap.filePanelService.presentImageOpenPanel() else {
             return
@@ -1456,11 +1458,13 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     private func loadReferenceImage(from url: URL, into slotID: Int) {
+        referenceImageUpgradeTasks[slotID]?.cancel()
+        referenceImageUpgradeTasks[slotID] = nil
         referenceImageLoadingSlotID = slotID
         let fileName = url.lastPathComponent
 
         Task.detached(priority: .userInitiated) { [weak self] in
-            let asset = ReferenceImageAsset.decode(from: url, maxDimension: 2048)
+            let asset = ReferenceImageAsset.decode(from: url, maxDimension: 768)
 
             await MainActor.run {
                 guard let self else { return }
@@ -1473,6 +1477,34 @@ final class WorkspaceViewModel: ObservableObject {
 
                 self.replaceReferenceImageSlotAsset(asset, at: slotID, selectAfterUpdate: true)
                 self.showStatus(.init(kind: .success, message: "已载入\(fileName)"))
+            }
+        }
+    }
+
+    private func promoteSelectedReferenceImageForFloatingPanelIfNeeded() {
+        guard let slotID = selectedReferenceImageSlotID else { return }
+        guard referenceImageUpgradeTasks[slotID] == nil else { return }
+        guard let asset = selectedReferenceImageSlot?.asset else { return }
+        guard asset.decodedMaxDimension < 3072, let sourceURL = asset.sourceURL else { return }
+
+        let sourceIdentifier = sourceURL.standardizedFileURL
+
+        referenceImageUpgradeTasks[slotID] = Task.detached(priority: .utility) { [weak self] in
+            let upgraded = ReferenceImageAsset.decode(from: sourceIdentifier, maxDimension: 3072)
+
+            await MainActor.run {
+                guard let self else { return }
+                self.referenceImageUpgradeTasks[slotID] = nil
+
+                guard let upgraded else { return }
+                guard self.referenceImageSlots.indices.contains(slotID) else { return }
+                guard self.referenceImageSlots[slotID].asset?.sourceURL?.standardizedFileURL == sourceIdentifier else { return }
+
+                self.replaceReferenceImageSlotAsset(
+                    upgraded,
+                    at: slotID,
+                    selectAfterUpdate: false
+                )
             }
         }
     }
@@ -1933,6 +1965,7 @@ final class WorkspaceViewModel: ObservableObject {
     func selectColorBlock(at index: Int) {
         let palette = ColorBlocksEngine.renderPalette(for: workspace.colorPanel)
         guard palette.indices.contains(index) else { return }
+        rememberReferenceImagePreviousColor(before: palette[index])
         bootstrap.workspaceStore.updateToolSession { session in
             session.selectedColor = palette[index]
         }
@@ -1948,6 +1981,7 @@ final class WorkspaceViewModel: ObservableObject {
                 document: workspace.document,
                 layerSurfaceStore: bootstrap.layerSurfaceStore
             )
+            rememberReferenceImagePreviousColor(before: sampledColor)
             bootstrap.workspaceStore.updateToolSession { session in
                 session.selectedColor = sampledColor
             }
@@ -9036,6 +9070,7 @@ final class WorkspaceViewModel: ObservableObject {
 
     private func applyPickerColorFromPanel() {
         let color = ColorBlocksEngine.pickerColor(from: bootstrap.workspaceStore.state.colorPanel)
+        rememberReferenceImagePreviousColor(before: color)
         bootstrap.workspaceStore.updateToolSession { session in
             session.selectedColor = color
         }
@@ -9086,6 +9121,7 @@ final class WorkspaceViewModel: ObservableObject {
         guard let state = quickColorPickerState else { return }
         let color = ColorBlocksEngine.pickerColor(from: state.panel)
 
+        rememberReferenceImagePreviousColor(before: color)
         bootstrap.workspaceStore.updateToolSession { session in
             session.selectedColor = color
         }
@@ -9114,6 +9150,12 @@ final class WorkspaceViewModel: ObservableObject {
         if includeSelectedColor {
             colorPanelProxy.selectedColor = state.toolSession.selectedColor
         }
+    }
+
+    private func rememberReferenceImagePreviousColor(before nextColor: RGBAColor) {
+        let currentColor = workspace.toolSession.selectedColor
+        guard currentColor != nextColor else { return }
+        referenceImagePreviousPickedColor = currentColor
     }
 
     @MainActor

@@ -264,6 +264,7 @@ struct WorkspaceViewModelSafetyTests {
     @MainActor
     func referenceImageColorPickUpdatesSelectedColorWithoutChangingActiveTool() throws {
         let harness = try BrushEditingBoundaryHarness()
+        let originalColor = harness.viewModel.workspace.toolSession.selectedColor
         let pickedColor = RGBAColor(red: 0.82, green: 0.31, blue: 0.18, alpha: 1)
 
         harness.viewModel.selectTool(.smudge)
@@ -272,6 +273,19 @@ struct WorkspaceViewModelSafetyTests {
         #expect(harness.viewModel.workspace.toolSession.activeTool == .smudge)
         #expect(harness.viewModel.workspace.toolSession.selectedColor == pickedColor)
         #expect(harness.viewModel.referenceImagePreviewColor == pickedColor)
+        #expect(harness.viewModel.referenceImagePreviousPickedColor == originalColor)
+    }
+
+    @Test
+    @MainActor
+    func selectingColorBlockUpdatesReferenceImagePreviousColorMemory() throws {
+        let harness = try BrushEditingBoundaryHarness()
+        let originalColor = harness.viewModel.workspace.toolSession.selectedColor
+
+        harness.viewModel.selectColorBlock(at: 0)
+
+        #expect(harness.viewModel.referenceImagePreviousPickedColor == originalColor)
+        #expect(harness.viewModel.workspace.toolSession.selectedColor != originalColor)
     }
 }
 
