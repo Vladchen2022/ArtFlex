@@ -431,14 +431,16 @@ struct RightInspectorView: View {
     }
 
     private var referenceImageSection: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        let hasLoadedReferenceImage = viewModel.referenceImageSlots.contains { $0.asset != nil }
+
+        return VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 8) {
                 ForEach(viewModel.referenceImageSlots) { slot in
                     referenceImageSlotButton(slot)
                 }
             }
 
-            referenceImagePreviewArea
+            referenceImagePreviewArea(hasLoadedReferenceImage: hasLoadedReferenceImage)
 
             HStack(spacing: 10) {
                 Button {
@@ -509,7 +511,7 @@ struct RightInspectorView: View {
         .help("左侧为上一次确认颜色，右侧为当前预览/选择颜色")
     }
 
-    private var referenceImagePreviewArea: some View {
+    private func referenceImagePreviewArea(hasLoadedReferenceImage: Bool) -> some View {
         ZStack {
             RoundedRectangle(cornerRadius: 12)
                 .fill(Color.black.opacity(0.20))
@@ -533,7 +535,7 @@ struct RightInspectorView: View {
             }
         }
         .frame(maxWidth: .infinity)
-        .frame(height: 232)
+        .frame(height: hasLoadedReferenceImage ? 232 : 56)
         .overlay(
             RoundedRectangle(cornerRadius: 12)
                 .stroke(Color.white.opacity(0.08), lineWidth: 1)
@@ -1050,9 +1052,15 @@ struct RightInspectorView: View {
             let slotWidth = max(40.0, floor((usableWidth - spacing * Double(columnCount - 1)) / Double(columnCount)))
             let contentWidth = (slotWidth * Double(columnCount)) + (spacing * Double(columnCount - 1))
             let horizontalInset = max(0.0, floor((usableWidth - contentWidth) * 0.5)) + outerInset
+            let resolvedSlotMap = viewModel.workspace.brushLibrary.resolvedSlotMap()
+            let occupiedSlotCount = max((resolvedSlotMap.values.max() ?? -1) + 1, 0)
+            let estimatedRowHeight = max(slotWidth + spacing, 1)
+            let visibleRowCount = max(2, Int(ceil(max(geometry.size.height - 4, 0) / estimatedRowHeight)))
+            let visibleSlotCapacity = visibleRowCount * columnCount
+            let rawSlotCount = max(occupiedSlotCount, visibleSlotCapacity)
             let totalSlotCount = max(
-                48,
-                (viewModel.workspace.brushLibrary.resolvedSlotMap().values.max() ?? -1) + 1
+                columnCount * 2,
+                ((rawSlotCount + columnCount - 1) / columnCount) * columnCount
             )
 
             VStack(alignment: .leading, spacing: 0) {
@@ -3658,8 +3666,8 @@ struct RightInspectorView: View {
                 shortcutSlotLabel(for: slotIndex)
                     .allowsHitTesting(false)
             }
-            .aspectRatio(1, contentMode: .fit)
         }
+        .aspectRatio(1, contentMode: .fit)
         .help(preset.name)
         .contextMenu {
             Button("应用") {
