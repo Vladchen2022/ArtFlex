@@ -287,6 +287,30 @@ struct WorkspaceViewModelSafetyTests {
         #expect(harness.viewModel.referenceImagePreviousPickedColor == originalColor)
         #expect(harness.viewModel.workspace.toolSession.selectedColor != originalColor)
     }
+
+    @Test
+    @MainActor
+    func smudgeToolRemembersItsPreviousBrushSettings() throws {
+        let harness = try BrushEditingBoundaryHarness()
+
+        harness.viewModel.setBrushSize(144)
+        #expect(harness.viewModel.workspace.toolSession.brush.size == 144)
+
+        harness.viewModel.selectTool(.smudge)
+        #expect(harness.viewModel.workspace.toolSession.brush.size == 144)
+
+        harness.viewModel.setBrushSize(38)
+        #expect(harness.viewModel.workspace.toolSession.brush.size == 38)
+
+        harness.viewModel.selectTool(.brush)
+        #expect(harness.viewModel.workspace.toolSession.brush.size == 144)
+
+        harness.viewModel.setBrushSize(220)
+        #expect(harness.viewModel.workspace.toolSession.brush.size == 220)
+
+        harness.viewModel.selectTool(.smudge)
+        #expect(harness.viewModel.workspace.toolSession.brush.size == 38)
+    }
 }
 
 @MainActor

@@ -376,9 +376,11 @@ private final class ReferenceImageBrowserScrollView: NSScrollView {
 
     private let documentImageView = ReferenceImageBrowserDocumentView()
     private var currentAsset: ReferenceImageAsset?
-    private var isApplyingViewportState = false
     private var currentZoomScale: Double = 1
-    private var lastFitViewportSize: CGSize = .zero
+    private var baseDisplaySize: CGSize = .zero
+    private var lastViewportSize: CGSize = .zero
+    private var lastAppliedInsets: NSEdgeInsets = NSEdgeInsets(top: 0, left: 0, bottom: 0, right: 0)
+    private var isApplyingLayout = false
     var lastResetToFitToken: Int = 0
     private var isPanModifierActive = false {
         didSet {
@@ -419,11 +421,16 @@ private final class ReferenceImageBrowserScrollView: NSScrollView {
 
     override func layout() {
         super.layout()
-        guard isApplyingViewportState == false else { return }
+        guard isApplyingLayout == false else { return }
         guard currentAsset != nil else { return }
-        let viewportSize = contentSize
+        let viewportSize = resolvedViewportSize()
         guard viewportSize.width > 1, viewportSize.height > 1 else { return }
-        applyCurrentLayout(centeredAt: currentVisibleDocumentCenter(), forceFitRebuild: false)
+        let viewportChanged = abs(viewportSize.width - lastViewportSize.width) > 0.5
+            || abs(viewportSize.height - lastViewportSize.height) > 0.5
+        guard viewportChanged else { return }
+        let preservedCenter = currentVisibleDocumentCenter()
+        _ = rebuildBaseDisplaySizeIfNeeded(force: false)
+        applyZoom(centeredAtContentPoint: contentPoint(forDocumentPoint: preservedCenter))
     }
 
     override func viewDidMoveToWindow() {
@@ -496,12 +503,16 @@ private final class ReferenceImageBrowserScrollView: NSScrollView {
 
         if assetChanged {
             documentImageView.asset = asset
+            documentImageView.resetHoverState()
             onHoverColorChanged?(nil)
         }
 
         guard asset != nil else {
-            lastFitViewportSize = .zero
+            baseDisplaySize = .zero
+            lastViewportSize = .zero
+            lastAppliedInsets = NSEdgeInsets(top: 0, left: 0, bottom: 0, right: 0)
             currentZoomScale = 1
+            contentInsets = NSEdgeInsets(top: 0, left: 0, bottom: 0, right: 0)
             if documentImageView.frame != .zero {
                 documentImageView.frame = .zero
             }
@@ -513,7 +524,8 @@ private final class ReferenceImageBrowserScrollView: NSScrollView {
         if sourceChanged || resetRequested {
             currentZoomScale = 1
         }
-        applyCurrentLayout(centeredAt: sourceChanged ? nil : preservedCenter, forceFitRebuild: true)
+        _ = rebuildBaseDisplaySizeIfNeeded(force: true)
+        applyZoom(centeredAtContentPoint: sourceChanged || resetRequested ? nil : contentPoint(forDocumentPoint: preservedCenter))
 
         if assetChanged {
             DispatchQueue.main.async { [weak self] in
@@ -525,7 +537,8 @@ private final class ReferenceImageBrowserScrollView: NSScrollView {
 
     func resetToFit() {
         currentZoomScale = 1
-        applyCurrentLayout(centeredAt: nil, forceFitRebuild: true)
+        _ = rebuildBaseDisplaySizeIfNeeded(force: true)
+        applyZoom(centeredAtContentPoint: nil)
     }
 
     func handleCommandKeyEquivalent(_ event: NSEvent) -> Bool {
@@ -559,36 +572,41 @@ private final class ReferenceImageBrowserScrollView: NSScrollView {
         return true
     }
 
-    private func applyCurrentLayout(centeredAt point: CGPoint?, forceFitRebuild: Bool) {
-        guard let currentAsset else { return }
+    @discardableResult
+    private func rebuildBaseDisplaySizeIfNeeded(force: Bool) -> Bool {
+        guard let currentAsset else { return false }
 
-        let viewportSize = contentSize
-        guard viewportSize.width > 1, viewportSize.height > 1 else { return }
+        let viewportSize = resolvedViewportSize()
+        guard viewportSize.width > 1, viewportSize.height > 1 else { return false }
 
-        let viewportChanged = abs(viewportSize.width - lastFitViewportSize.width) > 0.5
-            || abs(viewportSize.height - lastFitViewportSize.height) > 0.5
+        let viewportChanged = abs(viewportSize.width - lastViewportSize.width) > 0.5
+            || abs(viewportSize.height - lastViewportSize.height) > 0.5
 
-        if forceFitRebuild || viewportChanged {
-            lastFitViewportSize = viewportSize
-            let baseSize = fitDisplaySize(for: currentAsset, viewportSize: viewportSize)
-            documentImageView.frame = CGRect(origin: .zero, size: baseSize)
+        guard force || viewportChanged else {
+            return false
         }
 
-        minMagnification = 1
-        maxMagnification = 16
-        let anchor = point ?? CGPoint(x: documentImageView.bounds.midX, y: documentImageView.bounds.midY)
-        applyZoomScale(currentZoomScale, centeredAt: anchor)
+        lastViewportSize = viewportSize
+        let nextBaseSize = fitDisplaySize(for: currentAsset, viewportSize: viewportSize)
+        let sizeChanged = abs(nextBaseSize.width - baseDisplaySize.width) > 0.5
+            || abs(nextBaseSize.height - baseDisplaySize.height) > 0.5
+        baseDisplaySize = nextBaseSize
+        if sizeChanged || documentImageView.frame.size != nextBaseSize {
+            documentImageView.frame = CGRect(origin: .zero, size: nextBaseSize)
+        }
+        return sizeChanged || viewportChanged
     }
 
-    private func applyZoomScale(_ scale: Double, centeredAt point: CGPoint) {
-        let resolvedZoomScale = min(max(scale, 1), 16)
-        let anchorInContentView = contentView.convert(point, from: documentImageView)
-        isApplyingViewportState = true
+    private func applyZoom(centeredAtContentPoint point: CGPoint?) {
+        guard currentAsset != nil else { return }
+        let resolvedZoomScale = min(max(currentZoomScale, 1), 16)
+        let anchorInContentView = point ?? CGPoint(x: contentView.bounds.midX, y: contentView.bounds.midY)
+        isApplyingLayout = true
         currentZoomScale = resolvedZoomScale
         setMagnification(CGFloat(resolvedZoomScale), centeredAt: anchorInContentView)
-        updateContentInsetsForCurrentState()
+        updateContentInsetsIfNeeded()
         reflectScrolledClipView(contentView)
-        isApplyingViewportState = false
+        isApplyingLayout = false
     }
 
     private func updateZoom(by multiplier: Double, centeredAt point: CGPoint) {
@@ -598,14 +616,15 @@ private final class ReferenceImageBrowserScrollView: NSScrollView {
         let resolvedZoomScale = abs(nextZoomScale - 1) < 0.0001 ? 1 : nextZoomScale
         guard abs(resolvedZoomScale - currentZoomScale) > 0.0001 else { return }
 
-        applyZoomScale(resolvedZoomScale, centeredAt: point)
+        currentZoomScale = resolvedZoomScale
+        applyZoom(centeredAtContentPoint: point)
     }
 
     private func pan(by delta: CGPoint) {
         guard currentAsset != nil else { return }
 
-        let visibleRect = contentView.bounds
-        let documentSize = documentImageView.frame.size
+        let visibleRect = currentVisibleDocumentRect()
+        let documentSize = documentImageView.bounds.size
         var nextOrigin = CGPoint(
             x: visibleRect.origin.x - delta.x,
             y: visibleRect.origin.y - delta.y
@@ -624,19 +643,22 @@ private final class ReferenceImageBrowserScrollView: NSScrollView {
         )
     }
 
-    private func updateContentInsetsForCurrentState() {
-        let viewportSize = contentSize
+    private func updateContentInsetsIfNeeded() {
+        let viewportSize = resolvedViewportSize()
         let documentSize = CGSize(
-            width: documentImageView.frame.size.width * magnification,
-            height: documentImageView.frame.size.height * magnification
+            width: baseDisplaySize.width * currentZoomScale,
+            height: baseDisplaySize.height * currentZoomScale
         )
         let shouldCenter = abs(currentZoomScale - 1) < 0.0001
-        contentInsets = NSEdgeInsets(
+        let nextInsets = NSEdgeInsets(
             top: shouldCenter ? max((viewportSize.height - documentSize.height) * 0.5, 0) : 0,
             left: shouldCenter ? max((viewportSize.width - documentSize.width) * 0.5, 0) : 0,
             bottom: shouldCenter ? max((viewportSize.height - documentSize.height) * 0.5, 0) : 0,
             right: shouldCenter ? max((viewportSize.width - documentSize.width) * 0.5, 0) : 0
         )
+        guard insetsDiffer(nextInsets, lastAppliedInsets) else { return }
+        contentInsets = nextInsets
+        lastAppliedInsets = nextInsets
     }
 
     private func clampedOrigin(_ proposed: CGPoint, visibleSize: CGSize, documentSize: CGSize) -> CGPoint {
@@ -648,41 +670,54 @@ private final class ReferenceImageBrowserScrollView: NSScrollView {
         )
     }
 
-    private func resolvedZoomAnchor(from event: NSEvent?) -> CGPoint {
-        if let event {
-            let eventPoint = documentImageView.convert(event.locationInWindow, from: nil)
-            if documentImageView.bounds.contains(eventPoint) {
-                return eventPoint
-            }
-        }
-
+    private func contentPointForCurrentPointer() -> CGPoint {
         if let window {
-            let pointer = documentImageView.convert(window.mouseLocationOutsideOfEventStream, from: nil)
-            if documentImageView.bounds.contains(pointer) {
+            let pointer = contentView.convert(window.mouseLocationOutsideOfEventStream, from: nil)
+            if contentView.bounds.contains(pointer) {
                 return pointer
             }
         }
+        return CGPoint(x: contentView.bounds.midX, y: contentView.bounds.midY)
+    }
 
-        let visibleRect = currentVisibleDocumentRect()
-        if visibleRect.isEmpty == false {
-            return CGPoint(x: visibleRect.midX, y: visibleRect.midY)
+    private func contentPointForCurrentPointer(from event: NSEvent?) -> CGPoint {
+        if let event {
+            let eventPoint = contentView.convert(event.locationInWindow, from: nil)
+            if contentView.bounds.contains(eventPoint) {
+                return eventPoint
+            }
         }
+        return contentPointForCurrentPointer()
+    }
 
-        if documentImageView.bounds.isEmpty == false {
-            return CGPoint(x: documentImageView.bounds.midX, y: documentImageView.bounds.midY)
-        }
+    private func contentPoint(forDocumentPoint point: CGPoint?) -> CGPoint? {
+        guard let point else { return nil }
+        return contentView.convert(point, from: documentImageView)
+    }
 
-        return .zero
+    private func resolvedZoomAnchor(from event: NSEvent?) -> CGPoint {
+        contentPointForCurrentPointer(from: event)
     }
 
     private func currentVisibleDocumentRect() -> CGRect {
-        contentView.bounds
+        documentImageView.visibleRect
     }
 
     private func currentVisibleDocumentCenter() -> CGPoint? {
         let visibleRect = currentVisibleDocumentRect()
         guard visibleRect.isEmpty == false else { return nil }
         return CGPoint(x: visibleRect.midX, y: visibleRect.midY)
+    }
+
+    private func resolvedViewportSize() -> CGSize {
+        contentView.bounds.size
+    }
+
+    private func insetsDiffer(_ lhs: NSEdgeInsets, _ rhs: NSEdgeInsets) -> Bool {
+        abs(lhs.top - rhs.top) > 0.5
+            || abs(lhs.left - rhs.left) > 0.5
+            || abs(lhs.bottom - rhs.bottom) > 0.5
+            || abs(lhs.right - rhs.right) > 0.5
     }
 
     private func normalizedZoomModifiers(from event: NSEvent) -> NSEvent.ModifierFlags {
@@ -699,12 +734,19 @@ private final class ReferenceImageBrowserScrollView: NSScrollView {
 }
 
 private final class ReferenceImageBrowserDocumentView: NSView {
+    private struct HoverSample: Equatable {
+        let pixelX: Int
+        let pixelY: Int
+        let color: RGBAColor
+    }
+
     var asset: ReferenceImageAsset? {
         didSet {
             imageLayer.contents = asset?.cgImage
             imageLayer.isHidden = asset == nil
             needsLayout = true
             needsDisplay = true
+            resetHoverState()
         }
     }
     var onHoverColorChanged: ((RGBAColor?) -> Void)?
@@ -722,7 +764,7 @@ private final class ReferenceImageBrowserDocumentView: NSView {
     private let imageLayer = CALayer()
     private var trackingAreaRef: NSTrackingArea?
     private var dragStartLocation: CGPoint = .zero
-    private var lastDragLocation: CGPoint = .zero
+    private var lastHoverSample: HoverSample?
     private var draggedDuringCurrentGesture = false
     private let dragThreshold: CGFloat = 6
 
@@ -783,7 +825,10 @@ private final class ReferenceImageBrowserDocumentView: NSView {
 
     override func mouseExited(with event: NSEvent) {
         super.mouseExited(with: event)
-        onHoverColorChanged?(nil)
+        if lastHoverSample != nil {
+            onHoverColorChanged?(nil)
+            lastHoverSample = nil
+        }
         draggedDuringCurrentGesture = false
         resetCursorRects()
     }
@@ -796,11 +841,11 @@ private final class ReferenceImageBrowserDocumentView: NSView {
     override func mouseDown(with event: NSEvent) {
         window?.makeFirstResponder(enclosingScrollView)
         dragStartLocation = convert(event.locationInWindow, from: nil)
-        lastDragLocation = dragStartLocation
         draggedDuringCurrentGesture = false
         resetCursorRects()
-        if let color = sampledColor(at: dragStartLocation) {
-            onHoverColorChanged?(color)
+        if let sample = sampledColor(at: dragStartLocation) {
+            lastHoverSample = sample
+            onHoverColorChanged?(sample.color)
         }
     }
 
@@ -815,23 +860,22 @@ private final class ReferenceImageBrowserDocumentView: NSView {
         }
 
         if isPanModifierActive && draggedDuringCurrentGesture {
-            let delta = CGPoint(x: location.x - lastDragLocation.x, y: location.y - lastDragLocation.y)
+            let delta = CGPoint(x: event.deltaX, y: -event.deltaY)
             onPan?(delta)
         } else {
             updateHoverColor(at: location)
         }
-
-        lastDragLocation = location
     }
 
     override func mouseUp(with event: NSEvent) {
         let location = convert(event.locationInWindow, from: nil)
         let totalDistance = hypot(location.x - dragStartLocation.x, location.y - dragStartLocation.y)
         if isPanModifierActive == false,
-           let color = sampledColor(at: location),
+           let sample = sampledColor(at: location),
            totalDistance <= dragThreshold {
-            onHoverColorChanged?(color)
-            onPickColor?(color)
+            lastHoverSample = sample
+            onHoverColorChanged?(sample.color)
+            onPickColor?(sample.color)
         } else {
             updateHoverColor(at: location)
         }
@@ -840,17 +884,33 @@ private final class ReferenceImageBrowserDocumentView: NSView {
     }
 
     private func updateHoverColor(at location: CGPoint) {
-        onHoverColorChanged?(sampledColor(at: location))
+        let sample = sampledColor(at: location)
+        if sample == lastHoverSample {
+            return
+        }
+        lastHoverSample = sample
+        onHoverColorChanged?(sample?.color)
     }
 
-    private func sampledColor(at location: CGPoint) -> RGBAColor? {
+    func resetHoverState() {
+        lastHoverSample = nil
+    }
+
+    private func sampledColor(at location: CGPoint) -> HoverSample? {
         guard let asset, bounds.width > 0, bounds.height > 0, bounds.contains(location) else {
             return nil
         }
 
         let normalizedX = location.x / bounds.width
         let normalizedY = 1 - (location.y / bounds.height)
-        return asset.sampledColor(normalizedX: normalizedX, normalizedY: normalizedY)
+        let clampedX = min(max(normalizedX, 0), 0.999_999)
+        let clampedY = min(max(normalizedY, 0), 0.999_999)
+        let pixelX = min(max(Int(clampedX * Double(asset.width)), 0), asset.width - 1)
+        let pixelY = min(max(Int(clampedY * Double(asset.height)), 0), asset.height - 1)
+        guard let color = asset.sampledColor(normalizedX: normalizedX, normalizedY: normalizedY) else {
+            return nil
+        }
+        return HoverSample(pixelX: pixelX, pixelY: pixelY, color: color)
     }
 }
 
@@ -858,8 +918,6 @@ private final class ReferenceImageBrowserDocumentView: NSView {
 final class ReferenceImageFloatingPanelController: NSObject, NSWindowDelegate {
     private weak var viewModel: WorkspaceViewModel?
     private var panel: ReferenceImageFloatingPanel?
-    private var spaceKeyDownMonitor: Any?
-    private var spaceKeyUpMonitor: Any?
 
     func show(for viewModel: WorkspaceViewModel) {
         self.viewModel = viewModel
@@ -869,58 +927,25 @@ final class ReferenceImageFloatingPanelController: NSObject, NSWindowDelegate {
         }
 
         if let panel {
+            panel.delegate = self
             panel.contentView = FirstMouseHostingView(
                 rootView: ReferenceImageFloatingPanelContent(viewModel: viewModel)
             )
             panel.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
             panel.focusBrowserIfAvailable()
-            installSpaceKeyMonitorsIfNeeded()
         }
     }
 
     func close() {
-        removeSpaceKeyMonitors()
         panel?.orderOut(nil)
         panel?.close()
         panel = nil
     }
 
     func windowWillClose(_ notification: Notification) {
-        removeSpaceKeyMonitors()
         panel = nil
         viewModel?.referenceImageFloatingPanelDidClose()
-    }
-
-    private func installSpaceKeyMonitorsIfNeeded() {
-        if spaceKeyDownMonitor == nil {
-            spaceKeyDownMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-                guard let self, let panel = self.panel, panel.isKeyWindow else {
-                    return event
-                }
-                return panel.handleSpaceKeyDown(event) ? nil : event
-            }
-        }
-
-        if spaceKeyUpMonitor == nil {
-            spaceKeyUpMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyUp) { [weak self] event in
-                guard let self, let panel = self.panel, panel.isKeyWindow else {
-                    return event
-                }
-                return panel.handleSpaceKeyUp(event) ? nil : event
-            }
-        }
-    }
-
-    private func removeSpaceKeyMonitors() {
-        if let spaceKeyDownMonitor {
-            NSEvent.removeMonitor(spaceKeyDownMonitor)
-            self.spaceKeyDownMonitor = nil
-        }
-        if let spaceKeyUpMonitor {
-            NSEvent.removeMonitor(spaceKeyUpMonitor)
-            self.spaceKeyUpMonitor = nil
-        }
     }
 
     private func makePanel(for viewModel: WorkspaceViewModel) -> ReferenceImageFloatingPanel {
@@ -955,7 +980,7 @@ final class ReferenceImageFloatingPanelController: NSObject, NSWindowDelegate {
 
 private final class ReferenceImageFloatingPanel: NSPanel {
     override var canBecomeKey: Bool { true }
-    override var canBecomeMain: Bool { true }
+    override var canBecomeMain: Bool { false }
 
     override func becomeKey() {
         super.becomeKey()
@@ -970,17 +995,27 @@ private final class ReferenceImageFloatingPanel: NSPanel {
         makeFirstResponder(browser)
     }
 
-    func handleSpaceKeyDown(_ event: NSEvent) -> Bool {
+    override func keyDown(with event: NSEvent) {
+        if forwardSpaceEventIfNeeded(event, isKeyUp: false) {
+            return
+        }
+        super.keyDown(with: event)
+    }
+
+    override func keyUp(with event: NSEvent) {
+        if forwardSpaceEventIfNeeded(event, isKeyUp: true) {
+            return
+        }
+        super.keyUp(with: event)
+    }
+
+    private func forwardSpaceEventIfNeeded(_ event: NSEvent, isKeyUp: Bool) -> Bool {
+        guard event.charactersIgnoringModifiers == " " else { return false }
         guard let browser = firstBrowserScrollView(in: contentView) else { return false }
         if firstResponder !== browser {
             makeFirstResponder(browser)
         }
-        return browser.handleSpaceKeyDown(event)
-    }
-
-    func handleSpaceKeyUp(_ event: NSEvent) -> Bool {
-        guard let browser = firstBrowserScrollView(in: contentView) else { return false }
-        return browser.handleSpaceKeyUp(event)
+        return isKeyUp ? browser.handleSpaceKeyUp(event) : browser.handleSpaceKeyDown(event)
     }
 
     private func firstBrowserScrollView(in view: NSView?) -> ReferenceImageBrowserScrollView? {

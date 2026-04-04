@@ -819,9 +819,78 @@ struct BrushSettings: Codable, Sendable, Equatable {
 }
 
 struct ToolSessionState: Codable, Sendable, Equatable {
-    var activeTool: ToolKind
-    var brush: BrushSettings
+    var activeTool: ToolKind {
+        didSet {
+            guard activeTool != oldValue else { return }
+            synchronizeActiveBrushForToolChange(from: oldValue)
+        }
+    }
+    var brush: BrushSettings {
+        didSet {
+            guard !isSynchronizingBrushSlots else { return }
+            synchronizeStoredBrushesFromActiveBrush()
+        }
+    }
     var selectedColor: RGBAColor
+    var drawingBrush: BrushSettings
+    var smudgeBrush: BrushSettings
+    var smudgeBrushUsesIndependentSettings: Bool
+
+    private var isSynchronizingBrushSlots = false
+
+    init(
+        activeTool: ToolKind,
+        brush: BrushSettings,
+        selectedColor: RGBAColor,
+        drawingBrush: BrushSettings? = nil,
+        smudgeBrush: BrushSettings? = nil,
+        smudgeBrushUsesIndependentSettings: Bool = false
+    ) {
+        self.activeTool = activeTool
+        self.brush = brush
+        self.selectedColor = selectedColor
+        self.drawingBrush = drawingBrush ?? brush
+        self.smudgeBrush = smudgeBrush ?? brush
+        self.smudgeBrushUsesIndependentSettings = smudgeBrushUsesIndependentSettings
+        synchronizeOnInitialization()
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case activeTool
+        case brush
+        case selectedColor
+        case drawingBrush
+        case smudgeBrush
+        case smudgeBrushUsesIndependentSettings
+    }
+
+    init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let activeTool = try container.decode(ToolKind.self, forKey: .activeTool)
+        let brush = try container.decode(BrushSettings.self, forKey: .brush)
+        let selectedColor = try container.decode(RGBAColor.self, forKey: .selectedColor)
+        let decodedDrawingBrush = try container.decodeIfPresent(BrushSettings.self, forKey: .drawingBrush)
+        let decodedSmudgeBrush = try container.decodeIfPresent(BrushSettings.self, forKey: .smudgeBrush)
+        let decodedSmudgeUsesIndependent = try container.decodeIfPresent(Bool.self, forKey: .smudgeBrushUsesIndependentSettings)
+        self.init(
+            activeTool: activeTool,
+            brush: brush,
+            selectedColor: selectedColor,
+            drawingBrush: decodedDrawingBrush ?? brush,
+            smudgeBrush: decodedSmudgeBrush ?? brush,
+            smudgeBrushUsesIndependentSettings: decodedSmudgeUsesIndependent ?? (activeTool == .smudge)
+        )
+    }
+
+    func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(activeTool, forKey: .activeTool)
+        try container.encode(brush, forKey: .brush)
+        try container.encode(selectedColor, forKey: .selectedColor)
+        try container.encode(drawingBrush, forKey: .drawingBrush)
+        try container.encode(smudgeBrush, forKey: .smudgeBrush)
+        try container.encode(smudgeBrushUsesIndependentSettings, forKey: .smudgeBrushUsesIndependentSettings)
+    }
 
     static let stageOneDefault: ToolSessionState = {
         var brush = BrushSettings.stageOneDefault
@@ -829,7 +898,60 @@ struct ToolSessionState: Codable, Sendable, Equatable {
         return ToolSessionState(
             activeTool: .brush,
             brush: brush,
-            selectedColor: .black
+            selectedColor: .black,
+            drawingBrush: brush,
+            smudgeBrush: brush,
+            smudgeBrushUsesIndependentSettings: false
         )
     }()
+
+    private var effectiveSmudgeBrush: BrushSettings {
+        smudgeBrushUsesIndependentSettings ? smudgeBrush : drawingBrush
+    }
+
+    private mutating func synchronizeOnInitialization() {
+        if activeTool == .smudge {
+            if !smudgeBrushUsesIndependentSettings {
+                smudgeBrush = drawingBrush
+            }
+            brush = effectiveSmudgeBrush
+        } else {
+            drawingBrush = brush
+            if !smudgeBrushUsesIndependentSettings {
+                smudgeBrush = drawingBrush
+            }
+            brush = drawingBrush
+        }
+    }
+
+    private mutating func synchronizeStoredBrushesFromActiveBrush() {
+        if activeTool == .smudge {
+            smudgeBrush = brush
+            smudgeBrushUsesIndependentSettings = true
+        } else {
+            drawingBrush = brush
+            if !smudgeBrushUsesIndependentSettings {
+                smudgeBrush = drawingBrush
+            }
+        }
+    }
+
+    private mutating func synchronizeActiveBrushForToolChange(from previousTool: ToolKind) {
+        if previousTool == .smudge {
+            smudgeBrush = brush
+        } else {
+            drawingBrush = brush
+            if !smudgeBrushUsesIndependentSettings {
+                smudgeBrush = drawingBrush
+            }
+        }
+
+        if activeTool == .smudge, !smudgeBrushUsesIndependentSettings {
+            smudgeBrush = drawingBrush
+        }
+
+        isSynchronizingBrushSlots = true
+        brush = activeTool == .smudge ? effectiveSmudgeBrush : drawingBrush
+        isSynchronizingBrushSlots = false
+    }
 }

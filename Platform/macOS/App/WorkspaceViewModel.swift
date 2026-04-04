@@ -35,6 +35,8 @@ final class WorkspaceViewModel: ObservableObject {
     struct TipImageLibraryReferenceSummary: Equatable {
         var currentBrushUsesPrimary = false
         var currentBrushUsesSecondary = false
+        var smudgeBrushUsesPrimary = false
+        var smudgeBrushUsesSecondary = false
         var presetPrimaryNames: [String] = []
         var presetSecondaryNames: [String] = []
 
@@ -44,6 +46,14 @@ final class WorkspaceViewModel: ObservableObject {
 
         var currentBrushSecondaryCount: Int {
             currentBrushUsesSecondary ? 1 : 0
+        }
+
+        var smudgeBrushPrimaryCount: Int {
+            smudgeBrushUsesPrimary ? 1 : 0
+        }
+
+        var smudgeBrushSecondaryCount: Int {
+            smudgeBrushUsesSecondary ? 1 : 0
         }
 
         var presetPrimaryCount: Int {
@@ -58,12 +68,16 @@ final class WorkspaceViewModel: ObservableObject {
             currentBrushPrimaryCount + currentBrushSecondaryCount
         }
 
+        var smudgeBrushCount: Int {
+            smudgeBrushPrimaryCount + smudgeBrushSecondaryCount
+        }
+
         var presetCount: Int {
             presetPrimaryCount + presetSecondaryCount
         }
 
         var totalCount: Int {
-            currentBrushCount + presetCount
+            currentBrushCount + smudgeBrushCount + presetCount
         }
 
         var isReferenced: Bool {
@@ -1216,13 +1230,24 @@ final class WorkspaceViewModel: ObservableObject {
         var summary = TipImageLibraryReferenceSummary()
         let state = bootstrap.workspaceStore.state
 
-        let currentBrush = state.toolSession.brush
+        let currentBrush = state.toolSession.drawingBrush
         if currentBrush.customTipSourceSemantic == .importedImage, currentBrush.customTipAssetID == assetID {
             summary.currentBrushUsesPrimary = true
         }
         if currentBrush.secondaryTipDescriptor.sourceSemantic == .importedImage,
            currentBrush.secondaryTipDescriptor.tipAssetID == assetID {
             summary.currentBrushUsesSecondary = true
+        }
+
+        if state.toolSession.smudgeBrushUsesIndependentSettings {
+            let smudgeBrush = state.toolSession.smudgeBrush
+            if smudgeBrush.customTipSourceSemantic == .importedImage, smudgeBrush.customTipAssetID == assetID {
+                summary.smudgeBrushUsesPrimary = true
+            }
+            if smudgeBrush.secondaryTipDescriptor.sourceSemantic == .importedImage,
+               smudgeBrush.secondaryTipDescriptor.tipAssetID == assetID {
+                summary.smudgeBrushUsesSecondary = true
+            }
         }
 
         for preset in state.brushLibrary.presets {
@@ -1252,6 +1277,12 @@ final class WorkspaceViewModel: ObservableObject {
         }
         if summary.currentBrushUsesSecondary {
             parts.append("当前次笔尖")
+        }
+        if summary.smudgeBrushUsesPrimary {
+            parts.append("涂抹主笔尖")
+        }
+        if summary.smudgeBrushUsesSecondary {
+            parts.append("涂抹次笔尖")
         }
         if summary.presetCount > 0 {
             let previewNames = Array((summary.presetPrimaryNames + summary.presetSecondaryNames).prefix(3))
@@ -6210,12 +6241,17 @@ final class WorkspaceViewModel: ObservableObject {
         persistIfChanged: Bool
     ) -> Bool {
         let state = bootstrap.workspaceStore.state
-        let currentBrush = state.toolSession.brush
+        var brushVariants = [state.toolSession.drawingBrush]
+        if state.toolSession.smudgeBrushUsesIndependentSettings {
+            brushVariants.append(state.toolSession.smudgeBrush)
+        }
         let presetBrushes = state.brushLibrary.presets.map(\.brush)
 
         var changed = false
         bootstrap.workspaceStore.updateTipImageLibrary { library in
-            changed = library.upsertImportedTips(from: currentBrush)
+            for brush in brushVariants {
+                changed = library.upsertImportedTips(from: brush) || changed
+            }
             for brush in presetBrushes {
                 changed = library.upsertImportedTips(from: brush) || changed
             }

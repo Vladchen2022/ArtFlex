@@ -130,6 +130,7 @@ struct ArtFlexApp: App {
     }
 }
 
+@MainActor
 final class ArtFlexApplicationDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     weak var viewModel: WorkspaceViewModel?
     private var isApprovingTermination = false
@@ -151,7 +152,9 @@ final class ArtFlexApplicationDelegate: NSObject, NSApplicationDelegate, NSWindo
     func applicationDidBecomeActive(_ notification: Notification) {
         NSApp.windows.forEach {
             Self.applyWindowChrome(to: $0)
-            $0.delegate = self
+            if isReferenceImageFloatingPanel($0) == false {
+                $0.delegate = self
+            }
         }
     }
 
@@ -173,6 +176,10 @@ final class ArtFlexApplicationDelegate: NSObject, NSApplicationDelegate, NSWindo
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
+        if isReferenceImageFloatingPanel(sender) {
+            return true
+        }
+
         if isApprovingTermination {
             return true
         }
@@ -194,6 +201,10 @@ final class ArtFlexApplicationDelegate: NSObject, NSApplicationDelegate, NSWindo
         window.titlebarAppearsTransparent = true
         window.backgroundColor = chromeColor
         window.isOpaque = true
+    }
+
+    private func isReferenceImageFloatingPanel(_ window: NSWindow) -> Bool {
+        window.identifier?.rawValue == "ReferenceImageFloatingPanel"
     }
 
     @MainActor

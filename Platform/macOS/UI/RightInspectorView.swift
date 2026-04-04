@@ -198,7 +198,7 @@ struct RightInspectorView: View {
     @State private var secondaryTipEditorPreviewImage: CGImage?
     @State private var secondaryTipEditorPreviewRequestKey: String = ""
     @State private var leftInspectorTab: LeftInspectorTab = .referenceImages
-    @State private var topInspectorTab: TopInspectorTab = .tipShape
+    @State private var topInspectorTab: TopInspectorTab = .navigator
     @State private var navigatorZoomPercentText = "100"
     @State private var armedBrushPresetDragID: String?
 
