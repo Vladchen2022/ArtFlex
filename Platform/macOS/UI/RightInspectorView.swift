@@ -6,11 +6,17 @@ private let tipMaskResolution = 256
 
 private enum TipImageLibrarySheetTarget: String, Identifiable {
     case primary
+    case compoundSecondary
 
     var id: String { rawValue }
 
     var title: String {
-        "主笔尖图片资料库"
+        switch self {
+        case .primary:
+            return "主笔尖图片资料库"
+        case .compoundSecondary:
+            return "组合笔刷次笔尖图片资料库"
+        }
     }
 }
 
@@ -46,8 +52,10 @@ struct RightInspectorView: View {
     @State private var primaryTipEditorHighlightGeneration = 0
     @State private var tipImageLibrarySheetTarget: TipImageLibrarySheetTarget?
     @State private var primaryTipImageLibraryPendingSelection: BrushTipImageAssetID?
+    @State private var compoundSecondaryTipImageLibraryPendingSelection: BrushTipImageAssetID?
     @State private var draggedTipImageLibraryAssetID: BrushTipImageAssetID?
     @State private var tipImageLibraryDropTargetID: BrushTipImageAssetID?
+    @State private var showsCompoundBrushBuilder = false
     @State private var leftInspectorTab: LeftInspectorTab = .referenceImages
     @State private var topInspectorTab: TopInspectorTab = .navigator
     @State private var navigatorZoomPercentText = "100"
@@ -116,6 +124,9 @@ struct RightInspectorView: View {
             tipImageLibrarySheet(for: target) {
                 tipImageLibrarySheetTarget = nil
             }
+        }
+        .sheet(isPresented: $showsCompoundBrushBuilder) {
+            CompoundBrushBuilderSheet(viewModel: viewModel)
         }
     }
 
@@ -1060,6 +1071,14 @@ struct RightInspectorView: View {
                     prepareTipImageLibraryPresentation(for: .primary)
                     tipImageLibrarySheetTarget = .primary
                 }
+
+                compactTextActionButton(
+                    title: "组合笔刷…",
+                    tooltip: "打开组合笔刷工作台",
+                    minWidth: 104
+                ) {
+                    showsCompoundBrushBuilder = true
+                }
             }
 
             if let restoreTitle = primaryDormantTipRestoreTitle(for: viewModel.workspace.toolSession.brush) {
@@ -1740,6 +1759,9 @@ struct RightInspectorView: View {
                                 if primaryTipImageLibraryPendingSelection == item.id {
                                     primaryTipImageLibraryPendingSelection = nil
                                 }
+                                if compoundSecondaryTipImageLibraryPendingSelection == item.id {
+                                    compoundSecondaryTipImageLibraryPendingSelection = nil
+                                }
                             }
                         } label: {
                             Image(systemName: "xmark.circle.fill")
@@ -1793,6 +1815,14 @@ struct RightInspectorView: View {
                     title: "当前主笔尖",
                     tint: Color.accentColor,
                     tooltip: "当前主笔尖正在使用这张图片"
+                )
+            }
+
+            if summary.currentBrushUsesCompoundSecondary {
+                tipImageLibraryReferenceChip(
+                    title: "组合次笔尖",
+                    tint: Color.orange,
+                    tooltip: "当前组合笔刷次笔尖正在使用这张图片"
                 )
             }
 
@@ -1862,29 +1892,56 @@ struct RightInspectorView: View {
         if summary.currentBrushUsesPrimary {
             parts.append("当前主笔尖")
         }
+        if summary.currentBrushUsesCompoundSecondary {
+            parts.append("当前组合笔刷次笔尖")
+        }
         if summary.presetPrimaryNames.isEmpty == false {
             parts.append("主笔尖预设：\(tipImageLibraryPresetNameSummary(summary.presetPrimaryNames))")
+        }
+        if summary.presetCompoundSecondaryNames.isEmpty == false {
+            parts.append("组合次笔尖预设：\(tipImageLibraryPresetNameSummary(summary.presetCompoundSecondaryNames))")
         }
         return "该笔尖图片仍被\(parts.joined(separator: "、"))引用，无法删除"
     }
 
     private func selectedTipImageLibraryAssetID(for target: TipImageLibrarySheetTarget) -> BrushTipImageAssetID? {
         let brush = viewModel.workspace.toolSession.brush
-        guard brush.tipShape == .customRound, effectivePrimaryTipSourceSemantic(for: brush) == .importedImage else {
-            return nil
+        switch target {
+        case .primary:
+            guard brush.tipShape == .customRound, effectivePrimaryTipSourceSemantic(for: brush) == .importedImage else {
+                return nil
+            }
+            return brush.customTipAssetID
+        case .compoundSecondary:
+            guard
+                brush.compoundBrush.secondary.tipShape == .customRound,
+                brush.compoundBrush.secondary.sourceSemantic == .importedImage
+            else {
+                return nil
+            }
+            return brush.compoundBrush.secondary.tipAssetID
         }
-        return brush.customTipAssetID
     }
 
     private func pendingTipImageLibrarySelection(for target: TipImageLibrarySheetTarget) -> BrushTipImageAssetID? {
-        primaryTipImageLibraryPendingSelection
+        switch target {
+        case .primary:
+            return primaryTipImageLibraryPendingSelection
+        case .compoundSecondary:
+            return compoundSecondaryTipImageLibraryPendingSelection
+        }
     }
 
     private func setPendingTipImageLibrarySelection(
         _ assetID: BrushTipImageAssetID?,
         for target: TipImageLibrarySheetTarget
     ) {
-        primaryTipImageLibraryPendingSelection = assetID
+        switch target {
+        case .primary:
+            primaryTipImageLibraryPendingSelection = assetID
+        case .compoundSecondary:
+            compoundSecondaryTipImageLibraryPendingSelection = assetID
+        }
     }
 
     private func prepareTipImageLibraryPresentation(for target: TipImageLibrarySheetTarget) {
@@ -1924,7 +1981,12 @@ struct RightInspectorView: View {
     }
 
     private func applyTipImageLibraryItem(_ assetID: BrushTipImageAssetID, to target: TipImageLibrarySheetTarget) {
-        viewModel.applyPrimaryTipImageLibraryItem(assetID)
+        switch target {
+        case .primary:
+            viewModel.applyPrimaryTipImageLibraryItem(assetID)
+        case .compoundSecondary:
+            viewModel.applyCompoundSecondaryTipImageLibraryItem(assetID)
+        }
     }
 
     private func moveTipImageLibraryItemFromDrop(

@@ -25,6 +25,18 @@ private struct BrushUniforms {
     var selectionMin: SIMD2<Float>
     var selectionMax: SIMD2<Float>
     var usesAlphaLock: UInt32
+    var compoundEnabled: UInt32
+    var compoundSecondaryShape: UInt32
+    var compoundPrimaryMixWeight: Float
+    var compoundPrimaryOpacityFactor: Float
+    var compoundSecondaryOpacityFactor: Float
+    var compoundSecondaryDiameterPx: Float
+    var compoundSecondaryAdvancePx: Float
+    var compoundSecondarySoftness: Float
+    var compoundSecondaryRoundness: Float
+    var compoundSecondaryAngleDegrees: Float
+    var compoundArcLengthAtCenter: Float
+    var compoundStrokeTangent: SIMD2<Float>
 }
 
 private struct SmudgeGatherInput {
@@ -79,6 +91,7 @@ private let customTipMaskResolution = 256
 private enum CustomTipTextureRole {
     case primary
     case primaryEnvelope
+    case compoundSecondary
 }
 
 enum StageOneBrushRendererInitializationError: LocalizedError {
@@ -130,6 +143,8 @@ final class StageOneBrushRenderer {
     private var cachedPrimaryCustomTipTexture: MTLTexture?
     private var cachedPrimaryEnvelopeCustomTipData: Data?
     private var cachedPrimaryEnvelopeCustomTipTexture: MTLTexture?
+    private var cachedCompoundSecondaryCustomTipData: Data?
+    private var cachedCompoundSecondaryCustomTipTexture: MTLTexture?
 
     init(device: MTLDevice) throws {
         self.device = device
@@ -159,6 +174,18 @@ final class StageOneBrushRenderer {
             float2 selectionMin;
             float2 selectionMax;
             uint usesAlphaLock;
+            uint compoundEnabled;
+            uint compoundSecondaryShape;
+            float compoundPrimaryMixWeight;
+            float compoundPrimaryOpacityFactor;
+            float compoundSecondaryOpacityFactor;
+            float compoundSecondaryDiameterPx;
+            float compoundSecondaryAdvancePx;
+            float compoundSecondarySoftness;
+            float compoundSecondaryRoundness;
+            float compoundSecondaryAngleDegrees;
+            float compoundArcLengthAtCenter;
+            float2 compoundStrokeTangent;
         };
 
         struct SmudgeGatherInput {
@@ -277,11 +304,26 @@ final class StageOneBrushRenderer {
             return smoothHardnessAlpha(roundDistance, tipHardness);
         }
 
-        float tipAlpha(
+        float primaryTextureAlpha(
             float2 localPoint,
-            float2 pixelPoint,
             constant BrushUniforms &uniforms,
-            texture2d<float, access::sample> customTipMask,
+            texture2d<float, access::sample> customTipMask
+        ) {
+            return tipAlphaForDescriptor(
+                localPoint,
+                uniforms.tipShape,
+                uniforms.tipHardness,
+                uniforms.tipSoftness,
+                uniforms.tipRoundness,
+                uniforms.tipAngleDegrees,
+                customTipMask,
+                uniforms.tipShape == 3
+            );
+        }
+
+        float primaryEnvelopeAlpha(
+            float2 localPoint,
+            constant BrushUniforms &uniforms,
             texture2d<float, access::sample> primaryEnvelopeTipMask
         ) {
             return tipAlphaForDescriptor(
@@ -294,6 +336,77 @@ final class StageOneBrushRenderer {
                 primaryEnvelopeTipMask,
                 uniforms.tipShape == 3
             );
+        }
+
+        float compoundSecondaryTipAlpha(
+            float2 localPoint,
+            constant BrushUniforms &uniforms,
+            texture2d<float, access::sample> compoundSecondaryTipMask
+        ) {
+            if (uniforms.compoundEnabled == 0) {
+                return 0.0;
+            }
+
+            return tipAlphaForDescriptor(
+                localPoint,
+                uniforms.compoundSecondaryShape,
+                0.5,
+                uniforms.compoundSecondarySoftness,
+                uniforms.compoundSecondaryRoundness,
+                uniforms.compoundSecondaryAngleDegrees,
+                compoundSecondaryTipMask,
+                uniforms.compoundSecondaryShape == 3
+            );
+        }
+
+        float compoundFinalAlpha(
+            float2 localPoint,
+            float2 pixelPoint,
+            constant BrushUniforms &uniforms,
+            texture2d<float, access::sample> customTipMask,
+            texture2d<float, access::sample> primaryEnvelopeTipMask,
+            texture2d<float, access::sample> compoundSecondaryTipMask
+        ) {
+            float primaryTexture = primaryTextureAlpha(localPoint, uniforms, customTipMask);
+            float primaryEnvelope = primaryEnvelopeAlpha(localPoint, uniforms, primaryEnvelopeTipMask);
+
+            if (uniforms.compoundEnabled == 0) {
+                return primaryTexture * uniforms.compoundPrimaryOpacityFactor;
+            }
+
+            float2 tangent = normalize(uniforms.compoundStrokeTangent);
+            if (all(tangent == float2(0.0))) {
+                tangent = float2(1.0, 0.0);
+            }
+            float2 normal = float2(-tangent.y, tangent.x);
+            float2 deltaPx = pixelPoint - uniforms.center;
+            float sPx = uniforms.compoundArcLengthAtCenter + dot(deltaPx, tangent);
+            float tPx = dot(deltaPx, normal);
+
+            float secondaryAdvancePx = max(uniforms.compoundSecondaryAdvancePx, 1.0);
+            float secondaryDiameterPx = max(uniforms.compoundSecondaryDiameterPx, 1.0);
+            float repeatIndex = floor((sPx / secondaryAdvancePx) + 0.5);
+            float repeatCenterS = repeatIndex * secondaryAdvancePx;
+            float2 secondaryPoint = float2(
+                (sPx - repeatCenterS) / (secondaryDiameterPx * 0.5),
+                tPx / (secondaryDiameterPx * 0.5)
+            );
+
+            float secondaryField = compoundSecondaryTipAlpha(
+                secondaryPoint,
+                uniforms,
+                compoundSecondaryTipMask
+            ) * uniforms.compoundSecondaryOpacityFactor;
+
+            float lowAppearance = primaryEnvelope * secondaryField;
+            float highAppearance = primaryTexture * uniforms.compoundPrimaryOpacityFactor;
+            float mixedAppearance = mix(
+                lowAppearance,
+                highAppearance,
+                clamp(uniforms.compoundPrimaryMixWeight, 0.0, 1.0)
+            );
+
+            return min(mixedAppearance, primaryEnvelope);
         }
 
         float srgbChannelToLinear(float value) {
@@ -438,14 +551,16 @@ final class StageOneBrushRenderer {
             texture2d<float, access::read> selectionMask [[texture(0)]],
             texture2d<float, access::read> alphaLockTexture [[texture(1)]],
             texture2d<float, access::sample> customTipMask [[texture(2)]],
-            texture2d<float, access::sample> primaryEnvelopeTipMask [[texture(5)]]
+            texture2d<float, access::sample> primaryEnvelopeTipMask [[texture(5)]],
+            texture2d<float, access::sample> compoundSecondaryTipMask [[texture(6)]]
         ) {
-            float alphaMask = tipAlpha(
+            float alphaMask = compoundFinalAlpha(
                 in.localPoint,
                 in.pixelPoint,
                 uniforms,
                 customTipMask,
-                primaryEnvelopeTipMask
+                primaryEnvelopeTipMask,
+                compoundSecondaryTipMask
             );
             if (alphaMask <= 0.001) {
                 discard_fragment();
@@ -509,14 +624,16 @@ final class StageOneBrushRenderer {
             texture2d<float, access::read> alphaLockTexture [[texture(1)]],
             texture2d<float, access::read> gatheredColors [[texture(4)]],
             texture2d<float, access::sample> customTipMask [[texture(2)]],
-            texture2d<float, access::sample> primaryEnvelopeTipMask [[texture(5)]]
+            texture2d<float, access::sample> primaryEnvelopeTipMask [[texture(5)]],
+            texture2d<float, access::sample> compoundSecondaryTipMask [[texture(6)]]
         ) {
-            float alphaMask = tipAlpha(
+            float alphaMask = compoundFinalAlpha(
                 in.localPoint,
                 in.pixelPoint,
                 uniforms,
                 customTipMask,
-                primaryEnvelopeTipMask
+                primaryEnvelopeTipMask,
+                compoundSecondaryTipMask
             );
             if (alphaMask <= 0.001) {
                 discard_fragment();
@@ -576,14 +693,16 @@ final class StageOneBrushRenderer {
             texture2d<float, access::read> alphaLockTexture [[texture(1)]],
             texture2d<float, access::sample> sourceTexture [[texture(4)]],
             texture2d<float, access::sample> customTipMask [[texture(2)]],
-            texture2d<float, access::sample> primaryEnvelopeTipMask [[texture(5)]]
+            texture2d<float, access::sample> primaryEnvelopeTipMask [[texture(5)]],
+            texture2d<float, access::sample> compoundSecondaryTipMask [[texture(6)]]
         ) {
-            float alphaMask = tipAlpha(
+            float alphaMask = compoundFinalAlpha(
                 in.localPoint,
                 in.pixelPoint,
                 uniforms,
                 customTipMask,
-                primaryEnvelopeTipMask
+                primaryEnvelopeTipMask,
+                compoundSecondaryTipMask
             );
             if (alphaMask <= 0.001) {
                 discard_fragment();
@@ -675,14 +794,16 @@ final class StageOneBrushRenderer {
             texture2d<float, access::read> selectionMask [[texture(0)]],
             texture2d<float, access::read> alphaLockTexture [[texture(1)]],
             texture2d<float, access::sample> customTipMask [[texture(2)]],
-            texture2d<float, access::sample> primaryEnvelopeTipMask [[texture(5)]]
+            texture2d<float, access::sample> primaryEnvelopeTipMask [[texture(5)]],
+            texture2d<float, access::sample> compoundSecondaryTipMask [[texture(6)]]
         ) {
-            float alphaMask = tipAlpha(
+            float alphaMask = compoundFinalAlpha(
                 in.localPoint,
                 in.pixelPoint,
                 uniforms,
                 customTipMask,
-                primaryEnvelopeTipMask
+                primaryEnvelopeTipMask,
+                compoundSecondaryTipMask
             );
             if (alphaMask <= 0.001) {
                 discard_fragment();
@@ -1127,10 +1248,14 @@ final class StageOneBrushRenderer {
         let primaryEnvelopeTipTexture =
             customTipTexture(for: primaryEnvelopeCustomTipMaskData(for: stroke), role: .primaryEnvelope) ??
             primaryCustomTipTexture
+        let compoundSecondaryTipTexture =
+            customTipTexture(for: compoundSecondaryCustomTipMaskData(for: stroke), role: .compoundSecondary) ??
+            defaultTipTexture
         encoder.setFragmentTexture(selectionMaskTexture, index: 0)
         encoder.setFragmentTexture(alphaLockTexture ?? fallbackAlphaLockTexture, index: 1)
         encoder.setFragmentTexture(primaryCustomTipTexture, index: 2)
         encoder.setFragmentTexture(primaryEnvelopeTipTexture, index: 5)
+        encoder.setFragmentTexture(compoundSecondaryTipTexture, index: 6)
         encoder.setFragmentSamplerState(tipSamplerState, index: 1)
 
         for sample in samples {
@@ -1190,10 +1315,14 @@ final class StageOneBrushRenderer {
             let primaryEnvelopeTipTexture =
                 customTipTexture(for: primaryEnvelopeCustomTipMaskData(for: stroke), role: .primaryEnvelope) ??
                 primaryCustomTipTexture
+            let compoundSecondaryTipTexture =
+                customTipTexture(for: compoundSecondaryCustomTipMaskData(for: stroke), role: .compoundSecondary) ??
+                defaultTipTexture
             encoder.setFragmentTexture(selectionMaskTexture, index: 0)
             encoder.setFragmentTexture(alphaLockTexture ?? fallbackAlphaLockTexture, index: 1)
             encoder.setFragmentTexture(primaryCustomTipTexture, index: 2)
             encoder.setFragmentTexture(primaryEnvelopeTipTexture, index: 5)
+            encoder.setFragmentTexture(compoundSecondaryTipTexture, index: 6)
             encoder.setFragmentSamplerState(tipSamplerState, index: 1)
             encoder.setScissorRect(dirtyRect)
 
@@ -1311,6 +1440,19 @@ final class StageOneBrushRenderer {
         let remappedOpacityPressure = pressureResponsePressure(for: opacityPressure, stroke: stroke)
         let curvedPressure = opacityCurvePressure(for: remappedOpacityPressure, stroke: stroke)
         let opacityFactor = (1 - opacityResponse) + (opacityResponse * curvedPressure)
+        let compoundEnabled = stroke.brush.compoundBrush.enabled && (stroke.tool == .brush || stroke.tool == .eraser)
+        let compoundSecondary = stroke.brush.compoundBrush.secondary
+        let tangent = normalizedStrokeTangent(sample.strokeTangent)
+        let tangentDegrees = Float(atan2(tangent.y, tangent.x) * 180.0 / .pi)
+        let compoundSecondarySizeFactor = compoundSecondary.resolvedSizeFactor(for: effectivePressure)
+        let compoundSecondaryOpacityFactor = compoundSecondary.resolvedOpacityFactor(for: effectivePressure)
+        let compoundSecondaryDiameterPx = max(compoundSecondary.size * compoundSecondarySizeFactor, 1)
+        let compoundSecondaryAdvancePx = max(
+            compoundSecondaryDiameterPx * max(compoundSecondary.spacingPercent, 1) / 100,
+            1
+        )
+        let compoundSecondaryAngleDegrees = compoundSecondary.angleDegrees +
+            (compoundSecondary.followsStrokeDirection ? tangentDegrees : 0)
         let selectionMode: UInt32
         let selectionMin: SIMD2<Float>
         let selectionMax: SIMD2<Float>
@@ -1340,10 +1482,7 @@ final class StageOneBrushRenderer {
             selectionMax = SIMD2(0, 0)
         }
 
-        let resolvedOpacity = min(
-            max((includeBrushOpacity ? stroke.brush.opacity : 1) * opacityFactor, 0),
-            1
-        )
+        let resolvedOpacity = min(max(includeBrushOpacity ? stroke.brush.opacity : 1, 0), 1)
 
         return BrushUniforms(
             center: SIMD2(Float(point.x), Float(point.y)),
@@ -1372,8 +1511,41 @@ final class StageOneBrushRenderer {
             selectionMode: selectionMode,
             selectionMin: selectionMin,
             selectionMax: selectionMax,
-            usesAlphaLock: stroke.alphaLockEnabled ? 1 : 0
+            usesAlphaLock: stroke.alphaLockEnabled ? 1 : 0,
+            compoundEnabled: compoundEnabled ? 1 : 0,
+            compoundSecondaryShape: brushTipShapeCode(compoundSecondary.tipShape),
+            compoundPrimaryMixWeight: stroke.brush.compoundBrush.pressureMix.resolvedPrimaryWeight(for: effectivePressure),
+            compoundPrimaryOpacityFactor: opacityFactor,
+            compoundSecondaryOpacityFactor: compoundSecondaryOpacityFactor,
+            compoundSecondaryDiameterPx: compoundSecondaryDiameterPx,
+            compoundSecondaryAdvancePx: compoundSecondaryAdvancePx,
+            compoundSecondarySoftness: compoundSecondary.softness,
+            compoundSecondaryRoundness: compoundSecondary.roundness,
+            compoundSecondaryAngleDegrees: compoundSecondaryAngleDegrees,
+            compoundArcLengthAtCenter: sample.arcLengthPx,
+            compoundStrokeTangent: tangent
         )
+    }
+
+    private func brushTipShapeCode(_ shape: BrushTipShape) -> UInt32 {
+        switch shape {
+        case .hardRound:
+            return 0
+        case .softRound:
+            return 1
+        case .square:
+            return 2
+        case .customRound:
+            return 3
+        }
+    }
+
+    private func normalizedStrokeTangent(_ tangent: SIMD2<Float>) -> SIMD2<Float> {
+        let length = simd_length(tangent)
+        guard length > 0.0001 else {
+            return SIMD2<Float>(1, 0)
+        }
+        return tangent / length
     }
 
     // MARK: - Catmull-Rom 曲线插值核心
@@ -2274,8 +2446,12 @@ final class StageOneBrushRenderer {
         let primaryEnvelopeTipTexture =
             customTipTexture(for: primaryEnvelopeCustomTipMaskData(for: stroke), role: .primaryEnvelope) ??
             primaryCustomTipTexture
+        let compoundSecondaryTipTexture =
+            customTipTexture(for: compoundSecondaryCustomTipMaskData(for: stroke), role: .compoundSecondary) ??
+            defaultTipTexture
         encoder.setFragmentTexture(primaryCustomTipTexture, index: 2)
         encoder.setFragmentTexture(primaryEnvelopeTipTexture, index: 5)
+        encoder.setFragmentTexture(compoundSecondaryTipTexture, index: 6)
         encoder.setFragmentSamplerState(tipSamplerState, index: 1)
 
         for (stampIndex, sample) in samples.enumerated() {
@@ -2335,6 +2511,13 @@ final class StageOneBrushRenderer {
         return stroke.brush.customTipEnvelopeMaskData ?? stroke.brush.customTipMaskData
     }
 
+    private func compoundSecondaryCustomTipMaskData(for stroke: StrokeDescriptor) -> Data? {
+        guard stroke.brush.compoundBrush.secondary.tipShape == .customRound else {
+            return nil
+        }
+        return stroke.brush.compoundBrush.secondary.customTipMaskData
+    }
+
     private func customTipTexture(for data: Data?, role: CustomTipTextureRole) -> MTLTexture? {
         guard let data = resampledCustomTipData(data) else {
             switch role {
@@ -2344,6 +2527,9 @@ final class StageOneBrushRenderer {
             case .primaryEnvelope:
                 cachedPrimaryEnvelopeCustomTipData = nil
                 cachedPrimaryEnvelopeCustomTipTexture = nil
+            case .compoundSecondary:
+                cachedCompoundSecondaryCustomTipData = nil
+                cachedCompoundSecondaryCustomTipTexture = nil
             }
             return nil
         }
@@ -2356,6 +2542,10 @@ final class StageOneBrushRenderer {
         case .primaryEnvelope:
             if cachedPrimaryEnvelopeCustomTipData == data, let cachedPrimaryEnvelopeCustomTipTexture {
                 return cachedPrimaryEnvelopeCustomTipTexture
+            }
+        case .compoundSecondary:
+            if cachedCompoundSecondaryCustomTipData == data, let cachedCompoundSecondaryCustomTipTexture {
+                return cachedCompoundSecondaryCustomTipTexture
             }
         }
 
@@ -2389,6 +2579,9 @@ final class StageOneBrushRenderer {
         case .primaryEnvelope:
             cachedPrimaryEnvelopeCustomTipData = data
             cachedPrimaryEnvelopeCustomTipTexture = texture
+        case .compoundSecondary:
+            cachedCompoundSecondaryCustomTipData = data
+            cachedCompoundSecondaryCustomTipTexture = texture
         }
         return texture
     }

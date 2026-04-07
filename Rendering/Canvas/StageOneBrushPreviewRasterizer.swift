@@ -1,6 +1,7 @@
 import CoreGraphics
 import CryptoKit
 import Foundation
+import Metal
 
 enum StageOneBrushPreviewRasterizer {
     private final class CachedImageBox: NSObject {
@@ -35,6 +36,27 @@ enum StageOneBrushPreviewRasterizer {
         return cache
     }()
 
+    private struct CompoundPreviewRendererContext {
+        let device: MTLDevice
+        let commandQueue: MTLCommandQueue
+        let renderer: StageOneBrushRenderer
+    }
+
+    nonisolated(unsafe) private static let compoundPreviewRendererContext: CompoundPreviewRendererContext? = {
+        guard
+            let device = MTLCreateSystemDefaultDevice(),
+            let commandQueue = device.makeCommandQueue(),
+            let renderer = try? StageOneBrushRenderer(device: device)
+        else {
+            return nil
+        }
+        return CompoundPreviewRendererContext(
+            device: device,
+            commandQueue: commandQueue,
+            renderer: renderer
+        )
+    }()
+
     static func resetCache() {
         cache.removeAllObjects()
     }
@@ -62,6 +84,69 @@ enum StageOneBrushPreviewRasterizer {
             return nil
         }
 
+        cache.setObject(CachedImageBox(image: image), forKey: cacheKey)
+        return image
+    }
+
+    static func compoundStrokePreviewImage(
+        for brush: BrushSettings,
+        resolution: Int = 256,
+        pressure: Float
+    ) -> CGImage? {
+        guard resolution > 0 else { return nil }
+        let cacheKey = makeCompoundStrokePreviewCacheKey(
+            for: brush,
+            resolution: resolution,
+            pressure: pressure
+        )
+        if let cached = cache.object(forKey: cacheKey) {
+            return cached.image
+        }
+
+        guard
+            let context = compoundPreviewRendererContext,
+            let texture = makePreviewTexture(device: context.device, resolution: resolution)
+        else {
+            return nil
+        }
+
+        clearPreviewTexture(texture, commandQueue: context.commandQueue)
+        let stroke = makeCompoundPreviewStroke(for: brush, resolution: resolution, pressure: pressure)
+        var samplingState: BrushStrokeSamplingState?
+
+        if stroke.brush.buildMode == .opacityCap {
+            guard let session = context.renderer.makeOpacityCapSession(for: texture, commandQueue: context.commandQueue),
+                  let commandBuffer = context.commandQueue.makeCommandBuffer()
+            else {
+                return nil
+            }
+            _ = context.renderer.encodeOpacityCapStroke(
+                stroke: stroke,
+                session: session,
+                into: texture,
+                commandBuffer: commandBuffer,
+                samplingState: &samplingState
+            )
+            commandBuffer.commit()
+            commandBuffer.waitUntilCompleted()
+        } else {
+            guard let commandBuffer = context.commandQueue.makeCommandBuffer() else {
+                return nil
+            }
+            _ = context.renderer.encodeStroke(
+                stroke: stroke,
+                into: texture,
+                commandQueue: context.commandQueue,
+                commandBuffer: commandBuffer,
+                samplingState: &samplingState
+            )
+            commandBuffer.commit()
+            commandBuffer.waitUntilCompleted()
+        }
+
+        guard let image = makeCGImage(from: texture) else {
+            return nil
+        }
         cache.setObject(CachedImageBox(image: image), forKey: cacheKey)
         return image
     }
@@ -471,6 +556,42 @@ enum StageOneBrushPreviewRasterizer {
         return NSString(string: String(hasher.finalize()))
     }
 
+    private static func makeCompoundStrokePreviewCacheKey(
+        for brush: BrushSettings,
+        resolution: Int,
+        pressure: Float
+    ) -> NSString {
+        var hasher = Hasher()
+        brushHasher(brush, into: &hasher)
+        hasher.combine("compound-stroke")
+        hasher.combine(brush.compoundBrush.enabled)
+        let secondary = brush.compoundBrush.secondary
+        hasher.combine(secondary.tipShape.rawValue)
+        hasher.combine(secondary.sourceSemantic.rawValue)
+        hasher.combine(maskFingerprint(for: secondary.customTipMaskData))
+        hasher.combine(secondary.softness)
+        hasher.combine(secondary.roundness)
+        hasher.combine(secondary.angleDegrees)
+        hasher.combine(secondary.followsStrokeDirection)
+        hasher.combine(secondary.size)
+        hasher.combine(secondary.spacingPercent)
+        hasher.combine(secondary.pressureSizeAmount)
+        hasher.combine(secondary.pressureOpacityAmount)
+        hasher.combine(secondary.sizeCurveLow)
+        hasher.combine(secondary.sizeCurveMid)
+        hasher.combine(secondary.sizeCurveHigh)
+        hasher.combine(secondary.opacityCurveLow)
+        hasher.combine(secondary.opacityCurveMid)
+        hasher.combine(secondary.opacityCurveHigh)
+        let mix = brush.compoundBrush.pressureMix
+        hasher.combine(mix.primaryAtLowPressure)
+        hasher.combine(mix.primaryAtMidPressure)
+        hasher.combine(mix.primaryAtHighPressure)
+        hasher.combine(resolution)
+        hasher.combine(pressure)
+        return NSString(string: String(hasher.finalize()))
+    }
+
     private static func makeImportedAssetCacheKey(
         maskData: Data?,
         resolution: Int
@@ -506,6 +627,99 @@ enum StageOneBrushPreviewRasterizer {
         guard let data, data.isEmpty == false else { return "nil" }
         let digest = SHA256.hash(data: data)
         return digest.map { String(format: "%02x", $0) }.joined()
+    }
+
+    private static func makePreviewTexture(device: MTLDevice, resolution: Int) -> MTLTexture? {
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .bgra8Unorm_srgb,
+            width: resolution,
+            height: resolution,
+            mipmapped: false
+        )
+        descriptor.usage = [.renderTarget, .shaderRead]
+        descriptor.storageMode = .shared
+        return device.makeTexture(descriptor: descriptor)
+    }
+
+    private static func clearPreviewTexture(_ texture: MTLTexture, commandQueue: MTLCommandQueue) {
+        guard let commandBuffer = commandQueue.makeCommandBuffer() else { return }
+        let passDescriptor = MTLRenderPassDescriptor()
+        passDescriptor.colorAttachments[0].texture = texture
+        passDescriptor.colorAttachments[0].loadAction = .clear
+        passDescriptor.colorAttachments[0].storeAction = .store
+        passDescriptor.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
+        let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: passDescriptor)
+        encoder?.endEncoding()
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+    }
+
+    private static func makeCompoundPreviewStroke(
+        for brush: BrushSettings,
+        resolution: Int,
+        pressure: Float
+    ) -> StrokeDescriptor {
+        let side = Double(resolution)
+        let points = [
+            StrokePoint(x: side * 0.10, y: side * 0.70, pressure: pressure),
+            StrokePoint(x: side * 0.25, y: side * 0.43, pressure: pressure),
+            StrokePoint(x: side * 0.43, y: side * 0.56, pressure: pressure),
+            StrokePoint(x: side * 0.60, y: side * 0.37, pressure: pressure),
+            StrokePoint(x: side * 0.77, y: side * 0.53, pressure: pressure),
+            StrokePoint(x: side * 0.91, y: side * 0.34, pressure: pressure)
+        ]
+        return StrokeDescriptor(
+            tool: .brush,
+            color: .white,
+            brush: brush,
+            points: points,
+            selectionShape: nil
+        )
+    }
+
+    private static func makeCGImage(from texture: MTLTexture) -> CGImage? {
+        let width = texture.width
+        let height = texture.height
+        guard width > 0, height > 0 else { return nil }
+
+        let bytesPerRow = width * 4
+        var bgraBytes = [UInt8](repeating: 0, count: bytesPerRow * height)
+        texture.getBytes(
+            &bgraBytes,
+            bytesPerRow: bytesPerRow,
+            from: MTLRegionMake2D(0, 0, width, height),
+            mipmapLevel: 0
+        )
+
+        var rgbaBytes = bgraBytes
+        for index in stride(from: 0, to: rgbaBytes.count, by: 4) {
+            rgbaBytes[index] = bgraBytes[index + 2]
+            rgbaBytes[index + 1] = bgraBytes[index + 1]
+            rgbaBytes[index + 2] = bgraBytes[index]
+            rgbaBytes[index + 3] = bgraBytes[index + 3]
+        }
+
+        guard
+            let provider = CGDataProvider(data: Data(rgbaBytes) as CFData),
+            let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
+            let image = CGImage(
+                width: width,
+                height: height,
+                bitsPerComponent: 8,
+                bitsPerPixel: 32,
+                bytesPerRow: bytesPerRow,
+                space: colorSpace,
+                bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
+                provider: provider,
+                decode: nil,
+                shouldInterpolate: true,
+                intent: .defaultIntent
+            )
+        else {
+            return nil
+        }
+
+        return image
     }
 
     private static func resampledMaskBytes(

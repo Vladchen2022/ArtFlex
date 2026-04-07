@@ -296,6 +296,112 @@ enum PressureCurvePreset: String, CaseIterable, Sendable {
     }
 }
 
+struct CompoundPressureMixSettings: Codable, Equatable, Sendable {
+    var primaryAtLowPressure: Float
+    var primaryAtMidPressure: Float
+    var primaryAtHighPressure: Float
+
+    static let `default` = CompoundPressureMixSettings(
+        primaryAtLowPressure: 0.10,
+        primaryAtMidPressure: 0.45,
+        primaryAtHighPressure: 1.00
+    )
+
+    func resolvedPrimaryWeight(for pressure: Float) -> Float {
+        let clampedPressure = min(max(pressure, 0), 1)
+        if clampedPressure <= 0.5 {
+            let t = clampedPressure / 0.5
+            return primaryAtLowPressure + ((primaryAtMidPressure - primaryAtLowPressure) * t)
+        } else {
+            let t = (clampedPressure - 0.5) / 0.5
+            return primaryAtMidPressure + ((primaryAtHighPressure - primaryAtMidPressure) * t)
+        }
+    }
+}
+
+struct CompoundSecondaryTipSettings: Codable, Equatable, Sendable {
+    var tipShape: BrushTipShape
+    var sourceSemantic: TipSourceSemantic
+    var tipAssetID: BrushTipImageAssetID?
+    var importedSourceInfo: ImportedTipSourceInfo?
+    var customTipMaskData: Data?
+
+    var softness: Float
+    var roundness: Float
+    var angleDegrees: Float
+    var followsStrokeDirection: Bool
+
+    var size: Float
+    var spacingPercent: Float
+
+    var pressureSizeAmount: Float
+    var pressureOpacityAmount: Float
+
+    var sizeCurveLow: Float
+    var sizeCurveMid: Float
+    var sizeCurveHigh: Float
+
+    var opacityCurveLow: Float
+    var opacityCurveMid: Float
+    var opacityCurveHigh: Float
+
+    static let `default` = CompoundSecondaryTipSettings(
+        tipShape: .softRound,
+        sourceSemantic: .procedural,
+        tipAssetID: nil,
+        importedSourceInfo: nil,
+        customTipMaskData: nil,
+        softness: 0.35,
+        roundness: 1.0,
+        angleDegrees: 0,
+        followsStrokeDirection: false,
+        size: 24,
+        spacingPercent: 70,
+        pressureSizeAmount: 0.30,
+        pressureOpacityAmount: 1.00,
+        sizeCurveLow: 0.20,
+        sizeCurveMid: 0.60,
+        sizeCurveHigh: 1.00,
+        opacityCurveLow: 0.20,
+        opacityCurveMid: 0.60,
+        opacityCurveHigh: 1.00
+    )
+
+    func resolvedSizeFactor(for pressure: Float) -> Float {
+        let curved = BrushSettings.samplePressureCurve(
+            pressure: pressure,
+            low: sizeCurveLow,
+            mid: sizeCurveMid,
+            high: sizeCurveHigh
+        )
+        let response = min(max(pressureSizeAmount, 0), 1)
+        return (1 - response) + (response * curved)
+    }
+
+    func resolvedOpacityFactor(for pressure: Float) -> Float {
+        let curved = BrushSettings.samplePressureCurve(
+            pressure: pressure,
+            low: opacityCurveLow,
+            mid: opacityCurveMid,
+            high: opacityCurveHigh
+        )
+        let response = min(max(pressureOpacityAmount, 0), 1)
+        return (1 - response) + (response * curved)
+    }
+}
+
+struct CompoundBrushSettings: Codable, Equatable, Sendable {
+    var enabled: Bool
+    var secondary: CompoundSecondaryTipSettings
+    var pressureMix: CompoundPressureMixSettings
+
+    static let disabledDefault = CompoundBrushSettings(
+        enabled: false,
+        secondary: .default,
+        pressureMix: .default
+    )
+}
+
 struct BrushSettings: Codable, Sendable, Equatable {
     var size: Float
     var opacity: Float
@@ -325,6 +431,7 @@ struct BrushSettings: Codable, Sendable, Equatable {
     var opacityCurveLow: Float
     var opacityCurveMid: Float
     var opacityCurveHigh: Float
+    var compoundBrush: CompoundBrushSettings
 
     static let stageOneDefault = BrushSettings(
         size: 24,
@@ -354,7 +461,8 @@ struct BrushSettings: Codable, Sendable, Equatable {
         sizeCurveHigh: 0.88,
         opacityCurveLow: 0.05,
         opacityCurveMid: 0.4,
-        opacityCurveHigh: 0.82
+        opacityCurveHigh: 0.82,
+        compoundBrush: .disabledDefault
     )
 
     enum CodingKeys: String, CodingKey {
@@ -386,6 +494,7 @@ struct BrushSettings: Codable, Sendable, Equatable {
         case opacityCurveLow
         case opacityCurveMid
         case opacityCurveHigh
+        case compoundBrush
     }
 
     init(
@@ -416,7 +525,8 @@ struct BrushSettings: Codable, Sendable, Equatable {
         sizeCurveHigh: Float,
         opacityCurveLow: Float,
         opacityCurveMid: Float,
-        opacityCurveHigh: Float
+        opacityCurveHigh: Float,
+        compoundBrush: CompoundBrushSettings = .disabledDefault
     ) {
         self.size = size
         self.opacity = opacity
@@ -446,6 +556,7 @@ struct BrushSettings: Codable, Sendable, Equatable {
         self.opacityCurveLow = opacityCurveLow
         self.opacityCurveMid = opacityCurveMid
         self.opacityCurveHigh = opacityCurveHigh
+        self.compoundBrush = compoundBrush
     }
 
     init(from decoder: Decoder) throws {
@@ -480,6 +591,7 @@ struct BrushSettings: Codable, Sendable, Equatable {
         opacityCurveLow = try container.decodeIfPresent(Float.self, forKey: .opacityCurveLow) ?? defaults.opacityCurveLow
         opacityCurveMid = try container.decodeIfPresent(Float.self, forKey: .opacityCurveMid) ?? defaults.opacityCurveMid
         opacityCurveHigh = try container.decodeIfPresent(Float.self, forKey: .opacityCurveHigh) ?? defaults.opacityCurveHigh
+        compoundBrush = try container.decodeIfPresent(CompoundBrushSettings.self, forKey: .compoundBrush) ?? defaults.compoundBrush
     }
 
     func encode(to encoder: Encoder) throws {
@@ -512,6 +624,7 @@ struct BrushSettings: Codable, Sendable, Equatable {
         try container.encode(opacityCurveLow, forKey: .opacityCurveLow)
         try container.encode(opacityCurveMid, forKey: .opacityCurveMid)
         try container.encode(opacityCurveHigh, forKey: .opacityCurveHigh)
+        try container.encode(compoundBrush, forKey: .compoundBrush)
     }
 
     static func samplePressureCurve(

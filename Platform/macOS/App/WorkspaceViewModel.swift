@@ -34,8 +34,10 @@ private enum WholeLayerInteractionBoundsCacheEntry: Equatable {
 final class WorkspaceViewModel: ObservableObject {
     struct TipImageLibraryReferenceSummary: Equatable {
         var currentBrushUsesPrimary = false
+        var currentBrushUsesCompoundSecondary = false
         var smudgeBrushUsesPrimary = false
         var presetPrimaryNames: [String] = []
+        var presetCompoundSecondaryNames: [String] = []
 
         var currentBrushPrimaryCount: Int {
             currentBrushUsesPrimary ? 1 : 0
@@ -50,7 +52,7 @@ final class WorkspaceViewModel: ObservableObject {
         }
 
         var currentBrushCount: Int {
-            currentBrushPrimaryCount
+            currentBrushPrimaryCount + (currentBrushUsesCompoundSecondary ? 1 : 0)
         }
 
         var smudgeBrushCount: Int {
@@ -58,7 +60,7 @@ final class WorkspaceViewModel: ObservableObject {
         }
 
         var presetCount: Int {
-            presetPrimaryCount
+            presetPrimaryCount + presetCompoundSecondaryNames.count
         }
 
         var totalCount: Int {
@@ -729,6 +731,142 @@ final class WorkspaceViewModel: ObservableObject {
         updateCustomTipMask(nil)
     }
 
+    func setCompoundBrushEnabled(_ enabled: Bool) {
+        bootstrap.workspaceStore.updateToolSession { session in
+            session.brush.compoundBrush.enabled = enabled
+        }
+        refresh()
+    }
+
+    func setCompoundSecondaryTipShape(_ tipShape: BrushTipShape) {
+        bootstrap.workspaceStore.updateToolSession { session in
+            session.brush.compoundBrush.secondary.tipShape = tipShape
+            if tipShape != .customRound {
+                session.brush.compoundBrush.secondary.sourceSemantic = .procedural
+                session.brush.compoundBrush.secondary.tipAssetID = nil
+                session.brush.compoundBrush.secondary.importedSourceInfo = nil
+                session.brush.compoundBrush.secondary.customTipMaskData = nil
+            }
+        }
+        refresh()
+    }
+
+    func setCompoundSecondaryTipSoftness(_ softness: Float) {
+        bootstrap.workspaceStore.updateToolSession { session in
+            session.brush.compoundBrush.secondary.softness = min(max(softness, 0), 1)
+        }
+        refresh()
+    }
+
+    func setCompoundSecondaryTipRoundness(_ roundness: Float) {
+        bootstrap.workspaceStore.updateToolSession { session in
+            session.brush.compoundBrush.secondary.roundness = min(max(roundness, 0.25), 1)
+        }
+        refresh()
+    }
+
+    func setCompoundSecondaryTipAngleDegrees(_ angle: Float) {
+        bootstrap.workspaceStore.updateToolSession { session in
+            var normalized = angle.truncatingRemainder(dividingBy: 180)
+            if normalized < 0 {
+                normalized += 180
+            }
+            session.brush.compoundBrush.secondary.angleDegrees = normalized
+        }
+        refresh()
+    }
+
+    func setCompoundSecondaryFollowsStrokeDirection(_ value: Bool) {
+        bootstrap.workspaceStore.updateToolSession { session in
+            session.brush.compoundBrush.secondary.followsStrokeDirection = value
+        }
+        refresh()
+    }
+
+    func updateCompoundSecondaryTipMask(_ data: Data?) {
+        bootstrap.workspaceStore.updateToolSession { session in
+            session.brush.compoundBrush.secondary.tipShape = .customRound
+            session.brush.compoundBrush.secondary.sourceSemantic = data == nil ? .procedural : .customMask
+            session.brush.compoundBrush.secondary.tipAssetID = nil
+            session.brush.compoundBrush.secondary.importedSourceInfo = nil
+            session.brush.compoundBrush.secondary.customTipMaskData = data
+        }
+        refresh()
+    }
+
+    func clearCompoundSecondaryTipMask() {
+        updateCompoundSecondaryTipMask(nil)
+    }
+
+    func setCompoundSecondarySize(_ size: Float) {
+        bootstrap.workspaceStore.updateToolSession { session in
+            session.brush.compoundBrush.secondary.size = min(max(size, 1), 512)
+        }
+        refresh()
+    }
+
+    func setCompoundSecondarySpacingPercent(_ percent: Float) {
+        bootstrap.workspaceStore.updateToolSession { session in
+            session.brush.compoundBrush.secondary.spacingPercent = min(max(percent, 1), 400)
+        }
+        refresh()
+    }
+
+    func setCompoundSecondaryPressureSizeAmount(_ amount: Float) {
+        bootstrap.workspaceStore.updateToolSession { session in
+            session.brush.compoundBrush.secondary.pressureSizeAmount = min(max(amount, 0), 1)
+        }
+        refresh()
+    }
+
+    func setCompoundSecondaryPressureOpacityAmount(_ amount: Float) {
+        bootstrap.workspaceStore.updateToolSession { session in
+            session.brush.compoundBrush.secondary.pressureOpacityAmount = min(max(amount, 0), 1)
+        }
+        refresh()
+    }
+
+    func setCompoundSecondarySizeCurve(low: Float, mid: Float, high: Float) {
+        bootstrap.workspaceStore.updateToolSession { session in
+            session.brush.compoundBrush.secondary.sizeCurveLow = min(max(low, 0), 0.85)
+            session.brush.compoundBrush.secondary.sizeCurveMid = min(max(mid, session.brush.compoundBrush.secondary.sizeCurveLow), 0.95)
+            session.brush.compoundBrush.secondary.sizeCurveHigh = min(max(high, session.brush.compoundBrush.secondary.sizeCurveMid), 1)
+        }
+        refresh()
+    }
+
+    func setCompoundSecondaryOpacityCurve(low: Float, mid: Float, high: Float) {
+        bootstrap.workspaceStore.updateToolSession { session in
+            session.brush.compoundBrush.secondary.opacityCurveLow = min(max(low, 0), 0.85)
+            session.brush.compoundBrush.secondary.opacityCurveMid = min(max(mid, session.brush.compoundBrush.secondary.opacityCurveLow), 0.95)
+            session.brush.compoundBrush.secondary.opacityCurveHigh = min(max(high, session.brush.compoundBrush.secondary.opacityCurveMid), 1)
+        }
+        refresh()
+    }
+
+    func setCompoundPrimaryMixAtLowPressure(_ value: Float) {
+        bootstrap.workspaceStore.updateToolSession { session in
+            session.brush.compoundBrush.pressureMix.primaryAtLowPressure = min(max(value, 0), 1)
+        }
+        refresh()
+    }
+
+    func setCompoundPrimaryMixAtMidPressure(_ value: Float) {
+        bootstrap.workspaceStore.updateToolSession { session in
+            let low = session.brush.compoundBrush.pressureMix.primaryAtLowPressure
+            session.brush.compoundBrush.pressureMix.primaryAtMidPressure = min(max(value, low), 1)
+        }
+        refresh()
+    }
+
+    func setCompoundPrimaryMixAtHighPressure(_ value: Float) {
+        bootstrap.workspaceStore.updateToolSession { session in
+            let mid = session.brush.compoundBrush.pressureMix.primaryAtMidPressure
+            session.brush.compoundBrush.pressureMix.primaryAtHighPressure = min(max(value, mid), 1)
+        }
+        refresh()
+    }
+
     func setBrushTipCanvasFocused(_ focused: Bool) {
         isBrushTipCanvasFocused = focused
         if focused {
@@ -798,6 +936,45 @@ final class WorkspaceViewModel: ObservableObject {
         persistBrushLibrary()
         refresh()
         showStatus(.init(kind: .success, message: "已从\(sourceDescription)导入笔尖"))
+        return true
+    }
+
+    func importCompoundSecondaryTipImageFromDisk() {
+        guard let url = bootstrap.filePanelService.presentImageOpenPanel() else {
+            showStatus(.init(kind: .info, message: "已取消选择图片"))
+            return
+        }
+
+        _ = importCompoundSecondaryTipImage(from: url)
+    }
+
+    @discardableResult
+    func importCompoundSecondaryTipImage(from url: URL) -> Bool {
+        guard let image = NSImage(contentsOf: url) else {
+            showStatus(.init(kind: .error, message: "无法读取图片"))
+            return false
+        }
+        return importCompoundSecondaryTipImage(from: image, sourceDescription: url.deletingPathExtension().lastPathComponent)
+    }
+
+    @discardableResult
+    func importCompoundSecondaryTipImage(from image: NSImage, sourceDescription: String = "图片") -> Bool {
+        guard let importedTip = importTipImageLibraryItem(from: image, sourceDescription: sourceDescription) else {
+            showStatus(.init(kind: .error, message: "无法将图片转换为笔尖"))
+            return false
+        }
+
+        bootstrap.workspaceStore.updateToolSession { session in
+            session.brush.compoundBrush.secondary.tipShape = .customRound
+            session.brush.compoundBrush.secondary.sourceSemantic = .importedImage
+            session.brush.compoundBrush.secondary.tipAssetID = importedTip.item.id
+            session.brush.compoundBrush.secondary.importedSourceInfo = importedTip.item.sourceInfo
+            session.brush.compoundBrush.secondary.customTipMaskData = importedTip.item.maskData
+        }
+        StageOneBrushPreviewRasterizer.resetCache()
+        persistBrushLibrary()
+        refresh()
+        showStatus(.init(kind: .success, message: "已为组合笔刷次笔尖导入\(sourceDescription)"))
         return true
     }
 
@@ -1266,6 +1443,25 @@ final class WorkspaceViewModel: ObservableObject {
         showStatus(.init(kind: .success, message: "已应用共享笔尖图片"))
     }
 
+    func applyCompoundSecondaryTipImageLibraryItem(_ assetID: BrushTipImageAssetID) {
+        guard let item = workspace.tipImageLibrary.item(id: assetID),
+              let maskData = item.maskData else {
+            showStatus(.init(kind: .error, message: "无法读取该笔尖图片"))
+            return
+        }
+
+        bootstrap.workspaceStore.updateToolSession { session in
+            session.brush.compoundBrush.secondary.tipShape = .customRound
+            session.brush.compoundBrush.secondary.sourceSemantic = .importedImage
+            session.brush.compoundBrush.secondary.tipAssetID = item.id
+            session.brush.compoundBrush.secondary.importedSourceInfo = item.sourceInfo
+            session.brush.compoundBrush.secondary.customTipMaskData = maskData
+        }
+        StageOneBrushPreviewRasterizer.resetCache()
+        refresh()
+        showStatus(.init(kind: .success, message: "已应用组合笔刷次笔尖"))
+    }
+
     func moveTipImageLibraryItem(_ assetID: BrushTipImageAssetID, to targetIndex: Int) {
         var moved = false
         bootstrap.workspaceStore.updateTipImageLibrary { library in
@@ -1309,6 +1505,10 @@ final class WorkspaceViewModel: ObservableObject {
         if currentBrush.customTipSourceSemantic == .importedImage, currentBrush.customTipAssetID == assetID {
             summary.currentBrushUsesPrimary = true
         }
+        if currentBrush.compoundBrush.secondary.sourceSemantic == .importedImage,
+           currentBrush.compoundBrush.secondary.tipAssetID == assetID {
+            summary.currentBrushUsesCompoundSecondary = true
+        }
 
         if state.toolSession.smudgeBrushUsesIndependentSettings {
             let smudgeBrush = state.toolSession.smudgeBrush
@@ -1321,6 +1521,10 @@ final class WorkspaceViewModel: ObservableObject {
             if preset.brush.customTipSourceSemantic == .importedImage,
                preset.brush.customTipAssetID == assetID {
                 summary.presetPrimaryNames.append(preset.name)
+            }
+            if preset.brush.compoundBrush.secondary.sourceSemantic == .importedImage,
+               preset.brush.compoundBrush.secondary.tipAssetID == assetID {
+                summary.presetCompoundSecondaryNames.append(preset.name)
             }
         }
 
@@ -1338,11 +1542,14 @@ final class WorkspaceViewModel: ObservableObject {
         if summary.currentBrushUsesPrimary {
             parts.append("当前主笔尖")
         }
+        if summary.currentBrushUsesCompoundSecondary {
+            parts.append("当前组合笔刷次笔尖")
+        }
         if summary.smudgeBrushUsesPrimary {
             parts.append("涂抹主笔尖")
         }
         if summary.presetCount > 0 {
-            let previewNames = Array(summary.presetPrimaryNames.prefix(3))
+            let previewNames = Array((summary.presetPrimaryNames + summary.presetCompoundSecondaryNames).prefix(3))
             let suffix = summary.presetCount > previewNames.count ? " 等 \(summary.presetCount) 个预设" : ""
             parts.append("预设 \(previewNames.joined(separator: "、"))\(suffix)")
         }
