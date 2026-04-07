@@ -28,6 +28,7 @@ struct CompoundBrushBuilderSheet: View {
     @State private var tipLibraryTarget: TipLibraryTarget?
     @State private var primaryPendingSelection: BrushTipImageAssetID?
     @State private var compoundPendingSelection: BrushTipImageAssetID?
+    @State private var initialPreviewTask: Task<Void, Never>?
 
     private var brush: BrushSettings { viewModel.workspace.toolSession.brush }
 
@@ -49,6 +50,13 @@ struct CompoundBrushBuilderSheet: View {
         .padding(18)
         .frame(minWidth: 960, idealWidth: 1040, minHeight: 720, idealHeight: 780, alignment: .topLeading)
         .background(Color(red: 0.10, green: 0.10, blue: 0.11))
+        .onAppear {
+            scheduleInitialPreviews(for: brush)
+        }
+        .onDisappear {
+            initialPreviewTask?.cancel()
+            initialPreviewTask = nil
+        }
         .sheet(item: $tipLibraryTarget) { target in
             tipImageLibrarySheet(for: target)
         }
@@ -368,11 +376,30 @@ struct CompoundBrushBuilderSheet: View {
         Task.detached(priority: .utility) {
             let previewImage = StageOneBrushPreviewRasterizer.compoundStrokePreviewImage(
                 for: brush,
-                resolution: 112,
+                resolution: 96,
                 pressure: Float(previewPressure)
             )
             await MainActor.run {
                 strokePreviewImage = previewImage
+            }
+        }
+    }
+
+    private func scheduleInitialPreviews(for brush: BrushSettings) {
+        initialPreviewTask?.cancel()
+        initialPreviewTask = Task { @MainActor in
+            await Task.yield()
+            guard !Task.isCancelled else { return }
+
+            if primaryPreviewImage == nil || secondaryPreviewImage == nil {
+                refreshTipPreviews(for: brush)
+            }
+
+            try? await Task.sleep(nanoseconds: 150_000_000)
+            guard !Task.isCancelled else { return }
+
+            if strokePreviewImage == nil {
+                refreshStrokePreview(for: brush)
             }
         }
     }
