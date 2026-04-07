@@ -34,46 +34,31 @@ private enum WholeLayerInteractionBoundsCacheEntry: Equatable {
 final class WorkspaceViewModel: ObservableObject {
     struct TipImageLibraryReferenceSummary: Equatable {
         var currentBrushUsesPrimary = false
-        var currentBrushUsesSecondary = false
         var smudgeBrushUsesPrimary = false
-        var smudgeBrushUsesSecondary = false
         var presetPrimaryNames: [String] = []
-        var presetSecondaryNames: [String] = []
 
         var currentBrushPrimaryCount: Int {
             currentBrushUsesPrimary ? 1 : 0
-        }
-
-        var currentBrushSecondaryCount: Int {
-            currentBrushUsesSecondary ? 1 : 0
         }
 
         var smudgeBrushPrimaryCount: Int {
             smudgeBrushUsesPrimary ? 1 : 0
         }
 
-        var smudgeBrushSecondaryCount: Int {
-            smudgeBrushUsesSecondary ? 1 : 0
-        }
-
         var presetPrimaryCount: Int {
             presetPrimaryNames.count
         }
 
-        var presetSecondaryCount: Int {
-            presetSecondaryNames.count
-        }
-
         var currentBrushCount: Int {
-            currentBrushPrimaryCount + currentBrushSecondaryCount
+            currentBrushPrimaryCount
         }
 
         var smudgeBrushCount: Int {
-            smudgeBrushPrimaryCount + smudgeBrushSecondaryCount
+            smudgeBrushPrimaryCount
         }
 
         var presetCount: Int {
-            presetPrimaryCount + presetSecondaryCount
+            presetPrimaryCount
         }
 
         var totalCount: Int {
@@ -88,6 +73,11 @@ final class WorkspaceViewModel: ObservableObject {
     private static let runSamePathCommitTest = false
     private static let runSamplingTruthTest = false
     private static let brushTipMaskResolution = 256
+    private static let brushTipMaskThreshold: UInt8 = 16
+    private static let brushTipCanonicalPadding = 4
+    private static let brushTipGuideMassThresholdFraction = 0.08
+    private static let brushTipEnvelopeDilationPasses = 6
+    private static let brushTipEnvelopeErosionPasses = 3
     private static let maxSavedSnapshotCount = 6
     private static let savedSnapshotThumbnailDimension = 92
     private static let snapshotComparePreviewDimension = 960
@@ -698,152 +688,6 @@ final class WorkspaceViewModel: ObservableObject {
         refresh()
     }
 
-    func setDualTipEnabled(_ enabled: Bool) {
-        bootstrap.workspaceStore.updateToolSession { session in
-            session.brush.dualTipEnabled = enabled
-            if enabled && session.brush.secondarySizeRatio >= 0.95 {
-                session.brush.secondarySizeRatio = 0.65
-            }
-        }
-        refresh()
-    }
-
-    func setDualTipCombineMode(_ mode: DualTipCombineMode) {
-        bootstrap.workspaceStore.updateToolSession { session in
-            session.brush.dualTipCombineMode = mode
-        }
-        refresh()
-    }
-
-    func setDualTipStrength(_ strength: Float) {
-        bootstrap.workspaceStore.updateToolSession { session in
-            session.brush.dualTipStrength = min(max(strength, 0), 1)
-        }
-        refresh()
-    }
-
-    func setSecondaryTipShape(_ tipShape: BrushTipShape) {
-        bootstrap.workspaceStore.updateToolSession { session in
-            session.brush.secondaryTipDescriptor.tipShape = tipShape
-        }
-        refresh()
-    }
-
-    func reactivateSecondaryCustomTipSourceIfAvailable() {
-        bootstrap.workspaceStore.updateToolSession { session in
-            let secondary = session.brush.secondaryTipDescriptor
-            let hasDormantCustomTip =
-                secondary.customTipMaskData != nil ||
-                (secondary.sourceSemantic == .importedImage && secondary.tipAssetID != nil)
-            guard hasDormantCustomTip else { return }
-            session.brush.secondaryTipDescriptor.tipShape = .customRound
-        }
-        refresh()
-    }
-
-    func setSecondaryTipSoftness(_ softness: Float) {
-        bootstrap.workspaceStore.updateToolSession { session in
-            session.brush.secondaryTipDescriptor.customTipSoftness = min(max(softness, 0), 1)
-        }
-        refresh()
-    }
-
-    func setSecondaryTipRoundness(_ roundness: Float) {
-        bootstrap.workspaceStore.updateToolSession { session in
-            session.brush.secondaryTipDescriptor.customTipRoundness = min(max(roundness, 0.25), 1)
-        }
-        refresh()
-    }
-
-    func setSecondaryTipSourceAngleDegrees(_ angleDegrees: Float) {
-        bootstrap.workspaceStore.updateToolSession { session in
-            var normalized = angleDegrees.truncatingRemainder(dividingBy: 180)
-            if normalized < 0 {
-                normalized += 180
-            }
-            session.brush.secondaryTipDescriptor.customTipAngleDegrees = normalized
-        }
-        refresh()
-    }
-
-    func updateSecondaryTipMask(_ data: Data?) {
-        bootstrap.workspaceStore.updateToolSession { session in
-            session.brush.secondaryTipDescriptor.tipShape = .customRound
-            session.brush.secondaryTipDescriptor.sourceSemantic = data == nil ? .procedural : .customMask
-            session.brush.secondaryTipDescriptor.tipAssetID = nil
-            session.brush.secondaryTipDescriptor.importedSourceInfo = nil
-            session.brush.secondaryTipDescriptor.customTipMaskData = data
-        }
-        refresh()
-    }
-
-    func clearSecondaryTipMask() {
-        updateSecondaryTipMask(nil)
-    }
-
-    func setSecondarySizeRatio(_ ratio: Float) {
-        bootstrap.workspaceStore.updateToolSession { session in
-            session.brush.secondarySizeRatio = min(max(ratio, 0.25), 0.95)
-        }
-        refresh()
-    }
-
-    func setSecondarySizeJitter(_ amount: Float) {
-        bootstrap.workspaceStore.updateToolSession { session in
-            session.brush.secondarySizeJitter = min(max(amount, 0), 1)
-        }
-        refresh()
-    }
-
-    func setSecondaryAngleJitterDegrees(_ angleDegrees: Float) {
-        bootstrap.workspaceStore.updateToolSession { session in
-            session.brush.secondaryAngleJitterDegrees = min(max(angleDegrees, 0), 180)
-        }
-        refresh()
-    }
-
-    func setSecondaryAngleOffsetDegrees(_ angleDegrees: Float) {
-        bootstrap.workspaceStore.updateToolSession { session in
-            session.brush.secondaryAngleOffsetDegrees = min(max(angleDegrees, -180), 180)
-        }
-        refresh()
-    }
-
-    func setSecondarySpacingPhase(_ phase: Float) {
-        bootstrap.workspaceStore.updateToolSession { session in
-            session.brush.secondarySpacingPhase = min(max(phase, -0.5), 0.5)
-        }
-        refresh()
-    }
-
-    func setSecondarySpacingPhaseJitter(_ amount: Float) {
-        bootstrap.workspaceStore.updateToolSession { session in
-            session.brush.secondarySpacingPhaseJitter = min(max(amount, 0), 0.5)
-        }
-        refresh()
-    }
-
-    func setSecondaryScatter(_ scatter: Float) {
-        bootstrap.workspaceStore.updateToolSession { session in
-            session.brush.secondaryScatter = min(max(scatter, 0), 5)
-        }
-        refresh()
-    }
-
-    func setSecondaryScatterJitter(_ amount: Float) {
-        bootstrap.workspaceStore.updateToolSession { session in
-            session.brush.secondaryScatterJitter = min(max(amount, 0), 1)
-        }
-        refresh()
-    }
-
-    func setSecondaryInvert(_ invert: Bool) {
-        bootstrap.workspaceStore.updateToolSession { session in
-            session.brush.secondaryInvert = invert
-        }
-        refresh()
-    }
-
     func setCustomTipSoftness(_ softness: Float) {
         bootstrap.workspaceStore.updateToolSession { session in
             session.brush.customTipSoftness = min(max(softness, 0), 1)
@@ -876,6 +720,7 @@ final class WorkspaceViewModel: ObservableObject {
             session.brush.customTipAssetID = nil
             session.brush.customTipImportedSourceInfo = nil
             session.brush.customTipMaskData = data
+            session.brush.customTipEnvelopeMaskData = makeEnvelopeMaskData(from: data)
         }
         refresh()
     }
@@ -936,7 +781,7 @@ final class WorkspaceViewModel: ObservableObject {
 
     @discardableResult
     func importBrushTipImage(from image: NSImage, sourceDescription: String = "图片") -> Bool {
-        guard let libraryItem = importTipImageLibraryItem(from: image, sourceDescription: sourceDescription) else {
+        guard let importedTip = importTipImageLibraryItem(from: image, sourceDescription: sourceDescription) else {
             showStatus(.init(kind: .error, message: "无法将图片转换为笔尖"))
             return false
         }
@@ -944,52 +789,15 @@ final class WorkspaceViewModel: ObservableObject {
         bootstrap.workspaceStore.updateToolSession { session in
             session.brush.tipShape = .customRound
             session.brush.customTipSourceSemantic = .importedImage
-            session.brush.customTipAssetID = libraryItem.id
-            session.brush.customTipImportedSourceInfo = libraryItem.sourceInfo
-            session.brush.customTipMaskData = libraryItem.maskData
+            session.brush.customTipAssetID = importedTip.item.id
+            session.brush.customTipImportedSourceInfo = importedTip.item.sourceInfo
+            session.brush.customTipMaskData = importedTip.item.maskData
+            session.brush.customTipEnvelopeMaskData = importedTip.envelopeMaskData
         }
+        StageOneBrushPreviewRasterizer.resetCache()
         persistBrushLibrary()
         refresh()
         showStatus(.init(kind: .success, message: "已从\(sourceDescription)导入笔尖"))
-        return true
-    }
-
-    @discardableResult
-    func importSecondaryTipImageFromDisk() -> Bool {
-        guard let url = bootstrap.filePanelService.presentImageOpenPanel() else {
-            showStatus(.init(kind: .info, message: "已取消选择图片"))
-            return false
-        }
-
-        return importSecondaryTipImage(from: url)
-    }
-
-    @discardableResult
-    func importSecondaryTipImage(from url: URL) -> Bool {
-        guard let image = NSImage(contentsOf: url) else {
-            showStatus(.init(kind: .error, message: "无法读取图片"))
-            return false
-        }
-        return importSecondaryTipImage(from: image, sourceDescription: url.deletingPathExtension().lastPathComponent)
-    }
-
-    @discardableResult
-    func importSecondaryTipImage(from image: NSImage, sourceDescription: String = "图片") -> Bool {
-        guard let libraryItem = importTipImageLibraryItem(from: image, sourceDescription: sourceDescription) else {
-            showStatus(.init(kind: .error, message: "无法将图片转换为次笔尖"))
-            return false
-        }
-
-        bootstrap.workspaceStore.updateToolSession { session in
-            session.brush.secondaryTipDescriptor.tipShape = .customRound
-            session.brush.secondaryTipDescriptor.sourceSemantic = .importedImage
-            session.brush.secondaryTipDescriptor.tipAssetID = libraryItem.id
-            session.brush.secondaryTipDescriptor.importedSourceInfo = libraryItem.sourceInfo
-            session.brush.secondaryTipDescriptor.customTipMaskData = libraryItem.maskData
-        }
-        persistBrushLibrary()
-        refresh()
-        showStatus(.init(kind: .success, message: "已从\(sourceDescription)导入次笔尖"))
         return true
     }
 
@@ -1005,7 +813,7 @@ final class WorkspaceViewModel: ObservableObject {
 
     @discardableResult
     func importTipImageLibraryItems(from urls: [URL]) -> [BrushTipImageAssetID] {
-        var importedItems: [TipImageLibraryItem] = []
+        var importedItems: [ImportedTipPayload] = []
         var failedCount = 0
 
         for url in urls {
@@ -1026,6 +834,7 @@ final class WorkspaceViewModel: ObservableObject {
             return []
         }
 
+        StageOneBrushPreviewRasterizer.resetCache()
         persistBrushLibrary()
         refresh()
 
@@ -1039,12 +848,56 @@ final class WorkspaceViewModel: ObservableObject {
             showStatus(.init(kind: .info, message: message))
         }
 
-        return importedItems.map(\.id)
+        return importedItems.map(\.item.id)
+    }
+
+    private struct ImportedTipPayload {
+        let item: TipImageLibraryItem
+        let envelopeMaskData: Data
     }
 
     private func makeBrushTipMaskData(from image: NSImage) -> Data? {
-        let resolution = Self.brushTipMaskResolution
-        let targetSize = CGSize(width: resolution, height: resolution)
+        makeBrushTipMaskPair(from: image)?.detail
+    }
+
+    private func makeBrushTipMaskPair(from image: NSImage) -> (detail: Data, envelope: Data)? {
+        guard
+            let source = extractedMaskBytes(from: image),
+            let detectedBounds = contentBoundsIgnoringThinGuides(
+                mask: source.bytes,
+                width: source.width,
+                height: source.height
+            )
+        else {
+            return nil
+        }
+
+        let expandedBounds = detectedBounds.insetBy(
+            dx: -CGFloat(Self.brushTipCanonicalPadding),
+            dy: -CGFloat(Self.brushTipCanonicalPadding)
+        )
+        let cropped = cropMaskBytes(
+            source.bytes,
+            width: source.width,
+            height: source.height,
+            bounds: expandedBounds
+        )
+
+        guard let detail = resampledSquareMaskData(
+            from: cropped.bytes,
+            width: cropped.width,
+            height: cropped.height,
+            targetResolution: Self.brushTipMaskResolution
+        ) else {
+            return nil
+        }
+        guard let envelope = makeEnvelopeMaskData(from: detail) else {
+            return nil
+        }
+        return (detail: detail, envelope: envelope)
+    }
+
+    private func extractedMaskBytes(from image: NSImage) -> (bytes: [UInt8], width: Int, height: Int)? {
         guard
             let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil),
             let colorSpace = CGColorSpace(name: CGColorSpace.sRGB)
@@ -1052,14 +905,16 @@ final class WorkspaceViewModel: ObservableObject {
             return nil
         }
 
+        let width = max(cgImage.width, 1)
+        let height = max(cgImage.height, 1)
         let bytesPerPixel = 4
-        let bytesPerRow = resolution * bytesPerPixel
-        var rgba = [UInt8](repeating: 0, count: resolution * resolution * bytesPerPixel)
+        let bytesPerRow = width * bytesPerPixel
+        var rgba = [UInt8](repeating: 0, count: width * height * bytesPerPixel)
 
         guard let context = CGContext(
             data: &rgba,
-            width: resolution,
-            height: resolution,
+            width: width,
+            height: height,
             bitsPerComponent: 8,
             bytesPerRow: bytesPerRow,
             space: colorSpace,
@@ -1068,23 +923,12 @@ final class WorkspaceViewModel: ObservableObject {
             return nil
         }
 
-        context.clear(CGRect(origin: .zero, size: targetSize))
+        context.clear(CGRect(x: 0, y: 0, width: width, height: height))
+        context.interpolationQuality = .high
+        context.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
 
-        let imageSize = CGSize(width: cgImage.width, height: cgImage.height)
-        let scale = min(targetSize.width / max(imageSize.width, 1), targetSize.height / max(imageSize.height, 1))
-        let drawSize = CGSize(width: imageSize.width * scale, height: imageSize.height * scale)
-        let drawRect = CGRect(
-            x: (targetSize.width - drawSize.width) / 2,
-            y: (targetSize.height - drawSize.height) / 2,
-            width: drawSize.width,
-            height: drawSize.height
-        )
-
-        context.interpolationQuality = CGInterpolationQuality.high
-        context.draw(cgImage, in: drawRect)
-
-        var mask = [UInt8](repeating: 0, count: resolution * resolution)
-        for index in 0..<(resolution * resolution) {
+        var mask = [UInt8](repeating: 0, count: width * height)
+        for index in 0..<(width * height) {
             let offset = index * bytesPerPixel
             let red = Double(rgba[offset])
             let green = Double(rgba[offset + 1])
@@ -1095,7 +939,252 @@ final class WorkspaceViewModel: ObservableObject {
             mask[index] = UInt8(clamping: Int(darkness.rounded()))
         }
 
-        return Data(mask)
+        return (mask, width, height)
+    }
+
+    private func contentBoundsIgnoringThinGuides(
+        mask: [UInt8],
+        width: Int,
+        height: Int
+    ) -> CGRect? {
+        guard
+            width > 0,
+            height > 0,
+            mask.count == width * height
+        else {
+            return nil
+        }
+
+        var rowMass = [Double](repeating: 0, count: height)
+        var colMass = [Double](repeating: 0, count: width)
+
+        for y in 0..<height {
+            let rowOffset = y * width
+            for x in 0..<width {
+                let value = Double(mask[rowOffset + x])
+                rowMass[y] += value
+                colMass[x] += value
+            }
+        }
+
+        guard
+            let maxRowMass = rowMass.max(), maxRowMass > 0,
+            let maxColMass = colMass.max(), maxColMass > 0
+        else {
+            return nil
+        }
+
+        let rowThreshold = maxRowMass * Self.brushTipGuideMassThresholdFraction
+        let colThreshold = maxColMass * Self.brushTipGuideMassThresholdFraction
+
+        guard
+            let rowRange = dominantMassRun(in: rowMass, threshold: rowThreshold),
+            let colRange = dominantMassRun(in: colMass, threshold: colThreshold)
+        else {
+            return nil
+        }
+
+        return CGRect(
+            x: colRange.lowerBound,
+            y: rowRange.lowerBound,
+            width: colRange.upperBound - colRange.lowerBound + 1,
+            height: rowRange.upperBound - rowRange.lowerBound + 1
+        )
+    }
+
+    private func dominantMassRun(in masses: [Double], threshold: Double) -> ClosedRange<Int>? {
+        var bestRange: ClosedRange<Int>?
+        var bestLength = 0
+        var bestMass = 0.0
+        var index = 0
+
+        while index < masses.count {
+            guard masses[index] > threshold else {
+                index += 1
+                continue
+            }
+
+            let start = index
+            var totalMass = 0.0
+            while index < masses.count, masses[index] > threshold {
+                totalMass += masses[index]
+                index += 1
+            }
+
+            let end = index - 1
+            let length = end - start + 1
+            if length > bestLength || (length == bestLength && totalMass > bestMass) {
+                bestRange = start...end
+                bestLength = length
+                bestMass = totalMass
+            }
+        }
+
+        return bestRange
+    }
+
+    private func cropMaskBytes(
+        _ bytes: [UInt8],
+        width: Int,
+        height: Int,
+        bounds: CGRect
+    ) -> (bytes: [UInt8], width: Int, height: Int) {
+        guard width > 0, height > 0 else {
+            return (bytes, width, height)
+        }
+
+        let minX = max(0, Int(floor(bounds.minX)))
+        let minY = max(0, Int(floor(bounds.minY)))
+        let maxX = min(width - 1, Int(ceil(bounds.maxX)) - 1)
+        let maxY = min(height - 1, Int(ceil(bounds.maxY)) - 1)
+        guard maxX >= minX, maxY >= minY else {
+            return (bytes, width, height)
+        }
+        let croppedWidth = maxX - minX + 1
+        let croppedHeight = maxY - minY + 1
+        var cropped = [UInt8](repeating: 0, count: croppedWidth * croppedHeight)
+
+        for y in 0..<croppedHeight {
+            let sourceOffset = (minY + y) * width
+            let destinationOffset = y * croppedWidth
+            for x in 0..<croppedWidth {
+                cropped[destinationOffset + x] = bytes[sourceOffset + minX + x]
+            }
+        }
+
+        return (cropped, croppedWidth, croppedHeight)
+    }
+
+    private func resampledSquareMaskData(
+        from bytes: [UInt8],
+        width: Int,
+        height: Int,
+        targetResolution: Int
+    ) -> Data? {
+        guard width > 0, height > 0, targetResolution > 0 else {
+            return nil
+        }
+
+        guard
+            let colorSpace = CGColorSpace(name: CGColorSpace.genericGrayGamma2_2),
+            let provider = CGDataProvider(data: Data(bytes) as CFData),
+            let sourceImage = CGImage(
+                width: width,
+                height: height,
+                bitsPerComponent: 8,
+                bitsPerPixel: 8,
+                bytesPerRow: width,
+                space: colorSpace,
+                bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.none.rawValue),
+                provider: provider,
+                decode: nil,
+                shouldInterpolate: true,
+                intent: .defaultIntent
+            )
+        else {
+            return nil
+        }
+
+        let scale = min(Double(targetResolution) / Double(width), Double(targetResolution) / Double(height))
+        let drawWidth = max(1, min(targetResolution, Int(round(Double(width) * scale))))
+        let drawHeight = max(1, min(targetResolution, Int(round(Double(height) * scale))))
+        let offsetX = (targetResolution - drawWidth) / 2
+        let offsetY = (targetResolution - drawHeight) / 2
+        var destination = [UInt8](repeating: 0, count: targetResolution * targetResolution)
+
+        guard let context = CGContext(
+            data: &destination,
+            width: targetResolution,
+            height: targetResolution,
+            bitsPerComponent: 8,
+            bytesPerRow: targetResolution,
+            space: colorSpace,
+            bitmapInfo: CGImageAlphaInfo.none.rawValue
+        ) else {
+            return nil
+        }
+
+        context.setFillColor(gray: 0, alpha: 1)
+        context.fill(CGRect(x: 0, y: 0, width: targetResolution, height: targetResolution))
+        context.interpolationQuality = .high
+        context.draw(
+            sourceImage,
+            in: CGRect(x: offsetX, y: offsetY, width: drawWidth, height: drawHeight)
+        )
+
+        return Data(destination)
+    }
+
+    private func makeEnvelopeMaskData(from detailMaskData: Data?) -> Data? {
+        guard let detailMaskData else { return nil }
+        let resolution = Self.brushTipMaskResolution
+        let detailBytes = [UInt8](detailMaskData)
+        guard detailBytes.count == resolution * resolution else {
+            return nil
+        }
+
+        var binary = detailBytes.map { $0 > Self.brushTipMaskThreshold ? UInt8(255) : 0 }
+        for _ in 0..<Self.brushTipEnvelopeDilationPasses {
+            binary = dilatedMask(binary, resolution: resolution)
+        }
+        for _ in 0..<Self.brushTipEnvelopeErosionPasses {
+            binary = erodedMask(binary, resolution: resolution)
+        }
+        return Data(boxBlurredMask(binary, resolution: resolution))
+    }
+
+    private func dilatedMask(_ bytes: [UInt8], resolution: Int) -> [UInt8] {
+        var result = [UInt8](repeating: 0, count: bytes.count)
+        for y in 0..<resolution {
+            for x in 0..<resolution {
+                var value: UInt8 = 0
+                for sampleY in max(0, y - 1)...min(resolution - 1, y + 1) {
+                    for sampleX in max(0, x - 1)...min(resolution - 1, x + 1) {
+                        value = max(value, bytes[(sampleY * resolution) + sampleX])
+                    }
+                }
+                result[(y * resolution) + x] = value
+            }
+        }
+        return result
+    }
+
+    private func erodedMask(_ bytes: [UInt8], resolution: Int) -> [UInt8] {
+        var result = [UInt8](repeating: 0, count: bytes.count)
+        for y in 0..<resolution {
+            for x in 0..<resolution {
+                var value: UInt8 = 255
+                for sampleY in max(0, y - 1)...min(resolution - 1, y + 1) {
+                    for sampleX in max(0, x - 1)...min(resolution - 1, x + 1) {
+                        value = min(value, bytes[(sampleY * resolution) + sampleX])
+                    }
+                }
+                result[(y * resolution) + x] = value
+            }
+        }
+        return result
+    }
+
+    private func boxBlurredMask(_ bytes: [UInt8], resolution: Int) -> [UInt8] {
+        var result = [UInt8](repeating: 0, count: bytes.count)
+        for y in 0..<resolution {
+            for x in 0..<resolution {
+                var total = 0
+                var count = 0
+                for sampleY in max(0, y - 1)...min(resolution - 1, y + 1) {
+                    for sampleX in max(0, x - 1)...min(resolution - 1, x + 1) {
+                        total += Int(bytes[(sampleY * resolution) + sampleX])
+                        count += 1
+                    }
+                }
+                result[(y * resolution) + x] = UInt8(clamping: Int(round(Double(total) / Double(max(count, 1)))))
+            }
+        }
+        return result
+    }
+
+    private func canonicalMaskFingerprint(_ maskData: Data) -> BrushTipImageAssetID {
+        BrushTipImageAssetID(maskData: maskData)
     }
 
     private func makeImportedTipSourceInfo(from image: NSImage, sourceDescription: String) -> ImportedTipSourceInfo {
@@ -1125,12 +1214,13 @@ final class WorkspaceViewModel: ObservableObject {
     private func importTipImageLibraryItem(
         from image: NSImage,
         sourceDescription: String
-    ) -> TipImageLibraryItem? {
-        guard let maskData = makeBrushTipMaskData(from: image) else {
+    ) -> ImportedTipPayload? {
+        guard let maskPair = makeBrushTipMaskPair(from: image) else {
             return nil
         }
         let importedSourceInfo = makeImportedTipSourceInfo(from: image, sourceDescription: sourceDescription)
-        return upsertTipImageLibraryItem(maskData: maskData, sourceInfo: importedSourceInfo)
+        let item = upsertTipImageLibraryItem(maskData: maskPair.detail, sourceInfo: importedSourceInfo)
+        return ImportedTipPayload(item: item, envelopeMaskData: maskPair.envelope)
     }
 
     @discardableResult
@@ -1138,7 +1228,7 @@ final class WorkspaceViewModel: ObservableObject {
         maskData: Data,
         sourceInfo: ImportedTipSourceInfo
     ) -> TipImageLibraryItem {
-        let assetID = BrushTipImageAssetID(maskData: maskData)
+        let assetID = canonicalMaskFingerprint(maskData)
         var resolvedItem = TipImageLibraryItem(
             id: assetID,
             sourceInfo: sourceInfo,
@@ -1169,27 +1259,11 @@ final class WorkspaceViewModel: ObservableObject {
             session.brush.customTipAssetID = item.id
             session.brush.customTipImportedSourceInfo = item.sourceInfo
             session.brush.customTipMaskData = maskData
+            session.brush.customTipEnvelopeMaskData = makeEnvelopeMaskData(from: maskData)
         }
+        StageOneBrushPreviewRasterizer.resetCache()
         refresh()
         showStatus(.init(kind: .success, message: "已应用共享笔尖图片"))
-    }
-
-    func applySecondaryTipImageLibraryItem(_ assetID: BrushTipImageAssetID) {
-        guard let item = workspace.tipImageLibrary.item(id: assetID),
-              let maskData = item.maskData else {
-            showStatus(.init(kind: .error, message: "无法读取该笔尖图片"))
-            return
-        }
-
-        bootstrap.workspaceStore.updateToolSession { session in
-            session.brush.secondaryTipDescriptor.tipShape = .customRound
-            session.brush.secondaryTipDescriptor.sourceSemantic = .importedImage
-            session.brush.secondaryTipDescriptor.tipAssetID = item.id
-            session.brush.secondaryTipDescriptor.importedSourceInfo = item.sourceInfo
-            session.brush.secondaryTipDescriptor.customTipMaskData = maskData
-        }
-        refresh()
-        showStatus(.init(kind: .success, message: "已应用共享次笔尖图片"))
     }
 
     func moveTipImageLibraryItem(_ assetID: BrushTipImageAssetID, to targetIndex: Int) {
@@ -1220,6 +1294,7 @@ final class WorkspaceViewModel: ObservableObject {
             return false
         }
 
+        StageOneBrushPreviewRasterizer.resetCache()
         persistBrushLibrary()
         refresh()
         showStatus(.init(kind: .success, message: "已删除笔尖图片"))
@@ -1234,19 +1309,11 @@ final class WorkspaceViewModel: ObservableObject {
         if currentBrush.customTipSourceSemantic == .importedImage, currentBrush.customTipAssetID == assetID {
             summary.currentBrushUsesPrimary = true
         }
-        if currentBrush.secondaryTipDescriptor.sourceSemantic == .importedImage,
-           currentBrush.secondaryTipDescriptor.tipAssetID == assetID {
-            summary.currentBrushUsesSecondary = true
-        }
 
         if state.toolSession.smudgeBrushUsesIndependentSettings {
             let smudgeBrush = state.toolSession.smudgeBrush
             if smudgeBrush.customTipSourceSemantic == .importedImage, smudgeBrush.customTipAssetID == assetID {
                 summary.smudgeBrushUsesPrimary = true
-            }
-            if smudgeBrush.secondaryTipDescriptor.sourceSemantic == .importedImage,
-               smudgeBrush.secondaryTipDescriptor.tipAssetID == assetID {
-                summary.smudgeBrushUsesSecondary = true
             }
         }
 
@@ -1254,10 +1321,6 @@ final class WorkspaceViewModel: ObservableObject {
             if preset.brush.customTipSourceSemantic == .importedImage,
                preset.brush.customTipAssetID == assetID {
                 summary.presetPrimaryNames.append(preset.name)
-            }
-            if preset.brush.secondaryTipDescriptor.sourceSemantic == .importedImage,
-               preset.brush.secondaryTipDescriptor.tipAssetID == assetID {
-                summary.presetSecondaryNames.append(preset.name)
             }
         }
 
@@ -1275,17 +1338,11 @@ final class WorkspaceViewModel: ObservableObject {
         if summary.currentBrushUsesPrimary {
             parts.append("当前主笔尖")
         }
-        if summary.currentBrushUsesSecondary {
-            parts.append("当前次笔尖")
-        }
         if summary.smudgeBrushUsesPrimary {
             parts.append("涂抹主笔尖")
         }
-        if summary.smudgeBrushUsesSecondary {
-            parts.append("涂抹次笔尖")
-        }
         if summary.presetCount > 0 {
-            let previewNames = Array((summary.presetPrimaryNames + summary.presetSecondaryNames).prefix(3))
+            let previewNames = Array(summary.presetPrimaryNames.prefix(3))
             let suffix = summary.presetCount > previewNames.count ? " 等 \(summary.presetCount) 个预设" : ""
             parts.append("预设 \(previewNames.joined(separator: "、"))\(suffix)")
         }
@@ -6126,10 +6183,10 @@ final class WorkspaceViewModel: ObservableObject {
 
         bootstrap.workspaceStore.updateBrushLibrary { library in
             if replacingExistingLibrary {
-                library = normalizedLibrary.removingLegacyDualTipPhaseOneDemoPresets()
+                library = normalizedLibrary.removingRetiredBrushDemoPresets()
             } else {
                 library = Self.mergeBrushLibraries(base: library, imported: normalizedLibrary)
-                    .removingLegacyDualTipPhaseOneDemoPresets()
+                    .removingRetiredBrushDemoPresets()
             }
             if library.selectedPresetID == nil {
                 library.selectedPresetID = library.presets.first?.id
@@ -6277,7 +6334,7 @@ final class WorkspaceViewModel: ObservableObject {
     private static func restorePersistedBrushLibraryIfAvailable(in bootstrap: AppBootstrap) {
         guard let restored = bootstrap.brushLibraryPersistenceController.loadResources() else { return }
         let normalizedLibrary = Self.normalizeImportedBrushLibrary(restored.library)
-            .removingLegacyDualTipPhaseOneDemoPresets()
+            .removingRetiredBrushDemoPresets()
         bootstrap.workspaceStore.updateBrushLibrary { library in
             library = normalizedLibrary
             if library.selectedPresetID == nil {

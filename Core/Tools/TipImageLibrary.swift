@@ -96,18 +96,6 @@ struct TipImageLibraryState: Codable, Sendable, Equatable {
             ) || didChange
         }
 
-        let secondary = brush.secondaryTipDescriptor
-        if secondary.sourceSemantic == .importedImage,
-           let sourceInfo = secondary.importedSourceInfo,
-           let maskData = secondary.customTipMaskData {
-            let assetID = secondary.tipAssetID ?? BrushTipImageAssetID(maskData: maskData)
-            didChange = upsertImportedItemIfNeeded(
-                id: assetID,
-                sourceInfo: sourceInfo,
-                maskData: maskData
-            ) || didChange
-        }
-
         return didChange
     }
 

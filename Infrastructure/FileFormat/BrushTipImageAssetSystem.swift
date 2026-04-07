@@ -155,12 +155,6 @@ enum BrushTipImageAssetSystem {
             resolved.customTipMaskData = asset.maskData
         }
 
-        if resolved.secondaryTipDescriptor.sourceSemantic == .importedImage,
-           let assetID = resolved.secondaryTipDescriptor.tipAssetID,
-           let asset = lookup[assetID] {
-            resolved.secondaryTipDescriptor.customTipMaskData = asset.maskData
-        }
-
         return resolved
     }
 
@@ -188,25 +182,6 @@ enum BrushTipImageAssetSystem {
             } else {
                 normalized.customTipAssetID = nil
             }
-
-            normalized.secondaryTipDescriptor = archivedSecondaryTip(normalized.secondaryTipDescriptor)
-            return normalized
-        }
-
-        private mutating func archivedSecondaryTip(_ secondary: SecondaryTipDescriptor) -> SecondaryTipDescriptor {
-            var normalized = secondary
-
-            if normalized.sourceSemantic == .importedImage {
-                if let maskData = normalized.customTipMaskData {
-                    let asset = BrushTipImageAsset(maskData: maskData)
-                    insertAsset(asset)
-                    normalized.tipAssetID = asset.id
-                }
-                normalized.customTipMaskData = nil
-            } else {
-                normalized.tipAssetID = nil
-            }
-
             return normalized
         }
     }

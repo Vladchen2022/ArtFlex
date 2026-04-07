@@ -1,98 +1,129 @@
 # ArtFlex 当前状态
 
-- 当前阶段：Dual Tip 已完成到 `invert`，并补齐了主/次笔尖来源语义、preview 收口，以及最近一轮普通画笔卡顿 / 偶发不出笔 / 导入笔尖白边修复；下一阶段已开始推进，其中 `secondary image tip` 已先完成 archive / persistence 边界、imported-image model-driven 收口，以及共享 `tip image library` 当前基线；`renderer-backed preview` 第一刀也已落地；更复杂随机 / `spacing` 的前五刀 `secondary size jitter`、`secondary angle jitter`、`secondary spacing phase`、`secondary spacing phase jitter` 与 `secondary scatter jitter` 也已落地。当前最新补入并已定住的小功能是 `绘画数据` 工具
-- 当前画布视口交互新增两项：顶部工具栏已提供 `锁定画布` 切换；开启后主画布不能缩放、旋转或移动。当前缩放也已改为优先围绕最近一次笔尖 / hover 所在的画布位置进行，而不是固定围绕画布中心
-- `直线渐变 / 扇形渐变` 当前都已按新主线重建：入口恢复到 `油漆桶` 子菜单，`Shift + G` 可在 `油漆桶 / 直线渐变 / 扇形渐变` 之间切换；其中 `直线渐变` 采用单段 `A→B` 拖拽、拉完自动确认的线性投影模型，`扇形渐变` 则采用“用户从 A 点出发画出一个不可见 lasso 区域，再在该区域内以 A 为圆心生成径向渐变”的模型；两者当前都已支持当前选区裁剪并在松手后自动确认
-- `直线渐变 / 扇形渐变 / 套索填充` 当前都已接通顶部工具栏 `不透明度` 滑块；当前滑块值会直接乘进填充 alpha，不再各自维护单独的不透明度默认
-- `直线渐变 / 扇形渐变 / 套索填充` 当前也都继续吃 `杂色` 滑块；其中 `扇形渐变` 的杂色当前已收口成“以 A 点为中心、向边界放射的条纹”，`套索填充` 的杂色也已改成“以最初接触点为中心的放射状条纹”，不再是平行线
-- `套索填充` 当前已切到 GPU local-mask 填色链；同时 `油漆桶` 当前也已做局部范围优化，并新增了只在油漆桶工具下生效的 `option + delete / option + forward delete` 当前选区填充快捷键
-- 默认新建画布当前已改成双图层基线：底部白色 `背景` + 顶部透明 `图层 2`；默认活动层是顶部透明层，顶部工具栏 `不透明度` 也会在新建时重置为 `100%`
-- 当前图层已支持 `锁定透明像素`：图层行提供 `α` 状态图标，`A` 可切换当前活动图层；开启后，后续 `画笔 / 橡皮 / 涂抹 / 直线 / 直线渐变 / 扇形渐变 / 套索填充 / 普通选区填充与擦除 / 油漆桶` 都只能落在该图层原本已有非透明像素范围内
-- 当前已新增快捷 HUD 拾色器：按住 `Shift + Z` 会在笔尖附近弹出轻量拾色器，松开消失；HUD 当前会同步右侧主拾色器的主要滑块语义，并在下方映射画笔库前四格，点击可切换对应画笔
-- 当前启动与新建画布的笔刷大小默认值都已改为 `60`；启动恢复画笔库时可以保留当前选中 preset 的高亮，但不会再自动用它覆盖当前 brush 默认值
-- 图层面板当前默认基线也已调整：底部按钮顺序固定为“新建 / 复制 / 删除”，删除图层垃圾桶按钮固定为红色且位于第三个；`不透明度封顶` 右侧 3 个按钮的前两个顺序也已对调
-- 画笔库当前已收口为：不再通过格子右上角小叉删除笔刷预设；删除入口改为“先选中格子，再右键菜单删除”，以降低误点
-- `方案试探` 当前也已收口一条视口规则：四宫格模式下 4 个分支画布会统一回到默认 fit 视口，并临时锁定视口交互；因此不再继承主画布的平移/旋转偏移，也不会在四宫格里被继续拖动
-- `快照对比` 当前也已收口一条布局规则：右侧 2x2 对比卡片会按卡片总高度反推预览可用高度，不再让底部两格因为额外留白和高度估算偏差而被裁掉；4 个预览位现在都以完整画布为目标
-- `快照对比` 当前还已切到更轻的 GPU-first 基线：保存快照时的可见图层合成已改走 `StageOneCanvasPresenter` 的 GPU 合成链，而不是旧的 CPU mergeVisible 路径；保存后和进入对比界面时，已保存快照的大预览也会后台预热，减少首次拖入对比位时的等待
-- `方案试探` 当前也已切到更轻的 GPU-first 基线：进入方案试探时，不再先抓 CPU history snapshot 再恢复到 4 个分支，而是直接从当前 `WorkspaceState` 起步，并通过 GPU texture copy 克隆各图层纹理到 4 个 branch；“应用于主画布”时，也不再做 CPU per-pixel diff，而是改成 GPU visible delta render 后再生成 delta snapshot
-- 当前已新增 `绘画数据` 工具：左侧工具栏会提供一个 `绘画数据` 按钮，点击后弹出较大的统计 popover，显示 `总绘画时长 / 当前作品用时 / 今日绘画时长 / streak / 最近里程碑 / 过去 12 周热力图`
-- `绘画数据` 当前采用 `活跃创作计时 + 60 秒宽限期`：除 `画笔 / 橡皮 / 涂抹` 的真实笔触外，`油漆桶 / 直线 / 直线渐变 / 扇形渐变 / 套索填充 / 套索擦除 / 普通选区填充与删除 / 图形生成器 / 套索选区 / 矩形选区 / 椭圆选区` 也都会进入活跃计时；停下相关创作操作后 60 秒内若无新活动则结算并写入统计；切图层、缩放、平移等非创作操作不会计时，应用失焦或窗口失去焦点会立即暂停
-- `绘画数据` 当前持久化分为两层：全局累计数据写入 `Application Support/ArtFlex/drawing-stats.json`；当前作品用时写入文档 metadata 的 `drawingStatsID + accumulatedPaintingTime`，因此未保存画布在第一次保存前的绘画时间也会在保存后继续归入同一作品
-- 右侧顶部 `笔尖形状设计 / 导航器` 选项卡当前默认打开 `导航器`
-- `涂抹` 当前已改成独立记忆自己的画笔设置：第一次切到涂抹时先继承当前普通画笔，但只要在涂抹里改过参数，之后切回涂抹会恢复它自己上一次的 brush 设置，而不是跟随最新普通画笔
-- `参考图` 面板当前基线已冻结：左侧默认打开 `参考图` tab；小窗只负责固定 fit 预览与取色；放大浮窗用于浏览与取色；关闭浮窗不再需要任何工程保存确认
-- `颜色` 面板当前已做空间收口：`光色条 + 光色 / 明度 / 纯度 / 对比 / 补色` 默认收进底部高级区，启动时收起，点击底部细把手再展开
-- `移动变形` 当前也已收口一条预览规则：无选区 whole-layer 自由变形在预览阶段会直接围绕被移动像素的内容中心旋转，不再临时按整张画布中心旋转；预览与回车确认后的最终提交当前已对齐
-- 当前范围判断已调整：组合笔尖后续默认只继续推进“明显影响画笔效果”的能力，以及“预览 / 保存恢复 / 资料库稳定性”这类必做收口；轻微影响画笔效果的新随机 / `spacing` 小参数默认暂停
-- 当前代码状态：`multiply`、`subtract`、`intersect` 已可用；`secondary scatter`、`secondary scatter jitter`、`secondary angle offset`、`secondary invert`、`secondary size jitter`、`secondary angle jitter`、`secondary spacing phase`、`secondary spacing phase jitter` 已进入真实绘制；当前基线和主绘制路径未被打坏
-- 当前编辑/保存状态：主笔尖单一真相源已接通；次笔尖来源已接通；主/次笔尖的 `procedural / customMask / importedImage` 来源语义已能保存到 preset / project；imported-image 的来源标签与原始像素尺寸也已能保存和恢复
-- 当前支持：
-  1. 主笔尖：圆形、自定义笔尖
-  2. 次笔尖：圆形、自定义笔尖
-  3. 组合模式：`multiply`、`subtract`、`intersect`
-  4. 当前真正会影响绘制的参数：`strength`、`secondary size ratio`、`secondary size jitter`、`secondary angle jitter`、`secondary spacing phase`、`secondary spacing phase jitter`、`secondary scatter`、`secondary scatter jitter`、`secondary angle offset`、`secondary invert`
-  5. 当主/次笔尖是自定义笔尖时：`customTipMaskData / softness / roundness / angle`
-  6. 主/次笔尖摘要现在都能稳定区分：`procedural / customMask / importedImage`
-- 当前已接通的来源/说明能力：
-  1. `组合笔尖…` 面板里的主笔尖摘要 + 跳转
-  2. 次笔尖摘要
-  3. `编辑次笔尖…` 子面板
-  4. 主/次笔尖来源语义的 preset / project 保存
-  5. 自定义主/次笔尖的三格示意已与真实形状对齐，并已收口为黑底白笔触高对比样式
-  6. 预设预览的 Dual Tip 重计算热点已收口，不再拖慢普通画笔输入
-  7. 主/次 imported-image 现在会在 UI 中显示当前导入来源与像素尺寸摘要
-- 当前新增已落地的资产层能力：
-  1. imported-image 主/次笔尖现在会在 project package / brush library archive 中抽成独立 `tipImageAssets`
-  2. archive 内的主/次 imported-image 笔尖现在会保存资产引用，再在打开/导入时解析回当前运行态 `maskData`
-  3. imported-image 的来源说明和 preview fit 现在由 `TipSourceSemantic + ImportedTipSourceInfo` 决定，不再依赖会话态 flag
-  4. 主笔尖和次笔尖现在共用一套持久化 `tip image library`，资料库会跟随 workspace / project / brush library 一起保存和恢复
-  5. `tip image library` 现在会独立保留未被任何画笔引用的图片；重启后打开资料库也能恢复这些未使用项
-  6. `tip image library` 在打开工程、导入画笔库、以及恢复持久化资料库时，当前也会按重复 asset ID 做更稳的合并：不再简单丢弃后来的重复项；如果后来的项带有缺失的 `maskData` 或更可靠的资产内容，会补进现有资料库项
-  7. 重启恢复持久化画笔库时，如果此前有明确选中的画笔预设，当前笔刷现在也会重新对齐到这支预设，不再出现“预设已恢复高亮，但当前笔刷仍停在旧默认值”的分离状态
-  8. 画笔库替换/追加导入时，当前笔刷现在也会在需要时重新对齐到结果里的已选预设；如果导入资源里的 `tip image library` 不完整，也会从导入后的当前笔刷与预设里自动回填缺失的 imported tip 资料
-  9. 删除当前已选画笔预设时，如果画笔库自动切到了新的已选预设，当前笔刷现在也会一起切过去，不再留下“画笔库选中已变、当前笔刷仍停在已删预设”的分离状态
-  10. 自动化测试当前也已默认使用隔离的临时画笔库持久化，不再意外碰到真实 `Application Support/ArtFlex/brush-library.json`
-  11. 默认画笔库当前不再附带 3 个 Dual Tip Phase 1 示例预设；旧持久化或导入资源若还带着这 3 个 legacy demo preset ID，也会在恢复链里被过滤掉，不再重新出现在画笔库
-  12. `tip image library` 当前 UI 已切到：点选卡片后按“完成”应用、拖拽排序、右上角删除图标、`Esc` 退出资料库；资料库面板里的“导入图片…”现在支持一次多选多张
-  13. 在资料库面板里批量导入图片时，只会先批量入库，不会立刻改当前主/次笔尖；仍需手动点选一张后按“完成”应用
-  14. `tip image library` 卡片现在会直接显示引用状态：`当前主笔尖`、`当前次笔尖`、`N 个预设` 或 `未引用`
-  15. 当前删除规则已冻结为：如果某张图片仍被当前主/次笔尖或任一画笔预设引用，则禁止删除；资料库里的删除图标会直接禁用，并显示更明确的来源提示
-  16. `undo / redo` 的 history 合并链现在会保留 `tip image library`，不会再把资料库误掉成空库或局部库后写回磁盘
-  16. 即使当前临时切到硬边圆 / 柔边圆 / 方形，隐藏的 imported-image 笔尖状态也会继续走统一资产归档与恢复链；这目前作为兼容行为保留，但后续主入口将以显式资料库为准
-  16. 新增了共享 `StageOneBrushPreviewRasterizer`：当前会复用 `StageOneBrushRenderer` 的 `tipAlpha / dualTip combine / stable scatter` 公式来生成小尺寸 preview image
-  17. 主笔尖卡片、次笔尖卡片、三格示意最终笔尖、画笔库斜线笔触预览，以及 `tip image library` 资料库卡片，当前都已切到这条共享 preview rasterizer
-  18. 右侧 inspector 里残余的自定义笔尖静态预览，也已改成走同源 stamp preview，不再直接画旧的 mask 直出图
-  19. 画笔库斜线预览当前不会再为每个 stamp 重算一次 Dual Tip 组合图；小尺寸 preview 的 raster 分辨率也已按显示尺寸动态下调，避免拖慢启动和首屏布局
-  20. `组合笔尖` 面板里的主笔尖 / 次笔尖 / 最终笔尖预览，当前也已拆成独立异步刷新；参数或图片变化时不会再等三张图串行算完才一起更新
-  21. 三格示意里的最终笔尖，当前即使工具或形状不在真实绘制 gate，或 `Dual Tip` 开关暂时未开启，也仍会继续显示组合图形示意，不再只剩“示意”文字
-  22. 画笔库斜线笔触预览的 Dual Tip 语义，当前也已与三格示意对齐：只要预设启用了 `Dual Tip`，就会显示组合笔触示意，不再要求先进入当前真实 gate
-  23. 画笔库右下角的小 glyph 预览，当前也已与组合预览语义对齐：`Dual Tip` 预设会优先显示组合笔尖，而不是只显示主笔尖
-  24. `secondary size jitter / 次笔尖大小抖动` 当前已落地：会让 `secondary size ratio` 围绕当前中心值按每个 stamp 的稳定随机值波动；真实落笔仍维持当前窄 gate
-  25. `secondary angle jitter / 次笔尖角度抖动` 当前也已落地：会让次笔尖角度围绕当前基准角度按每个 stamp 的稳定随机值波动；真实落笔仍维持当前窄 gate
-  26. `secondary spacing phase / 次笔尖节距错相` 当前也已落地：会让次笔尖相对主笔尖沿当前笔触方向前后错开半个节距以内；真实落笔仍维持当前窄 gate
-  27. `secondary spacing phase jitter / 次笔尖节距错相抖动` 当前也已落地：会让节距错相围绕当前中心值按每个 stamp 的稳定随机值波动；真实落笔仍维持当前窄 gate
-  28. `secondary scatter jitter / 次笔尖散布抖动` 当前也已落地：会让次笔尖散布量围绕当前 `secondary scatter` 中心值按每个 stamp 的稳定随机值波动；真实落笔仍维持当前窄 gate
-  29. 笔尖形状设计区域里的黑白 mask 预览，当前也已复用共享 preview rasterizer 的 resample / crop / cache 链，不再单独维护一套小图生成逻辑
-  30. 参数化 `customRound` 在没有 `maskData` 时的小预览，也已优先走共享 preview rasterizer，不再默认退回手工渐变椭圆
-  31. `组合笔尖` 面板与 `编辑次笔尖…` 在高清 preview 尚未回填前，当前也会先显示同源的小型 rasterized 占位笔尖，不再只剩 spinner
-  32. `编辑次笔尖…` 的“次笔尖形状”菜单项现在也会显示同源小预览，不再只剩文字标签
-  33. `编辑次笔尖…` 顶部概览卡片，当前也已切到独立异步 preview；换图或调参数时不会再被同步 `stampImage` 阻塞
-  34. 画笔库小 glyph、笔尖静态小预览、资料库卡片、`编辑次笔尖…` 形状菜单，以及 `组合笔尖` / `编辑次笔尖…` 的异步 preview 与占位图，当前都已切到 best-effort shared rasterizer：如果高清图或 composite 图暂时拿不到，会先退同源低分辨率 raster preview，而不是再退回手工 `Circle / RadialGradient` 示意
-  35. 当前 renderer / preview 运行态仍继续直接吃解析后的 `maskData`，这一刀没有改动真实绘制主链，也还不是完整的离屏 Metal preview 终态
-  36. 画笔库笔触 preview 当前已改成模拟由轻到重的压感变化，因此有无压力变化、以及压力变化强不强，会比原来的单一力度预览更容易辨认
-  37. `组合笔尖` 面板当前已再次瘦身：顶部 gate 徽标、支持 chip、主/次笔尖说明句、三格示意说明字都已去掉；重复的“笔尖概览”也已移除，主/次笔尖预览直接并入三格示意前两格，并在格子下方直接放置编辑按钮
-  38. `组合笔尖` 面板当前不再用“进阶参数”折叠隐藏选项；参数区默认全部展开，popover 也已相应放大，并通过更紧凑的 card / section 间距维持可读性
-  39. `编辑次笔尖…` 面板当前也已按同一原则瘦身：顶部说明句、形状说明、画布说明，以及各 slider 的 helper text 都已去掉；顶部次笔尖预览也已改成黑底白图案的高对比样式
-- 当前未完全落地但已确认继续推进：
-  1. `renderer-backed preview` 的剩余 rollout（高感知一致性项）
-  2. 共享 `tip image library` 的剩余生命周期 / 管理体验收尾
-  3. 更宽真实绘制 gate（仅在效果提升明显时继续）
-- 当前明确不在本轮范围：
-  1. `smudge` 路径
-- 当前策略：下一阶段范围已经确认，但仍按小步分刀和强旁路原则推进，不一次性把 Dual Tip 扩成全家桶
+## 1. 项目概况
 
-如果要恢复上下文，先看：
+ArtFlex 是旧版 `BrushCanvas` 的 **Metal-first** 重构版 macOS 绘图软件。  
+产品层仍保留成熟桌面绘图软件的主结构：
+
+- 顶部工具栏
+- 左侧工具栏
+- 中央视图画布
+- 右侧参数 / 颜色 / 笔刷 / 生成器 / 参考图区域
+- 图层面板
+
+当前工作基线是：**Git 回退后的稳定版本**。  
+此前那轮“复杂笔尖工作台 / 双通道运行时 / 主次迁移曲线”的实验改动已经回退，不是当前活动基线。
+
+## 2. 当前代码真实状态
+
+### 2.1 构建状态
+
+- 当前工作树已清理为干净状态
+- `swift build` 通过
+- `swift test --filter WorkspaceViewModelSafetyTests` 通过
+
+当前仍有现存 warning，但不阻塞构建：
+
+- `Package.swift` 的 `exclude/unhandled files` warning
+- `OptimizedSliders.swift` 的 `onChange` 弃用 warning
+- `TimelapseRecorderController.swift` 的 Sendable warning
+
+### 2.2 画笔系统当前真实基线
+
+当前 `Dual Tip / 组合笔尖` 仍是**旧 flat-field + stamp-based runtime**：
+
+- [ToolKind.swift](/Users/victorcloux/Desktop/ArtFlex/Core/Tools/ToolKind.swift)
+  - 当前活动真相源仍包含：
+    - `secondarySizeRatio`
+    - `secondarySpacingPhase`
+    - `secondarySpacingPhaseJitter`
+    - `secondaryScatter`
+    - `secondaryScatterJitter`
+    - `secondaryInvert`
+    - 以及相关 jitter / offset 字段
+- [WorkspaceViewModel.swift](/Users/victorcloux/Desktop/ArtFlex/Platform/macOS/App/WorkspaceViewModel.swift)
+  - 当前活动接线仍通过旧 setter 写入运行时
+- [StageOneBrushRenderer.swift](/Users/victorcloux/Desktop/ArtFlex/Rendering/Canvas/StageOneBrushRenderer.swift)
+  - 当前真实绘制仍是 stamp-based 合成
+  - 次笔尖仍不是整条笔迹连续纹理场
+- [StageOneBrushPreviewRasterizer.swift](/Users/victorcloux/Desktop/ArtFlex/Rendering/Canvas/StageOneBrushPreviewRasterizer.swift)
+  - 当前预览仍跟随旧 dual-tip 语义
+  - 不是新的双通道 pressure-aware 运行时镜像
+
+### 2.3 当前 active Dual Tip UI
+
+当前活动 UI 在：
+
+- [RightInspectorView.swift](/Users/victorcloux/Desktop/ArtFlex/Platform/macOS/UI/RightInspectorView.swift)
+
+当前 active 交互仍是旧的 compact popover，而不是独立“复杂笔尖工作台”。
+
+当前 active 参数仍主要包括：
+
+- `强度`
+- `次笔尖大小比例`
+- `大小抖动`
+- `角度抖动`
+- `角度偏移`
+- `节距错相`
+- `错相抖动`
+- `散布`
+- `散布抖动`
+- `反相`
+
+当前 active 组合模式：
+
+- `调制`
+- `减去`
+- `相交`
+
+### 2.4 不再属于当前基线的内容
+
+以下内容**不是当前活动代码基线**：
+
+- `ComplexBrushBuilderSheet`
+- `TipChannelEditorView`
+- `TipPreviewStrip`
+- 基于 `primaryTipChannel / secondaryTipChannel / dualTipPressureBlend` 的活动 runtime 主路径
+- 新版“主通道 / 次通道 / 压力迁移”工作台 UI
+
+这些文件和思路此前是试验性改动，现已回退，不应再写进当前状态文档里当成已落地能力。
+
+## 3. 当前已接受的功能 / UX 基线
+
+- 右侧顶部 `笔尖形状设计 / 导航器` 默认打开 `导航器`
+- `涂抹` 会独立记住自己的 brush 设置
+- `参考图` 面板当前冻结：
+  - 默认打开 `参考图`
+  - 小窗只负责固定 fit 预览与取色
+  - 放大后使用独立浮窗浏览与取色
+  - 关闭浮窗不再弹出保存工程确认
+- `颜色` 面板默认收起高级区，通过底部细把手展开
+
+## 4. 当前 brush / dual-tip 的真实问题
+
+当前最重要的问题不是参数，而是运行时骨架仍然是旧模型：
+
+- 仍容易出现图章串珠感 / 管状连续截面
+- 轻压时不会明显体现次笔尖纹理
+- 重压时不会明显回到主笔尖包络
+- 结果层面仍不符合“轻压偏次、重压偏主”的目标
+
+也就是说，当前问题是**runtime 模型问题**，不是单纯调参问题。
+
+## 5. 当前如果要继续做 Dual Tip，正确方向
+
+当前文档基线已明确：
+
+- 不应继续在旧 dual-tip runtime 上打补丁
+- 后续如果重开这条线，应该按**硬重构**重新开始：
+  - runtime 真相源收敛
+  - 旧 flat 字段退出活动路径
+  - 新 preview/runtime 同公式
+
+在没有重新立项之前，当前仓库应继续按“已回退的稳定版本”理解。
+
+恢复上下文时，先看：
 
 1. [HANDOFF.md](/Users/victorcloux/Desktop/ArtFlex/HANDOFF.md)
 2. [CURRENT_TASK.md](/Users/victorcloux/Desktop/ArtFlex/CURRENT_TASK.md)

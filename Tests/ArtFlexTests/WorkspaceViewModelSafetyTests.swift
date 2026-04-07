@@ -311,6 +311,49 @@ struct WorkspaceViewModelSafetyTests {
         harness.viewModel.selectTool(.smudge)
         #expect(harness.viewModel.workspace.toolSession.brush.size == 38)
     }
+
+    @Test
+    @MainActor
+    func importingDistinctTipImagesKeepsDistinctLibraryMasks() throws {
+        let viewModel = try makeWorkspaceViewModelForTipImportTests()
+        let circleURL = try makeTemporaryTipImageURL(fileName: "circle", image: makeCircularTipSourceImage())
+        let scatterURL = try makeTemporaryTipImageURL(fileName: "scatter", image: makeScatterTipSourceImage())
+        defer {
+            try? FileManager.default.removeItem(at: circleURL)
+            try? FileManager.default.removeItem(at: scatterURL)
+        }
+
+        let imported = viewModel.importTipImageLibraryItems(from: [circleURL, scatterURL])
+        #expect(imported.count == 2)
+
+        let storedMasks = imported.compactMap { viewModel.workspace.tipImageLibrary.item(id: $0)?.maskData }
+        #expect(storedMasks.count == 2)
+        #expect(storedMasks[0] != storedMasks[1])
+    }
+
+    @Test
+    @MainActor
+    func importingTipImageRemovesThinGuideLinesFromFinalMask() throws {
+        let viewModel = try makeWorkspaceViewModelForTipImportTests()
+
+        #expect(viewModel.importBrushTipImage(from: makeGuidedBlobTipSourceImage(), sourceDescription: "guided"))
+        guard let maskData = viewModel.workspace.toolSession.brush.customTipMaskData else {
+            Issue.record("Expected imported tip mask data.")
+            return
+        }
+
+        let rowMass = maskRowMasses(maskData, resolution: 256)
+        let significantRows = rowMass.enumerated().filter { $0.element > 255.0 }.map(\.offset)
+        guard let first = significantRows.first, let last = significantRows.last else {
+            Issue.record("Expected non-empty imported tip mask.")
+            return
+        }
+
+        #expect(first > 10)
+        #expect(last < 245)
+        #expect(rowMass[0] < 1)
+        #expect(rowMass[255] < 1)
+    }
 }
 
 @MainActor
@@ -372,6 +415,115 @@ private enum BoundaryHarnessError: Error {
     case metalUnavailable
     case commandBufferUnavailable
     case textureUnavailable
+}
+
+@MainActor
+private func makeWorkspaceViewModelForTipImportTests() throws -> WorkspaceViewModel {
+    guard let metalContext = MetalDeviceContext() else {
+        throw BoundaryHarnessError.metalUnavailable
+    }
+    let bootstrap = try AppBootstrap(
+        workspaceStore: WorkspaceStore(),
+        metalContext: metalContext,
+        layerSurfaceStore: StageOneLayerSurfaceStore()
+    )
+    return WorkspaceViewModel(bootstrap: bootstrap, installsZoomKeyboardMonitor: false)
+}
+
+@MainActor
+private func makeTemporaryTipImageURL(fileName: String, image: NSImage) throws -> URL {
+    let url = FileManager.default.temporaryDirectory
+        .appendingPathComponent(fileName)
+        .appendingPathExtension("png")
+    guard
+        let tiff = image.tiffRepresentation,
+        let bitmap = NSBitmapImageRep(data: tiff),
+        let png = bitmap.representation(using: .png, properties: [:])
+    else {
+        throw CocoaError(.fileWriteUnknown)
+    }
+    try png.write(to: url)
+    return url
+}
+
+@MainActor
+private func makeCircularTipSourceImage(size: Int = 96) -> NSImage {
+    makeTipSourceImage(size: size) { context in
+        context.setFillColor(CGColor(gray: 0, alpha: 1))
+        context.fillEllipse(in: CGRect(x: 18, y: 18, width: 60, height: 60))
+    }
+}
+
+@MainActor
+private func makeScatterTipSourceImage(size: Int = 96) -> NSImage {
+    makeTipSourceImage(size: size) { context in
+        context.setFillColor(CGColor(gray: 0, alpha: 1))
+        let circles: [CGRect] = [
+            CGRect(x: 20, y: 56, width: 12, height: 12),
+            CGRect(x: 34, y: 44, width: 10, height: 10),
+            CGRect(x: 48, y: 30, width: 11, height: 11),
+            CGRect(x: 58, y: 50, width: 13, height: 13),
+            CGRect(x: 42, y: 62, width: 9, height: 9),
+            CGRect(x: 30, y: 26, width: 10, height: 10)
+        ]
+        for rect in circles {
+            context.fillEllipse(in: rect)
+        }
+    }
+}
+
+@MainActor
+private func makeGuidedBlobTipSourceImage(size: Int = 96) -> NSImage {
+    makeTipSourceImage(size: size) { context in
+        context.setStrokeColor(CGColor(gray: 0.78, alpha: 1))
+        context.setLineWidth(1)
+        context.move(to: CGPoint(x: 6, y: 18))
+        context.addLine(to: CGPoint(x: 90, y: 18))
+        context.move(to: CGPoint(x: 6, y: 78))
+        context.addLine(to: CGPoint(x: 90, y: 78))
+        context.strokePath()
+
+        context.setFillColor(CGColor(gray: 0, alpha: 1))
+        context.fillEllipse(in: CGRect(x: 24, y: 34, width: 24, height: 20))
+        context.fillEllipse(in: CGRect(x: 40, y: 38, width: 22, height: 20))
+        context.fillEllipse(in: CGRect(x: 34, y: 24, width: 18, height: 18))
+        context.fill(CGRect(x: 30, y: 32, width: 22, height: 12))
+    }
+}
+
+@MainActor
+private func makeTipSourceImage(size: Int, draw: (CGContext) -> Void) -> NSImage {
+    let colorSpace = CGColorSpace(name: CGColorSpace.sRGB)!
+    var bytes = [UInt8](repeating: 255, count: size * size * 4)
+    let bytesPerRow = size * 4
+    let context = CGContext(
+        data: &bytes,
+        width: size,
+        height: size,
+        bitsPerComponent: 8,
+        bytesPerRow: bytesPerRow,
+        space: colorSpace,
+        bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+    )!
+    context.setFillColor(CGColor(red: 1, green: 1, blue: 1, alpha: 1))
+    context.fill(CGRect(x: 0, y: 0, width: size, height: size))
+    context.interpolationQuality = .high
+    draw(context)
+    let cgImage = context.makeImage()!
+    return NSImage(cgImage: cgImage, size: NSSize(width: size, height: size))
+}
+
+private func maskRowMasses(_ maskData: Data, resolution: Int) -> [Double] {
+    let bytes = [UInt8](maskData)
+    guard bytes.count == resolution * resolution else { return [] }
+    var rows = [Double](repeating: 0, count: resolution)
+    for y in 0..<resolution {
+        let offset = y * resolution
+        for x in 0..<resolution {
+            rows[y] += Double(bytes[offset + x])
+        }
+    }
+    return rows
 }
 
 @MainActor

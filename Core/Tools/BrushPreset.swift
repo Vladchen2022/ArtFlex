@@ -9,14 +9,14 @@ struct BrushPreset: Codable, Sendable, Equatable, Identifiable {
 }
 
 extension BrushPreset {
-    static let legacyDualTipPhaseOneDemoPresetIDs: Set<String> = [
+    static let retiredBrushDemoPresetIDs: Set<String> = [
         "builtin-dual-tip-tighten",
         "builtin-dual-tip-soft-compress",
         "builtin-dual-tip-strong-modulate"
     ]
 
-    var isLegacyDualTipPhaseOneDemoPreset: Bool {
-        Self.legacyDualTipPhaseOneDemoPresetIDs.contains(id)
+    var isRetiredBrushDemoPreset: Bool {
+        Self.retiredBrushDemoPresetIDs.contains(id)
     }
 }
 
@@ -122,8 +122,8 @@ struct BrushLibraryState: Codable, Sendable, Equatable {
         return true
     }
 
-    func removingLegacyDualTipPhaseOneDemoPresets() -> BrushLibraryState {
-        let filteredPresets = presets.filter { !$0.isLegacyDualTipPhaseOneDemoPreset }
+    func removingRetiredBrushDemoPresets() -> BrushLibraryState {
+        let filteredPresets = presets.filter { !$0.isRetiredBrushDemoPreset }
         let resolvedSelectedPresetID: String?
 
         if let selectedPresetID,

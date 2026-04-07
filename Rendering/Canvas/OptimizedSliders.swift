@@ -43,7 +43,7 @@ struct ThrottledSlider: View {
         HStack(spacing: 8) {
             Text(title)
                 .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(Color.white.opacity(0.58))
+                .foregroundStyle(Color.white.opacity(0.84))
                 .frame(width: 44, alignment: .leading)
             
             Slider(
@@ -57,7 +57,7 @@ struct ThrottledSlider: View {
             
             Text(valueText(localValue))
                 .font(.system(size: 11, weight: .semibold).monospacedDigit())
-                .foregroundStyle(Color.white.opacity(0.88))
+                .foregroundStyle(Color.white.opacity(0.96))
                 .frame(width: 48, alignment: .trailing)
         }
         .onChange(of: value) { newValue in
@@ -130,7 +130,7 @@ struct OptimizedCompactSlider: View {
         HStack(spacing: 8) {
             Text(title)
                 .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(Color.white.opacity(0.58))
+                .foregroundStyle(Color.white.opacity(0.84))
                 .frame(width: 44, alignment: .leading)
             
             Slider(
@@ -141,7 +141,7 @@ struct OptimizedCompactSlider: View {
             
             Text(valueText)
                 .font(.system(size: 11, weight: .semibold).monospacedDigit())
-                .foregroundStyle(Color.white.opacity(0.88))
+                .foregroundStyle(Color.white.opacity(0.96))
                 .frame(width: 48, alignment: .trailing)
         }
         .onChange(of: value) { newValue in
@@ -198,10 +198,10 @@ struct OptimizedLabeledSlider: View {
         VStack(alignment: .leading, spacing: 6) {
             HStack {
                 Text(title)
-                    .foregroundStyle(Color.white.opacity(0.58))
+                    .foregroundStyle(Color.white.opacity(0.84))
                 Spacer()
                 Text(valueText)
-                    .foregroundStyle(Color.white.opacity(0.88))
+                    .foregroundStyle(Color.white.opacity(0.96))
             }
             .font(.system(size: 11, weight: .semibold))
             

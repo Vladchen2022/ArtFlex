@@ -312,24 +312,10 @@ private struct QuickColorPickerBrushStrokePreview: View {
                 maximum: 56,
                 scale: 1.2
             )
-            let compositeStampResolution = quickColorPickerPreviewRasterResolution(
-                for: baseWidth,
-                minimum: 28,
-                maximum: 48,
-                scale: 1.0
-            )
             let primaryStampPreviewImage = quickColorPickerBestEffortStampPreviewImage(
                 for: brush,
                 resolution: primaryStampResolution
             )
-            let dualTipStampPreviewImage = brush.dualTipEnabled
-                ? quickColorPickerBestEffortCompositePreviewImage(
-                    for: brush,
-                    activeTool: .brush,
-                    resolution: compositeStampResolution,
-                    directionDegrees: pathAngle * 180.0 / .pi
-                )
-                : nil
 
             for index in 0..<stampCount {
                 let t = stampCount == 1 ? 0.0 : Double(index) / Double(stampCount - 1)
@@ -390,11 +376,7 @@ private struct QuickColorPickerBrushStrokePreview: View {
                     layer.translateBy(x: rect.midX, y: rect.midY)
                     layer.rotate(by: Angle(radians: angle))
                     layer.translateBy(x: -rect.midX, y: -rect.midY)
-
-                    if let dualTipStampPreviewImage {
-                        let resolved = layer.resolve(Image(decorative: dualTipStampPreviewImage, scale: 1))
-                        layer.draw(resolved, in: rect)
-                    } else if let primaryStampPreviewImage {
+                    if let primaryStampPreviewImage {
                         let resolved = layer.resolve(Image(decorative: primaryStampPreviewImage, scale: 1))
                         layer.draw(resolved, in: rect)
                     }
@@ -416,16 +398,10 @@ private struct QuickColorPickerBrushGlyph: View {
             maximum: 40,
             scale: 1.6
         )
-        let previewImage = brush.dualTipEnabled
-            ? quickColorPickerBestEffortCompositePreviewImage(
-                for: brush,
-                activeTool: .brush,
-                resolution: stampResolution
-            )
-            : quickColorPickerBestEffortStampPreviewImage(
-                for: brush,
-                resolution: stampResolution
-            )
+        let previewImage = quickColorPickerBestEffortStampPreviewImage(
+            for: brush,
+            resolution: stampResolution
+        )
 
         return ZStack {
             if let previewImage {
@@ -578,40 +554,6 @@ private func quickColorPickerBestEffortStampPreviewImage(
         for: brush,
         resolution: fallbackResolution
     )
-}
-
-private func quickColorPickerBestEffortCompositePreviewImage(
-    for brush: BrushSettings,
-    activeTool: ToolKind,
-    resolution: Int,
-    previewPoint: CGPoint = .zero,
-    sampleIndex: Int = 0,
-    directionDegrees: Double = 0
-) -> CGImage? {
-    if let image = StageOneBrushPreviewRasterizer.compositeStampImage(
-        for: brush,
-        activeTool: activeTool,
-        resolution: resolution,
-        previewPoint: previewPoint,
-        sampleIndex: sampleIndex,
-        directionDegrees: directionDegrees
-    ) {
-        return image
-    }
-
-    if let fallbackResolution = quickColorPickerCompactPreviewFallbackResolution(for: resolution),
-       let image = StageOneBrushPreviewRasterizer.compositeStampImage(
-            for: brush,
-            activeTool: activeTool,
-            resolution: fallbackResolution,
-            previewPoint: previewPoint,
-            sampleIndex: sampleIndex,
-            directionDegrees: directionDegrees
-       ) {
-        return image
-    }
-
-    return quickColorPickerBestEffortStampPreviewImage(for: brush, resolution: resolution)
 }
 
 private extension Array {

@@ -1,4 +1,5 @@
 import CoreGraphics
+import CryptoKit
 import Foundation
 
 enum StageOneBrushPreviewRasterizer {
@@ -19,11 +20,24 @@ enum StageOneBrushPreviewRasterizer {
         let angleDegrees: Float
     }
 
+    private enum ContentMode {
+        case stamp(TipDescriptor)
+    }
+
+    enum TipMaskPreviewRole {
+        case library
+        case editor
+    }
+
     nonisolated(unsafe) private static let cache: NSCache<NSString, CachedImageBox> = {
         let cache = NSCache<NSString, CachedImageBox>()
         cache.countLimit = 512
         return cache
     }()
+
+    static func resetCache() {
+        cache.removeAllObjects()
+    }
 
     static func stampImage(
         for brush: BrushSettings,
@@ -35,15 +49,7 @@ enum StageOneBrushPreviewRasterizer {
             return cached.image
         }
 
-        let descriptor = tipDescriptor(
-            shape: brush.tipShape,
-            sourceSemantic: brush.customTipSourceSemantic,
-            maskData: brush.customTipMaskData,
-            softness: brush.customTipSoftness,
-            roundness: brush.customTipRoundness,
-            angleDegrees: brush.customTipAngleDegrees,
-            resolution: resolution
-        )
+        let descriptor = primaryDescriptor(for: brush, resolution: resolution)
         let alphaBytes = renderAlphaBytes(
             resolution: resolution,
             contentMode: .stamp(descriptor)
@@ -64,23 +70,12 @@ enum StageOneBrushPreviewRasterizer {
         from maskData: Data?,
         resolution: Int = 128
     ) -> CGImage? {
-        guard resolution > 0 else { return nil }
-        let cacheKey = makeImportedAssetCacheKey(maskData: maskData, resolution: resolution)
-        if let cached = cache.object(forKey: cacheKey) {
-            return cached.image
-        }
-
-        guard let alphaBytes = resampledMaskBytes(maskData, targetResolution: resolution),
-              let image = makeImage(
-                from: alphaBytes,
-                resolution: resolution,
-                cropToContent: true
-              ) else {
-            return nil
-        }
-
-        cache.setObject(CachedImageBox(image: image), forKey: cacheKey)
-        return image
+        normalizedMaskPreviewImage(
+            from: maskData,
+            resolution: resolution,
+            role: .library,
+            cropToContent: true
+        )
     }
 
     static func editorMaskImage(
@@ -88,10 +83,25 @@ enum StageOneBrushPreviewRasterizer {
         resolution: Int = 128,
         cropToContent: Bool = false
     ) -> CGImage? {
+        normalizedMaskPreviewImage(
+            from: maskData,
+            resolution: resolution,
+            role: .editor,
+            cropToContent: cropToContent
+        )
+    }
+
+    static func normalizedMaskPreviewImage(
+        from maskData: Data?,
+        resolution: Int = 128,
+        role: TipMaskPreviewRole,
+        cropToContent: Bool = true
+    ) -> CGImage? {
         guard resolution > 0 else { return nil }
-        let cacheKey = makeEditorMaskCacheKey(
+        let cacheKey = makeMaskPreviewCacheKey(
             maskData: maskData,
             resolution: resolution,
+            role: role,
             cropToContent: cropToContent
         )
         if let cached = cache.object(forKey: cacheKey) {
@@ -114,15 +124,24 @@ enum StageOneBrushPreviewRasterizer {
 
         let bytesPerPixel = 4
         let bytesPerRow = resolvedResolution * bytesPerPixel
-        var rgba = [UInt8](repeating: 255, count: resolvedResolution * resolvedResolution * bytesPerPixel)
+        let baseValue: UInt8 = role == .editor ? 255 : 0
+        var rgba = [UInt8](repeating: baseValue, count: resolvedResolution * resolvedResolution * bytesPerPixel)
 
         for index in 0..<(resolvedResolution * resolvedResolution) {
-            let grayscale = 255 - resolvedAlphaBytes[index]
             let offset = index * bytesPerPixel
-            rgba[offset] = grayscale
-            rgba[offset + 1] = grayscale
-            rgba[offset + 2] = grayscale
-            rgba[offset + 3] = 255
+            switch role {
+            case .library:
+                rgba[offset] = 255
+                rgba[offset + 1] = 255
+                rgba[offset + 2] = 255
+                rgba[offset + 3] = resolvedAlphaBytes[index]
+            case .editor:
+                let grayscale = 255 - resolvedAlphaBytes[index]
+                rgba[offset] = grayscale
+                rgba[offset + 1] = grayscale
+                rgba[offset + 2] = grayscale
+                rgba[offset + 3] = 255
+            }
         }
 
         guard
@@ -149,53 +168,6 @@ enum StageOneBrushPreviewRasterizer {
         return image
     }
 
-    static func compositeStampImage(
-        for brush: BrushSettings,
-        activeTool: ToolKind,
-        resolution: Int = 128,
-        previewPoint: CGPoint = .zero,
-        sampleIndex: Int = 0,
-        directionDegrees: Double = 0
-    ) -> CGImage? {
-        guard resolution > 0 else { return nil }
-        guard
-            (brush.dualTipCombineMode == .multiply ||
-             brush.dualTipCombineMode == .subtract ||
-             brush.dualTipCombineMode == .intersect)
-        else {
-            return nil
-        }
-
-        let cacheKey = makeCompositeCacheKey(
-            for: brush,
-            activeTool: activeTool,
-            resolution: resolution,
-            previewPoint: previewPoint,
-            sampleIndex: sampleIndex,
-            directionDegrees: directionDegrees
-        )
-        if let cached = cache.object(forKey: cacheKey) {
-            return cached.image
-        }
-
-        let alphaBytes = renderAlphaBytes(
-            resolution: resolution,
-            contentMode: .composite(
-                brush: brush,
-                activeTool: activeTool,
-                previewPoint: previewPoint,
-                sampleIndex: sampleIndex,
-                directionDegrees: directionDegrees
-            )
-        )
-        guard let image = makeImage(from: alphaBytes, resolution: resolution, cropToContent: false) else {
-            return nil
-        }
-
-        cache.setObject(CachedImageBox(image: image), forKey: cacheKey)
-        return image
-    }
-
     static func stableRandom(x: Double, y: Double, index: Int, salt: UInt64) -> Double {
         var value = UInt64(bitPattern: Int64(index &* 1_103_515_245 &+ 12_345)) ^ salt
         value ^= UInt64(abs(Int64(x * 10_000)).magnitude &* 0x9E37_79B1)
@@ -206,229 +178,44 @@ enum StageOneBrushPreviewRasterizer {
         return Double(value & 0xffff) / Double(0xffff)
     }
 
-    static func secondaryScatterOffset(
-        for brush: BrushSettings,
-        activeTool: ToolKind,
-        point: CGPoint = .zero,
-        sampleIndex: Int = 0
-    ) -> CGPoint {
-        let scatterAmount = secondaryResolvedScatterAmount(
-            for: brush,
-            activeTool: activeTool,
-            point: point,
-            sampleIndex: sampleIndex
-        )
-        guard scatterAmount > 0.0001 else {
-            return .zero
-        }
-
-        let radial = pow(stableRandom(x: point.x, y: point.y, index: sampleIndex, salt: 0xD1B5_4A31), 0.55)
-        let spreadAngle = stableRandom(x: point.x, y: point.y, index: sampleIndex, salt: 0xA24B_1C76) * (.pi * 2.0)
-        let scatterRadius = scatterAmount * 0.18 * radial
-
-        return CGPoint(
-            x: cos(spreadAngle) * scatterRadius,
-            y: sin(spreadAngle) * scatterRadius
-        )
-    }
-
-    static func secondaryResolvedScatterAmount(
-        for brush: BrushSettings,
-        activeTool: ToolKind,
-        point: CGPoint = .zero,
-        sampleIndex: Int = 0
-    ) -> Double {
-        let baseScatter = brush.supportsSecondaryScatterRealDrawing(for: activeTool)
-            ? Double(min(max(brush.secondaryScatter, 0), 5))
-            : 0
-        guard brush.supportsSecondaryScatterJitterRealDrawing(for: activeTool) else {
-            return baseScatter
-        }
-
-        let jitterAmount = Double(min(max(brush.secondaryScatterJitter, 0), 1))
-        guard jitterAmount > 0.0001 else {
-            return baseScatter
-        }
-
-        let scatterRandom = stableRandom(
-            x: point.x,
-            y: point.y,
-            index: sampleIndex,
-            salt: 0x91E1_CF13
-        )
-        let jitterScale = max(1 + (((scatterRandom * 2) - 1) * jitterAmount), 0)
-        return min(max(baseScatter * jitterScale, 0), 5)
-    }
-
-    static func secondarySpacingPhaseOffset(
-        for brush: BrushSettings,
-        activeTool: ToolKind,
-        point: CGPoint = .zero,
-        sampleIndex: Int = 0,
-        directionDegrees: Double = 0
-    ) -> CGPoint {
-        let phase = secondaryResolvedSpacingPhase(
-            for: brush,
-            activeTool: activeTool,
-            point: point,
-            sampleIndex: sampleIndex
-        )
-        guard abs(phase) > 0.0001 else {
-            return .zero
-        }
-
-        let normalizedSpacing = Double(min(max(brush.spacingPercent, 5), 150)) / 50.0
-        let offsetDistance = phase * normalizedSpacing
-        let radians = directionDegrees * (.pi / 180.0)
-
-        return CGPoint(
-            x: cos(radians) * offsetDistance,
-            y: sin(radians) * offsetDistance
-        )
-    }
-
-    static func secondaryResolvedSpacingPhase(
-        for brush: BrushSettings,
-        activeTool: ToolKind,
-        point: CGPoint = .zero,
-        sampleIndex: Int = 0
-    ) -> Double {
-        let basePhase = Double(min(max(brush.secondarySpacingPhase, -0.5), 0.5))
-        let effectiveBasePhase = brush.supportsSecondarySpacingPhaseRealDrawing(for: activeTool)
-            ? basePhase
-            : 0
-        guard brush.supportsSecondarySpacingPhaseJitterRealDrawing(for: activeTool) else {
-            return effectiveBasePhase
-        }
-
-        let jitterAmount = Double(min(max(brush.secondarySpacingPhaseJitter, 0), 0.5))
-        guard jitterAmount > 0.0001 else {
-            return effectiveBasePhase
-        }
-
-        let phaseRandom = stableRandom(
-            x: point.x,
-            y: point.y,
-            index: sampleIndex,
-            salt: 0x4A1D_93E7
-        )
-        let jitterPhase = ((phaseRandom * 2) - 1) * jitterAmount
-        return min(max(effectiveBasePhase + jitterPhase, -0.5), 0.5)
-    }
-
-    static func secondaryResolvedSizeRatio(
-        for brush: BrushSettings,
-        activeTool: ToolKind,
-        point: CGPoint = .zero,
-        sampleIndex: Int = 0
-    ) -> Double {
-        let baseRatio = Double(min(max(brush.secondarySizeRatio, 0.25), 0.95))
-        guard brush.supportsSecondarySizeJitterRealDrawing(for: activeTool) else {
-            return baseRatio
-        }
-
-        let jitterAmount = Double(min(max(brush.secondarySizeJitter, 0), 1))
-        guard jitterAmount > 0.0001 else {
-            return baseRatio
-        }
-
-        let sizeRandom = stableRandom(
-            x: point.x,
-            y: point.y,
-            index: sampleIndex,
-            salt: 0x71F4_1D29
-        )
-        let jitterScale = max(1 + (((sizeRandom * 2) - 1) * jitterAmount), 0.05)
-        return min(max(baseRatio * jitterScale, 0.25), 0.95)
-    }
-
-    static func secondaryResolvedAngleDegrees(
-        for brush: BrushSettings,
-        activeTool: ToolKind,
-        point: CGPoint = .zero,
-        sampleIndex: Int = 0
-    ) -> Double {
-        let baseAngle = Double(brush.secondaryTipDescriptor.customTipAngleDegrees) +
-            (brush.supportsSecondaryAngleOffsetRealDrawing(for: activeTool)
-                ? Double(brush.secondaryAngleOffsetDegrees)
-                : 0)
-        guard brush.supportsSecondaryAngleJitterRealDrawing(for: activeTool) else {
-            return baseAngle
-        }
-
-        let jitterAmount = Double(min(max(abs(brush.secondaryAngleJitterDegrees), 0), 180))
-        guard jitterAmount > 0.0001 else {
-            return baseAngle
-        }
-
-        let angleRandom = stableRandom(
-            x: point.x,
-            y: point.y,
-            index: sampleIndex,
-            salt: 0x5E2F_7A4C
-        )
-        let jitterDegrees = ((angleRandom * 2) - 1) * jitterAmount
-        return baseAngle + jitterDegrees
-    }
-
-    private enum ContentMode {
-        case stamp(TipDescriptor)
-        case composite(
-            brush: BrushSettings,
-            activeTool: ToolKind,
-            previewPoint: CGPoint,
-            sampleIndex: Int,
-            directionDegrees: Double
-        )
+    static func maskFingerprint(for data: Data?) -> String? {
+        guard let data, data.isEmpty == false else { return nil }
+        return stableMaskDigest(data)
     }
 
     private static func renderAlphaBytes(
         resolution: Int,
         contentMode: ContentMode
     ) -> [UInt8] {
-        var alphaBytes = [UInt8](repeating: 0, count: resolution * resolution)
+        let total = resolution * resolution
+        guard total > 0 else { return [] }
+        let center = Double(resolution - 1) * 0.5
+        let scale = max(center, 1)
+        var alpha = [UInt8](repeating: 0, count: total)
 
         for y in 0..<resolution {
             for x in 0..<resolution {
-                let normalizedX = ((Double(x) + 0.5) / Double(resolution)) * 2.0 - 1.0
-                let normalizedY = ((Double(y) + 0.5) / Double(resolution)) * 2.0 - 1.0
-
-                let alpha: Double
+                let localPoint = CGPoint(
+                    x: (Double(x) - center) / scale,
+                    y: (center - Double(y)) / scale
+                )
+                let value: Double
                 switch contentMode {
                 case .stamp(let descriptor):
-                    alpha = tipAlpha(
-                        localPoint: CGPoint(x: normalizedX, y: normalizedY),
-                        descriptor: descriptor
-                    )
-                case .composite(let brush, let activeTool, let previewPoint, let sampleIndex, let directionDegrees):
-                    alpha = compositeAlpha(
-                        localPoint: CGPoint(x: normalizedX, y: normalizedY),
-                        brush: brush,
-                        activeTool: activeTool,
-                        previewPoint: previewPoint,
-                        sampleIndex: sampleIndex,
-                        directionDegrees: directionDegrees,
-                        resolution: resolution
-                    )
+                    value = tipAlpha(localPoint: localPoint, descriptor: descriptor)
                 }
-
-                alphaBytes[(y * resolution) + x] = UInt8(clamping: Int((min(max(alpha, 0), 1) * 255.0).rounded()))
+                alpha[(y * resolution) + x] = UInt8(clamping: Int((min(max(value, 0), 1) * 255).rounded()))
             }
         }
 
-        return alphaBytes
+        return alpha
     }
 
-    private static func compositeAlpha(
-        localPoint: CGPoint,
-        brush: BrushSettings,
-        activeTool: ToolKind,
-        previewPoint: CGPoint,
-        sampleIndex: Int,
-        directionDegrees: Double,
+    private static func primaryDescriptor(
+        for brush: BrushSettings,
         resolution: Int
-    ) -> Double {
-        let primaryDescriptor = tipDescriptor(
+    ) -> TipDescriptor {
+        tipDescriptor(
             shape: brush.tipShape,
             sourceSemantic: brush.customTipSourceSemantic,
             maskData: brush.customTipMaskData,
@@ -437,68 +224,6 @@ enum StageOneBrushPreviewRasterizer {
             angleDegrees: brush.customTipAngleDegrees,
             resolution: resolution
         )
-        let secondaryDescriptor = tipDescriptor(
-            shape: brush.secondaryTipDescriptor.tipShape,
-            sourceSemantic: brush.secondaryTipDescriptor.sourceSemantic,
-            maskData: brush.secondaryTipDescriptor.customTipMaskData,
-            softness: brush.secondaryTipDescriptor.customTipSoftness,
-            roundness: brush.secondaryTipDescriptor.customTipRoundness,
-            angleDegrees: Float(
-                secondaryResolvedAngleDegrees(
-                    for: brush,
-                    activeTool: activeTool,
-                    point: previewPoint,
-                    sampleIndex: sampleIndex
-                )
-            ),
-            resolution: resolution
-        )
-
-        let primaryAlpha = tipAlpha(localPoint: localPoint, descriptor: primaryDescriptor)
-        guard primaryAlpha > 0 else {
-            return 0
-        }
-
-        let sizeRatio = secondaryResolvedSizeRatio(
-            for: brush,
-            activeTool: activeTool,
-            point: previewPoint,
-            sampleIndex: sampleIndex
-        )
-        let secondaryOffset = secondaryScatterOffset(
-            for: brush,
-            activeTool: activeTool,
-            point: previewPoint,
-            sampleIndex: sampleIndex
-        )
-        let spacingPhaseOffset = secondarySpacingPhaseOffset(
-            for: brush,
-            activeTool: activeTool,
-            point: previewPoint,
-            sampleIndex: sampleIndex,
-            directionDegrees: directionDegrees
-        )
-        let secondaryPoint = CGPoint(
-            x: (localPoint.x - secondaryOffset.x - spacingPhaseOffset.x) / sizeRatio,
-            y: (localPoint.y - secondaryOffset.y - spacingPhaseOffset.y) / sizeRatio
-        )
-        var secondaryAlpha = tipAlpha(localPoint: secondaryPoint, descriptor: secondaryDescriptor)
-        if brush.supportsSecondaryInvertRealDrawing(for: activeTool) {
-            secondaryAlpha = 1.0 - min(max(secondaryAlpha, 0), 1)
-        }
-
-        let strength = Double(min(max(brush.dualTipStrength, 0), 1))
-        switch brush.dualTipCombineMode {
-        case .multiply:
-            let modulation = ((1.0 - strength) + (secondaryAlpha * strength))
-            return primaryAlpha * modulation
-        case .subtract:
-            let subtraction = min(max(secondaryAlpha * strength, 0), 1)
-            return primaryAlpha * (1.0 - subtraction)
-        case .intersect:
-            let pureIntersection = min(primaryAlpha, secondaryAlpha)
-            return primaryAlpha + ((pureIntersection - primaryAlpha) * strength)
-        }
     }
 
     private static func tipDescriptor(
@@ -524,7 +249,7 @@ enum StageOneBrushPreviewRasterizer {
         localPoint: CGPoint,
         descriptor: TipDescriptor
     ) -> Double {
-        let radians = Double(descriptor.angleDegrees) * .pi / 180.0
+        let radians = Double(descriptor.angleDegrees) * (.pi / 180.0)
         let cosine = cos(radians)
         let sine = sin(radians)
         let rotatedPoint = CGPoint(
@@ -535,111 +260,99 @@ enum StageOneBrushPreviewRasterizer {
         switch descriptor.shape {
         case .square:
             let squareDistance = max(abs(rotatedPoint.x), abs(rotatedPoint.y))
-            return squareDistance <= 1.0 ? 1.0 : 0.0
+            return squareDistance <= 1 ? 1 : 0
         case .softRound:
             let roundDistance = hypot(localPoint.x, localPoint.y)
-            guard roundDistance < 1.0 else { return 0.0 }
-            let feather = max(0.0, 1.0 - roundDistance)
+            guard roundDistance < 1 else { return 0 }
+            let feather = min(max(1 - roundDistance, 0), 1)
             return feather * feather
+        case .hardRound:
+            let roundDistance = hypot(localPoint.x, localPoint.y)
+            return smoothHardnessAlpha(distance: roundDistance, hardness: Double(descriptor.shape.hardness))
         case .customRound:
-            let roundness = max(Double(descriptor.roundness), 0.25)
-            let shapedPoint = CGPoint(
-                x: rotatedPoint.x / roundness,
-                y: rotatedPoint.y
-            )
+            let roundness = Double(min(max(descriptor.roundness, 0.25), 1))
+            let shapedPoint = CGPoint(x: rotatedPoint.x / roundness, y: rotatedPoint.y)
+            guard max(abs(shapedPoint.x), abs(shapedPoint.y)) < 1 else { return 0 }
+
             if let maskBytes = descriptor.maskBytes {
                 return sampledCustomMaskAlpha(
-                    at: shapedPoint,
                     maskBytes: maskBytes,
-                    softness: descriptor.softness
+                    localPoint: shapedPoint,
+                    softness: Double(descriptor.softness)
                 )
             }
 
+            let customDistance = hypot(shapedPoint.x, shapedPoint.y)
             let hardness = Double(BrushTipShape.customRoundHardness(for: descriptor.softness))
-            let distance = hypot(shapedPoint.x, shapedPoint.y)
-            return smoothHardnessAlpha(distance: distance, hardness: hardness)
-        case .hardRound:
-            let roundDistance = hypot(localPoint.x, localPoint.y)
-            return smoothHardnessAlpha(distance: roundDistance, hardness: 1.0)
+            return smoothHardnessAlpha(distance: customDistance, hardness: hardness)
         }
     }
 
     private static func sampledCustomMaskAlpha(
-        at point: CGPoint,
         maskBytes: [UInt8],
-        softness: Float
+        localPoint: CGPoint,
+        softness: Double
     ) -> Double {
-        guard max(abs(point.x), abs(point.y)) < 1.0 else {
-            return 0.0
-        }
+        let resolution = Int(sqrt(Double(maskBytes.count)))
+        guard resolution > 1 else { return 0 }
 
-        let resolution = Int(Double(maskBytes.count).squareRoot())
-        guard resolution > 1 else {
-            return 0.0
-        }
+        let u = min(max((localPoint.x + 1) * 0.5, 0), 1)
+        let v = min(max((localPoint.y + 1) * 0.5, 0), 1)
+        let sampleX = u * Double(resolution - 1)
+        let sampleY = (1 - v) * Double(resolution - 1)
 
-        let u = min(max((point.x + 1.0) * 0.5, 0.0), 1.0)
-        let v = min(max((point.y + 1.0) * 0.5, 0.0), 1.0)
-        let x = u * Double(resolution - 1)
-        let y = v * Double(resolution - 1)
-        let x0 = Int(floor(x))
-        let y0 = Int(floor(y))
+        let x0 = Int(floor(sampleX))
+        let y0 = Int(floor(sampleY))
         let x1 = min(x0 + 1, resolution - 1)
         let y1 = min(y0 + 1, resolution - 1)
-        let tx = x - Double(x0)
-        let ty = y - Double(y0)
+        let tx = sampleX - Double(x0)
+        let ty = sampleY - Double(y0)
 
-        func sample(_ sampleX: Int, _ sampleY: Int) -> Double {
-            let index = (sampleY * resolution) + sampleX
-            return Double(maskBytes[index]) / 255.0
+        func sample(_ x: Int, _ y: Int) -> Double {
+            Double(maskBytes[(y * resolution) + x]) / 255.0
         }
 
-        let top = (sample(x0, y0) * (1.0 - tx)) + (sample(x1, y0) * tx)
-        let bottom = (sample(x0, y1) * (1.0 - tx)) + (sample(x1, y1) * tx)
-        let sampledAlpha = (top * (1.0 - ty)) + (bottom * ty)
-        let clampedSoftness = min(max(Double(softness), 0.0), 1.0)
-        let exponent = (3.2 * (1.0 - clampedSoftness)) + (0.75 * clampedSoftness)
-        return pow(min(max(sampledAlpha, 0.0), 1.0), exponent)
+        let top = sample(x0, y0) * (1 - tx) + sample(x1, y0) * tx
+        let bottom = sample(x0, y1) * (1 - tx) + sample(x1, y1) * tx
+        let sampled = top * (1 - ty) + bottom * ty
+        let exponent = (1 - softness) * 3.2 + softness * 0.75
+        return pow(min(max(sampled, 0), 1), exponent)
     }
 
     private static func smoothHardnessAlpha(distance: Double, hardness: Double) -> Double {
-        guard distance < 1.0 else { return 0.0 }
+        guard distance < 1 else { return 0 }
         if hardness >= 0.999 {
-            return 1.0
+            return 1
         }
         if distance <= hardness {
-            return 1.0
+            return 1
         }
 
-        let denominator = max(1.0 - hardness, 0.0001)
-        let t = min(max((distance - hardness) / denominator, 0.0), 1.0)
-        return 1.0 - (t * t * (3.0 - (2.0 * t)))
+        let normalized = min(max((distance - hardness) / max(1 - hardness, 0.0001), 0), 1)
+        let smooth = normalized * normalized * (3 - (2 * normalized))
+        return 1 - smooth
     }
 
     private static func resampledMaskBytes(
         _ data: Data?,
         targetResolution: Int
     ) -> [UInt8]? {
-        guard let data else { return nil }
-        let side = Int(Double(data.count).squareRoot())
-        guard side > 0, side * side == data.count else { return nil }
-
-        if side == targetResolution {
-            return [UInt8](data)
+        guard targetResolution > 0, let data else { return nil }
+        let sourceBytes = [UInt8](data)
+        guard sourceBytes.isEmpty == false else { return nil }
+        let sourceResolution = Int(sqrt(Double(sourceBytes.count)))
+        guard sourceResolution * sourceResolution == sourceBytes.count else {
+            return nil
         }
-
-        let source = [UInt8](data)
-        var destination = [UInt8](repeating: 0, count: targetResolution * targetResolution)
-
-        for y in 0..<targetResolution {
-            let sourceY = min(Int((Double(y) / Double(targetResolution)) * Double(side)), side - 1)
-            for x in 0..<targetResolution {
-                let sourceX = min(Int((Double(x) / Double(targetResolution)) * Double(side)), side - 1)
-                destination[(y * targetResolution) + x] = source[(sourceY * side) + sourceX]
-            }
+        guard sourceResolution != targetResolution else {
+            return sourceBytes
         }
-
-        return destination
+        return resampledMaskBytes(
+            sourceBytes,
+            width: sourceResolution,
+            height: sourceResolution,
+            targetResolution: targetResolution
+        )
     }
 
     private static func makeImage(
@@ -649,7 +362,6 @@ enum StageOneBrushPreviewRasterizer {
     ) -> CGImage? {
         let resolvedAlphaBytes: [UInt8]
         let resolvedResolution: Int
-
         if cropToContent, let cropped = cropAlphaBytes(alphaBytes, resolution: resolution) {
             resolvedAlphaBytes = cropped.bytes
             resolvedResolution = cropped.resolution
@@ -660,34 +372,37 @@ enum StageOneBrushPreviewRasterizer {
 
         let bytesPerPixel = 4
         let bytesPerRow = resolvedResolution * bytesPerPixel
-        var rgba = [UInt8](repeating: 255, count: resolvedResolution * resolvedResolution * bytesPerPixel)
+        var rgba = [UInt8](repeating: 0, count: resolvedResolution * resolvedResolution * bytesPerPixel)
 
         for index in 0..<(resolvedResolution * resolvedResolution) {
-            let alpha = resolvedAlphaBytes[index]
             let offset = index * bytesPerPixel
-            rgba[offset + 3] = alpha
+            rgba[offset] = 255
+            rgba[offset + 1] = 255
+            rgba[offset + 2] = 255
+            rgba[offset + 3] = resolvedAlphaBytes[index]
         }
 
         guard
             let provider = CGDataProvider(data: Data(rgba) as CFData),
-            let colorSpace = CGColorSpace(name: CGColorSpace.sRGB)
+            let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
+            let image = CGImage(
+                width: resolvedResolution,
+                height: resolvedResolution,
+                bitsPerComponent: 8,
+                bitsPerPixel: 32,
+                bytesPerRow: bytesPerRow,
+                space: colorSpace,
+                bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
+                provider: provider,
+                decode: nil,
+                shouldInterpolate: false,
+                intent: .defaultIntent
+            )
         else {
             return nil
         }
 
-        return CGImage(
-            width: resolvedResolution,
-            height: resolvedResolution,
-            bitsPerComponent: 8,
-            bitsPerPixel: 32,
-            bytesPerRow: bytesPerRow,
-            space: colorSpace,
-            bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
-            provider: provider,
-            decode: nil,
-            shouldInterpolate: true,
-            intent: .defaultIntent
-        )
+        return image
     }
 
     private static func cropAlphaBytes(
@@ -698,27 +413,30 @@ enum StageOneBrushPreviewRasterizer {
             return nil
         }
 
-        let croppedResolution = max(bounds.width, bounds.height)
-        var cropped = [UInt8](repeating: 0, count: croppedResolution * croppedResolution)
+        let width = bounds.maxX - bounds.minX + 1
+        let height = bounds.maxY - bounds.minY + 1
+        let side = max(width, height)
+        guard side > 0 else { return nil }
 
-        let horizontalInset = (croppedResolution - bounds.width) / 2
-        let verticalInset = (croppedResolution - bounds.height) / 2
+        let offsetX = (side - width) / 2
+        let offsetY = (side - height) / 2
+        var destination = [UInt8](repeating: 0, count: side * side)
 
-        for y in 0..<bounds.height {
-            for x in 0..<bounds.width {
+        for y in 0..<height {
+            for x in 0..<width {
                 let sourceIndex = ((bounds.minY + y) * resolution) + bounds.minX + x
-                let destinationIndex = ((verticalInset + y) * croppedResolution) + horizontalInset + x
-                cropped[destinationIndex] = alphaBytes[sourceIndex]
+                let destinationIndex = ((offsetY + y) * side) + offsetX + x
+                destination[destinationIndex] = alphaBytes[sourceIndex]
             }
         }
 
-        return (cropped, croppedResolution)
+        return (destination, side)
     }
 
     private static func alphaBounds(
         _ alphaBytes: [UInt8],
         resolution: Int
-    ) -> (minX: Int, minY: Int, width: Int, height: Int)? {
+    ) -> (minX: Int, minY: Int, maxX: Int, maxY: Int)? {
         var minX = resolution
         var minY = resolution
         var maxX = -1
@@ -739,124 +457,117 @@ enum StageOneBrushPreviewRasterizer {
             return nil
         }
 
-        let inset = 2
-        let originX = max(0, minX - inset)
-        let originY = max(0, minY - inset)
-        let width = min(resolution - originX, (maxX - minX + 1) + (inset * 2))
-        let height = min(resolution - originY, (maxY - minY + 1) + (inset * 2))
-        return (originX, originY, width, height)
+        return (minX, minY, maxX, maxY)
     }
 
     private static func makeStampCacheKey(
         for brush: BrushSettings,
         resolution: Int
     ) -> NSString {
-        let hasher = brushHasher(
-            prefix: "stamp",
-            brush: brush,
-            activeTool: nil,
-            resolution: resolution,
-            previewPoint: .zero,
-            sampleIndex: 0
-        )
-        return NSString(string: String(hasher))
-    }
-
-    private static func makeCompositeCacheKey(
-        for brush: BrushSettings,
-        activeTool: ToolKind,
-        resolution: Int,
-        previewPoint: CGPoint,
-        sampleIndex: Int,
-        directionDegrees: Double
-    ) -> NSString {
-        let hash = brushHasher(
-            prefix: "composite",
-            brush: brush,
-            activeTool: activeTool,
-            resolution: resolution,
-            previewPoint: previewPoint,
-            sampleIndex: sampleIndex,
-            directionDegrees: directionDegrees
-        )
-        return NSString(string: String(hash))
+        var hasher = Hasher()
+        brushHasher(brush, into: &hasher)
+        hasher.combine(resolution)
+        hasher.combine("stamp")
+        return NSString(string: String(hasher.finalize()))
     }
 
     private static func makeImportedAssetCacheKey(
         maskData: Data?,
         resolution: Int
     ) -> NSString {
-        var hasher = Hasher()
-        hasher.combine("imported-asset")
-        hasher.combine(maskFingerprint(for: maskData))
-        hasher.combine(resolution)
-        return NSString(string: String(hasher.finalize()))
+        NSString(string: "imported-asset|\(stableMaskDigest(maskData))|\(resolution)")
     }
 
-    private static func makeEditorMaskCacheKey(
+    private static func makeMaskPreviewCacheKey(
         maskData: Data?,
         resolution: Int,
+        role: TipMaskPreviewRole,
         cropToContent: Bool
     ) -> NSString {
-        var hasher = Hasher()
-        hasher.combine("editor-mask")
-        hasher.combine(maskFingerprint(for: maskData))
-        hasher.combine(resolution)
-        hasher.combine(cropToContent)
-        return NSString(string: String(hasher.finalize()))
+        NSString(
+            string: "mask-preview|\(stableMaskDigest(maskData))|\(resolution)|\(role == .editor ? "editor" : "library")|\(cropToContent)"
+        )
     }
 
     private static func brushHasher(
-        prefix: String,
-        brush: BrushSettings,
-        activeTool: ToolKind?,
-        resolution: Int,
-        previewPoint: CGPoint,
-        sampleIndex: Int,
-        directionDegrees: Double = 0
-    ) -> Int {
-        var hasher = Hasher()
-        hasher.combine(prefix)
-        hasher.combine(resolution)
-        hasher.combine(activeTool?.rawValue)
-        hasher.combine(sampleIndex)
-        hasher.combine(Int((previewPoint.x * 1_000).rounded()))
-        hasher.combine(Int((previewPoint.y * 1_000).rounded()))
-        hasher.combine(Int((directionDegrees * 100).rounded()))
-
+        _ brush: BrushSettings,
+        into hasher: inout Hasher
+    ) {
         hasher.combine(brush.tipShape.rawValue)
         hasher.combine(brush.customTipSourceSemantic.rawValue)
-        hasher.combine(maskFingerprint(for: brush.customTipMaskData))
         hasher.combine(brush.customTipSoftness)
         hasher.combine(brush.customTipRoundness)
         hasher.combine(brush.customTipAngleDegrees)
-
-        hasher.combine(brush.dualTipEnabled)
-        hasher.combine(brush.dualTipCombineMode.rawValue)
-        hasher.combine(brush.dualTipStrength)
-        hasher.combine(brush.secondarySizeRatio)
-        hasher.combine(brush.secondarySizeJitter)
-        hasher.combine(brush.secondaryAngleJitterDegrees)
-        hasher.combine(brush.secondaryAngleOffsetDegrees)
-        hasher.combine(brush.secondarySpacingPhase)
-        hasher.combine(brush.secondarySpacingPhaseJitter)
-        hasher.combine(brush.spacingPercent)
-        hasher.combine(brush.secondaryScatter)
-        hasher.combine(brush.secondaryScatterJitter)
-        hasher.combine(brush.secondaryInvert)
-
-        let secondary = brush.secondaryTipDescriptor
-        hasher.combine(secondary.tipShape.rawValue)
-        hasher.combine(secondary.sourceSemantic.rawValue)
-        hasher.combine(maskFingerprint(for: secondary.customTipMaskData))
-        hasher.combine(secondary.customTipSoftness)
-        hasher.combine(secondary.customTipRoundness)
-        hasher.combine(secondary.customTipAngleDegrees)
-        return hasher.finalize()
+        hasher.combine(maskFingerprint(for: brush.customTipMaskData))
+        hasher.combine(maskFingerprint(for: brush.customTipEnvelopeMaskData))
     }
 
-    static func maskFingerprint(for data: Data?) -> String? {
-        guard let data else { return nil }
-        return BrushTipImageAssetID(maskData: data).rawValue
+    private static func stableMaskDigest(_ data: Data?) -> String {
+        guard let data, data.isEmpty == false else { return "nil" }
+        let digest = SHA256.hash(data: data)
+        return digest.map { String(format: "%02x", $0) }.joined()
+    }
+
+    private static func resampledMaskBytes(
+        _ sourceBytes: [UInt8],
+        width: Int,
+        height: Int,
+        targetResolution: Int
+    ) -> [UInt8]? {
+        guard
+            width > 0,
+            height > 0,
+            targetResolution > 0,
+            sourceBytes.count == width * height,
+            let colorSpace = CGColorSpace(name: CGColorSpace.genericGrayGamma2_2),
+            let provider = CGDataProvider(data: Data(sourceBytes) as CFData),
+            let sourceImage = CGImage(
+                width: width,
+                height: height,
+                bitsPerComponent: 8,
+                bitsPerPixel: 8,
+                bytesPerRow: width,
+                space: colorSpace,
+                bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.none.rawValue),
+                provider: provider,
+                decode: nil,
+                shouldInterpolate: true,
+                intent: .defaultIntent
+            )
+        else {
+            return nil
+        }
+
+        let scale = min(
+            Double(targetResolution) / Double(width),
+            Double(targetResolution) / Double(height)
+        )
+        let drawWidth = max(1, min(targetResolution, Int(round(Double(width) * scale))))
+        let drawHeight = max(1, min(targetResolution, Int(round(Double(height) * scale))))
+        let offsetX = (targetResolution - drawWidth) / 2
+        let offsetY = (targetResolution - drawHeight) / 2
+
+        var destination = [UInt8](repeating: 0, count: targetResolution * targetResolution)
+        guard let context = CGContext(
+            data: &destination,
+            width: targetResolution,
+            height: targetResolution,
+            bitsPerComponent: 8,
+            bytesPerRow: targetResolution,
+            space: colorSpace,
+            bitmapInfo: CGImageAlphaInfo.none.rawValue
+        ) else {
+            return nil
+        }
+
+        context.setFillColor(gray: 0, alpha: 1)
+        context.fill(CGRect(x: 0, y: 0, width: targetResolution, height: targetResolution))
+        context.interpolationQuality = .high
+        context.draw(
+            sourceImage,
+            in: CGRect(x: offsetX, y: offsetY, width: drawWidth, height: drawHeight)
+        )
+
+        return destination
     }
 }
