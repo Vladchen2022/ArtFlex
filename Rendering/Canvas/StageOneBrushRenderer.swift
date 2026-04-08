@@ -26,6 +26,7 @@ private struct BrushUniforms {
     var selectionMax: SIMD2<Float>
     var usesAlphaLock: UInt32
     var compoundEnabled: UInt32
+    var compoundMode: UInt32
     var compoundSecondaryShape: UInt32
     var compoundPrimaryMixWeight: Float
     var compoundPrimaryOpacityFactor: Float
@@ -175,6 +176,7 @@ final class StageOneBrushRenderer {
             float2 selectionMax;
             uint usesAlphaLock;
             uint compoundEnabled;
+            uint compoundMode;
             uint compoundSecondaryShape;
             float compoundPrimaryMixWeight;
             float compoundPrimaryOpacityFactor;
@@ -399,9 +401,23 @@ final class StageOneBrushRenderer {
             ) * uniforms.compoundSecondaryOpacityFactor;
 
             float lowAppearance = primaryEnvelope * secondaryField;
-            float highAppearance = primaryTexture * uniforms.compoundPrimaryOpacityFactor;
+            float highAppearance = primaryEnvelope * uniforms.compoundPrimaryOpacityFactor;
+            float compoundAppearance = lowAppearance;
+
+            switch (uniforms.compoundMode) {
+                case 1:
+                    compoundAppearance = primaryEnvelope * (1.0 - secondaryField);
+                    break;
+                case 2:
+                    compoundAppearance = primaryEnvelope * secondaryField;
+                    break;
+                default:
+                    compoundAppearance = lowAppearance;
+                    break;
+            }
+
             float mixedAppearance = mix(
-                lowAppearance,
+                compoundAppearance,
                 highAppearance,
                 clamp(uniforms.compoundPrimaryMixWeight, 0.0, 1.0)
             );
@@ -1446,7 +1462,8 @@ final class StageOneBrushRenderer {
         let tangentDegrees = Float(atan2(tangent.y, tangent.x) * 180.0 / .pi)
         let compoundSecondarySizeFactor = compoundSecondary.resolvedSizeFactor(for: effectivePressure)
         let compoundSecondaryOpacityFactor = compoundSecondary.resolvedOpacityFactor(for: effectivePressure)
-        let compoundSecondaryDiameterPx = max(compoundSecondary.size * compoundSecondarySizeFactor, 1)
+        let compoundSecondaryBaseSize = compoundSecondary.resolvedBaseSize(for: stroke.brush.size)
+        let compoundSecondaryDiameterPx = max(compoundSecondaryBaseSize * compoundSecondarySizeFactor, 1)
         let compoundSecondaryAdvancePx = max(
             compoundSecondaryDiameterPx * max(compoundSecondary.spacingPercent, 1) / 100,
             1
@@ -1513,6 +1530,7 @@ final class StageOneBrushRenderer {
             selectionMax: selectionMax,
             usesAlphaLock: stroke.alphaLockEnabled ? 1 : 0,
             compoundEnabled: compoundEnabled ? 1 : 0,
+            compoundMode: compoundBrushModeCode(stroke.brush.compoundBrush.mode),
             compoundSecondaryShape: brushTipShapeCode(compoundSecondary.tipShape),
             compoundPrimaryMixWeight: stroke.brush.compoundBrush.pressureMix.resolvedPrimaryWeight(for: effectivePressure),
             compoundPrimaryOpacityFactor: opacityFactor,
@@ -1537,6 +1555,17 @@ final class StageOneBrushRenderer {
             return 2
         case .customRound:
             return 3
+        }
+    }
+
+    private func compoundBrushModeCode(_ mode: CompoundBrushMode) -> UInt32 {
+        switch mode {
+        case .textureBlend:
+            return 0
+        case .subtract:
+            return 1
+        case .intersect:
+            return 2
         }
     }
 
@@ -2073,23 +2102,36 @@ final class StageOneBrushRenderer {
             return samples
         }
 
-        let sideWeight = min(max(0.10 + (0.16 * smoothingStrength), 0), 0.24)
+        let previousWeight = min(max(0.08 + (0.14 * smoothingStrength), 0), 0.20)
         var stabilized = samples
 
         for index in samples.indices {
-            let start = max(index - 1, samples.startIndex)
-            let end = min(index + 1, samples.index(before: samples.endIndex))
-            var weightedPressure = 0.0 as Float
-            var totalWeight = 0.0 as Float
-
-            for neighbor in start...end {
-                let weight: Float = neighbor == index ? (1 - (2 * sideWeight)) : sideWeight
-                weightedPressure += samples[neighbor].point.pressure * weight
-                totalWeight += weight
+            guard index > samples.startIndex else {
+                stabilized[index].point.pressure = min(max(samples[index].point.pressure, 0), 1)
+                continue
             }
 
-            guard totalWeight > 0.0001 else { continue }
-            stabilized[index].point.pressure = min(max(weightedPressure / totalWeight, 0.01), 1)
+            let currentPressure = samples[index].point.pressure
+            let previousPressure = stabilized[index - 1].point.pressure
+            let pressureDelta = currentPressure - previousPressure
+
+            // Keep smoothing causal so later heavier pressure never lifts earlier
+            // light-touch stamps. Also reduce carry-over aggressively when the
+            // user is easing off pressure, so the stroke can get light quickly.
+            let carriedWeight: Float
+            switch pressureDelta {
+            case ..<(-0.06):
+                carriedWeight = previousWeight * 0.12
+            case ..<0:
+                carriedWeight = previousWeight * 0.30
+            case ..<0.08:
+                carriedWeight = previousWeight * 0.72
+            default:
+                carriedWeight = previousWeight
+            }
+
+            let stabilizedPressure = (currentPressure * (1 - carriedWeight)) + (previousPressure * carriedWeight)
+            stabilized[index].point.pressure = min(max(stabilizedPressure, 0), 1)
         }
 
         return stabilized

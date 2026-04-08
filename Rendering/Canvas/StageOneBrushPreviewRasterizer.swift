@@ -565,6 +565,7 @@ enum StageOneBrushPreviewRasterizer {
         brushHasher(brush, into: &hasher)
         hasher.combine("compound-stroke")
         hasher.combine(brush.compoundBrush.enabled)
+        hasher.combine(brush.compoundBrush.mode.rawValue)
         let secondary = brush.compoundBrush.secondary
         hasher.combine(secondary.tipShape.rawValue)
         hasher.combine(secondary.sourceSemantic.rawValue)
@@ -573,7 +574,9 @@ enum StageOneBrushPreviewRasterizer {
         hasher.combine(secondary.roundness)
         hasher.combine(secondary.angleDegrees)
         hasher.combine(secondary.followsStrokeDirection)
+        hasher.combine(secondary.sizeMode.rawValue)
         hasher.combine(secondary.size)
+        hasher.combine(secondary.relativeSizeRatio)
         hasher.combine(secondary.spacingPercent)
         hasher.combine(secondary.pressureSizeAmount)
         hasher.combine(secondary.pressureOpacityAmount)

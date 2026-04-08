@@ -1250,8 +1250,10 @@ final class StrokeCaptureMTKView: MTKView {
         let normalizedPressure: Float
         if rawPressure > 0 {
             let clamped = min(max(rawPressure, 0), 1)
+            // Let the first few tablet samples preserve the real contact pressure.
+            // Warming them through the previous-sample filter makes light starts
+            // feel artificially heavy before the stroke has even settled.
             let shouldBypassPressureWarmup =
-                debugBypassStartupPressureSmoothing &&
                 isTabletLikeEvent(event) &&
                 strokeInputSampleCount < 6
             if shouldBypassPressureWarmup {

@@ -319,7 +319,62 @@ struct CompoundPressureMixSettings: Codable, Equatable, Sendable {
     }
 }
 
+enum CompoundBrushMode: String, Codable, Equatable, Sendable, CaseIterable {
+    case textureBlend
+    case subtract
+    case intersect
+
+    var displayName: String {
+        switch self {
+        case .textureBlend:
+            return "叠加"
+        case .subtract:
+            return "减去"
+        case .intersect:
+            return "相交"
+        }
+    }
+}
+
+enum CompoundSecondarySizeMode: String, Codable, Equatable, Sendable, CaseIterable {
+    case absolutePixels
+    case relativeToPrimary
+
+    var displayName: String {
+        switch self {
+        case .absolutePixels:
+            return "绝对像素"
+        case .relativeToPrimary:
+            return "相对主笔尖"
+        }
+    }
+}
+
 struct CompoundSecondaryTipSettings: Codable, Equatable, Sendable {
+    enum CodingKeys: String, CodingKey {
+        case tipShape
+        case sourceSemantic
+        case tipAssetID
+        case importedSourceInfo
+        case customTipMaskData
+        case softness
+        case roundness
+        case angleDegrees
+        case followsStrokeDirection
+        case sizeMode
+        case size
+        case relativeSizeRatio
+        case spacingPercent
+        case pressureSizeAmount
+        case pressureOpacityAmount
+        case sizeCurveLow
+        case sizeCurveMid
+        case sizeCurveHigh
+        case opacityCurveLow
+        case opacityCurveMid
+        case opacityCurveHigh
+    }
+
     var tipShape: BrushTipShape
     var sourceSemantic: TipSourceSemantic
     var tipAssetID: BrushTipImageAssetID?
@@ -331,7 +386,9 @@ struct CompoundSecondaryTipSettings: Codable, Equatable, Sendable {
     var angleDegrees: Float
     var followsStrokeDirection: Bool
 
+    var sizeMode: CompoundSecondarySizeMode
     var size: Float
+    var relativeSizeRatio: Float
     var spacingPercent: Float
 
     var pressureSizeAmount: Float
@@ -355,7 +412,9 @@ struct CompoundSecondaryTipSettings: Codable, Equatable, Sendable {
         roundness: 1.0,
         angleDegrees: 0,
         followsStrokeDirection: false,
+        sizeMode: .absolutePixels,
         size: 24,
+        relativeSizeRatio: 1.0,
         spacingPercent: 70,
         pressureSizeAmount: 0.30,
         pressureOpacityAmount: 1.00,
@@ -388,15 +447,125 @@ struct CompoundSecondaryTipSettings: Codable, Equatable, Sendable {
         let response = min(max(pressureOpacityAmount, 0), 1)
         return (1 - response) + (response * curved)
     }
+
+    func resolvedBaseSize(for primarySize: Float) -> Float {
+        switch sizeMode {
+        case .absolutePixels:
+            return min(max(size, 1), 512)
+        case .relativeToPrimary:
+            let clampedRatio = min(max(relativeSizeRatio, 0.05), 4.0)
+            return min(max(primarySize * clampedRatio, 1), 512)
+        }
+    }
+
+    init(
+        tipShape: BrushTipShape,
+        sourceSemantic: TipSourceSemantic,
+        tipAssetID: BrushTipImageAssetID?,
+        importedSourceInfo: ImportedTipSourceInfo?,
+        customTipMaskData: Data?,
+        softness: Float,
+        roundness: Float,
+        angleDegrees: Float,
+        followsStrokeDirection: Bool,
+        sizeMode: CompoundSecondarySizeMode,
+        size: Float,
+        relativeSizeRatio: Float,
+        spacingPercent: Float,
+        pressureSizeAmount: Float,
+        pressureOpacityAmount: Float,
+        sizeCurveLow: Float,
+        sizeCurveMid: Float,
+        sizeCurveHigh: Float,
+        opacityCurveLow: Float,
+        opacityCurveMid: Float,
+        opacityCurveHigh: Float
+    ) {
+        self.tipShape = tipShape
+        self.sourceSemantic = sourceSemantic
+        self.tipAssetID = tipAssetID
+        self.importedSourceInfo = importedSourceInfo
+        self.customTipMaskData = customTipMaskData
+        self.softness = softness
+        self.roundness = roundness
+        self.angleDegrees = angleDegrees
+        self.followsStrokeDirection = followsStrokeDirection
+        self.sizeMode = sizeMode
+        self.size = size
+        self.relativeSizeRatio = relativeSizeRatio
+        self.spacingPercent = spacingPercent
+        self.pressureSizeAmount = pressureSizeAmount
+        self.pressureOpacityAmount = pressureOpacityAmount
+        self.sizeCurveLow = sizeCurveLow
+        self.sizeCurveMid = sizeCurveMid
+        self.sizeCurveHigh = sizeCurveHigh
+        self.opacityCurveLow = opacityCurveLow
+        self.opacityCurveMid = opacityCurveMid
+        self.opacityCurveHigh = opacityCurveHigh
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let defaults = CompoundSecondaryTipSettings.default
+
+        tipShape = try container.decodeIfPresent(BrushTipShape.self, forKey: .tipShape) ?? defaults.tipShape
+        sourceSemantic = try container.decodeIfPresent(TipSourceSemantic.self, forKey: .sourceSemantic) ?? defaults.sourceSemantic
+        tipAssetID = try container.decodeIfPresent(BrushTipImageAssetID.self, forKey: .tipAssetID)
+        importedSourceInfo = try container.decodeIfPresent(ImportedTipSourceInfo.self, forKey: .importedSourceInfo)
+        customTipMaskData = try container.decodeIfPresent(Data.self, forKey: .customTipMaskData)
+        softness = try container.decodeIfPresent(Float.self, forKey: .softness) ?? defaults.softness
+        roundness = try container.decodeIfPresent(Float.self, forKey: .roundness) ?? defaults.roundness
+        angleDegrees = try container.decodeIfPresent(Float.self, forKey: .angleDegrees) ?? defaults.angleDegrees
+        followsStrokeDirection = try container.decodeIfPresent(Bool.self, forKey: .followsStrokeDirection) ?? defaults.followsStrokeDirection
+        sizeMode = try container.decodeIfPresent(CompoundSecondarySizeMode.self, forKey: .sizeMode) ?? defaults.sizeMode
+        size = try container.decodeIfPresent(Float.self, forKey: .size) ?? defaults.size
+        relativeSizeRatio = try container.decodeIfPresent(Float.self, forKey: .relativeSizeRatio) ?? defaults.relativeSizeRatio
+        spacingPercent = try container.decodeIfPresent(Float.self, forKey: .spacingPercent) ?? defaults.spacingPercent
+        pressureSizeAmount = try container.decodeIfPresent(Float.self, forKey: .pressureSizeAmount) ?? defaults.pressureSizeAmount
+        pressureOpacityAmount = try container.decodeIfPresent(Float.self, forKey: .pressureOpacityAmount) ?? defaults.pressureOpacityAmount
+        sizeCurveLow = try container.decodeIfPresent(Float.self, forKey: .sizeCurveLow) ?? defaults.sizeCurveLow
+        sizeCurveMid = try container.decodeIfPresent(Float.self, forKey: .sizeCurveMid) ?? defaults.sizeCurveMid
+        sizeCurveHigh = try container.decodeIfPresent(Float.self, forKey: .sizeCurveHigh) ?? defaults.sizeCurveHigh
+        opacityCurveLow = try container.decodeIfPresent(Float.self, forKey: .opacityCurveLow) ?? defaults.opacityCurveLow
+        opacityCurveMid = try container.decodeIfPresent(Float.self, forKey: .opacityCurveMid) ?? defaults.opacityCurveMid
+        opacityCurveHigh = try container.decodeIfPresent(Float.self, forKey: .opacityCurveHigh) ?? defaults.opacityCurveHigh
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(tipShape, forKey: .tipShape)
+        try container.encode(sourceSemantic, forKey: .sourceSemantic)
+        try container.encodeIfPresent(tipAssetID, forKey: .tipAssetID)
+        try container.encodeIfPresent(importedSourceInfo, forKey: .importedSourceInfo)
+        try container.encodeIfPresent(customTipMaskData, forKey: .customTipMaskData)
+        try container.encode(softness, forKey: .softness)
+        try container.encode(roundness, forKey: .roundness)
+        try container.encode(angleDegrees, forKey: .angleDegrees)
+        try container.encode(followsStrokeDirection, forKey: .followsStrokeDirection)
+        try container.encode(sizeMode, forKey: .sizeMode)
+        try container.encode(size, forKey: .size)
+        try container.encode(relativeSizeRatio, forKey: .relativeSizeRatio)
+        try container.encode(spacingPercent, forKey: .spacingPercent)
+        try container.encode(pressureSizeAmount, forKey: .pressureSizeAmount)
+        try container.encode(pressureOpacityAmount, forKey: .pressureOpacityAmount)
+        try container.encode(sizeCurveLow, forKey: .sizeCurveLow)
+        try container.encode(sizeCurveMid, forKey: .sizeCurveMid)
+        try container.encode(sizeCurveHigh, forKey: .sizeCurveHigh)
+        try container.encode(opacityCurveLow, forKey: .opacityCurveLow)
+        try container.encode(opacityCurveMid, forKey: .opacityCurveMid)
+        try container.encode(opacityCurveHigh, forKey: .opacityCurveHigh)
+    }
 }
 
 struct CompoundBrushSettings: Codable, Equatable, Sendable {
     var enabled: Bool
+    var mode: CompoundBrushMode
     var secondary: CompoundSecondaryTipSettings
     var pressureMix: CompoundPressureMixSettings
 
     static let disabledDefault = CompoundBrushSettings(
         enabled: false,
+        mode: .textureBlend,
         secondary: .default,
         pressureMix: .default
     )

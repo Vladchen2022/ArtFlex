@@ -738,6 +738,13 @@ final class WorkspaceViewModel: ObservableObject {
         refresh()
     }
 
+    func setCompoundBrushMode(_ mode: CompoundBrushMode) {
+        bootstrap.workspaceStore.updateToolSession { session in
+            session.brush.compoundBrush.mode = mode
+        }
+        refresh()
+    }
+
     func setCompoundSecondaryTipShape(_ tipShape: BrushTipShape) {
         bootstrap.workspaceStore.updateToolSession { session in
             session.brush.compoundBrush.secondary.tipShape = tipShape
@@ -801,6 +808,27 @@ final class WorkspaceViewModel: ObservableObject {
     func setCompoundSecondarySize(_ size: Float) {
         bootstrap.workspaceStore.updateToolSession { session in
             session.brush.compoundBrush.secondary.size = min(max(size, 1), 512)
+        }
+        refresh()
+    }
+
+    func setCompoundSecondaryUsesRelativeSize(_ usesRelativeSize: Bool) {
+        bootstrap.workspaceStore.updateToolSession { session in
+            let primarySize = max(session.brush.size, 1)
+            let resolvedCurrentSize = session.brush.compoundBrush.secondary.resolvedBaseSize(for: primarySize)
+            session.brush.compoundBrush.secondary.sizeMode = usesRelativeSize ? .relativeToPrimary : .absolutePixels
+            if usesRelativeSize {
+                session.brush.compoundBrush.secondary.relativeSizeRatio = min(max(resolvedCurrentSize / primarySize, 0.05), 4.0)
+            } else {
+                session.brush.compoundBrush.secondary.size = min(max(resolvedCurrentSize, 1), 512)
+            }
+        }
+        refresh()
+    }
+
+    func setCompoundSecondaryRelativeSizeRatio(_ ratio: Float) {
+        bootstrap.workspaceStore.updateToolSession { session in
+            session.brush.compoundBrush.secondary.relativeSizeRatio = min(max(ratio, 0.05), 4.0)
         }
         refresh()
     }

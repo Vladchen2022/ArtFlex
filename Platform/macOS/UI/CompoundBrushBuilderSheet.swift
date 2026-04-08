@@ -48,7 +48,15 @@ struct CompoundBrushBuilderSheet: View {
             compoundPressureMixSection(brush: brush)
         }
         .padding(18)
-        .frame(minWidth: 960, idealWidth: 1040, minHeight: 720, idealHeight: 780, alignment: .topLeading)
+        .frame(
+            minWidth: 1100,
+            idealWidth: 1180,
+            maxWidth: 1240,
+            minHeight: 940,
+            idealHeight: 1020,
+            maxHeight: 1080,
+            alignment: .topLeading
+        )
         .background(Color(red: 0.10, green: 0.10, blue: 0.11))
         .onAppear {
             scheduleInitialPreviews(for: brush)
@@ -63,32 +71,50 @@ struct CompoundBrushBuilderSheet: View {
     }
 
     private func header(brush: BrushSettings) -> some View {
-        HStack(spacing: 12) {
-            Text("组合笔刷")
-                .font(.system(size: 22, weight: .bold))
-                .foregroundStyle(.white)
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 12) {
+                Text("组合笔刷")
+                    .font(.system(size: 22, weight: .bold))
+                    .foregroundStyle(.white)
 
-            Spacer()
+                Spacer()
 
-            Button("刷新主次预览") {
-                refreshTipPreviews(for: brush)
-            }
-            .buttonStyle(.bordered)
+                Button("刷新主次预览") {
+                    refreshTipPreviews(for: brush)
+                }
+                .buttonStyle(CompoundTextButtonStyle())
 
-            Toggle(
-                "启用组合笔刷",
-                isOn: Binding(
-                    get: { brush.compoundBrush.enabled },
-                    set: { viewModel.setCompoundBrushEnabled($0) }
+                Toggle(
+                    "启用组合笔刷",
+                    isOn: Binding(
+                        get: { brush.compoundBrush.enabled },
+                        set: { viewModel.setCompoundBrushEnabled($0) }
+                    )
                 )
-            )
-            .toggleStyle(.switch)
-            .labelsHidden()
+                .toggleStyle(.switch)
+                .labelsHidden()
 
             Button("完成") {
                 dismiss()
             }
             .buttonStyle(.borderedProminent)
+        }
+
+            HStack(spacing: 10) {
+                Text("混合模式")
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundStyle(Color.white.opacity(0.92))
+
+                HStack(spacing: 8) {
+                    ForEach(CompoundBrushMode.allCases, id: \.self) { mode in
+                        Button(mode.displayName) {
+                            viewModel.setCompoundBrushMode(mode)
+                            refreshStrokePreview(for: viewModel.workspace.toolSession.brush)
+                        }
+                        .buttonStyle(CompoundModeButtonStyle(isSelected: brush.compoundBrush.mode == mode))
+                    }
+                }
+            }
         }
     }
 
@@ -102,7 +128,7 @@ struct CompoundBrushBuilderSheet: View {
                     Button("刷新真实预览") {
                         refreshStrokePreview(for: brush)
                     }
-                    .buttonStyle(.bordered)
+                    .buttonStyle(CompoundTextButtonStyle())
                 }
 
                 OptimizedLabeledSlider(
@@ -141,7 +167,7 @@ struct CompoundBrushBuilderSheet: View {
 
                         Text(primaryTipSummary(for: brush))
                             .font(.system(size: 11))
-                            .foregroundStyle(Color.white.opacity(0.62))
+                            .foregroundStyle(Color.white.opacity(0.82))
                             .fixedSize(horizontal: false, vertical: true)
                     }
                     .frame(maxWidth: .infinity, alignment: .topLeading)
@@ -232,32 +258,59 @@ struct CompoundBrushBuilderSheet: View {
                                 refreshTipPreviews(for: viewModel.workspace.toolSession.brush)
                                 refreshStrokePreview(for: viewModel.workspace.toolSession.brush)
                             }
+
+                            Spacer(minLength: 0)
+
+                            Button("相对主笔尖") {
+                                viewModel.setCompoundSecondaryUsesRelativeSize(secondary.sizeMode != .relativeToPrimary)
+                                let updatedBrush = viewModel.workspace.toolSession.brush
+                                refreshTipPreviews(for: updatedBrush)
+                                refreshStrokePreview(for: updatedBrush)
+                            }
+                            .buttonStyle(
+                                CompoundModeButtonStyle(
+                                    isSelected: secondary.sizeMode == .relativeToPrimary
+                                )
+                            )
                         }
 
-                        Picker(
-                            "形状",
-                            selection: Binding(
-                                get: { secondary.tipShape },
-                                set: { viewModel.setCompoundSecondaryTipShape($0) }
-                            )
-                        ) {
-                            Text("硬边").tag(BrushTipShape.hardRound)
-                            Text("柔边").tag(BrushTipShape.softRound)
-                            Text("方形").tag(BrushTipShape.square)
-                            Text("自定义").tag(BrushTipShape.customRound)
+                        HStack(spacing: 6) {
+                            ForEach(
+                                [BrushTipShape.hardRound, .softRound, .square, .customRound],
+                                id: \.self
+                            ) { tipShape in
+                                Button(tipShape.displayName) {
+                                    viewModel.setCompoundSecondaryTipShape(tipShape)
+                                    refreshTipPreviews(for: viewModel.workspace.toolSession.brush)
+                                    refreshStrokePreview(for: viewModel.workspace.toolSession.brush)
+                                }
+                                .buttonStyle(CompoundModeButtonStyle(isSelected: secondary.tipShape == tipShape))
+                            }
                         }
-                        .pickerStyle(.segmented)
                     }
                     .frame(maxWidth: .infinity, alignment: .topLeading)
                 }
 
                 OptimizedCompactSlider(
                     title: "大小",
-                    valueText: "\(Int(secondary.size)) px",
-                    value: Binding(get: { Double(secondary.size) }, set: { _ in }),
-                    range: 1...512
+                    valueText: secondary.sizeMode == .relativeToPrimary
+                        ? "\(Int(secondary.relativeSizeRatio * 100))%"
+                        : "\(Int(secondary.size)) px",
+                    value: Binding(
+                        get: {
+                            secondary.sizeMode == .relativeToPrimary
+                                ? Double(secondary.relativeSizeRatio * 100)
+                                : Double(secondary.size)
+                        },
+                        set: { _ in }
+                    ),
+                    range: secondary.sizeMode == .relativeToPrimary ? 5...400 : 1...512
                 ) {
-                    viewModel.setCompoundSecondarySize(Float($0))
+                    if secondary.sizeMode == .relativeToPrimary {
+                        viewModel.setCompoundSecondaryRelativeSizeRatio(Float($0 / 100))
+                    } else {
+                        viewModel.setCompoundSecondarySize(Float($0))
+                    }
                 }
 
                 OptimizedCompactSlider(
@@ -314,44 +367,54 @@ struct CompoundBrushBuilderSheet: View {
         let mix = brush.compoundBrush.pressureMix
 
         return compoundCard(title: "主次迁移") {
-            VStack(alignment: .leading, spacing: 10) {
-                CompoundPressureCurvePreview(
-                    low: Double(mix.primaryAtLowPressure),
-                    mid: Double(mix.primaryAtMidPressure),
-                    high: Double(mix.primaryAtHighPressure)
-                )
-                .frame(height: 110)
+            HStack(alignment: .top, spacing: 16) {
+                VStack(alignment: .leading, spacing: 8) {
+                    CompoundPressureCurvePreview(
+                        low: Double(mix.primaryAtLowPressure),
+                        mid: Double(mix.primaryAtMidPressure),
+                        high: Double(mix.primaryAtHighPressure)
+                    )
+                    .frame(maxWidth: .infinity, minHeight: 118, maxHeight: 118)
 
-                OptimizedLabeledSlider(
-                    title: "低压主占比",
-                    valueText: "\(Int(mix.primaryAtLowPressure * 100))%",
-                    value: Binding(get: { Double(mix.primaryAtLowPressure) }, set: { _ in }),
-                    range: 0...1
-                ) {
-                    viewModel.setCompoundPrimaryMixAtLowPressure(Float($0))
+                    Text("曲线只负责决定轻压到重压时，主笔尖逐步接管的节奏。")
+                        .font(.system(size: 11))
+                        .foregroundStyle(Color.white.opacity(0.62))
                 }
+                .frame(maxWidth: .infinity, alignment: .topLeading)
 
-                OptimizedLabeledSlider(
-                    title: "中压主占比",
-                    valueText: "\(Int(mix.primaryAtMidPressure * 100))%",
-                    value: Binding(get: { Double(mix.primaryAtMidPressure) }, set: { _ in }),
-                    range: 0...1
-                ) {
-                    viewModel.setCompoundPrimaryMixAtMidPressure(Float($0))
+                VStack(alignment: .leading, spacing: 10) {
+                    OptimizedCompactSlider(
+                        title: "低压主占比",
+                        valueText: "\(Int(mix.primaryAtLowPressure * 100))%",
+                        value: Binding(get: { Double(mix.primaryAtLowPressure) }, set: { _ in }),
+                        range: 0...1
+                    ) {
+                        viewModel.setCompoundPrimaryMixAtLowPressure(Float($0))
+                    }
+
+                    OptimizedCompactSlider(
+                        title: "中压主占比",
+                        valueText: "\(Int(mix.primaryAtMidPressure * 100))%",
+                        value: Binding(get: { Double(mix.primaryAtMidPressure) }, set: { _ in }),
+                        range: 0...1
+                    ) {
+                        viewModel.setCompoundPrimaryMixAtMidPressure(Float($0))
+                    }
+
+                    OptimizedCompactSlider(
+                        title: "高压主占比",
+                        valueText: "\(Int(mix.primaryAtHighPressure * 100))%",
+                        value: Binding(get: { Double(mix.primaryAtHighPressure) }, set: { _ in }),
+                        range: 0...1
+                    ) {
+                        viewModel.setCompoundPrimaryMixAtHighPressure(Float($0))
+                    }
+
+                    Text("轻压更偏次笔尖，重压更偏主笔尖；最终边界始终受主笔尖包络约束。")
+                        .font(.system(size: 11))
+                        .foregroundStyle(Color.white.opacity(0.62))
                 }
-
-                OptimizedLabeledSlider(
-                    title: "高压主占比",
-                    valueText: "\(Int(mix.primaryAtHighPressure * 100))%",
-                    value: Binding(get: { Double(mix.primaryAtHighPressure) }, set: { _ in }),
-                    range: 0...1
-                ) {
-                    viewModel.setCompoundPrimaryMixAtHighPressure(Float($0))
-                }
-
-                Text("轻压更偏次笔尖，重压更偏主笔尖；最终边界始终受主笔尖包络约束。")
-                    .font(.system(size: 11))
-                    .foregroundStyle(Color.white.opacity(0.62))
+                .frame(width: 360, alignment: .topLeading)
             }
         }
     }
@@ -418,7 +481,7 @@ struct CompoundBrushBuilderSheet: View {
         preview.customTipRoundness = secondary.roundness
         preview.customTipAngleDegrees = secondary.angleDegrees
         preview.followsStrokeDirection = secondary.followsStrokeDirection
-        preview.size = secondary.size
+        preview.size = secondary.resolvedBaseSize(for: brush.size)
         preview.spacingPercent = secondary.spacingPercent
         preview.pressureSizeAmount = secondary.pressureSizeAmount
         preview.pressureOpacityAmount = secondary.pressureOpacityAmount
@@ -605,6 +668,55 @@ private struct CompoundPressureCurvePreview: View {
     }
 }
 
+private struct CompoundTextButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.system(size: 12, weight: .bold))
+            .foregroundStyle(Color.white.opacity(configuration.isPressed ? 0.84 : 0.96))
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(
+                RoundedRectangle(cornerRadius: 10)
+                    .fill(Color.white.opacity(configuration.isPressed ? 0.18 : 0.12))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 10)
+                    .stroke(Color.white.opacity(0.16), lineWidth: 1)
+            )
+    }
+}
+
+private struct CompoundModeButtonStyle: ButtonStyle {
+    let isSelected: Bool
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.system(size: 12, weight: .bold))
+            .foregroundStyle(
+                isSelected
+                    ? Color.white
+                    : Color.white.opacity(configuration.isPressed ? 0.84 : 0.92)
+            )
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .background(
+                RoundedRectangle(cornerRadius: 9)
+                    .fill(
+                        isSelected
+                            ? Color.accentColor.opacity(configuration.isPressed ? 0.82 : 0.96)
+                            : Color.white.opacity(configuration.isPressed ? 0.16 : 0.10)
+                    )
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 9)
+                    .stroke(
+                        isSelected ? Color.accentColor.opacity(0.92) : Color.white.opacity(0.14),
+                        lineWidth: 1
+                    )
+            )
+    }
+}
+
 private extension CompoundBrushBuilderSheet {
     func compoundCard<Content: View>(title: String, @ViewBuilder content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -652,7 +764,16 @@ private extension CompoundBrushBuilderSheet {
                 .labelStyle(.iconOnly)
                 .frame(width: 30, height: 30)
         }
-        .buttonStyle(.bordered)
+        .foregroundStyle(Color.white.opacity(0.94))
+        .background(
+            RoundedRectangle(cornerRadius: 9)
+                .fill(Color.white.opacity(0.12))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 9)
+                .stroke(Color.white.opacity(0.14), lineWidth: 1)
+        )
+        .buttonStyle(.plain)
         .help(title)
     }
 }
