@@ -36,6 +36,7 @@ private struct BrushUniforms {
     var compoundSecondarySoftness: Float
     var compoundSecondaryRoundness: Float
     var compoundSecondaryAngleDegrees: Float
+    var compoundSecondaryTileRandomRotation: Float
     var compoundArcLengthAtCenter: Float
     var compoundStrokeTangent: SIMD2<Float>
 }
@@ -186,6 +187,7 @@ final class StageOneBrushRenderer {
             float compoundSecondarySoftness;
             float compoundSecondaryRoundness;
             float compoundSecondaryAngleDegrees;
+            float compoundSecondaryTileRandomRotation;
             float compoundArcLengthAtCenter;
             float2 compoundStrokeTangent;
         };
@@ -390,15 +392,25 @@ final class StageOneBrushRenderer {
             float secondaryHalfDiameter = secondaryDiameterPx * 0.5;
             float repeatIndex = floor((sPx / secondaryAdvancePx) + 0.5);
 
-            // Sample the two nearest secondary repeat centers and take max to avoid hard seams.
+            // Sample nearest secondary repeat centers with per-tile random rotation.
             float secondaryField = 0.0;
             for (int di = -1; di <= 1; di++) {
-                float neighborCenter = (repeatIndex + float(di)) * secondaryAdvancePx;
+                float idx = repeatIndex + float(di);
+                float neighborCenter = idx * secondaryAdvancePx;
                 float2 neighborPoint = float2(
                     (sPx - neighborCenter) / secondaryHalfDiameter,
                     tPx / secondaryHalfDiameter
                 );
-                float sample = compoundSecondaryTipAlpha(neighborPoint, uniforms, compoundSecondaryTipMask);
+                // Random rotation per tile, amount controlled by uniform (0=none, 1=full 360°)
+                float tileAngle = fract(sin(idx * 127.1 + 311.7) * 43758.5453) * 6.2831853
+                    * uniforms.compoundSecondaryTileRandomRotation;
+                float ca = cos(tileAngle);
+                float sa = sin(tileAngle);
+                float2 rotated = float2(
+                    neighborPoint.x * ca - neighborPoint.y * sa,
+                    neighborPoint.x * sa + neighborPoint.y * ca
+                );
+                float sample = compoundSecondaryTipAlpha(rotated, uniforms, compoundSecondaryTipMask);
                 secondaryField = max(secondaryField, sample);
             }
             secondaryField *= uniforms.compoundSecondaryOpacityFactor;
@@ -1546,6 +1558,7 @@ final class StageOneBrushRenderer {
             compoundSecondarySoftness: compoundSecondary.softness,
             compoundSecondaryRoundness: compoundSecondary.roundness,
             compoundSecondaryAngleDegrees: compoundSecondaryAngleDegrees,
+            compoundSecondaryTileRandomRotation: compoundSecondary.tileRandomRotation,
             compoundArcLengthAtCenter: sample.arcLengthPx,
             compoundStrokeTangent: tangent
         )

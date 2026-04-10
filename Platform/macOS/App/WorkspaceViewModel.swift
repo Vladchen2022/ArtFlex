@@ -854,6 +854,13 @@ final class WorkspaceViewModel: ObservableObject {
         refresh()
     }
 
+    func setCompoundSecondaryTileRandomRotation(_ amount: Float) {
+        bootstrap.workspaceStore.updateToolSession { session in
+            session.brush.compoundBrush.secondary.tileRandomRotation = min(max(amount, 0), 1)
+        }
+        refresh()
+    }
+
     func setCompoundSecondarySizeCurve(low: Float, mid: Float, high: Float) {
         bootstrap.workspaceStore.updateToolSession { session in
             session.brush.compoundBrush.secondary.sizeCurveLow = min(max(low, 0), 0.85)

@@ -373,6 +373,7 @@ struct CompoundSecondaryTipSettings: Codable, Equatable, Sendable {
         case opacityCurveLow
         case opacityCurveMid
         case opacityCurveHigh
+        case tileRandomRotation
     }
 
     var tipShape: BrushTipShape
@@ -402,6 +403,9 @@ struct CompoundSecondaryTipSettings: Codable, Equatable, Sendable {
     var opacityCurveMid: Float
     var opacityCurveHigh: Float
 
+    /// 0 = no random rotation, 1 = full 360° random rotation per tile
+    var tileRandomRotation: Float
+
     static let `default` = CompoundSecondaryTipSettings(
         tipShape: .softRound,
         sourceSemantic: .procedural,
@@ -423,7 +427,8 @@ struct CompoundSecondaryTipSettings: Codable, Equatable, Sendable {
         sizeCurveHigh: 1.00,
         opacityCurveLow: 0.20,
         opacityCurveMid: 0.60,
-        opacityCurveHigh: 1.00
+        opacityCurveHigh: 1.00,
+        tileRandomRotation: 1.0
     )
 
     func resolvedSizeFactor(for pressure: Float) -> Float {
@@ -479,7 +484,8 @@ struct CompoundSecondaryTipSettings: Codable, Equatable, Sendable {
         sizeCurveHigh: Float,
         opacityCurveLow: Float,
         opacityCurveMid: Float,
-        opacityCurveHigh: Float
+        opacityCurveHigh: Float,
+        tileRandomRotation: Float = 1.0
     ) {
         self.tipShape = tipShape
         self.sourceSemantic = sourceSemantic
@@ -502,6 +508,7 @@ struct CompoundSecondaryTipSettings: Codable, Equatable, Sendable {
         self.opacityCurveLow = opacityCurveLow
         self.opacityCurveMid = opacityCurveMid
         self.opacityCurveHigh = opacityCurveHigh
+        self.tileRandomRotation = tileRandomRotation
     }
 
     init(from decoder: Decoder) throws {
@@ -529,6 +536,7 @@ struct CompoundSecondaryTipSettings: Codable, Equatable, Sendable {
         opacityCurveLow = try container.decodeIfPresent(Float.self, forKey: .opacityCurveLow) ?? defaults.opacityCurveLow
         opacityCurveMid = try container.decodeIfPresent(Float.self, forKey: .opacityCurveMid) ?? defaults.opacityCurveMid
         opacityCurveHigh = try container.decodeIfPresent(Float.self, forKey: .opacityCurveHigh) ?? defaults.opacityCurveHigh
+        tileRandomRotation = try container.decodeIfPresent(Float.self, forKey: .tileRandomRotation) ?? defaults.tileRandomRotation
     }
 
     func encode(to encoder: Encoder) throws {
@@ -554,6 +562,7 @@ struct CompoundSecondaryTipSettings: Codable, Equatable, Sendable {
         try container.encode(opacityCurveLow, forKey: .opacityCurveLow)
         try container.encode(opacityCurveMid, forKey: .opacityCurveMid)
         try container.encode(opacityCurveHigh, forKey: .opacityCurveHigh)
+        try container.encode(tileRandomRotation, forKey: .tileRandomRotation)
     }
 }
 

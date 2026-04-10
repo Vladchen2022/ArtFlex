@@ -163,6 +163,15 @@ struct CompoundBrushBuilderSheet: View {
                                 primaryPendingSelection = brush.customTipAssetID
                                 tipLibraryTarget = .primary
                             }
+
+                            Spacer(minLength: 0)
+
+                            Button(brush.followsStrokeDirection ? "跟随笔势" : "跟随笔势") {
+                                viewModel.setBrushFollowsStrokeDirection(!brush.followsStrokeDirection)
+                            }
+                            .buttonStyle(
+                                CompoundModeButtonStyle(isSelected: brush.followsStrokeDirection)
+                            )
                         }
 
                         Text(primaryTipSummary(for: brush))
@@ -199,17 +208,6 @@ struct CompoundBrushBuilderSheet: View {
                 ) {
                     viewModel.setBrushStampRotationDegrees(Float($0))
                 }
-
-                Toggle(
-                    "跟随笔势",
-                    isOn: Binding(
-                        get: { brush.followsStrokeDirection },
-                        set: { viewModel.setBrushFollowsStrokeDirection($0) }
-                    )
-                )
-                .toggleStyle(.switch)
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(Color.white.opacity(0.84))
 
                 OptimizedCompactSlider(
                     title: "大小压感",
@@ -261,7 +259,14 @@ struct CompoundBrushBuilderSheet: View {
 
                             Spacer(minLength: 0)
 
-                            Button("相对主笔尖") {
+                            Button("跟随笔势") {
+                                viewModel.setCompoundSecondaryFollowsStrokeDirection(!secondary.followsStrokeDirection)
+                            }
+                            .buttonStyle(
+                                CompoundModeButtonStyle(isSelected: secondary.followsStrokeDirection)
+                            )
+
+                            Button("相对") {
                                 viewModel.setCompoundSecondaryUsesRelativeSize(secondary.sizeMode != .relativeToPrimary)
                                 let updatedBrush = viewModel.workspace.toolSession.brush
                                 refreshTipPreviews(for: updatedBrush)
@@ -331,16 +336,14 @@ struct CompoundBrushBuilderSheet: View {
                     viewModel.setCompoundSecondaryTipAngleDegrees(Float($0))
                 }
 
-                Toggle(
-                    "跟随笔势",
-                    isOn: Binding(
-                        get: { secondary.followsStrokeDirection },
-                        set: { viewModel.setCompoundSecondaryFollowsStrokeDirection($0) }
-                    )
-                )
-                .toggleStyle(.switch)
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(Color.white.opacity(0.84))
+                OptimizedCompactSlider(
+                    title: "随机旋转",
+                    valueText: "\(Int(secondary.tileRandomRotation * 100))%",
+                    value: Binding(get: { Double(secondary.tileRandomRotation) }, set: { _ in }),
+                    range: 0...1
+                ) {
+                    viewModel.setCompoundSecondaryTileRandomRotation(Float($0))
+                }
 
                 OptimizedCompactSlider(
                     title: "大小压感",
