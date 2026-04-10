@@ -387,42 +387,48 @@ final class StageOneBrushRenderer {
 
             float secondaryAdvancePx = max(uniforms.compoundSecondaryAdvancePx, 1.0);
             float secondaryDiameterPx = max(uniforms.compoundSecondaryDiameterPx, 1.0);
+            float secondaryHalfDiameter = secondaryDiameterPx * 0.5;
             float repeatIndex = floor((sPx / secondaryAdvancePx) + 0.5);
-            float repeatCenterS = repeatIndex * secondaryAdvancePx;
-            float2 secondaryPoint = float2(
-                (sPx - repeatCenterS) / (secondaryDiameterPx * 0.5),
-                tPx / (secondaryDiameterPx * 0.5)
-            );
 
-            float secondaryField = compoundSecondaryTipAlpha(
-                secondaryPoint,
-                uniforms,
-                compoundSecondaryTipMask
-            ) * uniforms.compoundSecondaryOpacityFactor;
+            // Sample the two nearest secondary repeat centers and take max to avoid hard seams.
+            float secondaryField = 0.0;
+            for (int di = -1; di <= 1; di++) {
+                float neighborCenter = (repeatIndex + float(di)) * secondaryAdvancePx;
+                float2 neighborPoint = float2(
+                    (sPx - neighborCenter) / secondaryHalfDiameter,
+                    tPx / secondaryHalfDiameter
+                );
+                float sample = compoundSecondaryTipAlpha(neighborPoint, uniforms, compoundSecondaryTipMask);
+                secondaryField = max(secondaryField, sample);
+            }
+            secondaryField *= uniforms.compoundSecondaryOpacityFactor;
 
-            float lowAppearance = primaryEnvelope * secondaryField;
-            float highAppearance = primaryEnvelope * uniforms.compoundPrimaryOpacityFactor;
-            float compoundAppearance = lowAppearance;
+            float mixWeight = clamp(uniforms.compoundPrimaryMixWeight, 0.0, 1.0);
 
+            // Secondary texture field (evaluated in stroke-space, continuous across stamps)
+            float compoundAppearance;
             switch (uniforms.compoundMode) {
-                case 1:
-                    compoundAppearance = primaryEnvelope * (1.0 - secondaryField);
+                case 1: // subtract
+                    compoundAppearance = 1.0 - secondaryField;
                     break;
-                case 2:
-                    compoundAppearance = primaryEnvelope * secondaryField;
+                case 2: // intersect
+                    compoundAppearance = secondaryField;
                     break;
-                default:
-                    compoundAppearance = lowAppearance;
+                default: // textureBlend
+                    compoundAppearance = secondaryField;
                     break;
             }
 
-            float mixedAppearance = mix(
-                compoundAppearance,
-                highAppearance,
-                clamp(uniforms.compoundPrimaryMixWeight, 0.0, 1.0)
-            );
+            // Secondary texture always present. Primary adds on top, controlled by pressure.
+            // High pressure: primary body + secondary texture both visible.
+            // Low pressure: primary fades away, secondary texture remains.
+            float primaryBody = uniforms.compoundPrimaryOpacityFactor * mixWeight;
+            float interior = primaryBody + (1.0 - primaryBody) * compoundAppearance;
 
-            return min(mixedAppearance, primaryEnvelope);
+            // ALWAYS clip by primaryEnvelope — stroke boundary stays sharp at all pressures.
+            // Max-blend (opacityCap) across overlapping stamps ensures interior texture is
+            // one-layer only, while envelope overlap creates smooth interior fill.
+            return interior * primaryEnvelope;
         }
 
         float srgbChannelToLinear(float value) {

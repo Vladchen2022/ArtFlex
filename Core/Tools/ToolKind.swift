@@ -302,7 +302,7 @@ struct CompoundPressureMixSettings: Codable, Equatable, Sendable {
     var primaryAtHighPressure: Float
 
     static let `default` = CompoundPressureMixSettings(
-        primaryAtLowPressure: 0.10,
+        primaryAtLowPressure: 0.0,
         primaryAtMidPressure: 0.45,
         primaryAtHighPressure: 1.00
     )
@@ -408,14 +408,14 @@ struct CompoundSecondaryTipSettings: Codable, Equatable, Sendable {
         tipAssetID: nil,
         importedSourceInfo: nil,
         customTipMaskData: nil,
-        softness: 0.35,
+        softness: 0.45,
         roundness: 1.0,
         angleDegrees: 0,
         followsStrokeDirection: false,
-        sizeMode: .absolutePixels,
+        sizeMode: .relativeToPrimary,
         size: 24,
-        relativeSizeRatio: 1.0,
-        spacingPercent: 70,
+        relativeSizeRatio: 1.8,
+        spacingPercent: 25,
         pressureSizeAmount: 0.30,
         pressureOpacityAmount: 1.00,
         sizeCurveLow: 0.20,
