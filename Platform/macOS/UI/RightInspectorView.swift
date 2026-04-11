@@ -699,13 +699,13 @@ struct RightInspectorView: View {
 
             OptimizedCompactSlider(
                 title: "杂色",
-                valueText: "\(Int(viewModel.workspace.toolSession.brush.colorJitterAmount * 100))%",
+                valueText: "\(Int(viewModel.workspace.toolSession.brush.paintJitterAmount * 100))%",
                 value: Binding(
-                    get: { Double(viewModel.workspace.toolSession.brush.colorJitterAmount) },
+                    get: { Double(viewModel.workspace.toolSession.brush.paintJitterAmount) },
                     set: { _ in }
                 ),
                 range: 0...1,
-                onCommit: { viewModel.setBrushColorJitterAmount(Float($0)) }
+                onCommit: { viewModel.setPaintJitterAmount(Float($0)) }
             )
 
             OptimizedCompactSlider(
@@ -3636,10 +3636,10 @@ final class ColorSVPickerNSView: NSView {
         let displayY = isDragging ? CGFloat(localY) : CGFloat(panel.pickerY)
         let cx = displayX * bounds.width
         let cy = displayY * bounds.height
-        let r: CGFloat = 11
+        let r: CGFloat = 6
         let circle = CGRect(x: cx - r, y: cy - r, width: r * 2, height: r * 2)
         ctx.setStrokeColor(NSColor.white.cgColor)
-        ctx.setLineWidth(3)
+        ctx.setLineWidth(2)
         ctx.strokeEllipse(in: circle)
         ctx.setShadow(offset: CGSize(width: 0, height: -1), blur: 2, color: NSColor.black.withAlphaComponent(0.35).cgColor)
     }
@@ -3670,16 +3670,16 @@ private struct ColorHueStripView: View {
                 }
 
                 Rectangle()
-                    .stroke(Color.white, lineWidth: 3)
-                    .frame(width: proxy.size.width - 4, height: 12)
+                    .stroke(Color.white, lineWidth: 1.5)
+                    .frame(width: proxy.size.width - 2, height: 4)
                     .position(
                         x: proxy.size.width / 2,
                         y: min(
-                            max(CGFloat(displayHue / 360.0) * proxy.size.height, 6),
-                            proxy.size.height - 6
+                            max(CGFloat(displayHue / 360.0) * proxy.size.height, 2),
+                            proxy.size.height - 2
                         )
                     )
-                    .shadow(color: .black.opacity(0.35), radius: 2, x: 0, y: 1)
+                    .shadow(color: .black.opacity(0.35), radius: 1, x: 0, y: 1)
             }
             .clipped()
             .contentShape(Rectangle())

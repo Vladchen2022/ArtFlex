@@ -539,6 +539,13 @@ final class WorkspaceViewModel: ObservableObject {
         refresh()
     }
 
+    func setPaintJitterAmount(_ amount: Float) {
+        bootstrap.workspaceStore.updateToolSession { session in
+            session.brush.paintJitterAmount = min(max(amount, 0), 1)
+        }
+        refresh()
+    }
+
     func setBrushStampRotationDegrees(_ angleDegrees: Float) {
         bootstrap.workspaceStore.updateToolSession { session in
             var normalized = angleDegrees.truncatingRemainder(dividingBy: 360)

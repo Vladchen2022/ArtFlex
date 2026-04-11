@@ -13,6 +13,8 @@ private struct BrushUniforms {
     var opacity: Float
     var color: SIMD4<Float>
     var colorJitterAmount: Float
+    var paintJitterAmount: Float
+    var stampSeed: Float
     var jitterDirectionDegrees: Float
     var canvasSize: SIMD2<Float>
     var mode: UInt32
@@ -164,6 +166,8 @@ final class StageOneBrushRenderer {
             float opacity;
             float4 color;
             float colorJitterAmount;
+            float paintJitterAmount;
+            float stampSeed;
             float jitterDirectionDegrees;
             float2 canvasSize;
             uint mode;
@@ -550,6 +554,73 @@ final class StageOneBrushRenderer {
             return hsvToRgb(hsv);
         }
 
+        // Paint-like stripe jitter with many fine bands for oil-paint "pulled thread" feel.
+        float3 paintJitteredSrgbColor(
+            float3 srgbColor,
+            float2 localPoint,
+            constant BrushUniforms &uniforms
+        ) {
+            if (uniforms.paintJitterAmount <= 0.001) {
+                return srgbColor;
+            }
+
+            float amount = clamp(uniforms.paintJitterAmount, 0.0, 1.0);
+
+            // Project localPoint onto the jitter direction to get stripe coordinate
+            float radiansValue = uniforms.jitterDirectionDegrees * 0.017453292519943295;
+            float cosine = cos(radiansValue);
+            float sine = sin(radiansValue);
+            float2 rotatedPoint = float2(
+                (localPoint.x * cosine) + (localPoint.y * sine),
+                (-localPoint.x * sine) + (localPoint.y * cosine)
+            );
+
+            float stripeCoord = clamp((rotatedPoint.x + 1.0) * 0.5, 0.0, 1.0);
+
+            // 70 fine stripes for dense pulled-thread look
+            float stripeCount = 70.0;
+            float stripeIndex = floor(stripeCoord * stripeCount);
+
+            // Scatter adjacent stripes via golden ratio so neighbors never get similar colors
+            float scattered = fract(stripeIndex * 0.618033988749895) * stripeCount;
+            float hueRandom = hash11(scattered + 1001.0);
+            float satRandom = hash11(scattered + 1031.0);
+            float valRandom = hash11(scattered + 1061.0);
+            float complementRandom = hash11(scattered + 1091.0);
+
+            float3 hsv = rgbToHsv(srgbColor);
+
+            // Non-linear ramp: gentle at left, aggressive at right
+            float boost = pow(amount, 1.5);
+
+            // ~5% of stripes become very thin complementary accent lines
+            bool isComplement = (complementRandom > (0.97 - 0.02 * amount));
+
+            float hueOffset;
+            float satOffset;
+            float valOffset;
+
+            if (isComplement) {
+                // Complementary: shift hue by ~180° (±30° variation), keep vivid
+                hueOffset = 0.5 + ((hueRandom * 2.0) - 1.0) * 0.08;
+                satOffset = ((satRandom * 2.0) - 1.0) * 0.15;
+                valOffset = ((valRandom * 2.0) - 1.0) * 0.20;
+            } else {
+                // Normal stripe jitter
+                float hueRange = mix(0.05, 0.50, boost);
+                hueOffset = ((hueRandom * 2.0) - 1.0) * hueRange;
+                float satRange = mix(0.10, 0.60, boost);
+                satOffset = ((satRandom * 2.0) - 1.0) * satRange;
+                float valRange = mix(0.10, 0.45, boost);
+                valOffset = ((valRandom * 2.0) - 1.0) * valRange;
+            }
+
+            hsv.x = fract(hsv.x + hueOffset + 1.0);
+            hsv.y = clamp(hsv.y + satOffset, 0.0, 1.0);
+            hsv.z = clamp(hsv.z + valOffset, 0.0, 1.0);
+            return hsvToRgb(hsv);
+        }
+
         vertex CompositeVertexOut stageOneCompositeVertex(
             const device BrushVertex *vertices [[buffer(0)]],
             uint vertexID [[vertex_id]]
@@ -645,7 +716,7 @@ final class StageOneBrushRenderer {
 
             float4 inputColor = uniforms.color;
             float brushAlpha = inputColor.a * alpha;
-            float3 jitteredSrgb = jitteredSrgbColor(inputColor.rgb, in.localPoint, uniforms);
+            float3 jitteredSrgb = paintJitteredSrgbColor(inputColor.rgb, in.localPoint, uniforms);
             float3 linearRGB = srgbToLinear(jitteredSrgb);
             return float4(linearRGB * brushAlpha, brushAlpha);
         }
@@ -1530,6 +1601,8 @@ final class StageOneBrushRenderer {
                 stroke.color.alpha
             ),
             colorJitterAmount: stroke.brush.colorJitterAmount,
+            paintJitterAmount: stroke.brush.paintJitterAmount,
+            stampSeed: sample.arcLengthPx,
             jitterDirectionDegrees: sample.jitterDirectionDegrees + 90,
             canvasSize: SIMD2(Float(texture.width), Float(texture.height)),
             mode: modeOverride ?? (stroke.tool == .eraser ? 1 : 0),

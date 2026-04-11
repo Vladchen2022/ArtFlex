@@ -589,6 +589,7 @@ struct BrushSettings: Codable, Sendable, Equatable {
     var scatterAmount: Float
     var jitterAmount: Float
     var colorJitterAmount: Float
+    var paintJitterAmount: Float
     var stampRotationDegrees: Float
     var followsStrokeDirection: Bool
     var customTipSourceSemantic: TipSourceSemantic
@@ -620,6 +621,7 @@ struct BrushSettings: Codable, Sendable, Equatable {
         scatterAmount: 0,
         jitterAmount: 0,
         colorJitterAmount: 0,
+        paintJitterAmount: 0,
         stampRotationDegrees: 0,
         followsStrokeDirection: false,
         customTipSourceSemantic: .procedural,
@@ -652,6 +654,7 @@ struct BrushSettings: Codable, Sendable, Equatable {
         case scatterAmount
         case jitterAmount
         case colorJitterAmount
+        case paintJitterAmount
         case stampRotationDegrees
         case followsStrokeDirection
         case customTipSourceSemantic
@@ -684,6 +687,7 @@ struct BrushSettings: Codable, Sendable, Equatable {
         scatterAmount: Float,
         jitterAmount: Float,
         colorJitterAmount: Float = 0,
+        paintJitterAmount: Float = 0,
         stampRotationDegrees: Float,
         followsStrokeDirection: Bool,
         customTipSourceSemantic: TipSourceSemantic = .procedural,
@@ -714,6 +718,7 @@ struct BrushSettings: Codable, Sendable, Equatable {
         self.scatterAmount = scatterAmount
         self.jitterAmount = jitterAmount
         self.colorJitterAmount = colorJitterAmount
+        self.paintJitterAmount = paintJitterAmount
         self.stampRotationDegrees = stampRotationDegrees
         self.followsStrokeDirection = followsStrokeDirection
         self.customTipSourceSemantic = customTipSourceSemantic
@@ -749,6 +754,7 @@ struct BrushSettings: Codable, Sendable, Equatable {
         scatterAmount = try container.decodeIfPresent(Float.self, forKey: .scatterAmount) ?? defaults.scatterAmount
         jitterAmount = try container.decodeIfPresent(Float.self, forKey: .jitterAmount) ?? defaults.jitterAmount
         colorJitterAmount = try container.decodeIfPresent(Float.self, forKey: .colorJitterAmount) ?? defaults.colorJitterAmount
+        paintJitterAmount = try container.decodeIfPresent(Float.self, forKey: .paintJitterAmount) ?? defaults.paintJitterAmount
         stampRotationDegrees = try container.decodeIfPresent(Float.self, forKey: .stampRotationDegrees) ?? defaults.stampRotationDegrees
         followsStrokeDirection = try container.decodeIfPresent(Bool.self, forKey: .followsStrokeDirection) ?? defaults.followsStrokeDirection
         customTipSourceSemantic = try container.decodeIfPresent(TipSourceSemantic.self, forKey: .customTipSourceSemantic) ?? defaults.customTipSourceSemantic
