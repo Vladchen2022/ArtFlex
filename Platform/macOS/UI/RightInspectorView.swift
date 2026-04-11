@@ -35,8 +35,8 @@ struct RightInspectorView: View {
     @State private var showsPressureCurveEditor = false
     @State private var showsPressureSizeCurveEditor = false
     @State private var tipPaintMode: TipPaintMode = .round
-    @State private var tipPaintSoftness: Double = 0.35
-    @State private var tipPaintIntensity: Double = 1.0
+    @State private var tipPressureSizeAmount: Double = 0.0
+    @State private var tipPressureOpacityAmount: Double = 0.0
     @State private var presetShapeIndex = 0
     @State private var sprayPatternIndex = 0
     @State private var draggedBrushPresetID: String?
@@ -709,25 +709,25 @@ struct RightInspectorView: View {
             )
 
             OptimizedCompactSlider(
-                title: "压感",
-                valueText: String(format: "%.1f", viewModel.workspace.toolSession.brush.pressureSensitivity),
+                title: "大小压感",
+                valueText: "\(Int(viewModel.workspace.toolSession.brush.pressureSizeAmount * 100))%",
                 value: Binding(
-                    get: { Double(viewModel.workspace.toolSession.brush.pressureSensitivity) },
-                    set: { _ in }
-                ),
-                range: 0...2,
-                onCommit: { viewModel.setPressureSensitivity(Float($0)) }
-            )
-
-            OptimizedCompactSlider(
-                title: "尺寸下限",
-                valueText: "\(Int(viewModel.workspace.toolSession.brush.sizeLowerBound * 100))%",
-                value: Binding(
-                    get: { Double(viewModel.workspace.toolSession.brush.sizeLowerBound) },
+                    get: { Double(viewModel.workspace.toolSession.brush.pressureSizeAmount) },
                     set: { _ in }
                 ),
                 range: 0...1,
-                onCommit: { viewModel.setSizeLowerBound(Float($0)) }
+                onCommit: { viewModel.setPressureSizeAmount(Float($0)) }
+            )
+
+            OptimizedCompactSlider(
+                title: "透明压感",
+                valueText: "\(Int(viewModel.workspace.toolSession.brush.pressureOpacityAmount * 100))%",
+                value: Binding(
+                    get: { Double(viewModel.workspace.toolSession.brush.pressureOpacityAmount) },
+                    set: { _ in }
+                ),
+                range: 0...1,
+                onCommit: { viewModel.setPressureOpacityAmount(Float($0)) }
             )
 
             HStack(spacing: 8) {
@@ -1112,25 +1112,25 @@ struct RightInspectorView: View {
             // ⚡️ 优化：笔尖绘制参数使用本地状态，不需要触发 ViewModel
             // 这些滑块不影响实际笔刷，只影响笔尖编辑器
             OptimizedCompactSlider(
-                title: "柔边",
-                valueText: "\(Int(tipPaintSoftness * 100))%",
+                title: "大小压感",
+                valueText: "\(Int(tipPressureSizeAmount * 100))%",
                 value: Binding(
-                    get: { tipPaintSoftness },
+                    get: { tipPressureSizeAmount },
                     set: { _ in }
                 ),
                 range: 0...1,
-                onCommit: { tipPaintSoftness = $0 }
+                onCommit: { tipPressureSizeAmount = $0 }
             )
 
             OptimizedCompactSlider(
-                title: "灰度",
-                valueText: "\(Int(tipPaintIntensity * 100))%",
+                title: "透明压感",
+                valueText: "\(Int(tipPressureOpacityAmount * 100))%",
                 value: Binding(
-                    get: { tipPaintIntensity },
+                    get: { tipPressureOpacityAmount },
                     set: { _ in }
                 ),
-                range: 0.1...1,
-                onCommit: { tipPaintIntensity = $0 }
+                range: 0...1,
+                onCommit: { tipPressureOpacityAmount = $0 }
             )
 
             HStack(spacing: 8) {
@@ -1584,8 +1584,8 @@ struct RightInspectorView: View {
                 ),
                 fitImportedPreview: effectivePrimaryTipSourceSemantic(for: viewModel.workspace.toolSession.brush).usesImportedPreviewFit,
                 paintMode: tipPaintMode,
-                softness: Float(tipPaintSoftness),
-                intensity: Float(tipPaintIntensity),
+                pressureSizeAmount: Float(tipPressureSizeAmount),
+                pressureOpacityAmount: Float(tipPressureOpacityAmount),
                 brushSize: viewModel.workspace.toolSession.brush.size,
                 onFocusChanged: { isFocused in
                     viewModel.setBrushTipCanvasFocused(isFocused)
@@ -2115,13 +2115,13 @@ struct RightInspectorView: View {
     private func insertNextPresetShape() {
         let nextIndex = presetShapeIndex % 4
         presetShapeIndex += 1
-        viewModel.updateCustomTipMask(makePresetTipMask(for: nextIndex, intensity: UInt8((tipPaintIntensity * 255).rounded())))
+        viewModel.updateCustomTipMask(makePresetTipMask(for: nextIndex, intensity: 255))
     }
 
     private func insertNextSprayPattern() {
         let nextIndex = sprayPatternIndex % 4
         sprayPatternIndex += 1
-        viewModel.updateCustomTipMask(makeSprayTipMask(for: nextIndex, intensity: UInt8((tipPaintIntensity * 255).rounded())))
+        viewModel.updateCustomTipMask(makeSprayTipMask(for: nextIndex, intensity: 255))
     }
 
     private func rotateCustomTip() {
@@ -4056,8 +4056,8 @@ private struct TipMaskCanvasView: NSViewRepresentable {
     let syncToken: String
     let fitImportedPreview: Bool
     let paintMode: TipPaintMode
-    let softness: Float
-    let intensity: Float
+    let pressureSizeAmount: Float
+    let pressureOpacityAmount: Float
     let brushSize: Float
     let onFocusChanged: (Bool) -> Void
     let onImportImage: (NSImage) -> Void
@@ -4075,8 +4075,8 @@ private struct TipMaskCanvasView: NSViewRepresentable {
             syncToken: syncToken,
             fitImportedPreview: fitImportedPreview,
             paintMode: paintMode,
-            softness: softness,
-            intensity: intensity,
+            pressureSizeAmount: pressureSizeAmount,
+            pressureOpacityAmount: pressureOpacityAmount,
             brushSize: brushSize
         )
         return view
@@ -4089,8 +4089,8 @@ private struct TipMaskCanvasView: NSViewRepresentable {
             syncToken: syncToken,
             fitImportedPreview: fitImportedPreview,
             paintMode: paintMode,
-            softness: softness,
-            intensity: intensity,
+            pressureSizeAmount: pressureSizeAmount,
+            pressureOpacityAmount: pressureOpacityAmount,
             brushSize: brushSize
         )
     }
@@ -4117,8 +4117,8 @@ private final class TipMaskEditorNSView: NSView {
 
     private var maskBytes = [UInt8](repeating: 0, count: tipMaskResolution * tipMaskResolution)
     private var paintMode: TipPaintMode = .round
-    private var softness: Float = 0.35
-    private var intensity: Float = 1
+    private var pressureSizeAmount: Float = 0.0
+    private var pressureOpacityAmount: Float = 0.0
     private var brushSize: Float = 24
     private var fitImportedPreview = false
     private var lastPaintPoint: CGPoint?
@@ -4127,6 +4127,7 @@ private final class TipMaskEditorNSView: NSView {
     private var externalSyncToken = ""
     private var livePreviewImage: CGImage?
     private var livePreviewImageDirty = true
+    private var accumulatedDirtyRect: CGRect = .null
 
     override var isFlipped: Bool { true }
     override var acceptsFirstResponder: Bool { true }
@@ -4148,13 +4149,13 @@ private final class TipMaskEditorNSView: NSView {
         syncToken: String,
         fitImportedPreview: Bool,
         paintMode: TipPaintMode,
-        softness: Float,
-        intensity: Float,
+        pressureSizeAmount: Float,
+        pressureOpacityAmount: Float,
         brushSize: Float
     ) {
         self.paintMode = paintMode
-        self.softness = softness
-        self.intensity = intensity
+        self.pressureSizeAmount = pressureSizeAmount
+        self.pressureOpacityAmount = pressureOpacityAmount
         self.brushSize = brushSize
 
         if syncToken != externalSyncToken {
@@ -4218,18 +4219,21 @@ private final class TipMaskEditorNSView: NSView {
         window?.makeFirstResponder(self)
         coordinator?.onFocusChanged(true)
         let point = convert(event.locationInWindow, from: nil)
+        let pressure = Float(event.pressure)
         hoverLocation = point
         lastPaintPoint = point
         hasLocalChanges = true
         fitImportedPreview = false
         livePreviewImageDirty = true
-        paintSegment(from: point, to: point)
+        accumulatedDirtyRect = .null
+        paintSegment(from: point, to: point, pressure: max(pressure, 0.1))
     }
 
     override func mouseDragged(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
+        let pressure = Float(event.pressure)
         hoverLocation = point
-        paintSegment(from: lastPaintPoint ?? point, to: point)
+        paintSegment(from: lastPaintPoint ?? point, to: point, pressure: max(pressure, 0.1))
         lastPaintPoint = point
     }
 
@@ -4237,9 +4241,12 @@ private final class TipMaskEditorNSView: NSView {
         hoverLocation = convert(event.locationInWindow, from: nil)
         lastPaintPoint = nil
         if hasLocalChanges {
+            livePreviewImageDirty = true
+            needsDisplay = true
             coordinator?.onUpdateMask(Data(maskBytes))
             hasLocalChanges = false
         }
+        accumulatedDirtyRect = .null
         needsDisplay = true
     }
 
@@ -4294,9 +4301,13 @@ private final class TipMaskEditorNSView: NSView {
         return true
     }
 
-    private func paintSegment(from start: CGPoint, to end: CGPoint) {
-        let radius = currentRadius()
-        let step = max(radius * 0.35, 1)
+    private func paintSegment(from start: CGPoint, to end: CGPoint, pressure: Float) {
+        let baseRadius = currentRadius()
+        // Pressure affects size: pressureSizeAmount=1 means full pressure control (light=small),
+        // pressureSizeAmount=0 means no pressure effect on size
+        let sizeFactor = Double(1.0 - pressureSizeAmount + pressureSizeAmount * pressure)
+        let effectiveRadius = baseRadius * sizeFactor
+        let step = max(effectiveRadius * 0.35, 1)
         let dx = end.x - start.x
         let dy = end.y - start.y
         let distance = sqrt((dx * dx) + (dy * dy))
@@ -4308,14 +4319,18 @@ private final class TipMaskEditorNSView: NSView {
                 x: start.x + (dx * t),
                 y: start.y + (dy * t)
             )
-            paintStamp(at: point, radius: radius)
+            paintStamp(at: point, radius: effectiveRadius, pressure: pressure)
         }
 
-        livePreviewImageDirty = true
-        needsDisplay = true
+        // Incremental dirty-rect display instead of full redraw
+        if !accumulatedDirtyRect.isNull {
+            livePreviewImageDirty = true
+            setNeedsDisplay(accumulatedDirtyRect.insetBy(dx: -2, dy: -2))
+            accumulatedDirtyRect = .null
+        }
     }
 
-    private func paintStamp(at location: CGPoint, radius: Double) {
+    private func paintStamp(at location: CGPoint, radius: Double, pressure: Float) {
         let editableRect = previewDrawRect(for: nil)
         guard editableRect.width > 0, editableRect.height > 0 else { return }
 
@@ -4324,16 +4339,24 @@ private final class TipMaskEditorNSView: NSView {
         let centerX = Int((normalizedX * CGFloat(tipMaskResolution - 1)).rounded())
         let centerY = Int((normalizedY * CGFloat(tipMaskResolution - 1)).rounded())
 
-        let minX = max(0, Int(Double(centerX) - radius - 1))
-        let maxX = min(tipMaskResolution - 1, Int(Double(centerX) + radius + 1))
-        let minY = max(0, Int(Double(centerY) - radius - 1))
-        let maxY = min(tipMaskResolution - 1, Int(Double(centerY) + radius + 1))
+        let intRadius = Int(radius) + 1
+        let minX = max(0, centerX - intRadius)
+        let maxX = min(tipMaskResolution - 1, centerX + intRadius)
+        let minY = max(0, centerY - intRadius)
+        let maxY = min(tipMaskResolution - 1, centerY + intRadius)
 
         guard minX <= maxX, minY <= maxY else {
             return
         }
 
+        // Pressure affects opacity: pressureOpacityAmount=0 means no pressure effect on opacity,
+        // pressureOpacityAmount=1 means full pressure control (light=transparent)
+        let opacityFactor = Double(1.0 - pressureOpacityAmount + pressureOpacityAmount * pressure)
+
+        let radiusSq = radius * radius
+
         for y in minY...maxY {
+            let rowOffset = y * tipMaskResolution
             for x in minX...maxX {
                 let dx = Double(x - centerX)
                 let dy = Double(y - centerY)
@@ -4341,49 +4364,32 @@ private final class TipMaskEditorNSView: NSView {
                 let alpha: Double
                 switch paintMode {
                 case .round:
-                    let distance = sqrt((dx * dx) + (dy * dy))
-                    guard distance <= radius else { continue }
-                    let normalized = distance / radius
-                    let softnessValue = min(max(Double(softness), 0.0), 1.0)
-                    if softnessValue <= 0.01 {
+                    let distSq = (dx * dx) + (dy * dy)
+                    guard distSq <= radiusSq else { continue }
+                    let normalized = sqrt(distSq) / radius
+                    if normalized <= 0.6 {
                         alpha = 1
                     } else {
-                        let feather = max(0.08, softnessValue)
-                        let core = max(0.0, 1.0 - feather)
-                        if normalized <= core {
-                            alpha = 1
-                        } else {
-                            let fade = max(0.0, 1.0 - ((normalized - core) / feather))
-                            let exponent = 0.9 + ((1.0 - softnessValue) * 1.6)
-                            alpha = pow(fade, exponent)
-                        }
+                        let fade = max(0.0, 1.0 - ((normalized - 0.6) / 0.4))
+                        alpha = fade * fade
                     }
                 case .square:
                     guard abs(dx) <= radius, abs(dy) <= radius else { continue }
                     alpha = 1
                 case .eraser:
-                    let distance = sqrt((dx * dx) + (dy * dy))
-                    guard distance <= radius else { continue }
-                    let normalized = distance / radius
-                    let softnessValue = min(max(Double(softness), 0.0), 1.0)
-                    if softnessValue <= 0.01 {
+                    let distSq = (dx * dx) + (dy * dy)
+                    guard distSq <= radiusSq else { continue }
+                    let normalized = sqrt(distSq) / radius
+                    if normalized <= 0.6 {
                         alpha = 1
                     } else {
-                        let feather = max(0.08, softnessValue)
-                        let core = max(0.0, 1.0 - feather)
-                        if normalized <= core {
-                            alpha = 1
-                        } else {
-                            let fade = max(0.0, 1.0 - ((normalized - core) / feather))
-                            let exponent = 0.9 + ((1.0 - softnessValue) * 1.6)
-                            alpha = pow(fade, exponent)
-                        }
+                        let fade = max(0.0, 1.0 - ((normalized - 0.6) / 0.4))
+                        alpha = fade * fade
                     }
                 }
 
-                let intensityScale = min(max(Double(intensity), 0.0), 1.0)
-                let scaledAlpha = alpha * intensityScale
-                let index = (y * tipMaskResolution) + x
+                let scaledAlpha = alpha * opacityFactor
+                let index = rowOffset + x
                 let value = UInt8(clamping: Int((scaledAlpha * 255).rounded()))
                 switch paintMode {
                 case .eraser:
@@ -4393,6 +4399,17 @@ private final class TipMaskEditorNSView: NSView {
                 }
             }
         }
+
+        // Accumulate dirty rect in view coordinates
+        let scaleX = editableRect.width / CGFloat(tipMaskResolution)
+        let scaleY = editableRect.height / CGFloat(tipMaskResolution)
+        let dirtyViewRect = CGRect(
+            x: editableRect.minX + CGFloat(minX) * scaleX - 1,
+            y: editableRect.minY + CGFloat(minY) * scaleY - 1,
+            width: CGFloat(maxX - minX + 1) * scaleX + 2,
+            height: CGFloat(maxY - minY + 1) * scaleY + 2
+        )
+        accumulatedDirtyRect = accumulatedDirtyRect.isNull ? dirtyViewRect : accumulatedDirtyRect.union(dirtyViewRect)
     }
 
     private func currentRadius() -> Double {

@@ -2222,13 +2222,21 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func selectCreativeShapeGeneratorSource(_ source: CreativeShapeGeneratorColorSource) {
+        // Toggle off if the same source is already selected
+        if workspace.creativeShapeGenerator.selectedSource == source {
+            if source == .externalImage {
+                clearCreativeShapeGeneratorImage()
+            } else {
+                bootstrap.workspaceStore.updateCreativeShapeGenerator { generator in
+                    generator.selectedSource = nil
+                }
+                refreshLightweight()
+            }
+            return
+        }
+
         if source == .externalImage {
             if isCreativeShapeGeneratorImageLoading {
-                return
-            }
-            if workspace.creativeShapeGenerator.selectedSource == .externalImage,
-               workspace.creativeShapeGenerator.importedImage != nil {
-                clearCreativeShapeGeneratorImage()
                 return
             }
             if workspace.creativeShapeGenerator.importedImage == nil {
@@ -2595,9 +2603,24 @@ final class WorkspaceViewModel: ObservableObject {
 
         bootstrap.strokeEngine.endStroke()
         strokeResetToken &+= 1
-        bootstrap.workspaceStore.updateToolSession { session in
-            session.brush = preset.brush
+
+        let currentTool = workspace.toolSession.activeTool
+
+        if currentTool == .smudge || currentTool == .eraser {
+            // Smudge/eraser: assign brush to that tool's slot only, don't affect drawing brush
+            bootstrap.workspaceStore.updateToolSession { session in
+                session.brush = preset.brush
+            }
+        } else {
+            // Any other tool: switch to brush tool and assign
+            if currentTool != .brush {
+                selectTool(.brush)
+            }
+            bootstrap.workspaceStore.updateToolSession { session in
+                session.brush = preset.brush
+            }
         }
+
         bootstrap.workspaceStore.updateBrushLibrary { library in
             library.selectPreset(id: presetID)
         }

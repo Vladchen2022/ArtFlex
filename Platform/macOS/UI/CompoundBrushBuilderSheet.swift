@@ -34,27 +34,37 @@ struct CompoundBrushBuilderSheet: View {
 
     var body: some View {
         let brush = viewModel.workspace.toolSession.brush
+        let isCompoundEnabled = brush.compoundBrush.enabled
 
         VStack(alignment: .leading, spacing: 14) {
             header(brush: brush)
 
-            compoundStrokePreviewSection(brush: brush)
-
             HStack(alignment: .top, spacing: 12) {
-                compoundPrimarySection(brush: brush)
-                compoundSecondarySection(brush: brush)
-            }
+                // Left column: stroke preview + primary tip
+                VStack(alignment: .leading, spacing: 12) {
+                    compoundStrokePreviewSection(brush: brush)
+                        .disabled(!isCompoundEnabled)
+                        .opacity(isCompoundEnabled ? 1 : 0.35)
 
-            compoundPressureMixSection(brush: brush)
+                    compoundPrimarySection(brush: brush)
+                }
+                .frame(maxWidth: .infinity)
+
+                // Right column: secondary tip + pressure mix
+                VStack(alignment: .leading, spacing: 12) {
+                    compoundSecondarySection(brush: brush)
+                    compoundPressureMixSection(brush: brush)
+                }
+                .frame(maxWidth: .infinity)
+                .disabled(!isCompoundEnabled)
+                .opacity(isCompoundEnabled ? 1 : 0.35)
+            }
         }
         .padding(18)
         .frame(
             minWidth: 1100,
             idealWidth: 1180,
             maxWidth: 1240,
-            minHeight: 940,
-            idealHeight: 1020,
-            maxHeight: 1080,
             alignment: .topLeading
         )
         .background(Color(red: 0.10, green: 0.10, blue: 0.11))
@@ -115,16 +125,17 @@ struct CompoundBrushBuilderSheet: View {
                     }
                 }
             }
+            .disabled(!brush.compoundBrush.enabled)
+            .opacity(brush.compoundBrush.enabled ? 1 : 0.35)
         }
     }
 
     private func compoundStrokePreviewSection(brush: BrushSettings) -> some View {
         compoundCard(title: "实时笔迹预览") {
-            VStack(alignment: .leading, spacing: 10) {
-                compoundImageFrame(image: strokePreviewImage, height: 180)
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 8) {
+                    compoundImageFrame(image: strokePreviewImage, height: 100)
 
-                HStack {
-                    Spacer()
                     Button("刷新真实预览") {
                         refreshStrokePreview(for: brush)
                     }
@@ -370,24 +381,17 @@ struct CompoundBrushBuilderSheet: View {
         let mix = brush.compoundBrush.pressureMix
 
         return compoundCard(title: "主次迁移") {
-            HStack(alignment: .top, spacing: 16) {
+            HStack(alignment: .top, spacing: 12) {
+                CompoundPressureCurvePreview(
+                    low: Double(mix.primaryAtLowPressure),
+                    mid: Double(mix.primaryAtMidPressure),
+                    high: Double(mix.primaryAtHighPressure)
+                )
+                .frame(maxWidth: .infinity, minHeight: 100, maxHeight: 100)
+
                 VStack(alignment: .leading, spacing: 8) {
-                    CompoundPressureCurvePreview(
-                        low: Double(mix.primaryAtLowPressure),
-                        mid: Double(mix.primaryAtMidPressure),
-                        high: Double(mix.primaryAtHighPressure)
-                    )
-                    .frame(maxWidth: .infinity, minHeight: 118, maxHeight: 118)
-
-                    Text("曲线只负责决定轻压到重压时，主笔尖逐步接管的节奏。")
-                        .font(.system(size: 11))
-                        .foregroundStyle(Color.white.opacity(0.62))
-                }
-                .frame(maxWidth: .infinity, alignment: .topLeading)
-
-                VStack(alignment: .leading, spacing: 10) {
                     OptimizedCompactSlider(
-                        title: "低压主占比",
+                        title: "低压主占",
                         valueText: "\(Int(mix.primaryAtLowPressure * 100))%",
                         value: Binding(get: { Double(mix.primaryAtLowPressure) }, set: { _ in }),
                         range: 0...1
@@ -396,7 +400,7 @@ struct CompoundBrushBuilderSheet: View {
                     }
 
                     OptimizedCompactSlider(
-                        title: "中压主占比",
+                        title: "中压主占",
                         valueText: "\(Int(mix.primaryAtMidPressure * 100))%",
                         value: Binding(get: { Double(mix.primaryAtMidPressure) }, set: { _ in }),
                         range: 0...1
@@ -405,7 +409,7 @@ struct CompoundBrushBuilderSheet: View {
                     }
 
                     OptimizedCompactSlider(
-                        title: "高压主占比",
+                        title: "高压主占",
                         valueText: "\(Int(mix.primaryAtHighPressure * 100))%",
                         value: Binding(get: { Double(mix.primaryAtHighPressure) }, set: { _ in }),
                         range: 0...1
@@ -417,7 +421,7 @@ struct CompoundBrushBuilderSheet: View {
                         .font(.system(size: 11))
                         .foregroundStyle(Color.white.opacity(0.62))
                 }
-                .frame(width: 360, alignment: .topLeading)
+                .frame(maxWidth: .infinity, alignment: .topLeading)
             }
         }
     }

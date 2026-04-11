@@ -9,7 +9,9 @@
       "Bash(git -C /Users/victorcloux/Desktop/ArtFlex diff --name-only HEAD)",
       "Bash(git -C /Users/victorcloux/Desktop/ArtFlex diff HEAD -- Platform/macOS/App/WorkspaceViewModel.swift Platform/macOS/UI/RightInspectorView.swift Platform/macOS/Canvas/MetalCanvasHost.swift Platform/macOS/UI/MainToolbarView.swift Platform/macOS/UI/CanvasContainerView.swift)",
       "Bash(git -C /Users/victorcloux/Desktop/ArtFlex status --short)",
-      "Bash(grep -l \"encodeStroke\\\\|encodeOpacityCapStroke\" /Users/victorcloux/Desktop/ArtFlex/Rendering/Canvas/*.swift)"
+      "Bash(grep -l \"encodeStroke\\\\|encodeOpacityCapStroke\" /Users/victorcloux/Desktop/ArtFlex/Rendering/Canvas/*.swift)",
+      "Bash(grep -E \"^/Users/victorcloux/Desktop/ArtFlex/[^/]+\\\\.swift$|/Sources/|/ArtFlex/\")",
+      "Bash(grep -n \"class BrushSettings\\\\|struct BrushSettings\" /Users/victorcloux/Desktop/ArtFlex/Core/Tools/*.swift)"
     ]
   }
 }

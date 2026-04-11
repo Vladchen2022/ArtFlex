@@ -850,6 +850,7 @@ struct ToolSessionState: Codable, Sendable, Equatable {
     var selectedColor: RGBAColor
     var drawingBrush: BrushSettings
     var smudgeBrush: BrushSettings
+    var eraserBrush: BrushSettings
     var smudgeBrushUsesIndependentSettings: Bool
 
     private var isSynchronizingBrushSlots = false
@@ -860,6 +861,7 @@ struct ToolSessionState: Codable, Sendable, Equatable {
         selectedColor: RGBAColor,
         drawingBrush: BrushSettings? = nil,
         smudgeBrush: BrushSettings? = nil,
+        eraserBrush: BrushSettings? = nil,
         smudgeBrushUsesIndependentSettings: Bool = false
     ) {
         self.activeTool = activeTool
@@ -867,6 +869,7 @@ struct ToolSessionState: Codable, Sendable, Equatable {
         self.selectedColor = selectedColor
         self.drawingBrush = drawingBrush ?? brush
         self.smudgeBrush = smudgeBrush ?? brush
+        self.eraserBrush = eraserBrush ?? brush
         self.smudgeBrushUsesIndependentSettings = smudgeBrushUsesIndependentSettings
         synchronizeOnInitialization()
     }
@@ -877,6 +880,7 @@ struct ToolSessionState: Codable, Sendable, Equatable {
         case selectedColor
         case drawingBrush
         case smudgeBrush
+        case eraserBrush
         case smudgeBrushUsesIndependentSettings
     }
 
@@ -887,6 +891,7 @@ struct ToolSessionState: Codable, Sendable, Equatable {
         let selectedColor = try container.decode(RGBAColor.self, forKey: .selectedColor)
         let decodedDrawingBrush = try container.decodeIfPresent(BrushSettings.self, forKey: .drawingBrush)
         let decodedSmudgeBrush = try container.decodeIfPresent(BrushSettings.self, forKey: .smudgeBrush)
+        let decodedEraserBrush = try container.decodeIfPresent(BrushSettings.self, forKey: .eraserBrush)
         let decodedSmudgeUsesIndependent = try container.decodeIfPresent(Bool.self, forKey: .smudgeBrushUsesIndependentSettings)
         self.init(
             activeTool: activeTool,
@@ -894,6 +899,7 @@ struct ToolSessionState: Codable, Sendable, Equatable {
             selectedColor: selectedColor,
             drawingBrush: decodedDrawingBrush ?? brush,
             smudgeBrush: decodedSmudgeBrush ?? brush,
+            eraserBrush: decodedEraserBrush ?? brush,
             smudgeBrushUsesIndependentSettings: decodedSmudgeUsesIndependent ?? (activeTool == .smudge)
         )
     }
@@ -905,6 +911,7 @@ struct ToolSessionState: Codable, Sendable, Equatable {
         try container.encode(selectedColor, forKey: .selectedColor)
         try container.encode(drawingBrush, forKey: .drawingBrush)
         try container.encode(smudgeBrush, forKey: .smudgeBrush)
+        try container.encode(eraserBrush, forKey: .eraserBrush)
         try container.encode(smudgeBrushUsesIndependentSettings, forKey: .smudgeBrushUsesIndependentSettings)
     }
 
@@ -917,6 +924,7 @@ struct ToolSessionState: Codable, Sendable, Equatable {
             selectedColor: .black,
             drawingBrush: brush,
             smudgeBrush: brush,
+            eraserBrush: brush,
             smudgeBrushUsesIndependentSettings: false
         )
     }()
@@ -926,12 +934,15 @@ struct ToolSessionState: Codable, Sendable, Equatable {
     }
 
     private mutating func synchronizeOnInitialization() {
-        if activeTool == .smudge {
+        switch activeTool {
+        case .smudge:
             if !smudgeBrushUsesIndependentSettings {
                 smudgeBrush = drawingBrush
             }
             brush = effectiveSmudgeBrush
-        } else {
+        case .eraser:
+            brush = eraserBrush
+        default:
             drawingBrush = brush
             if !smudgeBrushUsesIndependentSettings {
                 smudgeBrush = drawingBrush
@@ -941,10 +952,13 @@ struct ToolSessionState: Codable, Sendable, Equatable {
     }
 
     private mutating func synchronizeStoredBrushesFromActiveBrush() {
-        if activeTool == .smudge {
+        switch activeTool {
+        case .smudge:
             smudgeBrush = brush
             smudgeBrushUsesIndependentSettings = true
-        } else {
+        case .eraser:
+            eraserBrush = brush
+        default:
             drawingBrush = brush
             if !smudgeBrushUsesIndependentSettings {
                 smudgeBrush = drawingBrush
@@ -953,9 +967,12 @@ struct ToolSessionState: Codable, Sendable, Equatable {
     }
 
     private mutating func synchronizeActiveBrushForToolChange(from previousTool: ToolKind) {
-        if previousTool == .smudge {
+        switch previousTool {
+        case .smudge:
             smudgeBrush = brush
-        } else {
+        case .eraser:
+            eraserBrush = brush
+        default:
             drawingBrush = brush
             if !smudgeBrushUsesIndependentSettings {
                 smudgeBrush = drawingBrush
@@ -967,7 +984,14 @@ struct ToolSessionState: Codable, Sendable, Equatable {
         }
 
         isSynchronizingBrushSlots = true
-        brush = activeTool == .smudge ? effectiveSmudgeBrush : drawingBrush
+        switch activeTool {
+        case .smudge:
+            brush = effectiveSmudgeBrush
+        case .eraser:
+            brush = eraserBrush
+        default:
+            brush = drawingBrush
+        }
         isSynchronizingBrushSlots = false
     }
 }
