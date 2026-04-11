@@ -2464,10 +2464,10 @@ struct RightInspectorView: View {
 
     private func previewStrokePressure(at progress: Double) -> Double {
         let clamped = min(max(progress, 0), 1)
-        let eased = clamped * clamped * (3 - (2 * clamped))
-        // Keep preview pressure clearly in the light-touch range so the sample
-        // reads like a test stroke instead of a near-full-pressure drag.
-        return 0.04 + (0.32 * eased)
+        // Simulate heavy → light: start at high pressure and ease out to near-zero.
+        let inverted = 1.0 - clamped
+        let eased = inverted * inverted * (3 - (2 * inverted))
+        return 0.05 + (0.90 * eased)
     }
 
     private func previewBrushStrokeMetrics(
@@ -2487,11 +2487,9 @@ struct RightInspectorView: View {
         let curvedOpacityPressure = previewOpacityCurvePressure(remappedOpacityPressure, brush: brush)
         let rawOpacityFactor = (1 - opacityResponse) + (opacityResponse * curvedOpacityPressure)
 
-        // Apply a preview-only attenuation so both the Dual Tip sample and brush
-        // library preview stay visually lighter than actual committed strokes.
-        let sizeFactor = rawSizeFactor * 0.72
-        let resolvedOpacity = min(max(Double(brush.opacity) * rawOpacityFactor * 0.52, 0.05), 0.72)
-        return (max(sizeFactor, 0.05), resolvedOpacity)
+        let sizeFactor = rawSizeFactor
+        let resolvedOpacity = min(max(Double(brush.opacity) * rawOpacityFactor, 0.03), 0.85)
+        return (max(sizeFactor, 0.04), resolvedOpacity)
     }
 
     private func previewPressureResponsePressure(
@@ -2813,10 +2811,13 @@ private struct ColorSectionView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             Group {
-                if proxy.colorPanel.mode == .picker {
+                switch proxy.colorPanel.mode {
+                case .picker:
                     pickerStageSection
-                } else {
+                case .blocks:
                     blocksStageSection
+                case .grayscale:
+                    grayscaleStageSection
                 }
             }
             .frame(height: 196)
@@ -2848,106 +2849,117 @@ private struct ColorSectionView: View {
                             viewModel.resetColorPanel()
                         }
                         compactIconButton(
+                            systemImage: "circle.lefthalf.filled",
+                            tooltip: proxy.colorPanel.mode == .grayscale ? "关闭黑白色块" : "黑白色块",
+                            isSelected: proxy.colorPanel.mode == .grayscale
+                        ) {
+                            viewModel.toggleGrayscaleMode()
+                        }
+                        compactIconButton(
                             systemImage: proxy.colorPanel.mode == .picker ? "square.grid.3x3.fill" : "eyedropper.full",
                             tooltip: proxy.colorPanel.mode == .picker ? "切换到色块模式" : "切换到拾色器模式",
-                            isSelected: true
+                            isSelected: proxy.colorPanel.mode == .blocks
                         ) {
                             viewModel.toggleColorPanelMode()
                         }
                     }
 
-                    ColorLightingHueBarView(
-                        hue: proxy.colorPanel.lightingHue,
-                        onUpdateHue: { hue in
-                            var updated = proxy.colorPanel
-                            updated.lightingHue = ColorBlocksEngine.wrapHue(hue)
-                            proxy.colorPanel = updated
-                            if updated.mode == .picker {
-                                proxy.selectedColor = ColorBlocksEngine.pickerColor(from: updated)
-                            }
-                        },
-                        onDragEnded: { viewModel.setColorPanelLightingHue($0) }
-                    )
-                    .frame(height: 6)
+                    if proxy.colorPanel.mode == .grayscale {
+                        grayscaleCountSlider
+                    } else {
+                        ColorLightingHueBarView(
+                            hue: proxy.colorPanel.lightingHue,
+                            onUpdateHue: { hue in
+                                var updated = proxy.colorPanel
+                                updated.lightingHue = ColorBlocksEngine.wrapHue(hue)
+                                proxy.colorPanel = updated
+                                if updated.mode == .picker {
+                                    proxy.selectedColor = ColorBlocksEngine.pickerColor(from: updated)
+                                }
+                            },
+                            onDragEnded: { viewModel.setColorPanelLightingHue($0) }
+                        )
+                        .frame(height: 6)
 
-                    bufferedCompactParameterSlider(
-                        title: "光色",
-                        valueText: "\(Int(proxy.colorPanel.lightingStrength))",
-                        value: Double(proxy.colorPanel.lightingStrength),
-                        range: 0...100,
-                        onUpdate: { value in
-                            var updated = proxy.colorPanel
-                            updated.lightingStrength = Float(value)
-                            proxy.colorPanel = updated
-                            if updated.mode == .picker {
-                                proxy.selectedColor = ColorBlocksEngine.pickerColor(from: updated)
-                            }
-                        },
-                        onCommit: { viewModel.setColorPanelLightingStrength(Float($0)) }
-                    )
-                    bufferedCompactParameterSlider(
-                        title: "明度",
-                        valueText: "\(Int(proxy.colorPanel.activeLightness))",
-                        value: Double(proxy.colorPanel.activeLightness),
-                        range: 0...100,
-                        onUpdate: { value in
-                            var updated = proxy.colorPanel
-                            if updated.mode == .picker {
-                                updated.pickerLightness = Float(value)
-                                proxy.selectedColor = ColorBlocksEngine.pickerColor(from: updated)
-                            } else {
-                                updated.blocksLightness = Float(value)
-                            }
-                            proxy.colorPanel = updated
-                        },
-                        onCommit: { viewModel.setColorPanelLightness(Float($0)) }
-                    )
-                    bufferedCompactParameterSlider(
-                        title: "纯度",
-                        valueText: "\(Int(proxy.colorPanel.activeSaturation))",
-                        value: Double(proxy.colorPanel.activeSaturation),
-                        range: 0...100,
-                        onUpdate: { value in
-                            var updated = proxy.colorPanel
-                            if updated.mode == .picker {
-                                updated.pickerSaturation = Float(value)
-                                proxy.selectedColor = ColorBlocksEngine.pickerColor(from: updated)
-                            } else {
-                                updated.blocksSaturation = Float(value)
-                            }
-                            proxy.colorPanel = updated
-                        },
-                        onCommit: { viewModel.setColorPanelSaturation(Float($0)) }
-                    )
-                    bufferedCompactParameterSlider(
-                        title: "对比",
-                        valueText: "\(Int(proxy.colorPanel.contrast))",
-                        value: Double(proxy.colorPanel.contrast),
-                        range: 0...100,
-                        onUpdate: { value in
-                            var updated = proxy.colorPanel
-                            updated.contrast = Float(value)
-                            proxy.colorPanel = updated
-                        },
-                        onCommit: { viewModel.setColorPanelContrast(Float($0)) }
-                    )
-                    .opacity(proxy.colorPanel.mode == .blocks ? 1 : 0.35)
-                    .allowsHitTesting(proxy.colorPanel.mode == .blocks)
+                        bufferedCompactParameterSlider(
+                            title: "光色",
+                            valueText: "\(Int(proxy.colorPanel.lightingStrength))",
+                            value: Double(proxy.colorPanel.lightingStrength),
+                            range: 0...100,
+                            onUpdate: { value in
+                                var updated = proxy.colorPanel
+                                updated.lightingStrength = Float(value)
+                                proxy.colorPanel = updated
+                                if updated.mode == .picker {
+                                    proxy.selectedColor = ColorBlocksEngine.pickerColor(from: updated)
+                                }
+                            },
+                            onCommit: { viewModel.setColorPanelLightingStrength(Float($0)) }
+                        )
+                        bufferedCompactParameterSlider(
+                            title: "明度",
+                            valueText: "\(Int(proxy.colorPanel.activeLightness))",
+                            value: Double(proxy.colorPanel.activeLightness),
+                            range: 0...100,
+                            onUpdate: { value in
+                                var updated = proxy.colorPanel
+                                if updated.mode == .picker {
+                                    updated.pickerLightness = Float(value)
+                                    proxy.selectedColor = ColorBlocksEngine.pickerColor(from: updated)
+                                } else {
+                                    updated.blocksLightness = Float(value)
+                                }
+                                proxy.colorPanel = updated
+                            },
+                            onCommit: { viewModel.setColorPanelLightness(Float($0)) }
+                        )
+                        bufferedCompactParameterSlider(
+                            title: "纯度",
+                            valueText: "\(Int(proxy.colorPanel.activeSaturation))",
+                            value: Double(proxy.colorPanel.activeSaturation),
+                            range: 0...100,
+                            onUpdate: { value in
+                                var updated = proxy.colorPanel
+                                if updated.mode == .picker {
+                                    updated.pickerSaturation = Float(value)
+                                    proxy.selectedColor = ColorBlocksEngine.pickerColor(from: updated)
+                                } else {
+                                    updated.blocksSaturation = Float(value)
+                                }
+                                proxy.colorPanel = updated
+                            },
+                            onCommit: { viewModel.setColorPanelSaturation(Float($0)) }
+                        )
+                        bufferedCompactParameterSlider(
+                            title: "对比",
+                            valueText: "\(Int(proxy.colorPanel.contrast))",
+                            value: Double(proxy.colorPanel.contrast),
+                            range: 0...100,
+                            onUpdate: { value in
+                                var updated = proxy.colorPanel
+                                updated.contrast = Float(value)
+                                proxy.colorPanel = updated
+                            },
+                            onCommit: { viewModel.setColorPanelContrast(Float($0)) }
+                        )
+                        .opacity(proxy.colorPanel.mode == .blocks ? 1 : 0.35)
+                        .allowsHitTesting(proxy.colorPanel.mode == .blocks)
 
-                    bufferedCompactParameterSlider(
-                        title: "补色",
-                        valueText: "\(Int(proxy.colorPanel.contrastHue))",
-                        value: Double(proxy.colorPanel.contrastHue),
-                        range: 0...100,
-                        onUpdate: { value in
-                            var updated = proxy.colorPanel
-                            updated.contrastHue = Float(value)
-                            proxy.colorPanel = updated
-                        },
-                        onCommit: { viewModel.setColorPanelContrastHue(Float($0)) }
-                    )
-                    .opacity(proxy.colorPanel.mode == .blocks ? 1 : 0.35)
-                    .allowsHitTesting(proxy.colorPanel.mode == .blocks)
+                        bufferedCompactParameterSlider(
+                            title: "补色",
+                            valueText: "\(Int(proxy.colorPanel.contrastHue))",
+                            value: Double(proxy.colorPanel.contrastHue),
+                            range: 0...100,
+                            onUpdate: { value in
+                                var updated = proxy.colorPanel
+                                updated.contrastHue = Float(value)
+                                proxy.colorPanel = updated
+                            },
+                            onCommit: { viewModel.setColorPanelContrastHue(Float($0)) }
+                        )
+                        .opacity(proxy.colorPanel.mode == .blocks ? 1 : 0.35)
+                        .allowsHitTesting(proxy.colorPanel.mode == .blocks)
+                    }
                 }
                 .transition(.move(edge: .top).combined(with: .opacity))
             }
@@ -3053,6 +3065,77 @@ private struct ColorSectionView: View {
             }
         }
         .padding(5)
+    }
+
+    private var grayscaleStageSection: some View {
+        GeometryReader { geo in
+            let inset: CGFloat = 5.0
+            let count = proxy.colorPanel.grayscaleBlockCount
+            let availableW = geo.size.width - inset * 2
+            let availableH = geo.size.height - inset * 2
+
+            let columns: Int = count <= 5 ? count : (count / 2)
+            let rows: Int = count <= 5 ? 1 : 2
+            let spacing: CGFloat = 4
+
+            let cellW = max(10, (availableW - spacing * CGFloat(columns - 1)) / CGFloat(columns))
+            let cellH = max(10, (availableH - spacing * CGFloat(rows - 1)) / CGFloat(rows))
+            let cellSize = min(cellW, cellH)
+
+            let gridW = cellSize * CGFloat(columns) + spacing * CGFloat(columns - 1)
+            let gridH = cellSize * CGFloat(rows) + spacing * CGFloat(rows - 1)
+
+            VStack(spacing: spacing) {
+                ForEach(0..<rows, id: \.self) { row in
+                    HStack(spacing: spacing) {
+                        ForEach(0..<columns, id: \.self) { col in
+                            let index = row * columns + col
+                            if index < count {
+                                let t = count > 1 ? Double(index) / Double(count - 1) : 0.0
+                                let gray = 1.0 - t
+                                RoundedRectangle(cornerRadius: 6)
+                                    .fill(Color(white: gray))
+                                    .frame(width: cellSize, height: cellSize)
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 6)
+                                            .stroke(Color.white.opacity(0.15), lineWidth: 1)
+                                    )
+                                    .onTapGesture {
+                                        viewModel.selectGrayscaleBlock(at: index, count: count)
+                                    }
+                            }
+                        }
+                    }
+                }
+            }
+            .frame(width: gridW, height: gridH)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+        }
+        .padding(5)
+    }
+
+    private var grayscaleCountSlider: some View {
+        let steps = [2, 3, 4, 5, 6, 8, 10]
+        let currentCount = proxy.colorPanel.grayscaleBlockCount
+        let currentIndex = Double(steps.firstIndex(of: currentCount) ?? 0)
+
+        return bufferedCompactParameterSlider(
+            title: "色阶",
+            valueText: "\(currentCount)",
+            value: currentIndex,
+            range: 0...Double(steps.count - 1),
+            onUpdate: { value in
+                let idx = min(max(Int(value.rounded()), 0), steps.count - 1)
+                let newCount = steps[idx]
+                var updated = proxy.colorPanel
+                updated.grayscaleBlockCount = newCount
+                proxy.colorPanel = updated
+            },
+            onCommit: { value in
+                let idx = min(max(Int(value.rounded()), 0), steps.count - 1)
+                viewModel.setGrayscaleBlockCount(steps[idx])
+            }
+        )
     }
 
     private func importColorPaletteFromDrop(providers: [NSItemProvider]) -> Bool {

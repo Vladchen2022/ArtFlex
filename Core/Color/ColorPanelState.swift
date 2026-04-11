@@ -3,6 +3,7 @@ import Foundation
 enum ColorPanelMode: String, Codable, Sendable, Equatable {
     case picker
     case blocks
+    case grayscale
 }
 
 enum ColorPanelBaseSource: String, Codable, Sendable, Equatable {
@@ -37,6 +38,7 @@ struct ColorPanelState: Codable, Sendable, Equatable {
     var pickerY: Float
     var lightingHue: Float
     var lightingStrength: Float
+    var grayscaleBlockCount: Int
 
     static let stageOneDefault = ColorPanelState(
         mode: .picker,
@@ -55,7 +57,8 @@ struct ColorPanelState: Codable, Sendable, Equatable {
         pickerX: 0,
         pickerY: 1,
         lightingHue: 0,
-        lightingStrength: 0
+        lightingStrength: 0,
+        grayscaleBlockCount: 5
     )
 
     enum CodingKeys: String, CodingKey {
@@ -76,6 +79,7 @@ struct ColorPanelState: Codable, Sendable, Equatable {
         case pickerY
         case lightingHue
         case lightingStrength
+        case grayscaleBlockCount
     }
 
     init(
@@ -95,7 +99,8 @@ struct ColorPanelState: Codable, Sendable, Equatable {
         pickerX: Float,
         pickerY: Float,
         lightingHue: Float,
-        lightingStrength: Float
+        lightingStrength: Float,
+        grayscaleBlockCount: Int = 5
     ) {
         self.mode = mode
         self.baseHSV = baseHSV
@@ -114,6 +119,7 @@ struct ColorPanelState: Codable, Sendable, Equatable {
         self.pickerY = pickerY
         self.lightingHue = lightingHue
         self.lightingStrength = lightingStrength
+        self.grayscaleBlockCount = grayscaleBlockCount
     }
 
     init(from decoder: Decoder) throws {
@@ -135,6 +141,7 @@ struct ColorPanelState: Codable, Sendable, Equatable {
         pickerY = try container.decodeIfPresent(Float.self, forKey: .pickerY) ?? 1
         lightingHue = try container.decodeIfPresent(Float.self, forKey: .lightingHue) ?? 0
         lightingStrength = try container.decodeIfPresent(Float.self, forKey: .lightingStrength) ?? 0
+        grayscaleBlockCount = try container.decodeIfPresent(Int.self, forKey: .grayscaleBlockCount) ?? 5
     }
 
     var activeLightness: Float {

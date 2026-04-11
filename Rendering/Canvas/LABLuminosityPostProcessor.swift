@@ -54,7 +54,7 @@ final class LABLuminosityPostProcessor {
             return out;
         }
 
-        // sRGB companding → linear
+        // sRGB companding → linear (for re-linearizing L*/100 before hardware auto-encode)
         static float srgbToLinear(float c) {
             return (c <= 0.04045f) ? (c / 12.92f) : pow((c + 0.055f) / 1.055f, 2.4f);
         }
@@ -73,27 +73,22 @@ final class LABLuminosityPostProcessor {
         ) {
             float4 color = sourceTexture.sample(sourceSampler, in.texCoord);
 
-            // sRGB → linear RGB
-            float r = srgbToLinear(color.r);
-            float g = srgbToLinear(color.g);
-            float b = srgbToLinear(color.b);
-
-            // Linear RGB → CIE XYZ (D65 illuminant)
-            // We only need Y for L* calculation
-            float Y = 0.2126729f * r + 0.7151522f * g + 0.0721750f * b;
+            // sourceTexture is _srgb format: hardware already decoded to linear RGB.
+            // No manual srgbToLinear needed.
+            float Y = 0.2126729f * color.r + 0.7151522f * color.g + 0.0721750f * color.b;
 
             // Y → L* (D65 reference white Yn = 1.0)
             float Lstar = 116.0f * labF(Y) - 16.0f;
 
             // L* range is [0, 100], normalize to [0, 1]
-            float luminance = Lstar / 100.0f;
+            float luminance = saturate(Lstar / 100.0f);
 
-            // Re-encode to sRGB gamma for display
-            float displayValue = (luminance <= 0.0031308f)
-                ? (luminance * 12.92f)
-                : (1.055f * pow(luminance, 1.0f / 2.4f) - 0.055f);
+            // We want the final stored sRGB pixel value = L*/100 (PS-style L channel display).
+            // Hardware will auto-apply linear→sRGB on write, so we output srgbToLinear(L*/100)
+            // to cancel it: sRGBEncode(sRGBDecode(L*/100)) = L*/100.
+            float output = srgbToLinear(luminance);
 
-            return float4(displayValue, displayValue, displayValue, color.a);
+            return float4(output, output, output, color.a);
         }
         """
 

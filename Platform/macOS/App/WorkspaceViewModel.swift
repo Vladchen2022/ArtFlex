@@ -2099,6 +2099,30 @@ final class WorkspaceViewModel: ObservableObject {
         setColorPanelMode(workspace.colorPanel.mode == .picker ? .blocks : .picker)
     }
 
+    func toggleGrayscaleMode() {
+        setColorPanelMode(workspace.colorPanel.mode == .grayscale ? .picker : .grayscale)
+    }
+
+    func setGrayscaleBlockCount(_ count: Int) {
+        bootstrap.workspaceStore.updateColorPanel { panel in
+            panel.grayscaleBlockCount = count
+        }
+        refreshColorPanelOnly()
+    }
+
+    func selectGrayscaleBlock(at index: Int, count: Int) {
+        guard count >= 2 else { return }
+        let t = Float(index) / Float(count - 1)
+        let value = 1.0 - t
+        let color = RGBAColor(red: value, green: value, blue: value, alpha: 1)
+        rememberReferenceImagePreviousColor(before: color)
+        bootstrap.workspaceStore.updateToolSession { session in
+            session.selectedColor = color
+        }
+        activateCreativeShapeGeneratorCurrentColorSourceIfNeeded()
+        refreshColorPanelOnly(includeSelectedColor: true)
+    }
+
     func syncColorPanelFromSelectedColor() {
         let selectedColor = workspace.toolSession.selectedColor
         let baseHSV = ColorBlocksEngine.rgbToHsv(selectedColor)
@@ -6425,8 +6449,10 @@ final class WorkspaceViewModel: ObservableObject {
         do {
             resetSnapshotToolState(resumeTimelapseIfNeeded: false)
             let result = try bootstrap.persistenceController.openProject(from: url)
+            let existingBrushLibrary = bootstrap.workspaceStore.state.brushLibrary
             let existingTipImageLibrary = bootstrap.workspaceStore.state.tipImageLibrary
             var openedWorkspace = result.workspace
+            openedWorkspace.brushLibrary = existingBrushLibrary
             openedWorkspace.tipImageLibrary = Self.mergeTipImageLibraries(
                 base: existingTipImageLibrary,
                 imported: Self.normalizeImportedTipImageLibrary(result.workspace.tipImageLibrary)

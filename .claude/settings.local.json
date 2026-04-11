@@ -2,7 +2,14 @@
   "permissions": {
     "allow": [
       "Bash(swift build:*)",
-      "Bash(xcodebuild -scheme ArtFlex -destination 'platform=macOS' build)"
+      "Bash(xcodebuild -scheme ArtFlex -destination 'platform=macOS' build)",
+      "Bash(python3 -c 'import json; data=json.load\\(open\\('\\\\''__TRACKED_VAR__/Library/Application Support/ArtFlex/brush-library.json'\\\\''\\)\\); print\\('\\\\''valid JSON'\\\\''\\); lib=data.get\\('\\\\''library'\\\\'',data\\); groups=lib.get\\('\\\\''groups'\\\\'',[]\\); total=sum\\(len\\(g.get\\('\\\\''presets'\\\\'',[]\\)\\) for g in groups\\); print\\(f'\\\\''groups: {len\\(groups\\)}, total presets: {total}'\\\\''\\)')",
+      "Bash(python3 -c 'import json; data=json.load\\(open\\('\\\\''__TRACKED_VAR__/Library/Application Support/ArtFlex/brush-library.json'\\\\''\\)\\); print\\(list\\(data.keys\\(\\)\\)[:10]\\)')",
+      "Bash(python3 -c ':*)",
+      "Bash(git -C /Users/victorcloux/Desktop/ArtFlex diff --name-only HEAD)",
+      "Bash(git -C /Users/victorcloux/Desktop/ArtFlex diff HEAD -- Platform/macOS/App/WorkspaceViewModel.swift Platform/macOS/UI/RightInspectorView.swift Platform/macOS/Canvas/MetalCanvasHost.swift Platform/macOS/UI/MainToolbarView.swift Platform/macOS/UI/CanvasContainerView.swift)",
+      "Bash(git -C /Users/victorcloux/Desktop/ArtFlex status --short)",
+      "Bash(grep -l \"encodeStroke\\\\|encodeOpacityCapStroke\" /Users/victorcloux/Desktop/ArtFlex/Rendering/Canvas/*.swift)"
     ]
   }
 }
