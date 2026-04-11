@@ -52,15 +52,7 @@ struct QuickColorPickerHUD: View {
             }
         }
         .padding(hudPadding)
-        .background(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(Color.black.opacity(0.68))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .stroke(Color.white.opacity(0.08), lineWidth: 1)
-        )
-        .shadow(color: .black.opacity(0.28), radius: 18, x: 0, y: 10)
+        .background(Color.clear)
         .frame(width: hudSize.width, height: hudSize.height)
         .position(x: center.x, y: center.y)
     }
@@ -118,7 +110,7 @@ private struct QuickColorPickerBrushSlotCell: View {
         Button(action: onSelect) {
             ZStack {
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(isSelected ? Color.accentColor.opacity(0.18) : Color.white.opacity(0.04))
+                    .fill(isSelected ? Color.accentColor.opacity(0.18) : Color.black.opacity(0.75))
                     .overlay {
                         RoundedRectangle(cornerRadius: 10, style: .continuous)
                             .stroke(
@@ -161,11 +153,17 @@ private struct QuickColorPickerSVSquare: View {
     let panel: ColorPanelState
     let onSetPoint: (Float, Float) -> Void
 
+    @State private var localX: Float = 0
+    @State private var localY: Float = 0
+    @State private var isDragging = false
+
     var body: some View {
         let topLeft = colorAt(x: 0, y: 0)
         let topRight = colorAt(x: 1, y: 0)
         let bottomLeft = colorAt(x: 0, y: 1)
         let bottomRight = colorAt(x: 1, y: 1)
+        let displayX = isDragging ? localX : panel.pickerX
+        let displayY = isDragging ? localY : panel.pickerY
 
         GeometryReader { geometry in
             ZStack(alignment: .topLeading) {
@@ -202,8 +200,8 @@ private struct QuickColorPickerSVSquare: View {
                     .background(Circle().fill(Color.black.opacity(0.18)))
                     .frame(width: 16, height: 16)
                     .position(
-                        x: CGFloat(panel.pickerX) * geometry.size.width,
-                        y: CGFloat(panel.pickerY) * geometry.size.height
+                        x: CGFloat(displayX) * geometry.size.width,
+                        y: CGFloat(displayY) * geometry.size.height
                     )
                     .shadow(color: .black.opacity(0.3), radius: 2, x: 0, y: 1)
             }
@@ -211,9 +209,18 @@ private struct QuickColorPickerSVSquare: View {
             .gesture(
                 DragGesture(minimumDistance: 0)
                     .onChanged { value in
-                        let resolvedX = min(max(value.location.x / geometry.size.width, 0), 1)
-                        let resolvedY = min(max(value.location.y / geometry.size.height, 0), 1)
-                        onSetPoint(Float(resolvedX), Float(resolvedY))
+                        let resolvedX = Float(min(max(value.location.x / geometry.size.width, 0), 1))
+                        let resolvedY = Float(min(max(value.location.y / geometry.size.height, 0), 1))
+                        isDragging = true
+                        localX = resolvedX
+                        localY = resolvedY
+                        onSetPoint(resolvedX, resolvedY)
+                    }
+                    .onEnded { value in
+                        let resolvedX = Float(min(max(value.location.x / geometry.size.width, 0), 1))
+                        let resolvedY = Float(min(max(value.location.y / geometry.size.height, 0), 1))
+                        onSetPoint(resolvedX, resolvedY)
+                        isDragging = false
                     }
             )
         }
@@ -237,6 +244,9 @@ private struct QuickColorPickerHueStrip: View {
     let hue: Float
     let onSetHue: (Float) -> Void
 
+    @State private var localHue: Float = 0
+    @State private var isDragging = false
+
     private var gradientStops: [Gradient.Stop] {
         let stopCount = 25
         return (0..<stopCount).map { index in
@@ -256,6 +266,8 @@ private struct QuickColorPickerHueStrip: View {
     }
 
     var body: some View {
+        let displayHue = isDragging ? localHue : hue
+
         GeometryReader { geometry in
             ZStack(alignment: .top) {
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
@@ -273,7 +285,7 @@ private struct QuickColorPickerHueStrip: View {
                     .frame(width: geometry.size.width + 6, height: 8)
                     .position(
                         x: geometry.size.width / 2,
-                        y: CGFloat(min(max(hue / 360, 0), 1)) * geometry.size.height
+                        y: CGFloat(min(max(displayHue / 360, 0), 1)) * geometry.size.height
                     )
                     .shadow(color: .black.opacity(0.3), radius: 2, x: 0, y: 1)
             }
@@ -282,7 +294,15 @@ private struct QuickColorPickerHueStrip: View {
                 DragGesture(minimumDistance: 0)
                     .onChanged { value in
                         let normalizedY = min(max(value.location.y / geometry.size.height, 0), 1)
+                        let newHue = Float(normalizedY) * 360
+                        isDragging = true
+                        localHue = newHue
+                        onSetHue(newHue)
+                    }
+                    .onEnded { value in
+                        let normalizedY = min(max(value.location.y / geometry.size.height, 0), 1)
                         onSetHue(Float(normalizedY) * 360)
+                        isDragging = false
                     }
             )
         }

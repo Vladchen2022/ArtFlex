@@ -467,7 +467,7 @@ final class WorkspaceViewModel: ObservableObject {
         bootstrap.workspaceStore.updateToolSession { session in
             session.brush.size = max(1, size)
         }
-        refresh()
+        refreshToolSessionOnly()
     }
 
     func adjustBrushSize(by delta: Float) {
@@ -490,7 +490,7 @@ final class WorkspaceViewModel: ObservableObject {
         bootstrap.workspaceStore.updateToolSession { session in
             session.brush.opacity = min(max(0, opacity), 1)
         }
-        refresh()
+        refreshToolSessionOnly()
     }
 
     func setBrushBuildMode(_ mode: BrushBuildMode) {
@@ -3531,7 +3531,13 @@ final class WorkspaceViewModel: ObservableObject {
             return
         }
 
-        let interpolated = interpolatedLassoPoints(from: last, to: point)
+        // Append raw drag points at a moderate spacing; smoothing handles curve fitting.
+        // Avoids dense 0.75px interpolation that creates thousands of points and causes lag.
+        let distance = distanceBetween(last, point)
+        if distance < 3.0 {
+            return
+        }
+        let interpolated: [CanvasPoint] = []
         if interpolated.isEmpty {
             if last != point {
                 points.append(point)
@@ -3837,6 +3843,22 @@ final class WorkspaceViewModel: ObservableObject {
                 ? .clear
                 : .fill(premultipliedPixel(from: workspace.toolSession.selectedColor))
             let successMessage = combineMode == .subtract ? "已删除套索区域像素" : "已填充套索区域"
+
+            // Clear selection BEFORE creating the history checkpoint so undo
+            // restores to a state without a leftover selection outline.
+            activeLassoRawPoints = []
+            activeLassoBounds = nil
+            lassoSamplingDebugPoints = []
+            samePathPreviewDebugShape = nil
+            samePathCommittedDebugShape = nil
+            bootstrap.workspaceStore.updateSelection { selection in
+                selection.committedShape = nil
+                selection.inProgressShape = nil
+                selection.anchorPoint = nil
+                selection.activeKind = nil
+                selection.activeCombineMode = .replace
+            }
+
             let didApplyPixelOperation: Bool
             if combineMode == .subtract {
                 didApplyPixelOperation = applyPixelOperation(
@@ -3851,18 +3873,6 @@ final class WorkspaceViewModel: ObservableObject {
                     historyOperationKind: "lasso.fill",
                     successMessage: successMessage
                 )
-            }
-            activeLassoRawPoints = []
-            activeLassoBounds = nil
-            lassoSamplingDebugPoints = []
-            samePathPreviewDebugShape = nil
-            samePathCommittedDebugShape = nil
-            bootstrap.workspaceStore.updateSelection { selection in
-                selection.committedShape = nil
-                selection.inProgressShape = nil
-                selection.anchorPoint = nil
-                selection.activeKind = nil
-                selection.activeCombineMode = .replace
             }
             refreshLightweight()
             if didApplyPixelOperation {
@@ -4010,55 +4020,92 @@ final class WorkspaceViewModel: ObservableObject {
             return
         }
 
-        // 非 lasso 工具：同步处理
-        let nextCommittedShape = committedSelectionShape(
-            input: input,
-            canvasSize: canvasSize,
-            mode: combineMode,
-            baseShape: previousCommittedShape?.clamped(to: canvasSize)
-        )
-        if currentKind == .lasso {
-            if let nextCommittedShape {
-                let message = "[commitSelection:result] committedKind=\(nextCommittedShape.kind.rawValue) boundsOrigin=(\(nextCommittedShape.bounds.origin.x),\(nextCommittedShape.bounds.origin.y)) boundsSize=(\(nextCommittedShape.bounds.size.x),\(nextCommittedShape.bounds.size.y)) pathPointCount=\(nextCommittedShape.pathPoints.count)"
-                selectionTraceLogger.debug("\(message, privacy: .public)")
-                emitSelectionTraceViewModel(message)
-            } else {
-                let message = "[commitSelection:result] committedShape=nil"
-                selectionTraceLogger.debug("\(message, privacy: .public)")
-                emitSelectionTraceViewModel(message)
-            }
+        // 非 lasso 工具（rectangle / ellipse）：两步异步处理，避免主线程卡顿
+        // Step 1: 立即提交轻量几何形状（不含 mask），UI 可以立刻渲染选区边框
+        let immediateShape = input.preferredDisplayShape.map { preferred in
+            SelectionShape(
+                kind: preferred.kind,
+                bounds: preferred.bounds,
+                pathPoints: preferred.pathPoints
+            )
         }
 
-        if combineMode == .replace, nextCommittedShape != previousCommittedShape {
+        if combineMode == .replace, immediateShape != previousCommittedShape {
             checkpointSelectionChangeIfPossible(previousCommittedShape: previousCommittedShape)
         }
 
+        let baseShapeForCombine = (combineMode != .replace) ? pendingCombineBaseShape : nil
+        pendingCombineBaseShape = nil
+
         bootstrap.workspaceStore.updateSelection { selection in
-            selection.committedShape = nextCommittedShape
+            if combineMode == .replace {
+                selection.committedShape = immediateShape
+            } else {
+                // add/subtract：先保持旧选区显示
+                selection.committedShape = baseShapeForCombine
+            }
             selection.inProgressShape = nil
             selection.anchorPoint = nil
             selection.activeKind = nil
-            selection.activeCombineMode = .replace
+            selection.activeCombineMode = combineMode
         }
         activeLassoRawPoints = []
         lassoSamplingDebugPoints = []
         samePathPreviewDebugShape = nil
         samePathCommittedDebugShape = nil
 
-        refresh()
+        refreshLightweight()
         relayIdeationOperation(.commitSelection(end: end, modifiers: .init(flags: modifiers)))
 
-        if isGeneratorRegionSelectionArmed, nextCommittedShape != nil {
-            isGeneratorRegionSelectionArmed = false
-            applyGeneratorToActiveLayer(clearSelectionAfterApply: true)
-            return
-        }
+        let capturedIsGeneratorArmed = isGeneratorRegionSelectionArmed
 
-        if nextCommittedShape == nil {
+        if immediateShape == nil {
             showStatus(.init(kind: .info, message: "选区为空"))
         } else {
             recordDrawingActivityIfNeeded()
             showStatus(.init(kind: .success, message: "已更新选区"))
+        }
+
+        // Step 2: 后台栅格化 mask
+        let polygonShapes = input.polygonShapes
+        let capturedPreferredShape = input.preferredDisplayShape
+        let capturedCanvasSize = canvasSize
+        let capturedBaseShape = baseShapeForCombine?.clamped(to: canvasSize)
+        let capturedCombineMode = combineMode
+        selectionEpoch += 1
+        let capturedEpoch = selectionEpoch
+        cancelActiveRasterizationTask()
+        activeRasterizationTask = Task { [weak self] in
+            guard let self else { return }
+            let result = await Task.detached(priority: .userInitiated) {
+                self.committedSelectionShape(
+                    input: SelectionInputShape(
+                        polygonShapes: polygonShapes,
+                        preferredDisplayShape: capturedPreferredShape
+                    ),
+                    canvasSize: capturedCanvasSize,
+                    mode: capturedCombineMode,
+                    baseShape: capturedBaseShape
+                )
+            }.value
+            guard self.selectionEpoch == capturedEpoch else { return }
+            self.bootstrap.workspaceStore.updateSelection { selection in
+                if capturedCombineMode != .replace {
+                    selection.committedShape = result ?? capturedBaseShape
+                } else {
+                    selection.committedShape = result
+                }
+                selection.inProgressShape = nil
+                selection.anchorPoint = nil
+                selection.activeKind = nil
+                selection.activeCombineMode = .replace
+            }
+            self.refreshLightweight()
+
+            if capturedIsGeneratorArmed, result != nil {
+                self.isGeneratorRegionSelectionArmed = false
+                self.applyGeneratorToActiveLayer(clearSelectionAfterApply: true)
+            }
         }
     }
 
@@ -4604,13 +4651,7 @@ final class WorkspaceViewModel: ObservableObject {
                 }
 
                 self.noteCanvasContentChanged()
-                if isFreeTransform && capturedFreeTransformUsesImplicit {
-                    let latestState = self.bootstrap.workspaceStore.state
-                    self.primeWholeLayerFreeTransformIdleStateIfNeeded(for: latestState)
-                    self.refreshLightweight()
-                } else {
-                    self.refresh()
-                }
+                self.refresh()
 
                 let totalDurationMs = Double(DispatchTime.now().uptimeNanoseconds - applyStart) / 1_000_000
                 self.transformLogger.debug("[apply] totalMs=\(totalDurationMs, privacy: .public)")
@@ -5568,6 +5609,13 @@ final class WorkspaceViewModel: ObservableObject {
         colorPanelProxy.selectedColor = state.toolSession.selectedColor
         syncSelectionOverlayProxy()
         scheduleWholeLayerInteractionBoundsRefreshIfNeeded(for: state)
+    }
+
+    /// 仅同步 toolSession 相关状态（画笔大小、不透明度、颜色等），
+    /// 不触碰 GPU 纹理、缩略图缓存或 sceneSnapshot，避免滑块拖动时主线程卡顿。
+    private func refreshToolSessionOnly() {
+        let state = bootstrap.workspaceStore.state
+        workspace = state
     }
 
     private func refreshSelectionOverlayOnly() {
@@ -9445,10 +9493,6 @@ final class WorkspaceViewModel: ObservableObject {
     private func previewQuickColorPickerState(_ state: QuickColorPickerState) {
         quickColorPickerState = state
         let color = ColorBlocksEngine.pickerColor(from: state.panel)
-        var updated = workspace
-        updated.toolSession.selectedColor = color
-        workspace = updated
-        activateCreativeShapeGeneratorCurrentColorSourceIfNeeded()
         colorPanelProxy.selectedColor = color
     }
 

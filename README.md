@@ -1,85 +1,58 @@
-# BrushCanvas Next
+# ArtFlex
 
-BrushCanvas Next 是现有 `BrushCanvas` 的 Metal 重构版。
+ArtFlex 是旧版 `BrushCanvas` 的 Metal-first 重构版 macOS 绘图软件。
 
-旧项目已经完成了较完整的产品设计与功能验证，但底层主要建立在 CPU / `CGContext` / `CGImage` 路线之上。为了获得更健康的长期架构、更稳定的颜色一致性、更好的大画布性能，以及更可持续的工具扩展能力，本项目将保留旧项目已经验证过的产品设计，同时重建画布、图层、渲染与工具底层实现。
-
-## 项目目标
-
-本项目的目标不是“复制旧项目代码”，而是：
-
-- 保留旧项目已经验证过的产品设计、界面结构、工具体系和工作流
-- 使用 Metal 重新构建画布底层
-- 统一像素格式、颜色空间、混合规则、取样路径
-- 重建图层、文档、撤销/重做、选区、变形、工具执行架构
-- 避免继续继承旧项目 CPU 路线带来的长期技术债
-
-## 为什么要重构
-
-旧项目已经证明产品方向成立，但底层存在这些问题：
-
-- 画布显示和图层合成主要依赖 CPU
-- 图层模型、文档状态、渲染缓存耦合严重
-- 大量功能依赖整图级位图操作
-- 颜色链、取色、导出、显示之间缺乏统一的底层真相源
-- 继续在旧架构上迭代，维护成本和性能风险会持续上升
+项目目标不是复制旧项目代码，而是在保留旧产品结构、工具体系和工作流的前提下，用更稳定的 Metal 渲染与文档架构重建画布、图层、工具和导出链路。
 
 ## 当前阶段
 
-当前仓库已经完成一轮性能收口与小范围 UX/perf follow-up，下一阶段默认转入新功能开发。
-
-如果你是新线程或刚恢复开发，不要从旧性能问题开始，先看：
-
-1. [HANDOFF.md](/Users/victorcloux/Desktop/ArtFlex/HANDOFF.md)
-2. [CURRENT_TASK.md](/Users/victorcloux/Desktop/ArtFlex/CURRENT_TASK.md)
-3. [DECISIONS.md](/Users/victorcloux/Desktop/ArtFlex/DECISIONS.md)
-
-## 当前进展
-
-项目当前已明显超出第一阶段 MVP，已经完成：
+当前项目已经明显超出最小 MVP，主工程里已经具备：
 
 - 多图层基础系统
-- 图层排序 / 可见性 / 锁定 / 透明度 / 复制
-- 撤销 / 重做基础链路
-- 吸管
-- 油漆桶
-- 矩形 / 椭圆 / 套索选区
-- 选区填充 / 删除
-- 套索填充 / 套索擦除
-- 最小版自由变形平移
+- 撤销 / 重做
+- 选区基础能力
 - PNG 导出
-- 多图层工程保存 / 打开
+- 工程保存 / 打开
+- 组合笔刷工作台与真实预览链
 
-当前系统已经能够完成以下更完整闭环：
+当前最活跃的工作不是管线接线，而是：
 
-`打开应用 -> 多图层绘制 -> 选区编辑 -> 撤销 / 重做 -> 导出 PNG -> 保存工程 -> 重新打开继续编辑`
+- 在主工程内继续收组合笔刷的最终外观
+- 保持现有 brush core、采样链、tip sampling 和显示链稳定
+- 只针对主层视觉表达做 look reconstruction
 
-当前更完整的阶段状态可见 [CURRENT_STATUS.md](/Users/victorcloux/Desktop/ArtFlex/CURRENT_STATUS.md)。  
-第一阶段完成时的历史总结已归档到 [STAGE1_STATUS.md](/Users/victorcloux/Desktop/ArtFlex/Docs/archive/STAGE1_STATUS.md)。
+## 当前组合笔刷状态
+
+当前组合笔刷已经不是“旧回退基线”。
+
+现状是：
+
+- 活动 UI 是 [CompoundBrushBuilderSheet.swift](/Users/victorcloux/Desktop/ArtFlex/Platform/macOS/UI/CompoundBrushBuilderSheet.swift)
+- 活动运行时是 [StageOneBrushRenderer.swift](/Users/victorcloux/Desktop/ArtFlex/Rendering/Canvas/StageOneBrushRenderer.swift) 里的 compound 分支
+- 主笔尖和次笔尖都已经通过 `BrushSettings` / `CompoundBrushSettings` 落到正式运行链
+- 当前目标 brush 的主路径是：
+  - 主笔尖决定笔触范围
+  - 次笔尖在笔迹坐标空间形成更大的重复纹理场
+  - 最终结果由主笔触包络裁剪
+  - 压力控制主次主导权
+  - 透明度曲线独立控制整条笔触深浅
+
+当前这条路径已经接回软件，可直接手测；剩余问题主要是主层外观仍需继续收口。
+
+## 新线程建议先看
+
+如果你是新线程或刚恢复开发，先看：
+
+1. [HANDOFF.md](/Users/victorcloux/Desktop/ArtFlex/HANDOFF.md)
+2. [CURRENT_STATUS.md](/Users/victorcloux/Desktop/ArtFlex/CURRENT_STATUS.md)
+3. [DECISIONS.md](/Users/victorcloux/Desktop/ArtFlex/DECISIONS.md)
 
 ## 迁移原则
 
 - 产品层设计优先继承旧项目
 - 底层实现优先重建，不复制旧项目 CPU 逻辑
-- 先做可验证闭环，再逐步追平旧功能
 - 所有颜色、纹理、混合、导出、取色路径必须共享统一规范
 - 不为了短期“能跑”而引入长期架构债务
-
-## 旧项目参考范围
-
-旧项目主要作为产品参考和行为参考，不作为实现模板。
-
-重点参考内容：
-
-- 主界面结构
-- 工具集合
-- 图层面板
-- 顶部工具栏
-- 色彩面板
-- 笔尖形状设计面板
-- 文件打开/保存/导出入口
-- 快捷键体系
-- 生成器入口设计
 
 ## 成功标准
 
@@ -89,4 +62,4 @@ BrushCanvas Next 是现有 `BrushCanvas` 的 Metal 重构版。
 - 颜色一致性稳定
 - 大画布下交互性能优于旧项目
 - 图层、画笔、选区、变形具备可持续扩展能力
-- 新项目不再依赖旧项目中的 CPU 栅格架构补丁
+- 组合笔刷既能稳定运行，也能在主工程里持续迭代外观而不破坏管线

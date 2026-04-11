@@ -15,10 +15,10 @@ struct ClosedLassoSmoothingConfiguration {
     )
 
     static let sectorGradient = ClosedLassoSmoothingConfiguration(
-        anchorMinimumDistance: 3,
-        sampleStep: 0.75,
-        outputMinimumDistance: 0.2,
-        fallbackMinimumDistance: 0.4
+        anchorMinimumDistance: 14,
+        sampleStep: 2.0,
+        outputMinimumDistance: 1.0,
+        fallbackMinimumDistance: 1.0
     )
 }
 

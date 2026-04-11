@@ -3287,10 +3287,21 @@ private struct ColorSVPickerView: NSViewRepresentable {
     }
 
     func updateNSView(_ nsView: ColorSVPickerNSView, context: Context) {
+        let previousPanel = context.coordinator.panel
         context.coordinator.panel = panel
         context.coordinator.onUpdatePoint = onUpdatePoint
         context.coordinator.onDragEnded = onDragEnded
-        nsView.needsDisplay = true
+        // NSView 拖动期间靠自身 needsDisplay 驱动指示圆移动，
+        // 只有影响 SV 渐变图的属性变化时才触发完整重绘（避免拖动 SV 时重算整张图）
+        let gradientChanged =
+            Int(previousPanel.pickerHue.rounded()) != Int(panel.pickerHue.rounded()) ||
+            Int(previousPanel.pickerLightness.rounded()) != Int(panel.pickerLightness.rounded()) ||
+            Int(previousPanel.pickerSaturation.rounded()) != Int(panel.pickerSaturation.rounded()) ||
+            Int(previousPanel.lightingHue.rounded()) != Int(panel.lightingHue.rounded()) ||
+            Int(previousPanel.lightingStrength.rounded()) != Int(panel.lightingStrength.rounded())
+        if gradientChanged || !nsView.hasDrawnOnce {
+            nsView.needsDisplay = true
+        }
     }
 
     final class Coordinator {
@@ -3487,6 +3498,7 @@ final class LongPressDraggableCellNSView: NSView, NSDraggingSource {
 
 final class ColorSVPickerNSView: NSView {
     fileprivate weak var coordinator: ColorSVPickerView.Coordinator?
+    fileprivate var hasDrawnOnce = false
     private var localX: Float = 0
     private var localY: Float = 0
     private var isDragging = false
@@ -3523,6 +3535,7 @@ final class ColorSVPickerNSView: NSView {
     override func draw(_ dirtyRect: NSRect) {
         guard let coordinator else { return }
         guard let ctx = NSGraphicsContext.current?.cgContext else { return }
+        hasDrawnOnce = true
         let size = max(64, Int(min(bounds.width, bounds.height) * 2))
         let panel = coordinator.panel
         if let image = colorPanelSVImage(size: size, panel: panel) {

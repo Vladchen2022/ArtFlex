@@ -2,8 +2,9 @@
 
 ## 1. 项目概况
 
-ArtFlex 是旧版 `BrushCanvas` 的 **Metal-first** 重构版 macOS 绘图软件。  
-产品层仍保留成熟桌面绘图软件的主结构：
+ArtFlex 是旧版 `BrushCanvas` 的 Metal-first 重构版 macOS 绘图软件。
+
+产品主结构保持桌面绘图软件形态：
 
 - 顶部工具栏
 - 左侧工具栏
@@ -11,120 +12,121 @@ ArtFlex 是旧版 `BrushCanvas` 的 **Metal-first** 重构版 macOS 绘图软件
 - 右侧参数 / 颜色 / 笔刷 / 生成器 / 参考图区域
 - 图层面板
 
-当前工作基线是：**Git 回退后的稳定版本**。  
-此前那轮“复杂笔尖工作台 / 双通道运行时 / 主次迁移曲线”的实验改动已经回退，不是当前活动基线。
+当前项目已经不再处于“Git 回退后旧 dual-tip 基线”的阶段。  
+当前活动基线是：**组合笔刷已经重新接回主工程，接线与运行链已可用，当前主要工作转入 look reconstruction。**
 
 ## 2. 当前代码真实状态
 
-### 2.1 构建状态
+### 2.1 构建与常用验证入口
 
-- 当前工作树已清理为干净状态
-- `swift build` 通过
-- `swift test --filter WorkspaceViewModelSafetyTests` 通过
+当前常用验证入口是：
 
-当前仍有现存 warning，但不阻塞构建：
+- `swift build`
+- `swift test --filter WorkspaceViewModelSafetyTests`
+- `swift test --filter BrushStrokeSamplingTests`
+- `swift test --filter StageOneBrushPreviewRasterizerTests`
 
-- `Package.swift` 的 `exclude/unhandled files` warning
-- `OptimizedSliders.swift` 的 `onChange` 弃用 warning
-- `TimelapseRecorderController.swift` 的 Sendable warning
+项目仍有若干非阻塞 warning，但当前阶段的重点不是 warning 清零，而是保持主工程组合笔刷可迭代。
 
-### 2.2 画笔系统当前真实基线
+### 2.2 组合笔刷当前真实基线
 
-当前 `Dual Tip / 组合笔尖` 仍是**旧 flat-field + stamp-based runtime**：
+当前组合笔刷的活动真相源已经是正式主工程路径，不再是“旧 flat dual-tip UI + 旧 compact popover”那套描述。
+
+当前关键位置：
 
 - [ToolKind.swift](/Users/victorcloux/Desktop/ArtFlex/Core/Tools/ToolKind.swift)
-  - 当前活动真相源仍包含：
-    - `secondarySizeRatio`
-    - `secondarySpacingPhase`
-    - `secondarySpacingPhaseJitter`
-    - `secondaryScatter`
-    - `secondaryScatterJitter`
-    - `secondaryInvert`
-    - 以及相关 jitter / offset 字段
+  - 活动真相源是 `CompoundBrushSettings`
+  - 包含：
+    - `enabled`
+    - `mode`
+    - `secondary`
+    - `pressureMix`
+  - 次笔尖活动参数包括：
+    - `sizeMode`
+    - `size / relativeSizeRatio`
+    - `spacingPercent`
+    - `pressureSizeAmount`
+    - `pressureOpacityAmount`
+    - `tileRandomRotation`
+    - `customTipMaskData`
+
 - [WorkspaceViewModel.swift](/Users/victorcloux/Desktop/ArtFlex/Platform/macOS/App/WorkspaceViewModel.swift)
-  - 当前活动接线仍通过旧 setter 写入运行时
+  - 当前存在完整的组合笔刷活动 setter
+  - 包括主笔尖、次笔尖、压力混合、次笔尖随机旋转等接线
+
+- [CompoundBrushBuilderSheet.swift](/Users/victorcloux/Desktop/ArtFlex/Platform/macOS/UI/CompoundBrushBuilderSheet.swift)
+  - 当前活动 UI 是组合笔刷工作台
+  - 不是旧 compact dual-tip popover
+
 - [StageOneBrushRenderer.swift](/Users/victorcloux/Desktop/ArtFlex/Rendering/Canvas/StageOneBrushRenderer.swift)
-  - 当前真实绘制仍是 stamp-based 合成
-  - 次笔尖仍不是整条笔迹连续纹理场
-- [StageOneBrushPreviewRasterizer.swift](/Users/victorcloux/Desktop/ArtFlex/Rendering/Canvas/StageOneBrushPreviewRasterizer.swift)
-  - 当前预览仍跟随旧 dual-tip 语义
-  - 不是新的双通道 pressure-aware 运行时镜像
+  - 当前活动 runtime 就在这里
+  - 组合笔刷开启后：
+    - 主笔尖包络决定笔触外轮廓
+    - 次笔尖沿 stroke-space 形成重复纹理场
+    - 最终结果始终被主包络裁剪
+    - 压力通过 `pressureMix` 控制主次主导权
+    - 次纹理支持 per-tile stable random rotation
 
-### 2.3 当前 active Dual Tip UI
+### 2.3 当前组合笔刷的外观语义
 
-当前活动 UI 在：
+当前主工程里的目标刷语义可以概括为：
 
-- [RightInspectorView.swift](/Users/victorcloux/Desktop/ArtFlex/Platform/macOS/UI/RightInspectorView.swift)
+1. 主笔尖先定义主体范围 / 轮廓
+2. 次笔尖作为更大的重复纹理场进入内部
+3. 最终只显示落在主包络范围内的部分
+4. 压力控制“主层更强还是次层更强”
+5. 整体透明度曲线独立控制整条笔触深浅
 
-当前 active 交互仍是旧的 compact popover，而不是独立“复杂笔尖工作台”。
+这和此前文档里那套“旧 dual-tip flat 字段 + rows/fill / scatter / invert 基线”已经不是一回事。
 
-当前 active 参数仍主要包括：
+### 2.4 当前最需要保持冻结的部分
 
-- `强度`
-- `次笔尖大小比例`
-- `大小抖动`
-- `角度抖动`
-- `角度偏移`
-- `节距错相`
-- `错相抖动`
-- `散布`
-- `散布抖动`
-- `反相`
+当前不要随意改这些：
 
-当前 active 组合模式：
+- sample builder
+- tip sampling
+- 主/次 tip 接线
+- dominance / opacity 曲线结构
+- projected/clipped 基本语义
+- actual-hand-stroke / display 链排错逻辑
 
-- `调制`
-- `减去`
-- `相交`
+这些链路之前已经花大量时间对齐过，不应该再当作默认怀疑对象。
 
-### 2.4 不再属于当前基线的内容
+## 3. 当前 look 层面的真实问题
 
-以下内容**不是当前活动代码基线**：
+当前剩余问题已经收缩到**主层视觉表达**，不是 plumbing。
 
-- `ComplexBrushBuilderSheet`
-- `TipChannelEditorView`
-- `TipPreviewStrip`
-- 基于 `primaryTipChannel / secondaryTipChannel / dualTipPressureBlend` 的活动 runtime 主路径
-- 新版“主通道 / 次通道 / 压力迁移”工作台 UI
+当前用户反馈已经明确：
 
-这些文件和思路此前是试验性改动，现已回退，不应再写进当前状态文档里当成已落地能力。
+- `primary_body_alpha` 基本正确，应视为锁定
+- `secondary_clipped_alpha` 基本正确，应视为锁定
+- 问题集中在主层可见结果：
+  - 主层仍容易露出 raw primary stamp 的串珠 / rail 感
+  - `primary_texture_modulation_alpha` 容易退化成“模糊过的 stamp chain”
+  - `high` 和 `sweep` 左半段因此还不够接近目标 brush
 
-## 3. 当前已接受的功能 / UX 基线
+所以当前阶段不是去改次层，不是去重查接线，而是继续把主层从“看得见的 stamp chain”收成“连续主体 + 很轻微的内部主纹理调制”。
 
-- 右侧顶部 `笔尖形状设计 / 导航器` 默认打开 `导航器`
-- `涂抹` 会独立记住自己的 brush 设置
-- `参考图` 面板当前冻结：
-  - 默认打开 `参考图`
-  - 小窗只负责固定 fit 预览与取色
-  - 放大后使用独立浮窗浏览与取色
-  - 关闭浮窗不再弹出保存工程确认
-- `颜色` 面板默认收起高级区，通过底部细把手展开
+## 4. 当前推荐工作范围
 
-## 4. 当前 brush / dual-tip 的真实问题
+如果继续做组合笔刷，优先范围是：
 
-当前最重要的问题不是参数，而是运行时骨架仍然是旧模型：
+1. 只收主层 modulation
+2. 优先看：
+   - `primary_body_alpha`
+   - `body_interior_mask`
+   - `primary_texture_modulation_alpha`
+   - `primary_visible_alpha`
+   - `high`
+   - `sweep`
+3. 不要顺手再改：
+   - 次层语义
+   - sample / tip / display 链
+   - 工程接线
+   - 旧 subtract/intersect 之外的基础模式框架
 
-- 仍容易出现图章串珠感 / 管状连续截面
-- 轻压时不会明显体现次笔尖纹理
-- 重压时不会明显回到主笔尖包络
-- 结果层面仍不符合“轻压偏次、重压偏主”的目标
-
-也就是说，当前问题是**runtime 模型问题**，不是单纯调参问题。
-
-## 5. 当前如果要继续做 Dual Tip，正确方向
-
-当前文档基线已明确：
-
-- 不应继续在旧 dual-tip runtime 上打补丁
-- 后续如果重开这条线，应该按**硬重构**重新开始：
-  - runtime 真相源收敛
-  - 旧 flat 字段退出活动路径
-  - 新 preview/runtime 同公式
-
-在没有重新立项之前，当前仓库应继续按“已回退的稳定版本”理解。
-
-恢复上下文时，先看：
+## 5. 恢复上下文时先看
 
 1. [HANDOFF.md](/Users/victorcloux/Desktop/ArtFlex/HANDOFF.md)
-2. [CURRENT_TASK.md](/Users/victorcloux/Desktop/ArtFlex/CURRENT_TASK.md)
+2. [CURRENT_STATUS.md](/Users/victorcloux/Desktop/ArtFlex/CURRENT_STATUS.md)
 3. [DECISIONS.md](/Users/victorcloux/Desktop/ArtFlex/DECISIONS.md)

@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(swift build:*)",
+      "Bash(xcodebuild -scheme ArtFlex -destination 'platform=macOS' build)"
+    ]
+  }
+}
