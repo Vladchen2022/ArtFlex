@@ -447,6 +447,7 @@ struct CompoundBrushBuilderSheet: View {
             let previewImage = StageOneBrushPreviewRasterizer.compoundStrokePreviewImage(
                 for: brush,
                 resolution: 96,
+                width: 480,
                 pressure: Float(previewPressure)
             )
             await MainActor.run {

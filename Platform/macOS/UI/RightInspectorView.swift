@@ -753,7 +753,7 @@ struct RightInspectorView: View {
                     viewModel.setBrushFollowsStrokeDirection(!viewModel.workspace.toolSession.brush.followsStrokeDirection)
                 }
 
-                compactIconButton(systemImage: "waveform.path.ecg", tooltip: "尺寸压感曲线") {
+                compactIconButton(systemImage: "waveform.path.ecg", tooltip: "大小压感曲线") {
                     showsPressureSizeCurveEditor.toggle()
                 }
                 .popover(isPresented: $showsPressureSizeCurveEditor, arrowEdge: .bottom) {
@@ -763,7 +763,7 @@ struct RightInspectorView: View {
                         .background(Color(nsColor: .windowBackgroundColor))
                 }
 
-                compactIconButton(systemImage: "drop", tooltip: "透明度压感曲线") {
+                compactIconButton(systemImage: "drop", tooltip: "透明压感曲线") {
                     showsPressureCurveEditor.toggle()
                 }
                 .popover(isPresented: $showsPressureCurveEditor, arrowEdge: .bottom) {
@@ -785,7 +785,7 @@ struct RightInspectorView: View {
 
     private var pressureSizeCurveEditor: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("尺寸压感曲线")
+            Text("大小压感曲线")
                 .font(.system(size: 13, weight: .bold))
 
             curvePresetRow(
@@ -842,7 +842,7 @@ struct RightInspectorView: View {
 
     private var pressureCurveEditor: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("透明度压感曲线")
+            Text("透明压感曲线")
                 .font(.system(size: 13, weight: .bold))
 
             curvePresetRow(
@@ -1133,26 +1133,6 @@ struct RightInspectorView: View {
                 onCommit: { tipPressureOpacityAmount = $0 }
             )
 
-            HStack(spacing: 8) {
-                compactIconButton(systemImage: "square.on.circle", tooltip: "插入形状") {
-                    insertNextPresetShape()
-                }
-
-                compactIconButton(systemImage: "aqi.medium", tooltip: "喷墨散点") {
-                    insertNextSprayPattern()
-                }
-                compactIconButton(systemImage: "rotate.right", tooltip: "旋转笔尖") {
-                    rotateCustomTip()
-                }
-
-                compactIconButton(systemImage: "arrow.left.and.right.square", tooltip: "左右翻转") {
-                    flipCustomTipHorizontally()
-                }
-
-                compactIconButton(systemImage: "arrow.up.and.down.square", tooltip: "上下翻转") {
-                    flipCustomTipVertically()
-                }
-            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }

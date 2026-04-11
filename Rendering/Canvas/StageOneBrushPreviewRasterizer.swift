@@ -91,12 +91,16 @@ enum StageOneBrushPreviewRasterizer {
     static func compoundStrokePreviewImage(
         for brush: BrushSettings,
         resolution: Int = 256,
+        width: Int? = nil,
         pressure: Float
     ) -> CGImage? {
-        guard resolution > 0 else { return nil }
+        let previewWidth = width ?? resolution
+        let previewHeight = resolution
+        guard previewWidth > 0, previewHeight > 0 else { return nil }
         let cacheKey = makeCompoundStrokePreviewCacheKey(
             for: brush,
             resolution: resolution,
+            width: previewWidth,
             pressure: pressure
         )
         if let cached = cache.object(forKey: cacheKey) {
@@ -105,13 +109,13 @@ enum StageOneBrushPreviewRasterizer {
 
         guard
             let context = compoundPreviewRendererContext,
-            let texture = makePreviewTexture(device: context.device, resolution: resolution)
+            let texture = makePreviewTexture(device: context.device, width: previewWidth, height: previewHeight)
         else {
             return nil
         }
 
         clearPreviewTexture(texture, commandQueue: context.commandQueue)
-        let stroke = makeCompoundPreviewStroke(for: brush, resolution: resolution, pressure: pressure)
+        let stroke = makeCompoundPreviewStroke(for: brush, width: previewWidth, height: previewHeight, pressure: pressure)
         var samplingState: BrushStrokeSamplingState?
 
         if stroke.brush.buildMode == .opacityCap {
@@ -559,11 +563,13 @@ enum StageOneBrushPreviewRasterizer {
     private static func makeCompoundStrokePreviewCacheKey(
         for brush: BrushSettings,
         resolution: Int,
+        width: Int? = nil,
         pressure: Float
     ) -> NSString {
         var hasher = Hasher()
         brushHasher(brush, into: &hasher)
         hasher.combine("compound-stroke")
+        hasher.combine(width ?? resolution)
         hasher.combine(brush.compoundBrush.enabled)
         hasher.combine(brush.compoundBrush.mode.rawValue)
         let secondary = brush.compoundBrush.secondary
@@ -633,10 +639,14 @@ enum StageOneBrushPreviewRasterizer {
     }
 
     private static func makePreviewTexture(device: MTLDevice, resolution: Int) -> MTLTexture? {
+        makePreviewTexture(device: device, width: resolution, height: resolution)
+    }
+
+    private static func makePreviewTexture(device: MTLDevice, width: Int, height: Int) -> MTLTexture? {
         let descriptor = MTLTextureDescriptor.texture2DDescriptor(
             pixelFormat: .bgra8Unorm_srgb,
-            width: resolution,
-            height: resolution,
+            width: width,
+            height: height,
             mipmapped: false
         )
         descriptor.usage = [.renderTarget, .shaderRead]
@@ -659,17 +669,20 @@ enum StageOneBrushPreviewRasterizer {
 
     private static func makeCompoundPreviewStroke(
         for brush: BrushSettings,
-        resolution: Int,
+        width: Int,
+        height: Int,
         pressure: Float
     ) -> StrokeDescriptor {
-        let side = Double(resolution)
+        let w = Double(width)
+        let h = Double(height)
         let points = [
-            StrokePoint(x: side * 0.10, y: side * 0.70, pressure: pressure),
-            StrokePoint(x: side * 0.25, y: side * 0.43, pressure: pressure),
-            StrokePoint(x: side * 0.43, y: side * 0.56, pressure: pressure),
-            StrokePoint(x: side * 0.60, y: side * 0.37, pressure: pressure),
-            StrokePoint(x: side * 0.77, y: side * 0.53, pressure: pressure),
-            StrokePoint(x: side * 0.91, y: side * 0.34, pressure: pressure)
+            StrokePoint(x: w * 0.05, y: h * 0.70, pressure: pressure),
+            StrokePoint(x: w * 0.20, y: h * 0.35, pressure: pressure),
+            StrokePoint(x: w * 0.38, y: h * 0.60, pressure: pressure),
+            StrokePoint(x: w * 0.55, y: h * 0.30, pressure: pressure),
+            StrokePoint(x: w * 0.72, y: h * 0.55, pressure: pressure),
+            StrokePoint(x: w * 0.88, y: h * 0.25, pressure: pressure),
+            StrokePoint(x: w * 0.95, y: h * 0.45, pressure: pressure)
         ]
         return StrokeDescriptor(
             tool: .brush,
