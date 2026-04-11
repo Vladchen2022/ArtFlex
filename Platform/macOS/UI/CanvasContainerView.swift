@@ -181,6 +181,7 @@ struct CanvasContainerView: View {
                             onCanvasInteraction?()
                             viewModel.cancelSelectionTransform()
                         },
+                        isLuminosityPreviewEnabled: viewModel.isLuminosityPreviewEnabled,
                         onAdjustBrushSize: { delta in
                             viewModel.adjustBrushSize(by: delta)
                         }

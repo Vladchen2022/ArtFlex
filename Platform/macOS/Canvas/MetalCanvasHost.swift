@@ -57,6 +57,7 @@ struct MetalCanvasHost: NSViewRepresentable {
     let onClearSelection: () -> Void
     let onApplyTransform: () -> Void
     let onCancelTransform: () -> Void
+    let isLuminosityPreviewEnabled: Bool
     let onAdjustBrushSize: (Float) -> Void
     private let brushFeelLogger = Logger(subsystem: "ArtFlex", category: "BrushFeel")
 
@@ -146,6 +147,8 @@ struct MetalCanvasHost: NSViewRepresentable {
         context.coordinator.sectorGradientPreview = sectorGradientPreview
         context.coordinator.gradientPreviewColor = gradientPreviewColor
         context.coordinator.gradientColorJitterAmount = gradientColorJitterAmount
+        let previousLuminosityPreview = context.coordinator.isLuminosityPreviewEnabled
+        context.coordinator.isLuminosityPreviewEnabled = isLuminosityPreviewEnabled
         if let view = nsView as? StrokeCaptureMTKView {
             let previousCanvasSize = view.canvasSize
             let previousViewportRotation = view.viewportRotationDegrees
@@ -174,6 +177,7 @@ struct MetalCanvasHost: NSViewRepresentable {
                 previousSectorGradientPreview != sectorGradientPreview ||
                 previousGradientPreviewColor != gradientPreviewColor ||
                 previousGradientColorJitterAmount != gradientColorJitterAmount ||
+                previousLuminosityPreview != isLuminosityPreviewEnabled ||
                 previousCanvasSize != sceneSnapshot.renderSnapshot.document.canvasSize ||
                 previousViewportRotation != viewportRotationDegrees ||
                 previousPanMode != isPanModeActive ||
@@ -219,6 +223,7 @@ struct MetalCanvasHost: NSViewRepresentable {
                 previousSectorGradientPreview != sectorGradientPreview ||
                 previousGradientPreviewColor != gradientPreviewColor ||
                 previousGradientColorJitterAmount != gradientColorJitterAmount ||
+                previousLuminosityPreview != isLuminosityPreviewEnabled ||
                 previousCanvasSize != view.canvasSize ||
                 previousViewportRotation != viewportRotationDegrees ||
                 previousPanMode != isPanModeActive ||
@@ -1894,6 +1899,9 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
     var previousGradientPreviewColor: RGBAColor = .black
     var previousGradientColorJitterAmount: Float = 0
     var transformPreview = FreeTransformPreview.identity
+    var isLuminosityPreviewEnabled = false
+    private let labLuminosityPostProcessor: LABLuminosityPostProcessor?
+    private let labLuminosityPostProcessorError: Error?
     private let selectionTraceLogger = Logger(subsystem: "ArtFlex", category: "SelectionTrace")
     private let transformLogger = Logger(subsystem: "ArtFlex", category: "Transform")
     private var previewTimingFrameCounter = 0
@@ -1960,6 +1968,13 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
         self.transformPreviewBuilder = TransformPreviewSessionBuilder(device: metalContext.device)
         self.linearGradientRenderer = LinearGradientRenderer(device: metalContext.device)
         self.sectorGradientRenderer = SectorGradientRenderer(device: metalContext.device)
+        do {
+            self.labLuminosityPostProcessor = try LABLuminosityPostProcessor(device: metalContext.device)
+            self.labLuminosityPostProcessorError = nil
+        } catch {
+            self.labLuminosityPostProcessor = nil
+            self.labLuminosityPostProcessorError = error
+        }
         self.activeTool = activeTool
         self.transformSelectionShape = transformSelectionShape
         self.transformPreview = transformPreview
@@ -2227,6 +2242,33 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
             }
         } else if let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: descriptor) {
             encoder.endEncoding()
+        }
+
+        if isLuminosityPreviewEnabled, let labProcessor = labLuminosityPostProcessor {
+            let drawableTexture = drawable.texture
+            let tempDesc = MTLTextureDescriptor.texture2DDescriptor(
+                pixelFormat: drawableTexture.pixelFormat,
+                width: drawableTexture.width,
+                height: drawableTexture.height,
+                mipmapped: false
+            )
+            tempDesc.usage = [.shaderRead, .renderTarget]
+            tempDesc.storageMode = .private
+            if let tempTexture = metalContext.device.makeTexture(descriptor: tempDesc),
+               let blitEncoder = commandBuffer.makeBlitCommandEncoder() {
+                blitEncoder.copy(from: drawableTexture, to: tempTexture)
+                blitEncoder.endEncoding()
+
+                let labPassDescriptor = MTLRenderPassDescriptor()
+                labPassDescriptor.colorAttachments[0].texture = drawableTexture
+                labPassDescriptor.colorAttachments[0].loadAction = .dontCare
+                labPassDescriptor.colorAttachments[0].storeAction = .store
+                labProcessor.encode(
+                    sourceTexture: tempTexture,
+                    into: labPassDescriptor,
+                    commandBuffer: commandBuffer
+                )
+            }
         }
 
         commandBuffer.present(drawable)

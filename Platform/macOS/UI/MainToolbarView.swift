@@ -54,6 +54,14 @@ struct MainToolbarView: View {
                 editingViewModel.setCanvasViewportLocked(!editingViewModel.isCanvasViewportLocked)
             }
 
+            toolbarToggleButton(
+                title: "黑白模式",
+                systemImage: "circle.lefthalf.filled",
+                isOn: editingViewModel.isLuminosityPreviewEnabled
+            ) {
+                editingViewModel.toggleLuminosityPreview()
+            }
+
             Spacer(minLength: 0)
 
             Text(hostViewModel.workspace.document.metadata.name)

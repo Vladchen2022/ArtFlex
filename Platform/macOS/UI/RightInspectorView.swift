@@ -322,6 +322,28 @@ struct RightInspectorView: View {
                 .disabled(viewModel.selectedReferenceImageSlot?.asset == nil)
                 .help("放大参考图")
 
+                Button {
+                    viewModel.toggleCanvasLuminosityReference()
+                } label: {
+                    Image(systemName: "circle.lefthalf.filled")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundStyle(Color.white.opacity(viewModel.isCanvasLuminosityReferenceActive ? 0.98 : 0.86))
+                        .frame(width: 30, height: 26)
+                        .background(
+                            RoundedRectangle(cornerRadius: 8)
+                                .fill(viewModel.isCanvasLuminosityReferenceActive ? Color.accentColor.opacity(0.92) : Color.white.opacity(0.10))
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8)
+                                .stroke(
+                                    viewModel.isCanvasLuminosityReferenceActive ? Color.accentColor.opacity(0.90) : Color.white.opacity(0.08),
+                                    lineWidth: 1
+                                )
+                        )
+                }
+                .buttonStyle(.plain)
+                .help("黑白模式 (LAB L通道)")
+
                 referenceImagePickedColorSwatch
 
                 Button {
@@ -3216,6 +3238,7 @@ private struct NavigatorPreviewPanel: View {
                     onClearSelection: {},
                     onApplyTransform: {},
                     onCancelTransform: {},
+                    isLuminosityPreviewEnabled: false,
                     onAdjustBrushSize: { _ in }
                 )
                 .frame(

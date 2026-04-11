@@ -117,6 +117,7 @@ final class WorkspaceViewModel: ObservableObject {
     @Published private(set) var transformPreviewOffset = CanvasPoint(x: 0, y: 0)
     @Published private(set) var freeTransformPreview = FreeTransformPreview.identity
     @Published private(set) var isApplyingGradientCommit = false
+    @Published private(set) var isLuminosityPreviewEnabled = false
     @Published private(set) var isFreeTransformDragging = false
     @Published private(set) var activeFreeTransformInteractionMode: FreeTransformInteractionMode?
     @Published private(set) var isBrushTipCanvasFocused = false
@@ -187,6 +188,16 @@ final class WorkspaceViewModel: ObservableObject {
         try TransformGPUCompositor(device: bootstrap.metalContext.device)
     }
     private lazy var referenceImageFloatingPanelController = ReferenceImageFloatingPanelController()
+    @Published private(set) var isCanvasLuminosityReferenceActive = false
+    private var luminosityReferenceSlotID: Int?
+    private var luminosityCaptureTask: Task<Void, Never>?
+    private var lastLuminosityCaptureRevision: UInt64 = 0
+    private lazy var luminosityPresenter: StageOneCanvasPresenter? = {
+        try? StageOneCanvasPresenter(device: bootstrap.metalContext.device)
+    }()
+    private lazy var luminosityPostProcessor: LABLuminosityPostProcessor? = {
+        try? LABLuminosityPostProcessor(device: bootstrap.metalContext.device)
+    }()
     init(
         bootstrap: AppBootstrap,
         installsZoomKeyboardMonitor: Bool = true,
@@ -1695,12 +1706,21 @@ final class WorkspaceViewModel: ObservableObject {
             return
         }
 
+        if slotID == luminosityReferenceSlotID { return }
+
         importReferenceImageIntoSlot(slotID)
     }
 
     func clearReferenceImageSlot(_ slotID: Int) {
         guard referenceImageSlots.indices.contains(slotID) else { return }
         guard referenceImageSlots[slotID].asset != nil else { return }
+
+        if slotID == luminosityReferenceSlotID {
+            luminosityCaptureTask?.cancel()
+            luminosityCaptureTask = nil
+            isCanvasLuminosityReferenceActive = false
+            luminosityReferenceSlotID = nil
+        }
 
         referenceImageUpgradeTasks[slotID]?.cancel()
         referenceImageUpgradeTasks[slotID] = nil
@@ -1854,6 +1874,211 @@ final class WorkspaceViewModel: ObservableObject {
         }
 
         return nil
+    }
+
+    // MARK: - Canvas Luminosity Reference (黑白模式参考)
+
+    func toggleCanvasLuminosityReference() {
+        if isCanvasLuminosityReferenceActive {
+            disableCanvasLuminosityReference()
+        } else {
+            enableCanvasLuminosityReference()
+        }
+    }
+
+    private func enableCanvasLuminosityReference() {
+        guard let slot = referenceImageSlots.first(where: { $0.asset == nil }) else {
+            showStatus(.init(kind: .info, message: "请先腾出一个参考图位置"))
+            return
+        }
+
+        isCanvasLuminosityReferenceActive = true
+        luminosityReferenceSlotID = slot.id
+        lastLuminosityCaptureRevision = 0
+        captureCanvasLuminositySnapshot()
+    }
+
+    func disableCanvasLuminosityReference() {
+        luminosityCaptureTask?.cancel()
+        luminosityCaptureTask = nil
+
+        if let slotID = luminosityReferenceSlotID {
+            referenceImageUpgradeTasks[slotID]?.cancel()
+            referenceImageUpgradeTasks[slotID] = nil
+
+            let nextSelectedSlotID: Int?
+            if selectedReferenceImageSlotID == slotID {
+                nextSelectedSlotID = nextLoadedReferenceImageSlotID(afterClearing: slotID)
+            } else {
+                nextSelectedSlotID = selectedReferenceImageSlotID
+            }
+
+            replaceReferenceImageSlotAsset(nil, at: slotID)
+            referenceImagePreviewColor = nil
+            selectedReferenceImageSlotID = nextSelectedSlotID
+
+            if nextSelectedSlotID == nil, isReferenceImageFloatingPanelPresented {
+                closeReferenceImageFloatingPanel()
+            }
+        }
+
+        isCanvasLuminosityReferenceActive = false
+        luminosityReferenceSlotID = nil
+    }
+
+    func scheduleLuminosityCaptureIfNeeded() {
+        guard isCanvasLuminosityReferenceActive else { return }
+
+        let currentRevision = sceneSnapshot.renderSnapshot.canvasContentRevision
+        guard currentRevision != lastLuminosityCaptureRevision else { return }
+        lastLuminosityCaptureRevision = currentRevision
+
+        luminosityCaptureTask?.cancel()
+        luminosityCaptureTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            guard !Task.isCancelled else { return }
+            self?.captureCanvasLuminositySnapshot()
+        }
+    }
+
+    private func captureCanvasLuminositySnapshot() {
+        guard isCanvasLuminosityReferenceActive,
+              let slotID = luminosityReferenceSlotID,
+              let presenter = luminosityPresenter,
+              let labProcessor = luminosityPostProcessor
+        else { return }
+
+        let device = metalContext.device
+        let snapshot = sceneSnapshot
+        let canvasWidth = snapshot.renderSnapshot.document.canvasSize.width
+        let canvasHeight = snapshot.renderSnapshot.document.canvasSize.height
+        guard canvasWidth > 0, canvasHeight > 0 else { return }
+
+        let maxDim = 1024
+        let scale = min(Double(maxDim) / Double(max(canvasWidth, canvasHeight)), 1.0)
+        let outWidth = max(Int(Double(canvasWidth) * scale), 1)
+        let outHeight = max(Int(Double(canvasHeight) * scale), 1)
+
+        let texDesc = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .bgra8Unorm_srgb,
+            width: outWidth,
+            height: outHeight,
+            mipmapped: false
+        )
+        texDesc.usage = [.shaderRead, .renderTarget]
+        texDesc.storageMode = .shared
+
+        let tempDesc = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .bgra8Unorm_srgb,
+            width: outWidth,
+            height: outHeight,
+            mipmapped: false
+        )
+        tempDesc.usage = [.shaderRead, .renderTarget]
+        tempDesc.storageMode = .private
+
+        guard let offscreen = device.makeTexture(descriptor: texDesc),
+              let tempTexture = device.makeTexture(descriptor: tempDesc),
+              let commandBuffer = metalContext.commandQueue.makeCommandBuffer()
+        else { return }
+
+        let layerTextures: [(texture: MTLTexture, opacity: Float)] = snapshot.layerSurfaces.compactMap { surface in
+            guard surface.isVisible,
+                  let texture = layerSurfaceStore.texture(for: surface.surfaceID)
+            else { return nil }
+            return (texture, surface.opacity)
+        }
+
+        let rpd = MTLRenderPassDescriptor()
+        rpd.colorAttachments[0].texture = offscreen
+        rpd.colorAttachments[0].loadAction = .clear
+        rpd.colorAttachments[0].clearColor = MTLClearColor(red: 1, green: 1, blue: 1, alpha: 1)
+        rpd.colorAttachments[0].storeAction = .store
+
+        presenter.encode(
+            layerTextures: layerTextures,
+            into: rpd,
+            commandBuffer: commandBuffer
+        )
+
+        if let blit = commandBuffer.makeBlitCommandEncoder() {
+            blit.copy(from: offscreen, to: tempTexture)
+            blit.endEncoding()
+        }
+
+        let labRPD = MTLRenderPassDescriptor()
+        labRPD.colorAttachments[0].texture = offscreen
+        labRPD.colorAttachments[0].loadAction = .dontCare
+        labRPD.colorAttachments[0].storeAction = .store
+
+        labProcessor.encode(
+            sourceTexture: tempTexture,
+            into: labRPD,
+            commandBuffer: commandBuffer
+        )
+
+        let capturedSlotID = slotID
+        commandBuffer.addCompletedHandler { [weak self] _ in
+            let bytesPerRow = 4 * outWidth
+            var pixels = [UInt8](repeating: 0, count: bytesPerRow * outHeight)
+            offscreen.getBytes(
+                &pixels,
+                bytesPerRow: bytesPerRow,
+                from: MTLRegion(
+                    origin: MTLOrigin(x: 0, y: 0, z: 0),
+                    size: MTLSize(width: outWidth, height: outHeight, depth: 1)
+                ),
+                mipmapLevel: 0
+            )
+
+            for i in 0..<(outWidth * outHeight) {
+                let offset = i * 4
+                let b = pixels[offset]
+                let r = pixels[offset + 2]
+                pixels[offset] = r
+                pixels[offset + 2] = b
+            }
+
+            let rgbaData = Data(pixels)
+
+            guard let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
+                  let provider = CGDataProvider(data: rgbaData as CFData),
+                  let cgImage = CGImage(
+                      width: outWidth,
+                      height: outHeight,
+                      bitsPerComponent: 8,
+                      bitsPerPixel: 32,
+                      bytesPerRow: bytesPerRow,
+                      space: colorSpace,
+                      bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
+                      provider: provider,
+                      decode: nil,
+                      shouldInterpolate: true,
+                      intent: .defaultIntent
+                  )
+            else { return }
+
+            let asset = ReferenceImageAsset(
+                fileName: "画布黑白预览",
+                width: outWidth,
+                height: outHeight,
+                rgbaPixels: rgbaData,
+                cgImage: cgImage,
+                sourceURL: nil,
+                decodedMaxDimension: maxDim
+            )
+
+            DispatchQueue.main.async { [weak self] in
+                guard let self,
+                      self.isCanvasLuminosityReferenceActive,
+                      self.luminosityReferenceSlotID == capturedSlotID
+                else { return }
+
+                self.replaceReferenceImageSlotAsset(asset, at: capturedSlotID, selectAfterUpdate: true)
+            }
+        }
+
+        commandBuffer.commit()
     }
 
     func setColorPanelMode(_ mode: ColorPanelMode) {
@@ -2496,6 +2721,10 @@ final class WorkspaceViewModel: ObservableObject {
         if isLocked {
             isPanModeActive = false
         }
+    }
+
+    func toggleLuminosityPreview() {
+        isLuminosityPreviewEnabled.toggle()
     }
 
     func updateCanvasViewportSize(_ size: CGSize) {
@@ -5588,6 +5817,7 @@ final class WorkspaceViewModel: ObservableObject {
         canMergeVisible = state.document.mergeVisibleContext != nil
         syncSelectionOverlayProxy()
         scheduleWholeLayerInteractionBoundsRefreshIfNeeded(for: state)
+        scheduleLuminosityCaptureIfNeeded()
     }
 
     private func refreshLightweight(reason: StaticString = "unspecified") {
