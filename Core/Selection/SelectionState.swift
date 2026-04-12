@@ -28,6 +28,22 @@ struct SelectionMaskData: Codable, Sendable, Equatable {
     var canvasWidth: Int
     var canvasHeight: Int
     var alphaBytes: Data
+
+    @inline(__always)
+    func withAlphaBytes<Result>(_ body: (UnsafeBufferPointer<UInt8>) -> Result) -> Result {
+        alphaBytes.withUnsafeBytes { rawBuffer in
+            body(rawBuffer.bindMemory(to: UInt8.self))
+        }
+    }
+
+    @inline(__always)
+    func alphaByte(at index: Int) -> UInt8? {
+        guard index >= 0, index < alphaBytes.count else { return nil }
+        return withAlphaBytes { buffer in
+            guard let baseAddress = buffer.baseAddress else { return nil }
+            return baseAddress[index]
+        }
+    }
 }
 
 struct CanvasRect: Codable, Sendable, Equatable {
@@ -189,12 +205,11 @@ struct SelectionShape: Codable, Sendable, Equatable {
             let x = Int(point.x.rounded(.down))
             let y = Int(point.y.rounded(.down))
             let index = (y * maskData.canvasWidth) + x
-            let bytes = [UInt8](maskData.alphaBytes)
-            guard bytes.indices.contains(index) else { return false }
-            return bytes[index] > 0
+            guard let alpha = maskData.alphaByte(at: index) else { return false }
+            return alpha > 0
         case .composite:
             var isSelected = false
-            for component in flattenedComponents() {
+            forEachFlattenedComponent { component in
                 switch component.operation {
                 case .add:
                     if component.shape.contains(point) {
@@ -215,13 +230,14 @@ struct SelectionShape: Codable, Sendable, Equatable {
             if maskData.canvasWidth == canvasSize.width, maskData.canvasHeight == canvasSize.height {
                 return self
             }
-            let sourceBytes = [UInt8](maskData.alphaBytes)
             var targetBytes = [UInt8](repeating: 0, count: canvasSize.width * canvasSize.height)
             let width = min(maskData.canvasWidth, canvasSize.width)
             let height = min(maskData.canvasHeight, canvasSize.height)
-            for y in 0..<height {
-                for x in 0..<width {
-                    targetBytes[(y * canvasSize.width) + x] = sourceBytes[(y * maskData.canvasWidth) + x]
+            maskData.withAlphaBytes { sourceBytes in
+                for y in 0..<height {
+                    for x in 0..<width {
+                        targetBytes[(y * canvasSize.width) + x] = sourceBytes[(y * maskData.canvasWidth) + x]
+                    }
                 }
             }
             let clampedMask = SelectionShape.mask(
@@ -266,23 +282,24 @@ struct SelectionShape: Codable, Sendable, Equatable {
         if kind == .mask, let maskData {
             let shiftX = Int(deltaX.rounded())
             let shiftY = Int(deltaY.rounded())
-            let sourceBytes = [UInt8](maskData.alphaBytes)
             var targetBytes = [UInt8](repeating: 0, count: maskData.canvasWidth * maskData.canvasHeight)
-            for y in 0..<maskData.canvasHeight {
-                for x in 0..<maskData.canvasWidth {
-                    let sourceIndex = (y * maskData.canvasWidth) + x
-                    guard sourceBytes[sourceIndex] > 0 else { continue }
-                    let destinationX = x + shiftX
-                    let destinationY = y + shiftY
-                    guard
-                        destinationX >= 0,
-                        destinationY >= 0,
-                        destinationX < maskData.canvasWidth,
-                        destinationY < maskData.canvasHeight
-                    else {
-                        continue
+            maskData.withAlphaBytes { sourceBytes in
+                for y in 0..<maskData.canvasHeight {
+                    for x in 0..<maskData.canvasWidth {
+                        let sourceIndex = (y * maskData.canvasWidth) + x
+                        guard sourceBytes[sourceIndex] > 0 else { continue }
+                        let destinationX = x + shiftX
+                        let destinationY = y + shiftY
+                        guard
+                            destinationX >= 0,
+                            destinationY >= 0,
+                            destinationX < maskData.canvasWidth,
+                            destinationY < maskData.canvasHeight
+                        else {
+                            continue
+                        }
+                        targetBytes[(destinationY * maskData.canvasWidth) + destinationX] = sourceBytes[sourceIndex]
                     }
-                    targetBytes[(destinationY * maskData.canvasWidth) + destinationX] = sourceBytes[sourceIndex]
                 }
             }
             let translatedMask = SelectionShape.mask(
@@ -339,29 +356,27 @@ struct SelectionShape: Codable, Sendable, Equatable {
         case .mask:
             return true
         case .composite:
-            let components = flattenedComponents()
-            return !components.isEmpty && components.allSatisfy { $0.shape.containsLassoContent }
+            var hasComponent = false
+            var allComponentsContainLassoContent = true
+            forEachFlattenedComponent { component in
+                hasComponent = true
+                if component.shape.containsLassoContent == false {
+                    allComponentsContainLassoContent = false
+                }
+            }
+            return hasComponent && allComponentsContainLassoContent
         case .rectangle, .ellipse:
             return false
         }
     }
 
     func flattenedComponents() -> [SelectionShapeComponent] {
-        guard kind == .composite else {
-            return [SelectionShapeComponent(operation: .add, shape: self)]
+        var flattened: [SelectionShapeComponent] = []
+        flattened.reserveCapacity(max(components.count, 1))
+        forEachFlattenedComponent { component in
+            flattened.append(component)
         }
-
-        return components.flatMap { component in
-            if component.shape.kind == .composite {
-                return component.shape.flattenedComponents().map {
-                    SelectionShapeComponent(
-                        operation: component.operation == .subtract ? .subtract : $0.operation,
-                        shape: $0.shape
-                    )
-                }
-            }
-            return [component]
-        }
+        return flattened
     }
 
     static func composite(_ components: [SelectionShapeComponent]) -> SelectionShape {
@@ -444,6 +459,34 @@ struct SelectionShape: Codable, Sendable, Equatable {
             origin: .init(x: Double(minX), y: Double(minY)),
             size: .init(x: Double(maxX - minX + 1), y: Double(maxY - minY + 1))
         )
+    }
+
+    private func forEachFlattenedComponent(
+        inheritedOperation: SelectionComponentOperation = .add,
+        _ body: (SelectionShapeComponent) -> Void
+    ) {
+        guard kind == .composite else {
+            body(SelectionShapeComponent(operation: inheritedOperation, shape: self))
+            return
+        }
+
+        for component in components {
+            let effectiveOperation: SelectionComponentOperation =
+                inheritedOperation == .subtract ? .subtract : component.operation
+            if component.shape.kind == .composite {
+                component.shape.forEachFlattenedComponent(
+                    inheritedOperation: effectiveOperation,
+                    body
+                )
+            } else {
+                body(
+                    SelectionShapeComponent(
+                        operation: effectiveOperation,
+                        shape: component.shape
+                    )
+                )
+            }
+        }
     }
 }
 

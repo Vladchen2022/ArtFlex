@@ -389,11 +389,20 @@ final class LinearGradientRenderer {
             return nil
         }
 
-        let pixels: [UInt8]
         if let maskData = selectionShape.maskData,
            maskData.canvasWidth == canvasSize.width,
            maskData.canvasHeight == canvasSize.height {
-            pixels = [UInt8](maskData.alphaBytes)
+            let didUploadMask = maskData.withAlphaBytes { buffer in
+                guard let baseAddress = buffer.baseAddress else { return false }
+                texture.replace(
+                    region: MTLRegionMake2D(0, 0, canvasSize.width, canvasSize.height),
+                    mipmapLevel: 0,
+                    withBytes: baseAddress,
+                    bytesPerRow: canvasSize.width
+                )
+                return true
+            }
+            guard didUploadMask else { return nil }
         } else {
             var generated = [UInt8](repeating: 0, count: canvasSize.width * canvasSize.height)
             let minX = max(Int(selectionShape.bounds.minX.rounded(.down)), 0)
@@ -412,15 +421,16 @@ final class LinearGradientRenderer {
                     }
                 }
             }
-            pixels = generated
+            generated.withUnsafeBytes { rawBuffer in
+                guard let baseAddress = rawBuffer.baseAddress else { return }
+                texture.replace(
+                    region: MTLRegionMake2D(0, 0, canvasSize.width, canvasSize.height),
+                    mipmapLevel: 0,
+                    withBytes: baseAddress,
+                    bytesPerRow: canvasSize.width
+                )
+            }
         }
-
-        texture.replace(
-            region: MTLRegionMake2D(0, 0, canvasSize.width, canvasSize.height),
-            mipmapLevel: 0,
-            withBytes: pixels,
-            bytesPerRow: canvasSize.width
-        )
 
         cachedSelectionMaskShape = selectionShape
         cachedSelectionMaskCanvasSize = canvasSize

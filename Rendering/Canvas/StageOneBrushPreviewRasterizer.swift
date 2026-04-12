@@ -707,16 +707,12 @@ enum StageOneBrushPreviewRasterizer {
             mipmapLevel: 0
         )
 
-        var rgbaBytes = bgraBytes
-        for index in stride(from: 0, to: rgbaBytes.count, by: 4) {
-            rgbaBytes[index] = bgraBytes[index + 2]
-            rgbaBytes[index + 1] = bgraBytes[index + 1]
-            rgbaBytes[index + 2] = bgraBytes[index]
-            rgbaBytes[index + 3] = bgraBytes[index + 3]
+        for index in stride(from: 0, to: bgraBytes.count, by: 4) {
+            bgraBytes.swapAt(index, index + 2)
         }
 
         guard
-            let provider = CGDataProvider(data: Data(rgbaBytes) as CFData),
+            let provider = CGDataProvider(data: Data(bgraBytes) as CFData),
             let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
             let image = CGImage(
                 width: width,

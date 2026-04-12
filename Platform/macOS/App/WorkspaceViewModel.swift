@@ -8401,12 +8401,14 @@ final class WorkspaceViewModel: ObservableObject {
             return mode == .replace ? nil : baseShape
         }
 
-        let incomingBytes = [UInt8](incomingMaskData.alphaBytes)
-        let resultBytes: [UInt8]
+        let resultMaskData: SelectionMaskData
+        let resultBounds: CanvasRect
         switch mode {
         case .replace:
-            resultBytes = incomingBytes
+            resultMaskData = incomingMaskData
+            resultBounds = incomingMaskShape.bounds
         case .add, .subtract:
+            let incomingBytes = Array(incomingMaskData.alphaBytes)
             var mergedBytes = selectionMaskBytes(for: baseShape, canvasSize: canvasSize)
             applyIncomingMask(
                 to: &mergedBytes,
@@ -8415,15 +8417,19 @@ final class WorkspaceViewModel: ObservableObject {
                 canvasSize: canvasSize,
                 mode: mode
             )
-            resultBytes = mergedBytes
+            let maskShape = SelectionShape.mask(
+                canvasWidth: canvasSize.width,
+                canvasHeight: canvasSize.height,
+                alphaBytes: mergedBytes
+            )
+            guard let maskData = maskShape.maskData else {
+                return nil
+            }
+            resultMaskData = maskData
+            resultBounds = maskShape.bounds
         }
 
-        let maskShape = SelectionShape.mask(
-            canvasWidth: canvasSize.width,
-            canvasHeight: canvasSize.height,
-            alphaBytes: resultBytes
-        )
-        guard !maskShape.bounds.isEmpty else {
+        guard !resultBounds.isEmpty else {
             return nil
         }
 
@@ -8463,9 +8469,9 @@ final class WorkspaceViewModel: ObservableObject {
 
         return SelectionShape(
             kind: .mask,
-            bounds: maskShape.bounds,
+            bounds: resultBounds,
             pathPoints: [],
-            maskData: maskShape.maskData,
+            maskData: resultMaskData,
             components: displayComponents
         )
     }

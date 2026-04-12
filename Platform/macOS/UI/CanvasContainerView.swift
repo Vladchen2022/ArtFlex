@@ -1496,38 +1496,36 @@ private func makeSelectionMaskImageSlice(
     let croppedWidth = maxX - minX
     let croppedHeight = maxY - minY
 
-    let source = [UInt8](maskData.alphaBytes)
-    let nonZero = source.filter { $0 > 0 }.count
-    print("🔵 maskSlice: nonZero=\(nonZero) total=\(source.count)")
     var rgba = [UInt8](repeating: 0, count: croppedWidth * croppedHeight * 4)
 
-    for y in 0..<croppedHeight {
-        for x in 0..<croppedWidth {
-            let sourceX = x + minX
-            let sourceY = y + minY
-            let index = (sourceY * maskData.canvasWidth) + sourceX
-            guard source.indices.contains(index) else { continue }
-            let alpha = source[index]
-            let shouldDraw: UInt8
-            if edgeOnly {
-                if alpha == 0 {
-                    shouldDraw = 0
+    maskData.withAlphaBytes { source in
+        for y in 0..<croppedHeight {
+            for x in 0..<croppedWidth {
+                let sourceX = x + minX
+                let sourceY = y + minY
+                let index = (sourceY * maskData.canvasWidth) + sourceX
+                let alpha = source[index]
+                let shouldDraw: UInt8
+                if edgeOnly {
+                    if alpha == 0 {
+                        shouldDraw = 0
+                    } else {
+                        let left = sourceX > 0 ? source[index - 1] : 0
+                        let right = sourceX < width - 1 ? source[index + 1] : 0
+                        let up = sourceY > 0 ? source[index - maskData.canvasWidth] : 0
+                        let down = sourceY < height - 1 ? source[index + maskData.canvasWidth] : 0
+                        shouldDraw = (left == 0 || right == 0 || up == 0 || down == 0) ? 255 : 0
+                    }
                 } else {
-                    let left = sourceX > 0 ? source[index - 1] : 0
-                    let right = sourceX < width - 1 ? source[index + 1] : 0
-                    let up = sourceY > 0 ? source[index - maskData.canvasWidth] : 0
-                    let down = sourceY < height - 1 ? source[index + maskData.canvasWidth] : 0
-                    shouldDraw = (left == 0 || right == 0 || up == 0 || down == 0) ? 255 : 0
+                    shouldDraw = alpha
                 }
-            } else {
-                shouldDraw = alpha
-            }
 
-            let rgbaIndex = ((y * croppedWidth) + x) * 4
-            rgba[rgbaIndex] = 255
-            rgba[rgbaIndex + 1] = 255
-            rgba[rgbaIndex + 2] = 255
-            rgba[rgbaIndex + 3] = shouldDraw
+                let rgbaIndex = ((y * croppedWidth) + x) * 4
+                rgba[rgbaIndex] = 255
+                rgba[rgbaIndex + 1] = 255
+                rgba[rgbaIndex + 2] = 255
+                rgba[rgbaIndex + 3] = shouldDraw
+            }
         }
     }
 

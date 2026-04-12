@@ -254,18 +254,19 @@ final class TransformPreviewSessionBuilder {
         let height = max(Int(clampedBounds.size.y.rounded(.up)), 1)
 
         if let maskData = selectionShape.maskData {
-            let sourceBytes = [UInt8](maskData.alphaBytes)
             var localBytes = [UInt8](repeating: 0, count: width * height)
             let originX = max(Int(clampedBounds.minX.rounded(.down)), 0)
             let originY = max(Int(clampedBounds.minY.rounded(.down)), 0)
-            for localY in 0..<height {
-                let canvasY = originY + localY
-                guard canvasY < maskData.canvasHeight else { continue }
-                for localX in 0..<width {
-                    let canvasX = originX + localX
-                    guard canvasX < maskData.canvasWidth else { continue }
-                    let sourceIndex = (canvasY * maskData.canvasWidth) + canvasX
-                    localBytes[(localY * width) + localX] = sourceBytes[sourceIndex]
+            maskData.withAlphaBytes { sourceBytes in
+                for localY in 0..<height {
+                    let canvasY = originY + localY
+                    guard canvasY < maskData.canvasHeight else { continue }
+                    for localX in 0..<width {
+                        let canvasX = originX + localX
+                        guard canvasX < maskData.canvasWidth else { continue }
+                        let sourceIndex = (canvasY * maskData.canvasWidth) + canvasX
+                        localBytes[(localY * width) + localX] = sourceBytes[sourceIndex]
+                    }
                 }
             }
             return localBytes
