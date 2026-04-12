@@ -9,6 +9,7 @@ private func emitSelectionTraceHost(_ message: String) {
 
 struct MetalCanvasHost: NSViewRepresentable {
     let sceneSnapshot: CanvasSceneSnapshot
+    let externalRedrawRevision: UInt64
     let transformSelectionShape: SelectionShape?
     let metalContext: MetalDeviceContext
     let layerSurfaceStore: StageOneLayerSurfaceStore
@@ -50,6 +51,9 @@ struct MetalCanvasHost: NSViewRepresentable {
     let onCanvasRotationChanged: (Double) -> Void
     let onPanModeChanged: (Bool) -> Void
     let onToolShortcut: (String, NSEvent.ModifierFlags) -> Void
+    let onKeyDown: (NSEvent) -> Bool
+    let onKeyUp: (NSEvent) -> Bool
+    let onModifierFlagsChanged: (NSEvent.ModifierFlags) -> Bool
     let onGradientDragBegan: (CanvasPoint, NSEvent.ModifierFlags) -> Void
     let onGradientDragChanged: (CanvasPoint, NSEvent.ModifierFlags) -> Void
     let onGradientDragEnded: (CanvasPoint, NSEvent.ModifierFlags) -> Void
@@ -68,6 +72,7 @@ struct MetalCanvasHost: NSViewRepresentable {
             metalContext: metalContext,
             layerSurfaceStore: layerSurfaceStore,
             activeTool: activeTool,
+            externalRedrawRevision: externalRedrawRevision,
             transformSelectionShape: transformSelectionShape,
             transformPreview: transformPreview,
             linearGradientPreview: linearGradientPreview,
@@ -123,6 +128,9 @@ struct MetalCanvasHost: NSViewRepresentable {
         view.enableSetNeedsDisplay = true
         view.isPaused = true
         view.framebufferOnly = false
+        view.keyDownEventHandler = onKeyDown
+        view.keyUpEventHandler = onKeyUp
+        view.modifierFlagsChangedEventHandler = onModifierFlagsChanged
         view.wantsLayer = true
         view.layer?.backgroundColor = CGColor(
             red: 1,
@@ -138,11 +146,13 @@ struct MetalCanvasHost: NSViewRepresentable {
         let wasTransforming = context.coordinator.isTransformingSelection
         let previousSnapshot = context.coordinator.sceneSnapshot
         let previousActiveTool = context.coordinator.activeTool
+        let previousExternalRedrawRevision = context.coordinator.previousExternalRedrawRevision
         let previousIsTransforming = context.coordinator.isTransformingSelection
         let previousTransformPreview = context.coordinator.transformPreview
         context.coordinator.sceneSnapshot = sceneSnapshot
         context.coordinator.transformSelectionShape = transformSelectionShape
         context.coordinator.activeTool = activeTool
+        context.coordinator.previousExternalRedrawRevision = externalRedrawRevision
         context.coordinator.isTransformingSelection = isTransformingSelection
         context.coordinator.isFreeTransformDragging = isFreeTransformDragging
         context.coordinator.activeFreeTransformInteractionMode = activeFreeTransformInteractionMode
@@ -179,6 +189,7 @@ struct MetalCanvasHost: NSViewRepresentable {
                 previousSelectionShape?.kind != sceneSnapshot.selectionShape?.kind ||
                 previousSelectionShape?.bounds != sceneSnapshot.selectionShape?.bounds ||
                 previousActiveTool != activeTool ||
+                previousExternalRedrawRevision != externalRedrawRevision ||
                 previousIsTransforming != isTransformingSelection ||
                 previousTransformPreview != transformPreview ||
                 previousLinearGradientPreview != linearGradientPreview ||
@@ -209,6 +220,9 @@ struct MetalCanvasHost: NSViewRepresentable {
             view.activeTool = activeTool
             view.viewportRotationDegrees = viewportRotationDegrees
             view.isPanModeActive = isPanModeActive
+            view.keyDownEventHandler = onKeyDown
+            view.keyUpEventHandler = onKeyUp
+            view.modifierFlagsChangedEventHandler = onModifierFlagsChanged
             if view.strokeResetToken != strokeResetToken {
                 view.strokeResetToken = strokeResetToken
                 view.resetInteractionState()
@@ -227,6 +241,7 @@ struct MetalCanvasHost: NSViewRepresentable {
                 previousSelectionShape?.kind != sceneSnapshot.selectionShape?.kind ||
                 previousSelectionShape?.bounds != sceneSnapshot.selectionShape?.bounds ||
                 previousActiveTool != activeTool ||
+                previousExternalRedrawRevision != externalRedrawRevision ||
                 previousIsTransforming != isTransformingSelection ||
                 previousTransformPreview != transformPreview ||
                 previousLinearGradientPreview != linearGradientPreview ||
@@ -521,6 +536,9 @@ final class StrokeCaptureMTKView: MTKView {
 
     weak var strokeDelegate: StrokeCaptureDelegate?
     weak var transformPreviewDelegate: TransformPreviewDelegate?
+    var keyDownEventHandler: ((NSEvent) -> Bool)?
+    var keyUpEventHandler: ((NSEvent) -> Bool)?
+    var modifierFlagsChangedEventHandler: ((NSEvent.ModifierFlags) -> Bool)?
     var canvasSize: CanvasSize = .stageOneDefault
     var activeTool: ToolKind = .brush {
         didSet {
@@ -1167,6 +1185,10 @@ final class StrokeCaptureMTKView: MTKView {
             return
         }
 
+        if keyDownEventHandler?(event) == true {
+            return
+        }
+
         super.keyDown(with: event)
     }
 
@@ -1240,6 +1262,10 @@ final class StrokeCaptureMTKView: MTKView {
             return
         }
 
+        if keyUpEventHandler?(event) == true {
+            return
+        }
+
         super.keyUp(with: event)
     }
 
@@ -1260,6 +1286,9 @@ final class StrokeCaptureMTKView: MTKView {
                 didChangeTransformAt: activePoint,
                 modifiers: activeModifierFlags
             )
+        }
+        if modifierFlagsChangedEventHandler?(event.modifierFlags) == true {
+            return
         }
         super.flagsChanged(with: event)
     }
@@ -1852,6 +1881,7 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
     private let linearGradientRenderer: LinearGradientRenderer
     private let sectorGradientRenderer: SectorGradientRenderer
     var activeTool: ToolKind
+    var previousExternalRedrawRevision: UInt64 = 0
     var transformSelectionShape: SelectionShape?
     private let onStrokeBegan: () -> Void
     private let onStrokeInput: ([CanvasStrokeSample]) -> Void
@@ -1938,6 +1968,7 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
         metalContext: MetalDeviceContext,
         layerSurfaceStore: StageOneLayerSurfaceStore,
         activeTool: ToolKind,
+        externalRedrawRevision: UInt64,
         transformSelectionShape: SelectionShape?,
         transformPreview: FreeTransformPreview,
         linearGradientPreview: LinearGradientPreview?,
@@ -2000,6 +2031,7 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
             self.labLuminosityPostProcessorError = error
         }
         self.activeTool = activeTool
+        self.previousExternalRedrawRevision = externalRedrawRevision
         self.transformSelectionShape = transformSelectionShape
         self.transformPreview = transformPreview
         self.linearGradientPreview = linearGradientPreview

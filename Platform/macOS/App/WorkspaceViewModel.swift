@@ -84,6 +84,10 @@ final class WorkspaceViewModel: ObservableObject {
     private static let savedSnapshotThumbnailDimension = 92
     private static let snapshotComparePreviewDimension = 960
     private static let maxReferenceImageSlotCount = 5
+    private static let luminosityReferenceAutoRefreshDelay: Duration = .seconds(2)
+    private static let luminosityReferenceVisibleResumeDelay: Duration = .milliseconds(150)
+    private static let navigatorPreviewAutoRefreshDelay: Duration = .milliseconds(1500)
+    private static let navigatorPreviewVisibleResumeDelay: Duration = .milliseconds(150)
 
     private static func makeDefaultReferenceImageSlots() -> [ReferenceImageSlotState] {
         (0..<maxReferenceImageSlotCount).map { ReferenceImageSlotState(id: $0) }
@@ -191,7 +195,13 @@ final class WorkspaceViewModel: ObservableObject {
     @Published private(set) var isCanvasLuminosityReferenceActive = false
     private var luminosityReferenceSlotID: Int?
     private var luminosityCaptureTask: Task<Void, Never>?
+    private var luminosityReferenceSourceRevision: UInt64 = 0
     private var lastLuminosityCaptureRevision: UInt64 = 0
+    private var isReferenceImageInspectorVisible = false
+    private var luminosityReferenceHasPendingRefresh = false
+    private var navigatorPreviewRefreshTask: Task<Void, Never>?
+    private var isNavigatorPreviewVisible = false
+    private var navigatorPreviewHasPendingRefresh = false
     private lazy var luminosityPresenter: StageOneCanvasPresenter? = {
         try? StageOneCanvasPresenter(device: bootstrap.metalContext.device)
     }()
@@ -1732,6 +1742,7 @@ final class WorkspaceViewModel: ObservableObject {
         if slotID == luminosityReferenceSlotID {
             luminosityCaptureTask?.cancel()
             luminosityCaptureTask = nil
+            luminosityReferenceHasPendingRefresh = false
             isCanvasLuminosityReferenceActive = false
             luminosityReferenceSlotID = nil
         }
@@ -1779,15 +1790,18 @@ final class WorkspaceViewModel: ObservableObject {
         isReferenceImageFloatingPanelPresented = true
         referenceImageFloatingPanelController.show(for: self)
         promoteSelectedReferenceImageForFloatingPanelIfNeeded()
+        scheduleLuminosityCaptureIfNeeded(after: Self.luminosityReferenceVisibleResumeDelay)
     }
 
     func closeReferenceImageFloatingPanel() {
         isReferenceImageFloatingPanelPresented = false
         referenceImageFloatingPanelController.close()
+        cancelScheduledLuminosityCaptureIfNotVisible()
     }
 
     func referenceImageFloatingPanelDidClose() {
         isReferenceImageFloatingPanelPresented = false
+        cancelScheduledLuminosityCaptureIfNotVisible()
     }
 
     func replaceReferenceImageSlotAsset(
@@ -1811,6 +1825,11 @@ final class WorkspaceViewModel: ObservableObject {
         guard referenceImageSlots[slotID].asset != nil else { return }
         selectedReferenceImageSlotID = slotID
         referenceImagePreviewColor = nil
+        if slotID == luminosityReferenceSlotID {
+            scheduleLuminosityCaptureIfNeeded(after: Self.luminosityReferenceVisibleResumeDelay)
+        } else {
+            cancelScheduledLuminosityCaptureIfNotVisible()
+        }
     }
 
     private func importReferenceImageIntoSlot(_ slotID: Int) {
@@ -1908,13 +1927,15 @@ final class WorkspaceViewModel: ObservableObject {
 
         isCanvasLuminosityReferenceActive = true
         luminosityReferenceSlotID = slot.id
-        lastLuminosityCaptureRevision = 0
+        lastLuminosityCaptureRevision = luminosityReferenceSourceRevision
+        luminosityReferenceHasPendingRefresh = false
         captureCanvasLuminositySnapshot()
     }
 
     func disableCanvasLuminosityReference() {
         luminosityCaptureTask?.cancel()
         luminosityCaptureTask = nil
+        luminosityReferenceHasPendingRefresh = false
 
         if let slotID = luminosityReferenceSlotID {
             referenceImageUpgradeTasks[slotID]?.cancel()
@@ -1941,18 +1962,7 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func scheduleLuminosityCaptureIfNeeded() {
-        guard isCanvasLuminosityReferenceActive else { return }
-
-        let currentRevision = sceneSnapshot.renderSnapshot.canvasContentRevision
-        guard currentRevision != lastLuminosityCaptureRevision else { return }
-        lastLuminosityCaptureRevision = currentRevision
-
-        luminosityCaptureTask?.cancel()
-        luminosityCaptureTask = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: 250_000_000)
-            guard !Task.isCancelled else { return }
-            self?.captureCanvasLuminositySnapshot()
-        }
+        scheduleLuminosityCaptureIfNeeded(after: Self.luminosityReferenceAutoRefreshDelay)
     }
 
     private func captureCanvasLuminositySnapshot() {
@@ -1963,7 +1973,7 @@ final class WorkspaceViewModel: ObservableObject {
         else { return }
 
         let device = metalContext.device
-        let snapshot = sceneSnapshot
+        let snapshot = currentSceneSnapshot(for: workspace)
         let canvasWidth = snapshot.renderSnapshot.document.canvasSize.width
         let canvasHeight = snapshot.renderSnapshot.document.canvasSize.height
         guard canvasWidth > 0, canvasHeight > 0 else { return }
@@ -2801,13 +2811,17 @@ final class WorkspaceViewModel: ObservableObject {
         latestCanvasViewportSize = size
     }
 
+    private func makeNavigatorSceneSnapshot(from snapshot: CanvasSceneSnapshot) -> CanvasSceneSnapshot {
+        var navigatorSnapshot = snapshot
+        navigatorSnapshot.renderSnapshot.viewport = .stageOneDefault
+        navigatorSnapshot.renderSnapshot.viewportRevision = 0
+        navigatorSnapshot.selectionShape = nil
+        navigatorSnapshot.selectionRevision = 0
+        return navigatorSnapshot
+    }
+
     var navigatorSceneSnapshot: CanvasSceneSnapshot {
-        var snapshot = sceneSnapshot
-        snapshot.renderSnapshot.viewport = .stageOneDefault
-        snapshot.renderSnapshot.viewportRevision = 0
-        snapshot.selectionShape = nil
-        snapshot.selectionRevision = 0
-        return snapshot
+        makeNavigatorSceneSnapshot(from: sceneSnapshot)
     }
 
     var navigatorZoomPercent: Double {
@@ -2878,6 +2892,125 @@ final class WorkspaceViewModel: ObservableObject {
                 x: min(max(canvasX, 0), Double(canvasSize.width)),
                 y: min(max(canvasY, 0), Double(canvasSize.height))
             )
+        }
+    }
+
+    func setNavigatorPreviewVisible(_ isVisible: Bool) {
+        guard isNavigatorPreviewVisible != isVisible else { return }
+        isNavigatorPreviewVisible = isVisible
+
+        if isVisible {
+            syncNavigatorPreviewProxy()
+            if navigatorPreviewHasPendingRefresh {
+                scheduleNavigatorPreviewRefresh(after: Self.navigatorPreviewVisibleResumeDelay)
+            }
+        } else {
+            navigatorPreviewRefreshTask?.cancel()
+            navigatorPreviewRefreshTask = nil
+        }
+    }
+
+    func setReferenceImageInspectorVisible(_ isVisible: Bool) {
+        guard isReferenceImageInspectorVisible != isVisible else { return }
+        isReferenceImageInspectorVisible = isVisible
+
+        if isVisible {
+            scheduleLuminosityCaptureIfNeeded(after: Self.luminosityReferenceVisibleResumeDelay)
+        } else {
+            cancelScheduledLuminosityCaptureIfNotVisible()
+        }
+    }
+
+    func refreshNavigatorPreviewNow() {
+        navigatorPreviewRefreshTask?.cancel()
+        navigatorPreviewRefreshTask = nil
+        navigatorPreviewHasPendingRefresh = false
+        syncNavigatorPreviewProxy()
+        navigatorPreviewProxy.redrawRevision &+= 1
+    }
+
+    private var isLuminosityReferencePreviewVisible: Bool {
+        guard isCanvasLuminosityReferenceActive,
+              selectedReferenceImageSlotID == luminosityReferenceSlotID
+        else {
+            return false
+        }
+
+        return isReferenceImageInspectorVisible || isReferenceImageFloatingPanelPresented
+    }
+
+    private func cancelScheduledLuminosityCaptureIfNotVisible() {
+        guard isLuminosityReferencePreviewVisible == false else { return }
+        luminosityCaptureTask?.cancel()
+        luminosityCaptureTask = nil
+    }
+
+    private func scheduleLuminosityCaptureIfSourceChanged(
+        previousSceneSnapshot: CanvasSceneSnapshot,
+        currentSceneSnapshot: CanvasSceneSnapshot
+    ) {
+        guard previousSceneSnapshot.renderSnapshot.document != currentSceneSnapshot.renderSnapshot.document ||
+                previousSceneSnapshot.layerSurfaces != currentSceneSnapshot.layerSurfaces
+        else {
+            return
+        }
+
+        luminosityReferenceSourceRevision &+= 1
+        scheduleLuminosityCaptureIfNeeded(after: Self.luminosityReferenceAutoRefreshDelay)
+    }
+
+    private func scheduleLuminosityCaptureIfNeeded(
+        after delay: Duration = WorkspaceViewModel.luminosityReferenceAutoRefreshDelay
+    ) {
+        guard isCanvasLuminosityReferenceActive else { return }
+
+        let currentRevision = luminosityReferenceSourceRevision
+        guard currentRevision != lastLuminosityCaptureRevision else {
+            if isLuminosityReferencePreviewVisible {
+                luminosityReferenceHasPendingRefresh = false
+            }
+            return
+        }
+
+        luminosityReferenceHasPendingRefresh = true
+        guard isLuminosityReferencePreviewVisible else { return }
+
+        luminosityCaptureTask?.cancel()
+        luminosityCaptureTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: delay)
+            guard !Task.isCancelled else { return }
+            guard let self else { return }
+            guard self.isLuminosityReferencePreviewVisible else { return }
+
+            let scheduledRevision = self.luminosityReferenceSourceRevision
+            guard scheduledRevision != self.lastLuminosityCaptureRevision else {
+                self.luminosityReferenceHasPendingRefresh = false
+                self.luminosityCaptureTask = nil
+                return
+            }
+
+            self.lastLuminosityCaptureRevision = scheduledRevision
+            self.luminosityReferenceHasPendingRefresh = false
+            self.luminosityCaptureTask = nil
+            self.captureCanvasLuminositySnapshot()
+        }
+    }
+
+    private func scheduleNavigatorPreviewRefresh(after delay: Duration = WorkspaceViewModel.navigatorPreviewAutoRefreshDelay) {
+        navigatorPreviewHasPendingRefresh = true
+        guard isNavigatorPreviewVisible else { return }
+
+        navigatorPreviewRefreshTask?.cancel()
+        navigatorPreviewRefreshTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            try? await Task.sleep(for: delay)
+            guard !Task.isCancelled else { return }
+            guard self.isNavigatorPreviewVisible else { return }
+
+            self.syncNavigatorPreviewProxy()
+            self.navigatorPreviewProxy.redrawRevision &+= 1
+            self.navigatorPreviewHasPendingRefresh = false
+            self.navigatorPreviewRefreshTask = nil
         }
     }
 
@@ -5895,6 +6028,7 @@ final class WorkspaceViewModel: ObservableObject {
     ) {
         Self.normalizeDisabledToolsIfNeeded(in: bootstrap.workspaceStore)
         let state = bootstrap.workspaceStore.state
+        let previousSceneSnapshot = sceneSnapshot
         if workspace.selection != state.selection {
             selectionRevision &+= 1
         }
@@ -5913,19 +6047,25 @@ final class WorkspaceViewModel: ObservableObject {
             layerThumbnailCache.removeAll()
         }
         workspace = state
-        sceneSnapshot = currentSceneSnapshot(for: state)
+        let updatedSceneSnapshot = currentSceneSnapshot(for: state)
+        sceneSnapshot = updatedSceneSnapshot
+        syncNavigatorPreviewProxy()
         canUndo = bootstrap.historyController.canUndo
         canRedo = bootstrap.historyController.canRedo
         canMergeDown = state.document.activeMergeDownContext != nil
         canMergeVisible = state.document.mergeVisibleContext != nil
         syncSelectionOverlayProxy()
         scheduleWholeLayerInteractionBoundsRefreshIfNeeded(for: state)
-        scheduleLuminosityCaptureIfNeeded()
+        scheduleLuminosityCaptureIfSourceChanged(
+            previousSceneSnapshot: previousSceneSnapshot,
+            currentSceneSnapshot: updatedSceneSnapshot
+        )
     }
 
     private func refreshLightweight(reason: StaticString = "unspecified") {
         Self.normalizeDisabledToolsIfNeeded(in: bootstrap.workspaceStore)
         let state = bootstrap.workspaceStore.state
+        let previousSceneSnapshot = sceneSnapshot
         if workspace.selection != state.selection {
             selectionRevision &+= 1
         }
@@ -5933,13 +6073,19 @@ final class WorkspaceViewModel: ObservableObject {
             viewportRevision &+= 1
         }
         workspace = state
-        sceneSnapshot = currentSceneSnapshot(for: state)
+        let updatedSceneSnapshot = currentSceneSnapshot(for: state)
+        sceneSnapshot = updatedSceneSnapshot
+        syncNavigatorPreviewProxy()
         canUndo = bootstrap.historyController.canUndo
         canRedo = bootstrap.historyController.canRedo
         canMergeDown = state.document.activeMergeDownContext != nil
         canMergeVisible = state.document.mergeVisibleContext != nil
         colorPanelProxy.colorPanel = state.colorPanel
         colorPanelProxy.selectedColor = state.toolSession.selectedColor
+        scheduleLuminosityCaptureIfSourceChanged(
+            previousSceneSnapshot: previousSceneSnapshot,
+            currentSceneSnapshot: updatedSceneSnapshot
+        )
         syncSelectionOverlayProxy()
         scheduleWholeLayerInteractionBoundsRefreshIfNeeded(for: state)
     }
@@ -7482,6 +7628,9 @@ final class WorkspaceViewModel: ObservableObject {
         hasUnsavedChanges = true
         documentChangeRevision &+= 1
         canvasContentRevision = documentChangeRevision
+        luminosityReferenceSourceRevision &+= 1
+        scheduleLuminosityCaptureIfNeeded()
+        scheduleNavigatorPreviewRefresh()
         syncTimelapseDocumentContext()
         timelapseRecorder.noteCanvasChanged(
             revision: documentChangeRevision,
@@ -9822,6 +9971,7 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     private func armQuickColorPickerShortcutIfNeeded() {
+        ideationBranchActivityHandler?()
         isQuickColorPickerShortcutActive = true
         guard quickColorPickerState == nil else { return }
         presentQuickColorPickerIfPossible()
@@ -9910,6 +10060,20 @@ final class WorkspaceViewModel: ObservableObject {
         return proxy
     }()
 
+    @MainActor
+    final class NavigatorPreviewProxy: ObservableObject {
+        @Published var sceneSnapshot: CanvasSceneSnapshot
+        @Published var redrawRevision: UInt64 = 0
+
+        init(sceneSnapshot: CanvasSceneSnapshot) {
+            self.sceneSnapshot = sceneSnapshot
+        }
+    }
+
+    private(set) lazy var navigatorPreviewProxy: NavigatorPreviewProxy = {
+        NavigatorPreviewProxy(sceneSnapshot: navigatorSceneSnapshot)
+    }()
+
     // 选区 overlay 专用代理
     // CanvasContainerView 里的 SelectionOverlay 只订阅它
     // 选区拖动时只有 overlay 重绘，MetalCanvasHost 完全不受影响
@@ -9948,6 +10112,12 @@ final class WorkspaceViewModel: ObservableObject {
         selectionOverlayProxy.hidesImplicitFreeTransformSelectionOverlay = hidesImplicitFreeTransformSelectionOverlay
         selectionOverlayProxy.isFreeTransformDragging = isFreeTransformDragging
         selectionOverlayProxy.activeFreeTransformInteractionMode = activeFreeTransformInteractionMode
+    }
+
+    private func syncNavigatorPreviewProxy() {
+        let snapshot = navigatorSceneSnapshot
+        guard navigatorPreviewProxy.sceneSnapshot != snapshot else { return }
+        navigatorPreviewProxy.sceneSnapshot = snapshot
     }
 
 }

@@ -34,6 +34,7 @@ struct CanvasContainerView: View {
 
                     MetalCanvasHost(
                         sceneSnapshot: viewModel.sceneSnapshot,
+                        externalRedrawRevision: 0,
                         transformSelectionShape: viewModel.transformPreparationSelectionShape,
                         metalContext: viewModel.metalContext,
                         layerSurfaceStore: viewModel.layerSurfaceStore,
@@ -146,6 +147,15 @@ struct CanvasContainerView: View {
                         },
                         onToolShortcut: { key, modifiers in
                             _ = viewModel.handleToolShortcutKey(key, modifiers: modifiers)
+                        },
+                        onKeyDown: { event in
+                            viewModel.handleKeyDown(event)
+                        },
+                        onKeyUp: { event in
+                            viewModel.handleKeyUp(event)
+                        },
+                        onModifierFlagsChanged: { modifiers in
+                            viewModel.handleModifierFlagsChanged(modifiers)
                         },
                         onGradientDragBegan: { point, modifiers in
                             onCanvasInteraction?()

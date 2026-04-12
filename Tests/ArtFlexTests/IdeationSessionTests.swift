@@ -1,5 +1,6 @@
 import Foundation
 import Metal
+import AppKit
 import Testing
 @testable import ArtFlex
 
@@ -208,6 +209,32 @@ struct IdeationSessionTests {
             #expect(branch.viewModel.isCanvasViewportLocked)
         }
     }
+
+    @Test
+    @MainActor
+    func quickColorPickerShortcutActivatesHoveredIdeationBranch() throws {
+        let harness = try IdeationHarness()
+        harness.viewModel.startIdeationSession()
+        let session = try #require(harness.viewModel.ideationSession)
+
+        session.selectBranch(0)
+        let targetBranch = session.branches[2].viewModel
+        targetBranch.updateCanvasToolHover(to: .init(x: 18, y: 18))
+
+        let handled = targetBranch.handleKeyDown(
+            makeKeyEvent(
+                type: .keyDown,
+                characters: "Z",
+                charactersIgnoringModifiers: "z",
+                modifiers: [.shift],
+                keyCode: 6
+            )
+        )
+
+        #expect(handled)
+        #expect(session.selectedBranchIndex == 2)
+        #expect(targetBranch.quickColorPickerState != nil)
+    }
 }
 
 @MainActor
@@ -305,4 +332,26 @@ private struct IdeationHarness {
 private enum IdeationHarnessError: Error {
     case metalUnavailable
     case textureUnavailable
+}
+
+@MainActor
+private func makeKeyEvent(
+    type: NSEvent.EventType,
+    characters: String,
+    charactersIgnoringModifiers: String,
+    modifiers: NSEvent.ModifierFlags,
+    keyCode: UInt16
+) -> NSEvent {
+    NSEvent.keyEvent(
+        with: type,
+        location: .zero,
+        modifierFlags: modifiers,
+        timestamp: ProcessInfo.processInfo.systemUptime,
+        windowNumber: 0,
+        context: nil,
+        characters: characters,
+        charactersIgnoringModifiers: charactersIgnoringModifiers,
+        isARepeat: false,
+        keyCode: keyCode
+    )!
 }

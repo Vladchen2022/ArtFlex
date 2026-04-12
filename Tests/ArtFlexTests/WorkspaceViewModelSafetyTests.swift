@@ -207,6 +207,51 @@ struct WorkspaceViewModelSafetyTests {
 
     @Test
     @MainActor
+    func manualNavigatorPreviewRefreshBumpsProxyRevisionAndKeepsDefaultViewport() throws {
+        let harness = try BrushEditingBoundaryHarness()
+
+        harness.viewModel.updateCanvasViewportSize(.init(width: 1200, height: 900))
+        harness.viewModel.setNavigatorZoomPercent(180)
+        harness.viewModel.selectTool(.rectangleSelection)
+        harness.viewModel.beginSelection(kind: .rectangle, at: .init(x: 8, y: 8))
+        harness.viewModel.updateSelection(to: .init(x: 24, y: 24))
+        harness.viewModel.commitSelection(at: .init(x: 24, y: 24))
+
+        let initialRevision = harness.viewModel.navigatorPreviewProxy.redrawRevision
+        harness.viewModel.refreshNavigatorPreviewNow()
+
+        #expect(harness.viewModel.navigatorPreviewProxy.redrawRevision == initialRevision + 1)
+        #expect(harness.viewModel.navigatorPreviewProxy.sceneSnapshot.renderSnapshot.viewport == .stageOneDefault)
+        #expect(harness.viewModel.navigatorPreviewProxy.sceneSnapshot.selectionShape == nil)
+    }
+
+    @Test
+    @MainActor
+    func canvasLuminosityReferenceDefersHiddenRefreshAndCatchesUpWhenVisible() async throws {
+        let harness = try BrushEditingBoundaryHarness()
+
+        harness.viewModel.setReferenceImageInspectorVisible(true)
+        harness.viewModel.toggleCanvasLuminosityReference()
+
+        let luminositySlotID = try await harness.waitForSelectedReferenceImageSlotID()
+        let initialPixels = try #require(harness.viewModel.referenceImageSlots[luminositySlotID].asset?.rgbaPixels)
+
+        harness.viewModel.setReferenceImageInspectorVisible(false)
+        harness.viewModel.setSelectedColor(.init(red: 0, green: 0, blue: 0, alpha: 1))
+        harness.viewModel.fillAtPoint(.init(x: 12, y: 12))
+
+        try? await Task.sleep(for: .milliseconds(2300))
+        #expect(harness.viewModel.referenceImageSlots[luminositySlotID].asset?.rgbaPixels == initialPixels)
+
+        harness.viewModel.setReferenceImageInspectorVisible(true)
+        try await harness.waitForReferenceImagePixelsChange(slotID: luminositySlotID, from: initialPixels)
+
+        let refreshedPixels = try #require(harness.viewModel.referenceImageSlots[luminositySlotID].asset?.rgbaPixels)
+        #expect(refreshedPixels != initialPixels)
+    }
+
+    @Test
+    @MainActor
     func togglingCreativeGeneratorTipImageModeUpdatesWorkspaceState() throws {
         let harness = try BrushEditingBoundaryHarness()
 
@@ -286,6 +331,36 @@ struct WorkspaceViewModelSafetyTests {
 
         #expect(harness.viewModel.referenceImagePreviousPickedColor == originalColor)
         #expect(harness.viewModel.workspace.toolSession.selectedColor != originalColor)
+    }
+
+    @Test
+    @MainActor
+    func strokeCaptureViewForwardsUnhandledKeyboardEvents() {
+        let view = StrokeCaptureMTKView(frame: .init(x: 0, y: 0, width: 120, height: 120), device: nil)
+        var handledKeyDown = false
+        var handledKeyUp = false
+        var handledFlagsChange = false
+
+        view.keyDownEventHandler = { event in
+            handledKeyDown = event.charactersIgnoringModifiers?.lowercased() == "z"
+            return handledKeyDown
+        }
+        view.keyUpEventHandler = { event in
+            handledKeyUp = event.charactersIgnoringModifiers?.lowercased() == "z"
+            return handledKeyUp
+        }
+        view.modifierFlagsChangedEventHandler = { modifiers in
+            handledFlagsChange = modifiers.contains(.shift)
+            return handledFlagsChange
+        }
+
+        view.keyDown(with: makeCanvasKeyEvent(type: .keyDown, characters: "Z", charactersIgnoringModifiers: "z", modifiers: [.shift], keyCode: 6))
+        view.keyUp(with: makeCanvasKeyEvent(type: .keyUp, characters: "Z", charactersIgnoringModifiers: "z", modifiers: [], keyCode: 6))
+        view.flagsChanged(with: makeCanvasKeyEvent(type: .flagsChanged, characters: "", charactersIgnoringModifiers: "", modifiers: [.shift], keyCode: 56))
+
+        #expect(handledKeyDown)
+        #expect(handledKeyUp)
+        #expect(handledFlagsChange)
     }
 
     @Test
@@ -409,12 +484,45 @@ private struct BrushEditingBoundaryHarness {
         }
         return try bootstrap.textureSerializer.samplePixel(texture: texture, x: x, y: y)
     }
+
+    func waitForSelectedReferenceImageSlotID(timeoutIterations: Int = 400) async throws -> Int {
+        for _ in 0..<timeoutIterations {
+            if let slotID = viewModel.selectedReferenceImageSlotID,
+               viewModel.referenceImageSlots[slotID].asset != nil {
+                return slotID
+            }
+
+            await Task.yield()
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+
+        throw BoundaryHarnessError.referenceImageTimeout
+    }
+
+    func waitForReferenceImagePixelsChange(
+        slotID: Int,
+        from previousPixels: Data,
+        timeoutIterations: Int = 400
+    ) async throws {
+        for _ in 0..<timeoutIterations {
+            if let currentPixels = viewModel.referenceImageSlots[slotID].asset?.rgbaPixels,
+               currentPixels != previousPixels {
+                return
+            }
+
+            await Task.yield()
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+
+        throw BoundaryHarnessError.referenceImageTimeout
+    }
 }
 
 private enum BoundaryHarnessError: Error {
     case metalUnavailable
     case commandBufferUnavailable
     case textureUnavailable
+    case referenceImageTimeout
 }
 
 @MainActor
@@ -569,4 +677,26 @@ private func makeReferenceImageAsset(
         rgbaPixels: rgbaPixels,
         cgImage: cgImage
     )
+}
+
+@MainActor
+private func makeCanvasKeyEvent(
+    type: NSEvent.EventType,
+    characters: String,
+    charactersIgnoringModifiers: String,
+    modifiers: NSEvent.ModifierFlags,
+    keyCode: UInt16
+) -> NSEvent {
+    NSEvent.keyEvent(
+        with: type,
+        location: .zero,
+        modifierFlags: modifiers,
+        timestamp: ProcessInfo.processInfo.systemUptime,
+        windowNumber: 0,
+        context: nil,
+        characters: characters,
+        charactersIgnoringModifiers: charactersIgnoringModifiers,
+        isARepeat: false,
+        keyCode: keyCode
+    )!
 }

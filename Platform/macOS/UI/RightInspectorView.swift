@@ -368,6 +368,12 @@ struct RightInspectorView: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .topLeading)
+        .onAppear {
+            viewModel.setReferenceImageInspectorVisible(true)
+        }
+        .onDisappear {
+            viewModel.setReferenceImageInspectorVisible(false)
+        }
     }
 
     private var referenceImagePickedColorSwatch: some View {
@@ -525,15 +531,39 @@ struct RightInspectorView: View {
 
     private var navigatorSection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            NavigatorPreviewPanel(
-                sceneSnapshot: viewModel.navigatorSceneSnapshot,
+            NavigatorPreviewContainer(
+                proxy: viewModel.navigatorPreviewProxy,
+                viewModel: viewModel,
                 visibleCanvasPolygon: viewModel.navigatorVisibleCanvasPolygon(),
-                canvasSize: viewModel.workspace.document.canvasSize,
-                metalContext: viewModel.metalContext,
-                layerSurfaceStore: viewModel.layerSurfaceStore
+                canvasSize: viewModel.workspace.document.canvasSize
             )
+            .onAppear {
+                viewModel.setNavigatorPreviewVisible(true)
+            }
+            .onDisappear {
+                viewModel.setNavigatorPreviewVisible(false)
+            }
 
             HStack(spacing: 8) {
+                Button {
+                    viewModel.refreshNavigatorPreviewNow()
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundStyle(Color.white.opacity(0.92))
+                        .frame(width: 28, height: 24)
+                        .background(
+                            RoundedRectangle(cornerRadius: 8)
+                                .fill(Color.white.opacity(0.10))
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8)
+                                .stroke(Color.white.opacity(0.08), lineWidth: 1)
+                        )
+                }
+                .buttonStyle(.plain)
+                .help("刷新导航器")
+
                 Button {
                     viewModel.setNavigatorZoomPercent(100)
                     syncNavigatorZoomPercentText()
@@ -3304,12 +3334,29 @@ private struct InspectorPanel<Content: View>: View {
     }
 }
 
-private struct NavigatorPreviewPanel: View {
-    let sceneSnapshot: CanvasSceneSnapshot
+private struct NavigatorPreviewContainer: View {
+    @ObservedObject var proxy: WorkspaceViewModel.NavigatorPreviewProxy
+    let viewModel: WorkspaceViewModel
     let visibleCanvasPolygon: [CanvasPoint]?
     let canvasSize: CanvasSize
-    let metalContext: MetalDeviceContext
-    let layerSurfaceStore: StageOneLayerSurfaceStore
+
+    var body: some View {
+        NavigatorPreviewPanel(
+            sceneSnapshot: proxy.sceneSnapshot,
+            redrawRevision: proxy.redrawRevision,
+            visibleCanvasPolygon: visibleCanvasPolygon,
+            canvasSize: canvasSize,
+            viewModel: viewModel
+        )
+    }
+}
+
+private struct NavigatorPreviewPanel: View {
+    let sceneSnapshot: CanvasSceneSnapshot
+    let redrawRevision: UInt64
+    let visibleCanvasPolygon: [CanvasPoint]?
+    let canvasSize: CanvasSize
+    let viewModel: WorkspaceViewModel
 
     var body: some View {
         GeometryReader { proxy in
@@ -3331,9 +3378,10 @@ private struct NavigatorPreviewPanel: View {
 
                 MetalCanvasHost(
                     sceneSnapshot: sceneSnapshot,
+                    externalRedrawRevision: redrawRevision,
                     transformSelectionShape: nil,
-                    metalContext: metalContext,
-                    layerSurfaceStore: layerSurfaceStore,
+                    metalContext: viewModel.metalContext,
+                    layerSurfaceStore: viewModel.layerSurfaceStore,
                     activeTool: .brush,
                     viewportRotationDegrees: 0,
                     strokeResetToken: 0,
@@ -3354,7 +3402,9 @@ private struct NavigatorPreviewPanel: View {
                     onStrokeEnded: {},
                     onFlushPendingBrushWork: { _ in nil },
                     onDrainPendingBrushCommitsInteractively: { _ in },
-                    resolveBrushDisplayTexture: { _ in nil },
+                    resolveBrushDisplayTexture: { layerID in
+                        viewModel.brushDisplayTexture(for: layerID)
+                    },
                     onEyedropperSample: { _ in },
                     onBucketFill: { _ in },
                     onCanvasClick: { _, _, _ in },
@@ -3372,6 +3422,9 @@ private struct NavigatorPreviewPanel: View {
                     onCanvasRotationChanged: { _ in },
                     onPanModeChanged: { _ in },
                     onToolShortcut: { _, _ in },
+                    onKeyDown: { _ in false },
+                    onKeyUp: { _ in false },
+                    onModifierFlagsChanged: { _ in false },
                     onGradientDragBegan: { _, _ in },
                     onGradientDragChanged: { _, _ in },
                     onGradientDragEnded: { _, _ in },
