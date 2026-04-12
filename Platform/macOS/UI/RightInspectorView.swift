@@ -2357,16 +2357,12 @@ struct RightInspectorView: View {
     private func brushColorTagCorner(_ tag: BrushColorTag) -> some View {
         GeometryReader { geometry in
             let side = min(geometry.size.width, geometry.size.height)
-            let tagSize = side * 0.32
-            Path { path in
-                path.move(to: CGPoint(x: 0, y: side))
-                path.addLine(to: CGPoint(x: 0, y: side - tagSize))
-                path.addLine(to: CGPoint(x: tagSize, y: side))
-                path.closeSubpath()
-            }
-            .fill(colorForBrushTag(tag))
+            let dotSize = max(6, side * 0.14)
+            Circle()
+                .fill(colorForBrushTag(tag))
+                .frame(width: dotSize, height: dotSize)
+                .position(x: dotSize * 0.5 + side * 0.12, y: side - dotSize * 0.5 - side * 0.10)
         }
-        .clipShape(RoundedRectangle(cornerRadius: 10))
     }
 
     private func colorForBrushTag(_ tag: BrushColorTag) -> Color {
@@ -2399,9 +2395,9 @@ struct RightInspectorView: View {
             Text("\(slotIndex + 1)")
                 .font(.system(size: 9, weight: .semibold).monospacedDigit())
                 .foregroundStyle(Color.accentColor.opacity(0.95))
-                .padding(.leading, 8)
-                .padding(.bottom, 7)
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
+                .padding(.trailing, 5)
+                .padding(.top, 4)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
         }
     }
 
