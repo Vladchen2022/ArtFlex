@@ -1209,6 +1209,9 @@ final class StrokeCaptureMTKView: MTKView {
     override func mouseEntered(with event: NSEvent) {
         activeModifierFlags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         hoverLocation = convert(event.locationInWindow, from: nil)
+        if window?.firstResponder !== self {
+            window?.makeFirstResponder(self)
+        }
         updateCursorIndicator()
         updateCursorAppearance()
         strokeDelegate?.strokeCaptureView(self, didHoverCanvasAt: sample(from: event).location)
@@ -1920,6 +1923,7 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
     var isLuminosityPreviewEnabled = false
     private let labLuminosityPostProcessor: LABLuminosityPostProcessor?
     private let labLuminosityPostProcessorError: Error?
+    private var cachedLuminosityTempTexture: MTLTexture?
     private let selectionTraceLogger = Logger(subsystem: "ArtFlex", category: "SelectionTrace")
     private let transformLogger = Logger(subsystem: "ArtFlex", category: "Transform")
     private var previewTimingFrameCounter = 0
@@ -2274,15 +2278,21 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
 
         if isLuminosityPreviewEnabled, let labProcessor = labLuminosityPostProcessor {
             let drawableTexture = drawable.texture
-            let tempDesc = MTLTextureDescriptor.texture2DDescriptor(
-                pixelFormat: drawableTexture.pixelFormat,
-                width: drawableTexture.width,
-                height: drawableTexture.height,
-                mipmapped: false
-            )
-            tempDesc.usage = [.shaderRead, .renderTarget]
-            tempDesc.storageMode = .private
-            if let tempTexture = metalContext.device.makeTexture(descriptor: tempDesc),
+            if cachedLuminosityTempTexture == nil
+                || cachedLuminosityTempTexture!.width != drawableTexture.width
+                || cachedLuminosityTempTexture!.height != drawableTexture.height
+                || cachedLuminosityTempTexture!.pixelFormat != drawableTexture.pixelFormat {
+                let tempDesc = MTLTextureDescriptor.texture2DDescriptor(
+                    pixelFormat: drawableTexture.pixelFormat,
+                    width: drawableTexture.width,
+                    height: drawableTexture.height,
+                    mipmapped: false
+                )
+                tempDesc.usage = [.shaderRead, .renderTarget]
+                tempDesc.storageMode = .private
+                cachedLuminosityTempTexture = metalContext.device.makeTexture(descriptor: tempDesc)
+            }
+            if let tempTexture = cachedLuminosityTempTexture,
                let blitEncoder = commandBuffer.makeBlitCommandEncoder() {
                 blitEncoder.copy(from: drawableTexture, to: tempTexture)
                 blitEncoder.endEncoding()

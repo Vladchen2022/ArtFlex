@@ -134,7 +134,11 @@ enum StageOneBrushRendererInitializationError: LocalizedError {
 
 final class StageOneBrushRenderer {
     private let brushStrokeLogger = Logger(subsystem: "ArtFlex", category: "BrushStroke")
+    #if DEBUG
     private let isBrushStampDebugLoggingEnabled = true
+    #else
+    private let isBrushStampDebugLoggingEnabled = false
+    #endif
     private let device: MTLDevice
     private let brushPipelineState: MTLRenderPipelineState
     private let eraserPipelineState: MTLRenderPipelineState
@@ -157,6 +161,10 @@ final class StageOneBrushRenderer {
     private var cachedPrimaryEnvelopeCustomTipTexture: MTLTexture?
     private var cachedCompoundSecondaryCustomTipData: Data?
     private var cachedCompoundSecondaryCustomTipTexture: MTLTexture?
+    private var cachedOpacityCapOriginalTexture: MTLTexture?
+    private var cachedOpacityCapAlphaTexture: MTLTexture?
+    private var cachedUniformBuffer: MTLBuffer?
+    private var cachedUniformBufferCapacity: Int = 0
 
     init(device: MTLDevice) throws {
         self.device = device
@@ -1273,7 +1281,20 @@ final class StageOneBrushRenderer {
         if bufferLength <= Self.maxSetBytesLength {
             encoder.setVertexBytes(&uniformsArray, length: bufferLength, index: 1)
             encoder.setFragmentBytes(&uniformsArray, length: bufferLength, index: 1)
-        } else if let buffer = device.makeBuffer(bytes: &uniformsArray, length: bufferLength, options: .storageModeShared) {
+        } else {
+            let buffer: MTLBuffer
+            if let cached = cachedUniformBuffer, cachedUniformBufferCapacity >= bufferLength {
+                cached.contents().copyMemory(from: &uniformsArray, byteCount: bufferLength)
+                buffer = cached
+            } else {
+                let allocSize = max(bufferLength, MemoryLayout<BrushUniforms>.stride * 64)
+                guard let newBuffer = device.makeBuffer(bytes: &uniformsArray, length: allocSize, options: .storageModeShared) else {
+                    return
+                }
+                cachedUniformBuffer = newBuffer
+                cachedUniformBufferCapacity = allocSize
+                buffer = newBuffer
+            }
             encoder.setVertexBuffer(buffer, offset: 0, index: 1)
             encoder.setFragmentBuffer(buffer, offset: 0, index: 1)
         }
@@ -1319,29 +1340,48 @@ final class StageOneBrushRenderer {
             let ms = Double(DispatchTime.now().uptimeNanoseconds - startNs) / 1_000_000
             PerformanceAuditStore.shared.recordDuration("StageOneBrushRenderer.makeOpacityCapSession", ms: ms)
         }
-        let originalDescriptor = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: texture.pixelFormat,
-            width: texture.width,
-            height: texture.height,
-            mipmapped: false
-        )
-        originalDescriptor.usage = [.shaderRead]
-        originalDescriptor.storageMode = .private
 
-        let alphaDescriptor = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: .r8Unorm,
-            width: texture.width,
-            height: texture.height,
-            mipmapped: false
-        )
-        alphaDescriptor.usage = [.renderTarget, .shaderRead]
-        alphaDescriptor.storageMode = .private
+        let originalTexture: MTLTexture
+        let alphaTexture: MTLTexture
 
-        guard
-            let originalTexture = device.makeTexture(descriptor: originalDescriptor),
-            let alphaTexture = device.makeTexture(descriptor: alphaDescriptor)
-        else {
-            return nil
+        if let cached = cachedOpacityCapOriginalTexture,
+           cached.width == texture.width,
+           cached.height == texture.height,
+           cached.pixelFormat == texture.pixelFormat,
+           let cachedAlpha = cachedOpacityCapAlphaTexture,
+           cachedAlpha.width == texture.width,
+           cachedAlpha.height == texture.height {
+            originalTexture = cached
+            alphaTexture = cachedAlpha
+        } else {
+            let originalDescriptor = MTLTextureDescriptor.texture2DDescriptor(
+                pixelFormat: texture.pixelFormat,
+                width: texture.width,
+                height: texture.height,
+                mipmapped: false
+            )
+            originalDescriptor.usage = [.shaderRead]
+            originalDescriptor.storageMode = .private
+
+            let alphaDescriptor = MTLTextureDescriptor.texture2DDescriptor(
+                pixelFormat: .r8Unorm,
+                width: texture.width,
+                height: texture.height,
+                mipmapped: false
+            )
+            alphaDescriptor.usage = [.renderTarget, .shaderRead]
+            alphaDescriptor.storageMode = .private
+
+            guard
+                let newOriginal = device.makeTexture(descriptor: originalDescriptor),
+                let newAlpha = device.makeTexture(descriptor: alphaDescriptor)
+            else {
+                return nil
+            }
+            originalTexture = newOriginal
+            alphaTexture = newAlpha
+            cachedOpacityCapOriginalTexture = newOriginal
+            cachedOpacityCapAlphaTexture = newAlpha
         }
 
         clearTexture(alphaTexture, commandQueue: commandQueue)
@@ -1909,26 +1949,20 @@ final class StageOneBrushRenderer {
         }
     }
 
-    private func hermitePoint(
-        start: StrokePoint,
-        end: StrokePoint,
-        startTangent: SIMD2<Double>,
-        endTangent: SIMD2<Double>,
-        t: Double
-    ) -> StrokePoint {
-        let tt = t * t
-        let ttt = tt * t
-        let h00 = (2 * ttt) - (3 * tt) + 1
-        let h10 = ttt - (2 * tt) + t
-        let h01 = (-2 * ttt) + (3 * tt)
-        let h11 = ttt - tt
-
-        return StrokePoint(
-            x: (h00 * start.x) + (h10 * startTangent.x) + (h01 * end.x) + (h11 * endTangent.x),
-            y: (h00 * start.y) + (h10 * startTangent.y) + (h01 * end.y) + (h11 * endTangent.y),
-            pressure: start.pressure + ((end.pressure - start.pressure) * Float(t))
-        )
-    }
+    private static let hermiteLUT: [(h00: Double, h10: Double, h01: Double, h11: Double, t: Double)] = {
+        (1...16).map { step in
+            let t = Double(step) / 16.0
+            let tt = t * t
+            let ttt = tt * t
+            return (
+                h00: (2 * ttt) - (3 * tt) + 1,
+                h10: ttt - (2 * tt) + t,
+                h01: (-2 * ttt) + (3 * tt),
+                h11: ttt - tt,
+                t: t
+            )
+        }
+    }()
 
     private func sampleHermiteSegment(
         start: StrokePoint,
@@ -1943,16 +1977,12 @@ final class StageOneBrushRenderer {
         stroke: StrokeDescriptor,
         result: inout [StampSample]
     ) {
-        let subdivisions = 16
         var prevPoint = start
-        for step in 1...subdivisions {
-            let t = Double(step) / Double(subdivisions)
-            let curPoint = hermitePoint(
-                start: start,
-                end: end,
-                startTangent: startTangent,
-                endTangent: endTangent,
-                t: t
+        for coeffs in Self.hermiteLUT {
+            let curPoint = StrokePoint(
+                x: (coeffs.h00 * start.x) + (coeffs.h10 * startTangent.x) + (coeffs.h01 * end.x) + (coeffs.h11 * endTangent.x),
+                y: (coeffs.h00 * start.y) + (coeffs.h10 * startTangent.y) + (coeffs.h01 * end.y) + (coeffs.h11 * endTangent.y),
+                pressure: start.pressure + ((end.pressure - start.pressure) * Float(coeffs.t))
             )
             let dx = curPoint.x - prevPoint.x
             let dy = curPoint.y - prevPoint.y
@@ -2730,7 +2760,11 @@ final class StageOneBrushRenderer {
         guard trimCount > 0 else {
             return
         }
-        state.pendingInputPoints.removeFirst(trimCount)
+        if trimCount >= state.pendingInputPoints.count / 2 {
+            state.pendingInputPoints = Array(state.pendingInputPoints.dropFirst(trimCount))
+        } else {
+            state.pendingInputPoints.removeFirst(trimCount)
+        }
         state.nextSegmentIndexToCommit = max(0, state.nextSegmentIndexToCommit - trimCount)
     }
 

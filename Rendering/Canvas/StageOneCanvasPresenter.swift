@@ -35,6 +35,7 @@ private struct CanvasPresenterUniforms {
 final class StageOneCanvasPresenter {
     private let pipelineState: MTLRenderPipelineState
     private let samplerState: MTLSamplerState
+    private let canvasVertexBuffer: MTLBuffer
 
     init(device: MTLDevice) throws {
         let source = """
@@ -116,6 +117,21 @@ final class StageOneCanvasPresenter {
             throw StageOneCanvasPresenterInitializationError.samplerStateCreation
         }
         self.samplerState = samplerState
+
+        var vertices = [
+            CanvasPresenterVertex(position: SIMD2(-1, -1), texCoord: SIMD2(0, 1)),
+            CanvasPresenterVertex(position: SIMD2(1, -1), texCoord: SIMD2(1, 1)),
+            CanvasPresenterVertex(position: SIMD2(-1, 1), texCoord: SIMD2(0, 0)),
+            CanvasPresenterVertex(position: SIMD2(1, 1), texCoord: SIMD2(1, 0))
+        ]
+        guard let vertexBuffer = device.makeBuffer(
+            bytes: &vertices,
+            length: MemoryLayout<CanvasPresenterVertex>.stride * vertices.count,
+            options: .storageModeShared
+        ) else {
+            throw StageOneCanvasPresenterInitializationError.samplerStateCreation
+        }
+        self.canvasVertexBuffer = vertexBuffer
     }
 
     func encode(
@@ -129,13 +145,7 @@ final class StageOneCanvasPresenter {
 
         encoder.setRenderPipelineState(pipelineState)
         encoder.setFragmentSamplerState(samplerState, index: 0)
-
-        let vertices = makeCanvasVertices()
-        encoder.setVertexBytes(
-            vertices,
-            length: MemoryLayout<CanvasPresenterVertex>.stride * vertices.count,
-            index: 0
-        )
+        encoder.setVertexBuffer(canvasVertexBuffer, offset: 0, index: 0)
 
         for layer in layerTextures {
             var uniforms = CanvasPresenterUniforms(layerOpacity: layer.opacity)
@@ -199,15 +209,6 @@ final class StageOneCanvasPresenter {
         )
         encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
         encoder.endEncoding()
-    }
-
-    private func makeCanvasVertices() -> [CanvasPresenterVertex] {
-        [
-            CanvasPresenterVertex(position: SIMD2(-1, -1), texCoord: SIMD2(0, 1)),
-            CanvasPresenterVertex(position: SIMD2(1, -1), texCoord: SIMD2(1, 1)),
-            CanvasPresenterVertex(position: SIMD2(-1, 1), texCoord: SIMD2(0, 0)),
-            CanvasPresenterVertex(position: SIMD2(1, 1), texCoord: SIMD2(1, 0))
-        ]
     }
 
     private func ndcPoint(

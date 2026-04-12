@@ -1,4 +1,5 @@
 import Foundation
+import Metal
 
 struct LayerHistorySnapshot: Codable, Sendable, Equatable {
     var layerID: LayerID
@@ -201,7 +202,7 @@ final class HistoryController {
             )
         }
 
-        var layerSnapshots: [LayerHistorySnapshot] = []
+        var snapshotLayers: [(layer: LayerRecord, texture: MTLTexture)] = []
         for layer in workspace.document.layers where snapshotLayerIDs.contains(layer.id) {
             guard
                 let surfaceID = layerSurfaceStore.surfaceID(for: layer.id),
@@ -209,12 +210,17 @@ final class HistoryController {
             else {
                 continue
             }
+            snapshotLayers.append((layer: layer, texture: texture))
+        }
 
-            layerSnapshots.append(
-                LayerHistorySnapshot(
-                    layerID: layer.id,
-                    texture: try serializer.snapshot(texture: texture)
-                )
+        let textureSnapshots = try serializer.snapshotBatch(
+            textures: snapshotLayers.map { $0.texture }
+        )
+
+        let layerSnapshots = zip(snapshotLayers, textureSnapshots).map { item, textureSnapshot in
+            LayerHistorySnapshot(
+                layerID: item.layer.id,
+                texture: textureSnapshot
             )
         }
 
@@ -351,6 +357,9 @@ final class HistoryController {
     }
 
     private func restoreSnapshots(_ layerSnapshots: [LayerHistorySnapshot]) throws {
+        var batchItems: [(snapshot: LayerTextureSnapshot, texture: MTLTexture)] = []
+        batchItems.reserveCapacity(layerSnapshots.count)
+
         for layerSnapshot in layerSnapshots {
             guard
                 let surfaceID = layerSurfaceStore.surfaceID(for: layerSnapshot.layerID),
@@ -358,9 +367,10 @@ final class HistoryController {
             else {
                 continue
             }
-
-            try serializer.restore(snapshot: layerSnapshot.texture, into: texture)
+            batchItems.append((snapshot: layerSnapshot.texture, texture: texture))
         }
+
+        try serializer.restoreBatch(batchItems)
     }
 
 #if DEBUG

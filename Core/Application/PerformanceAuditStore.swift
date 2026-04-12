@@ -142,6 +142,9 @@ struct PerformanceAuditSnapshot: Sendable {
 final class PerformanceAuditStore: @unchecked Sendable {
     static let shared = PerformanceAuditStore()
 
+    private static let maxSamplesPerKey = 2000
+    private static let maxHistoryEligibilityRecords = 500
+
     private let lock = NSLock()
     private var durationsMs: [String: [Double]] = [:]
     private var integerSamples: [String: [Int]] = [:]
@@ -157,18 +160,31 @@ final class PerformanceAuditStore: @unchecked Sendable {
 
     func recordDuration(_ key: String, ms: Double) {
         lock.lock()
-        durationsMs[key, default: []].append(ms)
+        var samples = durationsMs[key, default: []]
+        if samples.count >= Self.maxSamplesPerKey {
+            samples.removeFirst(samples.count / 2)
+        }
+        samples.append(ms)
+        durationsMs[key] = samples
         lock.unlock()
     }
 
     func recordInt(_ key: String, value: Int) {
         lock.lock()
-        integerSamples[key, default: []].append(value)
+        var samples = integerSamples[key, default: []]
+        if samples.count >= Self.maxSamplesPerKey {
+            samples.removeFirst(samples.count / 2)
+        }
+        samples.append(value)
+        integerSamples[key] = samples
         lock.unlock()
     }
 
     func recordHistoryEligibility(_ record: HistoryEligibilityAuditRecord) {
         lock.lock()
+        if historyEligibilityRecords.count >= Self.maxHistoryEligibilityRecords {
+            historyEligibilityRecords.removeFirst(historyEligibilityRecords.count / 2)
+        }
         historyEligibilityRecords.append(record)
         lock.unlock()
     }

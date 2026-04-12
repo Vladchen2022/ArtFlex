@@ -1,132 +1,227 @@
 # ArtFlex 当前状态
 
-## 1. 项目概况
+最后更新：2026-04-12
 
-ArtFlex 是旧版 `BrushCanvas` 的 Metal-first 重构版 macOS 绘图软件。
+## 1. 一句话概览
 
-产品主结构保持桌面绘图软件形态：
+ArtFlex 当前已经是一个功能面明显超出最小 MVP 的 macOS Metal 绘图应用原型；当前主线不是“基础壳层补齐”，而是围绕组合笔刷外观、颜色工作流和局部性能收口继续迭代。
+
+## 2. 当前代码真实状态
+
+### 2.1 主工作区已经不止一个 shell
+
+当前主窗口不是只有标准画布模式。
+
+[Platform/macOS/UI/MainWindowView.swift](Platform/macOS/UI/MainWindowView.swift) 里已经存在三套工作区壳：
+
+- `StandardWorkspaceShell`
+- `SnapshotCompareWorkspaceShell`
+- `IdeationWorkspaceShell`
+
+这意味着：
+
+- 标准绘制工作区是主路径
+- 快照对比不是临时实验，而是正式工作流入口
+- ideation 分支工作流也已经接进主窗口结构
+
+### 2.2 当前主界面结构
+
+当前主工程仍然保持桌面绘图软件形态：
 
 - 顶部工具栏
 - 左侧工具栏
 - 中央视图画布
-- 右侧参数 / 颜色 / 笔刷 / 生成器 / 参考图区域
+- 右侧两列 inspector
 - 图层面板
+- 笔尖形状设计 / 导航器区域
 
-当前项目已经不再处于“Git 回退后旧 dual-tip 基线”的阶段。  
-当前活动基线是：**组合笔刷已经重新接回主工程，接线与运行链已可用，当前主要工作转入 look reconstruction。**
+右侧 inspector 的真实职责集中在 [Platform/macOS/UI/RightInspectorView.swift](Platform/macOS/UI/RightInspectorView.swift)，目前包含：
 
-## 2. 当前代码真实状态
+- 生成器 / 参考图切换区
+- 颜色面板
+- 画笔库
+- 笔尖形状设计 / 导航器
+- 画笔参数
+- 图层
 
-### 2.1 构建与常用验证入口
+### 2.3 当前已接入主链的工具
 
-当前常用验证入口是：
+以 [Core/Tools/ToolKind.swift](Core/Tools/ToolKind.swift) 为准，当前工具集合包括：
 
-- `swift build`
-- `swift test --filter WorkspaceViewModelSafetyTests`
-- `swift test --filter BrushStrokeSamplingTests`
-- `swift test --filter StageOneBrushPreviewRasterizerTests`
+- 画笔
+- 橡皮擦
+- 涂抹
+- 吸管
+- 油漆桶
+- 套索选区
+- 多边形选区
+- 矩形选区
+- 椭圆选区
+- 套索填充
+- 直线
+- 直线渐变
+- 扇形渐变
+- 画布旋转
+- 自由变形
 
-项目仍有若干非阻塞 warning，但当前阶段的重点不是 warning 清零，而是保持主工程组合笔刷可迭代。
+说明：
 
-### 2.2 组合笔刷当前真实基线
+- `lasso erase` 目前不是独立 `ToolKind`
+- `straightLine / linearGradient / sectorGradient` 已经是正式工具组，而不是临时实验分支
 
-当前组合笔刷的活动真相源已经是正式主工程路径，不再是“旧 flat dual-tip UI + 旧 compact popover”那套描述。
+### 2.4 当前已可确认的核心产品能力
 
-当前关键位置：
+从代码和测试可以确认，当前主工程已经具备：
 
-- [ToolKind.swift](/Users/victorcloux/Desktop/ArtFlex/Core/Tools/ToolKind.swift)
-  - 活动真相源是 `CompoundBrushSettings`
-  - 包含：
-    - `enabled`
-    - `mode`
-    - `secondary`
-    - `pressureMix`
-  - 次笔尖活动参数包括：
-    - `sizeMode`
-    - `size / relativeSizeRatio`
-    - `spacingPercent`
-    - `pressureSizeAmount`
-    - `pressureOpacityAmount`
-    - `tileRandomRotation`
-    - `customTipMaskData`
+- 多图层基础系统：新建、删除、复制、重命名、排序、显示隐藏、锁定、透明度、合并
+- 历史系统：撤销 / 重做、图层状态与像素历史恢复
+- 选区系统：套索 / 多边形 / 矩形 / 椭圆选区，选区填充与删除
+- 自由变形：有选区和无选区两条路径
+- 画布控制：缩放、平移、重置视角、画布旋转
+- 笔刷系统：基础笔刷、橡皮、涂抹、直线、渐变
+- 自定义笔尖设计：绘制、图片导入、旋转、翻转、预览
+- 画笔库：持久化、导入导出、快捷键槽位
+- tip image library：导入、引用关系检查、主笔尖 / 次笔尖复用
+- 参考图系统：多槽位、浮窗、取色、LAB 黑白参考
+- 快照系统：保存快照、对比、导出
+- ideation 系统：多分支创作壳
+- timelapse：录制与视频导出
+- 文件系统：PNG 导出、工程保存 / 打开
 
-- [WorkspaceViewModel.swift](/Users/victorcloux/Desktop/ArtFlex/Platform/macOS/App/WorkspaceViewModel.swift)
-  - 当前存在完整的组合笔刷活动 setter
-  - 包括主笔尖、次笔尖、压力混合、次笔尖随机旋转等接线
+### 2.5 当前组合笔刷的真实位置
 
-- [CompoundBrushBuilderSheet.swift](/Users/victorcloux/Desktop/ArtFlex/Platform/macOS/UI/CompoundBrushBuilderSheet.swift)
-  - 当前活动 UI 是组合笔刷工作台
-  - 不是旧 compact dual-tip popover
+当前组合笔刷已经是主工程真实路径，不是旧回退基线。
 
-- [StageOneBrushRenderer.swift](/Users/victorcloux/Desktop/ArtFlex/Rendering/Canvas/StageOneBrushRenderer.swift)
-  - 当前活动 runtime 就在这里
-  - 组合笔刷开启后：
-    - 主笔尖包络决定笔触外轮廓
-    - 次笔尖沿 stroke-space 形成重复纹理场
-    - 最终结果始终被主包络裁剪
-    - 压力通过 `pressureMix` 控制主次主导权
-    - 次纹理支持 per-tile stable random rotation
+关键入口：
 
-### 2.3 当前组合笔刷的外观语义
+- 数据真相源：
+  [Core/Tools/ToolKind.swift](Core/Tools/ToolKind.swift)
+- 状态接线：
+  [Platform/macOS/App/WorkspaceViewModel.swift](Platform/macOS/App/WorkspaceViewModel.swift)
+- UI 工作台：
+  [Platform/macOS/UI/CompoundBrushBuilderSheet.swift](Platform/macOS/UI/CompoundBrushBuilderSheet.swift)
+- 运行时：
+  [Rendering/Canvas/StageOneBrushRenderer.swift](Rendering/Canvas/StageOneBrushRenderer.swift)
 
-当前主工程里的目标刷语义可以概括为：
+当前组合笔刷语义是：
 
-1. 主笔尖先定义主体范围 / 轮廓
-2. 次笔尖作为更大的重复纹理场进入内部
-3. 最终只显示落在主包络范围内的部分
-4. 压力控制“主层更强还是次层更强”
-5. 整体透明度曲线独立控制整条笔触深浅
+1. 主笔尖先定义笔触包络 / 主体范围
+2. 次笔尖沿 stroke-space 形成重复纹理场
+3. 最终结果由主包络裁剪
+4. 压力通过 `pressureMix` 控制主次主导权
+5. 次纹理支持 stable random rotation 打散重复感
 
-这和此前文档里那套“旧 dual-tip flat 字段 + rows/fill / scatter / invert 基线”已经不是一回事。
+当前剩余问题仍主要集中在主层可见外观，不是 sample builder、tip sampling 或 display/export plumbing。
 
-### 2.4 当前最需要保持冻结的部分
+### 2.6 当前颜色与像素底座仍然统一
 
-当前不要随意改这些：
+底层规范在代码里仍然一致，没有出现新的分裂链路：
 
-- sample builder
-- tip sampling
-- 主/次 tip 接线
-- dominance / opacity 曲线结构
-- projected/clipped 基本语义
-- actual-hand-stroke / display 链排错逻辑
+- 文档颜色标准：
+  [Core/Color/ColorStandard.swift](Core/Color/ColorStandard.swift)
+  - `RGBA8`
+  - `premultiplied alpha`
+  - `sRGB`
+- GPU layer surface / canvas drawable：
+  - `.bgra8Unorm_srgb`
+  - 见 [Rendering/Canvas/StageOneLayerSurfaceStore.swift](Rendering/Canvas/StageOneLayerSurfaceStore.swift)
+  - 见 [Platform/macOS/Canvas/MetalCanvasHost.swift](Platform/macOS/Canvas/MetalCanvasHost.swift)
+  - 见 [Rendering/Canvas/StageOneCanvasPresenter.swift](Rendering/Canvas/StageOneCanvasPresenter.swift)
+- PNG 导出：
+  [Infrastructure/FileFormat/PNGExporter.swift](Infrastructure/FileFormat/PNGExporter.swift)
+  - 从同一套 layer texture 数据读回
+  - 在基础设施层集中做 BGRA -> RGBA 扁平化处理
+  - 当前导出结果是白底不透明 PNG
 
-这些链路之前已经花大量时间对齐过，不应该再当作默认怀疑对象。
+## 3. 当前架构现实
 
-## 3. 当前 look 层面的真实问题
+### 3.1 分层仍然基本成立
 
-当前剩余问题已经收缩到**主层视觉表达**，不是 plumbing。
+当前目录分层仍然有意义：
 
-当前用户反馈已经明确：
+- `Core/`：文档、工具、颜色、选区、应用状态
+- `Rendering/`：Metal 画布、笔刷、合成、采样、变形
+- `Infrastructure/`：工程文件、导出、texture 序列化
+- `Platform/macOS/`：App、UI、Canvas host、平台服务
 
-- `primary_body_alpha` 基本正确，应视为锁定
-- `secondary_clipped_alpha` 基本正确，应视为锁定
-- 问题集中在主层可见结果：
-  - 主层仍容易露出 raw primary stamp 的串珠 / rail 感
-  - `primary_texture_modulation_alpha` 容易退化成“模糊过的 stamp chain”
-  - `high` 和 `sweep` 左半段因此还不够接近目标 brush
+### 3.2 但当前中心化已经非常明显
 
-所以当前阶段不是去改次层，不是去重查接线，而是继续把主层从“看得见的 stamp chain”收成“连续主体 + 很轻微的内部主纹理调制”。
+当前几个最大热点文件：
 
-## 4. 当前推荐工作范围
+- [Platform/macOS/App/WorkspaceViewModel.swift](Platform/macOS/App/WorkspaceViewModel.swift)
+  - 10378 行
+- [Platform/macOS/UI/RightInspectorView.swift](Platform/macOS/UI/RightInspectorView.swift)
+  - 4658 行
+- [Rendering/Canvas/StageOneBrushRenderer.swift](Rendering/Canvas/StageOneBrushRenderer.swift)
+  - 2943 行
 
-如果继续做组合笔刷，优先范围是：
+这说明：
 
-1. 只收主层 modulation
-2. 优先看：
-   - `primary_body_alpha`
-   - `body_interior_mask`
-   - `primary_texture_modulation_alpha`
-   - `primary_visible_alpha`
-   - `high`
-   - `sweep`
-3. 不要顺手再改：
-   - 次层语义
-   - sample / tip / display 链
-   - 工程接线
-   - 旧 subtract/intersect 之外的基础模式框架
+- 项目能力面已经明显扩大
+- 但中心化也很强
+- 如果后续要拆分，应该按明确功能切片做小范围分拆，不要无计划发起“大重构”
 
-## 5. 恢复上下文时先看
+## 4. 当前主线与近期重点
 
-1. [HANDOFF.md](/Users/victorcloux/Desktop/ArtFlex/HANDOFF.md)
-2. [CURRENT_STATUS.md](/Users/victorcloux/Desktop/ArtFlex/CURRENT_STATUS.md)
-3. [DECISIONS.md](/Users/victorcloux/Desktop/ArtFlex/DECISIONS.md)
+### 4.1 当前最活跃的产品线
+
+最近提交和当前文档一致，项目最近的高频工作是：
+
+- 组合笔刷面板与外观继续收口
+- 蜡笔 / 杂色 / 多工具接线
+- 颜色面板、黑白模式、色标与画笔库联动
+
+### 4.2 当前工作区里还有未提交的性能 / 稳定性改动
+
+截至 2026-04-12，working tree 仍是 dirty，未提交改动集中在：
+
+- `Core/Application/HistoryController.swift`
+- `Core/Application/PerformanceAuditStore.swift`
+- `Infrastructure/FileFormat/LayerTextureSerializer.swift`
+- `Platform/macOS/App/WorkspaceViewModel.swift`
+- `Platform/macOS/Canvas/MetalCanvasHost.swift`
+- `Platform/macOS/UI/RightInspectorView.swift`
+- `Rendering/Canvas/StageOneBrushRenderer.swift`
+- `Rendering/Canvas/StageOneCanvasPresenter.swift`
+- `Rendering/Canvas/StageOneLayerSurfaceStore.swift`
+
+这批改动的方向大致是：
+
+- history snapshot / restore 批处理
+- serializer staging / batch restore
+- Metal buffer / texture 复用
+- luminosity preview 临时纹理缓存
+- brush library 后台持久化
+- performance audit 样本裁剪
+
+后续线程接手前，应该先看 `git diff --stat` 和这几份文件的 diff，而不是假设当前 `HEAD` 就是完整现状。
+
+## 5. 构建与验证状态
+
+2026-04-12 本地确认：
+
+- `swift build` 通过
+- `swift test --filter WorkspaceViewModelSafetyTests` 通过
+- `swift test --filter BrushStrokeSamplingTests` 通过
+- `swift test --filter HistoryControllerTests` 通过
+
+当前仍存在的非阻塞 warning：
+
+- 文档相关的 SwiftPM warning 已经清理干净
+- 在完整重编译或相关文件重新编译时，当前代码里仍可能出现若干 `SendableClosureCaptures` warning
+
+这些 warning 当前不阻塞 build / test，但如果后续要做工程清洁度收口，需要单独处理。
+
+## 6. 新线程建议先读
+
+1. [HANDOFF.md](HANDOFF.md)
+2. [DECISIONS.md](DECISIONS.md)
+3. [Docs/reference/REPO_MAP.md](Docs/reference/REPO_MAP.md)
+4. [Docs/reference/COLOR_PIXEL_SPEC.md](Docs/reference/COLOR_PIXEL_SPEC.md)
+
+如果任务明确与组合笔刷相关，再继续看：
+
+- [Core/Tools/ToolKind.swift](Core/Tools/ToolKind.swift)
+- [Platform/macOS/App/WorkspaceViewModel.swift](Platform/macOS/App/WorkspaceViewModel.swift)
+- [Platform/macOS/UI/CompoundBrushBuilderSheet.swift](Platform/macOS/UI/CompoundBrushBuilderSheet.swift)
+- [Rendering/Canvas/StageOneBrushRenderer.swift](Rendering/Canvas/StageOneBrushRenderer.swift)

@@ -6916,13 +6916,20 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     private func persistBrushLibrary() {
-        do {
-            try bootstrap.brushLibraryPersistenceController.saveResources(
-                library: bootstrap.workspaceStore.state.brushLibrary,
-                tipImageLibrary: bootstrap.workspaceStore.state.tipImageLibrary
-            )
-        } catch {
-            showStatus(.init(kind: .error, message: "保存画笔库失败：\(error.localizedDescription)"))
+        let library = bootstrap.workspaceStore.state.brushLibrary
+        let tipImageLibrary = bootstrap.workspaceStore.state.tipImageLibrary
+        let controller = bootstrap.brushLibraryPersistenceController
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            do {
+                try controller.saveResources(
+                    library: library,
+                    tipImageLibrary: tipImageLibrary
+                )
+            } catch {
+                DispatchQueue.main.async {
+                    self?.showStatus(.init(kind: .error, message: "保存画笔库失败：\(error.localizedDescription)"))
+                }
+            }
         }
     }
 

@@ -23,13 +23,14 @@ let package = Package(
             path: ".",
             exclude: [
                 ".git",
+                ".claude",
                 "AGENTS.md",
-                "COLOR_PIXEL_SPEC.md",
                 "CURRENT_STATUS.md",
-                "MIGRATION_NOTES.md",
-                "MVP_PLAN.md",
-                "STAGE1_STATUS.md",
+                "DECISIONS.md",
+                "Docs",
+                "HANDOFF.md",
                 "README.md",
+                "selection-trace.log",
                 "Tests"
             ],
             resources: [

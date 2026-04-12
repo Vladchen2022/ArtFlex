@@ -15,7 +15,11 @@
       "Bash(xcodebuild test:*)",
       "Bash(swift test:*)",
       "Bash(git stash:*)",
-      "Bash(ls -la /Users/victorcloux/Desktop/ArtFlex/Platform/macOS/UI/*.swift)"
+      "Bash(ls -la /Users/victorcloux/Desktop/ArtFlex/Platform/macOS/UI/*.swift)",
+      "Bash(grep -n \"commandBuffer.waitUntilCompleted\\\\|synchronous\" /Users/victorcloux/Desktop/ArtFlex/Rendering/Canvas/*.swift)",
+      "Bash(xcodebuild -scheme ArtFlex -destination 'platform=macOS' test -only-testing:ArtFlexTests/StageOneBrushRendererTests -only-testing:ArtFlexTests/StageOneCanvasPresenterTests)",
+      "Bash(xcodebuild -scheme ArtFlex -destination 'platform=macOS' test)",
+      "Bash(tee /tmp/artflex_test_output.txt)"
     ]
   }
 }

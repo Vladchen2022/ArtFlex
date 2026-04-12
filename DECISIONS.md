@@ -1,117 +1,133 @@
 # DECISIONS
 
-最后更新：2026-04-10
+最后更新：2026-04-12
 
-本文件记录当前代码和产品层已经确认的关键决策。  
-如果后续改动与这些点冲突，应先重新讨论，而不是直接改代码。
+本文件记录当前代码和产品层已经确认、后续线程不应随意推翻的决策。
 
-## 0. 当前阶段与红线
+## 0. 项目级红线
 
-### 0.1 当前组合笔刷已经接回主工程
+### 0.1 产品结构继续沿用成熟桌面绘图软件路径
 
-已确认：
+默认保持：
 
-- 当前组合笔刷不是旧回退基线
-- 活动 UI 是 [CompoundBrushBuilderSheet.swift](/Users/victorcloux/Desktop/ArtFlex/Platform/macOS/UI/CompoundBrushBuilderSheet.swift)
-- 活动运行时是 [StageOneBrushRenderer.swift](/Users/victorcloux/Desktop/ArtFlex/Rendering/Canvas/StageOneBrushRenderer.swift) 的 compound 分支
-- 文档、handoff、后续开发都必须以这条主工程真实路径为准
+- 顶部工具栏
+- 左侧工具栏
+- 中央视图画布
+- 右侧 inspector
+- 图层面板
+- 笔尖形状设计区域
 
-### 0.2 当前工作重点是 look reconstruction，不是 plumbing
+除非明确进入产品设计调整阶段，不要为了实现方便重排主 UI 结构。
 
-已确认：
+### 0.2 继续保持 Metal-first
 
-- sample builder 不再是默认问题来源
-- tip sampling 不再是默认问题来源
-- 真实手绘 / live replay / display 链的大量对账已经做过
-- 当前默认问题来源应视为**主层视觉表达**，不是再去重查接线
+不允许把旧项目的 CPU 画布合成思路重新带回主链，包括：
 
-### 0.3 当前组合笔刷语义
+- 整图 CGContext 合成显示
+- 以 CPU bitmap / redraw flag 作为默认真相源
+- 用大量整图 CGImage / CGContext 拷贝支撑主交互
 
-已确认当前目标路径是：
+### 0.3 显示 / 编辑 / 取样 / 导出必须共享同一套真相源
 
-- 主笔尖定义主体范围 / 包络
-- 次笔尖在 stroke-space 形成更大的重复纹理场
-- 最终结果被主包络裁剪
-- 压力控制主次主导权
-- 透明度曲线独立控制整条笔触深浅
+当前仍然坚持：
 
-### 0.4 当前默认验收模式
+- 文档颜色标准：`RGBA8 + premultiplied alpha + sRGB`
+- GPU surface / drawable：`bgra8Unorm_srgb`
+- 导出和采样不允许再各走一条独立“补格式”链
 
-已确认：
+任何通道交换、颜色补偿、premultiply / unpremultiply 的必要处理，都必须收敛在基础设施层，而不是散落在业务和工具层。
 
-- 目标 brush 的默认验收模式应优先看 `textureBlend`
-- `subtract / intersect` 可以保留为已有模式，但不应继续主导目标刷验收判断
+## 1. 当前真实实现层决策
 
-### 0.5 当前不要再随意动的部分
+### 1.1 `WorkspaceViewModel` 目前是状态中心
 
-已确认冻结：
+当前代码现实不是“小而美的完全拆分状态树”，而是：
 
-- `CompoundBrushSampleBuilder`
-- 单 stamp tip sampling 逻辑
-- 主/次 tip 资源接线
-- dominance / opacity 曲线结构
-- projected/clipped 基本语义
-- 组合笔刷默认参数的大方向
-- display/composite/export 审计链
+- `WorkspaceViewModel` 承担大量主工作流接线
+- `RightInspectorView` 承担大量右侧 UI
 
-如果没有新的明确证据，不要再回到这些层反复排错。
+这不是理想终态，但在没有明确切片前，不要发起宽泛的大拆分。  
+如需拆分，应按具体子系统小步推进。
 
-## 1. 当前组合笔刷真实实现层决策
+### 1.2 快照对比 / ideation / timelapse 都是主工程能力
 
-### 1.1 数据层
+这些不是临时实验：
 
-- [ToolKind.swift](/Users/victorcloux/Desktop/ArtFlex/Core/Tools/ToolKind.swift) 里的 `CompoundBrushSettings` / `CompoundSecondaryTipSettings` 是当前活动真相源
-- 次笔尖活动参数包括：
-  - `sizeMode`
-  - `size / relativeSizeRatio`
-  - `spacingPercent`
-  - `pressureSizeAmount`
-  - `pressureOpacityAmount`
-  - `tileRandomRotation`
-  - `customTipMaskData`
+- `snapshotCompareSession`
+- `ideationSession`
+- `TimelapseRecorderController`
 
-### 1.2 交互层
+后续线程不应把它们当作可以默认删除或忽略的旁支。
 
-- [WorkspaceViewModel.swift](/Users/victorcloux/Desktop/ArtFlex/Platform/macOS/App/WorkspaceViewModel.swift) 当前已存在完整组合笔刷 setter
-- 不要再把当前状态写成“旧 secondary flat 字段 setter 才是活动路径”
+### 1.3 组合笔刷已经是正式主路径
 
-### 1.3 渲染层
+当前组合笔刷的活动真相源是：
 
-- [StageOneBrushRenderer.swift](/Users/victorcloux/Desktop/ArtFlex/Rendering/Canvas/StageOneBrushRenderer.swift) 当前组合笔刷渲染是正式主路径
-- 次纹理已使用 per-tile stable random rotation 打散重复感
-- 当前组合笔刷 look 更接近“主包络 + 次纹理场裁剪”的单路径外观模型，而不是早期分层实验文档里那种 prototype-only 语义拆解
+- `CompoundBrushSettings`
+- `WorkspaceViewModel` 中的相关 setter
+- `CompoundBrushBuilderSheet`
+- `StageOneBrushRenderer` 的 compound 路径
 
-## 2. 当前 look 阶段的明确结论
+不要再把“旧 dual-tip 回退基线”当作当前状态。
 
-### 2.1 已基本正确，优先锁定
+## 2. 当前阶段决策
 
-- `primary_body_alpha`
-- `secondary_clipped_alpha`
+### 2.1 当前主线是 targeted iteration，不是大范围返工
 
-### 2.2 当前主要问题
+当前默认工作方式应是：
 
-- 主层 modulation 仍容易退化成“模糊过的 primary stamp chain”
-- `high` 左端和 `sweep` 左半段容易露出梳齿 / rail
+- 对组合笔刷外观做局部收口
+- 对颜色 / 色标 / 黑白参考 / 画笔库工作流做局部打磨
+- 对 history / serializer / renderer / presenter 做 targeted 性能与稳定性修正
 
-### 2.3 当前允许继续改的范围
+不应默认重新打开大范围性能项目或全局架构返工。
 
-只建议继续收：
+### 2.2 当前组合笔刷默认不要再重查 plumbing
 
-- 主层 interior mask
-- 主层低频 modulation 场
-- `primary_visible` 的最终表达方式
+如果没有新的硬证据，默认冻结：
 
-### 2.4 当前不建议再回去做的事
+- sample builder
+- 单 stamp tip sampling
+- 主 / 次 tip 资源接线
+- dominance / opacity 曲线基础结构
+- projected / clipped 基本语义
+- display / composite / export 主链
 
-- 不要回退到 rows / fill / scatter 旧语义
-- 不要再重开 sample / tip / display 排错，除非有新的硬证据
-- 不要一边做主层 look，一边顺手改次层和曲线
+当前继续迭代组合笔刷时，优先看主层外观表达。
 
-## 3. 其它仍然成立的项目层决策
+### 2.3 颜色与像素规范不再回到“边做边补”
 
-- 项目继续保持 Metal-first 方向
-- 不允许把旧 CPU 画布思路重新带回主链
-- 参考图面板当前冻结
-- 颜色面板默认收起高级区
-- `笔尖形状设计 / 导航器` 默认打开 `导航器`
-- 涂抹工具独立记忆自己的 brush 设置
+当前项目已经具备：
+
+- `ArtColorStandard`
+- `LinearPremultipliedColor`
+- 统一的 layer texture / serializer / export 基础链
+
+后续新功能接入时，不允许再走“先做功能，之后再修颜色规范”的路线。
+
+## 3. 当前不要随意改动的地方
+
+### 3.1 参考图与 LAB 黑白参考已经接通
+
+参考图系统、参考图浮窗和 LAB 黑白参考都已是活动主链。  
+如果没有明确需求，不要把它们退回占位或只读 demo 状态。
+
+### 3.2 画笔库与 tip image library 已经是正式工作流
+
+当前已经有：
+
+- 画笔库持久化
+- 导入 / 导出
+- 槽位快捷键
+- tip image library 引用关系检查
+
+不要把这条链写回成“临时 UI”。
+
+### 3.3 当前警惕无界增长
+
+虽然项目功能面已经扩大，但继续开发时仍应遵守：
+
+- 决策先行
+- 改动聚焦
+- 不顺手拉出新主线
+- 不把临时优化建议文档当成实施命令

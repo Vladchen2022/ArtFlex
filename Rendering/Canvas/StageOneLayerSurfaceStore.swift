@@ -7,6 +7,11 @@ final class StageOneLayerSurfaceStore {
     func surfaceRecords(for document: ArtDocument) -> [LayerSurfaceRecord] {
         document.layers.map { layer in
             if let existing = surfacesByLayerID[layer.id] {
+                if existing.layerName == layer.name,
+                   existing.isVisible == layer.isVisible,
+                   existing.opacity == layer.opacity {
+                    return existing
+                }
                 let updated = LayerSurfaceRecord(
                     surfaceID: existing.surfaceID,
                     layerID: existing.layerID,
@@ -216,6 +221,5 @@ final class StageOneLayerSurfaceStore {
 
         encoder.endEncoding()
         commandBuffer.commit()
-        commandBuffer.waitUntilCompleted()
     }
 }

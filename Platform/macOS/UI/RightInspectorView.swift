@@ -1565,15 +1565,17 @@ struct RightInspectorView: View {
                         )
                 }
 
+            let tipSemantic = effectivePrimaryTipSourceSemantic(for: viewModel.workspace.toolSession.brush)
+            let tipFitPreview = tipSemantic.usesImportedPreviewFit
             TipMaskCanvasView(
                 maskData: viewModel.workspace.toolSession.brush.customTipMaskData,
                 syncToken: tipMaskEditorSyncToken(
                     maskData: viewModel.workspace.toolSession.brush.customTipMaskData,
-                    sourceSemantic: effectivePrimaryTipSourceSemantic(for: viewModel.workspace.toolSession.brush),
+                    sourceSemantic: tipSemantic,
                     assetID: viewModel.workspace.toolSession.brush.customTipAssetID,
-                    fitImportedPreview: effectivePrimaryTipSourceSemantic(for: viewModel.workspace.toolSession.brush).usesImportedPreviewFit
+                    fitImportedPreview: tipFitPreview
                 ),
-                fitImportedPreview: effectivePrimaryTipSourceSemantic(for: viewModel.workspace.toolSession.brush).usesImportedPreviewFit,
+                fitImportedPreview: tipFitPreview,
                 paintMode: tipPaintMode,
                 pressureSizeAmount: Float(tipPressureSizeAmount),
                 pressureOpacityAmount: Float(tipPressureOpacityAmount),

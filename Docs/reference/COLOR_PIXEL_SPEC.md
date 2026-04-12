@@ -1,348 +1,164 @@
 # ArtFlex 颜色与像素规范
 
-## 目的
+最后更新：2026-04-12
 
-本文件定义 ArtFlex 第一阶段必须固定的颜色与像素规则。
+本文件记录当前项目仍然生效的颜色与像素底层规范。  
+它不是“第一阶段规划文档”，而是后续线程接手时必须遵守的实现边界。
 
-目标是从项目一开始就统一：
+## 1. 当前规范一句话
 
-- 文档主像素格式
-- Metal texture format
-- render target format
-- premultiplied alpha 规则
-- sRGB / linear 规则
-- 显示、编辑、导出所使用的真相源
+ArtFlex 当前文档颜色标准保持为：
 
-本规范是第一阶段开发的硬约束，后续实现不得临时补通道交换、颜色补偿或 shader 特判来修正链路分裂问题。
-
----
-
-## 第一阶段总原则
-
-### 1. 单一真相源
-
-第一阶段所有核心链路共享同一套底层画布数据：
-
-- 屏幕显示
-- 画笔写入
-- 橡皮擦写入
-- PNG 导出
-
-后续阶段中的吸管、涂抹也必须建立在同一真相源基础上。
-
-第一阶段不允许出现：
-
-- 显示从一套中间缓存读
-- 导出从另一套 CPU 重绘结果读
-- 工具写入再走第三套格式
-
-### 2. 先规范后实现
-
-在以下规则未固定前，不进入正式画笔、导出和取样链路开发：
-
-- 通道顺序
-- alpha 语义
-- 颜色空间边界
-- Metal surface 格式
-- 导出读回来源
-
-### 3. 第一阶段只解决 MVP 所需链路
-
-第一阶段只覆盖：
-
-- 单图层
-- Metal 显示
-- 基础画笔
-- 橡皮擦
-- PNG 导出
-
-不提前为 HDR、CMYK、16-bit 文档、多色域工作流做复杂扩展。
-
----
-
-## 文档真相源定义
-
-## 文档主像素格式
-
-第一阶段文档像素真相源定义为：
-
-- 每像素 4 通道
-- 8-bit unsigned normalized
-- 通道顺序：RGBA
-- alpha：premultiplied alpha
-- 颜色语义：sRGB 编码存储
-
-可简写为：
-
-`RGBA8 + premultiplied alpha + sRGB`
-
-这意味着文档中的单图层底层内容，在逻辑上应被视为：
-
-- `R`, `G`, `B` 已经乘以 `A`
-- 颜色值以 sRGB 语义存储
-
-选择这个规范的原因：
-
-- 第一阶段实现复杂度可控
-- 与 PNG 8-bit 导出目标一致
-- 适合作为桌面绘图软件 MVP 的统一底座
-- 能避免过早引入 16-bit / HDR 复杂度
-
----
-
-## Metal 格式约定
-
-## Layer Surface Format
-
-第一阶段单图层 GPU surface 建议固定为：
-
-- `MTLPixelFormat.bgra8Unorm_srgb` 或 `MTLPixelFormat.rgba8Unorm_srgb`
-
-推荐优先选择：
-
-- `MTLPixelFormat.bgra8Unorm_srgb`
-
-原因：
-
-- 在 Apple 平台上兼容性和常见显示链路支持较好
-- 常见 drawable 与读回路径更顺滑
-
-但是无论 GPU 侧选择 `BGRA` 还是 `RGBA`，项目层面都必须明确：
-
-- 文档逻辑通道语义始终按 `RGBA` 理解
-- 若底层 Metal 格式选用 `BGRA`，转换必须是显式且稳定的底层实现细节
-- 不允许在上层业务代码、导出代码、工具代码里到处散落通道交换补丁
-
-换句话说：
-
-- 业务和文档层认知统一为 `RGBA`
-- Metal 资源格式可以是 `BGRA`
-- 通道映射只能收敛在渲染基础设施层处理
-
-## Render Target Format
-
-画布显示 render target 建议固定为：
-
-- `MTLPixelFormat.bgra8Unorm_srgb`
-
-原因：
-
-- 与 macOS 常见 Metal 显示目标更契合
-- 可减少显示链路格式分裂
-
-## CPU 读回格式
-
-从 GPU 读回用于 PNG 导出的 CPU 缓冲数据，统一按以下逻辑处理：
-
-- 对外语义为 `RGBA8 premultiplied sRGB`
-- 若底层读回受 Metal 资源格式影响产生 `BGRA` 排列，则在基础设施层集中转换为导出所需格式
-
-导出层不关心渲染时内部用的是 `BGRA` 还是 `RGBA`。
-
----
-
-## Alpha 规则
-
-第一阶段统一使用：
-
+- `RGBA8`
 - `premultiplied alpha`
+- `sRGB`
 
-适用范围：
+而 GPU 主 surface / drawable 统一使用：
 
-- 图层底层存储
-- 画笔写入结果
-- 橡皮擦写入结果
-- 屏幕显示合成输入
-- PNG 导出前的图像数据
+- `bgra8Unorm_srgb`
 
-## 禁止混用
+业务层按 `RGBA` 语义理解文档颜色，底层 `BGRA` 只是 Metal 资源格式细节。
 
-不允许出现以下情况：
+## 2. 当前代码里的真实依据
 
-- 某些工具写入 straight alpha
-- 某些显示路径按 premultiplied 解读
-- 导出前再临时做一次不透明的 alpha 修补
+### 2.1 文档颜色标准
 
-## 画笔语义
+[Core/Color/ColorStandard.swift](../../Core/Color/ColorStandard.swift) 当前定义：
 
-第一阶段基础画笔写入时：
+- `ArtPixelFormat.rgba8`
+- `ArtAlphaMode.premultiplied`
+- `ArtColorSpace.sRGB`
 
-- 输入颜色先按当前颜色语义生成
-- 写入图层前转换为 premultiplied 表示
+对应默认值：
 
-例如：
+- `ArtColorStandard.stageOneDefault`
 
-- 用户选中颜色 `(r, g, b, a)`
-- 实际写入值应为 `(r * a, g * a, b * a, a)`
+### 2.2 GPU layer surface / canvas drawable
 
-## 橡皮擦语义
+当前主工程里的图层 texture 和 canvas drawable 都以 `bgra8Unorm_srgb` 为主：
 
-第一阶段橡皮擦也必须在 premultiplied alpha 规则下工作。
+- [Rendering/Canvas/StageOneLayerSurfaceStore.swift](../../Rendering/Canvas/StageOneLayerSurfaceStore.swift)
+- [Rendering/Canvas/StageOneCanvasPresenter.swift](../../Rendering/Canvas/StageOneCanvasPresenter.swift)
+- [Platform/macOS/Canvas/MetalCanvasHost.swift](../../Platform/macOS/Canvas/MetalCanvasHost.swift)
+- [Rendering/Metal/MetalSurfaceDescriptor.swift](../../Rendering/Metal/MetalSurfaceDescriptor.swift)
 
-无论最终采用：
+说明：
 
-- 降低 alpha
-- 用特定 blend state 擦除
-- 通过 brush mask 执行目标衰减
+- 文档逻辑仍按 `RGBA` 语义理解
+- `BGRA` 只是在 Metal 资源和读回时集中处理
+- 不允许在上层工具和业务代码里散落通道交换补丁
 
-都必须保证结果仍是合法的 premultiplied 像素。
+### 2.3 CPU 读回 / 导出
 
----
+[Infrastructure/FileFormat/LayerTextureSerializer.swift](../../Infrastructure/FileFormat/LayerTextureSerializer.swift) 和 [Infrastructure/FileFormat/PNGExporter.swift](../../Infrastructure/FileFormat/PNGExporter.swift) 负责：
 
-## sRGB 与 Linear 规则
+- 从同一套 layer texture 读回像素
+- 在基础设施层集中做 BGRA 数据解释
+- 导出时统一转换到 PNG 所需的 RGBA 输出
 
-第一阶段统一规则如下：
+当前 PNG 导出行为是：
 
-### 1. 存储空间
+- 从同一套 layer surface 数据读回
+- 先按线性 premultiplied 颜色解释
+- 再合成到白底
+- 最终写出不透明 sRGB PNG
 
-图层主数据按 `sRGB` 语义存储。
+## 3. 单一真相源规则
 
-### 2. 显示链路
+当前仍然坚持：
 
-显示 render target 使用 `*_srgb` 格式，依赖 Metal 的 sRGB 采样/写入规则完成正确显示。
+- 屏幕显示来自 layer textures
+- 画笔 / 橡皮 / 涂抹写入 layer textures
+- 吸管采样基于同一套 layer 数据
+- 导出从同一套 layer 数据读回
+- 历史快照恢复的对象也是同一套 layer textures
 
-### 3. 混合与计算
+不允许演变成：
 
-第一阶段如果笔刷计算只做基础 stamp 和 alpha 混合，允许在当前 MVP 阶段保持实现简单，但必须遵守一条原则：
+- 显示走一套链
+- 吸管另走一套 CPU 合成链
+- 涂抹再走第三套中间缓存
+- 导出再走第四套临时补偿链
 
-- 不得在不同路径中随意混用“有的地方把值当 linear，有的地方把值当 sRGB 编码值”。
+## 4. Alpha 规则
 
-第一阶段推荐做法：
+### 4.1 文档语义
 
-- 统一使用 sRGB 纹理格式
-- 显示和采样遵循 Metal 对 sRGB 纹理的标准处理
-- 若某步计算需要明确在线性空间完成，应只在渲染层集中处理，不扩散到业务层
+文档层和工具写入统一按 `premultiplied alpha` 理解。
 
-### 4. UI 颜色输入
+这意味着：
 
-SwiftUI / AppKit 的颜色选择结果进入核心逻辑前，应转换为文档标准颜色语义，再进入画笔写入流程。
+- 颜色进入底层存储前应先 premultiply
+- 任何混合结果都必须保持合法 premultiplied 像素
 
-要求：
+当前代码中的对应实现可见于：
 
-- 平台颜色对象不能直接成为文档底层格式
-- 平台层与核心层之间需要显式颜色转换边界
+- [Core/Color/ColorStandard.swift](../../Core/Color/ColorStandard.swift)
+- [Core/Color/LinearPremultipliedColor.swift](../../Core/Color/LinearPremultipliedColor.swift)
+- [Platform/macOS/App/WorkspaceViewModel.swift](../../Platform/macOS/App/WorkspaceViewModel.swift)
+- [Rendering/Canvas/StageOneBrushRenderer.swift](../../Rendering/Canvas/StageOneBrushRenderer.swift)
 
----
+### 4.2 不允许混用
 
-## 显示、编辑、导出链路
+不允许出现：
 
-第一阶段统一链路定义如下：
+- 某个工具写 straight alpha
+- 某个显示路径按 premultiplied 解读
+- 导出前再临时做局部 alpha 修补
 
-### 显示
+## 5. sRGB / linear 规则
 
-- 屏幕显示来自文档图层对应的 GPU surface
+### 5.1 存储语义
 
-### 编辑
+文档和导出的颜色目标按 `sRGB` 语义理解。
 
-- 画笔和橡皮擦直接写入文档图层对应的 GPU surface
+### 5.2 计算边界
 
-### 导出
+需要做线性空间计算的地方，应集中在渲染或颜色基础设施层处理，例如：
 
-- PNG 导出从同一文档图层 surface 读回
+- `LinearPremultipliedColor`
+- `StageOneBrushRenderer`
+- `LABLuminosityPostProcessor`
+- `PNGExporter`
 
-### 工程保存
+不允许在业务层随意混用：
 
-- 工程保存的数据语义必须与文档真相源一致
-- 不允许保存一套、显示一套、导出再转一套
+- 一部分把颜色当 sRGB 编码值
+- 另一部分把同一值当 linear
 
----
+### 5.3 UI 颜色边界
 
-## 第一阶段推荐的数据边界
+SwiftUI / AppKit 的颜色对象不能直接成为文档底层格式。  
+平台颜色进入核心逻辑前，应转换到当前文档标准颜色语义。
 
-建议明确以下边界：
+## 6. 辅助 surface 与真相源的区别
 
-## Core 层
+项目里确实存在一些辅助贴图或中间贴图，例如：
 
-定义：
+- selection mask：`r8Unorm`
+- opacity cap / 临时 alpha texture：`r8Unorm`
+- 某些 preview / analysis texture：`rgba32Float`
 
-- 文档尺寸
-- 图层标识
-- 工具状态
-- 颜色标准语义
+这些都不是文档真相源本身。  
+它们可以作为局部算法中间结果存在，但不能演变成新的“主颜色标准”。
 
-不直接依赖：
+同理：
 
-- SwiftUI `Color`
-- AppKit `NSColor`
-- `MTLTexture`
+- 参考图贴图不是文档真相源
+- LAB 黑白参考是显示 / 参考路径，不是文档像素改写
 
-## Rendering 层
+## 7. 后续实现时的硬约束
 
-负责：
+后续接新功能时，默认遵守：
 
-- `MTLTexture` 生命周期
-- GPU surface 格式
-- blend state
-- shader 读写
-- readback
+1. 先确认它读写的是哪一套 layer data
+2. 先确认它是否保持 `RGBA8 + premultiplied + sRGB` 语义
+3. 先确认通道映射是否只在基础设施层处理
+4. 再去做工具逻辑、预览逻辑和导出逻辑
 
-## Platform 层
+不允许为了赶功能而回到：
 
-负责：
-
-- 颜色面板输入
-- 窗口显示
-- 文件面板
-
-平台颜色进入核心时必须转换为项目标准颜色值，不允许直接把平台对象透传到文档模型。
-
----
-
-## 后续工具的预留规则
-
-虽然第一阶段暂不实现吸管和涂抹，但现在必须先把采样来源定下来。
-
-## 吸管采样来源
-
-后续吸管应默认从：
-
-- 文档统一画布真相源
-
-采样，而不是从：
-
-- 屏幕截图
-- SwiftUI/AppKit 视图截图
-- 单独的临时预览缓存
-
-第一阶段结论先固定为：
-
-- 吸管未来应从标准化画布数据读取
-- 若有多图层，则从定义清楚的合成结果或目标层读取
-- 不允许临时改走屏幕像素路径
-
-## 涂抹采样来源
-
-后续涂抹应默认从：
-
-- 当前文档标准化图层/画布数据
-
-读取，而不是从独立 CPU 旁路缓存读取。
-
----
-
-## 第一阶段实现建议
-
-第一阶段实现时建议优先做到：
-
-1. 先把本规范中的常量和约束落到代码中
-2. 再建立单图层 surface
-3. 再实现显示
-4. 再实现画笔与橡皮擦
-5. 最后实现 PNG 导出和最小工程保存
-
-如果实现过程中发现本规范无法支撑某个步骤，应先回到规范层统一调整，再继续编码，不应在局部加补丁。
-
----
-
-## 当前阶段的明确结论
-
-第一阶段的默认标准为：
-
-- 文档逻辑像素格式：`RGBA8`
-- alpha：`premultiplied alpha`
-- 颜色语义：`sRGB`
-- 图层存储真相源：单图层 GPU surface
-- 显示来源：同一 surface
-- 导出来源：同一 surface 的读回结果
-
-这就是 ArtFlex 第一阶段所有后续画布、画笔、导出相关实现的基础约束。
+- 临时通道交换
+- 临时 shader 补偿
+- 一次性颜色修正 patch
+- 单独为某个工具开一条旁路颜色链

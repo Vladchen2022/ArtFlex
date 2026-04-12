@@ -205,6 +205,78 @@ final class LayerTextureSerializer {
         )
     }
 
+    func snapshotBatch(textures: [MTLTexture]) throws -> [LayerTextureSnapshot] {
+        guard !textures.isEmpty else { return [] }
+        let startedAt = DispatchTime.now().uptimeNanoseconds
+        defer {
+            let ms = Double(DispatchTime.now().uptimeNanoseconds - startedAt) / 1_000_000
+            PerformanceAuditStore.shared.recordDuration("LayerTextureSerializer.snapshotBatch(\(textures.count))", ms: ms)
+        }
+
+        guard let commandBuffer = metalContext.commandQueue.makeCommandBuffer(),
+              let blitEncoder = commandBuffer.makeBlitCommandEncoder()
+        else {
+            throw CocoaError(.fileWriteUnknown)
+        }
+
+        var stagingTextures: [MTLTexture] = []
+        stagingTextures.reserveCapacity(textures.count)
+
+        for texture in textures {
+            guard let stagingTexture = stagingPool.checkout(
+                width: texture.width,
+                height: texture.height,
+                pixelFormat: texture.pixelFormat
+            ) else {
+                for st in stagingTextures { stagingPool.checkin(st) }
+                throw CocoaError(.fileWriteUnknown)
+            }
+            stagingTextures.append(stagingTexture)
+
+            let region = MTLRegionMake2D(0, 0, texture.width, texture.height)
+            blitEncoder.copy(
+                from: texture,
+                sourceSlice: 0,
+                sourceLevel: 0,
+                sourceOrigin: region.origin,
+                sourceSize: region.size,
+                to: stagingTexture,
+                destinationSlice: 0,
+                destinationLevel: 0,
+                destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
+            )
+        }
+
+        blitEncoder.endEncoding()
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+
+        var snapshots: [LayerTextureSnapshot] = []
+        snapshots.reserveCapacity(textures.count)
+
+        for (texture, stagingTexture) in zip(textures, stagingTextures) {
+            let bytesPerPixel = 4
+            let bytesPerRow = texture.width * bytesPerPixel
+            var sourceBytes = [UInt8](repeating: 0, count: bytesPerRow * texture.height)
+            stagingTexture.getBytes(
+                &sourceBytes,
+                bytesPerRow: bytesPerRow,
+                from: MTLRegionMake2D(0, 0, texture.width, texture.height),
+                mipmapLevel: 0
+            )
+            stagingPool.checkin(stagingTexture)
+
+            snapshots.append(LayerTextureSnapshot(
+                width: texture.width,
+                height: texture.height,
+                bytesPerRow: bytesPerRow,
+                pixelData: Data(sourceBytes)
+            ))
+        }
+
+        return snapshots
+    }
+
     func snapshot(
         texture: MTLTexture,
         originX: Int,
@@ -360,6 +432,83 @@ final class LayerTextureSerializer {
         blitEncoder.endEncoding()
         commandBuffer.commit()
         commandBuffer.waitUntilCompleted()
+    }
+
+    func restoreBatch(
+        _ items: [(snapshot: LayerTextureSnapshot, texture: MTLTexture)]
+    ) throws {
+        guard !items.isEmpty else { return }
+        let startedAt = DispatchTime.now().uptimeNanoseconds
+        defer {
+            let ms = Double(DispatchTime.now().uptimeNanoseconds - startedAt) / 1_000_000
+            PerformanceAuditStore.shared.recordDuration("LayerTextureSerializer.restoreBatch(\(items.count))", ms: ms)
+        }
+
+        guard let commandBuffer = metalContext.commandQueue.makeCommandBuffer(),
+              let blitEncoder = commandBuffer.makeBlitCommandEncoder()
+        else {
+            throw CocoaError(.fileReadCorruptFile)
+        }
+
+        var checkedOutTextures: [MTLTexture] = []
+        checkedOutTextures.reserveCapacity(items.count)
+
+        do {
+            for item in items {
+                guard
+                    item.snapshot.width <= item.texture.width,
+                    item.snapshot.height <= item.texture.height
+                else {
+                    throw CocoaError(.fileReadCorruptFile)
+                }
+
+                guard let stagingTexture = stagingPool.checkout(
+                    width: item.snapshot.width,
+                    height: item.snapshot.height,
+                    pixelFormat: item.texture.pixelFormat
+                ) else {
+                    throw CocoaError(.fileReadCorruptFile)
+                }
+                checkedOutTextures.append(stagingTexture)
+
+                let region = MTLRegionMake2D(0, 0, item.snapshot.width, item.snapshot.height)
+                item.snapshot.pixelData.withUnsafeBytes { rawBuffer in
+                    if let baseAddress = rawBuffer.baseAddress {
+                        stagingTexture.replace(
+                            region: region,
+                            mipmapLevel: 0,
+                            withBytes: baseAddress,
+                            bytesPerRow: item.snapshot.bytesPerRow
+                        )
+                    }
+                }
+
+                blitEncoder.copy(
+                    from: stagingTexture,
+                    sourceSlice: 0,
+                    sourceLevel: 0,
+                    sourceOrigin: region.origin,
+                    sourceSize: region.size,
+                    to: item.texture,
+                    destinationSlice: 0,
+                    destinationLevel: 0,
+                    destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
+                )
+            }
+
+            blitEncoder.endEncoding()
+            commandBuffer.commit()
+            commandBuffer.waitUntilCompleted()
+        } catch {
+            for stagingTexture in checkedOutTextures {
+                stagingPool.checkin(stagingTexture)
+            }
+            throw error
+        }
+
+        for stagingTexture in checkedOutTextures {
+            stagingPool.checkin(stagingTexture)
+        }
     }
 
     func samplePixel(texture: MTLTexture, x: Int, y: Int) throws -> RGBAColor {
