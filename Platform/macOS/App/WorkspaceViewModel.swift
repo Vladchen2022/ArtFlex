@@ -2701,6 +2701,14 @@ final class WorkspaceViewModel: ObservableObject {
         }
     }
 
+    func setBrushPresetColorTag(_ tag: BrushColorTag?, forPresetID presetID: String) {
+        bootstrap.workspaceStore.updateBrushLibrary { library in
+            library.setColorTag(tag, forPresetID: presetID)
+        }
+        persistBrushLibrary()
+        refresh()
+    }
+
     func exportBrushLibrary() {
         let defaultName = workspace.document.metadata.name.isEmpty ? "ArtFlex-BrushLibrary" : workspace.document.metadata.name
         guard let url = bootstrap.filePanelService.presentBrushLibraryExportPanel(defaultName: defaultName) else {

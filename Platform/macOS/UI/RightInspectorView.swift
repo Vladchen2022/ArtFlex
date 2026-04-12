@@ -2305,6 +2305,11 @@ struct RightInspectorView: View {
                     .allowsHitTesting(false)
                 }
 
+                if let tag = preset.colorTag {
+                    brushColorTagCorner(tag)
+                        .allowsHitTesting(false)
+                }
+
                 shortcutSlotLabel(for: slotIndex)
                     .allowsHitTesting(false)
             }
@@ -2316,11 +2321,75 @@ struct RightInspectorView: View {
                 viewModel.applyBrushPreset(preset.id)
             }
 
+            Divider()
+
+            Menu("色标") {
+                ForEach(BrushColorTag.allCases, id: \.self) { tag in
+                    Button {
+                        viewModel.setBrushPresetColorTag(tag, forPresetID: preset.id)
+                    } label: {
+                        HStack {
+                            Circle()
+                                .fill(colorForBrushTag(tag))
+                                .frame(width: 10, height: 10)
+                            Text(labelForBrushTag(tag))
+                        }
+                    }
+                }
+
+                Divider()
+
+                Button("清除色标") {
+                    viewModel.setBrushPresetColorTag(nil, forPresetID: preset.id)
+                }
+                .disabled(preset.colorTag == nil)
+            }
+
             if !preset.isBuiltIn && isSelected {
+                Divider()
                 Button("删除") {
                     viewModel.deleteBrushPreset(preset.id)
                 }
             }
+        }
+    }
+
+    private func brushColorTagCorner(_ tag: BrushColorTag) -> some View {
+        GeometryReader { geometry in
+            let side = min(geometry.size.width, geometry.size.height)
+            let tagSize = side * 0.32
+            Path { path in
+                path.move(to: CGPoint(x: 0, y: side))
+                path.addLine(to: CGPoint(x: 0, y: side - tagSize))
+                path.addLine(to: CGPoint(x: tagSize, y: side))
+                path.closeSubpath()
+            }
+            .fill(colorForBrushTag(tag))
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+    }
+
+    private func colorForBrushTag(_ tag: BrushColorTag) -> Color {
+        switch tag {
+        case .red: return Color(red: 0.90, green: 0.22, blue: 0.21)
+        case .orange: return Color(red: 0.95, green: 0.55, blue: 0.15)
+        case .yellow: return Color(red: 0.95, green: 0.85, blue: 0.20)
+        case .green: return Color(red: 0.30, green: 0.78, blue: 0.30)
+        case .cyan: return Color(red: 0.20, green: 0.78, blue: 0.82)
+        case .blue: return Color(red: 0.25, green: 0.45, blue: 0.90)
+        case .purple: return Color(red: 0.65, green: 0.30, blue: 0.85)
+        }
+    }
+
+    private func labelForBrushTag(_ tag: BrushColorTag) -> String {
+        switch tag {
+        case .red: return "红"
+        case .orange: return "橙"
+        case .yellow: return "黄"
+        case .green: return "绿"
+        case .cyan: return "青"
+        case .blue: return "蓝"
+        case .purple: return "紫"
         }
     }
 

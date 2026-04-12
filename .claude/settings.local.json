@@ -14,7 +14,8 @@
       "Bash(grep -n \"class BrushSettings\\\\|struct BrushSettings\" /Users/victorcloux/Desktop/ArtFlex/Core/Tools/*.swift)",
       "Bash(xcodebuild test:*)",
       "Bash(swift test:*)",
-      "Bash(git stash:*)"
+      "Bash(git stash:*)",
+      "Bash(ls -la /Users/victorcloux/Desktop/ArtFlex/Platform/macOS/UI/*.swift)"
     ]
   }
 }

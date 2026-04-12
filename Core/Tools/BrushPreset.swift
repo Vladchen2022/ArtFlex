@@ -1,11 +1,22 @@
 import Foundation
 
+enum BrushColorTag: String, Codable, Sendable, CaseIterable {
+    case red
+    case orange
+    case yellow
+    case green
+    case cyan
+    case blue
+    case purple
+}
+
 struct BrushPreset: Codable, Sendable, Equatable, Identifiable {
     let id: String
     var name: String
     var brush: BrushSettings
     var isBuiltIn: Bool
     var slotIndex: Int? = nil
+    var colorTag: BrushColorTag? = nil
 }
 
 extension BrushPreset {
@@ -100,6 +111,11 @@ struct BrushLibraryState: Codable, Sendable, Equatable {
     func preset(atSlot slotIndex: Int) -> BrushPreset? {
         let slotMap = resolvedSlotMap()
         return presets.first { slotMap[$0.id] == slotIndex }
+    }
+
+    mutating func setColorTag(_ tag: BrushColorTag?, forPresetID id: String) {
+        guard let index = presets.firstIndex(where: { $0.id == id }) else { return }
+        presets[index].colorTag = tag
     }
 
     mutating func movePreset(id: String, toSlot targetSlotIndex: Int) -> Bool {
