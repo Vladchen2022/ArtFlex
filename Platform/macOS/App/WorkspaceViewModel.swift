@@ -546,6 +546,13 @@ final class WorkspaceViewModel: ObservableObject {
         refresh()
     }
 
+    func setPaintContrastAmount(_ amount: Float) {
+        bootstrap.workspaceStore.updateToolSession { session in
+            session.brush.paintContrastAmount = min(max(amount, 0), 1)
+        }
+        refresh()
+    }
+
     func setBrushStampRotationDegrees(_ angleDegrees: Float) {
         bootstrap.workspaceStore.updateToolSession { session in
             var normalized = angleDegrees.truncatingRemainder(dividingBy: 360)
@@ -5512,7 +5519,9 @@ final class WorkspaceViewModel: ObservableObject {
             pointB: pointB,
             pointC: pointC,
             color: gradientPreviewColor,
-            colorJitterAmount: workspace.toolSession.brush.colorJitterAmount,
+            paintJitterAmount: workspace.toolSession.brush.paintJitterAmount,
+            paintContrastAmount: workspace.toolSession.brush.paintContrastAmount,
+            distortionAmount: workspace.toolSession.brush.jitterAmount,
             selectionShape: workspace.selection.committedShape,
             alphaLockTexture: alphaLockTexture
         )
@@ -5620,7 +5629,9 @@ final class WorkspaceViewModel: ObservableObject {
             pathPoints: geometry.pathPoints,
             maxRadius: geometry.maxRadius,
             color: gradientPreviewColor,
-            colorJitterAmount: workspace.toolSession.brush.colorJitterAmount,
+            paintJitterAmount: workspace.toolSession.brush.paintJitterAmount,
+            paintContrastAmount: workspace.toolSession.brush.paintContrastAmount,
+            distortionAmount: workspace.toolSession.brush.jitterAmount,
             maskQuality: .commit,
             selectionShape: workspace.selection.committedShape,
             alphaLockTexture: alphaLockTexture
@@ -8013,7 +8024,9 @@ final class WorkspaceViewModel: ObservableObject {
             selectionMaskAlphaBytes: selectionMaskRegion.alphaBytes,
             fillCenter: lassoFillCenter,
             color: resolvedFillToolColor(from: workspace.toolSession.selectedColor),
-            colorJitterAmount: workspace.toolSession.brush.colorJitterAmount,
+            paintJitterAmount: workspace.toolSession.brush.paintJitterAmount,
+            paintContrastAmount: workspace.toolSession.brush.paintContrastAmount,
+            distortionAmount: workspace.toolSession.brush.jitterAmount,
             alphaLockTexture: alphaLockTexture
         )
 

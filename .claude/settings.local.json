@@ -11,7 +11,10 @@
       "Bash(git -C /Users/victorcloux/Desktop/ArtFlex status --short)",
       "Bash(grep -l \"encodeStroke\\\\|encodeOpacityCapStroke\" /Users/victorcloux/Desktop/ArtFlex/Rendering/Canvas/*.swift)",
       "Bash(grep -E \"^/Users/victorcloux/Desktop/ArtFlex/[^/]+\\\\.swift$|/Sources/|/ArtFlex/\")",
-      "Bash(grep -n \"class BrushSettings\\\\|struct BrushSettings\" /Users/victorcloux/Desktop/ArtFlex/Core/Tools/*.swift)"
+      "Bash(grep -n \"class BrushSettings\\\\|struct BrushSettings\" /Users/victorcloux/Desktop/ArtFlex/Core/Tools/*.swift)",
+      "Bash(xcodebuild test:*)",
+      "Bash(swift test:*)",
+      "Bash(git stash:*)"
     ]
   }
 }

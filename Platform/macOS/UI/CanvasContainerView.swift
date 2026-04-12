@@ -49,7 +49,9 @@ struct CanvasContainerView: View {
                         linearGradientPreview: viewModel.linearGradientState.preview,
                         sectorGradientPreview: viewModel.sectorGradientState.preview,
                         gradientPreviewColor: viewModel.gradientPreviewColor,
-                        gradientColorJitterAmount: viewModel.workspace.toolSession.brush.colorJitterAmount,
+                        gradientPaintJitterAmount: viewModel.workspace.toolSession.brush.paintJitterAmount,
+                        gradientPaintContrastAmount: viewModel.workspace.toolSession.brush.paintContrastAmount,
+                        gradientDistortionAmount: viewModel.workspace.toolSession.brush.jitterAmount,
                         onStrokeBegan: {
                             onCanvasInteraction?()
                             viewModel.beginStrokeIfNeeded()

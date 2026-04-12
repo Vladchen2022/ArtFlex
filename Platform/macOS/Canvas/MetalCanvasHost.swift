@@ -24,7 +24,9 @@ struct MetalCanvasHost: NSViewRepresentable {
     let linearGradientPreview: LinearGradientPreview?
     let sectorGradientPreview: SectorGradientPreview?
     let gradientPreviewColor: RGBAColor
-    let gradientColorJitterAmount: Float
+    let gradientPaintJitterAmount: Float
+    let gradientPaintContrastAmount: Float
+    let gradientDistortionAmount: Float
     let onStrokeBegan: () -> Void
     let onStrokeInput: ([CanvasStrokeSample]) -> Void
     let onStrokeEnded: () -> Void
@@ -71,7 +73,9 @@ struct MetalCanvasHost: NSViewRepresentable {
             linearGradientPreview: linearGradientPreview,
             sectorGradientPreview: sectorGradientPreview,
             gradientPreviewColor: gradientPreviewColor,
-            gradientColorJitterAmount: gradientColorJitterAmount,
+            gradientPaintJitterAmount: gradientPaintJitterAmount,
+            gradientPaintContrastAmount: gradientPaintContrastAmount,
+            gradientDistortionAmount: gradientDistortionAmount,
             onCanvasRotationChanged: onCanvasRotationChanged,
             onStrokeBegan: onStrokeBegan,
             onStrokeInput: onStrokeInput,
@@ -146,7 +150,9 @@ struct MetalCanvasHost: NSViewRepresentable {
         context.coordinator.linearGradientPreview = linearGradientPreview
         context.coordinator.sectorGradientPreview = sectorGradientPreview
         context.coordinator.gradientPreviewColor = gradientPreviewColor
-        context.coordinator.gradientColorJitterAmount = gradientColorJitterAmount
+        context.coordinator.gradientPaintJitterAmount = gradientPaintJitterAmount
+        context.coordinator.gradientPaintContrastAmount = gradientPaintContrastAmount
+        context.coordinator.gradientDistortionAmount = gradientDistortionAmount
         let previousLuminosityPreview = context.coordinator.isLuminosityPreviewEnabled
         context.coordinator.isLuminosityPreviewEnabled = isLuminosityPreviewEnabled
         if let view = nsView as? StrokeCaptureMTKView {
@@ -162,7 +168,9 @@ struct MetalCanvasHost: NSViewRepresentable {
             let previousLinearGradientPreview = context.coordinator.previousLinearGradientPreview
             let previousSectorGradientPreview = context.coordinator.previousSectorGradientPreview
             let previousGradientPreviewColor = context.coordinator.previousGradientPreviewColor
-            let previousGradientColorJitterAmount = context.coordinator.previousGradientColorJitterAmount
+            let previousGradientPaintJitterAmount = context.coordinator.previousGradientPaintJitterAmount
+            let previousGradientPaintContrastAmount = context.coordinator.previousGradientPaintContrastAmount
+            let previousGradientDistortionAmount = context.coordinator.previousGradientDistortionAmount
 
             let nonBrushStateChanged =
                 previousCanvasContentRevision != sceneSnapshot.renderSnapshot.canvasContentRevision ||
@@ -176,7 +184,9 @@ struct MetalCanvasHost: NSViewRepresentable {
                 previousLinearGradientPreview != linearGradientPreview ||
                 previousSectorGradientPreview != sectorGradientPreview ||
                 previousGradientPreviewColor != gradientPreviewColor ||
-                previousGradientColorJitterAmount != gradientColorJitterAmount ||
+                previousGradientPaintJitterAmount != gradientPaintJitterAmount ||
+                previousGradientPaintContrastAmount != gradientPaintContrastAmount ||
+                previousGradientDistortionAmount != gradientDistortionAmount ||
                 previousLuminosityPreview != isLuminosityPreviewEnabled ||
                 previousCanvasSize != sceneSnapshot.renderSnapshot.document.canvasSize ||
                 previousViewportRotation != viewportRotationDegrees ||
@@ -222,7 +232,9 @@ struct MetalCanvasHost: NSViewRepresentable {
                 previousLinearGradientPreview != linearGradientPreview ||
                 previousSectorGradientPreview != sectorGradientPreview ||
                 previousGradientPreviewColor != gradientPreviewColor ||
-                previousGradientColorJitterAmount != gradientColorJitterAmount ||
+                previousGradientPaintJitterAmount != gradientPaintJitterAmount ||
+                previousGradientPaintContrastAmount != gradientPaintContrastAmount ||
+                previousGradientDistortionAmount != gradientDistortionAmount ||
                 previousLuminosityPreview != isLuminosityPreviewEnabled ||
                 previousCanvasSize != view.canvasSize ||
                 previousViewportRotation != viewportRotationDegrees ||
@@ -232,7 +244,9 @@ struct MetalCanvasHost: NSViewRepresentable {
             context.coordinator.previousLinearGradientPreview = linearGradientPreview
             context.coordinator.previousSectorGradientPreview = sectorGradientPreview
             context.coordinator.previousGradientPreviewColor = gradientPreviewColor
-            context.coordinator.previousGradientColorJitterAmount = gradientColorJitterAmount
+            context.coordinator.previousGradientPaintJitterAmount = gradientPaintJitterAmount
+            context.coordinator.previousGradientPaintContrastAmount = gradientPaintContrastAmount
+            context.coordinator.previousGradientDistortionAmount = gradientDistortionAmount
 
             let brushSizeOnlyChanged = previousBrushSize != brushSize && !requiresCanvasRedraw
             let updateDurationMs = Double(DispatchTime.now().uptimeNanoseconds - updateStartNs) / 1_000_000
@@ -1893,11 +1907,15 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
     var linearGradientPreview: LinearGradientPreview?
     var sectorGradientPreview: SectorGradientPreview?
     var gradientPreviewColor: RGBAColor = .black
-    var gradientColorJitterAmount: Float = 0
+    var gradientPaintJitterAmount: Float = 0
+    var gradientPaintContrastAmount: Float = 0
+    var gradientDistortionAmount: Float = 0
     var previousLinearGradientPreview: LinearGradientPreview?
     var previousSectorGradientPreview: SectorGradientPreview?
     var previousGradientPreviewColor: RGBAColor = .black
-    var previousGradientColorJitterAmount: Float = 0
+    var previousGradientPaintJitterAmount: Float = 0
+    var previousGradientPaintContrastAmount: Float = 0
+    var previousGradientDistortionAmount: Float = 0
     var transformPreview = FreeTransformPreview.identity
     var isLuminosityPreviewEnabled = false
     private let labLuminosityPostProcessor: LABLuminosityPostProcessor?
@@ -1921,7 +1939,9 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
         linearGradientPreview: LinearGradientPreview?,
         sectorGradientPreview: SectorGradientPreview?,
         gradientPreviewColor: RGBAColor,
-        gradientColorJitterAmount: Float,
+        gradientPaintJitterAmount: Float,
+        gradientPaintContrastAmount: Float,
+        gradientDistortionAmount: Float,
         onCanvasRotationChanged: @escaping (Double) -> Void,
         onStrokeBegan: @escaping () -> Void,
         onStrokeInput: @escaping ([CanvasStrokeSample]) -> Void,
@@ -1981,11 +2001,15 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
         self.linearGradientPreview = linearGradientPreview
         self.sectorGradientPreview = sectorGradientPreview
         self.gradientPreviewColor = gradientPreviewColor
-        self.gradientColorJitterAmount = gradientColorJitterAmount
+        self.gradientPaintJitterAmount = gradientPaintJitterAmount
+        self.gradientPaintContrastAmount = gradientPaintContrastAmount
+        self.gradientDistortionAmount = gradientDistortionAmount
         self.previousLinearGradientPreview = linearGradientPreview
         self.previousSectorGradientPreview = sectorGradientPreview
         self.previousGradientPreviewColor = gradientPreviewColor
-        self.previousGradientColorJitterAmount = gradientColorJitterAmount
+        self.previousGradientPaintJitterAmount = gradientPaintJitterAmount
+        self.previousGradientPaintContrastAmount = gradientPaintContrastAmount
+        self.previousGradientDistortionAmount = gradientDistortionAmount
         self.onCanvasRotationChanged = onCanvasRotationChanged
         self.onStrokeBegan = onStrokeBegan
         self.onStrokeInput = onStrokeInput
@@ -2153,7 +2177,9 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
                         pointB: geometry.pointB,
                         pointC: geometry.pointC,
                         color: gradientPreviewColor,
-                        colorJitterAmount: gradientColorJitterAmount,
+                        paintJitterAmount: gradientPaintJitterAmount,
+                        paintContrastAmount: gradientPaintContrastAmount,
+                        distortionAmount: gradientDistortionAmount,
                         selectionShape: snapshot.selectionShape,
                         alphaLockTexture: activeLayerAlphaLockTexture
                     )
@@ -2166,7 +2192,9 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
                         pathPoints: geometry.pathPoints,
                         maxRadius: geometry.maxRadius,
                         color: gradientPreviewColor,
-                        colorJitterAmount: gradientColorJitterAmount,
+                        paintJitterAmount: gradientPaintJitterAmount,
+                        paintContrastAmount: gradientPaintContrastAmount,
+                        distortionAmount: gradientDistortionAmount,
                         maskQuality: .preview,
                         selectionShape: snapshot.selectionShape,
                         alphaLockTexture: activeLayerAlphaLockTexture

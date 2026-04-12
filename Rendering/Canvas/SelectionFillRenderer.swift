@@ -12,7 +12,9 @@ private struct SelectionFillUniforms {
     var selectionBoundsMax: SIMD2<Float>
     var fillCenter: SIMD2<Float>
     var color: SIMD4<Float>
-    var colorJitterAmount: Float
+    var paintJitterAmount: Float
+    var paintContrastAmount: Float
+    var distortionAmount: Float
     var usesAlphaLock: Float
 }
 
@@ -39,7 +41,9 @@ final class SelectionFillRenderer {
             float2 selectionBoundsMax;
             float2 fillCenter;
             float4 color;
-            float colorJitterAmount;
+            float paintJitterAmount;
+            float paintContrastAmount;
+            float distortionAmount;
             float usesAlphaLock;
         };
 
@@ -80,67 +84,78 @@ final class SelectionFillRenderer {
             return c.z * mix(K.xxx, clamp(p - K.xxx, 0.0, 1.0), c.y);
         }
 
-        float hash12(float2 point) {
-            return fract(sin(dot(point, float2(127.1, 311.7))) * 43758.5453123);
+        float hash11(float value) {
+            return fract(sin(value * 127.1) * 43758.5453123);
         }
 
-        float3 radialStripedJitteredFillSrgbColor(
+        float2 hash22(float2 p) {
+            float3 a = fract(p.xyx * float3(0.1031, 0.1030, 0.0973));
+            a += dot(a, a.yzx + 33.33);
+            return fract((a.xx + a.yz) * a.zy);
+        }
+
+        float valueNoise(float2 p) {
+            float2 i = floor(p);
+            float2 f = fract(p);
+            float2 u = f * f * (3.0 - 2.0 * f);
+            float a = hash22(i).x;
+            float b = hash22(i + float2(1.0, 0.0)).x;
+            float c = hash22(i + float2(0.0, 1.0)).x;
+            float d = hash22(i + float2(1.0, 1.0)).x;
+            return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+        }
+
+        float2 noiseDistort(float2 pos, float amount) {
+            if (amount <= 0.001) return pos;
+            float frequency = 0.015;
+            float strength = amount * 80.0;
+            float2 p = pos * frequency;
+            float dx = (valueNoise(p + float2(0.0, 137.0)) - 0.5) * 2.0 * strength;
+            float dy = (valueNoise(p + float2(237.0, 0.0)) - 0.5) * 2.0 * strength;
+            return pos + float2(dx, dy);
+        }
+
+        float3 radialPaintJitteredSrgbColor(
             float3 srgbColor,
             float angleNormalized,
-            float amount
+            float paintJitterAmount,
+            float paintContrastAmount
         ) {
-            if (amount <= 0.001) {
+            float contrastAmt = clamp(paintContrastAmount, 0.0, 1.0);
+            if (paintJitterAmount <= 0.001 && contrastAmt <= 0.001) {
                 return srgbColor;
             }
 
-            float amountClamped = clamp(amount, 0.0, 1.0);
-            float rightBoost = pow(amountClamped, 1.75);
-            float stripeCoordPrimary = clamp(angleNormalized, 0.0, 1.0);
-
-            float macroBandCount = floor(10.0 + (amountClamped * 16.0));
-            macroBandCount = max(macroBandCount, 2.0);
-            float macroBandIndex = floor(stripeCoordPrimary * macroBandCount);
-            float macroWarp = ((hash12(float2(macroBandIndex + 151.0, 3.0)) * 2.0) - 1.0) * ((0.02 * amountClamped) + (0.08 * rightBoost));
-
-            float fineWarpSeed = floor(stripeCoordPrimary * 220.0);
-            float fineWarp = ((hash12(float2(fineWarpSeed + 5.0, 9.0)) * 2.0) - 1.0) * ((0.01 * amountClamped) + (0.03 * rightBoost));
-
-            float warpedCoord = clamp(stripeCoordPrimary + macroWarp + fineWarp, 0.0, 0.999);
-            float stripeCount = floor(46.0 + (amountClamped * 52.0));
-            stripeCount = max(stripeCount, 8.0);
-            float stripeIndex = floor(warpedCoord * stripeCount);
-            float hueRandom = hash12(float2(stripeIndex + 1.0, 7.0));
-            float saturationRandom = hash12(float2(stripeIndex + 31.0, 11.0));
-            float valueRandom = hash12(float2(stripeIndex + 61.0, 23.0));
-            float accentRandom = hash12(float2(stripeIndex + 91.0, 37.0));
-            float stripeShapeRandom = hash12(float2(stripeIndex + 121.0, 43.0));
-
-            float layeringBandCount = floor(16.0 + (amountClamped * 18.0));
-            layeringBandCount = max(layeringBandCount, 2.0);
-            float layeringBandIndex = floor(warpedCoord * layeringBandCount);
-            float bandSaturationRandom = hash12(float2(layeringBandIndex + 211.0, 17.0));
-            float bandValueRandom = hash12(float2(layeringBandIndex + 241.0, 29.0));
+            float amount = clamp(paintJitterAmount, 0.0, 1.0);
+            float stripeCoord = clamp(angleNormalized, 0.0, 1.0);
+            float stripeCount = 70.0;
+            float stripeIndex = floor(stripeCoord * stripeCount);
+            float scattered = fract(stripeIndex * 0.618033988749895) * stripeCount;
+            float hueRandom = hash11(scattered + 1001.0);
+            float satRandom = hash11(scattered + 1031.0);
+            float valRandom = hash11(scattered + 1061.0);
 
             float3 hsv = rgbToHsv(srgbColor);
-            float hueOffsetRange = 0.30 * amountClamped;
-            float saturationOffsetRange = (0.95 * amountClamped) + (0.70 * rightBoost);
-            float valueOffsetRange = (0.52 * amountClamped) + (0.38 * rightBoost);
 
-            float hueOffset = ((hueRandom * 2.0) - 1.0) * hueOffsetRange;
-            float accentGate = step(0.82 - (0.18 * amountClamped), accentRandom);
-            hueOffset += ((accentRandom * 2.0) - 1.0) * (0.03 * rightBoost) * accentGate;
+            // Hue spread: slider 0-100% maps to ±0° to ±180° on the color wheel
+            float hueSpread = amount * 0.5;
+            float hueOffset = ((hueRandom * 2.0) - 1.0) * hueSpread;
 
-            float saturationBase = mix(saturationRandom, bandSaturationRandom, 0.55);
-            float valueBase = mix(valueRandom, bandValueRandom, 0.45);
-            float saturationOffset = ((saturationBase * 2.0) - 1.0) * saturationOffsetRange;
-            float valueOffset = ((valueBase * 2.0) - 1.0) * valueOffsetRange;
+            // Subtle saturation/value variation
+            float satOffset = ((satRandom * 2.0) - 1.0) * amount * 0.10;
+            float valOffset = ((valRandom * 2.0) - 1.0) * amount * 0.08;
 
-            float vividBoost = accentGate * ((0.24 * amountClamped) + (0.38 * rightBoost));
-            float darkLightSwing = ((stripeShapeRandom * 2.0) - 1.0) * ((0.08 * amountClamped) + (0.18 * rightBoost));
+            if (contrastAmt > 0.001) {
+                float complementRandom = hash11(scattered + 1091.0);
+                float threshold = 1.0 - (contrastAmt * 0.20);
+                if (complementRandom > threshold) {
+                    hueOffset = 0.5 + hueOffset;
+                }
+            }
 
             hsv.x = fract(hsv.x + hueOffset + 1.0);
-            hsv.y = clamp(hsv.y + saturationOffset + (0.20 * rightBoost) + vividBoost, 0.0, 1.0);
-            hsv.z = clamp(hsv.z + valueOffset + darkLightSwing, 0.0, 1.0);
+            hsv.y = clamp(hsv.y + satOffset, 0.0, 1.0);
+            hsv.z = clamp(hsv.z + valOffset, 0.0, 1.0);
             return hsvToRgb(hsv);
         }
 
@@ -165,12 +180,14 @@ final class SelectionFillRenderer {
                 }
             }
 
-            float angle = atan2(in.canvasPosition.y - uniforms.fillCenter.y, in.canvasPosition.x - uniforms.fillCenter.x);
+            float2 distortedPos = noiseDistort(in.canvasPosition, uniforms.distortionAmount);
+            float angle = atan2(distortedPos.y - uniforms.fillCenter.y, distortedPos.x - uniforms.fillCenter.x);
             float angleNormalized = (angle / 6.283185307179586) + 0.5;
-            float3 jitteredColor = radialStripedJitteredFillSrgbColor(
+            float3 jitteredColor = radialPaintJitteredSrgbColor(
                 uniforms.color.rgb,
                 angleNormalized,
-                uniforms.colorJitterAmount
+                uniforms.paintJitterAmount,
+                uniforms.paintContrastAmount
             );
 
             float alpha = uniforms.color.a * maskAlpha;
@@ -238,7 +255,9 @@ final class SelectionFillRenderer {
         selectionMaskAlphaBytes: [UInt8],
         fillCenter: CanvasPoint,
         color: RGBAColor,
-        colorJitterAmount: Float = 0,
+        paintJitterAmount: Float = 0,
+        paintContrastAmount: Float = 0,
+        distortionAmount: Float = 0,
         alphaLockTexture: MTLTexture? = nil
     ) {
         let minX = max(selectionMaskOriginX, 0)
@@ -272,7 +291,9 @@ final class SelectionFillRenderer {
             selectionBoundsMax: SIMD2(Float(maxX), Float(maxY)),
             fillCenter: SIMD2(Float(fillCenter.x), Float(fillCenter.y)),
             color: SIMD4(color.red, color.green, color.blue, color.alpha),
-            colorJitterAmount: colorJitterAmount,
+            paintJitterAmount: paintJitterAmount,
+            paintContrastAmount: paintContrastAmount,
+            distortionAmount: distortionAmount,
             usesAlphaLock: alphaLockTexture == nil ? 0 : 1
         )
 

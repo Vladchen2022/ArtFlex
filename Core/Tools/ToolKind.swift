@@ -590,6 +590,7 @@ struct BrushSettings: Codable, Sendable, Equatable {
     var jitterAmount: Float
     var colorJitterAmount: Float
     var paintJitterAmount: Float
+    var paintContrastAmount: Float
     var stampRotationDegrees: Float
     var followsStrokeDirection: Bool
     var customTipSourceSemantic: TipSourceSemantic
@@ -622,6 +623,7 @@ struct BrushSettings: Codable, Sendable, Equatable {
         jitterAmount: 0,
         colorJitterAmount: 0,
         paintJitterAmount: 0,
+        paintContrastAmount: 0,
         stampRotationDegrees: 0,
         followsStrokeDirection: false,
         customTipSourceSemantic: .procedural,
@@ -634,8 +636,8 @@ struct BrushSettings: Codable, Sendable, Equatable {
         customTipAngleDegrees: 0,
         pressureSensitivity: 1,
         sizeLowerBound: 0,
-        pressureSizeAmount: 1,
-        pressureOpacityAmount: 1,
+        pressureSizeAmount: 0,
+        pressureOpacityAmount: 0,
         sizeCurveLow: 0.18,
         sizeCurveMid: 0.52,
         sizeCurveHigh: 0.88,
@@ -655,6 +657,7 @@ struct BrushSettings: Codable, Sendable, Equatable {
         case jitterAmount
         case colorJitterAmount
         case paintJitterAmount
+        case paintContrastAmount
         case stampRotationDegrees
         case followsStrokeDirection
         case customTipSourceSemantic
@@ -688,6 +691,7 @@ struct BrushSettings: Codable, Sendable, Equatable {
         jitterAmount: Float,
         colorJitterAmount: Float = 0,
         paintJitterAmount: Float = 0,
+        paintContrastAmount: Float = 0,
         stampRotationDegrees: Float,
         followsStrokeDirection: Bool,
         customTipSourceSemantic: TipSourceSemantic = .procedural,
@@ -719,6 +723,7 @@ struct BrushSettings: Codable, Sendable, Equatable {
         self.jitterAmount = jitterAmount
         self.colorJitterAmount = colorJitterAmount
         self.paintJitterAmount = paintJitterAmount
+        self.paintContrastAmount = paintContrastAmount
         self.stampRotationDegrees = stampRotationDegrees
         self.followsStrokeDirection = followsStrokeDirection
         self.customTipSourceSemantic = customTipSourceSemantic
@@ -755,6 +760,7 @@ struct BrushSettings: Codable, Sendable, Equatable {
         jitterAmount = try container.decodeIfPresent(Float.self, forKey: .jitterAmount) ?? defaults.jitterAmount
         colorJitterAmount = try container.decodeIfPresent(Float.self, forKey: .colorJitterAmount) ?? defaults.colorJitterAmount
         paintJitterAmount = try container.decodeIfPresent(Float.self, forKey: .paintJitterAmount) ?? defaults.paintJitterAmount
+        paintContrastAmount = try container.decodeIfPresent(Float.self, forKey: .paintContrastAmount) ?? defaults.paintContrastAmount
         stampRotationDegrees = try container.decodeIfPresent(Float.self, forKey: .stampRotationDegrees) ?? defaults.stampRotationDegrees
         followsStrokeDirection = try container.decodeIfPresent(Bool.self, forKey: .followsStrokeDirection) ?? defaults.followsStrokeDirection
         customTipSourceSemantic = try container.decodeIfPresent(TipSourceSemantic.self, forKey: .customTipSourceSemantic) ?? defaults.customTipSourceSemantic

@@ -11,7 +11,9 @@ private struct LinearGradientUniforms {
     var pointA: SIMD2<Float>
     var pointB: SIMD2<Float>
     var color: SIMD4<Float>
-    var colorJitterAmount: Float
+    var paintJitterAmount: Float
+    var paintContrastAmount: Float
+    var distortionAmount: Float
     var usesSelectionMask: Float
     var usesAlphaLock: Float
 }
@@ -40,7 +42,9 @@ final class LinearGradientRenderer {
             float2 pointA;
             float2 pointB;
             float4 color;
-            float colorJitterAmount;
+            float paintJitterAmount;
+            float paintContrastAmount;
+            float distortionAmount;
             float usesSelectionMask;
             float usesAlphaLock;
         };
@@ -82,34 +86,78 @@ final class LinearGradientRenderer {
             return c.z * mix(K.xxx, clamp(p - K.xxx, 0.0, 1.0), c.y);
         }
 
-        float hash12(float2 point) {
-            return fract(sin(dot(point, float2(127.1, 311.7))) * 43758.5453123);
+        float hash11(float value) {
+            return fract(sin(value * 127.1) * 43758.5453123);
         }
 
-        float3 jitteredGradientSrgbColor(
+        float2 hash22(float2 p) {
+            float3 a = fract(p.xyx * float3(0.1031, 0.1030, 0.0973));
+            a += dot(a, a.yzx + 33.33);
+            return fract((a.xx + a.yz) * a.zy);
+        }
+
+        float valueNoise(float2 p) {
+            float2 i = floor(p);
+            float2 f = fract(p);
+            float2 u = f * f * (3.0 - 2.0 * f);
+            float a = hash22(i).x;
+            float b = hash22(i + float2(1.0, 0.0)).x;
+            float c = hash22(i + float2(0.0, 1.0)).x;
+            float d = hash22(i + float2(1.0, 1.0)).x;
+            return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+        }
+
+        float2 noiseDistort(float2 pos, float amount) {
+            if (amount <= 0.001) return pos;
+            float frequency = 0.015;
+            float strength = amount * 80.0;
+            float2 p = pos * frequency;
+            float dx = (valueNoise(p + float2(0.0, 137.0)) - 0.5) * 2.0 * strength;
+            float dy = (valueNoise(p + float2(237.0, 0.0)) - 0.5) * 2.0 * strength;
+            return pos + float2(dx, dy);
+        }
+
+        float3 linearPaintJitteredSrgbColor(
             float3 srgbColor,
-            float2 noiseCoord,
-            float amount
+            float stripeCoord,
+            float paintJitterAmount,
+            float paintContrastAmount
         ) {
-            if (amount <= 0.001) {
+            float contrastAmt = clamp(paintContrastAmount, 0.0, 1.0);
+            if (paintJitterAmount <= 0.001 && contrastAmt <= 0.001) {
                 return srgbColor;
             }
 
-            float2 macroCell = floor(noiseCoord * (3.0 + amount * 5.0));
-            float2 fineCell = floor(noiseCoord * (8.0 + amount * 14.0));
-
-            float hueRandom = mix(hash12(macroCell + float2(1.0, 7.0)), hash12(fineCell + float2(17.0, 5.0)), 0.35);
-            float saturationRandom = mix(hash12(macroCell + float2(31.0, 11.0)), hash12(fineCell + float2(47.0, 19.0)), 0.45);
-            float valueRandom = mix(hash12(macroCell + float2(61.0, 23.0)), hash12(fineCell + float2(79.0, 29.0)), 0.45);
+            float amount = clamp(paintJitterAmount, 0.0, 1.0);
+            float coord = clamp(stripeCoord, 0.0, 1.0);
+            float stripeCount = 70.0;
+            float stripeIndex = floor(coord * stripeCount);
+            float scattered = fract(stripeIndex * 0.618033988749895) * stripeCount;
+            float hueRandom = hash11(scattered + 1001.0);
+            float satRandom = hash11(scattered + 1031.0);
+            float valRandom = hash11(scattered + 1061.0);
 
             float3 hsv = rgbToHsv(srgbColor);
-            float hueOffset = ((hueRandom * 2.0) - 1.0) * (0.045 * amount);
-            float saturationOffset = ((saturationRandom * 2.0) - 1.0) * (0.22 * amount);
-            float valueOffset = ((valueRandom * 2.0) - 1.0) * (0.28 * amount);
+
+            // Hue spread: slider 0-100% maps to ±0° to ±180° on the color wheel
+            float hueSpread = amount * 0.5;
+            float hueOffset = ((hueRandom * 2.0) - 1.0) * hueSpread;
+
+            // Subtle saturation/value variation
+            float satOffset = ((satRandom * 2.0) - 1.0) * amount * 0.10;
+            float valOffset = ((valRandom * 2.0) - 1.0) * amount * 0.08;
+
+            if (contrastAmt > 0.001) {
+                float complementRandom = hash11(scattered + 1091.0);
+                float threshold = 1.0 - (contrastAmt * 0.20);
+                if (complementRandom > threshold) {
+                    hueOffset = 0.5 + hueOffset;
+                }
+            }
 
             hsv.x = fract(hsv.x + hueOffset + 1.0);
-            hsv.y = clamp(hsv.y + saturationOffset + (0.05 * amount), 0.0, 1.0);
-            hsv.z = clamp(hsv.z + valueOffset, 0.0, 1.0);
+            hsv.y = clamp(hsv.y + satOffset, 0.0, 1.0);
+            hsv.z = clamp(hsv.z + valOffset, 0.0, 1.0);
             return hsvToRgb(hsv);
         }
 
@@ -141,13 +189,16 @@ final class LinearGradientRenderer {
             float alpha = easedAlpha * uniforms.color.a * maskAlpha;
             float2 axisDirection = axis / axisLength;
             float2 perpendicularDirection = float2(-axisDirection.y, axisDirection.x);
-            float along = dot(in.canvasPosition - uniforms.pointA, axisDirection) / axisLength;
-            float across = dot(in.canvasPosition - uniforms.pointA, perpendicularDirection) / axisLength;
-            float2 noiseCoord = float2((along * 6.0) + (across * 1.75), across * 5.0);
-            float3 jitteredColor = jitteredGradientSrgbColor(
+            float2 distortedPos = noiseDistort(in.canvasPosition, uniforms.distortionAmount);
+            float2 centered = distortedPos - uniforms.canvasSize * 0.5;
+            float across = dot(centered, perpendicularDirection);
+            float canvasDiag = length(uniforms.canvasSize);
+            float stripeCoord = clamp(across / canvasDiag + 0.5, 0.0, 1.0);
+            float3 jitteredColor = linearPaintJitteredSrgbColor(
                 uniforms.color.rgb,
-                noiseCoord,
-                clamp(uniforms.colorJitterAmount, 0.0, 1.0)
+                stripeCoord,
+                uniforms.paintJitterAmount,
+                uniforms.paintContrastAmount
             );
             float3 premultiplied = jitteredColor * alpha;
             return float4(premultiplied, alpha);
@@ -227,7 +278,9 @@ final class LinearGradientRenderer {
         pointB: CanvasPoint,
         pointC: CanvasPoint,
         color: RGBAColor,
-        colorJitterAmount: Float = 0,
+        paintJitterAmount: Float = 0,
+        paintContrastAmount: Float = 0,
+        distortionAmount: Float = 0,
         selectionShape: SelectionShape? = nil,
         alphaLockTexture: MTLTexture? = nil
     ) {
@@ -246,7 +299,9 @@ final class LinearGradientRenderer {
             pointA: SIMD2(Float(pointA.x), Float(pointA.y)),
             pointB: SIMD2(Float(pointB.x), Float(pointB.y)),
             color: SIMD4(color.red, color.green, color.blue, color.alpha),
-            colorJitterAmount: colorJitterAmount,
+            paintJitterAmount: paintJitterAmount,
+            paintContrastAmount: paintContrastAmount,
+            distortionAmount: distortionAmount,
             usesSelectionMask: selectionShape == nil ? 0 : 1,
             usesAlphaLock: alphaLockTexture == nil ? 0 : 1
         )
@@ -271,7 +326,9 @@ final class LinearGradientRenderer {
         pointB: CanvasPoint,
         pointC: CanvasPoint,
         color: RGBAColor,
-        colorJitterAmount: Float = 0,
+        paintJitterAmount: Float = 0,
+        paintContrastAmount: Float = 0,
+        distortionAmount: Float = 0,
         commandQueue: MTLCommandQueue,
         selectionShape: SelectionShape? = nil
     ) {
@@ -292,7 +349,9 @@ final class LinearGradientRenderer {
             pointB: pointB,
             pointC: pointC,
             color: color,
-            colorJitterAmount: colorJitterAmount,
+            paintJitterAmount: paintJitterAmount,
+            paintContrastAmount: paintContrastAmount,
+            distortionAmount: distortionAmount,
             selectionShape: selectionShape
         )
         commandBuffer.commit()

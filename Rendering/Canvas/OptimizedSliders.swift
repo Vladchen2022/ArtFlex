@@ -154,16 +154,13 @@ struct OptimizedCompactSlider: View {
     
     private func handleEditingChanged(_ editing: Bool) {
         isEditing = editing
-        
+
         if editing {
             // 开始拖动时同步外部值
             localValue = value
         } else {
-            // 结束拖动时提交
-            if localValue != value {
-                value = localValue
-                onCommit(localValue)
-            }
+            // 结束拖动时无条件提交
+            onCommit(localValue)
         }
     }
 }
@@ -220,14 +217,11 @@ struct OptimizedLabeledSlider: View {
     
     private func handleEditingChanged(_ editing: Bool) {
         isEditing = editing
-        
+
         if editing {
             localValue = value
         } else {
-            if localValue != value {
-                value = localValue
-                onCommit(localValue)
-            }
+            onCommit(localValue)
         }
     }
 }

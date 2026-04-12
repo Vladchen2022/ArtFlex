@@ -709,6 +709,17 @@ struct RightInspectorView: View {
             )
 
             OptimizedCompactSlider(
+                title: "杂色对比",
+                valueText: "\(Int(viewModel.workspace.toolSession.brush.paintContrastAmount * 100))%",
+                value: Binding(
+                    get: { Double(viewModel.workspace.toolSession.brush.paintContrastAmount) },
+                    set: { _ in }
+                ),
+                range: 0...1,
+                onCommit: { viewModel.setPaintContrastAmount(Float($0)) }
+            )
+
+            OptimizedCompactSlider(
                 title: "大小压感",
                 valueText: "\(Int(viewModel.workspace.toolSession.brush.pressureSizeAmount * 100))%",
                 value: Binding(
@@ -3268,7 +3279,9 @@ private struct NavigatorPreviewPanel: View {
                     linearGradientPreview: nil,
                     sectorGradientPreview: nil,
                     gradientPreviewColor: .white,
-                    gradientColorJitterAmount: 0,
+                    gradientPaintJitterAmount: 0,
+                    gradientPaintContrastAmount: 0,
+                    gradientDistortionAmount: 0,
                     onStrokeBegan: {},
                     onStrokeInput: { _ in },
                     onStrokeEnded: {},

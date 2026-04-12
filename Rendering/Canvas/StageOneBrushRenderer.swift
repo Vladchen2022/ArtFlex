@@ -14,6 +14,7 @@ private struct BrushUniforms {
     var color: SIMD4<Float>
     var colorJitterAmount: Float
     var paintJitterAmount: Float
+    var paintContrastAmount: Float
     var stampSeed: Float
     var jitterDirectionDegrees: Float
     var canvasSize: SIMD2<Float>
@@ -63,7 +64,14 @@ private struct CompositeUniforms {
     var brushColor: SIMD4<Float>
     var mode: UInt32 = 0
     var paddingValues: SIMD3<UInt32> = .zero
-    var padding: SIMD4<Float> = .zero
+    var paintJitterAmount: Float = 0
+    var paintContrastAmount: Float = 0
+    var jitterDirectionDegrees: Float = 0
+    var canvasWidth: Float = 0
+    var canvasHeight: Float = 0
+    var strokeCenterX: Float = 0
+    var strokeCenterY: Float = 0
+    var strokeRadius: Float = 0
 }
 
 struct StampSample: Equatable {
@@ -167,6 +175,7 @@ final class StageOneBrushRenderer {
             float4 color;
             float colorJitterAmount;
             float paintJitterAmount;
+            float paintContrastAmount;
             float stampSeed;
             float jitterDirectionDegrees;
             float2 canvasSize;
@@ -216,6 +225,7 @@ final class StageOneBrushRenderer {
             float4 position [[position]];
             float2 localPoint;
             float2 pixelPoint;
+            uint instanceID [[flat]];
         };
 
         struct CompositeVertexOut {
@@ -227,7 +237,14 @@ final class StageOneBrushRenderer {
             float4 brushColor;
             uint mode;
             uint3 paddingValues;
-            float4 padding;
+            float paintJitterAmount;
+            float paintContrastAmount;
+            float jitterDirectionDegrees;
+            float canvasWidth;
+            float canvasHeight;
+            float strokeCenterX;
+            float strokeCenterY;
+            float strokeRadius;
         };
 
         float smoothHardnessAlpha(float distance, float hardness) {
@@ -314,7 +331,7 @@ final class StageOneBrushRenderer {
 
         float primaryTextureAlpha(
             float2 localPoint,
-            constant BrushUniforms &uniforms,
+            BrushUniforms uniforms,
             texture2d<float, access::sample> customTipMask
         ) {
             return tipAlphaForDescriptor(
@@ -331,7 +348,7 @@ final class StageOneBrushRenderer {
 
         float primaryEnvelopeAlpha(
             float2 localPoint,
-            constant BrushUniforms &uniforms,
+            BrushUniforms uniforms,
             texture2d<float, access::sample> primaryEnvelopeTipMask
         ) {
             return tipAlphaForDescriptor(
@@ -348,7 +365,7 @@ final class StageOneBrushRenderer {
 
         float compoundSecondaryTipAlpha(
             float2 localPoint,
-            constant BrushUniforms &uniforms,
+            BrushUniforms uniforms,
             texture2d<float, access::sample> compoundSecondaryTipMask
         ) {
             if (uniforms.compoundEnabled == 0) {
@@ -370,7 +387,7 @@ final class StageOneBrushRenderer {
         float compoundFinalAlpha(
             float2 localPoint,
             float2 pixelPoint,
-            constant BrushUniforms &uniforms,
+            BrushUniforms uniforms,
             texture2d<float, access::sample> customTipMask,
             texture2d<float, access::sample> primaryEnvelopeTipMask,
             texture2d<float, access::sample> compoundSecondaryTipMask
@@ -487,7 +504,7 @@ final class StageOneBrushRenderer {
         float3 jitteredSrgbColor(
             float3 srgbColor,
             float2 localPoint,
-            constant BrushUniforms &uniforms
+            BrushUniforms uniforms
         ) {
             if (uniforms.colorJitterAmount <= 0.001) {
                 return srgbColor;
@@ -558,9 +575,10 @@ final class StageOneBrushRenderer {
         float3 paintJitteredSrgbColor(
             float3 srgbColor,
             float2 localPoint,
-            constant BrushUniforms &uniforms
+            BrushUniforms uniforms
         ) {
-            if (uniforms.paintJitterAmount <= 0.001) {
+            float contrastAmt = clamp(uniforms.paintContrastAmount, 0.0, 1.0);
+            if (uniforms.paintJitterAmount <= 0.001 && contrastAmt <= 0.001) {
                 return srgbColor;
             }
 
@@ -586,33 +604,26 @@ final class StageOneBrushRenderer {
             float hueRandom = hash11(scattered + 1001.0);
             float satRandom = hash11(scattered + 1031.0);
             float valRandom = hash11(scattered + 1061.0);
-            float complementRandom = hash11(scattered + 1091.0);
 
             float3 hsv = rgbToHsv(srgbColor);
 
-            // Non-linear ramp: gentle at left, aggressive at right
-            float boost = pow(amount, 1.5);
+            // Hue spread: slider 0-100% maps to ±0° to ±180° on the color wheel
+            // 0.5 in HSV hue = 180°, so hueSpread = amount * 0.5
+            float hueSpread = amount * 0.5;
+            float hueOffset = ((hueRandom * 2.0) - 1.0) * hueSpread;
 
-            // ~5% of stripes become very thin complementary accent lines
-            bool isComplement = (complementRandom > (0.97 - 0.02 * amount));
+            // Subtle saturation/value variation to keep it natural
+            float satOffset = ((satRandom * 2.0) - 1.0) * amount * 0.10;
+            float valOffset = ((valRandom * 2.0) - 1.0) * amount * 0.08;
 
-            float hueOffset;
-            float satOffset;
-            float valOffset;
-
-            if (isComplement) {
-                // Complementary: shift hue by ~180° (±30° variation), keep vivid
-                hueOffset = 0.5 + ((hueRandom * 2.0) - 1.0) * 0.08;
-                satOffset = ((satRandom * 2.0) - 1.0) * 0.15;
-                valOffset = ((valRandom * 2.0) - 1.0) * 0.20;
-            } else {
-                // Normal stripe jitter
-                float hueRange = mix(0.05, 0.50, boost);
-                hueOffset = ((hueRandom * 2.0) - 1.0) * hueRange;
-                float satRange = mix(0.10, 0.60, boost);
-                satOffset = ((satRandom * 2.0) - 1.0) * satRange;
-                float valRange = mix(0.10, 0.45, boost);
-                valOffset = ((valRandom * 2.0) - 1.0) * valRange;
+            // Complementary stripe logic driven by paintContrastAmount
+            if (contrastAmt > 0.001) {
+                float complementRandom = hash11(scattered + 1091.0);
+                float threshold = 1.0 - (contrastAmt * 0.20);
+                if (complementRandom > threshold) {
+                    // Complementary: shift hue by 180° plus the normal spread
+                    hueOffset = 0.5 + hueOffset;
+                }
             }
 
             hsv.x = fract(hsv.x + hueOffset + 1.0);
@@ -634,10 +645,12 @@ final class StageOneBrushRenderer {
 
         vertex VertexOut stageOneBrushVertex(
             const device BrushVertex *vertices [[buffer(0)]],
-            constant BrushUniforms &uniforms [[buffer(1)]],
-            uint vertexID [[vertex_id]]
+            const device BrushUniforms *uniformsArray [[buffer(1)]],
+            uint vertexID [[vertex_id]],
+            uint instanceID [[instance_id]]
         ) {
             VertexOut out;
+            BrushUniforms uniforms = uniformsArray[instanceID];
             float2 local = vertices[vertexID].position;
             float2 pixel = uniforms.center + local * uniforms.radius;
             float2 ndc = float2(
@@ -647,18 +660,20 @@ final class StageOneBrushRenderer {
             out.position = float4(ndc, 0.0, 1.0);
             out.localPoint = local;
             out.pixelPoint = pixel;
+            out.instanceID = instanceID;
             return out;
         }
 
         fragment float4 stageOneBrushFragment(
             VertexOut in [[stage_in]],
-            constant BrushUniforms &uniforms [[buffer(1)]],
+            const device BrushUniforms *uniformsArray [[buffer(1)]],
             texture2d<float, access::read> selectionMask [[texture(0)]],
             texture2d<float, access::read> alphaLockTexture [[texture(1)]],
             texture2d<float, access::sample> customTipMask [[texture(2)]],
             texture2d<float, access::sample> primaryEnvelopeTipMask [[texture(5)]],
             texture2d<float, access::sample> compoundSecondaryTipMask [[texture(6)]]
         ) {
+            BrushUniforms uniforms = uniformsArray[in.instanceID];
             float alphaMask = compoundFinalAlpha(
                 in.localPoint,
                 in.pixelPoint,
@@ -723,8 +738,7 @@ final class StageOneBrushRenderer {
 
         fragment float4 stageOneSmudgeFragment(
             VertexOut in [[stage_in]],
-            constant BrushUniforms &uniforms [[buffer(1)]],
-            constant SmudgeFragmentUniforms &smudgeUniforms [[buffer(3)]],
+            const device BrushUniforms *uniformsArray [[buffer(1)]],
             texture2d<float, access::read> selectionMask [[texture(0)]],
             texture2d<float, access::read> alphaLockTexture [[texture(1)]],
             texture2d<float, access::read> gatheredColors [[texture(4)]],
@@ -732,6 +746,7 @@ final class StageOneBrushRenderer {
             texture2d<float, access::sample> primaryEnvelopeTipMask [[texture(5)]],
             texture2d<float, access::sample> compoundSecondaryTipMask [[texture(6)]]
         ) {
+            BrushUniforms uniforms = uniformsArray[in.instanceID];
             float alphaMask = compoundFinalAlpha(
                 in.localPoint,
                 in.pixelPoint,
@@ -786,14 +801,14 @@ final class StageOneBrushRenderer {
                 discard_fragment();
             }
 
-            float4 sampled = gatheredColors.read(uint2(smudgeUniforms.stampIndex, 0));
+            float4 sampled = gatheredColors.read(uint2(in.instanceID, 0));
             float3 visibleRGB = sampled.rgb + ((1.0 - sampled.a) * float3(1.0));
             return float4(visibleRGB * alpha, alpha);
         }
 
         fragment float4 stageOneSmudgeFrozenTextureFragment(
             VertexOut in [[stage_in]],
-            constant BrushUniforms &uniforms [[buffer(1)]],
+            const device BrushUniforms *uniformsArray [[buffer(1)]],
             texture2d<float, access::read> selectionMask [[texture(0)]],
             texture2d<float, access::read> alphaLockTexture [[texture(1)]],
             texture2d<float, access::sample> sourceTexture [[texture(4)]],
@@ -801,6 +816,7 @@ final class StageOneBrushRenderer {
             texture2d<float, access::sample> primaryEnvelopeTipMask [[texture(5)]],
             texture2d<float, access::sample> compoundSecondaryTipMask [[texture(6)]]
         ) {
+            BrushUniforms uniforms = uniformsArray[in.instanceID];
             float alphaMask = compoundFinalAlpha(
                 in.localPoint,
                 in.pixelPoint,
@@ -895,13 +911,14 @@ final class StageOneBrushRenderer {
 
         fragment float4 stageOneOpacityCapMaskFragment(
             VertexOut in [[stage_in]],
-            constant BrushUniforms &uniforms [[buffer(1)]],
+            const device BrushUniforms *uniformsArray [[buffer(1)]],
             texture2d<float, access::read> selectionMask [[texture(0)]],
             texture2d<float, access::read> alphaLockTexture [[texture(1)]],
             texture2d<float, access::sample> customTipMask [[texture(2)]],
             texture2d<float, access::sample> primaryEnvelopeTipMask [[texture(5)]],
             texture2d<float, access::sample> compoundSecondaryTipMask [[texture(6)]]
         ) {
+            BrushUniforms uniforms = uniformsArray[in.instanceID];
             float alphaMask = compoundFinalAlpha(
                 in.localPoint,
                 in.pixelPoint,
@@ -973,7 +990,76 @@ final class StageOneBrushRenderer {
                 );
             }
 
-            float3 linearRGB = srgbToLinear(uniforms.brushColor.rgb);
+            float3 brushSrgb = uniforms.brushColor.rgb;
+
+            // Apply paint jitter in composite pass using canvas-space stripes
+            float jitterAmt = uniforms.paintJitterAmount;
+            float contrastAmt = uniforms.paintContrastAmount;
+            if (jitterAmt > 0.001 || contrastAmt > 0.001) {
+                // Convert texCoord to pixel position relative to stroke center
+                float2 pixelPos = float2(
+                    in.texCoord.x * uniforms.canvasWidth - uniforms.strokeCenterX,
+                    in.texCoord.y * uniforms.canvasHeight - uniforms.strokeCenterY
+                );
+                // Normalize by stroke radius to get -1..1 range
+                float invRadius = 1.0 / max(uniforms.strokeRadius, 1.0);
+                float2 localPoint = pixelPos * invRadius;
+
+                // Project onto jitter direction for stripe coordinate
+                float radiansValue = uniforms.jitterDirectionDegrees * 0.017453292519943295;
+                float cosine = cos(radiansValue);
+                float sine = sin(radiansValue);
+                float rotX = (localPoint.x * cosine) + (localPoint.y * sine);
+                float stripeCoord = clamp((rotX + 1.0) * 0.5, 0.0, 1.0);
+
+                float stripeCount = 70.0;
+                float stripeIndex = floor(stripeCoord * stripeCount);
+                float scattered = fract(stripeIndex * 0.618033988749895) * stripeCount;
+                float hueRandom = hash11(scattered + 1001.0);
+                float satRandom = hash11(scattered + 1031.0);
+                float valRandom = hash11(scattered + 1061.0);
+
+                float3 hsv = rgbToHsv(brushSrgb);
+                float amount = clamp(jitterAmt * 0.36, 0.0, 1.0);
+                float boost = pow(amount, 1.5);
+
+                float hueOffset;
+                float satOffset;
+                float valOffset;
+
+                if (contrastAmt > 0.001) {
+                    float complementRandom = hash11(scattered + 1091.0);
+                    float threshold = 1.0 - (contrastAmt * 0.20);
+                    if (complementRandom > threshold) {
+                        hueOffset = 0.5 + ((hueRandom * 2.0) - 1.0) * 0.08;
+                        satOffset = ((satRandom * 2.0) - 1.0) * 0.15;
+                        valOffset = ((valRandom * 2.0) - 1.0) * 0.20;
+                        hsv.x = fract(hsv.x + hueOffset + 1.0);
+                        hsv.y = clamp(hsv.y + satOffset, 0.0, 1.0);
+                        hsv.z = clamp(hsv.z + valOffset, 0.0, 1.0);
+                        brushSrgb = hsvToRgb(hsv);
+                        float3 linearRGB = srgbToLinear(brushSrgb);
+                        return float4(
+                            (linearRGB * cappedAlpha) + (original.rgb * (1.0 - cappedAlpha)),
+                            cappedAlpha + (original.a * (1.0 - cappedAlpha))
+                        );
+                    }
+                }
+
+                float hueRange = mix(0.05, 0.50, boost);
+                hueOffset = ((hueRandom * 2.0) - 1.0) * hueRange;
+                float satRange = mix(0.10, 0.60, boost);
+                satOffset = ((satRandom * 2.0) - 1.0) * satRange;
+                float valRange = mix(0.10, 0.45, boost);
+                valOffset = ((valRandom * 2.0) - 1.0) * valRange;
+
+                hsv.x = fract(hsv.x + hueOffset + 1.0);
+                hsv.y = clamp(hsv.y + satOffset, 0.0, 1.0);
+                hsv.z = clamp(hsv.z + valOffset, 0.0, 1.0);
+                brushSrgb = hsvToRgb(hsv);
+            }
+
+            float3 linearRGB = srgbToLinear(brushSrgb);
 
             return float4(
                 (linearRGB * cappedAlpha) + (original.rgb * (1.0 - cappedAlpha)),
@@ -1177,6 +1263,22 @@ final class StageOneBrushRenderer {
 
     }
 
+    private static let maxSetBytesLength = 4096
+
+    private func setInstancedUniforms(
+        _ uniformsArray: inout [BrushUniforms],
+        encoder: MTLRenderCommandEncoder
+    ) {
+        let bufferLength = MemoryLayout<BrushUniforms>.stride * uniformsArray.count
+        if bufferLength <= Self.maxSetBytesLength {
+            encoder.setVertexBytes(&uniformsArray, length: bufferLength, index: 1)
+            encoder.setFragmentBytes(&uniformsArray, length: bufferLength, index: 1)
+        } else if let buffer = device.makeBuffer(bytes: &uniformsArray, length: bufferLength, options: .storageModeShared) {
+            encoder.setVertexBuffer(buffer, offset: 0, index: 1)
+            encoder.setFragmentBuffer(buffer, offset: 0, index: 1)
+        }
+    }
+
     @discardableResult
     func render(
         stroke: StrokeDescriptor,
@@ -1363,18 +1465,11 @@ final class StageOneBrushRenderer {
         encoder.setFragmentTexture(compoundSecondaryTipTexture, index: 6)
         encoder.setFragmentSamplerState(tipSamplerState, index: 1)
 
-        for sample in samples {
-            var uniforms = makeUniforms(
-                for: sample,
-                stroke: stroke,
-                texture: texture,
-                selectionShape: selectionShape
-            )
-
-            encoder.setVertexBytes(&uniforms, length: MemoryLayout<BrushUniforms>.stride, index: 1)
-            encoder.setFragmentBytes(&uniforms, length: MemoryLayout<BrushUniforms>.stride, index: 1)
-            encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+        var uniformsArray = samples.map {
+            makeUniforms(for: $0, stroke: stroke, texture: texture, selectionShape: selectionShape)
         }
+        setInstancedUniforms(&uniformsArray, encoder: encoder)
+        encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4, instanceCount: uniformsArray.count)
 
         encoder.endEncoding()
         return samples.count
@@ -1431,19 +1526,11 @@ final class StageOneBrushRenderer {
             encoder.setFragmentSamplerState(tipSamplerState, index: 1)
             encoder.setScissorRect(dirtyRect)
 
-            for sample in samples {
-                var uniforms = makeUniforms(
-                    for: sample,
-                    stroke: stroke,
-                    texture: texture,
-                    selectionShape: selectionShape,
-                    modeOverride: 0,
-                    includeBrushOpacity: true
-                )
-                encoder.setVertexBytes(&uniforms, length: MemoryLayout<BrushUniforms>.stride, index: 1)
-                encoder.setFragmentBytes(&uniforms, length: MemoryLayout<BrushUniforms>.stride, index: 1)
-                encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+            var uniformsArray = samples.map {
+                makeUniforms(for: $0, stroke: stroke, texture: texture, selectionShape: selectionShape, modeOverride: 0, includeBrushOpacity: true)
             }
+            setInstancedUniforms(&uniformsArray, encoder: encoder)
+            encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4, instanceCount: uniformsArray.count)
 
             encoder.endEncoding()
         }
@@ -1461,6 +1548,32 @@ final class StageOneBrushRenderer {
             encoder.setFragmentSamplerState(compositeSamplerState, index: 0)
             encoder.setScissorRect(dirtyRect)
 
+            // Compute stroke center and average direction for paint jitter stripes
+            let strokeCenterX: Float
+            let strokeCenterY: Float
+            let strokeRadius: Float
+            let avgJitterDir: Float
+            if !samples.isEmpty {
+                var sumX: Float = 0; var sumY: Float = 0; var sumDir: Float = 0
+                for s in samples {
+                    sumX += Float(s.point.x); sumY += Float(s.point.y)
+                    sumDir += s.jitterDirectionDegrees
+                }
+                let n = Float(samples.count)
+                strokeCenterX = sumX / n
+                strokeCenterY = sumY / n
+                avgJitterDir = sumDir / n + 90
+                var maxDist: Float = 0
+                for s in samples {
+                    let dx = Float(s.point.x) - strokeCenterX
+                    let dy = Float(s.point.y) - strokeCenterY
+                    maxDist = max(maxDist, sqrt(dx * dx + dy * dy))
+                }
+                strokeRadius = maxDist + Float(stroke.brush.size) * 0.5
+            } else {
+                strokeCenterX = 0; strokeCenterY = 0; strokeRadius = 1; avgJitterDir = 0
+            }
+
             var uniforms = CompositeUniforms(
                 brushColor: SIMD4(
                     stroke.color.red,
@@ -1468,7 +1581,15 @@ final class StageOneBrushRenderer {
                     stroke.color.blue,
                     stroke.color.alpha
                 ),
-                mode: stroke.tool == .eraser ? 1 : 0
+                mode: stroke.tool == .eraser ? 1 : 0,
+                paintJitterAmount: stroke.brush.paintJitterAmount,
+                paintContrastAmount: stroke.brush.paintContrastAmount,
+                jitterDirectionDegrees: avgJitterDir,
+                canvasWidth: Float(texture.width),
+                canvasHeight: Float(texture.height),
+                strokeCenterX: strokeCenterX,
+                strokeCenterY: strokeCenterY,
+                strokeRadius: strokeRadius
             )
             encoder.setFragmentBytes(&uniforms, length: MemoryLayout<CompositeUniforms>.stride, index: 0)
             encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
@@ -1539,9 +1660,7 @@ final class StageOneBrushRenderer {
         let sizeResponse = min(max(stroke.brush.pressureSizeAmount, 0), 1)
         let opacityResponse = min(max(stroke.brush.pressureOpacityAmount, 0), 1)
         let curvedSizePressure = sizeCurvePressure(for: sizePressure, stroke: stroke)
-        let lowerBound = min(max(stroke.brush.sizeLowerBound, 0), 1)
-        let lowerBoundedPressure = lowerBound + ((1 - lowerBound) * curvedSizePressure)
-        let sizeFactor = ((1 - sizeResponse) + (sizeResponse * lowerBoundedPressure)) * sample.sizeMultiplier
+        let sizeFactor = ((1 - sizeResponse) + (sizeResponse * curvedSizePressure)) * sample.sizeMultiplier
         let remappedOpacityPressure = pressureResponsePressure(for: opacityPressure, stroke: stroke)
         let curvedPressure = opacityCurvePressure(for: remappedOpacityPressure, stroke: stroke)
         let opacityFactor = (1 - opacityResponse) + (opacityResponse * curvedPressure)
@@ -1602,6 +1721,7 @@ final class StageOneBrushRenderer {
             ),
             colorJitterAmount: stroke.brush.colorJitterAmount,
             paintJitterAmount: stroke.brush.paintJitterAmount,
+            paintContrastAmount: stroke.brush.paintContrastAmount,
             stampSeed: sample.arcLengthPx,
             jitterDirectionDegrees: sample.jitterDirectionDegrees + 90,
             canvasSize: SIMD2(Float(texture.width), Float(texture.height)),
@@ -2332,9 +2452,7 @@ final class StageOneBrushRenderer {
         let sizePressure = max(effectivePressure, 0.01)
         let sizeResponse = min(max(stroke.brush.pressureSizeAmount, 0), 1)
         let curvedSizePressure = sizeCurvePressure(for: sizePressure, stroke: stroke)
-        let lowerBound = min(max(stroke.brush.sizeLowerBound, 0), 1)
-        let lowerBoundedPressure = lowerBound + ((1 - lowerBound) * curvedSizePressure)
-        let sizeFactor = (1 - sizeResponse) + (sizeResponse * lowerBoundedPressure)
+        let sizeFactor = (1 - sizeResponse) + (sizeResponse * curvedSizePressure)
         return max(Double((stroke.brush.size * sizeFactor) / 2), 0.5)
     }
 
@@ -2588,26 +2706,11 @@ final class StageOneBrushRenderer {
         encoder.setFragmentTexture(compoundSecondaryTipTexture, index: 6)
         encoder.setFragmentSamplerState(tipSamplerState, index: 1)
 
-        for (stampIndex, sample) in samples.enumerated() {
-            var uniforms = makeUniforms(
-                for: sample,
-                stroke: stroke,
-                texture: texture,
-                selectionShape: selectionShape
-            )
-            var smudgeUniforms = SmudgeFragmentUniforms(stampIndex: UInt32(stampIndex))
-
-            encoder.setVertexBytes(&uniforms, length: MemoryLayout<BrushUniforms>.stride, index: 1)
-            encoder.setFragmentBytes(&uniforms, length: MemoryLayout<BrushUniforms>.stride, index: 1)
-            if frozenSourceTexture == nil {
-                encoder.setFragmentBytes(
-                    &smudgeUniforms,
-                    length: MemoryLayout<SmudgeFragmentUniforms>.stride,
-                    index: 3
-                )
-            }
-            encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+        var uniformsArray = samples.map {
+            makeUniforms(for: $0, stroke: stroke, texture: texture, selectionShape: selectionShape)
         }
+        setInstancedUniforms(&uniformsArray, encoder: encoder)
+        encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4, instanceCount: uniformsArray.count)
 
         encoder.endEncoding()
         return samples.count
