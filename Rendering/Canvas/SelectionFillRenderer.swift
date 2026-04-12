@@ -252,7 +252,7 @@ final class SelectionFillRenderer {
         selectionMaskOriginY: Int,
         selectionMaskWidth: Int,
         selectionMaskHeight: Int,
-        selectionMaskAlphaBytes: [UInt8],
+        selectionMaskAlphaBytes: Data,
         fillCenter: CanvasPoint,
         color: RGBAColor,
         paintJitterAmount: Float = 0,
@@ -318,7 +318,7 @@ final class SelectionFillRenderer {
     }
 
     private func makeSelectionMaskTexture(
-        alphaBytes: [UInt8],
+        alphaBytes: Data,
         width: Int,
         height: Int
     ) -> MTLTexture? {
@@ -350,12 +350,15 @@ final class SelectionFillRenderer {
         }
         texture = reusableSelectionMaskTexture
 
-        texture.replace(
-            region: MTLRegionMake2D(0, 0, width, height),
-            mipmapLevel: 0,
-            withBytes: alphaBytes,
-            bytesPerRow: width
-        )
+        alphaBytes.withUnsafeBytes { rawBuffer in
+            guard let baseAddress = rawBuffer.baseAddress else { return }
+            texture.replace(
+                region: MTLRegionMake2D(0, 0, width, height),
+                mipmapLevel: 0,
+                withBytes: baseAddress,
+                bytesPerRow: width
+            )
+        }
 
         return texture
     }

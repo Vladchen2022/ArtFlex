@@ -82,6 +82,43 @@ struct LayerTextureSerializerQueueSafetyTests {
     }
 
     @Test
+    func snapshotBatchSupportsMixedSharedAndPrivateTextures() throws {
+        guard let metalContext = MetalDeviceContext() else {
+            Issue.record("Metal unavailable")
+            return
+        }
+
+        let layerSurfaceStore = StageOneLayerSurfaceStore()
+        let serializer = LayerTextureSerializer(metalContext: metalContext)
+        guard
+            let sharedTexture = layerSurfaceStore.makeTexture(
+                width: 4,
+                height: 4,
+                storageMode: .shared,
+                metal: metalContext
+            ),
+            let privateTexture = layerSurfaceStore.makeTexture(
+                width: 4,
+                height: 4,
+                storageMode: .private,
+                metal: metalContext
+            )
+        else {
+            throw QueueSafetyHarnessError.textureUnavailable
+        }
+
+        try serializer.restore(snapshot: opaqueRedSnapshot(width: 4, height: 4, red: 120), into: sharedTexture)
+        try serializer.restore(snapshot: opaqueRedSnapshot(width: 4, height: 4, red: 240), into: privateTexture)
+
+        let snapshots = try serializer.snapshotBatch(textures: [sharedTexture, privateTexture])
+        #expect(snapshots.count == 2)
+        #expect(snapshots[0].pixelData[2] == 120)
+        #expect(snapshots[0].pixelData[3] == 255)
+        #expect(snapshots[1].pixelData[2] == 240)
+        #expect(snapshots[1].pixelData[3] == 255)
+    }
+
+    @Test
     func copyTextureSynchronouslyMakesCopiedPixelsImmediatelyVisibleToSerializer() throws {
         guard let metalContext = MetalDeviceContext() else {
             Issue.record("Metal unavailable")

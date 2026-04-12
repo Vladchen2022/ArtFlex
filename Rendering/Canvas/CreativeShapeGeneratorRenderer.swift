@@ -25,6 +25,10 @@ final class CreativeShapeGeneratorRenderer {
     private let stampPipelineState: MTLRenderPipelineState
     private let fallbackAlphaLockTexture: MTLTexture
     private var stampTextureCache: [BrushTipImageAssetID: MTLTexture] = [:]
+    private var reusablePolygonVertexBuffer: MTLBuffer?
+    private var reusablePolygonVertexBufferLength = 0
+    private var reusableStampVertexBuffer: MTLBuffer?
+    private var reusableStampVertexBufferLength = 0
 
     private let stampMaskResolution = 128
 
@@ -271,11 +275,7 @@ final class CreativeShapeGeneratorRenderer {
         encoder.setFragmentTexture(alphaLockTexture ?? fallbackAlphaLockTexture, index: 0)
 
         if polygonVertices.isEmpty == false,
-           let vertexBuffer = device.makeBuffer(
-            bytes: polygonVertices,
-            length: MemoryLayout<CreativeShapeGeneratorPolygonVertex>.stride * polygonVertices.count,
-            options: .storageModeShared
-           ) {
+           let vertexBuffer = makePolygonVertexBuffer(vertices: polygonVertices) {
             encoder.setRenderPipelineState(polygonPipelineState)
             encoder.setVertexBuffer(vertexBuffer, offset: 0, index: 0)
             encoder.setVertexBytes(&uniforms, length: MemoryLayout<CreativeShapeGeneratorUniforms>.stride, index: 1)
@@ -289,22 +289,24 @@ final class CreativeShapeGeneratorRenderer {
         if stampVertexGroups.isEmpty == false {
             encoder.setRenderPipelineState(stampPipelineState)
             encoder.setVertexBytes(&uniforms, length: MemoryLayout<CreativeShapeGeneratorUniforms>.stride, index: 1)
-            for materialID in stampVertexGroups.keys.sorted() {
+            let sortedMaterialIDs = stampVertexGroups.keys.sorted()
+            let stampBufferInfo = makeStampVertexBuffer(
+                groups: stampVertexGroups,
+                sortedMaterialIDs: sortedMaterialIDs
+            )
+            for materialID in sortedMaterialIDs {
                 guard
                     let vertices = stampVertexGroups[materialID],
                     vertices.isEmpty == false,
                     let maskData = materialLookup[materialID],
                     let maskTexture = stampTexture(for: materialID, maskData: maskData),
-                    let vertexBuffer = device.makeBuffer(
-                        bytes: vertices,
-                        length: MemoryLayout<CreativeShapeGeneratorStampVertex>.stride * vertices.count,
-                        options: .storageModeShared
-                    )
+                    let stampBufferInfo,
+                    let bufferOffset = stampBufferInfo.offsets[materialID]
                 else {
                     continue
                 }
 
-                encoder.setVertexBuffer(vertexBuffer, offset: 0, index: 0)
+                encoder.setVertexBuffer(stampBufferInfo.buffer, offset: bufferOffset, index: 0)
                 encoder.setFragmentTexture(maskTexture, index: 1)
                 let scissorRect = bounds(for: vertices, canvasSize: canvasSize)
                 if scissorRect.width > 0, scissorRect.height > 0 {
@@ -315,6 +317,65 @@ final class CreativeShapeGeneratorRenderer {
         }
 
         encoder.endEncoding()
+    }
+
+    private func makePolygonVertexBuffer(
+        vertices: [CreativeShapeGeneratorPolygonVertex]
+    ) -> MTLBuffer? {
+        let length = MemoryLayout<CreativeShapeGeneratorPolygonVertex>.stride * vertices.count
+        guard length > 0 else { return nil }
+
+        if reusablePolygonVertexBuffer == nil || reusablePolygonVertexBufferLength < length {
+            let capacity = max(length, 16 * 1024)
+            reusablePolygonVertexBuffer = device.makeBuffer(length: capacity, options: .storageModeShared)
+            reusablePolygonVertexBufferLength = capacity
+        }
+
+        guard let reusablePolygonVertexBuffer else { return nil }
+        vertices.withUnsafeBytes { rawBuffer in
+            guard let sourceBaseAddress = rawBuffer.baseAddress else { return }
+            reusablePolygonVertexBuffer.contents().copyMemory(
+                from: sourceBaseAddress,
+                byteCount: rawBuffer.count
+            )
+        }
+        return reusablePolygonVertexBuffer
+    }
+
+    private func makeStampVertexBuffer(
+        groups: [BrushTipImageAssetID: [CreativeShapeGeneratorStampVertex]],
+        sortedMaterialIDs: [BrushTipImageAssetID]
+    ) -> (buffer: MTLBuffer, offsets: [BrushTipImageAssetID: Int])? {
+        let totalVertexCount = sortedMaterialIDs.reduce(0) { partialResult, materialID in
+            partialResult + (groups[materialID]?.count ?? 0)
+        }
+        let requiredLength = MemoryLayout<CreativeShapeGeneratorStampVertex>.stride * totalVertexCount
+        guard requiredLength > 0 else { return nil }
+
+        if reusableStampVertexBuffer == nil || reusableStampVertexBufferLength < requiredLength {
+            let capacity = max(requiredLength, 16 * 1024)
+            reusableStampVertexBuffer = device.makeBuffer(length: capacity, options: .storageModeShared)
+            reusableStampVertexBufferLength = capacity
+        }
+
+        guard let reusableStampVertexBuffer else { return nil }
+        var offsets: [BrushTipImageAssetID: Int] = [:]
+        var currentOffset = 0
+
+        for materialID in sortedMaterialIDs {
+            guard let vertices = groups[materialID], vertices.isEmpty == false else { continue }
+            offsets[materialID] = currentOffset
+            vertices.withUnsafeBytes { rawBuffer in
+                guard let sourceBaseAddress = rawBuffer.baseAddress else { return }
+                reusableStampVertexBuffer.contents().advanced(by: currentOffset).copyMemory(
+                    from: sourceBaseAddress,
+                    byteCount: rawBuffer.count
+                )
+                currentOffset += rawBuffer.count
+            }
+        }
+
+        return (reusableStampVertexBuffer, offsets)
     }
 
     private func polygonVertices(for shapes: [CreativeShapeGeneratedShape]) -> [CreativeShapeGeneratorPolygonVertex] {
@@ -460,18 +521,27 @@ final class CreativeShapeGeneratorRenderer {
             return data
         }
 
-        let source = [UInt8](data)
-        var destination = [UInt8](repeating: 0, count: stampMaskResolution * stampMaskResolution)
+        var destination = Data(count: stampMaskResolution * stampMaskResolution)
+        data.withUnsafeBytes { sourceRawBuffer in
+            destination.withUnsafeMutableBytes { destinationRawBuffer in
+                guard
+                    let sourceBase = sourceRawBuffer.baseAddress?.assumingMemoryBound(to: UInt8.self),
+                    let destinationBase = destinationRawBuffer.baseAddress?.assumingMemoryBound(to: UInt8.self)
+                else {
+                    return
+                }
 
-        for y in 0..<stampMaskResolution {
-            let sourceY = min(Int((Double(y) / Double(stampMaskResolution)) * Double(side)), side - 1)
-            for x in 0..<stampMaskResolution {
-                let sourceX = min(Int((Double(x) / Double(stampMaskResolution)) * Double(side)), side - 1)
-                destination[(y * stampMaskResolution) + x] = source[(sourceY * side) + sourceX]
+                for y in 0..<stampMaskResolution {
+                    let sourceY = min(Int((Double(y) / Double(stampMaskResolution)) * Double(side)), side - 1)
+                    for x in 0..<stampMaskResolution {
+                        let sourceX = min(Int((Double(x) / Double(stampMaskResolution)) * Double(side)), side - 1)
+                        destinationBase[(y * stampMaskResolution) + x] = sourceBase[(sourceY * side) + sourceX]
+                    }
+                }
             }
         }
 
-        return Data(destination)
+        return destination
     }
 
     private func bounds(for vertices: [CreativeShapeGeneratorPolygonVertex], canvasSize: CanvasSize) -> MTLScissorRect {

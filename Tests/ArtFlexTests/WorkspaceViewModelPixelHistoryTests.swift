@@ -100,6 +100,7 @@ struct WorkspaceViewModelPixelHistoryTests {
         harness.viewModel.beginGradientDrag(at: .init(x: 12, y: 20))
         harness.viewModel.updateGradientDrag(to: .init(x: 24, y: 20))
         harness.viewModel.endGradientDrag(at: .init(x: 24, y: 20))
+        try await harness.waitForGradientCommitToFinish()
 
         #expect(harness.viewModel.isApplyingGradientCommit == false)
         #expect(harness.viewModel.linearGradientState.phase == .idle)
@@ -116,7 +117,7 @@ struct WorkspaceViewModelPixelHistoryTests {
 
     @Test
     @MainActor
-    func linearGradientAutoApplyFinishesSynchronouslyAtDragEnd() throws {
+    func linearGradientAutoApplyCompletesAtDragEnd() async throws {
         let harness = try PixelHistoryHarness()
         let layerID = harness.addLayer()
 
@@ -125,6 +126,7 @@ struct WorkspaceViewModelPixelHistoryTests {
         harness.viewModel.beginGradientDrag(at: .init(x: 10, y: 16))
         harness.viewModel.updateGradientDrag(to: .init(x: 30, y: 16))
         harness.viewModel.endGradientDrag(at: .init(x: 30, y: 16))
+        try await harness.waitForGradientCommitToFinish()
 
         #expect(harness.viewModel.isApplyingGradientCommit == false)
         #expect(harness.viewModel.linearGradientState.phase == .idle)
@@ -135,7 +137,7 @@ struct WorkspaceViewModelPixelHistoryTests {
 
     @Test
     @MainActor
-    func linearGradientRespectsBrushOpacity() throws {
+    func linearGradientRespectsBrushOpacity() async throws {
         let harness = try PixelHistoryHarness()
         let layerID = harness.addLayer()
 
@@ -145,6 +147,7 @@ struct WorkspaceViewModelPixelHistoryTests {
         harness.viewModel.beginGradientDrag(at: .init(x: 10, y: 16))
         harness.viewModel.updateGradientDrag(to: .init(x: 30, y: 16))
         harness.viewModel.endGradientDrag(at: .init(x: 30, y: 16))
+        try await harness.waitForGradientCommitToFinish()
 
         let nearAlpha = try harness.alpha(atX: 10, y: 16, layerID: layerID)
         #expect(nearAlpha > 0.18)
@@ -153,7 +156,7 @@ struct WorkspaceViewModelPixelHistoryTests {
 
     @Test
     @MainActor
-    func linearGradientApplyClearsRetainedBrushDisplayTexture() throws {
+    func linearGradientApplyClearsRetainedBrushDisplayTexture() async throws {
         let harness = try PixelHistoryHarness()
         let layerID = harness.addLayer()
 
@@ -170,6 +173,7 @@ struct WorkspaceViewModelPixelHistoryTests {
         harness.viewModel.beginGradientDrag(at: .init(x: 10, y: 16))
         harness.viewModel.updateGradientDrag(to: .init(x: 30, y: 16))
         harness.viewModel.endGradientDrag(at: .init(x: 30, y: 16))
+        try await harness.waitForGradientCommitToFinish()
 
         #expect(harness.bootstrap.strokeEngine.displayTexture(for: layerID) == nil)
         #expect(try harness.alpha(atX: 10, y: 16, layerID: layerID) > 0.7)
@@ -177,7 +181,7 @@ struct WorkspaceViewModelPixelHistoryTests {
 
     @Test
     @MainActor
-    func sectorGradientAutoApplySupportsUndoRedoAndSelectionClipping() throws {
+    func sectorGradientAutoApplySupportsUndoRedoAndSelectionClipping() async throws {
         let harness = try PixelHistoryHarness()
         let layerID = harness.addLayer()
 
@@ -196,6 +200,7 @@ struct WorkspaceViewModelPixelHistoryTests {
         harness.viewModel.updateGradientDrag(to: .init(x: 44, y: 20))
         harness.viewModel.updateGradientDrag(to: .init(x: 28, y: 38))
         harness.viewModel.endGradientDrag(at: .init(x: 12, y: 20))
+        try await harness.waitForGradientCommitToFinish()
 
         #expect(harness.viewModel.isApplyingGradientCommit == false)
         #expect(harness.viewModel.sectorGradientState.phase == .idle)
@@ -218,7 +223,7 @@ struct WorkspaceViewModelPixelHistoryTests {
 
     @Test
     @MainActor
-    func sectorGradientRespectsBrushOpacity() throws {
+    func sectorGradientRespectsBrushOpacity() async throws {
         let harness = try PixelHistoryHarness()
         let layerID = harness.addLayer()
 
@@ -230,6 +235,7 @@ struct WorkspaceViewModelPixelHistoryTests {
         harness.viewModel.updateGradientDrag(to: .init(x: 44, y: 20))
         harness.viewModel.updateGradientDrag(to: .init(x: 28, y: 38))
         harness.viewModel.endGradientDrag(at: .init(x: 12, y: 20))
+        try await harness.waitForGradientCommitToFinish()
 
         let nearAlpha = try harness.alpha(atX: 14, y: 20, layerID: layerID)
         #expect(nearAlpha > 0.18)
@@ -685,6 +691,18 @@ private struct PixelHistoryHarness {
         }
         return try bootstrap.textureSerializer.samplePixel(texture: texture, x: x, y: y)
     }
+
+    func waitForGradientCommitToFinish(timeoutIterations: Int = 80) async throws {
+        for _ in 0..<timeoutIterations {
+            if !viewModel.isApplyingGradientCommit {
+                return
+            }
+            await Task.yield()
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+
+        throw PixelHistoryHarnessError.gradientCommitTimeout
+    }
 }
 
 @MainActor
@@ -704,6 +722,7 @@ private enum PixelHistoryHarnessError: Error {
     case metalUnavailable
     case textureUnavailable
     case commandBufferUnavailable
+    case gradientCommitTimeout
 }
 
 @MainActor

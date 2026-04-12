@@ -3439,6 +3439,47 @@ final class WorkspaceViewModel: ObservableObject {
         }
     }
 
+    private func commitGradientApplication(
+        _ commandBuffer: MTLCommandBuffer,
+        layerID: LayerID,
+        resetInteractionState: () -> Void,
+        successMessage: String,
+        failureMessage: String,
+        logTool: String? = nil,
+        startedAt: UInt64? = nil
+    ) {
+        isApplyingGradientCommit = true
+        resetInteractionState()
+        commandBuffer.addCompletedHandler { [weak self] completedBuffer in
+            Task { @MainActor in
+                guard let self else { return }
+
+                self.bootstrap.strokeEngine.resetBrushPipelineState()
+                self.isApplyingGradientCommit = false
+                defer { self.handleDeferredGradientActionIfNeeded() }
+
+                guard completedBuffer.status == .completed else {
+                    let message = completedBuffer.error?.localizedDescription ?? failureMessage
+                    self.showStatus(.init(kind: .error, message: message))
+                    return
+                }
+
+                self.layerThumbnailCache.removeValue(forKey: layerID)
+                self.noteCanvasContentChanged()
+                self.refresh(invalidatedLayerIDs: [layerID])
+                self.recordDrawingActivityIfNeeded()
+
+                if let logTool, let startedAt {
+                    let gpuMs = Double(DispatchTime.now().uptimeNanoseconds - startedAt) / 1_000_000
+                    self.transformLogger.debug("[gradient] applyGpuMs=\(gpuMs, privacy: .public) sessionTool=\(logTool, privacy: .public)")
+                }
+
+                self.showStatus(.init(kind: .success, message: successMessage))
+            }
+        }
+        commandBuffer.commit()
+    }
+
     private func performDeferredGradientDrag(_ drag: DeferredGradientDrag) {
         bootstrap.workspaceStore.updateToolSession { session in
             session.activeTool = drag.tool
@@ -5264,22 +5305,23 @@ final class WorkspaceViewModel: ObservableObject {
         guard width > 0, height > 0 else {
             return .empty
         }
-
-        let bytes = [UInt8](snapshot.pixelData)
         var minX = width
         var minY = height
         var maxX = -1
         var maxY = -1
 
-        for y in 0..<height {
-            let rowStart = y * snapshot.bytesPerRow
-            for x in 0..<width {
-                let alphaIndex = rowStart + (x * 4) + 3
-                if bytes[alphaIndex] > 0 {
-                    minX = min(minX, x)
-                    minY = min(minY, y)
-                    maxX = max(maxX, x)
-                    maxY = max(maxY, y)
+        snapshot.pixelData.withUnsafeBytes { rawBuffer in
+            let bytes = rawBuffer.bindMemory(to: UInt8.self)
+            for y in 0..<height {
+                let rowStart = y * snapshot.bytesPerRow
+                for x in 0..<width {
+                    let alphaIndex = rowStart + (x * 4) + 3
+                    if bytes[alphaIndex] > 0 {
+                        minX = min(minX, x)
+                        minY = min(minY, y)
+                        maxX = max(maxX, x)
+                        maxY = max(maxY, y)
+                    }
                 }
             }
         }
@@ -5534,21 +5576,15 @@ final class WorkspaceViewModel: ObservableObject {
             alphaLockTexture: alphaLockTexture
         )
 
-        isApplyingGradientCommit = true
-        commandBuffer.commit()
-        commandBuffer.waitUntilCompleted()
-
-        let gpuMs = Double(DispatchTime.now().uptimeNanoseconds - applyStart) / 1_000_000
-        layerThumbnailCache.removeValue(forKey: layerID)
-        linearGradientState = .init()
-        bootstrap.strokeEngine.resetBrushPipelineState()
-        noteCanvasContentChanged()
-        refresh(invalidatedLayerIDs: [layerID])
-        isApplyingGradientCommit = false
-        recordDrawingActivityIfNeeded()
-        transformLogger.debug("[gradient] applyGpuMs=\(gpuMs, privacy: .public) sessionTool=linear")
-        showStatus(.init(kind: .success, message: "已应用直线渐变"))
-        handleDeferredGradientActionIfNeeded()
+        commitGradientApplication(
+            commandBuffer,
+            layerID: layerID,
+            resetInteractionState: { self.linearGradientState = .init() },
+            successMessage: "已应用直线渐变",
+            failureMessage: "无法完成直线渐变提交",
+            logTool: "linear",
+            startedAt: applyStart
+        )
     }
 
     func applyStraightLine(pointA: CanvasPoint, pointB: CanvasPoint) -> Bool {
@@ -5645,19 +5681,13 @@ final class WorkspaceViewModel: ObservableObject {
             alphaLockTexture: alphaLockTexture
         )
 
-        isApplyingGradientCommit = true
-        commandBuffer.commit()
-        commandBuffer.waitUntilCompleted()
-
-        layerThumbnailCache.removeValue(forKey: layerID)
-        sectorGradientState = .init()
-        bootstrap.strokeEngine.resetBrushPipelineState()
-        noteCanvasContentChanged()
-        refresh(invalidatedLayerIDs: [layerID])
-        isApplyingGradientCommit = false
-        recordDrawingActivityIfNeeded()
-        showStatus(.init(kind: .success, message: "已应用扇形渐变"))
-        handleDeferredGradientActionIfNeeded()
+        commitGradientApplication(
+            commandBuffer,
+            layerID: layerID,
+            resetInteractionState: { self.sectorGradientState = .init() },
+            successMessage: "已应用扇形渐变",
+            failureMessage: "无法完成扇形渐变提交"
+        )
     }
 
     func eraseLassoContents() {
@@ -7351,19 +7381,21 @@ final class WorkspaceViewModel: ObservableObject {
         )
         let bytesPerPixel = 4
         let targetBytesPerRow = targetWidth * bytesPerPixel
-        let sourceBytes = [UInt8](snapshot.pixelData)
         var rgba = [UInt8](repeating: 0, count: targetHeight * targetBytesPerRow)
 
-        for targetY in 0..<targetHeight {
-            let sourceY = Swift.min((targetY * snapshot.height) / targetHeight, snapshot.height - 1)
-            for targetX in 0..<targetWidth {
-                let sourceX = Swift.min((targetX * snapshot.width) / targetWidth, snapshot.width - 1)
-                let sourceOffset = (sourceY * snapshot.bytesPerRow) + (sourceX * bytesPerPixel)
-                let targetOffset = (targetY * targetBytesPerRow) + (targetX * bytesPerPixel)
-                rgba[targetOffset] = sourceBytes[sourceOffset + 2]
-                rgba[targetOffset + 1] = sourceBytes[sourceOffset + 1]
-                rgba[targetOffset + 2] = sourceBytes[sourceOffset]
-                rgba[targetOffset + 3] = sourceBytes[sourceOffset + 3]
+        snapshot.pixelData.withUnsafeBytes { rawBuffer in
+            let sourceBytes = rawBuffer.bindMemory(to: UInt8.self)
+            for targetY in 0..<targetHeight {
+                let sourceY = Swift.min((targetY * snapshot.height) / targetHeight, snapshot.height - 1)
+                for targetX in 0..<targetWidth {
+                    let sourceX = Swift.min((targetX * snapshot.width) / targetWidth, snapshot.width - 1)
+                    let sourceOffset = (sourceY * snapshot.bytesPerRow) + (sourceX * bytesPerPixel)
+                    let targetOffset = (targetY * targetBytesPerRow) + (targetX * bytesPerPixel)
+                    rgba[targetOffset] = sourceBytes[sourceOffset + 2]
+                    rgba[targetOffset + 1] = sourceBytes[sourceOffset + 1]
+                    rgba[targetOffset + 2] = sourceBytes[sourceOffset]
+                    rgba[targetOffset + 3] = sourceBytes[sourceOffset + 3]
+                }
             }
         }
 
@@ -7727,8 +7759,10 @@ final class WorkspaceViewModel: ObservableObject {
         commandBuffer.waitUntilCompleted()
 
         let snapshot = try bootstrap.textureSerializer.snapshot(texture: deltaTexture)
-        let bytes = [UInt8](snapshot.pixelData)
-        let hasVisibleDelta = stride(from: 3, to: bytes.count, by: 4).contains { bytes[$0] > 0 }
+        let hasVisibleDelta = snapshot.pixelData.withUnsafeBytes { rawBuffer in
+            let bytes = rawBuffer.bindMemory(to: UInt8.self)
+            return stride(from: 3, to: bytes.count, by: 4).contains { bytes[$0] > 0 }
+        }
         return hasVisibleDelta ? snapshot : nil
     }
 
@@ -8201,37 +8235,41 @@ final class WorkspaceViewModel: ObservableObject {
             return
         }
 
-        switch operation {
-        case .clear:
-            for localY in 0..<height {
-                let maskRow = localY * selectionMaskRegion.width
-                let byteRow = localY * bytesPerRow
-                for localX in 0..<width {
-                    guard selectionMaskRegion.alphaBytes[maskRow + localX] > 0 else { continue }
-                    let index = byteRow + (localX * bytesPerPixel)
-                    if alphaLockEnabled, bytes[index + 3] == 0 {
-                        continue
+        selectionMaskRegion.withAlphaBytes { maskBytes in
+            guard let maskBaseAddress = maskBytes.baseAddress else { return }
+
+            switch operation {
+            case .clear:
+                for localY in 0..<height {
+                    let maskRow = localY * selectionMaskRegion.width
+                    let byteRow = localY * bytesPerRow
+                    for localX in 0..<width {
+                        guard maskBaseAddress[maskRow + localX] > 0 else { continue }
+                        let index = byteRow + (localX * bytesPerPixel)
+                        if alphaLockEnabled, bytes[index + 3] == 0 {
+                            continue
+                        }
+                        bytes[index] = 0
+                        bytes[index + 1] = 0
+                        bytes[index + 2] = 0
+                        bytes[index + 3] = 0
                     }
-                    bytes[index] = 0
-                    bytes[index + 1] = 0
-                    bytes[index + 2] = 0
-                    bytes[index + 3] = 0
                 }
-            }
-        case .fill(let fillPixel):
-            for localY in 0..<height {
-                let maskRow = localY * selectionMaskRegion.width
-                let byteRow = localY * bytesPerRow
-                for localX in 0..<width {
-                    guard selectionMaskRegion.alphaBytes[maskRow + localX] > 0 else { continue }
-                    let index = byteRow + (localX * bytesPerPixel)
-                    if alphaLockEnabled, bytes[index + 3] == 0 {
-                        continue
+            case .fill(let fillPixel):
+                for localY in 0..<height {
+                    let maskRow = localY * selectionMaskRegion.width
+                    let byteRow = localY * bytesPerRow
+                    for localX in 0..<width {
+                        guard maskBaseAddress[maskRow + localX] > 0 else { continue }
+                        let index = byteRow + (localX * bytesPerPixel)
+                        if alphaLockEnabled, bytes[index + 3] == 0 {
+                            continue
+                        }
+                        bytes[index] = fillPixel.blue
+                        bytes[index + 1] = fillPixel.green
+                        bytes[index + 2] = fillPixel.red
+                        bytes[index + 3] = fillPixel.alpha
                     }
-                    bytes[index] = fillPixel.blue
-                    bytes[index + 1] = fillPixel.green
-                    bytes[index + 2] = fillPixel.red
-                    bytes[index + 3] = fillPixel.alpha
                 }
             }
         }
@@ -8408,11 +8446,10 @@ final class WorkspaceViewModel: ObservableObject {
             resultMaskData = incomingMaskData
             resultBounds = incomingMaskShape.bounds
         case .add, .subtract:
-            let incomingBytes = Array(incomingMaskData.alphaBytes)
             var mergedBytes = selectionMaskBytes(for: baseShape, canvasSize: canvasSize)
             applyIncomingMask(
                 to: &mergedBytes,
-                incomingBytes: incomingBytes,
+                incomingMaskData: incomingMaskData,
                 incomingBounds: incomingMaskShape.bounds,
                 canvasSize: canvasSize,
                 mode: mode
@@ -8833,7 +8870,7 @@ final class WorkspaceViewModel: ObservableObject {
         height: Int
     ) -> SelectionMaskRegion {
         guard width > 0, height > 0 else {
-            return SelectionMaskRegion(originX: originX, originY: originY, width: 0, height: 0, alphaBytes: [])
+            return SelectionMaskRegion(originX: originX, originY: originY, width: 0, height: 0, alphaBytes: Data())
         }
 
         guard let shape else {
@@ -8842,7 +8879,7 @@ final class WorkspaceViewModel: ObservableObject {
                 originY: originY,
                 width: width,
                 height: height,
-                alphaBytes: [UInt8](repeating: 0, count: width * height)
+                alphaBytes: Data(count: width * height)
             )
         }
 
@@ -8874,7 +8911,7 @@ final class WorkspaceViewModel: ObservableObject {
                     originY: originY,
                     width: width,
                     height: height,
-                    alphaBytes: [UInt8](repeating: 0, count: width * height)
+                    alphaBytes: Data(count: width * height)
                 )
             }
             polygonShapes = [[shape.pathPoints.map { CGPoint(x: $0.x, y: $0.y) }]]
@@ -8901,7 +8938,7 @@ final class WorkspaceViewModel: ObservableObject {
                     originY: originY,
                     width: width,
                     height: height,
-                    alphaBytes: [UInt8](repeating: 0, count: width * height)
+                    alphaBytes: Data(count: width * height)
                 )
             }
         case .composite:
@@ -8944,14 +8981,14 @@ final class WorkspaceViewModel: ObservableObject {
         originY: Int,
         width: Int,
         height: Int
-    ) -> [UInt8] {
-        var result = [UInt8](repeating: 0, count: width * height)
+    ) -> Data {
+        var result = Data(count: width * height)
         guard !result.isEmpty else { return result }
 
-        result.withUnsafeMutableBufferPointer { destinationBuffer in
+        result.withUnsafeMutableBytes { destinationRawBuffer in
             alphaBytes.withUnsafeBytes { sourceRawBuffer in
                 guard
-                    let destinationBase = destinationBuffer.baseAddress,
+                    let destinationBase = destinationRawBuffer.baseAddress?.assumingMemoryBound(to: UInt8.self),
                     let sourceBase = sourceRawBuffer.baseAddress?.assumingMemoryBound(to: UInt8.self)
                 else {
                     return
@@ -8979,14 +9016,14 @@ final class WorkspaceViewModel: ObservableObject {
         originY: Int,
         width: Int,
         height: Int
-    ) -> [UInt8] {
-        var result = [UInt8](repeating: 0, count: width * height)
+    ) -> Data {
+        var result = Data(count: width * height)
         guard !result.isEmpty else { return result }
 
-        result.withUnsafeMutableBufferPointer { destinationBuffer in
+        result.withUnsafeMutableBytes { destinationRawBuffer in
             alphaBytes.withUnsafeBufferPointer { sourceBuffer in
                 guard
-                    let destinationBase = destinationBuffer.baseAddress,
+                    let destinationBase = destinationRawBuffer.baseAddress?.assumingMemoryBound(to: UInt8.self),
                     let sourceBase = sourceBuffer.baseAddress
                 else {
                     return
@@ -9009,7 +9046,7 @@ final class WorkspaceViewModel: ObservableObject {
 
     nonisolated private func applyIncomingMask(
         to result: inout [UInt8],
-        incomingBytes: [UInt8],
+        incomingMaskData: SelectionMaskData,
         incomingBounds: CanvasRect,
         canvasSize: CanvasSize,
         mode: SelectionCombineMode
@@ -9020,21 +9057,24 @@ final class WorkspaceViewModel: ObservableObject {
         let maxY = min(Int(ceil(incomingBounds.maxY)), canvasSize.height)
         guard minX < maxX, minY < maxY else { return }
 
-        for y in minY..<maxY {
-            let rowOffset = y * canvasSize.width
-            for x in minX..<maxX {
-                let index = rowOffset + x
-                let incoming = incomingBytes[index]
-                guard incoming > 0 else { continue }
+        incomingMaskData.withAlphaBytes { incomingBytes in
+            for y in minY..<maxY {
+                let rowOffset = y * canvasSize.width
+                for x in minX..<maxX {
+                    let index = rowOffset + x
+                    guard index < incomingBytes.count else { continue }
+                    let incoming = incomingBytes[index]
+                    guard incoming > 0 else { continue }
 
-                switch mode {
-                case .replace:
-                    result[index] = incoming
-                case .add:
-                    result[index] = max(result[index], incoming)
-                case .subtract:
-                    let kept = (Int(result[index]) * (255 - Int(incoming))) / 255
-                    result[index] = UInt8(clamping: kept)
+                    switch mode {
+                    case .replace:
+                        result[index] = incoming
+                    case .add:
+                        result[index] = max(result[index], incoming)
+                    case .subtract:
+                        let kept = (Int(result[index]) * (255 - Int(incoming))) / 255
+                        result[index] = UInt8(clamping: kept)
+                    }
                 }
             }
         }
@@ -9118,8 +9158,8 @@ final class WorkspaceViewModel: ObservableObject {
         originY: Int,
         width: Int,
         height: Int
-    ) -> [UInt8] {
-        var result = [UInt8](repeating: 0, count: width * height)
+    ) -> Data {
+        var result = Data(count: width * height)
         guard !polygonShapes.isEmpty, width > 0, height > 0 else { return result }
 
         let padding = 1
@@ -9163,10 +9203,10 @@ final class WorkspaceViewModel: ObservableObject {
             }
         }
 
-        result.withUnsafeMutableBufferPointer { destinationBuffer in
+        result.withUnsafeMutableBytes { destinationRawBuffer in
             paddedBytes.withUnsafeBufferPointer { sourceBuffer in
                 guard
-                    let destinationBase = destinationBuffer.baseAddress,
+                    let destinationBase = destinationRawBuffer.baseAddress?.assumingMemoryBound(to: UInt8.self),
                     let sourceBase = sourceBuffer.baseAddress
                 else {
                     return
@@ -9924,7 +9964,14 @@ private struct SelectionMaskRegion {
     var originY: Int
     var width: Int
     var height: Int
-    var alphaBytes: [UInt8]
+    var alphaBytes: Data
+
+    @inline(__always)
+    func withAlphaBytes<Result>(_ body: (UnsafeBufferPointer<UInt8>) -> Result) -> Result {
+        alphaBytes.withUnsafeBytes { rawBuffer in
+            body(rawBuffer.bindMemory(to: UInt8.self))
+        }
+    }
 }
 
 private struct GeneratorStrokeSessionState {
@@ -10106,58 +10153,60 @@ private func shiftLayerPixels(
 ) -> LayerTextureSnapshot {
     let w = snapshot.width; let h = snapshot.height
     let bpr = snapshot.bytesPerRow; let bpp = 4
-    let src = [UInt8](snapshot.pixelData)
-    var dst = src
+    var dst = [UInt8](snapshot.pixelData)
 
     let minX = max(Int(selection.bounds.minX.rounded(.down)), 0)
     let minY = max(Int(selection.bounds.minY.rounded(.down)), 0)
     let maxX = min(Int(selection.bounds.maxX.rounded(.up)), w)
     let maxY = min(Int(selection.bounds.maxY.rounded(.up)), h)
 
-    if selection.kind == .rectangle {
-        for y in minY..<maxY {
-            for x in minX..<maxX {
-                let si = (y * bpr) + (x * bpp)
-                dst[si] = 0; dst[si+1] = 0; dst[si+2] = 0; dst[si+3] = 0
+    snapshot.pixelData.withUnsafeBytes { rawBuffer in
+        let src = rawBuffer.bindMemory(to: UInt8.self)
+        if selection.kind == .rectangle {
+            for y in minY..<maxY {
+                for x in minX..<maxX {
+                    let si = (y * bpr) + (x * bpp)
+                    dst[si] = 0; dst[si+1] = 0; dst[si+2] = 0; dst[si+3] = 0
+                }
             }
-        }
-        for y in minY..<maxY {
-            let ny = y + dy; guard ny >= 0, ny < h else { continue }
-            for x in minX..<maxX {
-                let nx = x + dx; guard nx >= 0, nx < w else { continue }
-                let si = (y * bpr) + (x * bpp)
-                let di = (ny * bpr) + (nx * bpp)
-                dst[di] = src[si]; dst[di+1] = src[si+1]
-                dst[di+2] = src[si+2]; dst[di+3] = src[si+3]
+            for y in minY..<maxY {
+                let ny = y + dy; guard ny >= 0, ny < h else { continue }
+                for x in minX..<maxX {
+                    let nx = x + dx; guard nx >= 0, nx < w else { continue }
+                    let si = (y * bpr) + (x * bpp)
+                    let di = (ny * bpr) + (nx * bpp)
+                    dst[di] = src[si]; dst[di+1] = src[si+1]
+                    dst[di+2] = src[si+2]; dst[di+3] = src[si+3]
+                }
             }
-        }
-    } else {
-        let rw = maxX - minX; let rh = maxY - minY
-        var mask = [Bool](repeating: false, count: rw * rh)
-        for ly in 0..<rh {
-            for lx in 0..<rw {
-                mask[ly * rw + lx] = selection.contains(
-                    CanvasPoint(x: Double(minX + lx) + 0.5, y: Double(minY + ly) + 0.5)
-                )
+        } else {
+            let rw = maxX - minX; let rh = maxY - minY
+            var mask = [Bool](repeating: false, count: rw * rh)
+            for ly in 0..<rh {
+                for lx in 0..<rw {
+                    mask[ly * rw + lx] = selection.contains(
+                        CanvasPoint(x: Double(minX + lx) + 0.5, y: Double(minY + ly) + 0.5)
+                    )
+                }
             }
-        }
-        for ly in 0..<rh {
-            for lx in 0..<rw {
-                guard mask[ly * rw + lx] else { continue }
-                let si = ((minY+ly) * bpr) + ((minX+lx) * bpp)
-                dst[si] = 0; dst[si+1] = 0; dst[si+2] = 0; dst[si+3] = 0
+            for ly in 0..<rh {
+                for lx in 0..<rw {
+                    guard mask[ly * rw + lx] else { continue }
+                    let si = ((minY+ly) * bpr) + ((minX+lx) * bpp)
+                    dst[si] = 0; dst[si+1] = 0; dst[si+2] = 0; dst[si+3] = 0
+                }
             }
-        }
-        for ly in 0..<rh {
-            for lx in 0..<rw {
-                guard mask[ly * rw + lx] else { continue }
-                let x = minX+lx; let y = minY+ly
-                let si = (y * bpr) + (x * bpp)
-                let nx = x + dx; let ny = y + dy
-                guard nx >= 0, ny >= 0, nx < w, ny < h else { continue }
-                let di = (ny * bpr) + (nx * bpp)
-                dst[di] = src[si]; dst[di+1] = src[si+1]
-                dst[di+2] = src[si+2]; dst[di+3] = src[si+3]
+            for ly in 0..<rh {
+                for lx in 0..<rw {
+                    guard mask[ly * rw + lx] else { continue }
+                    let x = minX+lx; let y = minY+ly
+                    let si = (y * bpr) + (x * bpp)
+                    let nx = x + dx; let ny = y + dy
+                    guard nx >= 0, ny >= 0, nx < w, ny < h else { continue }
+                    let di = (ny * bpr) + (nx * bpp)
+                    dst[di] = src[si]; dst[di+1] = src[si+1]
+                    dst[di+2] = src[si+2]; dst[di+3] = src[si+3]
+                }
             }
         }
     }
@@ -10186,45 +10235,51 @@ private func affineTransformLayerPixels(
 
     var sourceBGRA = [UInt8](snapshot.pixelData)
 
-    // マスクバイト取得
-    let fullMaskBytes: [UInt8]
-    if selection.kind == .mask, let maskData = selection.maskData {
-        fullMaskBytes = [UInt8](maskData.alphaBytes)
-    } else if selection.kind == .rectangle {
-        fullMaskBytes = []
+    // 選択領域のクロップを BGRA のまま抽出し、ソースから消去
+    var cropBGRA = [UInt8](repeating: 0, count: cropBytesPerRow * cropHeight)
+    func extractSelectedPixels(maskBytes: UnsafeBufferPointer<UInt8>?) {
+        for localY in 0..<cropHeight {
+            let y = minY + localY
+            for localX in 0..<cropWidth {
+                let x = minX + localX
+                let isSelected: Bool
+                if let maskBytes {
+                    let maskIndex = (y * width) + x
+                    isSelected = maskIndex < maskBytes.count && maskBytes[maskIndex] > 0
+                } else {
+                    isSelected = true
+                }
+                guard isSelected else { continue }
+                let si = (y * bytesPerRow) + (x * bytesPerPixel)
+                let ci = (localY * cropBytesPerRow) + (localX * bytesPerPixel)
+                cropBGRA[ci] = sourceBGRA[si]; cropBGRA[ci+1] = sourceBGRA[si+1]
+                cropBGRA[ci+2] = sourceBGRA[si+2]; cropBGRA[ci+3] = sourceBGRA[si+3]
+                sourceBGRA[si] = 0; sourceBGRA[si+1] = 0
+                sourceBGRA[si+2] = 0; sourceBGRA[si+3] = 0
+            }
+        }
+    }
+
+    if selection.kind == .rectangle {
+        extractSelectedPixels(maskBytes: nil)
+    } else if let maskData = selection.maskData,
+              maskData.canvasWidth == width,
+              maskData.canvasHeight == height {
+        maskData.withAlphaBytes { maskBytes in
+            extractSelectedPixels(maskBytes: maskBytes)
+        }
     } else {
-        var bytes = [UInt8](repeating: 0, count: width * height)
+        var fullMaskBytes = [UInt8](repeating: 0, count: width * height)
         for y in minY..<maxY {
             for x in minX..<maxX {
                 let point = CanvasPoint(x: Double(x) + 0.5, y: Double(y) + 0.5)
                 if selection.contains(point) {
-                    bytes[(y * width) + x] = 255
+                    fullMaskBytes[(y * width) + x] = 255
                 }
             }
         }
-        fullMaskBytes = bytes
-    }
-
-    // 選択領域のクロップを BGRA のまま抽出し、ソースから消去
-    var cropBGRA = [UInt8](repeating: 0, count: cropBytesPerRow * cropHeight)
-    for localY in 0..<cropHeight {
-        let y = minY + localY
-        for localX in 0..<cropWidth {
-            let x = minX + localX
-            let isSelected: Bool
-            if selection.kind == .rectangle {
-                isSelected = true
-            } else {
-                let maskIndex = (y * width) + x
-                isSelected = fullMaskBytes.indices.contains(maskIndex) && fullMaskBytes[maskIndex] > 0
-            }
-            guard isSelected else { continue }
-            let si = (y * bytesPerRow) + (x * bytesPerPixel)
-            let ci = (localY * cropBytesPerRow) + (localX * bytesPerPixel)
-            cropBGRA[ci] = sourceBGRA[si]; cropBGRA[ci+1] = sourceBGRA[si+1]
-            cropBGRA[ci+2] = sourceBGRA[si+2]; cropBGRA[ci+3] = sourceBGRA[si+3]
-            sourceBGRA[si] = 0; sourceBGRA[si+1] = 0
-            sourceBGRA[si+2] = 0; sourceBGRA[si+3] = 0
+        fullMaskBytes.withUnsafeBufferPointer { maskBytes in
+            extractSelectedPixels(maskBytes: maskBytes)
         }
     }
 

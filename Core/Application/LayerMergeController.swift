@@ -58,32 +58,34 @@ final class LayerMergeController {
         for layerIndex in snapshots.indices {
             let snapshot = snapshots[layerIndex]
             let layer = layers[layerIndex]
-            let bytes = [UInt8](snapshot.pixelData)
             let effectiveOpacity: Float = layer.isVisible ? layer.opacity : 0
 
             guard effectiveOpacity > 0 else { continue }
 
-            for offset in stride(from: 0, to: bytes.count, by: bytesPerPixel) {
-                let destination = LinearPremultipliedColor(
-                    bgraBlue: mergedBytes[offset],
-                    green: mergedBytes[offset + 1],
-                    red: mergedBytes[offset + 2],
-                    alpha: mergedBytes[offset + 3]
-                )
+            snapshot.pixelData.withUnsafeBytes { rawBuffer in
+                let bytes = rawBuffer.bindMemory(to: UInt8.self)
+                for offset in stride(from: 0, to: bytes.count, by: bytesPerPixel) {
+                    let destination = LinearPremultipliedColor(
+                        bgraBlue: mergedBytes[offset],
+                        green: mergedBytes[offset + 1],
+                        red: mergedBytes[offset + 2],
+                        alpha: mergedBytes[offset + 3]
+                    )
 
-                let source = LinearPremultipliedColor(
-                    bgraBlue: bytes[offset],
-                    green: bytes[offset + 1],
-                    red: bytes[offset + 2],
-                    alpha: bytes[offset + 3]
-                ).applyingOpacity(effectiveOpacity)
+                    let source = LinearPremultipliedColor(
+                        bgraBlue: bytes[offset],
+                        green: bytes[offset + 1],
+                        red: bytes[offset + 2],
+                        alpha: bytes[offset + 3]
+                    ).applyingOpacity(effectiveOpacity)
 
-                let merged = source.composited(over: destination)
-                let output = merged.bgra8PremultipliedBytes
-                mergedBytes[offset] = output.blue
-                mergedBytes[offset + 1] = output.green
-                mergedBytes[offset + 2] = output.red
-                mergedBytes[offset + 3] = output.alpha
+                    let merged = source.composited(over: destination)
+                    let output = merged.bgra8PremultipliedBytes
+                    mergedBytes[offset] = output.blue
+                    mergedBytes[offset + 1] = output.green
+                    mergedBytes[offset + 2] = output.red
+                    mergedBytes[offset + 3] = output.alpha
+                }
             }
         }
 

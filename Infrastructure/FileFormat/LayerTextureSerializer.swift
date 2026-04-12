@@ -183,6 +183,7 @@ private final class LayerSerializerStagingPool {
 final class LayerTextureSerializer {
     private let metalContext: MetalDeviceContext
     private let stagingPool: LayerSerializerStagingPool
+    private let bytesPerPixel = 4
 
     init(
         metalContext: MetalDeviceContext,
@@ -192,6 +193,49 @@ final class LayerTextureSerializer {
         self.stagingPool = LayerSerializerStagingPool(
             device: metalContext.device,
             maxRetainedBytes: stagingPoolMaxResidentBytes
+        )
+    }
+
+    private func readPixelData(
+        from texture: MTLTexture,
+        originX: Int,
+        originY: Int,
+        width: Int,
+        height: Int
+    ) -> Data {
+        let bytesPerRow = width * bytesPerPixel
+        var pixelData = Data(count: bytesPerRow * height)
+        pixelData.withUnsafeMutableBytes { rawBuffer in
+            guard let baseAddress = rawBuffer.baseAddress else { return }
+            texture.getBytes(
+                baseAddress,
+                bytesPerRow: bytesPerRow,
+                from: MTLRegionMake2D(originX, originY, width, height),
+                mipmapLevel: 0
+            )
+        }
+        return pixelData
+    }
+
+    private func makeSnapshot(
+        from texture: MTLTexture,
+        originX: Int,
+        originY: Int,
+        width: Int,
+        height: Int
+    ) -> LayerTextureSnapshot {
+        let bytesPerRow = width * bytesPerPixel
+        return LayerTextureSnapshot(
+            width: width,
+            height: height,
+            bytesPerRow: bytesPerRow,
+            pixelData: readPixelData(
+                from: texture,
+                originX: originX,
+                originY: originY,
+                width: width,
+                height: height
+            )
         )
     }
 
@@ -213,68 +257,92 @@ final class LayerTextureSerializer {
             PerformanceAuditStore.shared.recordDuration("LayerTextureSerializer.snapshotBatch(\(textures.count))", ms: ms)
         }
 
-        guard let commandBuffer = metalContext.commandQueue.makeCommandBuffer(),
-              let blitEncoder = commandBuffer.makeBlitCommandEncoder()
-        else {
-            throw CocoaError(.fileWriteUnknown)
+        struct StagedBatchTexture {
+            let index: Int
+            let sourceTexture: MTLTexture
+            let stagingTexture: MTLTexture
         }
 
-        var stagingTextures: [MTLTexture] = []
-        stagingTextures.reserveCapacity(textures.count)
+        var snapshots = Array<LayerTextureSnapshot?>(repeating: nil, count: textures.count)
+        var stagedTextures: [StagedBatchTexture] = []
+        stagedTextures.reserveCapacity(textures.count)
+        var commandBuffer: MTLCommandBuffer?
+        var blitEncoder: MTLBlitCommandEncoder?
 
-        for texture in textures {
-            guard let stagingTexture = stagingPool.checkout(
-                width: texture.width,
-                height: texture.height,
-                pixelFormat: texture.pixelFormat
-            ) else {
-                for st in stagingTextures { stagingPool.checkin(st) }
-                throw CocoaError(.fileWriteUnknown)
+        do {
+            for (index, texture) in textures.enumerated() {
+                if texture.storageMode == .shared {
+                    snapshots[index] = makeSnapshot(
+                        from: texture,
+                        originX: 0,
+                        originY: 0,
+                        width: texture.width,
+                        height: texture.height
+                    )
+                    continue
+                }
+
+                if blitEncoder == nil {
+                    guard
+                        let createdCommandBuffer = metalContext.commandQueue.makeCommandBuffer(),
+                        let createdBlitEncoder = createdCommandBuffer.makeBlitCommandEncoder()
+                    else {
+                        throw CocoaError(.fileWriteUnknown)
+                    }
+                    commandBuffer = createdCommandBuffer
+                    blitEncoder = createdBlitEncoder
+                }
+
+                guard let stagingTexture = stagingPool.checkout(
+                    width: texture.width,
+                    height: texture.height,
+                    pixelFormat: texture.pixelFormat
+                ) else {
+                    throw CocoaError(.fileWriteUnknown)
+                }
+                stagedTextures.append(.init(index: index, sourceTexture: texture, stagingTexture: stagingTexture))
+
+                let region = MTLRegionMake2D(0, 0, texture.width, texture.height)
+                blitEncoder?.copy(
+                    from: texture,
+                    sourceSlice: 0,
+                    sourceLevel: 0,
+                    sourceOrigin: region.origin,
+                    sourceSize: region.size,
+                    to: stagingTexture,
+                    destinationSlice: 0,
+                    destinationLevel: 0,
+                    destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
+                )
             }
-            stagingTextures.append(stagingTexture)
 
-            let region = MTLRegionMake2D(0, 0, texture.width, texture.height)
-            blitEncoder.copy(
-                from: texture,
-                sourceSlice: 0,
-                sourceLevel: 0,
-                sourceOrigin: region.origin,
-                sourceSize: region.size,
-                to: stagingTexture,
-                destinationSlice: 0,
-                destinationLevel: 0,
-                destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
-            )
+            if let blitEncoder, let commandBuffer {
+                blitEncoder.endEncoding()
+                commandBuffer.commit()
+                commandBuffer.waitUntilCompleted()
+            }
+        } catch {
+            for stagedTexture in stagedTextures {
+                stagingPool.checkin(stagedTexture.stagingTexture)
+            }
+            throw error
         }
 
-        blitEncoder.endEncoding()
-        commandBuffer.commit()
-        commandBuffer.waitUntilCompleted()
-
-        var snapshots: [LayerTextureSnapshot] = []
-        snapshots.reserveCapacity(textures.count)
-
-        for (texture, stagingTexture) in zip(textures, stagingTextures) {
-            let bytesPerPixel = 4
-            let bytesPerRow = texture.width * bytesPerPixel
-            var sourceBytes = [UInt8](repeating: 0, count: bytesPerRow * texture.height)
-            stagingTexture.getBytes(
-                &sourceBytes,
-                bytesPerRow: bytesPerRow,
-                from: MTLRegionMake2D(0, 0, texture.width, texture.height),
-                mipmapLevel: 0
+        for stagedTexture in stagedTextures {
+            snapshots[stagedTexture.index] = makeSnapshot(
+                from: stagedTexture.stagingTexture,
+                originX: 0,
+                originY: 0,
+                width: stagedTexture.sourceTexture.width,
+                height: stagedTexture.sourceTexture.height
             )
-            stagingPool.checkin(stagingTexture)
-
-            snapshots.append(LayerTextureSnapshot(
-                width: texture.width,
-                height: texture.height,
-                bytesPerRow: bytesPerRow,
-                pixelData: Data(sourceBytes)
-            ))
+            stagingPool.checkin(stagedTexture.stagingTexture)
         }
 
-        return snapshots
+        return try snapshots.enumerated().map { _, snapshot in
+            guard let snapshot else { throw CocoaError(.fileWriteUnknown) }
+            return snapshot
+        }
     }
 
     func snapshot(
@@ -299,8 +367,16 @@ final class LayerTextureSerializer {
             throw CocoaError(.fileReadCorruptFile)
         }
 
-        let bytesPerPixel = 4
-        let bytesPerRow = width * bytesPerPixel
+        if texture.storageMode == .shared {
+            return makeSnapshot(
+                from: texture,
+                originX: originX,
+                originY: originY,
+                width: width,
+                height: height
+            )
+        }
+
         let region = MTLRegionMake2D(originX, originY, width, height)
 
         guard
@@ -338,19 +414,12 @@ final class LayerTextureSerializer {
         commandBuffer.commit()
         commandBuffer.waitUntilCompleted()
 
-        var sourceBytes = [UInt8](repeating: 0, count: bytesPerRow * height)
-        stagingTexture.getBytes(
-            &sourceBytes,
-            bytesPerRow: bytesPerRow,
-            from: MTLRegionMake2D(0, 0, width, height),
-            mipmapLevel: 0
-        )
-
-        return LayerTextureSnapshot(
+        return makeSnapshot(
+            from: stagingTexture,
+            originX: 0,
+            originY: 0,
             width: width,
-            height: height,
-            bytesPerRow: bytesPerRow,
-            pixelData: Data(sourceBytes)
+            height: height
         )
     }
 
@@ -526,6 +595,24 @@ final class LayerTextureSerializer {
         }
 
         let region = MTLRegionMake2D(x, y, 1, 1)
+
+        if texture.storageMode == .shared {
+            var bytes = [UInt8](repeating: 0, count: 4)
+            texture.getBytes(
+                &bytes,
+                bytesPerRow: 4,
+                from: region,
+                mipmapLevel: 0
+            )
+
+            return RGBAColor(
+                red: Float(bytes[2]) / 255,
+                green: Float(bytes[1]) / 255,
+                blue: Float(bytes[0]) / 255,
+                alpha: Float(bytes[3]) / 255
+            )
+        }
+
         guard
             let stagingTexture = stagingPool.checkout(
                 width: 1,
