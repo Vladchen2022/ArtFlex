@@ -3858,7 +3858,7 @@ final class ColorSVPickerNSView: NSView {
         hasDrawnOnce = true
         let size = max(64, Int(min(bounds.width, bounds.height) * 2))
         let panel = coordinator.panel
-        if let image = colorPanelSVImage(size: size, panel: panel) {
+        if let image = sharedColorPickerSVImage(size: size, panel: panel) {
             ctx.saveGState()
             ctx.translateBy(x: 0, y: bounds.height)
             ctx.scaleBy(x: 1, y: -1)
@@ -3894,7 +3894,7 @@ private struct ColorHueStripView: View {
             let displayHue = isDragging ? localHue : hue
 
             ZStack {
-                if let image = colorPanelHueImage(height: height, width: width) {
+                if let image = sharedColorPickerVerticalHueImage(height: height, width: width) {
                     Image(decorative: image, scale: 1)
                         .resizable()
                         .interpolation(.high)
@@ -3951,7 +3951,7 @@ private struct ColorLightingHueBarView: View {
             let displayHue = isDragging ? localHue : hue
 
             ZStack {
-                if let image = colorPanelHorizontalHueImage(width: width, height: height) {
+                if let image = sharedColorPickerHorizontalHueImage(width: width, height: height) {
                     Image(decorative: image, scale: 1)
                         .resizable()
                         .interpolation(.high)

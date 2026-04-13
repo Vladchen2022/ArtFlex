@@ -158,42 +158,22 @@ private struct QuickColorPickerSVSquare: View {
     @State private var isDragging = false
 
     var body: some View {
-        let topLeft = colorAt(x: 0, y: 0)
-        let topRight = colorAt(x: 1, y: 0)
-        let bottomLeft = colorAt(x: 0, y: 1)
-        let bottomRight = colorAt(x: 1, y: 1)
         let displayX = isDragging ? localX : panel.pickerX
         let displayY = isDragging ? localY : panel.pickerY
 
         GeometryReader { geometry in
             ZStack(alignment: .topLeading) {
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(
-                        LinearGradient(
-                            colors: [topLeft, bottomLeft],
-                            startPoint: .top,
-                            endPoint: .bottom
-                        )
-                    )
-
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(
-                        LinearGradient(
-                            colors: [topRight, bottomRight],
-                            startPoint: .top,
-                            endPoint: .bottom
-                        )
-                    )
-                    .mask(
-                        RoundedRectangle(cornerRadius: 10, style: .continuous)
-                            .fill(
-                                LinearGradient(
-                                    colors: [Color.clear, Color.white],
-                                    startPoint: .leading,
-                                    endPoint: .trailing
-                                )
-                            )
-                    )
+                let size = max(64, Int(min(geometry.size.width, geometry.size.height) * 2))
+                if let image = sharedColorPickerSVImage(size: size, panel: panel) {
+                    Image(decorative: image, scale: 1)
+                        .resizable()
+                        .interpolation(.high)
+                        .scaledToFill()
+                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                } else {
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .fill(Color.clear)
+                }
 
                 Circle()
                     .strokeBorder(Color.white, lineWidth: 2)
@@ -224,19 +204,6 @@ private struct QuickColorPickerSVSquare: View {
                     }
             )
         }
-    }
-
-    private func colorAt(x: Float, y: Float) -> Color {
-        var updated = panel
-        updated.pickerX = x
-        updated.pickerY = y
-        let color = ColorBlocksEngine.pickerColor(from: updated)
-        return Color(
-            red: Double(color.red),
-            green: Double(color.green),
-            blue: Double(color.blue),
-            opacity: Double(color.alpha)
-        )
     }
 }
 
