@@ -554,14 +554,24 @@ final class WorkspaceViewModel: ObservableObject {
 
     func setPaintJitterAmount(_ amount: Float) {
         bootstrap.workspaceStore.updateToolSession { session in
-            session.brush.paintJitterAmount = min(max(amount, 0), 1)
+            let clamped = min(max(amount, 0), 1)
+            if session.brush.compoundBrush.enabled {
+                session.brush.compoundBrush.globalPaintJitterAmount = clamped
+            } else {
+                session.brush.paintJitterAmount = clamped
+            }
         }
         refresh()
     }
 
     func setPaintContrastAmount(_ amount: Float) {
         bootstrap.workspaceStore.updateToolSession { session in
-            session.brush.paintContrastAmount = min(max(amount, 0), 1)
+            let clamped = min(max(amount, 0), 1)
+            if session.brush.compoundBrush.enabled {
+                session.brush.compoundBrush.globalPaintContrastAmount = clamped
+            } else {
+                session.brush.paintContrastAmount = clamped
+            }
         }
         refresh()
     }
@@ -622,6 +632,13 @@ final class WorkspaceViewModel: ObservableObject {
         refresh()
     }
 
+    func setBuildUpOpacityCompensationAmount(_ amount: Float) {
+        bootstrap.workspaceStore.updateToolSession { session in
+            session.brush.buildUpOpacityCompensationAmount = min(max(amount, 0), 1)
+        }
+        refresh()
+    }
+
     func setCompoundPrimaryPressureSizeAmount(_ amount: Float) {
         bootstrap.workspaceStore.updateToolSession { session in
             session.brush.pressureSizeAmount = min(max(amount, 0), 1)
@@ -648,6 +665,18 @@ final class WorkspaceViewModel: ObservableObject {
         return brush.compoundBrush.enabled
             ? brush.compoundBrush.globalPressureOpacityAmount
             : brush.pressureOpacityAmount
+    }
+
+    var displayedBuildUpOpacityCompensationAmount: Float {
+        workspace.toolSession.brush.buildUpOpacityCompensationAmount
+    }
+
+    var displayedPaintJitterAmount: Float {
+        workspace.toolSession.brush.effectivePaintJitterAmount
+    }
+
+    var displayedPaintContrastAmount: Float {
+        workspace.toolSession.brush.effectivePaintContrastAmount
     }
 
     func setSizeCurveLow(_ value: Float) {
@@ -5821,8 +5850,8 @@ final class WorkspaceViewModel: ObservableObject {
             pointB: pointB,
             pointC: pointC,
             color: gradientPreviewColor,
-            paintJitterAmount: workspace.toolSession.brush.paintJitterAmount,
-            paintContrastAmount: workspace.toolSession.brush.paintContrastAmount,
+            paintJitterAmount: displayedPaintJitterAmount,
+            paintContrastAmount: displayedPaintContrastAmount,
             distortionAmount: workspace.toolSession.brush.jitterAmount,
             selectionShape: workspace.selection.committedShape,
             alphaLockTexture: alphaLockTexture
@@ -5926,8 +5955,8 @@ final class WorkspaceViewModel: ObservableObject {
             pathPoints: geometry.pathPoints,
             maxRadius: geometry.maxRadius,
             color: gradientPreviewColor,
-            paintJitterAmount: workspace.toolSession.brush.paintJitterAmount,
-            paintContrastAmount: workspace.toolSession.brush.paintContrastAmount,
+            paintJitterAmount: displayedPaintJitterAmount,
+            paintContrastAmount: displayedPaintContrastAmount,
             distortionAmount: workspace.toolSession.brush.jitterAmount,
             maskQuality: .commit,
             selectionShape: workspace.selection.committedShape,
@@ -8348,8 +8377,8 @@ final class WorkspaceViewModel: ObservableObject {
             selectionMaskAlphaBytes: selectionMaskRegion.alphaBytes,
             fillCenter: lassoFillCenter,
             color: resolvedFillToolColor(from: workspace.toolSession.selectedColor),
-            paintJitterAmount: workspace.toolSession.brush.paintJitterAmount,
-            paintContrastAmount: workspace.toolSession.brush.paintContrastAmount,
+            paintJitterAmount: displayedPaintJitterAmount,
+            paintContrastAmount: displayedPaintContrastAmount,
             distortionAmount: workspace.toolSession.brush.jitterAmount,
             alphaLockTexture: alphaLockTexture
         )

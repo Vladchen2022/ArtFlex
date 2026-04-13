@@ -1647,8 +1647,8 @@ final class StageOneBrushRenderer {
                     stroke.color.alpha
                 ),
                 mode: stroke.tool == .eraser ? 1 : 0,
-                paintJitterAmount: stroke.brush.paintJitterAmount,
-                paintContrastAmount: stroke.brush.paintContrastAmount,
+                paintJitterAmount: stroke.brush.effectivePaintJitterAmount,
+                paintContrastAmount: stroke.brush.effectivePaintContrastAmount,
                 jitterDirectionDegrees: avgJitterDir,
                 canvasWidth: Float(texture.width),
                 canvasHeight: Float(texture.height),
@@ -1764,17 +1764,18 @@ final class StageOneBrushRenderer {
         )
         let primarySpacingPx = max(Float(Double(stroke.brush.size) * Double(stroke.brush.spacingPercent) / 100.0), 0.5)
         let primaryStampDiameterPx = max(stroke.brush.size * sizeFactor, 1)
-        let buildUpOpacityCompensationAmount: Float =
+        let automaticBuildUpOpacityCompensationAmount: Float =
             (stroke.tool == .brush || stroke.tool == .eraser) && stroke.brush.buildMode == .buildUp
             ? (
                 compoundEnabled
-                ? max(
-                    globalOpacityResponse,
-                    max(primaryOpacityResponse, min(max(compoundSecondary.pressureOpacityAmount, 0), 1))
-                )
+                ? globalOpacityResponse
                 : primaryOpacityResponse
             )
             : 0
+        let buildUpOpacityCompensationAmount = BrushSettings.resolvedBuildUpCompensationAmount(
+            automaticCompensationAmount: automaticBuildUpOpacityCompensationAmount,
+            brushCompensationAmount: stroke.brush.buildUpOpacityCompensationAmount
+        )
         let buildUpOpacitySpacingRatio: Float =
             (stroke.tool == .brush || stroke.tool == .eraser) && stroke.brush.buildMode == .buildUp
             ? min(max(primarySpacingPx / primaryStampDiameterPx, 0.02), 1)
@@ -1823,8 +1824,8 @@ final class StageOneBrushRenderer {
                 stroke.color.alpha
             ),
             colorJitterAmount: stroke.brush.colorJitterAmount,
-            paintJitterAmount: stroke.brush.paintJitterAmount,
-            paintContrastAmount: stroke.brush.paintContrastAmount,
+            paintJitterAmount: stroke.brush.effectivePaintJitterAmount,
+            paintContrastAmount: stroke.brush.effectivePaintContrastAmount,
             stampSeed: sample.arcLengthPx,
             jitterDirectionDegrees: sample.jitterDirectionDegrees + 90,
             canvasSize: SIMD2(Float(texture.width), Float(texture.height)),

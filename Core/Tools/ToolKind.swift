@@ -585,6 +585,8 @@ struct CompoundBrushSettings: Codable, Equatable, Sendable {
         case pressureMix
         case globalPressureSizeAmount
         case globalPressureOpacityAmount
+        case globalPaintJitterAmount
+        case globalPaintContrastAmount
     }
 
     var enabled: Bool
@@ -593,6 +595,8 @@ struct CompoundBrushSettings: Codable, Equatable, Sendable {
     var pressureMix: CompoundPressureMixSettings
     var globalPressureSizeAmount: Float
     var globalPressureOpacityAmount: Float
+    var globalPaintJitterAmount: Float
+    var globalPaintContrastAmount: Float
 
     static let disabledDefault = CompoundBrushSettings(
         enabled: false,
@@ -600,7 +604,9 @@ struct CompoundBrushSettings: Codable, Equatable, Sendable {
         secondary: .default,
         pressureMix: .default,
         globalPressureSizeAmount: 0,
-        globalPressureOpacityAmount: 0
+        globalPressureOpacityAmount: 0,
+        globalPaintJitterAmount: 0,
+        globalPaintContrastAmount: 0
     )
 
     init(
@@ -609,7 +615,9 @@ struct CompoundBrushSettings: Codable, Equatable, Sendable {
         secondary: CompoundSecondaryTipSettings,
         pressureMix: CompoundPressureMixSettings,
         globalPressureSizeAmount: Float = 0,
-        globalPressureOpacityAmount: Float = 0
+        globalPressureOpacityAmount: Float = 0,
+        globalPaintJitterAmount: Float = 0,
+        globalPaintContrastAmount: Float = 0
     ) {
         self.enabled = enabled
         self.mode = mode
@@ -617,6 +625,8 @@ struct CompoundBrushSettings: Codable, Equatable, Sendable {
         self.pressureMix = pressureMix
         self.globalPressureSizeAmount = globalPressureSizeAmount
         self.globalPressureOpacityAmount = globalPressureOpacityAmount
+        self.globalPaintJitterAmount = globalPaintJitterAmount
+        self.globalPaintContrastAmount = globalPaintContrastAmount
     }
 
     init(from decoder: Decoder) throws {
@@ -630,6 +640,10 @@ struct CompoundBrushSettings: Codable, Equatable, Sendable {
             ?? defaults.globalPressureSizeAmount
         globalPressureOpacityAmount = try container.decodeIfPresent(Float.self, forKey: .globalPressureOpacityAmount)
             ?? defaults.globalPressureOpacityAmount
+        globalPaintJitterAmount = try container.decodeIfPresent(Float.self, forKey: .globalPaintJitterAmount)
+            ?? defaults.globalPaintJitterAmount
+        globalPaintContrastAmount = try container.decodeIfPresent(Float.self, forKey: .globalPaintContrastAmount)
+            ?? defaults.globalPaintContrastAmount
     }
 
     func encode(to encoder: Encoder) throws {
@@ -640,6 +654,8 @@ struct CompoundBrushSettings: Codable, Equatable, Sendable {
         try container.encode(pressureMix, forKey: .pressureMix)
         try container.encode(globalPressureSizeAmount, forKey: .globalPressureSizeAmount)
         try container.encode(globalPressureOpacityAmount, forKey: .globalPressureOpacityAmount)
+        try container.encode(globalPaintJitterAmount, forKey: .globalPaintJitterAmount)
+        try container.encode(globalPaintContrastAmount, forKey: .globalPaintContrastAmount)
     }
 }
 
@@ -668,6 +684,7 @@ struct BrushSettings: Codable, Sendable, Equatable {
     var sizeLowerBound: Float
     var pressureSizeAmount: Float
     var pressureOpacityAmount: Float
+    var buildUpOpacityCompensationAmount: Float
     var sizeCurveLow: Float
     var sizeCurveMid: Float
     var sizeCurveHigh: Float
@@ -701,6 +718,7 @@ struct BrushSettings: Codable, Sendable, Equatable {
         sizeLowerBound: 0,
         pressureSizeAmount: 0,
         pressureOpacityAmount: 0,
+        buildUpOpacityCompensationAmount: 1,
         sizeCurveLow: 0.18,
         sizeCurveMid: 0.52,
         sizeCurveHigh: 0.88,
@@ -735,6 +753,7 @@ struct BrushSettings: Codable, Sendable, Equatable {
         case sizeLowerBound
         case pressureSizeAmount
         case pressureOpacityAmount
+        case buildUpOpacityCompensationAmount
         case sizeCurveLow
         case sizeCurveMid
         case sizeCurveHigh
@@ -769,6 +788,7 @@ struct BrushSettings: Codable, Sendable, Equatable {
         sizeLowerBound: Float,
         pressureSizeAmount: Float,
         pressureOpacityAmount: Float,
+        buildUpOpacityCompensationAmount: Float = 1,
         sizeCurveLow: Float,
         sizeCurveMid: Float,
         sizeCurveHigh: Float,
@@ -801,6 +821,7 @@ struct BrushSettings: Codable, Sendable, Equatable {
         self.sizeLowerBound = sizeLowerBound
         self.pressureSizeAmount = pressureSizeAmount
         self.pressureOpacityAmount = pressureOpacityAmount
+        self.buildUpOpacityCompensationAmount = buildUpOpacityCompensationAmount
         self.sizeCurveLow = sizeCurveLow
         self.sizeCurveMid = sizeCurveMid
         self.sizeCurveHigh = sizeCurveHigh
@@ -838,6 +859,8 @@ struct BrushSettings: Codable, Sendable, Equatable {
         sizeLowerBound = try container.decodeIfPresent(Float.self, forKey: .sizeLowerBound) ?? defaults.sizeLowerBound
         pressureSizeAmount = try container.decodeIfPresent(Float.self, forKey: .pressureSizeAmount) ?? defaults.pressureSizeAmount
         pressureOpacityAmount = try container.decodeIfPresent(Float.self, forKey: .pressureOpacityAmount) ?? defaults.pressureOpacityAmount
+        buildUpOpacityCompensationAmount = try container.decodeIfPresent(Float.self, forKey: .buildUpOpacityCompensationAmount)
+            ?? defaults.buildUpOpacityCompensationAmount
         sizeCurveLow = try container.decodeIfPresent(Float.self, forKey: .sizeCurveLow) ?? defaults.sizeCurveLow
         sizeCurveMid = try container.decodeIfPresent(Float.self, forKey: .sizeCurveMid) ?? defaults.sizeCurveMid
         sizeCurveHigh = try container.decodeIfPresent(Float.self, forKey: .sizeCurveHigh) ?? defaults.sizeCurveHigh
@@ -871,6 +894,7 @@ struct BrushSettings: Codable, Sendable, Equatable {
         try container.encode(sizeLowerBound, forKey: .sizeLowerBound)
         try container.encode(pressureSizeAmount, forKey: .pressureSizeAmount)
         try container.encode(pressureOpacityAmount, forKey: .pressureOpacityAmount)
+        try container.encode(buildUpOpacityCompensationAmount, forKey: .buildUpOpacityCompensationAmount)
         try container.encode(sizeCurveLow, forKey: .sizeCurveLow)
         try container.encode(sizeCurveMid, forKey: .sizeCurveMid)
         try container.encode(sizeCurveHigh, forKey: .sizeCurveHigh)
@@ -914,6 +938,18 @@ struct BrushSettings: Codable, Sendable, Equatable {
     ) -> Float {
         let response = min(max(responseAmount, 0), 1)
         return (1 - response) + (response * curvedPressure)
+    }
+
+    var effectivePaintJitterAmount: Float {
+        compoundBrush.enabled
+            ? compoundBrush.globalPaintJitterAmount
+            : paintJitterAmount
+    }
+
+    var effectivePaintContrastAmount: Float {
+        compoundBrush.enabled
+            ? compoundBrush.globalPaintContrastAmount
+            : paintContrastAmount
     }
 
     static func remappedOpacityPressure(
@@ -974,6 +1010,15 @@ struct BrushSettings: Codable, Sendable, Equatable {
             stampDiameterPx: stampDiameterPx
         )
         return target + ((compensated - target) * amount)
+    }
+
+    static func resolvedBuildUpCompensationAmount(
+        automaticCompensationAmount: Float,
+        brushCompensationAmount: Float
+    ) -> Float {
+        let automatic = min(max(automaticCompensationAmount, 0), 1)
+        let brush = min(max(brushCompensationAmount, 0), 1)
+        return automatic * brush
     }
 }
 

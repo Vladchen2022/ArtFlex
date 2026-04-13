@@ -30,6 +30,7 @@ struct ProjectPackageTests {
         presetBrush.sizeLowerBound = 0.24
         presetBrush.pressureSizeAmount = 0.35
         presetBrush.pressureOpacityAmount = 0.7
+        presetBrush.buildUpOpacityCompensationAmount = 0.44
         presetBrush.sizeCurveLow = 0.12
         presetBrush.sizeCurveMid = 0.58
         presetBrush.sizeCurveHigh = 0.91
@@ -39,6 +40,8 @@ struct ProjectPackageTests {
         presetBrush.compoundBrush.enabled = true
         presetBrush.compoundBrush.globalPressureSizeAmount = 0.42
         presetBrush.compoundBrush.globalPressureOpacityAmount = 0.68
+        presetBrush.compoundBrush.globalPaintJitterAmount = 0.57
+        presetBrush.compoundBrush.globalPaintContrastAmount = 0.26
         workspace.toolSession.brush = presetBrush
 
         workspace.brushLibrary = BrushLibraryState(
@@ -110,10 +113,16 @@ struct ProjectPackageTests {
         #expect(package.workspaceState.brushLibrary.presets.count == workspace.brushLibrary.presets.count)
         #expect(package.workspaceState.brushLibrary.presets.first?.brush.customTipMaskData == primaryMask)
         #expect(package.workspaceState.brushLibrary.presets.first?.brush.customTipImportedSourceInfo == primarySourceInfo)
+        #expect(package.workspaceState.brushLibrary.presets.first?.brush.buildUpOpacityCompensationAmount == 0.44)
         #expect(package.workspaceState.brushLibrary.presets.first?.brush.compoundBrush.globalPressureSizeAmount == 0.42)
         #expect(package.workspaceState.brushLibrary.presets.first?.brush.compoundBrush.globalPressureOpacityAmount == 0.68)
+        #expect(package.workspaceState.brushLibrary.presets.first?.brush.compoundBrush.globalPaintJitterAmount == 0.57)
+        #expect(package.workspaceState.brushLibrary.presets.first?.brush.compoundBrush.globalPaintContrastAmount == 0.26)
+        #expect(package.workspaceState.toolSession.brush.buildUpOpacityCompensationAmount == 0.44)
         #expect(package.workspaceState.toolSession.brush.compoundBrush.globalPressureSizeAmount == 0.42)
         #expect(package.workspaceState.toolSession.brush.compoundBrush.globalPressureOpacityAmount == 0.68)
+        #expect(package.workspaceState.toolSession.brush.compoundBrush.globalPaintJitterAmount == 0.57)
+        #expect(package.workspaceState.toolSession.brush.compoundBrush.globalPaintContrastAmount == 0.26)
         #expect(package.workspaceState.tipImageLibrary == workspace.tipImageLibrary)
         #expect(package.creativeShapeGenerator == workspace.creativeShapeGenerator)
         #expect(package.workspaceState.creativeShapeGenerator == workspace.creativeShapeGenerator)

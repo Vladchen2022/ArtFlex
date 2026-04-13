@@ -151,6 +151,38 @@ struct WorkspaceViewModelSafetyTests {
 
     @Test
     @MainActor
+    func compoundGlobalPaintNoiseControlsStayDecoupledFromPrimaryBrushNoiseControls() throws {
+        let harness = try BrushEditingBoundaryHarness()
+
+        harness.viewModel.setPaintJitterAmount(0.21)
+        harness.viewModel.setPaintContrastAmount(0.32)
+        harness.viewModel.setCompoundBrushEnabled(true)
+        harness.viewModel.setPaintJitterAmount(0.73)
+        harness.viewModel.setPaintContrastAmount(0.84)
+
+        let brush = harness.viewModel.workspace.toolSession.brush
+        #expect(brush.compoundBrush.enabled == true)
+        #expect(brush.paintJitterAmount == 0.21)
+        #expect(brush.paintContrastAmount == 0.32)
+        #expect(brush.compoundBrush.globalPaintJitterAmount == 0.73)
+        #expect(brush.compoundBrush.globalPaintContrastAmount == 0.84)
+        #expect(harness.viewModel.displayedPaintJitterAmount == 0.73)
+        #expect(harness.viewModel.displayedPaintContrastAmount == 0.84)
+    }
+
+    @Test
+    @MainActor
+    func buildUpOpacityCompensationControlUpdatesBrushSetting() throws {
+        let harness = try BrushEditingBoundaryHarness()
+
+        harness.viewModel.setBuildUpOpacityCompensationAmount(0.38)
+
+        #expect(harness.viewModel.workspace.toolSession.brush.buildUpOpacityCompensationAmount == 0.38)
+        #expect(harness.viewModel.displayedBuildUpOpacityCompensationAmount == 0.38)
+    }
+
+    @Test
+    @MainActor
     func fillAtPointStartsDrawingStatsTracking() throws {
         let harness = try BrushEditingBoundaryHarness()
 
@@ -476,6 +508,30 @@ struct WorkspaceViewModelSafetyTests {
         #expect(harness.viewModel.workspace.toolSession.brush.customTipMaskData == customMask)
         #expect(harness.viewModel.workspace.toolSession.brush != selectedPresetBrush)
         #expect(harness.viewModel.workspace.brushLibrary.preset(id: selectedPresetID)?.brush == selectedPresetBrush)
+    }
+
+    @Test
+    @MainActor
+    func savingBrushPresetPreservesBuildUpOpacityCompensationAmount() throws {
+        let harness = try BrushEditingBoundaryHarness()
+        harness.viewModel.setBuildUpOpacityCompensationAmount(0.41)
+
+        harness.viewModel.saveCurrentBrushPreset()
+
+        let selectedPresetID = try #require(
+            harness.viewModel.workspace.brushLibrary.selectedPresetID ??
+            harness.viewModel.workspace.brushLibrary.presets.first?.id
+        )
+        let savedPresetBrush = try #require(
+            harness.viewModel.workspace.brushLibrary.preset(id: selectedPresetID)?.brush
+        )
+
+        #expect(savedPresetBrush.buildUpOpacityCompensationAmount == 0.41)
+
+        harness.viewModel.setBuildUpOpacityCompensationAmount(0.9)
+        harness.viewModel.applyBrushPreset(selectedPresetID)
+
+        #expect(harness.viewModel.workspace.toolSession.brush.buildUpOpacityCompensationAmount == 0.41)
     }
 
     @Test

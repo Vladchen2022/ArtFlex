@@ -64,6 +64,16 @@ struct PressureInputTests {
     }
 
     @Test
+    func resolvedBuildUpCompensationAmountScalesAutomaticResponseByBrushSetting() {
+        let amount = BrushSettings.resolvedBuildUpCompensationAmount(
+            automaticCompensationAmount: 0.8,
+            brushCompensationAmount: 0.25
+        )
+
+        #expect(abs(amount - 0.2) < 0.0001)
+    }
+
+    @Test
     func opacityCapCurveKeepsLightStartAndAllowsFastRamp() {
         let points: [(x: Float, y: Float)] = [
             (0.0, 0.0),

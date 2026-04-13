@@ -724,11 +724,15 @@ struct RightInspectorView: View {
                 onCommit: { viewModel.setBrushJitterAmount(Float($0)) }
             )
 
+            Divider()
+                .overlay(Color.white.opacity(0.08))
+                .padding(.vertical, 2)
+
             OptimizedCompactSlider(
                 title: "杂色",
-                valueText: "\(Int(viewModel.workspace.toolSession.brush.paintJitterAmount * 100))%",
+                valueText: "\(Int(viewModel.displayedPaintJitterAmount * 100))%",
                 value: Binding(
-                    get: { Double(viewModel.workspace.toolSession.brush.paintJitterAmount) },
+                    get: { Double(viewModel.displayedPaintJitterAmount) },
                     set: { _ in }
                 ),
                 range: 0...1,
@@ -737,9 +741,9 @@ struct RightInspectorView: View {
 
             OptimizedCompactSlider(
                 title: "杂色对比",
-                valueText: "\(Int(viewModel.workspace.toolSession.brush.paintContrastAmount * 100))%",
+                valueText: "\(Int(viewModel.displayedPaintContrastAmount * 100))%",
                 value: Binding(
-                    get: { Double(viewModel.workspace.toolSession.brush.paintContrastAmount) },
+                    get: { Double(viewModel.displayedPaintContrastAmount) },
                     set: { _ in }
                 ),
                 range: 0...1,
@@ -767,6 +771,23 @@ struct RightInspectorView: View {
                 range: 0...1,
                 onCommit: { viewModel.setPressureOpacityAmount(Float($0)) }
             )
+
+            Divider()
+                .overlay(Color.white.opacity(0.08))
+                .padding(.vertical, 2)
+
+            if viewModel.workspace.toolSession.brush.buildMode == .buildUp {
+                OptimizedCompactSlider(
+                    title: "透明修正",
+                    valueText: "\(Int(viewModel.displayedBuildUpOpacityCompensationAmount * 100))%",
+                    value: Binding(
+                        get: { Double(viewModel.displayedBuildUpOpacityCompensationAmount) },
+                        set: { _ in }
+                    ),
+                    range: 0...1,
+                    onCommit: { viewModel.setBuildUpOpacityCompensationAmount(Float($0)) }
+                )
+            }
 
             HStack(spacing: 8) {
                 compactIconButton(
@@ -2652,12 +2673,10 @@ struct RightInspectorView: View {
         let targetVisibleOpacity = Float(brush.opacity) * Float(rawOpacityFactor)
         let spacingPx = max(Float(Double(brush.size) * Double(brush.spacingPercent) / 100.0), 0.5)
         let stampDiameterPx = max(Float(brush.size) * Float(sizeFactor), 1)
-        let compensationAmount = brush.compoundBrush.enabled
-            ? max(
-                Float(opacityResponse),
-                min(max(brush.compoundBrush.secondary.pressureOpacityAmount, 0), 1)
-            )
-            : Float(opacityResponse)
+        let compensationAmount = BrushSettings.resolvedBuildUpCompensationAmount(
+            automaticCompensationAmount: Float(opacityResponse),
+            brushCompensationAmount: brush.buildUpOpacityCompensationAmount
+        )
         let visibleOpacity = brush.buildMode == .buildUp
             ? BrushSettings.resolvedBuildUpVisibleAlpha(
                 targetVisibleAlpha: targetVisibleOpacity,
