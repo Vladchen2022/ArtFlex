@@ -126,6 +126,8 @@ final class WorkspaceViewModel: ObservableObject {
     @Published private(set) var activeFreeTransformInteractionMode: FreeTransformInteractionMode?
     @Published private(set) var isBrushTipCanvasFocused = false
     @Published private(set) var isColorBlocksPanelFocused = false
+    @Published private(set) var brushTipDraftMaskData: Data?
+    @Published private(set) var hasPendingBrushTipDraft = false
     private(set) var lassoSamplingDebugPoints: [CanvasPoint] = []
     private(set) var samePathCommittedDebugShape: SelectionShape?
     private(set) var samePathPreviewDebugShape: SelectionShape?
@@ -135,6 +137,7 @@ final class WorkspaceViewModel: ObservableObject {
     var ideationOperationHandler: ((IdeationCanvasOperation) -> Void)?
     var ideationUndoHandler: (() -> Bool)?
     var ideationRedoHandler: (() -> Bool)?
+    var canvasContentChangeHandler: (() -> Void)?
     private var isApplyingMirroredIdeationOperation = false
     private var statusDismissTask: Task<Void, Never>?
     private var isAdjustingLayerOpacity = false
@@ -597,16 +600,54 @@ final class WorkspaceViewModel: ObservableObject {
 
     func setPressureSizeAmount(_ amount: Float) {
         bootstrap.workspaceStore.updateToolSession { session in
-            session.brush.pressureSizeAmount = min(max(amount, 0), 1)
+            let clamped = min(max(amount, 0), 1)
+            if session.brush.compoundBrush.enabled {
+                session.brush.compoundBrush.globalPressureSizeAmount = clamped
+            } else {
+                session.brush.pressureSizeAmount = clamped
+            }
         }
         refresh()
     }
 
     func setPressureOpacityAmount(_ amount: Float) {
         bootstrap.workspaceStore.updateToolSession { session in
+            let clamped = min(max(amount, 0), 1)
+            if session.brush.compoundBrush.enabled {
+                session.brush.compoundBrush.globalPressureOpacityAmount = clamped
+            } else {
+                session.brush.pressureOpacityAmount = clamped
+            }
+        }
+        refresh()
+    }
+
+    func setCompoundPrimaryPressureSizeAmount(_ amount: Float) {
+        bootstrap.workspaceStore.updateToolSession { session in
+            session.brush.pressureSizeAmount = min(max(amount, 0), 1)
+        }
+        refresh()
+    }
+
+    func setCompoundPrimaryPressureOpacityAmount(_ amount: Float) {
+        bootstrap.workspaceStore.updateToolSession { session in
             session.brush.pressureOpacityAmount = min(max(amount, 0), 1)
         }
         refresh()
+    }
+
+    var displayedPressureSizeAmount: Float {
+        let brush = workspace.toolSession.brush
+        return brush.compoundBrush.enabled
+            ? brush.compoundBrush.globalPressureSizeAmount
+            : brush.pressureSizeAmount
+    }
+
+    var displayedPressureOpacityAmount: Float {
+        let brush = workspace.toolSession.brush
+        return brush.compoundBrush.enabled
+            ? brush.compoundBrush.globalPressureOpacityAmount
+            : brush.pressureOpacityAmount
     }
 
     func setSizeCurveLow(_ value: Float) {
@@ -711,32 +752,39 @@ final class WorkspaceViewModel: ObservableObject {
         bootstrap.workspaceStore.updateToolSession { session in
             session.brush.tipShape = tipShape
         }
-        refresh()
+        notePrimaryBrushTipDefinitionChanged()
+        refreshToolSessionOnly()
     }
 
     func reactivatePrimaryCustomTipSourceIfAvailable() {
+        var didReactivate = false
         bootstrap.workspaceStore.updateToolSession { session in
             let hasDormantCustomTip =
                 session.brush.customTipMaskData != nil ||
                 (session.brush.customTipSourceSemantic == .importedImage && session.brush.customTipAssetID != nil)
             guard hasDormantCustomTip else { return }
             session.brush.tipShape = .customRound
+            didReactivate = true
         }
-        refresh()
+        guard didReactivate else { return }
+        notePrimaryBrushTipDefinitionChanged()
+        refreshToolSessionOnly()
     }
 
     func setCustomTipSoftness(_ softness: Float) {
         bootstrap.workspaceStore.updateToolSession { session in
             session.brush.customTipSoftness = min(max(softness, 0), 1)
         }
-        refresh()
+        notePrimaryBrushTipDefinitionChanged()
+        refreshToolSessionOnly()
     }
 
     func setCustomTipRoundness(_ roundness: Float) {
         bootstrap.workspaceStore.updateToolSession { session in
             session.brush.customTipRoundness = min(max(roundness, 0.25), 1)
         }
-        refresh()
+        notePrimaryBrushTipDefinitionChanged()
+        refreshToolSessionOnly()
     }
 
     func setCustomTipAngleDegrees(_ angleDegrees: Float) {
@@ -747,7 +795,8 @@ final class WorkspaceViewModel: ObservableObject {
             }
             session.brush.customTipAngleDegrees = normalized
         }
-        refresh()
+        notePrimaryBrushTipDefinitionChanged()
+        refreshToolSessionOnly()
     }
 
     func updateCustomTipMask(_ data: Data?) {
@@ -759,11 +808,32 @@ final class WorkspaceViewModel: ObservableObject {
             session.brush.customTipMaskData = data
             session.brush.customTipEnvelopeMaskData = makeEnvelopeMaskData(from: data)
         }
-        refresh()
+        discardPendingBrushTipDraft()
+        notePrimaryBrushTipDefinitionChanged()
+        refreshToolSessionOnly()
     }
 
     func clearCustomTipMask() {
         updateCustomTipMask(nil)
+    }
+
+    func updateBrushTipDraft(_ data: Data?) {
+        guard brushTipDraftMaskData != data || hasPendingBrushTipDraft == false else {
+            return
+        }
+        brushTipDraftMaskData = data
+        hasPendingBrushTipDraft = true
+    }
+
+    func clearBrushTipDraft() {
+        updateBrushTipDraft(nil)
+    }
+
+    @discardableResult
+    func applyBrushTipDraft() -> Bool {
+        guard hasPendingBrushTipDraft else { return false }
+        updateCustomTipMask(brushTipDraftMaskData)
+        return true
     }
 
     func setCompoundBrushEnabled(_ enabled: Bool) {
@@ -938,6 +1008,7 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func setBrushTipCanvasFocused(_ focused: Bool) {
+        guard isBrushTipCanvasFocused != focused else { return }
         isBrushTipCanvasFocused = focused
         if focused {
             isColorBlocksPanelFocused = false
@@ -945,6 +1016,7 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func setColorBlocksPanelFocused(_ focused: Bool) {
+        guard isColorBlocksPanelFocused != focused else { return }
         isColorBlocksPanelFocused = focused
         if focused {
             isBrushTipCanvasFocused = false
@@ -1002,6 +1074,8 @@ final class WorkspaceViewModel: ObservableObject {
             session.brush.customTipMaskData = importedTip.item.maskData
             session.brush.customTipEnvelopeMaskData = importedTip.envelopeMaskData
         }
+        discardPendingBrushTipDraft()
+        notePrimaryBrushTipDefinitionChanged()
         StageOneBrushPreviewRasterizer.resetCache()
         persistBrushLibrary()
         refresh()
@@ -1144,6 +1218,15 @@ final class WorkspaceViewModel: ObservableObject {
         return (detail: detail, envelope: envelope)
     }
 
+    private func resolvedToolSessionForCanvasStrokes() -> ToolSessionState {
+        return bootstrap.workspaceStore.state.toolSession
+    }
+
+    private func discardPendingBrushTipDraft() {
+        brushTipDraftMaskData = nil
+        hasPendingBrushTipDraft = false
+    }
+
     private func extractedMaskBytes(from image: NSImage) -> (bytes: [UInt8], width: Int, height: Int)? {
         guard
             let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil),
@@ -1184,6 +1267,40 @@ final class WorkspaceViewModel: ObservableObject {
             let luminance = (0.299 * red) + (0.587 * green) + (0.114 * blue)
             let darkness = (255.0 - luminance) * alpha
             mask[index] = UInt8(clamping: Int(darkness.rounded()))
+        }
+
+        return (mask, width, height)
+    }
+
+    private func extractedMaskBytes(from snapshot: LayerTextureSnapshot) -> (bytes: [UInt8], width: Int, height: Int)? {
+        let width = snapshot.width
+        let height = snapshot.height
+        guard
+            width > 0,
+            height > 0,
+            snapshot.bytesPerRow >= width * 4,
+            snapshot.pixelData.count >= snapshot.bytesPerRow * height
+        else {
+            return nil
+        }
+
+        var mask = [UInt8](repeating: 0, count: width * height)
+        snapshot.pixelData.withUnsafeBytes { rawBuffer in
+            let bytes = rawBuffer.bindMemory(to: UInt8.self)
+            for y in 0..<height {
+                let rowOffset = y * snapshot.bytesPerRow
+                let maskRowOffset = y * width
+                for x in 0..<width {
+                    let offset = rowOffset + (x * 4)
+                    let blue = Double(bytes[offset])
+                    let green = Double(bytes[offset + 1])
+                    let red = Double(bytes[offset + 2])
+                    let alpha = Double(bytes[offset + 3]) / 255.0
+                    let luminance = (0.299 * red) + (0.587 * green) + (0.114 * blue)
+                    let darkness = (255.0 - luminance) * alpha
+                    mask[maskRowOffset + x] = UInt8(clamping: Int(darkness.rounded()))
+                }
+            }
         }
 
         return (mask, width, height)
@@ -1508,6 +1625,8 @@ final class WorkspaceViewModel: ObservableObject {
             session.brush.customTipMaskData = maskData
             session.brush.customTipEnvelopeMaskData = makeEnvelopeMaskData(from: maskData)
         }
+        discardPendingBrushTipDraft()
+        notePrimaryBrushTipDefinitionChanged()
         StageOneBrushPreviewRasterizer.resetCache()
         refresh()
         showStatus(.init(kind: .success, message: "已应用共享笔尖图片"))
@@ -5727,11 +5846,12 @@ final class WorkspaceViewModel: ObservableObject {
         }
 
         checkpointHistoryIfPossible()
+        let resolvedToolSession = resolvedToolSessionForCanvasStrokes()
 
         let stroke = StrokeDescriptor(
             tool: .brush,
-            color: workspace.toolSession.selectedColor,
-            brush: workspace.toolSession.brush,
+            color: resolvedToolSession.selectedColor,
+            brush: resolvedToolSession.brush,
             points: [
                 StrokePoint(x: pointA.x, y: pointA.y, pressure: 1),
                 StrokePoint(x: pointB.x, y: pointB.y, pressure: 1)
@@ -5743,8 +5863,8 @@ final class WorkspaceViewModel: ObservableObject {
         bootstrap.strokeEngine.beginStrokeIfNeeded(
             toolSession: ToolSessionState(
                 activeTool: .brush,
-                brush: workspace.toolSession.brush,
-                selectedColor: workspace.toolSession.selectedColor
+                brush: resolvedToolSession.brush,
+                selectedColor: resolvedToolSession.selectedColor
             ),
             layerID: layerID
         )
@@ -6097,6 +6217,10 @@ final class WorkspaceViewModel: ObservableObject {
         workspace = state
     }
 
+    private func notePrimaryBrushTipDefinitionChanged() {
+        strokeResetToken &+= 1
+    }
+
     private func refreshSelectionOverlayOnly() {
         syncSelectionOverlayProxy()
     }
@@ -6114,6 +6238,7 @@ final class WorkspaceViewModel: ObservableObject {
         ideationBranchActivityHandler?()
         let packetIndex = strokePacketCount
         let skipLeadingStamp = packetIndex > 0
+        _ = resolvedToolSessionForCanvasStrokes()
         guard let strokePayload = bootstrap.interactionController.makeStrokeDescriptor(
             samples: samples,
             skipLeadingStamp: skipLeadingStamp
@@ -6175,7 +6300,7 @@ final class WorkspaceViewModel: ObservableObject {
         }
 
         bootstrap.strokeEngine.beginStrokeIfNeeded(
-            toolSession: workspace.toolSession,
+            toolSession: resolvedToolSessionForCanvasStrokes(),
             layerID: layerID
         )
         relayIdeationOperation(.beginStroke)
@@ -7637,6 +7762,7 @@ final class WorkspaceViewModel: ObservableObject {
             documentName: workspace.document.metadata.name,
             documentFileURL: currentProjectURL
         )
+        canvasContentChangeHandler?()
     }
 
     func captureWorkspaceSnapshot() throws -> WorkspaceHistoryEntry {

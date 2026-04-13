@@ -57,7 +57,8 @@ struct MainToolbarView: View {
             toolbarToggleButton(
                 title: "黑白模式",
                 systemImage: "circle.lefthalf.filled",
-                isOn: editingViewModel.isLuminosityPreviewEnabled
+                isOn: editingViewModel.isLuminosityPreviewEnabled,
+                helpText: "切换主画布和参考图的黑白预览"
             ) {
                 editingViewModel.toggleLuminosityPreview()
             }
@@ -130,6 +131,7 @@ struct MainToolbarView: View {
         title: String,
         systemImage: String,
         isOn: Bool,
+        helpText: String? = nil,
         action: @escaping () -> Void
     ) -> some View {
         Button(action: action) {
@@ -152,6 +154,6 @@ struct MainToolbarView: View {
             )
         }
         .buttonStyle(.plain)
-        .help(isOn ? "已锁定画布：主画布不能缩放、旋转或移动" : "锁定画布：主画布不能缩放、旋转或移动")
+        .help(helpText ?? (isOn ? "已锁定画布：主画布不能缩放、旋转或移动" : "锁定画布：主画布不能缩放、旋转或移动"))
     }
 }

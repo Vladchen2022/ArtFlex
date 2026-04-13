@@ -443,14 +443,25 @@ struct CompoundSecondaryTipSettings: Codable, Equatable, Sendable {
     }
 
     func resolvedOpacityFactor(for pressure: Float) -> Float {
-        let curved = BrushSettings.samplePressureCurve(
+        resolvedOpacityFactor(for: pressure, pressureSensitivity: 1)
+    }
+
+    func resolvedOpacityFactor(
+        for pressure: Float,
+        pressureSensitivity: Float
+    ) -> Float {
+        let curved = BrushSettings.resolvedOpacityCurvePressure(
             pressure: pressure,
+            pressureSensitivity: pressureSensitivity,
             low: opacityCurveLow,
             mid: opacityCurveMid,
             high: opacityCurveHigh
         )
         let response = min(max(pressureOpacityAmount, 0), 1)
-        return (1 - response) + (response * curved)
+        return BrushSettings.resolvedPressureFactor(
+            responseAmount: response,
+            curvedPressure: curved
+        )
     }
 
     func resolvedBaseSize(for primarySize: Float) -> Float {
@@ -567,17 +578,69 @@ struct CompoundSecondaryTipSettings: Codable, Equatable, Sendable {
 }
 
 struct CompoundBrushSettings: Codable, Equatable, Sendable {
+    enum CodingKeys: String, CodingKey {
+        case enabled
+        case mode
+        case secondary
+        case pressureMix
+        case globalPressureSizeAmount
+        case globalPressureOpacityAmount
+    }
+
     var enabled: Bool
     var mode: CompoundBrushMode
     var secondary: CompoundSecondaryTipSettings
     var pressureMix: CompoundPressureMixSettings
+    var globalPressureSizeAmount: Float
+    var globalPressureOpacityAmount: Float
 
     static let disabledDefault = CompoundBrushSettings(
         enabled: false,
         mode: .textureBlend,
         secondary: .default,
-        pressureMix: .default
+        pressureMix: .default,
+        globalPressureSizeAmount: 0,
+        globalPressureOpacityAmount: 0
     )
+
+    init(
+        enabled: Bool,
+        mode: CompoundBrushMode,
+        secondary: CompoundSecondaryTipSettings,
+        pressureMix: CompoundPressureMixSettings,
+        globalPressureSizeAmount: Float = 0,
+        globalPressureOpacityAmount: Float = 0
+    ) {
+        self.enabled = enabled
+        self.mode = mode
+        self.secondary = secondary
+        self.pressureMix = pressureMix
+        self.globalPressureSizeAmount = globalPressureSizeAmount
+        self.globalPressureOpacityAmount = globalPressureOpacityAmount
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let defaults = CompoundBrushSettings.disabledDefault
+        enabled = try container.decodeIfPresent(Bool.self, forKey: .enabled) ?? defaults.enabled
+        mode = try container.decodeIfPresent(CompoundBrushMode.self, forKey: .mode) ?? defaults.mode
+        secondary = try container.decodeIfPresent(CompoundSecondaryTipSettings.self, forKey: .secondary) ?? defaults.secondary
+        pressureMix = try container.decodeIfPresent(CompoundPressureMixSettings.self, forKey: .pressureMix) ?? defaults.pressureMix
+        globalPressureSizeAmount = try container.decodeIfPresent(Float.self, forKey: .globalPressureSizeAmount)
+            ?? defaults.globalPressureSizeAmount
+        globalPressureOpacityAmount = try container.decodeIfPresent(Float.self, forKey: .globalPressureOpacityAmount)
+            ?? defaults.globalPressureOpacityAmount
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(enabled, forKey: .enabled)
+        try container.encode(mode, forKey: .mode)
+        try container.encode(secondary, forKey: .secondary)
+        try container.encode(pressureMix, forKey: .pressureMix)
+        try container.encode(globalPressureSizeAmount, forKey: .globalPressureSizeAmount)
+        try container.encode(globalPressureOpacityAmount, forKey: .globalPressureOpacityAmount)
+    }
 }
 
 struct BrushSettings: Codable, Sendable, Equatable {
@@ -843,6 +906,74 @@ struct BrushSettings: Codable, Sendable, Equatable {
         }
 
         return points.last?.y ?? 1
+    }
+
+    static func resolvedPressureFactor(
+        responseAmount: Float,
+        curvedPressure: Float
+    ) -> Float {
+        let response = min(max(responseAmount, 0), 1)
+        return (1 - response) + (response * curvedPressure)
+    }
+
+    static func remappedOpacityPressure(
+        pressure: Float,
+        pressureSensitivity: Float
+    ) -> Float {
+        let clamped = min(max(pressure, 0), 1)
+        let sensitivity = min(max(pressureSensitivity, 0), 2)
+        guard sensitivity > 0.0001 else {
+            return 1
+        }
+        return pow(clamped, sensitivity)
+    }
+
+    static func resolvedOpacityCurvePressure(
+        pressure: Float,
+        pressureSensitivity: Float,
+        low: Float,
+        mid: Float,
+        high: Float
+    ) -> Float {
+        let remapped = remappedOpacityPressure(
+            pressure: pressure,
+            pressureSensitivity: pressureSensitivity
+        )
+        return samplePressureCurve(
+            pressure: remapped,
+            low: low,
+            mid: mid,
+            high: high
+        )
+    }
+
+    static func spacingCompensatedBuildUpAlpha(
+        targetVisibleAlpha: Float,
+        spacingPx: Float,
+        stampDiameterPx: Float
+    ) -> Float {
+        let target = min(max(targetVisibleAlpha, 0), 1)
+        guard target > 0 else { return 0 }
+        let advanceRatio = min(max(spacingPx / max(stampDiameterPx, 1), 0.02), 1)
+        guard advanceRatio < 0.999 else { return target }
+        return 1 - pow(max(1 - target, 0), advanceRatio)
+    }
+
+    static func resolvedBuildUpVisibleAlpha(
+        targetVisibleAlpha: Float,
+        spacingPx: Float,
+        stampDiameterPx: Float,
+        compensationAmount: Float
+    ) -> Float {
+        let target = min(max(targetVisibleAlpha, 0), 1)
+        let amount = min(max(compensationAmount, 0), 1)
+        guard amount > 0.0001 else { return target }
+        let compensated = spacingCompensatedBuildUpAlpha(
+            targetVisibleAlpha: target,
+            spacingPx: spacingPx,
+            stampDiameterPx: stampDiameterPx
+        )
+        return target + ((compensated - target) * amount)
     }
 }
 

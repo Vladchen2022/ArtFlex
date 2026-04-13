@@ -130,6 +130,27 @@ struct WorkspaceViewModelSafetyTests {
 
     @Test
     @MainActor
+    func compoundGlobalPressureControlsStayDecoupledFromPrimaryInternalPressureControls() throws {
+        let harness = try BrushEditingBoundaryHarness()
+
+        harness.viewModel.setCompoundBrushEnabled(true)
+        harness.viewModel.setCompoundPrimaryPressureSizeAmount(0.22)
+        harness.viewModel.setCompoundPrimaryPressureOpacityAmount(0.33)
+        harness.viewModel.setPressureSizeAmount(0.74)
+        harness.viewModel.setPressureOpacityAmount(0.81)
+
+        let brush = harness.viewModel.workspace.toolSession.brush
+        #expect(brush.compoundBrush.enabled == true)
+        #expect(brush.pressureSizeAmount == 0.22)
+        #expect(brush.pressureOpacityAmount == 0.33)
+        #expect(brush.compoundBrush.globalPressureSizeAmount == 0.74)
+        #expect(brush.compoundBrush.globalPressureOpacityAmount == 0.81)
+        #expect(harness.viewModel.displayedPressureSizeAmount == 0.74)
+        #expect(harness.viewModel.displayedPressureOpacityAmount == 0.81)
+    }
+
+    @Test
+    @MainActor
     func fillAtPointStartsDrawingStatsTracking() throws {
         let harness = try BrushEditingBoundaryHarness()
 
@@ -429,6 +450,116 @@ struct WorkspaceViewModelSafetyTests {
         #expect(rowMass[0] < 1)
         #expect(rowMass[255] < 1)
     }
+
+    @Test
+    @MainActor
+    func updatingCustomTipMaskKeepsSelectedPresetUntouchedAndBumpsStrokeResetToken() throws {
+        let harness = try BrushEditingBoundaryHarness()
+        harness.viewModel.saveCurrentBrushPreset()
+
+        let selectedPresetID = try #require(
+            harness.viewModel.workspace.brushLibrary.selectedPresetID ??
+            harness.viewModel.workspace.brushLibrary.presets.first?.id
+        )
+        harness.viewModel.applyBrushPreset(selectedPresetID)
+
+        let selectedPresetBrush = try #require(
+            harness.viewModel.workspace.brushLibrary.preset(id: selectedPresetID)?.brush
+        )
+        let previousStrokeResetToken = harness.viewModel.strokeResetToken
+        let customMask = makeVerticalTipMask(side: 16)
+
+        harness.viewModel.updateCustomTipMask(customMask)
+
+        #expect(harness.viewModel.strokeResetToken == previousStrokeResetToken + 1)
+        #expect(harness.viewModel.workspace.toolSession.brush.tipShape == .customRound)
+        #expect(harness.viewModel.workspace.toolSession.brush.customTipMaskData == customMask)
+        #expect(harness.viewModel.workspace.toolSession.brush != selectedPresetBrush)
+        #expect(harness.viewModel.workspace.brushLibrary.preset(id: selectedPresetID)?.brush == selectedPresetBrush)
+    }
+
+    @Test
+    @MainActor
+    func applyingBrushTipDraftCommitsWithoutCanvasStroke() throws {
+        let harness = try BrushEditingBoundaryHarness()
+        let previousStrokeResetToken = harness.viewModel.strokeResetToken
+        let baselineBrush = harness.viewModel.workspace.toolSession.brush
+        let draftMask = makeVerticalTipMask(side: 16)
+
+        harness.viewModel.updateBrushTipDraft(draftMask)
+
+        #expect(harness.viewModel.hasPendingBrushTipDraft)
+        #expect(harness.viewModel.brushTipDraftMaskData == draftMask)
+        #expect(harness.viewModel.workspace.toolSession.brush == baselineBrush)
+        #expect(harness.viewModel.strokeResetToken == previousStrokeResetToken)
+
+        #expect(harness.viewModel.applyBrushTipDraft())
+        #expect(harness.viewModel.hasPendingBrushTipDraft == false)
+        #expect(harness.viewModel.brushTipDraftMaskData == nil)
+        #expect(harness.viewModel.workspace.toolSession.brush.customTipMaskData == draftMask)
+        #expect(harness.viewModel.strokeResetToken == previousStrokeResetToken + 1)
+    }
+
+    @Test
+    @MainActor
+    func pendingBrushTipDraftDoesNotAutoCommitWhenMainCanvasStrokeBegins() throws {
+        let harness = try BrushEditingBoundaryHarness()
+        let previousStrokeResetToken = harness.viewModel.strokeResetToken
+        let baselineBrush = harness.viewModel.workspace.toolSession.brush
+        let draftMask = makeVerticalTipMask(side: 16)
+
+        harness.viewModel.updateBrushTipDraft(draftMask)
+        harness.viewModel.setBrushSize(90)
+        try drawSingleMainCanvasStamp(in: harness.viewModel, at: .init(x: 180, y: 180))
+
+        #expect(harness.viewModel.hasPendingBrushTipDraft)
+        #expect(harness.viewModel.brushTipDraftMaskData == draftMask)
+        #expect(harness.viewModel.workspace.toolSession.brush.tipShape == baselineBrush.tipShape)
+        #expect(harness.viewModel.workspace.toolSession.brush.customTipSourceSemantic == baselineBrush.customTipSourceSemantic)
+        #expect(harness.viewModel.workspace.toolSession.brush.customTipMaskData == baselineBrush.customTipMaskData)
+        #expect(harness.viewModel.workspace.toolSession.brush.customTipEnvelopeMaskData == baselineBrush.customTipEnvelopeMaskData)
+        #expect(harness.viewModel.strokeResetToken == previousStrokeResetToken)
+
+        let appliedBounds = try #require(
+            try activeDisplayOpaqueBounds(
+                in: harness.viewModel,
+                minX: 120,
+                minY: 90,
+                maxX: 240,
+                maxY: 270
+            )
+        )
+        #expect(abs(Double(appliedBounds.width - appliedBounds.height)) < Double(max(appliedBounds.width, appliedBounds.height)) * 0.35)
+    }
+
+    @Test
+    @MainActor
+    func clearBrushTipDraftRequiresManualApplyToClearCommittedTip() throws {
+        let harness = try BrushEditingBoundaryHarness()
+        let baselineMask = makeVerticalTipMask(side: 16)
+        harness.viewModel.updateCustomTipMask(baselineMask)
+        let committedStrokeResetToken = harness.viewModel.strokeResetToken
+
+        harness.viewModel.clearBrushTipDraft()
+
+        #expect(harness.viewModel.hasPendingBrushTipDraft)
+        #expect(harness.viewModel.brushTipDraftMaskData == nil)
+        #expect(harness.viewModel.workspace.toolSession.brush.customTipMaskData == baselineMask)
+        #expect(harness.viewModel.strokeResetToken == committedStrokeResetToken)
+
+        harness.viewModel.setBrushSize(90)
+        try drawSingleMainCanvasStamp(in: harness.viewModel, at: .init(x: 220, y: 220))
+        #expect(harness.viewModel.hasPendingBrushTipDraft)
+        #expect(harness.viewModel.brushTipDraftMaskData == nil)
+        #expect(harness.viewModel.workspace.toolSession.brush.customTipMaskData == baselineMask)
+        #expect(harness.viewModel.strokeResetToken == committedStrokeResetToken)
+
+        #expect(harness.viewModel.applyBrushTipDraft())
+        #expect(harness.viewModel.hasPendingBrushTipDraft == false)
+        #expect(harness.viewModel.workspace.toolSession.brush.customTipMaskData == nil)
+        #expect(harness.viewModel.workspace.toolSession.brush.customTipSourceSemantic == .procedural)
+        #expect(harness.viewModel.strokeResetToken == committedStrokeResetToken + 1)
+    }
 }
 
 @MainActor
@@ -555,6 +686,114 @@ private func makeTemporaryTipImageURL(fileName: String, image: NSImage) throws -
 }
 
 @MainActor
+private func sampleActiveLayerAlpha(
+    in viewModel: WorkspaceViewModel,
+    serializer: LayerTextureSerializer,
+    x: Int,
+    y: Int
+) throws -> Float {
+    let activeLayerID = viewModel.workspace.document.activeLayerID
+    guard
+        let surfaceID = viewModel.layerSurfaceStore.surfaceID(for: activeLayerID),
+        let texture = viewModel.layerSurfaceStore.texture(for: surfaceID)
+    else {
+        throw BoundaryHarnessError.textureUnavailable
+    }
+
+    return try serializer.samplePixel(texture: texture, x: x, y: y).alpha
+}
+
+@MainActor
+private func drawSingleMainCanvasStamp(
+    in viewModel: WorkspaceViewModel,
+    at point: CanvasPoint
+) throws {
+    viewModel.beginStrokeIfNeeded()
+    viewModel.applyStroke(samples: [.init(location: point, pressure: 1)])
+    viewModel.endStroke()
+
+    guard let commandBuffer = viewModel.metalContext.commandQueue.makeCommandBuffer() else {
+        throw BoundaryHarnessError.commandBufferUnavailable
+    }
+
+    _ = viewModel.flushPendingBrushWork(into: commandBuffer)
+    commandBuffer.commit()
+    commandBuffer.waitUntilCompleted()
+}
+
+@MainActor
+private func activeDisplayOpaqueBounds(
+    in viewModel: WorkspaceViewModel,
+    minX: Int,
+    minY: Int,
+    maxX: Int,
+    maxY: Int,
+    alphaThreshold: UInt8 = 8
+) throws -> (width: Int, height: Int)? {
+    let activeLayerID = viewModel.workspace.document.activeLayerID
+    let serializer = LayerTextureSerializer(metalContext: viewModel.metalContext)
+
+    guard
+        let texture = viewModel.brushDisplayTexture(for: activeLayerID)
+            ?? viewModel.layerSurfaceStore.surfaceID(for: activeLayerID)
+            .flatMap(viewModel.layerSurfaceStore.texture(for:))
+    else {
+        throw BoundaryHarnessError.textureUnavailable
+    }
+
+    let snapshot = try serializer.snapshot(texture: texture)
+    return opaqueBounds(
+        in: snapshot,
+        minX: minX,
+        minY: minY,
+        maxX: maxX,
+        maxY: maxY,
+        alphaThreshold: alphaThreshold
+    )
+}
+
+private func opaqueBounds(
+    in snapshot: LayerTextureSnapshot,
+    minX: Int,
+    minY: Int,
+    maxX: Int,
+    maxY: Int,
+    alphaThreshold: UInt8
+) -> (width: Int, height: Int)? {
+    let clampedMinX = max(0, minX)
+    let clampedMinY = max(0, minY)
+    let clampedMaxX = min(snapshot.width - 1, maxX)
+    let clampedMaxY = min(snapshot.height - 1, maxY)
+    guard clampedMaxX >= clampedMinX, clampedMaxY >= clampedMinY else { return nil }
+
+    var foundMinX = Int.max
+    var foundMinY = Int.max
+    var foundMaxX = Int.min
+    var foundMaxY = Int.min
+
+    snapshot.pixelData.withUnsafeBytes { rawBuffer in
+        let bytes = rawBuffer.bindMemory(to: UInt8.self)
+        for y in clampedMinY...clampedMaxY {
+            let rowOffset = y * snapshot.bytesPerRow
+            for x in clampedMinX...clampedMaxX {
+                let alpha = bytes[rowOffset + (x * 4) + 3]
+                guard alpha > alphaThreshold else { continue }
+                foundMinX = min(foundMinX, x)
+                foundMinY = min(foundMinY, y)
+                foundMaxX = max(foundMaxX, x)
+                foundMaxY = max(foundMaxY, y)
+            }
+        }
+    }
+
+    guard foundMaxX >= foundMinX, foundMaxY >= foundMinY else { return nil }
+    return (
+        width: foundMaxX - foundMinX + 1,
+        height: foundMaxY - foundMinY + 1
+    )
+}
+
+@MainActor
 private func makeCircularTipSourceImage(size: Int = 96) -> NSImage {
     makeTipSourceImage(size: size) { context in
         context.setFillColor(CGColor(gray: 0, alpha: 1))
@@ -632,6 +871,15 @@ private func maskRowMasses(_ maskData: Data, resolution: Int) -> [Double] {
         }
     }
     return rows
+}
+
+private func makeVerticalTipMask(side: Int) -> Data {
+    var bytes = [UInt8](repeating: 0, count: side * side)
+    let centerX = side / 2
+    for y in 0..<side {
+        bytes[(y * side) + centerX] = 255
+    }
+    return Data(bytes)
 }
 
 @MainActor

@@ -109,6 +109,158 @@ struct StageOneBrushPreviewRasterizerTests {
     }
 
     @Test
+    func stampAlphaBytesReflectCurrentBrushTipShape() {
+        var roundBrush = BrushSettings.stageOneDefault
+        roundBrush.tipShape = .hardRound
+
+        var squareBrush = BrushSettings.stageOneDefault
+        squareBrush.tipShape = .square
+
+        let resolution = 17
+        let roundAlpha = StageOneBrushPreviewRasterizer.stampAlphaBytes(
+            for: roundBrush,
+            resolution: resolution
+        )
+        let squareAlpha = StageOneBrushPreviewRasterizer.stampAlphaBytes(
+            for: squareBrush,
+            resolution: resolution
+        )
+
+        #expect(roundAlpha.count == resolution * resolution)
+        #expect(squareAlpha.count == resolution * resolution)
+        #expect(roundAlpha[0] == 0)
+        #expect(squareAlpha[0] > 0)
+        #expect(squareAlpha[(resolution / 2) * resolution + (resolution / 2)] == 255)
+    }
+
+    @Test
+    func compoundStrokeAlphaBytesRespectGlobalPressureOpacityForSecondaryDominantBrushes() {
+        var brush = BrushSettings.stageOneDefault
+        brush.size = 28
+        brush.pressureOpacityAmount = 0
+        brush.compoundBrush.enabled = true
+        brush.compoundBrush.globalPressureOpacityAmount = 1
+        brush.compoundBrush.pressureMix.primaryAtLowPressure = 0
+        brush.compoundBrush.pressureMix.primaryAtMidPressure = 0
+        brush.compoundBrush.pressureMix.primaryAtHighPressure = 0
+        brush.compoundBrush.secondary.pressureOpacityAmount = 0
+
+        var lowSamplingState: BrushStrokeSamplingState?
+        let lowAlphaBytes = StageOneBrushPreviewRasterizer.strokeAlphaBytes(
+            for: brush,
+            resolution: 256,
+            points: [
+                StrokePoint(x: 64, y: 128, pressure: 0.15),
+                StrokePoint(x: 192, y: 128, pressure: 0.15)
+            ],
+            samplingState: &lowSamplingState,
+            flushPendingSamples: true
+        )
+
+        var highSamplingState: BrushStrokeSamplingState?
+        let highAlphaBytes = StageOneBrushPreviewRasterizer.strokeAlphaBytes(
+            for: brush,
+            resolution: 256,
+            points: [
+                StrokePoint(x: 64, y: 128, pressure: 1.0),
+                StrokePoint(x: 192, y: 128, pressure: 1.0)
+            ],
+            samplingState: &highSamplingState,
+            flushPendingSamples: true
+        )
+
+        let lowAverageAlpha = alphaAverage(in: lowAlphaBytes ?? [])
+        let highAverageAlpha = alphaAverage(in: highAlphaBytes ?? [])
+
+        #expect(lowAverageAlpha > 0)
+        #expect(highAverageAlpha > lowAverageAlpha * 2.5)
+    }
+
+    @Test
+    func buildUpStrokeAlphaBytesRespectPressureOpacityUnderTightSpacing() {
+        var brush = BrushSettings.stageOneDefault
+        brush.size = 28
+        brush.spacingPercent = 8
+        brush.opacity = 1
+        brush.pressureSizeAmount = 0
+        brush.pressureOpacityAmount = 1
+        brush.buildMode = .buildUp
+
+        var lowSamplingState: BrushStrokeSamplingState?
+        let lowAlphaBytes = StageOneBrushPreviewRasterizer.strokeAlphaBytes(
+            for: brush,
+            resolution: 256,
+            points: [
+                StrokePoint(x: 64, y: 128, pressure: 0.2),
+                StrokePoint(x: 192, y: 128, pressure: 0.2)
+            ],
+            samplingState: &lowSamplingState,
+            flushPendingSamples: true
+        )
+
+        var highSamplingState: BrushStrokeSamplingState?
+        let highAlphaBytes = StageOneBrushPreviewRasterizer.strokeAlphaBytes(
+            for: brush,
+            resolution: 256,
+            points: [
+                StrokePoint(x: 64, y: 128, pressure: 1.0),
+                StrokePoint(x: 192, y: 128, pressure: 1.0)
+            ],
+            samplingState: &highSamplingState,
+            flushPendingSamples: true
+        )
+
+        let lowAverageAlpha = alphaAverage(in: lowAlphaBytes ?? [])
+        let highAverageAlpha = alphaAverage(in: highAlphaBytes ?? [])
+
+        #expect(lowAverageAlpha > 0)
+        #expect(highAverageAlpha > lowAverageAlpha * 2.5)
+    }
+
+    @Test
+    func compoundStrokeAlphaBytesRespectGlobalPressureSizeForSecondaryDominantBrushes() {
+        var brush = BrushSettings.stageOneDefault
+        brush.size = 28
+        brush.pressureSizeAmount = 0
+        brush.compoundBrush.enabled = true
+        brush.compoundBrush.globalPressureSizeAmount = 1
+        brush.compoundBrush.pressureMix.primaryAtLowPressure = 0
+        brush.compoundBrush.pressureMix.primaryAtMidPressure = 0
+        brush.compoundBrush.pressureMix.primaryAtHighPressure = 0
+        brush.compoundBrush.secondary.pressureSizeAmount = 0
+
+        var lowSamplingState: BrushStrokeSamplingState?
+        let lowAlphaBytes = StageOneBrushPreviewRasterizer.strokeAlphaBytes(
+            for: brush,
+            resolution: 256,
+            points: [
+                StrokePoint(x: 64, y: 128, pressure: 0.45),
+                StrokePoint(x: 192, y: 128, pressure: 0.45)
+            ],
+            samplingState: &lowSamplingState,
+            flushPendingSamples: true
+        )
+
+        var highSamplingState: BrushStrokeSamplingState?
+        let highAlphaBytes = StageOneBrushPreviewRasterizer.strokeAlphaBytes(
+            for: brush,
+            resolution: 256,
+            points: [
+                StrokePoint(x: 64, y: 128, pressure: 1.0),
+                StrokePoint(x: 192, y: 128, pressure: 1.0)
+            ],
+            samplingState: &highSamplingState,
+            flushPendingSamples: true
+        )
+
+        let lowCoverage = alphaCoverageCount(in: lowAlphaBytes ?? [], threshold: 18)
+        let highCoverage = alphaCoverageCount(in: highAlphaBytes ?? [], threshold: 18)
+
+        #expect(lowCoverage > 0)
+        #expect(Double(highCoverage) > Double(lowCoverage) * 1.4)
+    }
+
+    @Test
     func maskFingerprintUsesStableContentIdentity() {
         let maskA = makeVerticalMask(side: 16)
         let maskB = makeSoftCenteredMask(side: 16, alpha: 128)
@@ -178,6 +330,26 @@ struct StageOneBrushPreviewRasterizerTests {
         return stride(from: 3, to: data.count, by: bytesPerPixel).reduce(0) { partialResult, index in
             partialResult + Int(data[index])
         }
+    }
+
+    private func alphaMax(in bytes: [UInt8]) -> UInt8 {
+        bytes.max() ?? 0
+    }
+
+    private func alphaCoverageCount(in bytes: [UInt8], threshold: UInt8) -> Int {
+        bytes.reduce(into: 0) { count, value in
+            if value >= threshold {
+                count += 1
+            }
+        }
+    }
+
+    private func alphaAverage(in bytes: [UInt8]) -> Double {
+        guard !bytes.isEmpty else { return 0 }
+        let total = bytes.reduce(into: 0) { partialResult, value in
+            partialResult += Int(value)
+        }
+        return Double(total) / Double(bytes.count)
     }
 
     private func rgba(atX x: Int, y: Int, in image: CGImage) throws -> (red: UInt8, green: UInt8, blue: UInt8, alpha: UInt8) {

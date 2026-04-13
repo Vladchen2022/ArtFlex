@@ -452,17 +452,44 @@ private func quickColorPickerPreviewBrushStrokeMetrics(
     let effectivePressure = min(max(pressure, 0), 1)
     let sizePressure = max(effectivePressure, 0.01)
     let opacityPressure = max(effectivePressure, 0.005)
-    let sizeResponse = min(max(Double(brush.pressureSizeAmount), 0), 1)
-    let opacityResponse = min(max(Double(brush.pressureOpacityAmount), 0), 1)
+    let sizeResponseSource = brush.compoundBrush.enabled
+        ? brush.compoundBrush.globalPressureSizeAmount
+        : brush.pressureSizeAmount
+    let opacityResponseSource = brush.compoundBrush.enabled
+        ? brush.compoundBrush.globalPressureOpacityAmount
+        : brush.pressureOpacityAmount
+    let sizeResponse = min(max(Double(sizeResponseSource), 0), 1)
+    let opacityResponse = min(max(Double(opacityResponseSource), 0), 1)
     let curvedSizePressure = quickColorPickerPreviewSizeCurvePressure(sizePressure, brush: brush)
     let lowerBound = min(max(Double(brush.sizeLowerBound), 0), 1)
     let lowerBoundedPressure = lowerBound + ((1 - lowerBound) * curvedSizePressure)
     let rawSizeFactor = (1 - sizeResponse) + (sizeResponse * lowerBoundedPressure)
-    let remappedOpacityPressure = quickColorPickerPreviewPressureResponsePressure(opacityPressure, brush: brush)
-    let curvedOpacityPressure = quickColorPickerPreviewOpacityCurvePressure(remappedOpacityPressure, brush: brush)
-    let rawOpacityFactor = (1 - opacityResponse) + (opacityResponse * curvedOpacityPressure)
+    let curvedOpacityPressure = quickColorPickerPreviewOpacityCurvePressure(opacityPressure, brush: brush)
+    let rawOpacityFactor = Double(
+        BrushSettings.resolvedPressureFactor(
+            responseAmount: Float(opacityResponse),
+            curvedPressure: Float(curvedOpacityPressure)
+        )
+    )
     let sizeFactor = rawSizeFactor * 0.72
-    let resolvedOpacity = min(max(Double(brush.opacity) * rawOpacityFactor * 0.52, 0.05), 0.72)
+    let targetVisibleOpacity = Float(brush.opacity) * Float(rawOpacityFactor)
+    let spacingPx = max(Float(Double(brush.size) * Double(brush.spacingPercent) / 100.0), 0.5)
+    let stampDiameterPx = max(Float(brush.size) * Float(rawSizeFactor), 1)
+    let compensationAmount = brush.compoundBrush.enabled
+        ? max(
+            Float(opacityResponse),
+            min(max(brush.compoundBrush.secondary.pressureOpacityAmount, 0), 1)
+        )
+        : Float(opacityResponse)
+    let visibleOpacity = brush.buildMode == .buildUp
+        ? BrushSettings.resolvedBuildUpVisibleAlpha(
+            targetVisibleAlpha: targetVisibleOpacity,
+            spacingPx: spacingPx,
+            stampDiameterPx: stampDiameterPx,
+            compensationAmount: compensationAmount
+        )
+        : targetVisibleOpacity
+    let resolvedOpacity = min(max(Double(visibleOpacity) * 0.52, 0.05), 0.72)
     return (max(sizeFactor, 0.05), resolvedOpacity)
 }
 
@@ -501,23 +528,15 @@ private func quickColorPickerPreviewOpacityCurvePressure(
     _ pressure: Double,
     brush: BrushSettings
 ) -> Double {
-    if brush.buildMode == .opacityCap {
-        let low = min(max(Double(brush.opacityCurveLow), 0), 0.85)
-        let mid = min(max(Double(brush.opacityCurveMid), low), 0.95)
-        let high = min(max(Double(brush.opacityCurveHigh), mid), 1)
-        return quickColorPickerPreviewSamplePiecewiseCurve(
-            pressure: pressure,
-            points: [
-                (0.0, 0.0),
-                (0.2, low),
-                (0.5, mid),
-                (0.8, high),
-                (1.0, 1.0)
-            ]
+    Double(
+        BrushSettings.resolvedOpacityCurvePressure(
+            pressure: Float(pressure),
+            pressureSensitivity: brush.pressureSensitivity,
+            low: brush.opacityCurveLow,
+            mid: brush.opacityCurveMid,
+            high: brush.opacityCurveHigh
         )
-    }
-
-    return pow(min(max(pressure, 0), 1), 3.6)
+    )
 }
 
 private func quickColorPickerPreviewSamplePiecewiseCurve(

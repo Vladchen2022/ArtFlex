@@ -3,6 +3,50 @@ import SwiftUI
 import os
 @preconcurrency import Metal
 
+func resolveBrushInputPressure(
+    rawPressure: Float,
+    isTabletLikeEvent: Bool,
+    eventSubtypeIsTabletPoint: Bool,
+    sawTabletAuxiliaryEvent: Bool,
+    lastPressure: Float?,
+    strokeInputSampleCount: Int,
+    minimumTabletPressure: Float,
+    debugForceConstantPressure: Bool
+) -> Float {
+    let normalizedPressure: Float
+    let shouldTrustRawPressure = isTabletLikeEvent || !sawTabletAuxiliaryEvent
+
+    if rawPressure > 0, shouldTrustRawPressure {
+        let clamped = min(max(rawPressure, 0), 1)
+        let shouldBypassPressureWarmup =
+            isTabletLikeEvent &&
+            strokeInputSampleCount < 6
+        if shouldBypassPressureWarmup {
+            normalizedPressure = clamped
+        } else if let lastPressure {
+            let delta = abs(clamped - lastPressure)
+            let previousWeight: Float
+            switch delta {
+            case ..<0.04:
+                previousWeight = 0.82
+            case ..<0.12:
+                previousWeight = 0.58
+            default:
+                previousWeight = 0.25
+            }
+            normalizedPressure = (lastPressure * previousWeight) + (clamped * (1 - previousWeight))
+        } else {
+            normalizedPressure = clamped
+        }
+    } else if eventSubtypeIsTabletPoint || sawTabletAuxiliaryEvent {
+        normalizedPressure = lastPressure ?? minimumTabletPressure
+    } else {
+        normalizedPressure = 1
+    }
+
+    return debugForceConstantPressure ? 1 : normalizedPressure
+}
+
 private func emitSelectionTraceHost(_ message: String) {
     appendSelectionTrace(message)
 }
@@ -1298,38 +1342,16 @@ final class StrokeCaptureMTKView: MTKView {
         let normalizedX = max(min(location.x / bounds.width, 1), 0)
         let normalizedY = max(min(location.y / bounds.height, 1), 0)
         let rawPressure = Float(event.pressure)
-        let normalizedPressure: Float
-        if rawPressure > 0 {
-            let clamped = min(max(rawPressure, 0), 1)
-            // Let the first few tablet samples preserve the real contact pressure.
-            // Warming them through the previous-sample filter makes light starts
-            // feel artificially heavy before the stroke has even settled.
-            let shouldBypassPressureWarmup =
-                isTabletLikeEvent(event) &&
-                strokeInputSampleCount < 6
-            if shouldBypassPressureWarmup {
-                normalizedPressure = clamped
-            } else if let lastPressure {
-                let delta = abs(clamped - lastPressure)
-                let previousWeight: Float
-                switch delta {
-                case ..<0.04:
-                    previousWeight = 0.82
-                case ..<0.12:
-                    previousWeight = 0.58
-                default:
-                    previousWeight = 0.25
-                }
-                normalizedPressure = (lastPressure * previousWeight) + (clamped * (1 - previousWeight))
-            } else {
-                normalizedPressure = clamped
-            }
-        } else if event.subtype == .tabletPoint {
-            normalizedPressure = lastPressure ?? minimumTabletPressure
-        } else {
-            normalizedPressure = 1
-        }
-        let effectivePressure: Float = debugForceConstantPressure ? 1 : normalizedPressure
+        let effectivePressure = resolveBrushInputPressure(
+            rawPressure: rawPressure,
+            isTabletLikeEvent: isTabletLikeEvent(event),
+            eventSubtypeIsTabletPoint: event.subtype == .tabletPoint,
+            sawTabletAuxiliaryEvent: sawTabletAuxiliaryEvent,
+            lastPressure: lastPressure,
+            strokeInputSampleCount: strokeInputSampleCount,
+            minimumTabletPressure: minimumTabletPressure,
+            debugForceConstantPressure: debugForceConstantPressure
+        )
         lastPressure = effectivePressure
 
         let sample = CanvasStrokeSample(

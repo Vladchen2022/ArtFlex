@@ -33,6 +33,9 @@ private struct BrushUniforms {
     var compoundSecondaryShape: UInt32
     var compoundPrimaryMixWeight: Float
     var compoundPrimaryOpacityFactor: Float
+    var compoundGlobalOpacityFactor: Float
+    var buildUpOpacityCompensationAmount: Float
+    var buildUpOpacitySpacingRatio: Float
     var compoundSecondaryOpacityFactor: Float
     var compoundSecondaryDiameterPx: Float
     var compoundSecondaryAdvancePx: Float
@@ -202,6 +205,9 @@ final class StageOneBrushRenderer {
             uint compoundSecondaryShape;
             float compoundPrimaryMixWeight;
             float compoundPrimaryOpacityFactor;
+            float compoundGlobalOpacityFactor;
+            float buildUpOpacityCompensationAmount;
+            float buildUpOpacitySpacingRatio;
             float compoundSecondaryOpacityFactor;
             float compoundSecondaryDiameterPx;
             float compoundSecondaryAdvancePx;
@@ -404,7 +410,7 @@ final class StageOneBrushRenderer {
             float primaryEnvelope = primaryEnvelopeAlpha(localPoint, uniforms, primaryEnvelopeTipMask);
 
             if (uniforms.compoundEnabled == 0) {
-                return primaryTexture * uniforms.compoundPrimaryOpacityFactor;
+                return primaryTexture * uniforms.compoundGlobalOpacityFactor;
             }
 
             float2 tangent = normalize(uniforms.compoundStrokeTangent);
@@ -460,16 +466,34 @@ final class StageOneBrushRenderer {
                     break;
             }
 
-            // Secondary texture always present. Primary adds on top, controlled by pressure.
-            // High pressure: primary body + secondary texture both visible.
-            // Low pressure: primary fades away, secondary texture remains.
+            // Pressure mix controls how much of the primary body survives versus the
+            // secondary texture appearance. Overall opacity pressure is applied once
+            // at the end so the main "透明压感" slider still fades the whole brush,
+            // including compound-secondary-dominant presets.
             float primaryBody = uniforms.compoundPrimaryOpacityFactor * mixWeight;
             float interior = primaryBody + (1.0 - primaryBody) * compoundAppearance;
 
             // ALWAYS clip by primaryEnvelope — stroke boundary stays sharp at all pressures.
             // Max-blend (opacityCap) across overlapping stamps ensures interior texture is
             // one-layer only, while envelope overlap creates smooth interior fill.
-            return interior * primaryEnvelope;
+            return interior * primaryEnvelope * uniforms.compoundGlobalOpacityFactor;
+        }
+
+        float buildUpVisibleAlpha(
+            float targetAlpha,
+            BrushUniforms uniforms
+        ) {
+            float clampedTarget = clamp(targetAlpha, 0.0, 1.0);
+            float compensationAmount = clamp(uniforms.buildUpOpacityCompensationAmount, 0.0, 1.0);
+            if (compensationAmount <= 0.0001) {
+                return clampedTarget;
+            }
+            float advanceRatio = clamp(uniforms.buildUpOpacitySpacingRatio, 0.02, 1.0);
+            if (advanceRatio >= 0.999 || clampedTarget <= 0.0) {
+                return clampedTarget;
+            }
+            float compensated = 1.0 - pow(max(1.0 - clampedTarget, 0.0), advanceRatio);
+            return mix(clampedTarget, compensated, compensationAmount);
         }
 
         float srgbChannelToLinear(float value) {
@@ -731,7 +755,8 @@ final class StageOneBrushRenderer {
                 }
             }
 
-            float alpha = uniforms.opacity * alphaMask;
+            float targetAlpha = uniforms.opacity * alphaMask;
+            float alpha = buildUpVisibleAlpha(targetAlpha, uniforms);
 
             if (uniforms.mode == 1) {
                 return float4(0.0, 0.0, 0.0, alpha);
@@ -1697,25 +1722,63 @@ final class StageOneBrushRenderer {
         let effectivePressure = min(max(point.pressure, 0), 1)
         let sizePressure = max(effectivePressure, 0.01)
         let opacityPressure = max(effectivePressure, 0.005)
-        let sizeResponse = min(max(stroke.brush.pressureSizeAmount, 0), 1)
-        let opacityResponse = min(max(stroke.brush.pressureOpacityAmount, 0), 1)
-        let curvedSizePressure = sizeCurvePressure(for: sizePressure, stroke: stroke)
-        let sizeFactor = ((1 - sizeResponse) + (sizeResponse * curvedSizePressure)) * sample.sizeMultiplier
-        let remappedOpacityPressure = pressureResponsePressure(for: opacityPressure, stroke: stroke)
-        let curvedPressure = opacityCurvePressure(for: remappedOpacityPressure, stroke: stroke)
-        let opacityFactor = (1 - opacityResponse) + (opacityResponse * curvedPressure)
         let compoundEnabled = stroke.brush.compoundBrush.enabled && (stroke.tool == .brush || stroke.tool == .eraser)
+        let primarySizeResponse = min(max(stroke.brush.pressureSizeAmount, 0), 1)
+        let globalSizeResponse = compoundEnabled
+            ? min(max(stroke.brush.compoundBrush.globalPressureSizeAmount, 0), 1)
+            : 0
+        let primaryOpacityResponse = min(max(stroke.brush.pressureOpacityAmount, 0), 1)
+        let globalOpacityResponse = compoundEnabled
+            ? min(max(stroke.brush.compoundBrush.globalPressureOpacityAmount, 0), 1)
+            : primaryOpacityResponse
+        let curvedSizePressure = sizeCurvePressure(for: sizePressure, stroke: stroke)
+        let primarySizeFactor = (1 - primarySizeResponse) + (primarySizeResponse * curvedSizePressure)
+        let globalSizeFactor = compoundEnabled
+            ? ((1 - globalSizeResponse) + (globalSizeResponse * curvedSizePressure))
+            : 1
+        let sizeFactor = (primarySizeFactor * globalSizeFactor) * sample.sizeMultiplier
+        let curvedOpacityPressure = opacityCurvePressure(for: opacityPressure, stroke: stroke)
+        let compoundPrimaryOpacityFactor = BrushSettings.resolvedPressureFactor(
+            responseAmount: primaryOpacityResponse,
+            curvedPressure: curvedOpacityPressure
+        )
+        let compoundGlobalOpacityFactor = compoundEnabled
+            ? BrushSettings.resolvedPressureFactor(
+                responseAmount: globalOpacityResponse,
+                curvedPressure: curvedOpacityPressure
+            )
+            : compoundPrimaryOpacityFactor
         let compoundSecondary = stroke.brush.compoundBrush.secondary
         let tangent = normalizedStrokeTangent(sample.strokeTangent)
         let tangentDegrees = Float(atan2(tangent.y, tangent.x) * 180.0 / .pi)
-        let compoundSecondarySizeFactor = compoundSecondary.resolvedSizeFactor(for: effectivePressure)
-        let compoundSecondaryOpacityFactor = compoundSecondary.resolvedOpacityFactor(for: effectivePressure)
+        let compoundSecondarySizeFactor = compoundSecondary.resolvedSizeFactor(for: effectivePressure) * globalSizeFactor
+        let compoundSecondaryOpacityFactor = compoundSecondary.resolvedOpacityFactor(
+            for: opacityPressure,
+            pressureSensitivity: stroke.brush.pressureSensitivity
+        )
         let compoundSecondaryBaseSize = compoundSecondary.resolvedBaseSize(for: stroke.brush.size)
         let compoundSecondaryDiameterPx = max(compoundSecondaryBaseSize * compoundSecondarySizeFactor, 1)
         let compoundSecondaryAdvancePx = max(
             compoundSecondaryDiameterPx * max(compoundSecondary.spacingPercent, 1) / 100,
             1
         )
+        let primarySpacingPx = max(Float(Double(stroke.brush.size) * Double(stroke.brush.spacingPercent) / 100.0), 0.5)
+        let primaryStampDiameterPx = max(stroke.brush.size * sizeFactor, 1)
+        let buildUpOpacityCompensationAmount: Float =
+            (stroke.tool == .brush || stroke.tool == .eraser) && stroke.brush.buildMode == .buildUp
+            ? (
+                compoundEnabled
+                ? max(
+                    globalOpacityResponse,
+                    max(primaryOpacityResponse, min(max(compoundSecondary.pressureOpacityAmount, 0), 1))
+                )
+                : primaryOpacityResponse
+            )
+            : 0
+        let buildUpOpacitySpacingRatio: Float =
+            (stroke.tool == .brush || stroke.tool == .eraser) && stroke.brush.buildMode == .buildUp
+            ? min(max(primarySpacingPx / primaryStampDiameterPx, 0.02), 1)
+            : 1
         let compoundSecondaryAngleDegrees = compoundSecondary.angleDegrees +
             (compoundSecondary.followsStrokeDirection ? tangentDegrees : 0)
         let selectionMode: UInt32
@@ -1784,7 +1847,10 @@ final class StageOneBrushRenderer {
             compoundMode: compoundBrushModeCode(stroke.brush.compoundBrush.mode),
             compoundSecondaryShape: brushTipShapeCode(compoundSecondary.tipShape),
             compoundPrimaryMixWeight: stroke.brush.compoundBrush.pressureMix.resolvedPrimaryWeight(for: effectivePressure),
-            compoundPrimaryOpacityFactor: opacityFactor,
+            compoundPrimaryOpacityFactor: compoundPrimaryOpacityFactor,
+            compoundGlobalOpacityFactor: compoundGlobalOpacityFactor,
+            buildUpOpacityCompensationAmount: buildUpOpacityCompensationAmount,
+            buildUpOpacitySpacingRatio: buildUpOpacitySpacingRatio,
             compoundSecondaryOpacityFactor: compoundSecondaryOpacityFactor,
             compoundSecondaryDiameterPx: compoundSecondaryDiameterPx,
             compoundSecondaryAdvancePx: compoundSecondaryAdvancePx,
@@ -2337,8 +2403,25 @@ final class StageOneBrushRenderer {
             return samples
         }
 
-        let opacityWeight = min(max(stroke.brush.pressureOpacityAmount, 0), 1)
-        let sizeWeight = min(max(stroke.brush.pressureSizeAmount, 0), 1)
+        let compoundEnabled = stroke.brush.compoundBrush.enabled
+        let opacityWeight = compoundEnabled
+            ? max(
+                min(max(stroke.brush.compoundBrush.globalPressureOpacityAmount, 0), 1),
+                max(
+                    min(max(stroke.brush.pressureOpacityAmount, 0), 1),
+                    min(max(stroke.brush.compoundBrush.secondary.pressureOpacityAmount, 0), 1)
+                )
+            )
+            : min(max(stroke.brush.pressureOpacityAmount, 0), 1)
+        let sizeWeight = compoundEnabled
+            ? max(
+                min(max(stroke.brush.compoundBrush.globalPressureSizeAmount, 0), 1),
+                max(
+                    min(max(stroke.brush.pressureSizeAmount, 0), 1),
+                    min(max(stroke.brush.compoundBrush.secondary.pressureSizeAmount, 0), 1)
+                )
+            )
+            : min(max(stroke.brush.pressureSizeAmount, 0), 1)
         let smoothingStrength = max(opacityWeight * 0.7, sizeWeight * 0.45)
         guard smoothingStrength > 0.0001 else {
             return samples
@@ -2433,32 +2516,20 @@ final class StageOneBrushRenderer {
     }
 
     private func opacityCurvePressure(for pressure: Float, stroke: StrokeDescriptor) -> Float {
-        if (stroke.tool == .brush || stroke.tool == .eraser), stroke.brush.buildMode == .opacityCap {
-            let low = min(max(stroke.brush.opacityCurveLow, 0), 0.85)
-            let mid = min(max(stroke.brush.opacityCurveMid, low), 0.95)
-            let high = min(max(stroke.brush.opacityCurveHigh, mid), 1)
-            return samplePiecewiseCurve(
-                pressure: pressure,
-                points: [
-                    (0.0, 0.0),
-                    (0.2, low),
-                    (0.5, mid),
-                    (0.8, high),
-                    (1.0, 1.0)
-                ]
-            )
-        }
-
-        return pow(pressure, 3.6)
+        BrushSettings.resolvedOpacityCurvePressure(
+            pressure: pressure,
+            pressureSensitivity: stroke.brush.pressureSensitivity,
+            low: stroke.brush.opacityCurveLow,
+            mid: stroke.brush.opacityCurveMid,
+            high: stroke.brush.opacityCurveHigh
+        )
     }
 
     private func pressureResponsePressure(for pressure: Float, stroke: StrokeDescriptor) -> Float {
-        let clamped = min(max(pressure, 0), 1)
-        let sensitivity = min(max(stroke.brush.pressureSensitivity, 0), 2)
-        guard sensitivity > 0.0001 else {
-            return 1
-        }
-        return pow(clamped, sensitivity)
+        BrushSettings.remappedOpacityPressure(
+            pressure: pressure,
+            pressureSensitivity: stroke.brush.pressureSensitivity
+        )
     }
 
     private func sizeCurvePressure(for pressure: Float, stroke: StrokeDescriptor) -> Float {
@@ -2480,9 +2551,16 @@ final class StageOneBrushRenderer {
     private func opacityCapRadius(for point: StrokePoint, stroke: StrokeDescriptor) -> Double {
         let effectivePressure = min(max(point.pressure, 0), 1)
         let sizePressure = max(effectivePressure, 0.01)
-        let sizeResponse = min(max(stroke.brush.pressureSizeAmount, 0), 1)
+        let primarySizeResponse = min(max(stroke.brush.pressureSizeAmount, 0), 1)
+        let globalSizeResponse = stroke.brush.compoundBrush.enabled
+            ? min(max(stroke.brush.compoundBrush.globalPressureSizeAmount, 0), 1)
+            : 0
         let curvedSizePressure = sizeCurvePressure(for: sizePressure, stroke: stroke)
-        let sizeFactor = (1 - sizeResponse) + (sizeResponse * curvedSizePressure)
+        let primarySizeFactor = (1 - primarySizeResponse) + (primarySizeResponse * curvedSizePressure)
+        let globalSizeFactor = stroke.brush.compoundBrush.enabled
+            ? ((1 - globalSizeResponse) + (globalSizeResponse * curvedSizePressure))
+            : 1
+        let sizeFactor = primarySizeFactor * globalSizeFactor
         return max(Double((stroke.brush.size * sizeFactor) / 2), 0.5)
     }
 

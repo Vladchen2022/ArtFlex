@@ -94,21 +94,21 @@ struct CompoundBrushBuilderSheet: View {
                 }
                 .buttonStyle(CompoundTextButtonStyle())
 
-                Toggle(
-                    "启用组合笔刷",
-                    isOn: Binding(
-                        get: { brush.compoundBrush.enabled },
-                        set: { viewModel.setCompoundBrushEnabled($0) }
+                Text(brush.compoundBrush.enabled ? "组合模式已启用" : "组合模式未启用")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(Color.white.opacity(0.92))
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 7)
+                    .background(
+                        Capsule()
+                            .fill(brush.compoundBrush.enabled ? Color.accentColor.opacity(0.88) : Color.white.opacity(0.12))
                     )
-                )
-                .toggleStyle(.switch)
-                .labelsHidden()
 
-            Button("完成") {
-                dismiss()
+                Button("完成") {
+                    dismiss()
+                }
+                .buttonStyle(.borderedProminent)
             }
-            .buttonStyle(.borderedProminent)
-        }
 
             HStack(spacing: 10) {
                 Text("混合模式")
@@ -226,7 +226,7 @@ struct CompoundBrushBuilderSheet: View {
                     value: Binding(get: { Double(brush.pressureSizeAmount) }, set: { _ in }),
                     range: 0...1
                 ) {
-                    viewModel.setPressureSizeAmount(Float($0))
+                    viewModel.setCompoundPrimaryPressureSizeAmount(Float($0))
                 }
 
                 OptimizedCompactSlider(
@@ -235,7 +235,7 @@ struct CompoundBrushBuilderSheet: View {
                     value: Binding(get: { Double(brush.pressureOpacityAmount) }, set: { _ in }),
                     range: 0...1
                 ) {
-                    viewModel.setPressureOpacityAmount(Float($0))
+                    viewModel.setCompoundPrimaryPressureOpacityAmount(Float($0))
                 }
             }
         }

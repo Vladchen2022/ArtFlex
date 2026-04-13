@@ -36,6 +36,9 @@ struct ProjectPackageTests {
         presetBrush.opacityCurveLow = 0.03
         presetBrush.opacityCurveMid = 0.48
         presetBrush.opacityCurveHigh = 0.86
+        presetBrush.compoundBrush.enabled = true
+        presetBrush.compoundBrush.globalPressureSizeAmount = 0.42
+        presetBrush.compoundBrush.globalPressureOpacityAmount = 0.68
         workspace.toolSession.brush = presetBrush
 
         workspace.brushLibrary = BrushLibraryState(
@@ -107,6 +110,10 @@ struct ProjectPackageTests {
         #expect(package.workspaceState.brushLibrary.presets.count == workspace.brushLibrary.presets.count)
         #expect(package.workspaceState.brushLibrary.presets.first?.brush.customTipMaskData == primaryMask)
         #expect(package.workspaceState.brushLibrary.presets.first?.brush.customTipImportedSourceInfo == primarySourceInfo)
+        #expect(package.workspaceState.brushLibrary.presets.first?.brush.compoundBrush.globalPressureSizeAmount == 0.42)
+        #expect(package.workspaceState.brushLibrary.presets.first?.brush.compoundBrush.globalPressureOpacityAmount == 0.68)
+        #expect(package.workspaceState.toolSession.brush.compoundBrush.globalPressureSizeAmount == 0.42)
+        #expect(package.workspaceState.toolSession.brush.compoundBrush.globalPressureOpacityAmount == 0.68)
         #expect(package.workspaceState.tipImageLibrary == workspace.tipImageLibrary)
         #expect(package.creativeShapeGenerator == workspace.creativeShapeGenerator)
         #expect(package.workspaceState.creativeShapeGenerator == workspace.creativeShapeGenerator)

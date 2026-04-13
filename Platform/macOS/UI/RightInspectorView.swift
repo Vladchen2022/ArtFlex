@@ -3,6 +3,14 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 private let tipMaskResolution = 256
+private let topInspectorPanelHeight: CGFloat = 264
+private let collapsedReferenceInspectorHeight: CGFloat = 214
+private let topInspectorSectionSpacing: CGFloat = 10
+private let topInspectorControlSpacing: CGFloat = 6
+private let topInspectorControlButtonWidth: CGFloat = 24
+private let topInspectorControlButtonHeight: CGFloat = 22
+private let topInspectorControlCornerRadius: CGFloat = 7
+private let topInspectorControlIconSize: CGFloat = 11.5
 
 private enum TipImageLibrarySheetTarget: String, Identifiable {
     case primary
@@ -35,8 +43,6 @@ struct RightInspectorView: View {
     @State private var showsPressureCurveEditor = false
     @State private var showsPressureSizeCurveEditor = false
     @State private var tipPaintMode: TipPaintMode = .round
-    @State private var tipPressureSizeAmount: Double = 0.0
-    @State private var tipPressureOpacityAmount: Double = 0.0
     @State private var presetShapeIndex = 0
     @State private var sprayPatternIndex = 0
     @State private var draggedBrushPresetID: String?
@@ -61,11 +67,10 @@ struct RightInspectorView: View {
     @State private var navigatorZoomPercentText = "100"
     var body: some View {
         GeometryReader { proxy in
-            let leftTopPanelMaxHeight = max(280.0, min(proxy.size.height * 0.48, 440.0))
             ScrollView(.vertical, showsIndicators: true) {
                 HStack(alignment: .top, spacing: 12) {
                     VStack(spacing: 12) {
-                        generatorReferencePanel(maxHeight: leftTopPanelMaxHeight)
+                        generatorReferencePanel()
 
                         InspectorPanel(title: "颜色") {
                             ColorSectionView(
@@ -133,7 +138,7 @@ struct RightInspectorView: View {
     private var generatorSection: some View {
         let generator = viewModel.workspace.creativeShapeGenerator
         return VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 8) {
+            HStack(spacing: 6) {
                 generatorSourceButton(
                     title: CreativeShapeGeneratorColorSource.currentColor.title,
                     isSelected: generator.selectedSource == .currentColor
@@ -232,8 +237,18 @@ struct RightInspectorView: View {
         .frame(maxWidth: .infinity, alignment: .topLeading)
     }
 
-    private func generatorReferencePanel(maxHeight: CGFloat) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
+    private func generatorReferencePanel() -> some View {
+        let hasLoadedReferenceImage = viewModel.referenceImageSlots.contains { $0.asset != nil }
+        let resolvedFixedHeight: CGFloat?
+        if leftInspectorTab == .generator {
+            resolvedFixedHeight = nil
+        } else if !hasLoadedReferenceImage {
+            resolvedFixedHeight = collapsedReferenceInspectorHeight
+        } else {
+            resolvedFixedHeight = topInspectorPanelHeight
+        }
+
+        return VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 8) {
                 leftInspectorTabButton(.generator)
                 leftInspectorTabButton(.referenceImages)
@@ -241,11 +256,8 @@ struct RightInspectorView: View {
 
             Group {
                 if leftInspectorTab == .generator {
-                    ScrollView(.vertical, showsIndicators: true) {
-                        generatorSection
-                            .frame(maxWidth: .infinity, alignment: .topLeading)
-                    }
-                    .frame(maxHeight: maxHeight)
+                    generatorSection
+                        .frame(maxWidth: .infinity, alignment: .topLeading)
                 } else {
                     referenceImageSection
                         .frame(maxWidth: .infinity, alignment: .topLeading)
@@ -253,7 +265,7 @@ struct RightInspectorView: View {
             }
         }
         .padding(12)
-        .frame(maxWidth: .infinity)
+        .frame(maxWidth: .infinity, minHeight: resolvedFixedHeight, maxHeight: resolvedFixedHeight, alignment: .top)
         .background(
             RoundedRectangle(cornerRadius: 12)
                 .fill(Color.white.opacity(0.06))
@@ -530,7 +542,7 @@ struct RightInspectorView: View {
     }
 
     private var navigatorSection: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: topInspectorSectionSpacing) {
             NavigatorPreviewContainer(
                 proxy: viewModel.navigatorPreviewProxy,
                 viewModel: viewModel,
@@ -544,45 +556,29 @@ struct RightInspectorView: View {
                 viewModel.setNavigatorPreviewVisible(false)
             }
 
-            HStack(spacing: 8) {
-                Button {
+            HStack(spacing: topInspectorControlSpacing) {
+                compactToolButton(
+                    systemImage: "arrow.clockwise",
+                    tooltip: "刷新导航器",
+                    width: topInspectorControlButtonWidth,
+                    height: topInspectorControlButtonHeight,
+                    iconSize: topInspectorControlIconSize,
+                    cornerRadius: topInspectorControlCornerRadius
+                ) {
                     viewModel.refreshNavigatorPreviewNow()
-                } label: {
-                    Image(systemName: "arrow.clockwise")
-                        .font(.system(size: 11, weight: .bold))
-                        .foregroundStyle(Color.white.opacity(0.92))
-                        .frame(width: 28, height: 24)
-                        .background(
-                            RoundedRectangle(cornerRadius: 8)
-                                .fill(Color.white.opacity(0.10))
-                        )
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 8)
-                                .stroke(Color.white.opacity(0.08), lineWidth: 1)
-                        )
                 }
-                .buttonStyle(.plain)
-                .help("刷新导航器")
 
-                Button {
+                compactToolButton(
+                    systemImage: "arrow.counterclockwise",
+                    tooltip: "恢复 100%",
+                    width: topInspectorControlButtonWidth,
+                    height: topInspectorControlButtonHeight,
+                    iconSize: topInspectorControlIconSize,
+                    cornerRadius: topInspectorControlCornerRadius
+                ) {
                     viewModel.setNavigatorZoomPercent(100)
                     syncNavigatorZoomPercentText()
-                } label: {
-                    Image(systemName: "arrow.counterclockwise")
-                        .font(.system(size: 11, weight: .bold))
-                        .foregroundStyle(Color.white.opacity(0.92))
-                        .frame(width: 28, height: 24)
-                        .background(
-                            RoundedRectangle(cornerRadius: 8)
-                                .fill(Color.white.opacity(0.10))
-                        )
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 8)
-                                .stroke(Color.white.opacity(0.08), lineWidth: 1)
-                        )
                 }
-                .buttonStyle(.plain)
-                .help("恢复 100%")
 
                 Slider(
                     value: Binding(
@@ -591,6 +587,7 @@ struct RightInspectorView: View {
                     ),
                     in: 5...3200
                 )
+                .frame(maxWidth: .infinity)
 
                 HStack(spacing: 4) {
                     TextField("", text: $navigatorZoomPercentText)
@@ -598,7 +595,7 @@ struct RightInspectorView: View {
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(Color.white.opacity(0.92))
                         .multilineTextAlignment(.trailing)
-                        .frame(width: 44)
+                        .frame(width: 36)
                         .onSubmit {
                             commitNavigatorZoomPercentText()
                         }
@@ -607,14 +604,14 @@ struct RightInspectorView: View {
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(Color.white.opacity(0.66))
                 }
-                .padding(.horizontal, 8)
-                .frame(height: 24)
+                .padding(.horizontal, 7)
+                .frame(height: topInspectorControlButtonHeight)
                 .background(
-                    RoundedRectangle(cornerRadius: 8)
+                    RoundedRectangle(cornerRadius: topInspectorControlCornerRadius)
                         .fill(Color.black.opacity(0.18))
                 )
                 .overlay(
-                    RoundedRectangle(cornerRadius: 8)
+                    RoundedRectangle(cornerRadius: topInspectorControlCornerRadius)
                         .stroke(Color.white.opacity(0.08), lineWidth: 1)
                 )
             }
@@ -751,9 +748,9 @@ struct RightInspectorView: View {
 
             OptimizedCompactSlider(
                 title: "大小压感",
-                valueText: "\(Int(viewModel.workspace.toolSession.brush.pressureSizeAmount * 100))%",
+                valueText: "\(Int(viewModel.displayedPressureSizeAmount * 100))%",
                 value: Binding(
-                    get: { Double(viewModel.workspace.toolSession.brush.pressureSizeAmount) },
+                    get: { Double(viewModel.displayedPressureSizeAmount) },
                     set: { _ in }
                 ),
                 range: 0...1,
@@ -762,9 +759,9 @@ struct RightInspectorView: View {
 
             OptimizedCompactSlider(
                 title: "透明压感",
-                valueText: "\(Int(viewModel.workspace.toolSession.brush.pressureOpacityAmount * 100))%",
+                valueText: "\(Int(viewModel.displayedPressureOpacityAmount * 100))%",
                 value: Binding(
-                    get: { Double(viewModel.workspace.toolSession.brush.pressureOpacityAmount) },
+                    get: { Double(viewModel.displayedPressureOpacityAmount) },
                     set: { _ in }
                 ),
                 range: 0...1,
@@ -1106,22 +1103,31 @@ struct RightInspectorView: View {
     }
 
     private var tipShapeSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: topInspectorSectionSpacing) {
             tipDesignCanvas
 
-            HStack(spacing: 8) {
+            HStack(spacing: topInspectorControlSpacing) {
                 compactToolButton(
-                    systemImage: tipPaintMode == .round ? "circle.fill" : "eraser.fill",
-                    tooltip: tipPaintMode == .round ? "切换到擦除笔尖" : "切换到圆形绘制",
-                    isSelected: true
+                    systemImage: "checkmark",
+                    tooltip: "确认当前笔尖草稿",
+                    isSelected: viewModel.hasPendingBrushTipDraft,
+                    width: topInspectorControlButtonWidth,
+                    height: topInspectorControlButtonHeight,
+                    iconSize: topInspectorControlIconSize,
+                    cornerRadius: topInspectorControlCornerRadius
                 ) {
-                    tipPaintMode = tipPaintMode == .round ? .eraser : .round
+                    _ = viewModel.applyBrushTipDraft()
                 }
+                .disabled(!viewModel.hasPendingBrushTipDraft)
 
                 compactToolButton(
                     systemImage: "photo.badge.plus",
                     tooltip: "从图片导入笔尖",
-                    isSelected: false
+                    isSelected: false,
+                    width: topInspectorControlButtonWidth,
+                    height: topInspectorControlButtonHeight,
+                    iconSize: topInspectorControlIconSize,
+                    cornerRadius: topInspectorControlCornerRadius
                 ) {
                     viewModel.importBrushTipImageFromDisk()
                 }
@@ -1129,18 +1135,47 @@ struct RightInspectorView: View {
                 compactToolButton(
                     systemImage: "square.grid.3x2",
                     tooltip: "打开笔尖图片资料库",
-                    isSelected: false
+                    isSelected: false,
+                    width: topInspectorControlButtonWidth,
+                    height: topInspectorControlButtonHeight,
+                    iconSize: topInspectorControlIconSize,
+                    cornerRadius: topInspectorControlCornerRadius
                 ) {
                     prepareTipImageLibraryPresentation(for: .primary)
                     tipImageLibrarySheetTarget = .primary
                 }
 
+                compactToolButton(
+                    systemImage: "eraser.fill",
+                    tooltip: tipPaintMode == .eraser ? "切回笔刷绘制" : "切换到橡皮",
+                    isSelected: tipPaintMode == .eraser,
+                    width: topInspectorControlButtonWidth,
+                    height: topInspectorControlButtonHeight,
+                    iconSize: topInspectorControlIconSize,
+                    cornerRadius: topInspectorControlCornerRadius
+                ) {
+                    tipPaintMode = tipPaintMode == .eraser ? .round : .eraser
+                }
+
                 compactTextActionButton(
                     title: "组合笔刷…",
                     tooltip: "打开组合笔刷工作台",
-                    minWidth: 104
+                    minWidth: 82,
+                    isProminent: viewModel.workspace.toolSession.brush.compoundBrush.enabled,
+                    fillsAvailableWidth: true,
+                    height: topInspectorControlButtonHeight,
+                    cornerRadius: topInspectorControlCornerRadius,
+                    fontSize: 11,
+                    horizontalPadding: 6
                 ) {
-                    showsCompoundBrushBuilder = true
+                    let isCompoundEnabled = viewModel.workspace.toolSession.brush.compoundBrush.enabled
+                    if isCompoundEnabled {
+                        viewModel.setCompoundBrushEnabled(false)
+                        showsCompoundBrushBuilder = false
+                    } else {
+                        viewModel.setCompoundBrushEnabled(true)
+                        showsCompoundBrushBuilder = true
+                    }
                 }
             }
 
@@ -1149,30 +1184,6 @@ struct RightInspectorView: View {
                     viewModel.reactivatePrimaryCustomTipSourceIfAvailable()
                 }
             }
-
-            // ⚡️ 优化：笔尖绘制参数使用本地状态，不需要触发 ViewModel
-            // 这些滑块不影响实际笔刷，只影响笔尖编辑器
-            OptimizedCompactSlider(
-                title: "大小压感",
-                valueText: "\(Int(tipPressureSizeAmount * 100))%",
-                value: Binding(
-                    get: { tipPressureSizeAmount },
-                    set: { _ in }
-                ),
-                range: 0...1,
-                onCommit: { tipPressureSizeAmount = $0 }
-            )
-
-            OptimizedCompactSlider(
-                title: "透明压感",
-                valueText: "\(Int(tipPressureOpacityAmount * 100))%",
-                value: Binding(
-                    get: { tipPressureOpacityAmount },
-                    set: { _ in }
-                ),
-                range: 0...1,
-                onCommit: { tipPressureOpacityAmount = $0 }
-            )
 
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -1192,19 +1203,23 @@ struct RightInspectorView: View {
         systemImage: String,
         tooltip: String,
         isSelected: Bool = false,
+        width: CGFloat = 34,
+        height: CGFloat = 30,
+        iconSize: CGFloat = 13,
+        cornerRadius: CGFloat = 8,
         action: @escaping () -> Void
     ) -> some View {
         Button(action: action) {
             Image(systemName: systemImage)
-                .font(.system(size: 13, weight: .bold))
+                .font(.system(size: iconSize, weight: .bold))
                 .foregroundStyle(isSelected ? Color.white : Color.white.opacity(0.95))
-                .frame(width: 34, height: 30)
+                .frame(width: width, height: height)
                 .background(
-                    RoundedRectangle(cornerRadius: 8)
+                    RoundedRectangle(cornerRadius: cornerRadius)
                         .fill(isSelected ? Color.accentColor : Color.white.opacity(0.18))
                 )
                 .overlay(
-                    RoundedRectangle(cornerRadius: 8)
+                    RoundedRectangle(cornerRadius: cornerRadius)
                         .stroke(
                             isSelected ? Color.accentColor.opacity(0.95) : Color.white.opacity(0.16),
                             lineWidth: 1
@@ -1220,24 +1235,33 @@ struct RightInspectorView: View {
         title: String,
         tooltip: String,
         minWidth: CGFloat? = nil,
+        isProminent: Bool = false,
+        fillsAvailableWidth: Bool = false,
+        height: CGFloat = 30,
+        cornerRadius: CGFloat = 8,
+        fontSize: CGFloat = 12,
+        horizontalPadding: CGFloat = 10,
         action: @escaping () -> Void
     ) -> some View {
         Button(action: action) {
             Text(title)
-                .font(.system(size: 12, weight: .semibold))
+                .font(.system(size: fontSize, weight: .semibold))
                 .foregroundStyle(Color.white.opacity(0.96))
                 .lineLimit(1)
                 .minimumScaleFactor(0.95)
-                .frame(maxWidth: .infinity, minHeight: 30)
+                .frame(maxWidth: fillsAvailableWidth ? .infinity : nil, minHeight: height)
                 .frame(minWidth: minWidth)
-                .padding(.horizontal, 10)
+                .padding(.horizontal, horizontalPadding)
                 .background(
-                    RoundedRectangle(cornerRadius: 8)
-                        .fill(Color.white.opacity(0.18))
+                    RoundedRectangle(cornerRadius: cornerRadius)
+                        .fill(isProminent ? Color.accentColor : Color.white.opacity(0.18))
                 )
                 .overlay(
-                    RoundedRectangle(cornerRadius: 8)
-                        .stroke(Color.white.opacity(0.16), lineWidth: 1)
+                    RoundedRectangle(cornerRadius: cornerRadius)
+                        .stroke(
+                            isProminent ? Color.accentColor.opacity(0.95) : Color.white.opacity(0.16),
+                            lineWidth: 1
+                        )
                 )
         }
         .buttonStyle(.plain)
@@ -1583,56 +1607,95 @@ struct RightInspectorView: View {
     }
 
     private var tipDesignCanvas: some View {
-        ZStack {
-            RoundedRectangle(cornerRadius: 12)
-                .fill(Color.white)
-                .frame(height: 180)
-                .overlay {
-                    RoundedRectangle(cornerRadius: 12)
-                        .stroke(
-                            isTipImageDropTarget ? Color.accentColor.opacity(0.9) : Color.clear,
-                            lineWidth: 2
-                        )
-                }
-
-            let tipSemantic = effectivePrimaryTipSourceSemantic(for: viewModel.workspace.toolSession.brush)
-            let tipFitPreview = tipSemantic.usesImportedPreviewFit
-            TipMaskCanvasView(
-                maskData: viewModel.workspace.toolSession.brush.customTipMaskData,
-                syncToken: tipMaskEditorSyncToken(
-                    maskData: viewModel.workspace.toolSession.brush.customTipMaskData,
-                    sourceSemantic: tipSemantic,
-                    assetID: viewModel.workspace.toolSession.brush.customTipAssetID,
-                    fitImportedPreview: tipFitPreview
-                ),
-                fitImportedPreview: tipFitPreview,
-                paintMode: tipPaintMode,
-                pressureSizeAmount: Float(tipPressureSizeAmount),
-                pressureOpacityAmount: Float(tipPressureOpacityAmount),
-                brushSize: viewModel.workspace.toolSession.brush.size,
-                onFocusChanged: { isFocused in
-                    viewModel.setBrushTipCanvasFocused(isFocused)
-                },
-                onImportImage: { image in
-                    _ = viewModel.importBrushTipImage(from: image)
-                },
-                onUpdateMask: { data in
-                    viewModel.updateCustomTipMask(data)
-                }
+        GeometryReader { proxy in
+            let presentation = CanvasPresentationBuilder.makePresentation(
+                canvasSize: CanvasSize(width: tipMaskResolution, height: tipMaskResolution),
+                viewport: .stageOneDefault,
+                availableWidth: proxy.size.width,
+                availableHeight: proxy.size.height,
+                padding: 10
             )
-            .frame(height: 180)
+            let documentCenter = CanvasPoint(
+                x: presentation.documentOrigin.x + (presentation.documentDisplaySize.x / 2),
+                y: presentation.documentOrigin.y + (presentation.documentDisplaySize.y / 2)
+            )
+            let editorMaskData =
+                viewModel.hasPendingBrushTipDraft
+                ? viewModel.brushTipDraftMaskData
+                : viewModel.workspace.toolSession.brush.customTipMaskData
+            let tipSemantic =
+                viewModel.hasPendingBrushTipDraft
+                ? TipSourceSemantic.customMask
+                : effectivePrimaryTipSourceSemantic(for: viewModel.workspace.toolSession.brush)
+            let tipFitPreview = tipSemantic.usesImportedPreviewFit
+
+            ZStack(alignment: .topLeading) {
+                RoundedRectangle(cornerRadius: 10)
+                    .fill(Color.black.opacity(0.14))
+
+                TipMaskCanvasView(
+                    maskData: editorMaskData,
+                    syncToken: tipMaskEditorSyncToken(
+                        maskData: editorMaskData,
+                        sourceSemantic: tipSemantic,
+                        assetID: viewModel.hasPendingBrushTipDraft ? nil : viewModel.workspace.toolSession.brush.customTipAssetID,
+                        fitImportedPreview: tipFitPreview
+                    ),
+                    fitImportedPreview: tipFitPreview,
+                    paintMode: tipPaintMode,
+                    drawingBrush: viewModel.workspace.toolSession.brush,
+                    onRequestPaintModeShortcut: { mode in
+                        tipPaintMode = mode
+                    },
+                    onFocusChanged: { isFocused in
+                        viewModel.setBrushTipCanvasFocused(isFocused)
+                    },
+                    onImportImage: { image in
+                        _ = viewModel.importBrushTipImage(from: image)
+                    },
+                    onUpdateMask: { data in
+                        viewModel.updateBrushTipDraft(data)
+                    }
+                )
+                .frame(
+                    width: presentation.documentDisplaySize.x,
+                    height: presentation.documentDisplaySize.y
+                )
+                .position(
+                    x: documentCenter.x,
+                    y: documentCenter.y
+                )
+            }
         }
+        .frame(height: 168)
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .overlay(
+            RoundedRectangle(cornerRadius: 10)
+                .stroke(
+                    isTipImageDropTarget ? Color.accentColor.opacity(0.9) : Color.white.opacity(0.08),
+                    lineWidth: isTipImageDropTarget ? 2 : 1
+                )
+        )
         .overlay(alignment: .topTrailing) {
             Button {
-                viewModel.clearCustomTipMask()
+                viewModel.clearBrushTipDraft()
             } label: {
                 Image(systemName: "trash")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(Color.black.opacity(0.45))
-                    .padding(8)
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(Color.white.opacity(0.72))
+                    .frame(width: 28, height: 24)
+                    .background(
+                        RoundedRectangle(cornerRadius: 8)
+                            .fill(Color.white.opacity(0.10))
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8)
+                            .stroke(Color.white.opacity(0.08), lineWidth: 1)
+                    )
             }
             .buttonStyle(.plain)
             .help("清空笔尖")
+            .padding(8)
         }
         .onDrop(of: [UTType.fileURL.identifier, UTType.image.identifier], isTargeted: $isTipImageDropTarget) { providers in
             importTipImageFromDrop(providers: providers)
@@ -2565,18 +2628,45 @@ struct RightInspectorView: View {
         let effectivePressure = min(max(pressure, 0), 1)
         let sizePressure = max(effectivePressure, 0.01)
         let opacityPressure = max(effectivePressure, 0.005)
-        let sizeResponse = min(max(Double(brush.pressureSizeAmount), 0), 1)
-        let opacityResponse = min(max(Double(brush.pressureOpacityAmount), 0), 1)
+        let sizeResponseSource = brush.compoundBrush.enabled
+            ? brush.compoundBrush.globalPressureSizeAmount
+            : brush.pressureSizeAmount
+        let opacityResponseSource = brush.compoundBrush.enabled
+            ? brush.compoundBrush.globalPressureOpacityAmount
+            : brush.pressureOpacityAmount
+        let sizeResponse = min(max(Double(sizeResponseSource), 0), 1)
+        let opacityResponse = min(max(Double(opacityResponseSource), 0), 1)
         let curvedSizePressure = previewSizeCurvePressure(sizePressure, brush: brush)
         let lowerBound = min(max(Double(brush.sizeLowerBound), 0), 1)
         let lowerBoundedPressure = lowerBound + ((1 - lowerBound) * curvedSizePressure)
         let rawSizeFactor = (1 - sizeResponse) + (sizeResponse * lowerBoundedPressure)
-        let remappedOpacityPressure = previewPressureResponsePressure(opacityPressure, brush: brush)
-        let curvedOpacityPressure = previewOpacityCurvePressure(remappedOpacityPressure, brush: brush)
-        let rawOpacityFactor = (1 - opacityResponse) + (opacityResponse * curvedOpacityPressure)
+        let curvedOpacityPressure = previewOpacityCurvePressure(opacityPressure, brush: brush)
+        let rawOpacityFactor = Double(
+            BrushSettings.resolvedPressureFactor(
+                responseAmount: Float(opacityResponse),
+                curvedPressure: Float(curvedOpacityPressure)
+            )
+        )
 
         let sizeFactor = rawSizeFactor
-        let resolvedOpacity = min(max(Double(brush.opacity) * rawOpacityFactor, 0.03), 0.85)
+        let targetVisibleOpacity = Float(brush.opacity) * Float(rawOpacityFactor)
+        let spacingPx = max(Float(Double(brush.size) * Double(brush.spacingPercent) / 100.0), 0.5)
+        let stampDiameterPx = max(Float(brush.size) * Float(sizeFactor), 1)
+        let compensationAmount = brush.compoundBrush.enabled
+            ? max(
+                Float(opacityResponse),
+                min(max(brush.compoundBrush.secondary.pressureOpacityAmount, 0), 1)
+            )
+            : Float(opacityResponse)
+        let visibleOpacity = brush.buildMode == .buildUp
+            ? BrushSettings.resolvedBuildUpVisibleAlpha(
+                targetVisibleAlpha: targetVisibleOpacity,
+                spacingPx: spacingPx,
+                stampDiameterPx: stampDiameterPx,
+                compensationAmount: compensationAmount
+            )
+            : targetVisibleOpacity
+        let resolvedOpacity = min(max(Double(visibleOpacity), 0.03), 0.85)
         return (max(sizeFactor, 0.04), resolvedOpacity)
     }
 
@@ -2615,23 +2705,15 @@ struct RightInspectorView: View {
         _ pressure: Double,
         brush: BrushSettings
     ) -> Double {
-        if brush.buildMode == .opacityCap {
-            let low = min(max(Double(brush.opacityCurveLow), 0), 0.85)
-            let mid = min(max(Double(brush.opacityCurveMid), low), 0.95)
-            let high = min(max(Double(brush.opacityCurveHigh), mid), 1)
-            return previewSamplePiecewiseCurve(
-                pressure: pressure,
-                points: [
-                    (0.0, 0.0),
-                    (0.2, low),
-                    (0.5, mid),
-                    (0.8, high),
-                    (1.0, 1.0)
-                ]
+        Double(
+            BrushSettings.resolvedOpacityCurvePressure(
+                pressure: Float(pressure),
+                pressureSensitivity: brush.pressureSensitivity,
+                low: brush.opacityCurveLow,
+                mid: brush.opacityCurveMid,
+                high: brush.opacityCurveHigh
             )
-        }
-
-        return pow(min(max(pressure, 0), 1), 3.6)
+        )
     }
 
     private func previewSamplePiecewiseCurve(
@@ -4169,15 +4251,19 @@ private struct TipMaskCanvasView: NSViewRepresentable {
     let syncToken: String
     let fitImportedPreview: Bool
     let paintMode: TipPaintMode
-    let pressureSizeAmount: Float
-    let pressureOpacityAmount: Float
-    let brushSize: Float
+    let drawingBrush: BrushSettings
+    let onRequestPaintModeShortcut: (TipPaintMode) -> Void
     let onFocusChanged: (Bool) -> Void
     let onImportImage: (NSImage) -> Void
     let onUpdateMask: (Data) -> Void
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(onFocusChanged: onFocusChanged, onImportImage: onImportImage, onUpdateMask: onUpdateMask)
+        Coordinator(
+            onRequestPaintModeShortcut: onRequestPaintModeShortcut,
+            onFocusChanged: onFocusChanged,
+            onImportImage: onImportImage,
+            onUpdateMask: onUpdateMask
+        )
     }
 
     func makeNSView(context: Context) -> TipMaskEditorNSView {
@@ -4188,9 +4274,7 @@ private struct TipMaskCanvasView: NSViewRepresentable {
             syncToken: syncToken,
             fitImportedPreview: fitImportedPreview,
             paintMode: paintMode,
-            pressureSizeAmount: pressureSizeAmount,
-            pressureOpacityAmount: pressureOpacityAmount,
-            brushSize: brushSize
+            drawingBrush: drawingBrush
         )
         return view
     }
@@ -4202,22 +4286,23 @@ private struct TipMaskCanvasView: NSViewRepresentable {
             syncToken: syncToken,
             fitImportedPreview: fitImportedPreview,
             paintMode: paintMode,
-            pressureSizeAmount: pressureSizeAmount,
-            pressureOpacityAmount: pressureOpacityAmount,
-            brushSize: brushSize
+            drawingBrush: drawingBrush
         )
     }
 
     final class Coordinator: NSObject {
+        let onRequestPaintModeShortcut: (TipPaintMode) -> Void
         let onFocusChanged: (Bool) -> Void
         let onImportImage: (NSImage) -> Void
         let onUpdateMask: (Data) -> Void
 
         init(
+            onRequestPaintModeShortcut: @escaping (TipPaintMode) -> Void,
             onFocusChanged: @escaping (Bool) -> Void,
             onImportImage: @escaping (NSImage) -> Void,
             onUpdateMask: @escaping (Data) -> Void
         ) {
+            self.onRequestPaintModeShortcut = onRequestPaintModeShortcut
             self.onFocusChanged = onFocusChanged
             self.onImportImage = onImportImage
             self.onUpdateMask = onUpdateMask
@@ -4229,10 +4314,12 @@ private final class TipMaskEditorNSView: NSView {
     weak var coordinator: TipMaskCanvasView.Coordinator?
 
     private var maskBytes = [UInt8](repeating: 0, count: tipMaskResolution * tipMaskResolution)
+    private var livePreviewRGBAData = Data(
+        repeating: 255,
+        count: tipMaskResolution * tipMaskResolution * 4
+    )
     private var paintMode: TipPaintMode = .round
-    private var pressureSizeAmount: Float = 0.0
-    private var pressureOpacityAmount: Float = 0.0
-    private var brushSize: Float = 24
+    private var drawingBrush = BrushSettings.stageOneDefault
     private var fitImportedPreview = false
     private var lastPaintPoint: CGPoint?
     private var hoverLocation: CGPoint?
@@ -4241,6 +4328,10 @@ private final class TipMaskEditorNSView: NSView {
     private var livePreviewImage: CGImage?
     private var livePreviewImageDirty = true
     private var accumulatedDirtyRect: CGRect = .null
+    private var strokeBaseMaskBytes: [UInt8]?
+    private var activeStrokePoints: [StrokePoint] = []
+    private var shortcutContextArmed = false
+    private var localKeyDownMonitor: Any?
 
     override var isFlipped: Bool { true }
     override var acceptsFirstResponder: Bool { true }
@@ -4248,9 +4339,10 @@ private final class TipMaskEditorNSView: NSView {
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
-        layer?.cornerRadius = 12
+        layer?.cornerRadius = 0
         layer?.masksToBounds = true
         registerForDraggedTypes([.fileURL, .tiff, .png])
+        installLocalKeyDownMonitor()
     }
 
     required init?(coder: NSCoder) {
@@ -4262,22 +4354,21 @@ private final class TipMaskEditorNSView: NSView {
         syncToken: String,
         fitImportedPreview: Bool,
         paintMode: TipPaintMode,
-        pressureSizeAmount: Float,
-        pressureOpacityAmount: Float,
-        brushSize: Float
+        drawingBrush: BrushSettings
     ) {
         self.paintMode = paintMode
-        self.pressureSizeAmount = pressureSizeAmount
-        self.pressureOpacityAmount = pressureOpacityAmount
-        self.brushSize = brushSize
+        self.drawingBrush = drawingBrush
 
         if syncToken != externalSyncToken {
             externalSyncToken = syncToken
             hasLocalChanges = false
+            strokeBaseMaskBytes = nil
+            activeStrokePoints = []
             self.fitImportedPreview = fitImportedPreview
             let nextMask = normalizedMaskData(maskData)
             if nextMask != maskBytes {
                 maskBytes = nextMask
+                rebuildLivePreviewRGBADataFromMask()
             }
             livePreviewImageDirty = true
             needsDisplay = true
@@ -4293,6 +4384,7 @@ private final class TipMaskEditorNSView: NSView {
 
             if maskData == nil, maskBytes.contains(where: { $0 != 0 }) {
                 maskBytes = [UInt8](repeating: 0, count: tipMaskResolution * tipMaskResolution)
+                rebuildLivePreviewRGBADataFromMask()
                 livePreviewImageDirty = true
                 needsDisplay = true
             }
@@ -4307,7 +4399,7 @@ private final class TipMaskEditorNSView: NSView {
         if let previewImage = resolvedPreviewImage() {
             let drawRect = previewDrawRect(for: previewImage)
             context.saveGState()
-            context.interpolationQuality = .high
+            context.interpolationQuality = .none
             context.translateBy(x: drawRect.minX, y: drawRect.maxY)
             context.scaleBy(x: 1, y: -1)
             context.draw(previewImage, in: CGRect(origin: .zero, size: drawRect.size))
@@ -4330,6 +4422,7 @@ private final class TipMaskEditorNSView: NSView {
 
     override func mouseDown(with event: NSEvent) {
         window?.makeFirstResponder(self)
+        shortcutContextArmed = true
         coordinator?.onFocusChanged(true)
         let point = convert(event.locationInWindow, from: nil)
         let pressure = Float(event.pressure)
@@ -4339,6 +4432,8 @@ private final class TipMaskEditorNSView: NSView {
         fitImportedPreview = false
         livePreviewImageDirty = true
         accumulatedDirtyRect = .null
+        strokeBaseMaskBytes = maskBytes
+        activeStrokePoints = []
         paintSegment(from: point, to: point, pressure: max(pressure, 0.1))
     }
 
@@ -4359,6 +4454,8 @@ private final class TipMaskEditorNSView: NSView {
             coordinator?.onUpdateMask(Data(maskBytes))
             hasLocalChanges = false
         }
+        strokeBaseMaskBytes = nil
+        activeStrokePoints = []
         accumulatedDirtyRect = .null
         needsDisplay = true
     }
@@ -4391,13 +4488,28 @@ private final class TipMaskEditorNSView: NSView {
     }
 
     override func keyDown(with event: NSEvent) {
-        let modifiers = event.modifierFlags.intersection([.command, .control])
-        if modifiers.isEmpty == false,
-           event.charactersIgnoringModifiers?.lowercased() == "v",
-           importImageFromPasteboard(NSPasteboard.general) {
+        if handleShortcutEvent(event) {
             return
         }
         super.keyDown(with: event)
+    }
+
+    override func becomeFirstResponder() -> Bool {
+        let became = super.becomeFirstResponder()
+        if became {
+            shortcutContextArmed = true
+            coordinator?.onFocusChanged(true)
+        }
+        return became
+    }
+
+    override func resignFirstResponder() -> Bool {
+        let resigned = super.resignFirstResponder()
+        if resigned {
+            shortcutContextArmed = false
+            coordinator?.onFocusChanged(false)
+        }
+        return resigned
     }
 
     override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
@@ -4414,106 +4526,148 @@ private final class TipMaskEditorNSView: NSView {
         return true
     }
 
-    private func paintSegment(from start: CGPoint, to end: CGPoint, pressure: Float) {
-        let baseRadius = currentRadius()
-        // Pressure affects size: pressureSizeAmount=1 means full pressure control (light=small),
-        // pressureSizeAmount=0 means no pressure effect on size
-        let sizeFactor = Double(1.0 - pressureSizeAmount + pressureSizeAmount * pressure)
-        let effectiveRadius = baseRadius * sizeFactor
-        let step = max(effectiveRadius * 0.35, 1)
-        let dx = end.x - start.x
-        let dy = end.y - start.y
-        let distance = sqrt((dx * dx) + (dy * dy))
-        let steps = max(Int((distance / step).rounded()), 1)
-
-        for index in 0...steps {
-            let t = CGFloat(index) / CGFloat(steps)
-            let point = CGPoint(
-                x: start.x + (dx * t),
-                y: start.y + (dy * t)
-            )
-            paintStamp(at: point, radius: effectiveRadius, pressure: pressure)
-        }
-
-        // Incremental dirty-rect display instead of full redraw
-        if !accumulatedDirtyRect.isNull {
-            livePreviewImageDirty = true
-            setNeedsDisplay(accumulatedDirtyRect.insetBy(dx: -2, dy: -2))
-            accumulatedDirtyRect = .null
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        super.viewWillMove(toWindow: newWindow)
+        if newWindow == nil, let localKeyDownMonitor {
+            NSEvent.removeMonitor(localKeyDownMonitor)
+            self.localKeyDownMonitor = nil
+        } else if newWindow != nil, localKeyDownMonitor == nil {
+            installLocalKeyDownMonitor()
         }
     }
 
-    private func paintStamp(at location: CGPoint, radius: Double, pressure: Float) {
+    private func installLocalKeyDownMonitor() {
+        localKeyDownMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self else { return event }
+            guard self.isShortcutContextActive(for: event) else { return event }
+            return self.handleShortcutEvent(event) ? nil : event
+        }
+    }
+
+    private func isShortcutContextActive(for event: NSEvent) -> Bool {
+        guard event.window === window else { return false }
+        if window?.firstResponder === self {
+            return true
+        }
+        return shortcutContextArmed
+    }
+
+    private func handleShortcutEvent(_ event: NSEvent) -> Bool {
+        let modifiers = event.modifierFlags.intersection([.command, .control, .option])
+        if modifiers.contains(.command) || modifiers.contains(.control) {
+            if event.charactersIgnoringModifiers?.lowercased() == "v" {
+                return importImageFromPasteboard(NSPasteboard.general)
+            }
+            return false
+        }
+        guard modifiers.isEmpty,
+              let shortcut = event.charactersIgnoringModifiers?.lowercased()
+        else {
+            return false
+        }
+        switch shortcut {
+        case "e":
+            coordinator?.onRequestPaintModeShortcut(.eraser)
+            return true
+        case "b":
+            coordinator?.onRequestPaintModeShortcut(.round)
+            return true
+        default:
+            return false
+        }
+    }
+
+    private func paintSegment(from start: CGPoint, to end: CGPoint, pressure: Float) {
         let editableRect = previewDrawRect(for: nil)
         guard editableRect.width > 0, editableRect.height > 0 else { return }
 
-        let normalizedX = min(max((location.x - editableRect.minX) / editableRect.width, 0), 1)
-        let normalizedY = min(max((location.y - editableRect.minY) / editableRect.height, 0), 1)
-        let centerX = Int((normalizedX * CGFloat(tipMaskResolution - 1)).rounded())
-        let centerY = Int((normalizedY * CGFloat(tipMaskResolution - 1)).rounded())
+        let startMaskPoint = maskPoint(for: start, in: editableRect)
+        let endMaskPoint = maskPoint(for: end, in: editableRect)
+        let brush = strokeBrushSettings(for: paintMode)
+        let startPoint = StrokePoint(x: Double(startMaskPoint.x), y: Double(startMaskPoint.y), pressure: pressure)
+        let endPoint = StrokePoint(x: Double(endMaskPoint.x), y: Double(endMaskPoint.y), pressure: pressure)
 
-        let intRadius = Int(radius) + 1
-        let minX = max(0, centerX - intRadius)
-        let maxX = min(tipMaskResolution - 1, centerX + intRadius)
-        let minY = max(0, centerY - intRadius)
-        let maxY = min(tipMaskResolution - 1, centerY + intRadius)
+        if activeStrokePoints.isEmpty {
+            activeStrokePoints = [startPoint]
+        }
+        activeStrokePoints.append(endPoint)
 
-        guard minX <= maxX, minY <= maxY else {
+        var scratchSamplingState: BrushStrokeSamplingState?
+        guard let alphaBytes = StageOneBrushPreviewRasterizer.strokeAlphaBytes(
+            for: brush,
+            tool: paintMode == .eraser ? .eraser : .brush,
+            resolution: tipMaskResolution,
+            points: activeStrokePoints,
+            samplingState: &scratchSamplingState,
+            flushPendingSamples: true
+        ) else {
             return
         }
 
-        // Pressure affects opacity: pressureOpacityAmount=0 means no pressure effect on opacity,
-        // pressureOpacityAmount=1 means full pressure control (light=transparent)
-        let opacityFactor = Double(1.0 - pressureOpacityAmount + pressureOpacityAmount * pressure)
+        maskBytes = strokeBaseMaskBytes ?? [UInt8](repeating: 0, count: tipMaskResolution * tipMaskResolution)
+        mergeRenderedStrokeAlphaBytes(
+            alphaBytes,
+            paintMode: paintMode,
+            buildMode: brush.buildMode
+        )
+        flushIncrementalDisplayIfNeeded()
+    }
 
-        let radiusSq = radius * radius
+    private func currentRadius() -> Double {
+        min(max(Double(drawingBrush.size) * 0.4, 3.0), 28.0)
+    }
 
-        for y in minY...maxY {
-            let rowOffset = y * tipMaskResolution
-            for x in minX...maxX {
-                let dx = Double(x - centerX)
-                let dy = Double(y - centerY)
+    private func flushIncrementalDisplayIfNeeded() {
+        guard !accumulatedDirtyRect.isNull else { return }
+        livePreviewImageDirty = true
+        setNeedsDisplay(accumulatedDirtyRect.insetBy(dx: -2, dy: -2))
+        accumulatedDirtyRect = .null
+    }
 
-                let alpha: Double
-                switch paintMode {
-                case .round:
-                    let distSq = (dx * dx) + (dy * dy)
-                    guard distSq <= radiusSq else { continue }
-                    let normalized = sqrt(distSq) / radius
-                    if normalized <= 0.6 {
-                        alpha = 1
-                    } else {
-                        let fade = max(0.0, 1.0 - ((normalized - 0.6) / 0.4))
-                        alpha = fade * fade
-                    }
-                case .square:
-                    guard abs(dx) <= radius, abs(dy) <= radius else { continue }
-                    alpha = 1
-                case .eraser:
-                    let distSq = (dx * dx) + (dy * dy)
-                    guard distSq <= radiusSq else { continue }
-                    let normalized = sqrt(distSq) / radius
-                    if normalized <= 0.6 {
-                        alpha = 1
-                    } else {
-                        let fade = max(0.0, 1.0 - ((normalized - 0.6) / 0.4))
-                        alpha = fade * fade
-                    }
-                }
+    private func mergeRenderedStrokeAlphaBytes(
+        _ alphaBytes: [UInt8],
+        paintMode: TipPaintMode,
+        buildMode: BrushBuildMode
+    ) {
+        guard alphaBytes.count == maskBytes.count else { return }
 
-                let scaledAlpha = alpha * opacityFactor
-                let index = rowOffset + x
-                let value = UInt8(clamping: Int((scaledAlpha * 255).rounded()))
-                switch paintMode {
-                case .eraser:
-                    maskBytes[index] = UInt8(max(0, Int(maskBytes[index]) - Int(value)))
-                default:
-                    maskBytes[index] = max(maskBytes[index], value)
+        var minX = tipMaskResolution
+        var minY = tipMaskResolution
+        var maxX = -1
+        var maxY = -1
+
+        for index in alphaBytes.indices {
+            let alpha = alphaBytes[index]
+            guard alpha > 0 else { continue }
+
+            let existing = maskBytes[index]
+            let updated: UInt8
+            switch paintMode {
+            case .eraser:
+                updated = UInt8(max(0, Int(existing) - Int(alpha)))
+            case .round, .square:
+                if buildMode == .buildUp {
+                    updated = UInt8(min(255, Int(existing) + Int(alpha)))
+                } else {
+                    updated = max(existing, alpha)
                 }
             }
+
+            guard updated != existing else { continue }
+            maskBytes[index] = updated
+
+            let x = index % tipMaskResolution
+            let y = index / tipMaskResolution
+            minX = min(minX, x)
+            minY = min(minY, y)
+            maxX = max(maxX, x)
+            maxY = max(maxY, y)
         }
 
-        // Accumulate dirty rect in view coordinates
+        guard maxX >= minX, maxY >= minY else { return }
+        updateLivePreviewRGBAData(minX: minX, maxX: maxX, minY: minY, maxY: maxY)
+
+        let editableRect = previewDrawRect(for: nil)
         let scaleX = editableRect.width / CGFloat(tipMaskResolution)
         let scaleY = editableRect.height / CGFloat(tipMaskResolution)
         let dirtyViewRect = CGRect(
@@ -4525,8 +4679,13 @@ private final class TipMaskEditorNSView: NSView {
         accumulatedDirtyRect = accumulatedDirtyRect.isNull ? dirtyViewRect : accumulatedDirtyRect.union(dirtyViewRect)
     }
 
-    private func currentRadius() -> Double {
-        min(max(Double(brushSize) * 0.4, 3.0), 28.0)
+    private func maskPoint(for viewPoint: CGPoint, in editableRect: CGRect) -> CGPoint {
+        let normalizedX = min(max((viewPoint.x - editableRect.minX) / editableRect.width, 0), 1)
+        let normalizedY = min(max((viewPoint.y - editableRect.minY) / editableRect.height, 0), 1)
+        return CGPoint(
+            x: normalizedX * CGFloat(tipMaskResolution - 1),
+            y: normalizedY * CGFloat(tipMaskResolution - 1)
+        )
     }
 
     private func indicatorDiameter(in size: CGSize) -> CGFloat {
@@ -4551,28 +4710,48 @@ private final class TipMaskEditorNSView: NSView {
         }
 
         if livePreviewImageDirty || livePreviewImage == nil {
-            livePreviewImage = makeLivePreviewImage(from: maskBytes)
+            livePreviewImage = makeLivePreviewImage()
             livePreviewImageDirty = false
         }
         return livePreviewImage
     }
 
-    private func makeLivePreviewImage(from alphaBytes: [UInt8]) -> CGImage? {
+    private func rebuildLivePreviewRGBADataFromMask() {
+        updateLivePreviewRGBAData(
+            minX: 0,
+            maxX: tipMaskResolution - 1,
+            minY: 0,
+            maxY: tipMaskResolution - 1
+        )
+    }
+
+    private func updateLivePreviewRGBAData(minX: Int, maxX: Int, minY: Int, maxY: Int) {
+        guard minX <= maxX, minY <= maxY else { return }
+
+        livePreviewRGBAData.withUnsafeMutableBytes { rawBytes in
+            guard let destinationBaseAddress = rawBytes.bindMemory(to: UInt8.self).baseAddress else { return }
+
+            for y in minY...maxY {
+                let rowOffset = y * tipMaskResolution
+                for x in minX...maxX {
+                    let sourceIndex = rowOffset + x
+                    let grayscale = 255 - maskBytes[sourceIndex]
+                    let destinationIndex = sourceIndex * 4
+                    destinationBaseAddress[destinationIndex] = grayscale
+                    destinationBaseAddress[destinationIndex + 1] = grayscale
+                    destinationBaseAddress[destinationIndex + 2] = grayscale
+                    destinationBaseAddress[destinationIndex + 3] = 255
+                }
+            }
+        }
+    }
+
+    private func makeLivePreviewImage() -> CGImage? {
         let bytesPerPixel = 4
         let bytesPerRow = tipMaskResolution * bytesPerPixel
-        var rgba = [UInt8](repeating: 255, count: tipMaskResolution * tipMaskResolution * bytesPerPixel)
-
-        for index in 0..<(tipMaskResolution * tipMaskResolution) {
-            let grayscale = 255 - alphaBytes[index]
-            let offset = index * bytesPerPixel
-            rgba[offset] = grayscale
-            rgba[offset + 1] = grayscale
-            rgba[offset + 2] = grayscale
-            rgba[offset + 3] = 255
-        }
 
         guard
-            let provider = CGDataProvider(data: Data(rgba) as CFData),
+            let provider = CGDataProvider(data: livePreviewRGBAData as CFData),
             let colorSpace = CGColorSpace(name: CGColorSpace.sRGB)
         else {
             return nil
@@ -4591,6 +4770,22 @@ private final class TipMaskEditorNSView: NSView {
             shouldInterpolate: false,
             intent: .defaultIntent
         )
+    }
+
+    private func strokeBrushSettings(for paintMode: TipPaintMode) -> BrushSettings {
+        var brush = drawingBrush
+        switch paintMode {
+        case .square:
+            brush.tipShape = .square
+            brush.customTipSourceSemantic = .procedural
+            brush.customTipAssetID = nil
+            brush.customTipImportedSourceInfo = nil
+            brush.customTipMaskData = nil
+            brush.customTipEnvelopeMaskData = nil
+        case .round, .eraser:
+            break
+        }
+        return brush
     }
 
     private func aspectFitRect(imageSize: CGSize, in bounds: CGRect) -> CGRect {

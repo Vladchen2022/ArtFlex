@@ -155,6 +155,121 @@ enum StageOneBrushPreviewRasterizer {
         return image
     }
 
+    static func strokeAlphaBytes(
+        for brush: BrushSettings,
+        tool: ToolKind = .brush,
+        resolution: Int,
+        points: [StrokePoint],
+        samplingState: inout BrushStrokeSamplingState?,
+        flushPendingSamples: Bool = false
+    ) -> [UInt8]? {
+        guard resolution > 0 else { return nil }
+        guard !points.isEmpty || flushPendingSamples else { return nil }
+        guard
+            let context = compoundPreviewRendererContext,
+            let texture = makePreviewTexture(device: context.device, resolution: resolution)
+        else {
+            return nil
+        }
+
+        clearPreviewTexture(texture, commandQueue: context.commandQueue)
+
+        var workingSamplingState = samplingState
+
+        let stroke = StrokeDescriptor(
+            tool: tool,
+            color: .white,
+            brush: brush,
+            points: points,
+            selectionShape: nil
+        )
+
+        if tool == .brush && brush.buildMode == .opacityCap {
+            guard let session = context.renderer.makeOpacityCapSession(for: texture, commandQueue: context.commandQueue),
+                  let commandBuffer = context.commandQueue.makeCommandBuffer()
+            else {
+                return nil
+            }
+
+            if points.isEmpty == false {
+                _ = context.renderer.encodeOpacityCapStroke(
+                    stroke: stroke,
+                    session: session,
+                    into: texture,
+                    commandBuffer: commandBuffer,
+                    samplingState: &workingSamplingState
+                )
+            }
+
+            if flushPendingSamples {
+                var flushState: BrushStrokeSamplingState? = workingSamplingState ?? BrushStrokeSamplingState()
+                flushState?.isFlushing = true
+                let flushStroke = StrokeDescriptor(
+                    tool: tool,
+                    color: .white,
+                    brush: brush,
+                    points: [],
+                    selectionShape: nil,
+                    alphaLockEnabled: false,
+                    skipLeadingStamp: true
+                )
+                _ = context.renderer.encodeOpacityCapStroke(
+                    stroke: flushStroke,
+                    session: session,
+                    into: texture,
+                    commandBuffer: commandBuffer,
+                    samplingState: &flushState
+                )
+                workingSamplingState = flushState
+            }
+
+            commandBuffer.commit()
+            commandBuffer.waitUntilCompleted()
+        } else {
+            guard let commandBuffer = context.commandQueue.makeCommandBuffer() else {
+                return nil
+            }
+
+            if points.isEmpty == false {
+                _ = context.renderer.encodeStroke(
+                    stroke: stroke,
+                    into: texture,
+                    commandQueue: context.commandQueue,
+                    commandBuffer: commandBuffer,
+                    samplingState: &workingSamplingState
+                )
+            }
+
+            if flushPendingSamples {
+                var flushState: BrushStrokeSamplingState? = workingSamplingState ?? BrushStrokeSamplingState()
+                flushState?.isFlushing = true
+                let flushStroke = StrokeDescriptor(
+                    tool: tool,
+                    color: .white,
+                    brush: brush,
+                    points: [],
+                    selectionShape: nil,
+                    alphaLockEnabled: false,
+                    skipLeadingStamp: true
+                )
+                _ = context.renderer.encodeStroke(
+                    stroke: flushStroke,
+                    into: texture,
+                    commandQueue: context.commandQueue,
+                    commandBuffer: commandBuffer,
+                    samplingState: &flushState
+                )
+                workingSamplingState = flushState
+            }
+
+            commandBuffer.commit()
+            commandBuffer.waitUntilCompleted()
+        }
+
+        samplingState = workingSamplingState
+        return makeAlphaBytes(from: texture)
+    }
+
     static func importedAssetImage(
         from maskData: Data?,
         resolution: Int = 128
@@ -177,6 +292,18 @@ enum StageOneBrushPreviewRasterizer {
             resolution: resolution,
             role: .editor,
             cropToContent: cropToContent
+        )
+    }
+
+    static func stampAlphaBytes(
+        for brush: BrushSettings,
+        resolution: Int
+    ) -> [UInt8] {
+        guard resolution > 0 else { return [] }
+        let descriptor = primaryDescriptor(for: brush, resolution: resolution)
+        return renderAlphaBytes(
+            resolution: resolution,
+            contentMode: .stamp(descriptor)
         )
     }
 
@@ -570,8 +697,27 @@ enum StageOneBrushPreviewRasterizer {
         brushHasher(brush, into: &hasher)
         hasher.combine("compound-stroke")
         hasher.combine(width ?? resolution)
+        hasher.combine(brush.size)
+        hasher.combine(brush.opacity)
+        hasher.combine(brush.buildMode.rawValue)
+        hasher.combine(brush.spacingPercent)
+        hasher.combine(brush.scatterAmount)
+        hasher.combine(brush.jitterAmount)
+        hasher.combine(brush.stampRotationDegrees)
+        hasher.combine(brush.followsStrokeDirection)
+        hasher.combine(brush.pressureSensitivity)
+        hasher.combine(brush.pressureSizeAmount)
+        hasher.combine(brush.pressureOpacityAmount)
+        hasher.combine(brush.sizeCurveLow)
+        hasher.combine(brush.sizeCurveMid)
+        hasher.combine(brush.sizeCurveHigh)
+        hasher.combine(brush.opacityCurveLow)
+        hasher.combine(brush.opacityCurveMid)
+        hasher.combine(brush.opacityCurveHigh)
         hasher.combine(brush.compoundBrush.enabled)
         hasher.combine(brush.compoundBrush.mode.rawValue)
+        hasher.combine(brush.compoundBrush.globalPressureSizeAmount)
+        hasher.combine(brush.compoundBrush.globalPressureOpacityAmount)
         let secondary = brush.compoundBrush.secondary
         hasher.combine(secondary.tipShape.rawValue)
         hasher.combine(secondary.sourceSemantic.rawValue)
@@ -732,6 +878,27 @@ enum StageOneBrushPreviewRasterizer {
         }
 
         return image
+    }
+
+    private static func makeAlphaBytes(from texture: MTLTexture) -> [UInt8]? {
+        let width = texture.width
+        let height = texture.height
+        guard width > 0, height > 0 else { return nil }
+
+        let bytesPerRow = width * 4
+        var bgraBytes = [UInt8](repeating: 0, count: bytesPerRow * height)
+        texture.getBytes(
+            &bgraBytes,
+            bytesPerRow: bytesPerRow,
+            from: MTLRegionMake2D(0, 0, width, height),
+            mipmapLevel: 0
+        )
+
+        var alphaBytes = [UInt8](repeating: 0, count: width * height)
+        for index in 0..<(width * height) {
+            alphaBytes[index] = bgraBytes[(index * 4) + 3]
+        }
+        return alphaBytes
     }
 
     private static func resampledMaskBytes(

@@ -21,13 +21,46 @@ struct PressureInputTests {
     }
 
     @Test
-    func opacityPressureCurveIsStrongerThanLinearAtMidPressure() {
-        let linear: Float = 0.5
-        let curved = Float(pow(Double(0.5), 3.6))
+    func opacityPressureCurveUsesBrushPiecewiseControlPoints() {
+        let curved = BrushSettings.resolvedOpacityCurvePressure(
+            pressure: 0.5,
+            pressureSensitivity: 1,
+            low: 0.05,
+            mid: 0.4,
+            high: 0.82
+        )
 
-        #expect(curved < linear)
-        #expect(curved < 0.1)
-        #expect(curved > 0)
+        #expect(abs(curved - 0.4) < 0.0001)
+    }
+
+    @Test
+    func spacingCompensatedBuildUpAlphaReducesPerDabFlowForTightSpacing() {
+        let loose = BrushSettings.spacingCompensatedBuildUpAlpha(
+            targetVisibleAlpha: 0.7,
+            spacingPx: 18,
+            stampDiameterPx: 18
+        )
+        let tight = BrushSettings.spacingCompensatedBuildUpAlpha(
+            targetVisibleAlpha: 0.7,
+            spacingPx: 3,
+            stampDiameterPx: 18
+        )
+
+        #expect(abs(loose - 0.7) < 0.0001)
+        #expect(tight < loose)
+        #expect(tight > 0)
+    }
+
+    @Test
+    func resolvedBuildUpVisibleAlphaLeavesLegacyOpacityUntouchedWhenCompensationDisabled() {
+        let visible = BrushSettings.resolvedBuildUpVisibleAlpha(
+            targetVisibleAlpha: 0.72,
+            spacingPx: 3,
+            stampDiameterPx: 18,
+            compensationAmount: 0
+        )
+
+        #expect(abs(visible - 0.72) < 0.0001)
     }
 
     @Test
@@ -90,5 +123,53 @@ struct PressureInputTests {
         #expect(sample(0.2) == 0.12)
         #expect(sample(0.5) > 0.55)
         #expect(sample(0.8) > 0.9)
+    }
+
+    @Test
+    func nonTabletDragUsesLastTabletPressureAfterAuxiliaryEventsAppear() {
+        let resolved = resolveBrushInputPressure(
+            rawPressure: 1,
+            isTabletLikeEvent: false,
+            eventSubtypeIsTabletPoint: false,
+            sawTabletAuxiliaryEvent: true,
+            lastPressure: 0.27,
+            strokeInputSampleCount: 9,
+            minimumTabletPressure: 0.02,
+            debugForceConstantPressure: false
+        )
+
+        #expect(abs(resolved - 0.27) < 0.0001)
+    }
+
+    @Test
+    func nonTabletDragWithoutAuxiliaryPressureStillUsesOwnPressure() {
+        let resolved = resolveBrushInputPressure(
+            rawPressure: 0.64,
+            isTabletLikeEvent: false,
+            eventSubtypeIsTabletPoint: false,
+            sawTabletAuxiliaryEvent: false,
+            lastPressure: nil,
+            strokeInputSampleCount: 1,
+            minimumTabletPressure: 0.02,
+            debugForceConstantPressure: false
+        )
+
+        #expect(abs(resolved - 0.64) < 0.0001)
+    }
+
+    @Test
+    func tabletEventsStillBypassWarmupAtStrokeStart() {
+        let resolved = resolveBrushInputPressure(
+            rawPressure: 0.18,
+            isTabletLikeEvent: true,
+            eventSubtypeIsTabletPoint: true,
+            sawTabletAuxiliaryEvent: true,
+            lastPressure: 0.92,
+            strokeInputSampleCount: 2,
+            minimumTabletPressure: 0.02,
+            debugForceConstantPressure: false
+        )
+
+        #expect(abs(resolved - 0.18) < 0.0001)
     }
 }
