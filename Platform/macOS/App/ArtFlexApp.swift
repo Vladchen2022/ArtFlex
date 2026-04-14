@@ -7,6 +7,7 @@ struct ArtFlexApp: App {
     private var appDelegate
 
     @StateObject private var viewModel: WorkspaceViewModel
+    @StateObject private var presentationState = AppPresentationState()
 
     init() {
         do {
@@ -27,13 +28,23 @@ struct ArtFlexApp: App {
 
     var body: some Scene {
         WindowGroup {
-            MainWindowView(viewModel: viewModel)
+            MainWindowView(
+                viewModel: viewModel,
+                presentationState: presentationState
+            )
                 .frame(minWidth: 1200, minHeight: 760)
                 .onAppear {
                     appDelegate.viewModel = viewModel
                 }
         }
         .commands {
+            CommandGroup(replacing: .appSettings) {
+                Button("设置…") {
+                    presentationState.presentSettingsSheet()
+                }
+                .keyboardShortcut(",", modifiers: [.command])
+            }
+
             CommandGroup(replacing: .newItem) {
                 Button("新建文件") {
                     viewModel.presentNewCanvasSheet()

@@ -2,21 +2,27 @@ import SwiftUI
 
 struct MainWindowView: View {
     @ObservedObject var viewModel: WorkspaceViewModel
+    let presentationState: AppPresentationState
 
     var body: some View {
         VStack(spacing: 0) {
             if let snapshotCompareSession = viewModel.snapshotCompareSession {
                 SnapshotCompareWorkspaceShell(
                     hostViewModel: viewModel,
-                    session: snapshotCompareSession
+                    session: snapshotCompareSession,
+                    openSettings: presentationState.presentSettingsSheet
                 )
             } else if let ideationSession = viewModel.ideationSession {
                 IdeationWorkspaceShell(
                     hostViewModel: viewModel,
-                    session: ideationSession
+                    session: ideationSession,
+                    openSettings: presentationState.presentSettingsSheet
                 )
             } else {
-                StandardWorkspaceShell(viewModel: viewModel)
+                StandardWorkspaceShell(
+                    viewModel: viewModel,
+                    openSettings: presentationState.presentSettingsSheet
+                )
             }
         }
         .background(Color(red: 0.11, green: 0.11, blue: 0.12))
@@ -31,6 +37,13 @@ struct MainWindowView: View {
         .sheet(isPresented: $viewModel.isNewCanvasSheetPresented) {
             NewCanvasSheetView(viewModel: viewModel)
         }
+        .background(
+            SettingsSheetPresenter(
+                presentationState: presentationState,
+                shortcutSettings: viewModel.shortcutSettings
+            )
+            .frame(width: 0, height: 0)
+        )
     }
 
     private var activeKeyboardTarget: WorkspaceViewModel {
@@ -61,6 +74,7 @@ struct MainWindowView: View {
 private struct SnapshotCompareWorkspaceShell: View {
     @ObservedObject var hostViewModel: WorkspaceViewModel
     @ObservedObject var session: SnapshotCompareSessionState
+    let openSettings: () -> Void
 
     var body: some View {
         let chromeHidden = hostViewModel.isWorkspaceChromeHidden
@@ -69,7 +83,8 @@ private struct SnapshotCompareWorkspaceShell: View {
             if !chromeHidden {
                 MainToolbarView(
                     hostViewModel: hostViewModel,
-                    editingViewModel: hostViewModel
+                    editingViewModel: hostViewModel,
+                    openSettings: openSettings
                 )
                 .allowsHitTesting(false)
                 .opacity(0.88)
@@ -110,6 +125,7 @@ private struct SnapshotCompareWorkspaceShell: View {
 
 private struct StandardWorkspaceShell: View {
     @ObservedObject var viewModel: WorkspaceViewModel
+    let openSettings: () -> Void
 
     var body: some View {
         let chromeHidden = viewModel.isWorkspaceChromeHidden
@@ -118,7 +134,8 @@ private struct StandardWorkspaceShell: View {
             if !chromeHidden {
                 MainToolbarView(
                     hostViewModel: viewModel,
-                    editingViewModel: viewModel
+                    editingViewModel: viewModel,
+                    openSettings: openSettings
                 )
             }
 
@@ -153,6 +170,7 @@ private struct StandardWorkspaceShell: View {
 private struct IdeationWorkspaceShell: View {
     @ObservedObject var hostViewModel: WorkspaceViewModel
     @ObservedObject var session: IdeationSessionState
+    let openSettings: () -> Void
 
     var body: some View {
         let editingViewModel = session.activeBranchViewModel
@@ -162,7 +180,8 @@ private struct IdeationWorkspaceShell: View {
             if !chromeHidden {
                 MainToolbarView(
                     hostViewModel: hostViewModel,
-                    editingViewModel: editingViewModel
+                    editingViewModel: editingViewModel,
+                    openSettings: openSettings
                 )
             }
 
@@ -194,5 +213,20 @@ private struct IdeationWorkspaceShell: View {
                 }
             }
         }
+    }
+}
+
+private struct SettingsSheetPresenter: View {
+    @ObservedObject var presentationState: AppPresentationState
+    @ObservedObject var shortcutSettings: AppShortcutSettingsStore
+
+    var body: some View {
+        Color.clear
+            .sheet(isPresented: $presentationState.isSettingsSheetPresented) {
+                SettingsSheetView(
+                    settings: shortcutSettings,
+                    onClose: presentationState.dismissSettingsSheet
+                )
+            }
     }
 }

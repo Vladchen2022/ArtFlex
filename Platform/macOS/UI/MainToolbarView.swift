@@ -3,6 +3,7 @@ import SwiftUI
 struct MainToolbarView: View {
     @ObservedObject var hostViewModel: WorkspaceViewModel
     @ObservedObject var editingViewModel: WorkspaceViewModel
+    let openSettings: () -> Void
 
     var body: some View {
         HStack(spacing: 14) {
@@ -20,6 +21,10 @@ struct MainToolbarView: View {
 
             toolbarTextButton("导出") {
                 hostViewModel.exportPNG()
+            }
+
+            toolbarTextButton("设置") {
+                openSettings()
             }
 
             divider

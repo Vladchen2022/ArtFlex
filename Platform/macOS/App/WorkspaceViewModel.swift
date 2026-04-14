@@ -196,6 +196,7 @@ final class WorkspaceViewModel: ObservableObject {
     }
     private lazy var referenceImageFloatingPanelController = ReferenceImageFloatingPanelController()
     @Published private(set) var isCanvasLuminosityReferenceActive = false
+    let shortcutSettings = AppShortcutSettingsStore()
     private var luminosityReferenceSlotID: Int?
     private var luminosityCaptureTask: Task<Void, Never>?
     private var luminosityReferenceSourceRevision: UInt64 = 0
@@ -477,7 +478,7 @@ final class WorkspaceViewModel: ObservableObject {
     func handleToolShortcutKey(_ key: String, modifiers: NSEvent.ModifierFlags) -> Bool {
         let normalized = modifiers.intersection(.deviceIndependentFlagsMask)
         guard normalized.isDisjoint(with: [.command, .option, .control]) else { return false }
-        guard let group = ToolSidebarGroup.group(forShortcutKey: key) else { return false }
+        guard let group = shortcutSettings.toolGroup(forShortcutKey: key) else { return false }
 
         if normalized.contains(.shift), group.tools.count > 1 {
             cycleSidebarGroup(group)
@@ -6000,8 +6001,7 @@ final class WorkspaceViewModel: ObservableObject {
             return true
         }
 
-        if normalizedModifiers == [.shift],
-           event.charactersIgnoringModifiers?.uppercased() == "Z" {
+        if shortcutSettings.quickColorPickerShortcut.matchesKeyDown(event) {
             armQuickColorPickerShortcutIfNeeded()
             return true
         }
@@ -6149,7 +6149,7 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func handleKeyUp(_ event: NSEvent) -> Bool {
-        if event.charactersIgnoringModifiers?.uppercased() == "Z",
+        if shortcutSettings.quickColorPickerShortcut.matchesKeyUp(event),
            isQuickColorPickerShortcutActive {
             cancelQuickColorPickerShortcut()
             return true
@@ -6165,7 +6165,7 @@ final class WorkspaceViewModel: ObservableObject {
     func handleModifierFlagsChanged(_ modifierFlags: NSEvent.ModifierFlags) -> Bool {
         let normalizedModifiers = modifierFlags.intersection(.deviceIndependentFlagsMask)
         if isQuickColorPickerShortcutActive,
-           !normalizedModifiers.contains(.shift) {
+           !shortcutSettings.quickColorPickerShortcut.modifiersStillSatisfied(by: normalizedModifiers) {
             cancelQuickColorPickerShortcut()
         }
         return false

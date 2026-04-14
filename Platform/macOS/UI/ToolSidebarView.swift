@@ -50,6 +50,7 @@ struct ToolSidebarView: View {
                     if let group = ToolSidebarGroup.orderedGroups.first(where: { $0.id == groupID }) {
                         ToolSidebarGroupButton(
                             group: group,
+                            shortcutSettings: hostViewModel.shortcutSettings,
                             displayedTool: viewModel.displayedTool(for: group),
                             isSelected: viewModel.isSelected(group: group),
                             activateGroup: { viewModel.activateSidebarGroup(group) },
@@ -383,6 +384,7 @@ struct ToolSidebarView: View {
 
 private struct ToolSidebarGroupButton: View {
     let group: ToolSidebarGroup
+    @ObservedObject var shortcutSettings: AppShortcutSettingsStore
     let displayedTool: ToolKind
     let isSelected: Bool
     let activateGroup: () -> Void
@@ -441,7 +443,7 @@ private struct ToolSidebarGroupButton: View {
                                 .font(.system(size: 13, weight: tool == displayedTool ? .bold : .medium))
                                 .foregroundStyle(Color.white)
                             Spacer(minLength: 12)
-                            if let shortcut = tool.shortcutKey {
+                            if let shortcut = shortcutSettings.shortcutKey(for: group) {
                                 Text(shortcut)
                                     .font(.system(size: 11, weight: .bold, design: .rounded))
                                     .foregroundStyle(Color.white.opacity(0.7))
@@ -464,10 +466,10 @@ private struct ToolSidebarGroupButton: View {
     }
 
     private var helpText: String {
-        if group.isGrouped, let shortcut = group.shortcutKey {
+        if group.isGrouped, let shortcut = shortcutSettings.shortcutKey(for: group) {
             return "\(displayedTool.displayName) (\(shortcut))，长按可切换组内工具，Shift+\(shortcut) 轮换"
         }
-        if let shortcut = group.shortcutKey {
+        if let shortcut = shortcutSettings.shortcutKey(for: group) {
             return "\(displayedTool.displayName) (\(shortcut))"
         }
         return displayedTool.displayName
