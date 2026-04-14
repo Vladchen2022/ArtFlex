@@ -13,6 +13,7 @@ final class AppSharedMetalServices {
     let eyedropperSampler: EyedropperSampler
     let bucketFillEngine: BucketFillEngine
     let layerMergeController: LayerMergeController
+    let pixelClipboardController: PixelClipboardController
 
     init(metalContext: MetalDeviceContext) throws {
         self.canvasPresenter = try StageOneCanvasPresenter(device: metalContext.device)
@@ -31,6 +32,7 @@ final class AppSharedMetalServices {
             metalContext: metalContext,
             canvasPresenter: canvasPresenter
         )
+        self.pixelClipboardController = PixelClipboardController()
     }
 }
 
@@ -51,6 +53,7 @@ struct AppBootstrap {
     let eyedropperSampler: EyedropperSampler
     let bucketFillEngine: BucketFillEngine
     let layerMergeController: LayerMergeController
+    let pixelClipboardController: PixelClipboardController
     let textureSerializer: LayerTextureSerializer
     let pngExporter: PNGExporter
     let exportController: ExportController
@@ -99,6 +102,7 @@ struct AppBootstrap {
         self.eyedropperSampler = resolvedSharedMetalServices.eyedropperSampler
         self.bucketFillEngine = resolvedSharedMetalServices.bucketFillEngine
         self.layerMergeController = resolvedSharedMetalServices.layerMergeController
+        self.pixelClipboardController = resolvedSharedMetalServices.pixelClipboardController
         self.exportController = ExportController(
             workspaceStore: workspaceStore,
             layerSurfaceStore: layerSurfaceStore,

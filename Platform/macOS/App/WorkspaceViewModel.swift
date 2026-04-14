@@ -5656,6 +5656,429 @@ final class WorkspaceViewModel: ObservableObject {
         )
     }
 
+    func copyPixels() {
+        guard !isTransformingSelection else {
+            showStatus(.init(kind: .info, message: "请先应用或取消变形"))
+            return
+        }
+
+        _ = flushBrushEditingBoundary(reason: "copyPixels")
+
+        guard let (_, texture) = activeLayerTextureForPixelClipboard(requireEditableLayer: false) else {
+            return
+        }
+
+        do {
+            guard let payload = try makePixelClipboardPayload(
+                from: texture,
+                selectionShape: workspace.selection.committedShape,
+                canvasSize: workspace.document.canvasSize
+            ) else {
+                showStatus(.init(kind: .info, message: "当前图层没有可复制的像素"))
+                return
+            }
+
+            bootstrap.pixelClipboardController.store(payload)
+            showStatus(.init(kind: .success, message: "已复制像素"))
+        } catch {
+            showStatus(.init(kind: .error, message: error.localizedDescription))
+        }
+    }
+
+    func cutPixels() {
+        guard !isTransformingSelection else {
+            showStatus(.init(kind: .info, message: "请先应用或取消变形"))
+            return
+        }
+
+        _ = flushBrushEditingBoundary(reason: "cutPixels")
+
+        guard let (layerID, texture) = activeLayerTextureForPixelClipboard(requireEditableLayer: true) else {
+            return
+        }
+
+        do {
+            guard let payload = try makePixelClipboardPayload(
+                from: texture,
+                selectionShape: workspace.selection.committedShape,
+                canvasSize: workspace.document.canvasSize
+            ) else {
+                showStatus(.init(kind: .info, message: "当前图层没有可剪切的像素"))
+                return
+            }
+
+            bootstrap.pixelClipboardController.store(payload)
+
+            if let selectionShape = workspace.selection.committedShape {
+                _ = applyPixelOperation(
+                    to: selectionShape,
+                    operation: .clear,
+                    historyOperationKind: "selection.cut",
+                    successMessage: "已剪切像素"
+                )
+                return
+            }
+
+            checkpointHistoryIfPossible(
+                operationKind: "pixel.cut",
+                candidateChangedLayerIDs: [layerID],
+                additionalOperationKinds: ["pixelClipboard"],
+                captureMode: .inPlaceChangedLayers([layerID])
+            )
+
+            let clearedSnapshot = LayerTextureSnapshot(
+                width: payload.snapshot.width,
+                height: payload.snapshot.height,
+                bytesPerRow: payload.snapshot.bytesPerRow,
+                pixelData: Data(count: payload.snapshot.bytesPerRow * payload.snapshot.height)
+            )
+            try bootstrap.textureSerializer.restore(
+                snapshot: clearedSnapshot,
+                into: texture,
+                destinationX: payload.originX,
+                destinationY: payload.originY
+            )
+            refresh(invalidatedLayerIDs: [layerID])
+            noteCanvasContentChanged()
+            recordDrawingActivityIfNeeded()
+            showStatus(.init(kind: .success, message: "已剪切像素"))
+        } catch {
+            showStatus(.init(kind: .error, message: error.localizedDescription))
+        }
+    }
+
+    func pastePixels() {
+        guard !isTransformingSelection else {
+            showStatus(.init(kind: .info, message: "请先应用或取消变形"))
+            return
+        }
+
+        _ = flushBrushEditingBoundary(reason: "pastePixels")
+
+        guard let payload = bootstrap.pixelClipboardController.preferredPayload() else {
+            showStatus(.init(kind: .info, message: "剪贴板中没有可粘贴的像素"))
+            return
+        }
+
+        guard let placement = clippedPlacement(
+            for: payload,
+            destinationCanvasSize: workspace.document.canvasSize
+        ) else {
+            showStatus(.init(kind: .info, message: "粘贴内容超出当前画布"))
+            return
+        }
+
+        do {
+            checkpointHistoryIfPossible(
+                operationKind: "pixel.paste",
+                topologyOperation: true,
+                additionalOperationKinds: ["pixelClipboard"]
+            )
+
+            let insertionIndex = min(
+                (workspace.document.layers.firstIndex(where: { $0.id == workspace.document.activeLayerID }) ?? (workspace.document.layers.count - 1)) + 1,
+                workspace.document.layers.count
+            )
+
+            var createdLayerID: LayerID?
+            bootstrap.workspaceStore.updateDocument { document in
+                createdLayerID = document.addLayer(named: "粘贴图层").id
+                if let createdLayerID {
+                    _ = document.moveLayer(createdLayerID, toIndex: insertionIndex)
+                }
+            }
+
+            let state = bootstrap.workspaceStore.state
+            bootstrap.layerSurfaceStore.prepareTextures(
+                for: state.document,
+                metal: bootstrap.metalContext
+            )
+
+            guard
+                let createdLayerID,
+                let surfaceID = bootstrap.layerSurfaceStore.surfaceID(for: createdLayerID),
+                let texture = bootstrap.layerSurfaceStore.texture(for: surfaceID)
+            else {
+                throw CocoaError(.fileWriteUnknown)
+            }
+
+            try bootstrap.textureSerializer.restore(
+                snapshot: placement.snapshot,
+                into: texture,
+                destinationX: placement.destinationX,
+                destinationY: placement.destinationY
+            )
+
+            refresh(invalidatedLayerIDs: [createdLayerID])
+            noteCanvasContentChanged()
+            recordDrawingActivityIfNeeded()
+            showStatus(.init(kind: .success, message: "已粘贴为新图层"))
+        } catch {
+            showStatus(.init(kind: .error, message: error.localizedDescription))
+        }
+    }
+
+    private func activeLayerTextureForPixelClipboard(
+        requireEditableLayer: Bool
+    ) -> (layerID: LayerID, texture: MTLTexture)? {
+        let layerID: LayerID
+        if requireEditableLayer {
+            guard let editableLayerID = bootstrap.interactionController.activeEditableLayerID() else {
+                showStatus(.init(kind: .info, message: "当前图层已锁定"))
+                return nil
+            }
+            layerID = editableLayerID
+        } else {
+            layerID = workspace.document.activeLayerID
+        }
+
+        guard
+            let surfaceID = bootstrap.layerSurfaceStore.surfaceID(for: layerID),
+            let texture = bootstrap.layerSurfaceStore.texture(for: surfaceID)
+        else {
+            showStatus(.init(kind: .error, message: "无法访问当前图层"))
+            return nil
+        }
+
+        return (layerID, texture)
+    }
+
+    private func makePixelClipboardPayload(
+        from texture: MTLTexture,
+        selectionShape: SelectionShape?,
+        canvasSize: CanvasSize
+    ) throws -> PixelClipboardPayload? {
+        if let selectionShape {
+            let clampedSelection = selectionShape.clamped(to: canvasSize)
+            let minX = max(Int(clampedSelection.bounds.minX.rounded(.down)), 0)
+            let minY = max(Int(clampedSelection.bounds.minY.rounded(.down)), 0)
+            let maxX = min(Int(clampedSelection.bounds.maxX.rounded(.up)), texture.width)
+            let maxY = min(Int(clampedSelection.bounds.maxY.rounded(.up)), texture.height)
+            guard minX < maxX, minY < maxY else {
+                return nil
+            }
+
+            let selectionMask = selectionMaskRegion(
+                for: clampedSelection,
+                canvasSize: canvasSize,
+                originX: minX,
+                originY: minY,
+                width: maxX - minX,
+                height: maxY - minY
+            )
+            let boundedSnapshot = try bootstrap.textureSerializer.snapshot(
+                texture: texture,
+                originX: minX,
+                originY: minY,
+                width: maxX - minX,
+                height: maxY - minY
+            )
+            let maskedSnapshot = Self.maskedSnapshot(
+                boundedSnapshot,
+                using: selectionMask
+            )
+            guard let trimmedSnapshot = Self.trimmedSnapshot(maskedSnapshot) else {
+                return nil
+            }
+
+            return PixelClipboardPayload(
+                snapshot: trimmedSnapshot.snapshot,
+                originX: minX + trimmedSnapshot.offsetX,
+                originY: minY + trimmedSnapshot.offsetY,
+                sourceCanvasSize: canvasSize
+            )
+        }
+
+        let fullSnapshot = try bootstrap.textureSerializer.snapshot(texture: texture)
+        guard let opaqueBounds = Self.opaqueBounds(in: fullSnapshot) else {
+            return nil
+        }
+
+        return PixelClipboardPayload(
+            snapshot: Self.cropSnapshot(
+                fullSnapshot,
+                originX: opaqueBounds.originX,
+                originY: opaqueBounds.originY,
+                width: opaqueBounds.width,
+                height: opaqueBounds.height
+            ),
+            originX: opaqueBounds.originX,
+            originY: opaqueBounds.originY,
+            sourceCanvasSize: canvasSize
+        )
+    }
+
+    private func clippedPlacement(
+        for payload: PixelClipboardPayload,
+        destinationCanvasSize: CanvasSize
+    ) -> (snapshot: LayerTextureSnapshot, destinationX: Int, destinationY: Int)? {
+        let destinationMinX = max(0, payload.originX)
+        let destinationMinY = max(0, payload.originY)
+        let destinationMaxX = min(destinationCanvasSize.width, payload.originX + payload.snapshot.width)
+        let destinationMaxY = min(destinationCanvasSize.height, payload.originY + payload.snapshot.height)
+
+        guard destinationMinX < destinationMaxX, destinationMinY < destinationMaxY else {
+            return nil
+        }
+
+        let sourceOffsetX = destinationMinX - payload.originX
+        let sourceOffsetY = destinationMinY - payload.originY
+        let clippedWidth = destinationMaxX - destinationMinX
+        let clippedHeight = destinationMaxY - destinationMinY
+
+        return (
+            snapshot: Self.cropSnapshot(
+                payload.snapshot,
+                originX: sourceOffsetX,
+                originY: sourceOffsetY,
+                width: clippedWidth,
+                height: clippedHeight
+            ),
+            destinationX: destinationMinX,
+            destinationY: destinationMinY
+        )
+    }
+
+    private static func maskedSnapshot(
+        _ snapshot: LayerTextureSnapshot,
+        using selectionMaskRegion: SelectionMaskRegion
+    ) -> LayerTextureSnapshot {
+        guard
+            snapshot.width == selectionMaskRegion.width,
+            snapshot.height == selectionMaskRegion.height
+        else {
+            return snapshot
+        }
+
+        var bytes = [UInt8](snapshot.pixelData)
+        let bytesPerPixel = 4
+        selectionMaskRegion.withAlphaBytes { maskBytes in
+            guard let maskBaseAddress = maskBytes.baseAddress else { return }
+
+            for localY in 0..<snapshot.height {
+                let maskRow = localY * selectionMaskRegion.width
+                let byteRow = localY * snapshot.bytesPerRow
+                for localX in 0..<snapshot.width {
+                    let maskAlpha = maskBaseAddress[maskRow + localX]
+                    let index = byteRow + (localX * bytesPerPixel)
+
+                    switch maskAlpha {
+                    case 0:
+                        bytes[index] = 0
+                        bytes[index + 1] = 0
+                        bytes[index + 2] = 0
+                        bytes[index + 3] = 0
+                    case 255:
+                        continue
+                    default:
+                        let scale = Int(maskAlpha)
+                        for channel in 0..<bytesPerPixel {
+                            bytes[index + channel] = UInt8((Int(bytes[index + channel]) * scale + 127) / 255)
+                        }
+                    }
+                }
+            }
+        }
+
+        return LayerTextureSnapshot(
+            width: snapshot.width,
+            height: snapshot.height,
+            bytesPerRow: snapshot.bytesPerRow,
+            pixelData: Data(bytes)
+        )
+    }
+
+    private static func trimmedSnapshot(
+        _ snapshot: LayerTextureSnapshot
+    ) -> (snapshot: LayerTextureSnapshot, offsetX: Int, offsetY: Int)? {
+        guard let bounds = opaqueBounds(in: snapshot) else {
+            return nil
+        }
+
+        return (
+            snapshot: cropSnapshot(
+                snapshot,
+                originX: bounds.originX,
+                originY: bounds.originY,
+                width: bounds.width,
+                height: bounds.height
+            ),
+            offsetX: bounds.originX,
+            offsetY: bounds.originY
+        )
+    }
+
+    private static func opaqueBounds(
+        in snapshot: LayerTextureSnapshot
+    ) -> (originX: Int, originY: Int, width: Int, height: Int)? {
+        let width = snapshot.width
+        let height = snapshot.height
+        guard width > 0, height > 0 else {
+            return nil
+        }
+
+        var minX = width
+        var minY = height
+        var maxX = -1
+        var maxY = -1
+
+        snapshot.pixelData.withUnsafeBytes { rawBuffer in
+            let bytes = rawBuffer.bindMemory(to: UInt8.self)
+            for y in 0..<height {
+                let rowStart = y * snapshot.bytesPerRow
+                for x in 0..<width {
+                    let alphaIndex = rowStart + (x * 4) + 3
+                    guard bytes[alphaIndex] > 0 else { continue }
+                    minX = min(minX, x)
+                    minY = min(minY, y)
+                    maxX = max(maxX, x)
+                    maxY = max(maxY, y)
+                }
+            }
+        }
+
+        guard maxX >= minX, maxY >= minY else {
+            return nil
+        }
+
+        return (
+            originX: minX,
+            originY: minY,
+            width: (maxX - minX) + 1,
+            height: (maxY - minY) + 1
+        )
+    }
+
+    private static func cropSnapshot(
+        _ snapshot: LayerTextureSnapshot,
+        originX: Int,
+        originY: Int,
+        width: Int,
+        height: Int
+    ) -> LayerTextureSnapshot {
+        let bytesPerPixel = 4
+        let croppedBytesPerRow = width * bytesPerPixel
+        var croppedBytes = [UInt8](repeating: 0, count: croppedBytesPerRow * height)
+
+        snapshot.pixelData.withUnsafeBytes { rawBuffer in
+            let sourceBytes = rawBuffer.bindMemory(to: UInt8.self)
+            for localY in 0..<height {
+                let sourceOffset = (originY + localY) * snapshot.bytesPerRow + (originX * bytesPerPixel)
+                let destinationOffset = localY * croppedBytesPerRow
+                for localX in 0..<croppedBytesPerRow {
+                    croppedBytes[destinationOffset + localX] = sourceBytes[sourceOffset + localX]
+                }
+            }
+        }
+
+        return LayerTextureSnapshot(
+            width: width,
+            height: height,
+            bytesPerRow: croppedBytesPerRow,
+            pixelData: Data(croppedBytes)
+        )
+    }
+
     func deleteSelectionContents() {
         guard let selectionShape = workspace.selection.committedShape else {
             showStatus(.init(kind: .info, message: "没有可删除的选区"))
@@ -6111,6 +6534,23 @@ final class WorkspaceViewModel: ObservableObject {
            normalizedModifiers.intersection([.command, .control]).isEmpty == false,
            event.charactersIgnoringModifiers?.lowercased() == "v" {
             return importColorPanelPalette(fromPasteboard: .general)
+        }
+
+        if normalizedModifiers == [.command],
+           let shortcut = event.charactersIgnoringModifiers?.lowercased() {
+            switch shortcut {
+            case "c":
+                copyPixels()
+                return true
+            case "x":
+                cutPixels()
+                return true
+            case "v":
+                pastePixels()
+                return true
+            default:
+                break
+            }
         }
 
         if normalizedModifiers.intersection([.command, .control, .option]).isEmpty,

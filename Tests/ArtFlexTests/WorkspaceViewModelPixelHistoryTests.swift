@@ -181,6 +181,50 @@ struct WorkspaceViewModelPixelHistoryTests {
 
     @Test
     @MainActor
+    func cutAndPastePixelsSupportUndoRedo() throws {
+        let harness = try PixelHistoryHarness()
+        let layerID = harness.viewModel.workspace.document.activeLayerID
+
+        try fillOpaqueRect(
+            in: harness,
+            layerID: layerID,
+            originX: 12,
+            originY: 14,
+            width: 8,
+            height: 8,
+            color: .init(red: 1, green: 0, blue: 0, alpha: 1)
+        )
+        harness.viewModel.selectTool(.rectangleSelection)
+        harness.viewModel.beginSelection(kind: .rectangle, at: .init(x: 13, y: 15))
+        harness.viewModel.updateSelection(to: .init(x: 18, y: 20))
+        harness.viewModel.commitSelection(at: .init(x: 18, y: 20))
+
+        harness.viewModel.cutPixels()
+        #expect(try harness.alpha(atX: 15, y: 17, layerID: layerID) < 0.01)
+
+        harness.viewModel.undo()
+        #expect(try harness.alpha(atX: 15, y: 17, layerID: layerID) > 0.95)
+
+        harness.viewModel.redo()
+        #expect(try harness.alpha(atX: 15, y: 17, layerID: layerID) < 0.01)
+
+        let layerCountBeforePaste = harness.viewModel.workspace.document.layers.count
+        harness.viewModel.pastePixels()
+        let pastedLayerID = harness.viewModel.workspace.document.activeLayerID
+        #expect(harness.viewModel.workspace.document.layers.count == layerCountBeforePaste + 1)
+        #expect(try harness.alpha(atX: 15, y: 17, layerID: pastedLayerID) > 0.95)
+
+        harness.viewModel.undo()
+        #expect(harness.viewModel.workspace.document.layers.count == layerCountBeforePaste)
+
+        harness.viewModel.redo()
+        let restoredPastedLayerID = harness.viewModel.workspace.document.activeLayerID
+        #expect(harness.viewModel.workspace.document.layers.count == layerCountBeforePaste + 1)
+        #expect(try harness.alpha(atX: 15, y: 17, layerID: restoredPastedLayerID) > 0.95)
+    }
+
+    @Test
+    @MainActor
     func sectorGradientAutoApplySupportsUndoRedoAndSelectionClipping() async throws {
         let harness = try PixelHistoryHarness()
         let layerID = harness.addLayer()
@@ -723,6 +767,50 @@ private enum PixelHistoryHarnessError: Error {
     case textureUnavailable
     case commandBufferUnavailable
     case gradientCommitTimeout
+}
+
+@MainActor
+private func fillOpaqueRect(
+    in harness: PixelHistoryHarness,
+    layerID: LayerID,
+    originX: Int,
+    originY: Int,
+    width: Int,
+    height: Int,
+    color: RGBAColor
+) throws {
+    guard
+        let surfaceID = harness.bootstrap.layerSurfaceStore.surfaceID(for: layerID),
+        let texture = harness.bootstrap.layerSurfaceStore.texture(for: surfaceID)
+    else {
+        throw PixelHistoryHarnessError.textureUnavailable
+    }
+
+    let pixelCount = width * height
+    let bgraPixel = [
+        UInt8((color.blue * color.alpha * 255).rounded()),
+        UInt8((color.green * color.alpha * 255).rounded()),
+        UInt8((color.red * color.alpha * 255).rounded()),
+        UInt8((color.alpha * 255).rounded())
+    ]
+    var bytes = [UInt8]()
+    bytes.reserveCapacity(pixelCount * 4)
+    for _ in 0..<pixelCount {
+        bytes.append(contentsOf: bgraPixel)
+    }
+
+    let snapshot = LayerTextureSnapshot(
+        width: width,
+        height: height,
+        bytesPerRow: width * 4,
+        pixelData: Data(bytes)
+    )
+    try harness.bootstrap.textureSerializer.restore(
+        snapshot: snapshot,
+        into: texture,
+        destinationX: originX,
+        destinationY: originY
+    )
 }
 
 @MainActor

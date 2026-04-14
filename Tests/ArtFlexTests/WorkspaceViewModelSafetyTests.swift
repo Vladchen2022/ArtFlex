@@ -155,6 +155,69 @@ struct WorkspaceViewModelSafetyTests {
 
     @Test
     @MainActor
+    func copyPixelsAndPastePixelsInsertNewLayerAboveCurrentActiveLayer() throws {
+        let harness = try BrushEditingBoundaryHarness()
+        let sourceLayerID = harness.viewModel.workspace.document.activeLayerID
+        let backgroundLayerID = try #require(harness.viewModel.workspace.document.layers.first?.id)
+
+        try fillOpaqueRect(
+            in: harness,
+            layerID: sourceLayerID,
+            originX: 12,
+            originY: 18,
+            width: 6,
+            height: 5,
+            color: .init(red: 1, green: 0, blue: 0, alpha: 1)
+        )
+
+        harness.viewModel.copyPixels()
+        harness.viewModel.selectLayer(backgroundLayerID)
+        harness.viewModel.pastePixels()
+
+        let layers = harness.viewModel.workspace.document.layers
+        #expect(layers.count == 3)
+        #expect(harness.viewModel.workspace.document.activeLayerID == layers[1].id)
+        #expect(try harness.alpha(atX: 14, y: 20, layerID: layers[1].id) > 0.95)
+        #expect(try harness.alpha(atX: 14, y: 20, layerID: sourceLayerID) > 0.95)
+        #expect(harness.viewModel.status?.message == "已粘贴为新图层")
+    }
+
+    @Test
+    @MainActor
+    func cutPixelsWithSelectionClearsSourceAndCanPasteBackInPlace() throws {
+        let harness = try BrushEditingBoundaryHarness()
+        let sourceLayerID = harness.viewModel.workspace.document.activeLayerID
+
+        try fillOpaqueRect(
+            in: harness,
+            layerID: sourceLayerID,
+            originX: 10,
+            originY: 14,
+            width: 8,
+            height: 8,
+            color: .init(red: 0, green: 0, blue: 1, alpha: 1)
+        )
+
+        makeRectangleSelection(
+            in: harness.viewModel,
+            minX: 11,
+            minY: 15,
+            maxX: 16,
+            maxY: 20
+        )
+
+        harness.viewModel.cutPixels()
+        #expect(try harness.alpha(atX: 13, y: 17, layerID: sourceLayerID) < 0.01)
+
+        harness.viewModel.pastePixels()
+        let pastedLayerID = harness.viewModel.workspace.document.activeLayerID
+        #expect(pastedLayerID != sourceLayerID)
+        #expect(try harness.alpha(atX: 13, y: 17, layerID: pastedLayerID) > 0.95)
+        #expect(harness.viewModel.status?.message == "已粘贴为新图层")
+    }
+
+    @Test
+    @MainActor
     func compoundGlobalPressureControlsStayDecoupledFromPrimaryInternalPressureControls() throws {
         let harness = try BrushEditingBoundaryHarness()
 
@@ -686,6 +749,10 @@ private struct BrushEditingBoundaryHarness {
         try color(atX: x, y: y).alpha
     }
 
+    func alpha(atX x: Int, y: Int, layerID: LayerID) throws -> Float {
+        try color(atX: x, y: y, layerID: layerID).alpha
+    }
+
     func color(atX x: Int, y: Int, layerID: LayerID? = nil) throws -> RGBAColor {
         let resolvedLayerID = layerID ?? viewModel.workspace.document.activeLayerID
         guard
@@ -782,6 +849,66 @@ private func sampleActiveLayerAlpha(
     }
 
     return try serializer.samplePixel(texture: texture, x: x, y: y).alpha
+}
+
+@MainActor
+private func fillOpaqueRect(
+    in harness: BrushEditingBoundaryHarness,
+    layerID: LayerID,
+    originX: Int,
+    originY: Int,
+    width: Int,
+    height: Int,
+    color: RGBAColor
+) throws {
+    guard
+        let surfaceID = harness.bootstrap.layerSurfaceStore.surfaceID(for: layerID),
+        let texture = harness.bootstrap.layerSurfaceStore.texture(for: surfaceID)
+    else {
+        throw BoundaryHarnessError.textureUnavailable
+    }
+
+    let pixelCount = width * height
+    let bgraPixel = [
+        UInt8((color.blue * color.alpha * 255).rounded()),
+        UInt8((color.green * color.alpha * 255).rounded()),
+        UInt8((color.red * color.alpha * 255).rounded()),
+        UInt8((color.alpha * 255).rounded())
+    ]
+    var bytes = [UInt8]()
+    bytes.reserveCapacity(pixelCount * 4)
+    for _ in 0..<pixelCount {
+        bytes.append(contentsOf: bgraPixel)
+    }
+
+    let snapshot = LayerTextureSnapshot(
+        width: width,
+        height: height,
+        bytesPerRow: width * 4,
+        pixelData: Data(bytes)
+    )
+    try harness.bootstrap.textureSerializer.restore(
+        snapshot: snapshot,
+        into: texture,
+        destinationX: originX,
+        destinationY: originY
+    )
+}
+
+@MainActor
+private func makeRectangleSelection(
+    in viewModel: WorkspaceViewModel,
+    minX: Double,
+    minY: Double,
+    maxX: Double,
+    maxY: Double
+) {
+    let start = CanvasPoint(x: minX, y: minY)
+    let end = CanvasPoint(x: maxX, y: maxY)
+    viewModel.selectTool(.rectangleSelection)
+    viewModel.beginSelection(kind: .rectangle, at: start)
+    viewModel.updateSelection(to: end)
+    viewModel.commitSelection(at: end)
 }
 
 @MainActor
