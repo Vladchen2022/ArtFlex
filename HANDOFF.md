@@ -1,12 +1,12 @@
 # ArtFlex Handoff
 
-最后更新：2026-04-12
+最后更新：2026-04-14
 
 ## 1. 先记住这三句话
 
 1. 当前仓库已经不是第一阶段 MVP，也不是“旧 dual-tip 回退基线”。
-2. 当前最值得关注的产品主线是组合笔刷外观、颜色工作流，以及一批尚未提交的性能 / 稳定性收口。
-3. 当前工作区不是干净状态；接手前先看 diff，再决定是否继续在 pending 改动上工作。
+2. 当前最值得关注的产品主线是组合笔刷参数语义、颜色工作流，以及局部交互一致性。
+3. 当前不要再默认假设仓库挂着一批历史性 dirty 性能 patch；接手前先看 `git status` 再判断。
 
 ## 2. 推荐阅读顺序
 
@@ -60,33 +60,40 @@
 - timelapse 录制 / 导出
 - 线性渐变 / 扇形渐变
 
+### 3.4 右侧画笔参数区已经有“主笔尖参数 / 整体画笔参数”分层
+
+当前右侧参数区不要再全部按“主笔尖参数”理解。
+
+更接近真实状态的是：
+
+- 结构类：`间距 / 散布 / 旋转 / 抖动`
+  - 当前仍偏主笔尖 / 主体结构
+- 整体表现类：`杂色 / 杂色对比 / 大小压感 / 透明压感 / 透明修正`
+  - 普通笔刷时作用于当前笔刷
+  - 组合笔刷时作用于整支组合笔刷，而不是只等于主笔尖内部参数
+
+### 3.5 颜色面板拾色器和 HUD 快速拾色器不能分开改
+
+当前颜色工作流里，`Shift+Z` HUD 拾色器和右侧颜色面板拾色器必须一起理解。
+
+后续若继续修改这块，必须同步考虑：
+
+- 色立方显示
+- 点选实际取色结果
+- 当前颜色反推拾色器位置
+- `光色 / 明度 / 纯度` 滑块语义
+
+不要只修其中一层。
+
 ## 4. 当前 working tree 状态
 
-截至 2026-04-12，未提交代码改动集中在以下文件：
-
-- `Core/Application/HistoryController.swift`
-- `Core/Application/PerformanceAuditStore.swift`
-- `Infrastructure/FileFormat/LayerTextureSerializer.swift`
-- `Platform/macOS/App/WorkspaceViewModel.swift`
-- `Platform/macOS/Canvas/MetalCanvasHost.swift`
-- `Platform/macOS/UI/RightInspectorView.swift`
-- `Rendering/Canvas/StageOneBrushRenderer.swift`
-- `Rendering/Canvas/StageOneCanvasPresenter.swift`
-- `Rendering/Canvas/StageOneLayerSurfaceStore.swift`
-
-这批改动大多与以下方向有关：
-
-- history / serializer 批处理
-- Metal 资源缓存与 presenter 复用
-- luminosity preview 临时纹理复用
-- brush library 异步持久化
-- 右侧 inspector 的近期颜色 / 色标变化
+当前不要再沿用旧文档里“仓库默认 dirty，且主要是性能 patch”的说法。
 
 接手前建议先执行：
 
 ```bash
 git status --short
-git diff --stat
+git diff --stat   # 仅在 dirty 时再看
 ```
 
 ## 5. 关键入口文件

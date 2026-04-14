@@ -1,10 +1,10 @@
 # ArtFlex 当前状态
 
-最后更新：2026-04-12
+最后更新：2026-04-14
 
 ## 1. 一句话概览
 
-ArtFlex 当前已经是一个功能面明显超出最小 MVP 的 macOS Metal 绘图应用原型；当前主线不是“基础壳层补齐”，而是围绕组合笔刷外观、颜色工作流和局部性能收口继续迭代。
+ArtFlex 当前已经是一个功能面明显超出最小 MVP 的 macOS Metal 绘图应用原型；当前主线不是“基础壳层补齐”，而是围绕组合笔刷参数语义、颜色工作流和局部交互一致性继续迭代。
 
 ## 2. 当前代码真实状态
 
@@ -133,6 +133,48 @@ ArtFlex 当前已经是一个功能面明显超出最小 MVP 的 macOS Metal 绘
   - 在基础设施层集中做 BGRA -> RGBA 扁平化处理
   - 当前导出结果是白底不透明 PNG
 
+### 2.7 当前画笔参数区的真实语义
+
+右侧画笔参数区不要再简单理解成“所有参数都等于主笔尖参数”。
+
+当前真实语义是：
+
+- 偏主笔尖 / 结构类参数：
+  - `间距`
+  - `散布`
+  - `旋转`
+  - `抖动`
+- 偏整体画笔 / 最终表现类参数：
+  - `杂色`
+  - `杂色对比`
+  - `大小压感`
+  - `透明压感`
+  - `透明修正`
+
+其中：
+
+- 普通笔刷时，上述参数都直接作用于这支笔刷本身
+- 组合笔刷时，右侧参数区里的“整体表现类参数”不再等于主笔尖内部参数，而是作用于整支组合笔刷
+- `透明修正` 是笔刷级 `buildUp` 透明叠加修正参数，会随笔刷保存到画笔库
+
+### 2.8 当前颜色面板 / HUD 拾色器的真实状态
+
+当前颜色系统里有两套需要区分的东西：
+
+- 颜色面板的 `blocks` / `grayscale` 模式
+- 颜色面板的 `picker` 模式与 `Shift+Z` HUD 快速拾色器
+
+当前约束是：
+
+- HUD 快速拾色器和右侧颜色面板拾色器必须保持显示一致
+- 任何后续修改都不应只改显示、不改实际取色结果
+- `光色 / 明度 / 纯度` 这些拾色器相关滑块仍然属于活动产品语义，后续线程不要擅自删减或重定义
+- 如果未来继续重做拾色器，必须同时统一：
+  - 色立方显示
+  - 点选取色结果
+  - 当前颜色反推拾色器坐标
+  - `光色 / 明度 / 纯度` 的接入语义
+
 ## 3. 当前架构现实
 
 ### 3.1 分层仍然基本成立
@@ -169,41 +211,27 @@ ArtFlex 当前已经是一个功能面明显超出最小 MVP 的 macOS Metal 绘
 
 - 组合笔刷面板与外观继续收口
 - 蜡笔 / 杂色 / 多工具接线
-- 颜色面板、黑白模式、色标与画笔库联动
+- 颜色面板、HUD 拾色器、黑白模式、色标与画笔库联动
 
-### 4.2 当前工作区里还有未提交的性能 / 稳定性改动
+### 4.2 当前工作区状态
 
-截至 2026-04-12，working tree 仍是 dirty，未提交改动集中在：
+截至 2026-04-14，这个仓库不应再被默认理解成“长期挂着一批历史性的性能 dirty tree”。
 
-- `Core/Application/HistoryController.swift`
-- `Core/Application/PerformanceAuditStore.swift`
-- `Infrastructure/FileFormat/LayerTextureSerializer.swift`
-- `Platform/macOS/App/WorkspaceViewModel.swift`
-- `Platform/macOS/Canvas/MetalCanvasHost.swift`
-- `Platform/macOS/UI/RightInspectorView.swift`
-- `Rendering/Canvas/StageOneBrushRenderer.swift`
-- `Rendering/Canvas/StageOneCanvasPresenter.swift`
-- `Rendering/Canvas/StageOneLayerSurfaceStore.swift`
+当前接手前的正确做法是：
 
-这批改动的方向大致是：
-
-- history snapshot / restore 批处理
-- serializer staging / batch restore
-- Metal buffer / texture 复用
-- luminosity preview 临时纹理缓存
-- brush library 后台持久化
-- performance audit 样本裁剪
-
-后续线程接手前，应该先看 `git diff --stat` 和这几份文件的 diff，而不是假设当前 `HEAD` 就是完整现状。
+- 先执行 `git status --short`
+- 如果是 dirty，再看 `git diff --stat`
+- 不要沿用“仓库默认带着旧性能 patch 尚未提交”的过期叙事
 
 ## 5. 构建与验证状态
 
-2026-04-12 本地确认：
+2026-04-14 本地确认：
 
 - `swift build` 通过
 - `swift test --filter WorkspaceViewModelSafetyTests` 通过
 - `swift test --filter BrushStrokeSamplingTests` 通过
 - `swift test --filter HistoryControllerTests` 通过
+- `swift test --filter ColorStandardTests` 通过
 
 当前仍存在的非阻塞 warning：
 

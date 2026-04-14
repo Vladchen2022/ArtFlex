@@ -245,7 +245,7 @@ struct RightInspectorView: View {
         } else if !hasLoadedReferenceImage {
             resolvedFixedHeight = collapsedReferenceInspectorHeight
         } else {
-            resolvedFixedHeight = topInspectorPanelHeight
+            resolvedFixedHeight = nil
         }
 
         return VStack(alignment: .leading, spacing: 10) {

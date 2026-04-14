@@ -4,7 +4,7 @@ ArtFlex 是旧版 `BrushCanvas` 的 Metal-first 重构版 macOS 绘图软件。
 
 项目目标不是复制旧项目的 CPU 画布实现，而是在保留成熟产品结构、工具集合和主工作流的前提下，用更稳定的 Metal 渲染、图层、文档和工具架构重建整套编辑链。
 
-## 当前基线（2026-04-12）
+## 当前基线（2026-04-14）
 
 当前仓库已经不是“第一阶段 MVP”状态，也不是“旧 dual-tip / 回退基线”。
 
@@ -24,9 +24,9 @@ ArtFlex 是旧版 `BrushCanvas` 的 Metal-first 重构版 macOS 绘图软件。
 
 当前最活跃的工作主要集中在三条线上：
 
-1. 组合笔刷外观继续收口，重点是主层视觉表达而不是 plumbing 重查
+1. 组合笔刷外观与参数语义继续收口，重点是“整体画笔 vs 内部结构”的边界清晰
 2. 颜色 / 色标 / 黑白参考 / 画笔库工作流继续打磨
-3. 一批未提交的性能与稳定性改动正在 `history / serializer / canvas presenter / brush renderer / canvas host` 上收口
+3. HUD 拾色器、颜色面板拾色器和参考图 UI 等交互一致性继续打磨
 
 ## 文档入口
 
@@ -45,10 +45,11 @@ swift build
 swift test --filter WorkspaceViewModelSafetyTests
 swift test --filter BrushStrokeSamplingTests
 swift test --filter HistoryControllerTests
+swift test --filter ColorStandardTests
 swift test --filter StageOneBrushPreviewRasterizerTests
 ```
 
 ## 说明
 
 - 旧的阶段计划、MVP 状态、临时编译修复记录和性能建议文档已经移除；如果需要历史上下文，请直接查 `git log` / `git show`。
-- 当前工作区存在未提交代码改动；接手前请先看 [CURRENT_STATUS.md](CURRENT_STATUS.md) 里的 working tree 说明。
+- 当前不要假设仓库一定带着一批历史性的 pending 性能 patch；接手前先看 [CURRENT_STATUS.md](CURRENT_STATUS.md) 里的 working tree 说明。
