@@ -128,7 +128,7 @@ final class LinearGradientRenderer {
                 return srgbColor;
             }
 
-            float amount = clamp(paintJitterAmount, 0.0, 1.0);
+            float amount = clamp(paintJitterAmount / 0.75, 0.0, 1.0);
             float coord = clamp(stripeCoord, 0.0, 1.0);
             float stripeCount = 70.0;
             float stripeIndex = floor(coord * stripeCount);
@@ -136,29 +136,24 @@ final class LinearGradientRenderer {
             float hueRandom = hash11(scattered + 1001.0);
             float satRandom = hash11(scattered + 1031.0);
             float valRandom = hash11(scattered + 1061.0);
+            float contrastRandom = hash11(scattered + 1091.0);
 
             float3 hsv = rgbToHsv(srgbColor);
-
-            // Hue spread: slider 0-100% maps to ±0° to ±180° on the color wheel
-            float hueSpread = amount * 0.5;
-            float hueOffset = ((hueRandom * 2.0) - 1.0) * hueSpread;
-
-            // Subtle saturation/value variation
-            float satOffset = ((satRandom * 2.0) - 1.0) * amount * 0.10;
-            float valOffset = ((valRandom * 2.0) - 1.0) * amount * 0.08;
-
+            float wheelHue = hueRandom;
             if (contrastAmt > 0.001) {
-                float complementRandom = hash11(scattered + 1091.0);
-                float threshold = 1.0 - (contrastAmt * 0.20);
-                if (complementRandom > threshold) {
-                    hueOffset = 0.5 + hueOffset;
+                float threshold = 1.0 - (contrastAmt * 0.25);
+                if (contrastRandom > threshold) {
+                    wheelHue = fract(hsv.x + 0.5 + (((hueRandom * 2.0) - 1.0) * 0.06) + 1.0);
                 }
             }
 
-            hsv.x = fract(hsv.x + hueOffset + 1.0);
-            hsv.y = clamp(hsv.y + satOffset, 0.0, 1.0);
-            hsv.z = clamp(hsv.z + valOffset, 0.0, 1.0);
-            return hsvToRgb(hsv);
+            float satSigned = ((satRandom * 2.0) - 1.0);
+            float valSigned = ((valRandom * 2.0) - 1.0);
+            float wheelS = clamp(mix(hsv.y, 0.82, amount) + (satSigned * 0.12 * amount), 0.0, 1.0);
+            float wheelV = clamp(hsv.z + (valSigned * 0.18 * amount), 0.0, 1.0);
+            float baseCoverage = mix(1.0, 0.20, amount);
+            float3 wheelSrgb = hsvToRgb(float3(wheelHue, wheelS, wheelV));
+            return mix(wheelSrgb, srgbColor, baseCoverage);
         }
 
         fragment float4 linearGradientFragmentShader(

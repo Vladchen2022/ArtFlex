@@ -238,11 +238,11 @@ struct RightInspectorView: View {
     }
 
     private func generatorReferencePanel() -> some View {
-        let hasLoadedReferenceImage = viewModel.referenceImageSlots.contains { $0.asset != nil }
+        let selectedReferenceAsset = viewModel.selectedReferenceImageSlot?.asset
         let resolvedFixedHeight: CGFloat?
         if leftInspectorTab == .generator {
             resolvedFixedHeight = nil
-        } else if !hasLoadedReferenceImage {
+        } else if selectedReferenceAsset == nil {
             resolvedFixedHeight = collapsedReferenceInspectorHeight
         } else {
             resolvedFixedHeight = nil
@@ -302,7 +302,7 @@ struct RightInspectorView: View {
     }
 
     private var referenceImageSection: some View {
-        let hasLoadedReferenceImage = viewModel.referenceImageSlots.contains { $0.asset != nil }
+        let selectedReferenceAsset = viewModel.selectedReferenceImageSlot?.asset
 
         return VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 8) {
@@ -311,7 +311,7 @@ struct RightInspectorView: View {
                 }
             }
 
-            referenceImagePreviewArea(hasLoadedReferenceImage: hasLoadedReferenceImage)
+            referenceImagePreviewArea(selectedAsset: selectedReferenceAsset)
 
             HStack(spacing: 10) {
                 Button {
@@ -410,13 +410,14 @@ struct RightInspectorView: View {
         .help("左侧为上一次确认颜色，右侧为当前预览/选择颜色")
     }
 
-    private func referenceImagePreviewArea(hasLoadedReferenceImage: Bool) -> some View {
-        ZStack {
+    @ViewBuilder
+    private func referenceImagePreviewArea(selectedAsset: ReferenceImageAsset?) -> some View {
+        let previewShell = ZStack {
             RoundedRectangle(cornerRadius: 12)
                 .fill(Color.black.opacity(0.20))
 
             ReferenceImageViewer(
-                asset: viewModel.selectedReferenceImageSlot?.asset,
+                asset: selectedAsset,
                 backgroundColor: NSColor(calibratedWhite: 0.08, alpha: 1),
                 onHoverColorChanged: { color in
                     viewModel.updateReferenceImagePreviewColor(color)
@@ -427,18 +428,26 @@ struct RightInspectorView: View {
             )
             .clipShape(RoundedRectangle(cornerRadius: 12))
 
-            if viewModel.selectedReferenceImageSlot?.asset == nil {
+            if selectedAsset == nil {
                 Text(viewModel.referenceImageLoadingSlotID != nil ? "载入中…" : "点击 1 - 5 载入参考图")
                     .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(Color.white.opacity(0.52))
             }
         }
         .frame(maxWidth: .infinity)
-        .frame(height: hasLoadedReferenceImage ? 232 : 56)
         .overlay(
             RoundedRectangle(cornerRadius: 12)
                 .stroke(Color.white.opacity(0.08), lineWidth: 1)
         )
+
+        if let selectedAsset {
+            let previewAspectRatio = CGFloat(max(selectedAsset.width, 1)) / CGFloat(max(selectedAsset.height, 1))
+            previewShell
+                .aspectRatio(previewAspectRatio, contentMode: .fit)
+        } else {
+            previewShell
+                .frame(height: 56)
+        }
     }
 
     private func referenceImageSlotButton(_ slot: ReferenceImageSlotState) -> some View {
@@ -737,17 +746,6 @@ struct RightInspectorView: View {
                 ),
                 range: 0...1,
                 onCommit: { viewModel.setPaintJitterAmount(Float($0)) }
-            )
-
-            OptimizedCompactSlider(
-                title: "杂色对比",
-                valueText: "\(Int(viewModel.displayedPaintContrastAmount * 100))%",
-                value: Binding(
-                    get: { Double(viewModel.displayedPaintContrastAmount) },
-                    set: { _ in }
-                ),
-                range: 0...1,
-                onCommit: { viewModel.setPaintContrastAmount(Float($0)) }
             )
 
             OptimizedCompactSlider(

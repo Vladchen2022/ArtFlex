@@ -167,7 +167,7 @@ struct WorkspaceViewModelSafetyTests {
         #expect(brush.compoundBrush.globalPaintJitterAmount == 0.73)
         #expect(brush.compoundBrush.globalPaintContrastAmount == 0.84)
         #expect(harness.viewModel.displayedPaintJitterAmount == 0.73)
-        #expect(harness.viewModel.displayedPaintContrastAmount == 0.84)
+        #expect(harness.viewModel.displayedPaintContrastAmount == 0)
     }
 
     @Test

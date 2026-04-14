@@ -947,9 +947,7 @@ struct BrushSettings: Codable, Sendable, Equatable {
     }
 
     var effectivePaintContrastAmount: Float {
-        compoundBrush.enabled
-            ? compoundBrush.globalPaintContrastAmount
-            : paintContrastAmount
+        0
     }
 
     static func remappedOpacityPressure(
