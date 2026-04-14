@@ -119,6 +119,10 @@ private struct SnapshotCompareWorkspaceShell: View {
                         .opacity(0.64)
                 }
             }
+
+            if !chromeHidden {
+                WorkspaceStatusBarChrome(status: hostViewModel.status)
+            }
         }
     }
 }
@@ -162,6 +166,10 @@ private struct StandardWorkspaceShell: View {
                                 .overlay(Color.white.opacity(0.08))
                         }
                 }
+            }
+
+            if !chromeHidden {
+                WorkspaceStatusBarChrome(status: viewModel.status)
             }
         }
     }
@@ -212,6 +220,10 @@ private struct IdeationWorkspaceShell: View {
                         }
                 }
             }
+
+            if !chromeHidden {
+                WorkspaceStatusBarChrome(status: editingViewModel.status)
+            }
         }
     }
 }
@@ -228,5 +240,84 @@ private struct SettingsSheetPresenter: View {
                     onClose: presentationState.dismissSettingsSheet
                 )
             }
+    }
+}
+
+private struct WorkspaceStatusBarChrome: View {
+    let status: WorkspaceStatus?
+
+    var body: some View {
+        GeometryReader { proxy in
+            ZStack(alignment: .leading) {
+                Color(red: 0.14, green: 0.14, blue: 0.15)
+                    .overlay(alignment: .top) {
+                        Rectangle()
+                            .fill(Color.white.opacity(0.07))
+                            .frame(height: 1)
+                    }
+
+                WorkspaceOperationStatusBar(status: status)
+                    .offset(x: centeredStatusBarX(in: proxy.size.width))
+            }
+        }
+        .frame(height: 22)
+    }
+
+    private func centeredStatusBarX(in totalWidth: CGFloat) -> CGFloat {
+        let leftSidebarWidth: CGFloat = 142
+        let rightInspectorWidth: CGFloat = 560
+        let canvasRegionWidth = max(0, totalWidth - leftSidebarWidth - rightInspectorWidth)
+        let canvasRegionMinX = leftSidebarWidth
+        return canvasRegionMinX + max(0, (canvasRegionWidth - WorkspaceOperationStatusBar.width) * 0.5)
+    }
+}
+
+private struct WorkspaceOperationStatusBar: View {
+    let status: WorkspaceStatus?
+    static let width: CGFloat = 340
+
+    var body: some View {
+        HStack(spacing: 10) {
+            shortcutBadge
+
+            Text(status?.message ?? "准备就绪")
+                .font(.system(size: 11, weight: status == nil ? .regular : .semibold))
+                .foregroundStyle(messageColor)
+                .lineLimit(1)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(.horizontal, 8)
+        .frame(width: Self.width, height: 22)
+        .allowsHitTesting(false)
+    }
+
+    @ViewBuilder
+    private var shortcutBadge: some View {
+        if let shortcutLabel = status?.shortcutLabel, !shortcutLabel.isEmpty {
+            Text(shortcutLabel)
+                .font(.system(size: 10, weight: .bold, design: .rounded))
+                .foregroundStyle(Color.white.opacity(0.45))
+                .frame(width: 62, height: 16)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 4)
+                        .stroke(Color.white.opacity(0.04), lineWidth: 1)
+                )
+        } else {
+            Color.clear
+                .frame(width: 62, height: 16)
+        }
+    }
+
+    private var messageColor: Color {
+        switch status?.kind {
+        case .success:
+            return Color.white.opacity(0.45)
+        case .error:
+            return Color.red.opacity(0.44)
+        case .info:
+            return Color.white.opacity(0.43)
+        case nil:
+            return Color.white.opacity(0.26)
+        }
     }
 }

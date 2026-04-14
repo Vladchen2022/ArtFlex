@@ -12,7 +12,11 @@ struct LayerMergeControllerTests {
         }
 
         let serializer = LayerTextureSerializer(metalContext: metalContext)
-        let mergeController = LayerMergeController(serializer: serializer)
+        let canvasPresenter = try StageOneCanvasPresenter(device: metalContext.device)
+        let mergeController = LayerMergeController(
+            metalContext: metalContext,
+            canvasPresenter: canvasPresenter
+        )
         let layerSurfaceStore = StageOneLayerSurfaceStore()
 
         guard

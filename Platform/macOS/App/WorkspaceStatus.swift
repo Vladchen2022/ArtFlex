@@ -9,4 +9,11 @@ struct WorkspaceStatus: Equatable, Sendable {
 
     var kind: Kind
     var message: String
+    var shortcutLabel: String?
+
+    init(kind: Kind, message: String, shortcutLabel: String? = nil) {
+        self.kind = kind
+        self.message = message
+        self.shortcutLabel = shortcutLabel
+    }
 }

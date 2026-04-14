@@ -292,6 +292,32 @@ final class WorkspaceViewModel: ObservableObject {
         performToolSelection(normalizedTool)
     }
 
+    func selectToolFromUI(_ tool: ToolKind, shortcutLabel: String? = nil) {
+        selectTool(tool)
+        showToolSelectionStatus(for: tool, shortcutLabel: shortcutLabel)
+    }
+
+    private func showToolSelectionStatus(for tool: ToolKind, shortcutLabel: String? = nil) {
+        let resolvedShortcutLabel = shortcutLabel
+            ?? ToolSidebarGroup.group(containing: tool).map { shortcutSettings.shortcutDisplayTitle(for: $0) }
+        showStatus(.init(
+            kind: .info,
+            message: "选择了\(tool.displayName)",
+            shortcutLabel: resolvedShortcutLabel
+        ))
+    }
+
+    private func nextSidebarGroupTool(_ group: ToolSidebarGroup) -> ToolKind {
+        guard group.tools.count > 1 else {
+            return displayedTool(for: group)
+        }
+
+        let current = displayedTool(for: group)
+        let currentIndex = group.tools.firstIndex(of: current) ?? 0
+        let nextIndex = (currentIndex + 1) % group.tools.count
+        return group.tools[nextIndex]
+    }
+
     private func performToolSelection(_ tool: ToolKind) {
         let tool = Self.normalizedAvailableTool(tool)
         let previousTool = workspace.toolSession.activeTool
@@ -460,7 +486,7 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func activateSidebarGroup(_ group: ToolSidebarGroup) {
-        selectTool(displayedTool(for: group))
+        selectToolFromUI(displayedTool(for: group))
     }
 
     func cycleSidebarGroup(_ group: ToolSidebarGroup) {
@@ -468,22 +494,19 @@ final class WorkspaceViewModel: ObservableObject {
             activateSidebarGroup(group)
             return
         }
-
-        let current = displayedTool(for: group)
-        let currentIndex = group.tools.firstIndex(of: current) ?? 0
-        let nextIndex = (currentIndex + 1) % group.tools.count
-        selectTool(group.tools[nextIndex])
+        selectToolFromUI(nextSidebarGroupTool(group))
     }
 
     func handleToolShortcutKey(_ key: String, modifiers: NSEvent.ModifierFlags) -> Bool {
         let normalized = modifiers.intersection(.deviceIndependentFlagsMask)
         guard normalized.isDisjoint(with: [.command, .option, .control]) else { return false }
         guard let group = shortcutSettings.toolGroup(forShortcutKey: key) else { return false }
+        let shortcutTitle = shortcutSettings.shortcutDisplayTitle(for: group)
 
         if normalized.contains(.shift), group.tools.count > 1 {
-            cycleSidebarGroup(group)
+            selectToolFromUI(nextSidebarGroupTool(group), shortcutLabel: "Shift+\(shortcutTitle)")
         } else {
-            activateSidebarGroup(group)
+            selectToolFromUI(displayedTool(for: group), shortcutLabel: shortcutTitle)
         }
         return true
     }

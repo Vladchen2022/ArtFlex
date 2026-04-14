@@ -130,6 +130,31 @@ struct WorkspaceViewModelSafetyTests {
 
     @Test
     @MainActor
+    func selectingToolFromUIPublishesOperationStatusMessage() throws {
+        let harness = try BrushEditingBoundaryHarness()
+
+        harness.viewModel.selectToolFromUI(.eraser)
+
+        #expect(harness.viewModel.workspace.toolSession.activeTool == .eraser)
+        #expect(harness.viewModel.status?.message == "选择了橡皮")
+        #expect(harness.viewModel.status?.shortcutLabel == "E")
+    }
+
+    @Test
+    @MainActor
+    func toolShortcutStatusIncludesShortcutLabel() throws {
+        let harness = try BrushEditingBoundaryHarness()
+
+        let handled = harness.viewModel.handleToolShortcutKey("B", modifiers: [])
+
+        #expect(handled == true)
+        #expect(harness.viewModel.workspace.toolSession.activeTool == .brush)
+        #expect(harness.viewModel.status?.message == "选择了画笔")
+        #expect(harness.viewModel.status?.shortcutLabel == "B")
+    }
+
+    @Test
+    @MainActor
     func compoundGlobalPressureControlsStayDecoupledFromPrimaryInternalPressureControls() throws {
         let harness = try BrushEditingBoundaryHarness()
 

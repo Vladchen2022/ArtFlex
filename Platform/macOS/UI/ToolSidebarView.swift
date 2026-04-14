@@ -54,7 +54,7 @@ struct ToolSidebarView: View {
                             displayedTool: viewModel.displayedTool(for: group),
                             isSelected: viewModel.isSelected(group: group),
                             activateGroup: { viewModel.activateSidebarGroup(group) },
-                            activateTool: { tool in viewModel.selectTool(tool) }
+                            activateTool: { tool in viewModel.selectToolFromUI(tool) }
                         )
                     }
                 }

@@ -27,7 +27,10 @@ final class AppSharedMetalServices {
         self.smudgeEngine = SmudgeEngine(serializer: textureSerializer)
         self.eyedropperSampler = EyedropperSampler(serializer: textureSerializer)
         self.bucketFillEngine = BucketFillEngine(serializer: textureSerializer)
-        self.layerMergeController = LayerMergeController(serializer: textureSerializer)
+        self.layerMergeController = LayerMergeController(
+            metalContext: metalContext,
+            canvasPresenter: canvasPresenter
+        )
     }
 }
 

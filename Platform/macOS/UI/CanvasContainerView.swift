@@ -22,11 +22,7 @@ struct CanvasContainerView: View {
                 availableSize: geometry.size
             ) { presentation, documentPresentation, documentCenter in
             ZStack(alignment: .topLeading) {
-                Color(
-                    red: 136.0 / 255.0,
-                    green: 136.0 / 255.0,
-                    blue: 136.0 / 255.0
-                )
+                CanvasWorkspaceBackdrop()
                     .clipped()
 
                 ZStack(alignment: .topLeading) {
@@ -411,6 +407,42 @@ struct CanvasContainerView: View {
             } // CanvasViewportHost
         }
         .clipped()
+    }
+}
+
+private struct CanvasWorkspaceBackdrop: View {
+    private let baseColor = Color(
+        red: 136.0 / 255.0,
+        green: 136.0 / 255.0,
+        blue: 136.0 / 255.0
+    )
+    private let stripeSpacing: CGFloat = 50
+
+    var body: some View {
+        Canvas(opaque: true, colorMode: .nonLinear, rendersAsynchronously: true) { context, size in
+            context.fill(
+                Path(CGRect(origin: .zero, size: size)),
+                with: .color(baseColor)
+            )
+
+            var stripePath = Path()
+
+            for x in stride(from: CGFloat.zero, through: size.width, by: stripeSpacing) {
+                stripePath.move(to: CGPoint(x: x, y: 0))
+                stripePath.addLine(to: CGPoint(x: x, y: size.height))
+            }
+
+            for y in stride(from: CGFloat.zero, through: size.height, by: stripeSpacing) {
+                stripePath.move(to: CGPoint(x: 0, y: y))
+                stripePath.addLine(to: CGPoint(x: size.width, y: y))
+            }
+
+            context.stroke(
+                stripePath,
+                with: .color(Color.white.opacity(0.16)),
+                lineWidth: 1
+            )
+        }
     }
 }
 
