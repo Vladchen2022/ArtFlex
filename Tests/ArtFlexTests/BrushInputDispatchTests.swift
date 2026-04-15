@@ -133,6 +133,35 @@ struct BrushInputDispatchTests {
     }
 
     @Test
+    func brushLikeSampleMappingAllowsOverflowWhileBoundedToolsStillClamp() {
+        let viewBounds = CGRect(x: 0, y: 0, width: 200, height: 100)
+        let canvasSize = CanvasSize(width: 1000, height: 500)
+        let outsideRight = CGPoint(x: 240, y: 40)
+
+        let brushLikeMapping = mapViewLocationToCanvasSample(
+            viewLocation: outsideRight,
+            viewBounds: viewBounds,
+            canvasSize: canvasSize,
+            clampsToDocumentBounds: false
+        )
+
+        #expect(brushLikeMapping.normalizedX == 1.2)
+        #expect(brushLikeMapping.canvasPoint.x == 1200)
+        #expect(brushLikeMapping.canvasPoint.y == 300)
+
+        let boundedMapping = mapViewLocationToCanvasSample(
+            viewLocation: outsideRight,
+            viewBounds: viewBounds,
+            canvasSize: canvasSize,
+            clampsToDocumentBounds: true
+        )
+
+        #expect(boundedMapping.normalizedX == 1)
+        #expect(boundedMapping.canvasPoint.x == 1000)
+        #expect(boundedMapping.canvasPoint.y == 300)
+    }
+
+    @Test
     func localBrushSizePreviewIsNotStompedUntilModelCatchesUpOrTimeout() {
         let keepLocal = resolveBrushSizePreview(
             displayBrushSize: 40,

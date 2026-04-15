@@ -408,6 +408,45 @@ func latestBrushHoverLocation(
     batchedLocations.last ?? originalLocation
 }
 
+struct CanvasSampleMapping: Equatable {
+    var normalizedX: Double
+    var normalizedY: Double
+    var canvasPoint: CanvasPoint
+}
+
+func mapViewLocationToCanvasSample(
+    viewLocation: CGPoint,
+    viewBounds: CGRect,
+    canvasSize: CanvasSize,
+    clampsToDocumentBounds: Bool
+) -> CanvasSampleMapping {
+    guard viewBounds.width > 0, viewBounds.height > 0 else {
+        return CanvasSampleMapping(
+            normalizedX: 0,
+            normalizedY: 0,
+            canvasPoint: .init(x: 0, y: 0)
+        )
+    }
+
+    let rawNormalizedX = Double(viewLocation.x / viewBounds.width)
+    let rawNormalizedY = Double(viewLocation.y / viewBounds.height)
+    let resolvedNormalizedX = clampsToDocumentBounds
+        ? min(max(rawNormalizedX, 0), 1)
+        : rawNormalizedX
+    let resolvedNormalizedY = clampsToDocumentBounds
+        ? min(max(rawNormalizedY, 0), 1)
+        : rawNormalizedY
+
+    return CanvasSampleMapping(
+        normalizedX: resolvedNormalizedX,
+        normalizedY: resolvedNormalizedY,
+        canvasPoint: CanvasPoint(
+            x: resolvedNormalizedX * Double(canvasSize.width),
+            y: (1 - resolvedNormalizedY) * Double(canvasSize.height)
+        )
+    )
+}
+
 enum PendingBrushInputKind: Equatable {
     case begin
     case samples([CanvasStrokeSample])
@@ -1359,8 +1398,12 @@ final class StrokeCaptureMTKView: MTKView {
 
     private func sample(from event: NSEvent) -> CanvasStrokeSample {
         let location = convert(event.locationInWindow, from: nil)
-        let normalizedX = max(min(location.x / bounds.width, 1), 0)
-        let normalizedY = max(min(location.y / bounds.height, 1), 0)
+        let sampleMapping = mapViewLocationToCanvasSample(
+            viewLocation: location,
+            viewBounds: bounds,
+            canvasSize: canvasSize,
+            clampsToDocumentBounds: !isBrushLikeToolActive()
+        )
         let rawPressure = Float(event.pressure)
         let effectivePressure = resolveBrushInputPressure(
             rawPressure: rawPressure,
@@ -1375,10 +1418,7 @@ final class StrokeCaptureMTKView: MTKView {
         lastPressure = effectivePressure
 
         let sample = CanvasStrokeSample(
-            location: CanvasPoint(
-                x: Double(normalizedX) * Double(canvasSize.width),
-                y: Double(1 - normalizedY) * Double(canvasSize.height)
-            ),
+            location: sampleMapping.canvasPoint,
             pressure: effectivePressure
         )
         recordBrushInputDebugSample(
@@ -1393,7 +1433,7 @@ final class StrokeCaptureMTKView: MTKView {
                 """
                 [sample] event=\(event.type.rawValue) \
                 rawView=(\(location.x),\(location.y)) \
-                normalized=(\(normalizedX),\(normalizedY)) \
+                normalized=(\(sampleMapping.normalizedX),\(sampleMapping.normalizedY)) \
                 canvas=(\(sample.location.x),\(sample.location.y))
                 """
             selectionTraceLogger.debug("\(message, privacy: .public)")
