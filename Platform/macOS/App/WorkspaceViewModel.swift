@@ -227,7 +227,7 @@ final class WorkspaceViewModel: ObservableObject {
     ) {
         self.bootstrap = bootstrap
         resetSelectionTraceLog()
-        Self.restorePersistedBrushLibraryIfAvailable(in: bootstrap)
+        let didSanitizePersistedBrushResources = Self.restorePersistedBrushLibraryIfAvailable(in: bootstrap)
         Self.normalizeLegacySelectionIfNeeded(in: bootstrap.workspaceStore)
         Self.normalizeDisabledToolsIfNeeded(in: bootstrap.workspaceStore)
         let state = bootstrap.workspaceStore.state
@@ -255,6 +255,9 @@ final class WorkspaceViewModel: ObservableObject {
         syncDrawingStatsDocumentContext()
         if installsZoomKeyboardMonitor {
             setupZoomKeyboardMonitor()
+        }
+        if didSanitizePersistedBrushResources {
+            persistBrushLibrary()
         }
     }
 
@@ -7611,12 +7614,14 @@ final class WorkspaceViewModel: ObservableObject {
         let normalizedTipImageLibrary = Self.normalizeImportedTipImageLibrary(imported.tipImageLibrary)
 
         bootstrap.workspaceStore.updateBrushLibrary { library in
-            if replacingExistingLibrary {
-                library = normalizedLibrary.removingRetiredBrushDemoPresets()
-            } else {
-                library = Self.mergeBrushLibraries(base: library, imported: normalizedLibrary)
-                    .removingRetiredBrushDemoPresets()
-            }
+            let resolvedLibrary = (
+                replacingExistingLibrary
+                ? normalizedLibrary
+                : Self.mergeBrushLibraries(base: library, imported: normalizedLibrary)
+            )
+            .removingLikelyAutoSavedDuplicatePresets()
+            .removingRetiredBrushDemoPresets()
+            library = resolvedLibrary
             if library.selectedPresetID == nil {
                 library.selectedPresetID = library.presets.first?.id
             }
@@ -7662,7 +7667,10 @@ final class WorkspaceViewModel: ObservableObject {
         }
 
         let selectedPresetID = presets.contains(where: { $0.id == library.selectedPresetID }) ? library.selectedPresetID : presets.first?.id
-        return BrushLibraryState(presets: presets, selectedPresetID: selectedPresetID)
+        return BrushLibraryState(
+            presets: presets,
+            selectedPresetID: selectedPresetID
+        ).removingLikelyAutoSavedDuplicatePresets()
     }
 
     private static func mergeBrushLibraries(base: BrushLibraryState, imported: BrushLibraryState) -> BrushLibraryState {
@@ -7767,10 +7775,14 @@ final class WorkspaceViewModel: ObservableObject {
         }
     }
 
-    private static func restorePersistedBrushLibraryIfAvailable(in bootstrap: AppBootstrap) {
-        guard let restored = bootstrap.brushLibraryPersistenceController.loadResources() else { return }
+    @discardableResult
+    private static func restorePersistedBrushLibraryIfAvailable(in bootstrap: AppBootstrap) -> Bool {
+        guard let restored = bootstrap.brushLibraryPersistenceController.loadResources() else {
+            return false
+        }
         let normalizedLibrary = Self.normalizeImportedBrushLibrary(restored.library)
             .removingRetiredBrushDemoPresets()
+        let normalizedTipImageLibrary = Self.normalizeImportedTipImageLibrary(restored.tipImageLibrary)
         bootstrap.workspaceStore.updateBrushLibrary { library in
             library = normalizedLibrary
             if library.selectedPresetID == nil {
@@ -7778,8 +7790,9 @@ final class WorkspaceViewModel: ObservableObject {
             }
         }
         bootstrap.workspaceStore.updateTipImageLibrary { tipImageLibrary in
-            tipImageLibrary = Self.normalizeImportedTipImageLibrary(restored.tipImageLibrary)
+            tipImageLibrary = normalizedTipImageLibrary
         }
+        return normalizedLibrary != restored.library || normalizedTipImageLibrary != restored.tipImageLibrary
     }
 
     @discardableResult
