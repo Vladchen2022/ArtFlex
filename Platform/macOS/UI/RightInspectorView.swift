@@ -28,6 +28,60 @@ private enum TipImageLibrarySheetTarget: String, Identifiable {
     }
 }
 
+private struct PressAndHoldActionButton: View {
+    let title: String
+    let isEnabled: Bool
+    let isPressed: Bool
+    let onPressChanged: (Bool) -> Void
+
+    @State private var localPressActive = false
+
+    var body: some View {
+        let active = isPressed || localPressActive
+
+        Text(title)
+            .font(.system(size: 11, weight: .semibold))
+            .foregroundStyle(Color.white.opacity(isEnabled ? 0.92 : 0.42))
+            .frame(maxWidth: .infinity, minHeight: 30)
+            .background(
+                RoundedRectangle(cornerRadius: 10)
+                    .fill(active ? Color.accentColor.opacity(0.22) : Color.white.opacity(0.05))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 10)
+                    .stroke(
+                        active ? Color.accentColor.opacity(0.88) : Color.white.opacity(0.08),
+                        lineWidth: 1
+                    )
+            )
+            .contentShape(RoundedRectangle(cornerRadius: 10))
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { _ in
+                        guard isEnabled, !localPressActive else { return }
+                        localPressActive = true
+                        onPressChanged(true)
+                    }
+                    .onEnded { _ in
+                        guard localPressActive else { return }
+                        localPressActive = false
+                        onPressChanged(false)
+                    }
+            )
+            .onChange(of: isEnabled) { _, enabled in
+                guard !enabled, localPressActive else { return }
+                localPressActive = false
+                onPressChanged(false)
+            }
+            .onDisappear {
+                guard localPressActive else { return }
+                localPressActive = false
+                onPressChanged(false)
+            }
+            .opacity(isEnabled ? 1 : 0.72)
+    }
+}
+
 struct RightInspectorView: View {
     private enum LeftInspectorTab: String {
         case generator = "图形生成器"
@@ -100,8 +154,12 @@ struct RightInspectorView: View {
                             radius: 12
                         )
 
-                        InspectorPanel(title: "画笔参数") {
-                            brushSection
+                        InspectorPanel(title: viewModel.isColorAdjustmentToolActive ? "色彩调整参数" : "画笔参数") {
+                            if viewModel.isColorAdjustmentToolActive {
+                                colorAdjustmentSection
+                            } else {
+                                brushSection
+                            }
                         }
 
                         InspectorPanel(title: "图层") {
@@ -838,6 +896,171 @@ struct RightInspectorView: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var colorAdjustmentSection: some View {
+        let parameters = viewModel.colorAdjustmentParameters
+        let canAdjust = viewModel.canEditColorAdjustmentPaintedSession
+        let wrappedHue = ColorBlocksEngine.wrapHue(parameters.selectedHueDegrees)
+        let strengthDisplayValue = parameters.hueStrength * 2
+
+        return VStack(alignment: .leading, spacing: 10) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(canAdjust ? "当前影响区域：已绘制蒙版" : "先在画布上涂出影响区域，再拖动下面的参数。")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(Color.white.opacity(0.84))
+
+                Text(canAdjust ? "调参时仍然可以继续补画或擦除蒙版。" : "阶段 B 目前只接通 painted mask，会话不会自动扩展到整层或选区。")
+                    .font(.system(size: 11))
+                    .foregroundStyle(Color.white.opacity(0.62))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 8) {
+                    Text("色相")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(Color.white.opacity(0.84))
+
+                    Circle()
+                        .fill(colorAdjustmentHuePreviewColor(for: wrappedHue))
+                        .frame(width: 12, height: 12)
+                        .overlay(
+                            Circle()
+                                .stroke(Color.white.opacity(0.35), lineWidth: 1)
+                        )
+
+                    Spacer(minLength: 8)
+
+                    Text("\(Int(wrappedHue.rounded()))°")
+                        .font(.system(size: 11, weight: .semibold).monospacedDigit())
+                        .foregroundStyle(Color.white.opacity(0.96))
+                }
+
+                ColorLightingHueBarView(
+                    hue: wrappedHue,
+                    onUpdateHue: { hue in
+                        viewModel.setColorAdjustmentSelectedHueDegrees(hue)
+                    },
+                    onDragEnded: { hue in
+                        viewModel.setColorAdjustmentSelectedHueDegrees(hue)
+                    }
+                )
+                .frame(height: 16)
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8)
+                        .stroke(Color.white.opacity(0.12), lineWidth: 1)
+                )
+                .disabled(!canAdjust)
+                .opacity(canAdjust ? 1 : 0.42)
+            }
+
+            colorAdjustmentSlider(
+                title: "强度",
+                valueText: signedPercentText(strengthDisplayValue),
+                value: Double(strengthDisplayValue),
+                range: -1...1,
+                isEnabled: canAdjust
+            ) { value in
+                viewModel.setColorAdjustmentHueStrength(Float(value) * 0.5)
+            }
+
+            colorAdjustmentSlider(
+                title: "亮度",
+                valueText: signedPercentText(parameters.brightness),
+                value: Double(parameters.brightness),
+                range: -1...1,
+                isEnabled: canAdjust
+            ) { value in
+                viewModel.setColorAdjustmentBrightness(Float(value))
+            }
+
+            colorAdjustmentSlider(
+                title: "对比",
+                valueText: signedPercentText(parameters.contrast),
+                value: Double(parameters.contrast),
+                range: -1...1,
+                isEnabled: canAdjust
+            ) { value in
+                viewModel.setColorAdjustmentContrast(Float(value))
+            }
+
+            colorAdjustmentSlider(
+                title: "纯度",
+                valueText: signedPercentText(parameters.purity),
+                value: Double(parameters.purity),
+                range: -1...1,
+                isEnabled: canAdjust
+            ) { value in
+                viewModel.setColorAdjustmentPurity(Float(value))
+            }
+
+            Divider()
+                .overlay(Color.white.opacity(0.08))
+                .padding(.vertical, 2)
+
+            HStack(spacing: 8) {
+                Button("恢复默认") {
+                    viewModel.resetColorAdjustmentParameters()
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(!canAdjust)
+
+                PressAndHoldActionButton(
+                    title: "按住预览",
+                    isEnabled: canAdjust,
+                    isPressed: viewModel.colorAdjustmentOverlayState.showsOriginalPreview
+                ) { isPressed in
+                    viewModel.setColorAdjustmentShowsOriginalPreview(isPressed)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func colorAdjustmentSlider(
+        title: String,
+        valueText: String,
+        value: Double,
+        range: ClosedRange<Double>,
+        isEnabled: Bool,
+        onChange: @escaping (Double) -> Void
+    ) -> some View {
+        ThrottledSlider(
+            title: title,
+            valueText: { _ in valueText },
+            value: Binding(
+                get: { value },
+                set: { _ in }
+            ),
+            range: range,
+            enableLivePreview: true,
+            onValueChanged: onChange
+        )
+        .disabled(!isEnabled)
+        .opacity(isEnabled ? 1 : 0.42)
+    }
+
+    private func signedPercentText(_ value: Float) -> String {
+        let rounded = Int((value * 100).rounded())
+        if rounded > 0 {
+            return "+\(rounded)%"
+        }
+        return "\(rounded)%"
+    }
+
+    private func colorAdjustmentHuePreviewColor(for hue: Float) -> Color {
+        let rgb = ColorBlocksEngine.hsvToRgb(
+            HSVColor(h: ColorBlocksEngine.wrapHue(hue), s: 1, v: 1)
+        )
+        return Color(
+            red: Double(rgb.red),
+            green: Double(rgb.green),
+            blue: Double(rgb.blue),
+            opacity: 1
+        )
     }
 
     private var pressureSizeCurveEditor: some View {

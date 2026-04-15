@@ -4,6 +4,74 @@ import Foundation
 
 @MainActor
 extension WorkspaceViewModel {
+    var colorAdjustmentParameters: ColorAdjustmentParameters {
+        colorAdjustmentSession?.parameters ?? .neutral
+    }
+
+    var isColorAdjustmentToolActive: Bool {
+        workspace.toolSession.activeTool == .brightnessAdjust
+    }
+
+    var canEditColorAdjustmentPaintedSession: Bool {
+        guard
+            isColorAdjustmentToolActive,
+            let activeLayerID = activeEditableLayerIDForColorAdjustment(),
+            let session = colorAdjustmentSession
+        else {
+            return false
+        }
+
+        guard session.layerID == activeLayerID else { return false }
+        guard case .painted = session.source else { return false }
+        return true
+    }
+
+    func setColorAdjustmentSelectedHueDegrees(_ value: Float) {
+        updateColorAdjustmentParameters { parameters in
+            parameters.selectedHueDegrees = ColorBlocksEngine.wrapHue(value)
+        }
+    }
+
+    func setColorAdjustmentHueStrength(_ value: Float) {
+        updateColorAdjustmentParameters { parameters in
+            parameters.hueStrength = clampSignedColorAdjustmentValue(value)
+        }
+    }
+
+    func setColorAdjustmentBrightness(_ value: Float) {
+        updateColorAdjustmentParameters { parameters in
+            parameters.brightness = clampSignedColorAdjustmentValue(value)
+        }
+    }
+
+    func setColorAdjustmentContrast(_ value: Float) {
+        updateColorAdjustmentParameters { parameters in
+            parameters.contrast = clampSignedColorAdjustmentValue(value)
+        }
+    }
+
+    func setColorAdjustmentPurity(_ value: Float) {
+        updateColorAdjustmentParameters { parameters in
+            parameters.purity = clampSignedColorAdjustmentValue(value)
+        }
+    }
+
+    func resetColorAdjustmentParameters() {
+        updateColorAdjustmentParameters { parameters in
+            parameters = .neutral
+        }
+    }
+
+    func setColorAdjustmentShowsOriginalPreview(_ showsOriginalPreview: Bool) {
+        guard var session = colorAdjustmentSession else { return }
+        guard session.showsOriginalPreview != showsOriginalPreview else { return }
+
+        session.showsOriginalPreview = showsOriginalPreview
+        colorAdjustmentSession = session
+        colorAdjustmentRedrawRevision &+= 1
+        syncColorAdjustmentOverlayState()
+    }
+
     func beginColorAdjustmentStrokeIfNeeded() {
         guard let layerID = activeEditableLayerIDForColorAdjustment() else { return }
         guard let sourceTexture = sourceTextureForColorAdjustment(layerID: layerID) else { return }
@@ -293,7 +361,7 @@ extension WorkspaceViewModel {
             maskTexture: paintedState.maskTexture,
             maskReadMode: .maskRed,
             parameters: session.parameters,
-            overlayOnly: true,
+            overlayOnly: session.parameters.isNeutral,
             effectRegion: effectRegion,
             commandQueue: metalContext.commandQueue
         ) { [weak self] in
@@ -391,5 +459,38 @@ extension WorkspaceViewModel {
         blitEncoder.endEncoding()
         commandBuffer.commit()
         commandBuffer.waitUntilCompleted()
+    }
+
+    private func updateColorAdjustmentParameters(
+        _ mutate: (inout ColorAdjustmentParameters) -> Void
+    ) {
+        guard canEditColorAdjustmentPaintedSession else { return }
+        guard var session = colorAdjustmentSession else { return }
+
+        var nextParameters = session.parameters
+        mutate(&nextParameters)
+        nextParameters = normalizedColorAdjustmentParameters(nextParameters)
+        guard nextParameters != session.parameters else { return }
+
+        session.parameters = nextParameters
+        colorAdjustmentSession = session
+        scheduleColorAdjustmentPreviewUpdate(force: true)
+        syncColorAdjustmentOverlayState()
+    }
+
+    private func normalizedColorAdjustmentParameters(
+        _ parameters: ColorAdjustmentParameters
+    ) -> ColorAdjustmentParameters {
+        var normalized = parameters
+        normalized.selectedHueDegrees = ColorBlocksEngine.wrapHue(normalized.selectedHueDegrees)
+        normalized.hueStrength = clampSignedColorAdjustmentValue(normalized.hueStrength)
+        normalized.brightness = clampSignedColorAdjustmentValue(normalized.brightness)
+        normalized.contrast = clampSignedColorAdjustmentValue(normalized.contrast)
+        normalized.purity = clampSignedColorAdjustmentValue(normalized.purity)
+        return normalized
+    }
+
+    private func clampSignedColorAdjustmentValue(_ value: Float) -> Float {
+        min(max(value, -1), 1)
     }
 }

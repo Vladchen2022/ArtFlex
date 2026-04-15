@@ -1,6 +1,6 @@
 # ArtFlex Handoff
 
-最后更新：2026-04-14
+最后更新：2026-04-15
 
 ## 1. 先记住这三句话
 
@@ -14,6 +14,7 @@
 2. [DECISIONS.md](DECISIONS.md)
 3. [Docs/reference/REPO_MAP.md](Docs/reference/REPO_MAP.md)
 4. [Docs/reference/COLOR_PIXEL_SPEC.md](Docs/reference/COLOR_PIXEL_SPEC.md)
+5. [Docs/reference/COLOR_ADJUSTMENT_STATUS.md](Docs/reference/COLOR_ADJUSTMENT_STATUS.md)
 
 如果任务和组合笔刷直接相关，再看：
 
@@ -84,6 +85,21 @@
 - `光色 / 明度 / 纯度` 滑块语义
 
 不要只修其中一层。
+
+### 3.6 色彩调整当前只做到阶段 A
+
+当前不要把 `色彩调整` 理解成“参数面板和正式调整已经完成，只是在修 bug”。
+
+当前真实状态是：
+
+- 阶段 A 已完成并手测通过
+- 只支持工具态蓝色蒙版绘制
+- `E/B/Esc` 已接通
+- 参数面板、确认链、正式色彩调整应用还没开始
+
+继续接手这块时，先读：
+
+- [Docs/reference/COLOR_ADJUSTMENT_STATUS.md](Docs/reference/COLOR_ADJUSTMENT_STATUS.md)
 
 ## 4. 当前 working tree 状态
 
