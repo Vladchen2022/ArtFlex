@@ -6,6 +6,7 @@ final class AppSharedMetalServices {
     let sectorGradientRenderer: SectorGradientRenderer
     let selectionFillRenderer: SelectionFillRenderer
     let colorAdjustmentRenderer: ColorAdjustmentRenderer
+    let curveAdjustmentRenderer: CurveAdjustmentRenderer
     let creativeShapeGeneratorRenderer: CreativeShapeGeneratorRenderer
     let visibleDeltaRenderer: VisibleDeltaRenderer
     let textureSerializer: LayerTextureSerializer
@@ -22,6 +23,7 @@ final class AppSharedMetalServices {
         self.sectorGradientRenderer = SectorGradientRenderer(device: metalContext.device)
         self.selectionFillRenderer = SelectionFillRenderer(device: metalContext.device)
         self.colorAdjustmentRenderer = try ColorAdjustmentRenderer(device: metalContext.device)
+        self.curveAdjustmentRenderer = try CurveAdjustmentRenderer(device: metalContext.device)
         self.creativeShapeGeneratorRenderer = CreativeShapeGeneratorRenderer(device: metalContext.device)
         self.visibleDeltaRenderer = try VisibleDeltaRenderer(device: metalContext.device)
         let textureSerializer = LayerTextureSerializer(metalContext: metalContext)
@@ -50,6 +52,7 @@ struct AppBootstrap {
     let sectorGradientRenderer: SectorGradientRenderer
     let selectionFillRenderer: SelectionFillRenderer
     let colorAdjustmentRenderer: ColorAdjustmentRenderer
+    let curveAdjustmentRenderer: CurveAdjustmentRenderer
     let creativeShapeGeneratorRenderer: CreativeShapeGeneratorRenderer
     let visibleDeltaRenderer: VisibleDeltaRenderer
     let smudgeEngine: SmudgeEngine
@@ -96,6 +99,7 @@ struct AppBootstrap {
         self.sectorGradientRenderer = resolvedSharedMetalServices.sectorGradientRenderer
         self.selectionFillRenderer = resolvedSharedMetalServices.selectionFillRenderer
         self.colorAdjustmentRenderer = resolvedSharedMetalServices.colorAdjustmentRenderer
+        self.curveAdjustmentRenderer = resolvedSharedMetalServices.curveAdjustmentRenderer
         self.creativeShapeGeneratorRenderer = resolvedSharedMetalServices.creativeShapeGeneratorRenderer
         self.visibleDeltaRenderer = resolvedSharedMetalServices.visibleDeltaRenderer
         let textureSerializer = resolvedSharedMetalServices.textureSerializer

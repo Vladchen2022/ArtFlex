@@ -91,6 +91,7 @@ struct RightInspectorView: View {
     private enum ParameterInspectorTab: String {
         case brush = "画笔参数"
         case colorAdjustment = "色彩调整参数"
+        case curves = "曲线"
     }
 
     private enum TopInspectorTab: String {
@@ -123,6 +124,7 @@ struct RightInspectorView: View {
     @State private var showsCompoundBrushBuilder = false
     @State private var leftInspectorTab: LeftInspectorTab = .referenceImages
     @State private var parameterInspectorTab: ParameterInspectorTab = .colorAdjustment
+    @State private var lastUsedAdjustmentTab: ParameterInspectorTab = .colorAdjustment
     @State private var parameterInspectorAutoRestoreTab: ParameterInspectorTab?
     @State private var topInspectorTab: TopInspectorTab = .navigator
     @State private var navigatorZoomPercentText = "100"
@@ -205,11 +207,14 @@ struct RightInspectorView: View {
             HStack(spacing: 8) {
                 parameterInspectorTabButton(.brush)
                 parameterInspectorTabButton(.colorAdjustment)
+                parameterInspectorTabButton(.curves)
             }
 
             Group {
                 if parameterInspectorTab == .colorAdjustment {
                     colorAdjustmentSection
+                } else if parameterInspectorTab == .curves {
+                    curveAdjustmentSection
                 } else {
                     brushSection
                 }
@@ -220,7 +225,7 @@ struct RightInspectorView: View {
     private func parameterInspectorTabButton(_ tab: ParameterInspectorTab) -> some View {
         let isSelected = parameterInspectorTab == tab
         return Button {
-            parameterInspectorTab = tab
+            handleParameterInspectorTabSelection(tab)
         } label: {
             Text(tab.rawValue)
                 .font(.system(size: 12, weight: .bold))
@@ -242,6 +247,26 @@ struct RightInspectorView: View {
         .buttonStyle(.plain)
     }
 
+    private func handleParameterInspectorTabSelection(_ tab: ParameterInspectorTab) {
+        switch tab {
+        case .brush:
+            parameterInspectorTab = .brush
+        case .colorAdjustment:
+            if viewModel.curveAdjustmentOverlayState.isActive {
+                return
+            }
+            parameterInspectorTab = .colorAdjustment
+            lastUsedAdjustmentTab = .colorAdjustment
+        case .curves:
+            if viewModel.colorAdjustmentOverlayState.isActive {
+                return
+            }
+            parameterInspectorTab = .curves
+            lastUsedAdjustmentTab = .curves
+            _ = viewModel.beginCurveAdjustmentFromWholeLayerIfNeeded(showFeedback: true)
+        }
+    }
+
     private func handleToolDrivenParameterInspectorTabChange(
         oldTool: ToolKind,
         newTool: ToolKind
@@ -252,9 +277,11 @@ struct RightInspectorView: View {
         switch (oldToolUsesColorAdjustmentPanel, newToolUsesColorAdjustmentPanel) {
         case (false, true):
             parameterInspectorAutoRestoreTab = parameterInspectorTab
-            parameterInspectorTab = .colorAdjustment
+            parameterInspectorTab = lastUsedAdjustmentTab
         case (true, true):
-            parameterInspectorTab = .colorAdjustment
+            if parameterInspectorTab != .brush {
+                parameterInspectorTab = lastUsedAdjustmentTab
+            }
         case (true, false):
             if let restoreTab = parameterInspectorAutoRestoreTab {
                 parameterInspectorTab = restoreTab
@@ -1069,42 +1096,151 @@ struct RightInspectorView: View {
                 .overlay(Color.white.opacity(0.08))
                 .padding(.vertical, 2)
 
-            HStack(spacing: 8) {
-                compactToolButton(
-                    systemImage: "checkmark",
-                    tooltip: "确认应用",
-                    isSelected: canConfirm,
-                    width: topInspectorControlButtonWidth,
-                    height: topInspectorControlButtonHeight,
-                    iconSize: topInspectorControlIconSize,
-                    cornerRadius: topInspectorControlCornerRadius
-                ) {
-                    viewModel.confirmColorAdjustmentSession()
-                }
-                .disabled(!canConfirm)
-
-                compactToolButton(
-                    systemImage: "arrow.counterclockwise",
-                    tooltip: "恢复默认",
-                    width: topInspectorControlButtonWidth,
-                    height: topInspectorControlButtonHeight,
-                    iconSize: topInspectorControlIconSize,
-                    cornerRadius: topInspectorControlCornerRadius
-                ) {
-                    viewModel.resetColorAdjustmentParameters()
-                }
-                .disabled(!canAdjust)
-
-                PressAndHoldActionButton(
-                    title: "按住预览",
-                    isEnabled: viewModel.canPreviewColorAdjustmentOriginal,
-                    isPressed: viewModel.colorAdjustmentOverlayState.showsOriginalPreview
-                ) { isPressed in
+            adjustmentActionStrip(
+                canConfirm: canConfirm,
+                canReset: canAdjust,
+                canHoldPreview: viewModel.canPreviewColorAdjustmentOriginal,
+                isHoldingPreview: viewModel.colorAdjustmentOverlayState.showsOriginalPreview,
+                onConfirm: { viewModel.confirmColorAdjustmentSession() },
+                onReset: { viewModel.resetColorAdjustmentParameters() },
+                onSetShowsOriginalPreview: { isPressed in
                     viewModel.setColorAdjustmentShowsOriginalPreview(isPressed)
                 }
-            }
+            )
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var curveAdjustmentSection: some View {
+        let parameters = viewModel.curveAdjustmentParameters
+        let selectedChannel = parameters.selectedChannel
+        let canAdjust = viewModel.canStartOrEditCurveAdjustmentFromPanel
+
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .bottom, spacing: 10) {
+                CurveEditorView(
+                    state: parameters.state(for: selectedChannel),
+                    isEnabled: canAdjust
+                ) { nextState in
+                    viewModel.updateCurveAdjustmentChannelPoints(nextState.points, channel: selectedChannel)
+                }
+                .frame(maxWidth: .infinity)
+                .aspectRatio(1, contentMode: .fit)
+                .clipShape(RoundedRectangle(cornerRadius: 10))
+                .opacity(canAdjust ? 1 : 0.58)
+                .layoutPriority(1)
+
+                VStack(spacing: 6) {
+                    ForEach(CurveChannel.allCases, id: \.self) { channel in
+                        curveChannelButton(
+                            channel: channel,
+                            isSelected: selectedChannel == channel,
+                            isEnabled: canAdjust
+                        ) {
+                            viewModel.setCurveAdjustmentSelectedChannel(channel)
+                        }
+                    }
+                }
+                .frame(width: 54)
+            }
+
+            if !canAdjust {
+                Text(viewModel.curveAdjustmentStatusMessage)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(Color.white.opacity(0.66))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Divider()
+                .overlay(Color.white.opacity(0.08))
+                .padding(.vertical, 2)
+
+            adjustmentActionStrip(
+                canConfirm: viewModel.canConfirmCurveAdjustmentSession,
+                canReset: canAdjust,
+                canHoldPreview: viewModel.canPreviewCurveAdjustmentOriginal,
+                isHoldingPreview: viewModel.curveAdjustmentOverlayState.showsOriginalPreview,
+                onConfirm: { viewModel.confirmCurveAdjustmentIfNeeded(showFeedback: true) },
+                onReset: { viewModel.resetCurveAdjustmentValues() },
+                onSetShowsOriginalPreview: { isPressed in
+                    viewModel.setCurveAdjustmentShowingOriginalPreview(isPressed)
+                }
+            )
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func curveChannelButton(
+        channel: CurveChannel,
+        isSelected: Bool,
+        isEnabled: Bool,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Text(channel.displayName)
+                .font(.system(size: 11, weight: .bold))
+                .foregroundStyle(Color.white.opacity(isSelected ? 0.96 : 0.72))
+                .frame(maxWidth: .infinity, minHeight: 24)
+                .padding(.horizontal, 4)
+                .background(
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(isSelected ? Color.accentColor.opacity(0.24) : Color.white.opacity(0.04))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8)
+                        .stroke(
+                            isSelected ? Color.accentColor.opacity(0.86) : Color.white.opacity(0.08),
+                            lineWidth: 1
+                        )
+                )
+        }
+        .buttonStyle(.plain)
+        .disabled(!isEnabled)
+    }
+
+    private func adjustmentActionStrip(
+        canConfirm: Bool,
+        canReset: Bool,
+        canHoldPreview: Bool,
+        isHoldingPreview: Bool,
+        onConfirm: @escaping () -> Void,
+        onReset: @escaping () -> Void,
+        onSetShowsOriginalPreview: @escaping (Bool) -> Void
+    ) -> some View {
+        HStack(spacing: 8) {
+            compactToolButton(
+                systemImage: "checkmark",
+                tooltip: "确认应用",
+                isSelected: canConfirm,
+                width: topInspectorControlButtonWidth,
+                height: topInspectorControlButtonHeight,
+                iconSize: topInspectorControlIconSize,
+                cornerRadius: topInspectorControlCornerRadius
+            ) {
+                onConfirm()
+            }
+            .disabled(!canConfirm)
+
+            compactToolButton(
+                systemImage: "arrow.counterclockwise",
+                tooltip: "恢复默认",
+                width: topInspectorControlButtonWidth,
+                height: topInspectorControlButtonHeight,
+                iconSize: topInspectorControlIconSize,
+                cornerRadius: topInspectorControlCornerRadius
+            ) {
+                onReset()
+            }
+            .disabled(!canReset)
+
+            PressAndHoldActionButton(
+                title: "按住预览",
+                isEnabled: canHoldPreview,
+                isPressed: isHoldingPreview
+            ) { isPressed in
+                onSetShowsOriginalPreview(isPressed)
+            }
+        }
     }
 
     private func colorAdjustmentSlider(

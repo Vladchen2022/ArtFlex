@@ -160,6 +160,7 @@ final class WorkspaceViewModel: ObservableObject {
     @Published private(set) var quickColorPickerState: QuickColorPickerState?
     @Published private(set) var isWorkspaceChromeHidden = false
     @Published var colorAdjustmentOverlayState = ColorAdjustmentOverlayState.inactive
+    @Published var curveAdjustmentOverlayState = CurveAdjustmentOverlayState.inactive
     @Published var colorAdjustmentRedrawRevision: UInt64 = 0
     @Published private(set) var referenceImageSlots = WorkspaceViewModel.makeDefaultReferenceImageSlots()
     @Published private(set) var selectedReferenceImageSlotID: Int?
@@ -183,6 +184,7 @@ final class WorkspaceViewModel: ObservableObject {
     private var documentChangeRevision: UInt64 = 0
     private var strokePacketCount = 0
     var colorAdjustmentSession: ColorAdjustmentSession?
+    var curveAdjustmentSession: CurveAdjustmentSession?
     var colorAdjustmentBrushMode: ColorAdjustmentBrushMode = .paint
     var colorAdjustmentStrokePacketCount = 0
     var colorAdjustmentPreviewRenderInFlight = false
@@ -191,6 +193,7 @@ final class WorkspaceViewModel: ObservableObject {
     var colorAdjustmentAllowsIdleModeHotkeys = false
 #if DEBUG
     var debugColorAdjustmentResolutionDecisionOverride: ColorAdjustmentResolutionDecision?
+    var debugCurveAdjustmentResolutionDecisionOverride: CurveAdjustmentResolutionDecision?
     var debugPixelOperationHistoryCaptureModeOverride: HistoryCaptureMode?
     var debugFillAtPointHistoryCaptureModeOverride: HistoryCaptureMode?
 #endif
@@ -293,6 +296,10 @@ final class WorkspaceViewModel: ObservableObject {
         let currentTool = workspace.toolSession.activeTool
         if currentTool != normalizedTool
             && !resolveColorAdjustmentSessionIfNeeded(reason: .toolChange) {
+            return
+        }
+        if currentTool != normalizedTool
+            && !resolveCurveAdjustmentSessionIfNeeded(reason: .toolChange) {
             return
         }
         if shouldAutoApplyGradientBeforeSelectingTool(normalizedTool) {
@@ -1301,12 +1308,20 @@ final class WorkspaceViewModel: ObservableObject {
         bootstrap.colorAdjustmentRenderer
     }
 
+    var curveAdjustmentRenderer: CurveAdjustmentRenderer {
+        bootstrap.curveAdjustmentRenderer
+    }
+
     var colorAdjustmentStrokeEngine: MetalStrokeEngine {
         bootstrap.strokeEngine
     }
 
     func activeEditableLayerIDForColorAdjustment() -> LayerID? {
         bootstrap.interactionController.activeEditableLayerID()
+    }
+
+    func activeEditableLayerIDForCurveAdjustment() -> LayerID? {
+        activeEditableLayerIDForColorAdjustment()
     }
 
     func selectionMaskBytesForColorAdjustment(
@@ -1345,6 +1360,10 @@ final class WorkspaceViewModel: ObservableObject {
         case .empty:
             return nil
         }
+    }
+
+    func activeEditableLayerEffectBoundsForCurveAdjustment() -> CanvasRect? {
+        activeEditableLayerEffectBoundsForColorAdjustment()
     }
 
     private func discardPendingBrushTipDraft() {
@@ -3491,6 +3510,7 @@ final class WorkspaceViewModel: ObservableObject {
         _ = drainPendingBrushCommitsIfNeeded(resetLiveSession: true)
         if workspace.document.activeLayerID != layerID {
             guard resolveColorAdjustmentSessionIfNeeded(reason: .layerChange) else { return }
+            guard resolveCurveAdjustmentSessionIfNeeded(reason: .layerChange) else { return }
             resolveTransformSession(reason: .layerChange)
         }
         bootstrap.workspaceStore.updateDocument { document in
@@ -6514,6 +6534,10 @@ final class WorkspaceViewModel: ObservableObject {
     func handleKeyDown(_ event: NSEvent) -> Bool {
         let normalizedModifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
 
+        if handleCurveAdjustmentKeyDown(event, modifiers: normalizedModifiers) {
+            return true
+        }
+
         if workspace.toolSession.activeTool == .brightnessAdjust,
            handleColorAdjustmentKeyDown(event, modifiers: normalizedModifiers) {
             return true
@@ -6939,6 +6963,9 @@ final class WorkspaceViewModel: ObservableObject {
         if let liveTexture = bootstrap.strokeEngine.displayTexture(for: layerID) {
             return liveTexture
         }
+        if let liveTexture = activeCurveAdjustmentPreviewTexture(for: layerID) {
+            return liveTexture
+        }
         return activeColorAdjustmentPreviewTexture(for: layerID)
     }
 
@@ -6989,6 +7016,9 @@ final class WorkspaceViewModel: ObservableObject {
         guard resolveColorAdjustmentSessionIfNeeded(reason: .historyNavigation) else {
             return
         }
+        guard resolveCurveAdjustmentSessionIfNeeded(reason: .historyNavigation) else {
+            return
+        }
         if resolveTransformSession(reason: .historyNavigation) {
             return
         }
@@ -7022,6 +7052,9 @@ final class WorkspaceViewModel: ObservableObject {
 
     private func performRedoLocally() {
         guard resolveColorAdjustmentSessionIfNeeded(reason: .historyNavigation) else {
+            return
+        }
+        guard resolveCurveAdjustmentSessionIfNeeded(reason: .historyNavigation) else {
             return
         }
         if resolveTransformSession(reason: .historyNavigation) {
@@ -7410,6 +7443,7 @@ final class WorkspaceViewModel: ObservableObject {
         _ = drainPendingBrushCommitsIfNeeded(resetLiveSession: true)
         pauseDrawingStatsTracking()
         guard resolveColorAdjustmentSessionIfNeeded(reason: .documentOpen) else { return }
+        guard resolveCurveAdjustmentSessionIfNeeded(reason: .documentOpen) else { return }
         resolveTransformSession(reason: .documentOpen)
         timelapseRecorder.stopRecording()
         guard let url = bootstrap.filePanelService.presentProjectOpenPanel() else {
@@ -7498,6 +7532,7 @@ final class WorkspaceViewModel: ObservableObject {
     ) {
         pauseDrawingStatsTracking()
         guard resolveColorAdjustmentSessionIfNeeded(reason: .documentOpen) else { return }
+        guard resolveCurveAdjustmentSessionIfNeeded(reason: .documentOpen) else { return }
         resolveTransformSession(reason: .documentOpen)
         timelapseRecorder.stopRecording()
 
@@ -7920,6 +7955,9 @@ final class WorkspaceViewModel: ObservableObject {
     func confirmCloseOrQuitIfNeeded() -> Bool {
         pauseDrawingStatsTracking()
         guard resolveColorAdjustmentSessionIfNeeded(reason: .closeOrQuit) else {
+            return false
+        }
+        guard resolveCurveAdjustmentSessionIfNeeded(reason: .closeOrQuit) else {
             return false
         }
         switch confirmUnsavedChangesIfNeeded(

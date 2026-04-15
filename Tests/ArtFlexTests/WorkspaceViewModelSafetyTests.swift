@@ -736,6 +736,62 @@ struct WorkspaceViewModelSafetyTests {
 
     @Test
     @MainActor
+    func curveAdjustmentWholeLayerPreviewUsesActiveLayerWithoutPainting() async throws {
+        let harness = try BrushEditingBoundaryHarness()
+        let activeLayerID = harness.viewModel.workspace.document.activeLayerID
+        let opaqueX = 96
+        let opaqueY = 96
+        let transparentX = 16
+        let transparentY = 16
+
+        try fillOpaqueRect(
+            in: harness,
+            layerID: activeLayerID,
+            originX: 48,
+            originY: 48,
+            width: 120,
+            height: 120,
+            color: .init(red: 0.48, green: 0.48, blue: 0.48, alpha: 1)
+        )
+
+        let opaqueBasePixel = try harness.color(atX: opaqueX, y: opaqueY, layerID: activeLayerID)
+        let transparentBasePixel = try harness.color(atX: transparentX, y: transparentY, layerID: activeLayerID)
+
+        #expect(harness.viewModel.beginCurveAdjustmentFromWholeLayerIfNeeded(showFeedback: false))
+        let baselineRevision = harness.viewModel.colorAdjustmentRedrawRevision
+        harness.viewModel.updateCurveAdjustmentChannelPoints(
+            [
+                .init(x: 0, y: 0),
+                .init(x: 0.5, y: 0.25),
+                .init(x: 1, y: 1)
+            ],
+            channel: .rgb
+        )
+        try await waitForColorAdjustmentRedrawRevision(in: harness, after: baselineRevision)
+
+        let opaquePreviewPixel = try harness.colorAdjustmentPreviewColor(atX: opaqueX, y: opaqueY)
+        let transparentPreviewPixel = try harness.colorAdjustmentPreviewColor(atX: transparentX, y: transparentY)
+        #expect(opaquePreviewPixel.red < opaqueBasePixel.red - 0.04)
+        #expect(opaquePreviewPixel.green < opaqueBasePixel.green - 0.04)
+        #expect(opaquePreviewPixel.blue < opaqueBasePixel.blue - 0.04)
+        #expect(abs(transparentPreviewPixel.alpha - transparentBasePixel.alpha) < 0.02)
+        #expect(harness.viewModel.curveAdjustmentOverlayState.sourceKind == .wholeLayer)
+
+        guard let session = harness.viewModel.curveAdjustmentSession else {
+            Issue.record("Expected whole-layer curve adjustment session")
+            return
+        }
+
+        switch session.source {
+        case .wholeLayer:
+            break
+        case .painted, .selection:
+            Issue.record("Expected whole-layer curve source")
+        }
+    }
+
+    @Test
+    @MainActor
     func colorAdjustmentConfirmReleasesBEKeysBackToToolShortcuts() throws {
         let harness = try BrushEditingBoundaryHarness()
         let activeLayerID = harness.viewModel.workspace.document.activeLayerID
