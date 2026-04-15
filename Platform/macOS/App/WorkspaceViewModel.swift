@@ -190,6 +190,7 @@ final class WorkspaceViewModel: ObservableObject {
     var colorAdjustmentPreviewToken: UInt64 = 0
     var colorAdjustmentAllowsIdleModeHotkeys = false
 #if DEBUG
+    var debugColorAdjustmentResolutionDecisionOverride: ColorAdjustmentResolutionDecision?
     var debugPixelOperationHistoryCaptureModeOverride: HistoryCaptureMode?
     var debugFillAtPointHistoryCaptureModeOverride: HistoryCaptureMode?
 #endif
@@ -289,6 +290,11 @@ final class WorkspaceViewModel: ObservableObject {
     func selectTool(_ tool: ToolKind) {
         ideationBranchActivityHandler?()
         let normalizedTool = Self.normalizedAvailableTool(tool)
+        let currentTool = workspace.toolSession.activeTool
+        if currentTool != normalizedTool
+            && !resolveColorAdjustmentSessionIfNeeded(reason: .toolChange) {
+            return
+        }
         if shouldAutoApplyGradientBeforeSelectingTool(normalizedTool) {
             deferredGradientAction = .toolSwitch(normalizedTool)
             transformLogger.debug("[gradient] autoApplyOnToolSwitch=true sessionState=\(self.gradientSessionStateDescription(), privacy: .public)")
@@ -297,7 +303,6 @@ final class WorkspaceViewModel: ObservableObject {
             applyActiveGradientSession()
             return
         }
-        let currentTool = workspace.toolSession.activeTool
         if isBrushLikeTool(currentTool) && !isBrushLikeTool(normalizedTool) {
             _ = drainPendingBrushCommitsIfNeeded(resetLiveSession: true)
         }
@@ -1302,6 +1307,13 @@ final class WorkspaceViewModel: ObservableObject {
 
     func activeEditableLayerIDForColorAdjustment() -> LayerID? {
         bootstrap.interactionController.activeEditableLayerID()
+    }
+
+    func selectionMaskBytesForColorAdjustment(
+        shape: SelectionShape?,
+        canvasSize: CanvasSize
+    ) -> [UInt8] {
+        selectionMaskBytes(for: shape, canvasSize: canvasSize)
     }
 
     private func discardPendingBrushTipDraft() {
@@ -3447,6 +3459,7 @@ final class WorkspaceViewModel: ObservableObject {
     func selectLayer(_ layerID: LayerID) {
         _ = drainPendingBrushCommitsIfNeeded(resetLiveSession: true)
         if workspace.document.activeLayerID != layerID {
+            guard resolveColorAdjustmentSessionIfNeeded(reason: .layerChange) else { return }
             resolveTransformSession(reason: .layerChange)
         }
         bootstrap.workspaceStore.updateDocument { document in
@@ -6940,6 +6953,9 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     private func performUndoLocally() {
+        guard resolveColorAdjustmentSessionIfNeeded(reason: .historyNavigation) else {
+            return
+        }
         if resolveTransformSession(reason: .historyNavigation) {
             return
         }
@@ -6972,6 +6988,9 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     private func performRedoLocally() {
+        guard resolveColorAdjustmentSessionIfNeeded(reason: .historyNavigation) else {
+            return
+        }
         if resolveTransformSession(reason: .historyNavigation) {
             return
         }
@@ -7357,6 +7376,7 @@ final class WorkspaceViewModel: ObservableObject {
     func openProject() {
         _ = drainPendingBrushCommitsIfNeeded(resetLiveSession: true)
         pauseDrawingStatsTracking()
+        guard resolveColorAdjustmentSessionIfNeeded(reason: .documentOpen) else { return }
         resolveTransformSession(reason: .documentOpen)
         timelapseRecorder.stopRecording()
         guard let url = bootstrap.filePanelService.presentProjectOpenPanel() else {
@@ -7444,6 +7464,7 @@ final class WorkspaceViewModel: ObservableObject {
         decisionOverride: NewCanvasCreationDecision?
     ) {
         pauseDrawingStatsTracking()
+        guard resolveColorAdjustmentSessionIfNeeded(reason: .documentOpen) else { return }
         resolveTransformSession(reason: .documentOpen)
         timelapseRecorder.stopRecording()
 
@@ -7865,6 +7886,9 @@ final class WorkspaceViewModel: ObservableObject {
 
     func confirmCloseOrQuitIfNeeded() -> Bool {
         pauseDrawingStatsTracking()
+        guard resolveColorAdjustmentSessionIfNeeded(reason: .closeOrQuit) else {
+            return false
+        }
         switch confirmUnsavedChangesIfNeeded(
             messageText: "当前画布有未保存内容",
             informativeText: "退出前，要先保存当前内容吗？"

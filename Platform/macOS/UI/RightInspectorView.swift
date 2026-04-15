@@ -88,6 +88,11 @@ struct RightInspectorView: View {
         case referenceImages = "参考图"
     }
 
+    private enum ParameterInspectorTab: String {
+        case brush = "画笔参数"
+        case colorAdjustment = "色彩调整参数"
+    }
+
     private enum TopInspectorTab: String {
         case tipShape = "笔尖形状设计"
         case navigator = "导航器"
@@ -117,6 +122,8 @@ struct RightInspectorView: View {
     @State private var tipImageLibraryDropTargetID: BrushTipImageAssetID?
     @State private var showsCompoundBrushBuilder = false
     @State private var leftInspectorTab: LeftInspectorTab = .referenceImages
+    @State private var parameterInspectorTab: ParameterInspectorTab = .colorAdjustment
+    @State private var parameterInspectorAutoRestoreTab: ParameterInspectorTab?
     @State private var topInspectorTab: TopInspectorTab = .navigator
     @State private var navigatorZoomPercentText = "100"
     var body: some View {
@@ -154,12 +161,8 @@ struct RightInspectorView: View {
                             radius: 12
                         )
 
-                        InspectorPanel(title: viewModel.isColorAdjustmentToolActive ? "色彩调整参数" : "画笔参数") {
-                            if viewModel.isColorAdjustmentToolActive {
-                                colorAdjustmentSection
-                            } else {
-                                brushSection
-                            }
+                        InspectorPanel(title: "") {
+                            parameterInspectorSection
                         }
 
                         InspectorPanel(title: "图层") {
@@ -183,6 +186,10 @@ struct RightInspectorView: View {
         .onChange(of: viewModel.workspace.viewport.zoomScale) { _, _ in
             syncNavigatorZoomPercentText()
         }
+        .onChange(of: viewModel.workspace.toolSession.activeTool) { oldTool, newTool in
+            guard oldTool != newTool else { return }
+            handleToolDrivenParameterInspectorTabChange(oldTool: oldTool, newTool: newTool)
+        }
         .sheet(item: $tipImageLibrarySheetTarget) { target in
             tipImageLibrarySheet(for: target) {
                 tipImageLibrarySheetTarget = nil
@@ -190,6 +197,80 @@ struct RightInspectorView: View {
         }
         .sheet(isPresented: $showsCompoundBrushBuilder) {
             CompoundBrushBuilderSheet(viewModel: viewModel)
+        }
+    }
+
+    private var parameterInspectorSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                parameterInspectorTabButton(.brush)
+                parameterInspectorTabButton(.colorAdjustment)
+            }
+
+            Group {
+                if parameterInspectorTab == .colorAdjustment {
+                    colorAdjustmentSection
+                } else {
+                    brushSection
+                }
+            }
+        }
+    }
+
+    private func parameterInspectorTabButton(_ tab: ParameterInspectorTab) -> some View {
+        let isSelected = parameterInspectorTab == tab
+        return Button {
+            parameterInspectorTab = tab
+        } label: {
+            Text(tab.rawValue)
+                .font(.system(size: 12, weight: .bold))
+                .foregroundStyle(Color.white.opacity(isSelected ? 0.96 : 0.72))
+                .frame(maxWidth: .infinity, minHeight: 28)
+                .padding(.horizontal, 10)
+                .background(
+                    RoundedRectangle(cornerRadius: 10)
+                        .fill(isSelected ? Color.accentColor.opacity(0.24) : Color.white.opacity(0.04))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10)
+                        .stroke(
+                            isSelected ? Color.accentColor.opacity(0.86) : Color.white.opacity(0.08),
+                            lineWidth: 1
+                        )
+                )
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func handleToolDrivenParameterInspectorTabChange(
+        oldTool: ToolKind,
+        newTool: ToolKind
+    ) {
+        let oldToolUsesColorAdjustmentPanel = usesColorAdjustmentParameterPanel(oldTool)
+        let newToolUsesColorAdjustmentPanel = usesColorAdjustmentParameterPanel(newTool)
+
+        switch (oldToolUsesColorAdjustmentPanel, newToolUsesColorAdjustmentPanel) {
+        case (false, true):
+            parameterInspectorAutoRestoreTab = parameterInspectorTab
+            parameterInspectorTab = .colorAdjustment
+        case (true, true):
+            parameterInspectorTab = .colorAdjustment
+        case (true, false):
+            if let restoreTab = parameterInspectorAutoRestoreTab {
+                parameterInspectorTab = restoreTab
+            }
+            parameterInspectorAutoRestoreTab = nil
+        case (false, false):
+            break
+        }
+    }
+
+    private func usesColorAdjustmentParameterPanel(_ tool: ToolKind) -> Bool {
+        switch tool {
+        case .brightnessAdjust, .lassoSelection, .rectangleSelection, .ellipseSelection:
+            return true
+        default:
+            return false
         }
     }
 
@@ -376,15 +457,15 @@ struct RightInspectorView: View {
                     viewModel.openReferenceImageFloatingPanel()
                 } label: {
                     Image(systemName: "arrow.up.left.and.arrow.down.right")
-                        .font(.system(size: 11, weight: .bold))
+                        .font(.system(size: topInspectorControlIconSize, weight: .bold))
                         .foregroundStyle(Color.white.opacity(viewModel.selectedReferenceImageSlot?.asset == nil ? 0.42 : 0.92))
-                        .frame(width: 30, height: 26)
+                        .frame(width: topInspectorControlButtonWidth, height: topInspectorControlButtonHeight)
                         .background(
-                            RoundedRectangle(cornerRadius: 8)
+                            RoundedRectangle(cornerRadius: topInspectorControlCornerRadius)
                                 .fill(Color.white.opacity(0.10))
                         )
                         .overlay(
-                            RoundedRectangle(cornerRadius: 8)
+                            RoundedRectangle(cornerRadius: topInspectorControlCornerRadius)
                                 .stroke(Color.white.opacity(0.08), lineWidth: 1)
                         )
                 }
@@ -396,15 +477,15 @@ struct RightInspectorView: View {
                     viewModel.toggleCanvasLuminosityReference()
                 } label: {
                     Image(systemName: "circle.lefthalf.filled")
-                        .font(.system(size: 11, weight: .bold))
+                        .font(.system(size: topInspectorControlIconSize, weight: .bold))
                         .foregroundStyle(Color.white.opacity(viewModel.isCanvasLuminosityReferenceActive ? 0.98 : 0.86))
-                        .frame(width: 30, height: 26)
+                        .frame(width: topInspectorControlButtonWidth, height: topInspectorControlButtonHeight)
                         .background(
-                            RoundedRectangle(cornerRadius: 8)
+                            RoundedRectangle(cornerRadius: topInspectorControlCornerRadius)
                                 .fill(viewModel.isCanvasLuminosityReferenceActive ? Color.accentColor.opacity(0.92) : Color.white.opacity(0.10))
                         )
                         .overlay(
-                            RoundedRectangle(cornerRadius: 8)
+                            RoundedRectangle(cornerRadius: topInspectorControlCornerRadius)
                                 .stroke(
                                     viewModel.isCanvasLuminosityReferenceActive ? Color.accentColor.opacity(0.90) : Color.white.opacity(0.08),
                                     lineWidth: 1
@@ -420,15 +501,15 @@ struct RightInspectorView: View {
                     viewModel.clearSelectedReferenceImage()
                 } label: {
                     Image(systemName: "trash")
-                        .font(.system(size: 11, weight: .bold))
+                        .font(.system(size: topInspectorControlIconSize, weight: .bold))
                         .foregroundStyle(Color.white.opacity(viewModel.selectedReferenceImageSlot?.asset == nil ? 0.42 : 0.92))
-                        .frame(width: 30, height: 26)
+                        .frame(width: topInspectorControlButtonWidth, height: topInspectorControlButtonHeight)
                         .background(
-                            RoundedRectangle(cornerRadius: 8)
+                            RoundedRectangle(cornerRadius: topInspectorControlCornerRadius)
                                 .fill(Color.white.opacity(0.10))
                         )
                         .overlay(
-                            RoundedRectangle(cornerRadius: 8)
+                            RoundedRectangle(cornerRadius: topInspectorControlCornerRadius)
                                 .stroke(Color.white.opacity(0.08), lineWidth: 1)
                         )
                 }
@@ -587,6 +668,9 @@ struct RightInspectorView: View {
         let isSelected = topInspectorTab == tab
         return Button {
             topInspectorTab = tab
+            if tab == .tipShape, parameterInspectorTab == .colorAdjustment {
+                parameterInspectorTab = .brush
+            }
         } label: {
             Text(tab.rawValue)
                 .font(.system(size: 12, weight: .bold))
@@ -900,23 +984,12 @@ struct RightInspectorView: View {
 
     private var colorAdjustmentSection: some View {
         let parameters = viewModel.colorAdjustmentParameters
-        let canAdjust = viewModel.canEditColorAdjustmentPaintedSession
-        let canConfirm = viewModel.canConfirmColorAdjustmentPaintedSession
+        let canAdjust = viewModel.canEditColorAdjustmentParameters
+        let canConfirm = viewModel.canConfirmColorAdjustmentSession
         let wrappedHue = ColorBlocksEngine.wrapHue(parameters.selectedHueDegrees)
         let strengthDisplayValue = parameters.hueStrength * 2
 
         return VStack(alignment: .leading, spacing: 10) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text(canAdjust ? "当前影响区域：已绘制蒙版" : "先在画布上涂出影响区域，再拖动下面的参数。")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(Color.white.opacity(0.84))
-
-                Text(canAdjust ? "调参时仍然可以继续补画或擦除蒙版。" : "阶段 B 目前只接通 painted mask，会话不会自动扩展到整层或选区。")
-                    .font(.system(size: 11))
-                    .foregroundStyle(Color.white.opacity(0.62))
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-
             VStack(alignment: .leading, spacing: 6) {
                 HStack(spacing: 8) {
                     Text("色相")
@@ -947,12 +1020,7 @@ struct RightInspectorView: View {
                         viewModel.setColorAdjustmentSelectedHueDegrees(hue)
                     }
                 )
-                .frame(height: 16)
-                .clipShape(RoundedRectangle(cornerRadius: 8))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 8)
-                        .stroke(Color.white.opacity(0.12), lineWidth: 1)
-                )
+                .frame(height: 6)
                 .disabled(!canAdjust)
                 .opacity(canAdjust ? 1 : 0.42)
             }
@@ -1002,23 +1070,34 @@ struct RightInspectorView: View {
                 .padding(.vertical, 2)
 
             HStack(spacing: 8) {
-                Button("确认应用") {
-                    viewModel.confirmColorAdjustmentPaintedSession()
+                compactToolButton(
+                    systemImage: "checkmark",
+                    tooltip: "确认应用",
+                    isSelected: canConfirm,
+                    width: topInspectorControlButtonWidth,
+                    height: topInspectorControlButtonHeight,
+                    iconSize: topInspectorControlIconSize,
+                    cornerRadius: topInspectorControlCornerRadius
+                ) {
+                    viewModel.confirmColorAdjustmentSession()
                 }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.small)
                 .disabled(!canConfirm)
 
-                Button("恢复默认") {
+                compactToolButton(
+                    systemImage: "arrow.counterclockwise",
+                    tooltip: "恢复默认",
+                    width: topInspectorControlButtonWidth,
+                    height: topInspectorControlButtonHeight,
+                    iconSize: topInspectorControlIconSize,
+                    cornerRadius: topInspectorControlCornerRadius
+                ) {
                     viewModel.resetColorAdjustmentParameters()
                 }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
                 .disabled(!canAdjust)
 
                 PressAndHoldActionButton(
                     title: "按住预览",
-                    isEnabled: canAdjust,
+                    isEnabled: viewModel.canPreviewColorAdjustmentOriginal,
                     isPressed: viewModel.colorAdjustmentOverlayState.showsOriginalPreview
                 ) { isPressed in
                     viewModel.setColorAdjustmentShowsOriginalPreview(isPressed)
@@ -1453,10 +1532,10 @@ struct RightInspectorView: View {
         systemImage: String,
         tooltip: String,
         isSelected: Bool = false,
-        width: CGFloat = 34,
-        height: CGFloat = 30,
-        iconSize: CGFloat = 13,
-        cornerRadius: CGFloat = 8,
+        width: CGFloat = topInspectorControlButtonWidth,
+        height: CGFloat = topInspectorControlButtonHeight,
+        iconSize: CGFloat = topInspectorControlIconSize,
+        cornerRadius: CGFloat = topInspectorControlCornerRadius,
         action: @escaping () -> Void
     ) -> some View {
         Button(action: action) {
@@ -1527,15 +1606,15 @@ struct RightInspectorView: View {
     ) -> some View {
         Button(action: action) {
             Image(systemName: systemImage)
-                .font(.system(size: 12, weight: .bold))
+                .font(.system(size: topInspectorControlIconSize, weight: .bold))
                 .foregroundStyle(isSelected ? Color.white : Color.white.opacity(0.98))
-                .frame(width: 30, height: 30)
+                .frame(width: topInspectorControlButtonWidth, height: topInspectorControlButtonHeight)
                 .background(
-                    RoundedRectangle(cornerRadius: 7)
+                    RoundedRectangle(cornerRadius: topInspectorControlCornerRadius)
                         .fill(isSelected ? Color.accentColor : Color.white.opacity(0.18))
                 )
                 .overlay(
-                    RoundedRectangle(cornerRadius: 7)
+                    RoundedRectangle(cornerRadius: topInspectorControlCornerRadius)
                         .stroke(
                             isSelected ? Color.accentColor.opacity(0.95) : Color.white.opacity(0.16),
                             lineWidth: 1
@@ -1728,15 +1807,15 @@ struct RightInspectorView: View {
     ) -> some View {
         Button(action: action) {
             Image(systemName: systemImage)
-                .font(.system(size: 13, weight: .semibold))
+                .font(.system(size: topInspectorControlIconSize, weight: .semibold))
                 .foregroundStyle(tint)
-                .frame(width: 28, height: 28)
+                .frame(width: topInspectorControlButtonWidth, height: topInspectorControlButtonHeight)
                 .background(
-                    RoundedRectangle(cornerRadius: 8)
+                    RoundedRectangle(cornerRadius: topInspectorControlCornerRadius)
                         .fill(Color.white.opacity(0.12))
                 )
                 .overlay(
-                    RoundedRectangle(cornerRadius: 8)
+                    RoundedRectangle(cornerRadius: topInspectorControlCornerRadius)
                         .stroke(Color.white.opacity(0.10), lineWidth: 1)
                 )
         }
@@ -1931,15 +2010,15 @@ struct RightInspectorView: View {
                 viewModel.clearBrushTipDraft()
             } label: {
                 Image(systemName: "trash")
-                    .font(.system(size: 11, weight: .bold))
+                    .font(.system(size: topInspectorControlIconSize, weight: .bold))
                     .foregroundStyle(Color.white.opacity(0.72))
-                    .frame(width: 28, height: 24)
+                    .frame(width: topInspectorControlButtonWidth, height: topInspectorControlButtonHeight)
                     .background(
-                        RoundedRectangle(cornerRadius: 8)
+                        RoundedRectangle(cornerRadius: topInspectorControlCornerRadius)
                             .fill(Color.white.opacity(0.10))
                     )
                     .overlay(
-                        RoundedRectangle(cornerRadius: 8)
+                        RoundedRectangle(cornerRadius: topInspectorControlCornerRadius)
                             .stroke(Color.white.opacity(0.08), lineWidth: 1)
                     )
             }
@@ -3600,15 +3679,15 @@ private struct ColorSectionView: View {
     ) -> some View {
         Button(action: action) {
             Image(systemName: systemImage)
-                .font(.system(size: 12, weight: .bold))
+                .font(.system(size: topInspectorControlIconSize, weight: .bold))
                 .foregroundStyle(isSelected ? Color.white : Color.white.opacity(0.98))
-                .frame(width: 30, height: 30)
+                .frame(width: topInspectorControlButtonWidth, height: topInspectorControlButtonHeight)
                 .background(
-                    RoundedRectangle(cornerRadius: 7)
+                    RoundedRectangle(cornerRadius: topInspectorControlCornerRadius)
                         .fill(isSelected ? Color.accentColor : Color.white.opacity(0.18))
                 )
                 .overlay(
-                    RoundedRectangle(cornerRadius: 7)
+                    RoundedRectangle(cornerRadius: topInspectorControlCornerRadius)
                         .stroke(
                             isSelected ? Color.accentColor.opacity(0.95) : Color.white.opacity(0.16),
                             lineWidth: 1
@@ -3644,11 +3723,12 @@ private struct InspectorPanel<Content: View>: View {
     @ViewBuilder let content: Content
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text(title)
-                .font(.system(size: 12, weight: .bold))
-                .foregroundStyle(Color.white.opacity(0.74))
-
+        VStack(alignment: .leading, spacing: title.isEmpty ? 0 : 10) {
+            if !title.isEmpty {
+                Text(title)
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundStyle(Color.white.opacity(0.74))
+            }
             content
         }
         .padding(12)

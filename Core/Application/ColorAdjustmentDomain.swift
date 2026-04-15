@@ -24,6 +24,29 @@ enum ColorAdjustmentBrushMode: Equatable, Sendable {
     case erase
 }
 
+enum ColorAdjustmentResolutionReason: Equatable, Sendable {
+    case toolChange
+    case layerChange
+    case historyNavigation
+    case documentOpen
+    case closeOrQuit
+
+    var continuesTriggeringActionAfterResolution: Bool {
+        switch self {
+        case .historyNavigation:
+            return false
+        case .toolChange, .layerChange, .documentOpen, .closeOrQuit:
+            return true
+        }
+    }
+}
+
+enum ColorAdjustmentResolutionDecision: Equatable, Sendable {
+    case apply
+    case discard
+    case cancel
+}
+
 enum ColorAdjustmentMaskReadMode: Sendable {
     case maskRed
     case sourceAlpha
@@ -89,6 +112,17 @@ struct ColorAdjustmentSession {
             return state.paintedBounds != nil || !parameters.isNeutral
         case .selection, .wholeLayer:
             return !parameters.isNeutral
+        }
+    }
+
+    var hasPendingCommittedEffect: Bool {
+        guard !parameters.isNeutral else { return false }
+
+        switch source {
+        case .painted(let state):
+            return state.paintedBounds != nil
+        case .selection, .wholeLayer:
+            return true
         }
     }
 }

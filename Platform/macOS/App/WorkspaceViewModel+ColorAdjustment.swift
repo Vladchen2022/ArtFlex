@@ -2,6 +2,12 @@ import AppKit
 import Foundation
 @preconcurrency import Metal
 
+private struct ColorAdjustmentRenderPlan {
+    let maskTexture: MTLTexture?
+    let maskReadMode: ColorAdjustmentMaskReadMode
+    let effectRegion: MTLRegion?
+}
+
 @MainActor
 extension WorkspaceViewModel {
     var colorAdjustmentParameters: ColorAdjustmentParameters {
@@ -10,6 +16,10 @@ extension WorkspaceViewModel {
 
     var isColorAdjustmentToolActive: Bool {
         workspace.toolSession.activeTool == .brightnessAdjust
+    }
+
+    var canEditColorAdjustmentParameters: Bool {
+        return activeEditableLayerIDForColorAdjustment() != nil
     }
 
     var canEditColorAdjustmentPaintedSession: Bool {
@@ -26,12 +36,33 @@ extension WorkspaceViewModel {
         return true
     }
 
-    var canConfirmColorAdjustmentPaintedSession: Bool {
-        guard canEditColorAdjustmentPaintedSession,
-              let session = colorAdjustmentSession else {
+    var canConfirmColorAdjustmentSession: Bool {
+        guard
+            canEditColorAdjustmentParameters,
+            let activeLayerID = activeEditableLayerIDForColorAdjustment(),
+            let session = colorAdjustmentSession,
+            session.layerID == activeLayerID
+        else {
             return false
         }
-        return !session.parameters.isNeutral
+        return session.hasPendingCommittedEffect
+    }
+
+    var canConfirmColorAdjustmentPaintedSession: Bool {
+        canConfirmColorAdjustmentSession
+    }
+
+    var canPreviewColorAdjustmentOriginal: Bool {
+        guard let session = colorAdjustmentSession else { return false }
+        return session.hasVisiblePreview
+    }
+
+    var preferredColorAdjustmentSourceKind: ColorAdjustmentOverlayState.SourceKind {
+        if let session = colorAdjustmentSession {
+            return session.source.sourceKindForOverlay
+        }
+        guard canEditColorAdjustmentParameters else { return .none }
+        return workspace.selection.committedShape == nil ? .wholeLayer : .selection
     }
 
     func setColorAdjustmentSelectedHueDegrees(_ value: Float) {
@@ -80,10 +111,11 @@ extension WorkspaceViewModel {
         syncColorAdjustmentOverlayState()
     }
 
-    func confirmColorAdjustmentPaintedSession() {
-        guard canEditColorAdjustmentPaintedSession else {
-            presentWorkspaceStatus(kind: .info, message: "先在画布上涂出影响区域")
-            return
+    @discardableResult
+    func confirmColorAdjustmentSession() -> Bool {
+        guard canEditColorAdjustmentParameters else {
+            presentWorkspaceStatus(kind: .info, message: "请先切到可编辑图层")
+            return false
         }
         guard let layerID = activeEditableLayerIDForColorAdjustment(),
               let surfaceID = layerSurfaceStore.surfaceID(for: layerID),
@@ -91,19 +123,29 @@ extension WorkspaceViewModel {
               let session = colorAdjustmentSession,
               session.layerID == layerID else {
             presentWorkspaceStatus(kind: .error, message: "无法访问当前图层")
-            return
-        }
-        guard case .painted(let paintedState) = session.source else {
-            presentWorkspaceStatus(kind: .info, message: "当前阶段只支持蒙版模式确认")
-            return
-        }
-        guard paintedState.paintedBounds != nil else {
-            presentWorkspaceStatus(kind: .info, message: "先在画布上涂出影响区域")
-            return
+            return false
         }
         guard !session.parameters.isNeutral else {
             presentWorkspaceStatus(kind: .info, message: "当前还没有可应用的调整")
-            return
+            return false
+        }
+        switch session.source {
+        case .painted(let paintedState):
+            guard paintedState.paintedBounds != nil else {
+                presentWorkspaceStatus(kind: .info, message: "先在画布上涂出影响区域")
+                return false
+            }
+        case .selection(let selectionState):
+            guard effectRegion(from: selectionState.bounds) != nil else {
+                presentWorkspaceStatus(kind: .info, message: "当前选区为空")
+                return false
+            }
+        case .wholeLayer:
+            break
+        }
+        guard let renderPlan = renderPlan(for: session) else {
+            presentWorkspaceStatus(kind: .error, message: "无法准备色彩调整范围")
+            return false
         }
         guard let targetTexture = layerSurfaceStore.makeTexture(
             width: sourceTexture.width,
@@ -112,11 +154,11 @@ extension WorkspaceViewModel {
             metal: metalContext
         ) else {
             presentWorkspaceStatus(kind: .error, message: "无法创建色彩调整结果纹理")
-            return
+            return false
         }
         guard let commandBuffer = metalContext.commandQueue.makeCommandBuffer() else {
             presentWorkspaceStatus(kind: .error, message: "无法创建色彩调整提交命令")
-            return
+            return false
         }
 
         checkpointSingleLayerHistoryIfPossible(
@@ -127,8 +169,8 @@ extension WorkspaceViewModel {
         colorAdjustmentRenderer.encodePreview(
             sourceTexture: sourceTexture,
             previewTexture: targetTexture,
-            maskTexture: paintedState.maskTexture,
-            maskReadMode: .maskRed,
+            maskTexture: renderPlan.maskTexture,
+            maskReadMode: renderPlan.maskReadMode,
             parameters: session.parameters,
             overlayOnly: false,
             effectRegion: nil,
@@ -140,26 +182,67 @@ extension WorkspaceViewModel {
         guard commandBuffer.status == .completed else {
             let message = commandBuffer.error?.localizedDescription ?? "色彩调整提交失败"
             presentWorkspaceStatus(kind: .error, message: message)
-            return
+            return false
         }
 
         layerSurfaceStore.swapTexture(for: surfaceID, with: targetTexture)
         discardColorAdjustmentSession()
         finalizeCommittedSingleLayerMutation(layerID)
         presentWorkspaceStatus(kind: .success, message: "已应用色彩调整")
+        return true
+    }
+
+    @discardableResult
+    func confirmColorAdjustmentPaintedSession() -> Bool {
+        confirmColorAdjustmentSession()
+    }
+
+    @discardableResult
+    func resolveColorAdjustmentSessionIfNeeded(
+        reason: ColorAdjustmentResolutionReason
+    ) -> Bool {
+        guard let session = colorAdjustmentSession else { return true }
+        guard session.hasPendingCommittedEffect else {
+            discardColorAdjustmentSession()
+            return true
+        }
+
+        switch confirmColorAdjustmentResolution(reason: reason) {
+        case .apply:
+            guard confirmColorAdjustmentSession() else { return false }
+        case .discard:
+            discardColorAdjustmentSession()
+            presentWorkspaceStatus(kind: .info, message: "已放弃当前色彩调整")
+        case .cancel:
+            return false
+        }
+
+        return reason.continuesTriggeringActionAfterResolution
     }
 
     func beginColorAdjustmentStrokeIfNeeded() {
         guard let layerID = activeEditableLayerIDForColorAdjustment() else { return }
         guard let sourceTexture = sourceTextureForColorAdjustment(layerID: layerID) else { return }
 
-        if colorAdjustmentSession == nil || colorAdjustmentSession?.layerID != layerID {
+        let carriedParameters = colorAdjustmentSession?.parameters ?? .neutral
+        let requiresPaintedMaskSession: Bool = {
+            guard let session = colorAdjustmentSession, session.layerID == layerID else {
+                return true
+            }
+            if case .painted = session.source {
+                return false
+            }
+            return true
+        }()
+
+        if requiresPaintedMaskSession {
             colorAdjustmentPreviewToken &+= 1
             colorAdjustmentPreviewRenderInFlight = false
             colorAdjustmentPreviewRenderNeedsResubmit = false
             colorAdjustmentSession = makePaintedColorAdjustmentSession(
                 layerID: layerID,
-                sourceTexture: sourceTexture
+                sourceTexture: sourceTexture,
+                parameters: carriedParameters
             )
         }
 
@@ -305,7 +388,6 @@ extension WorkspaceViewModel {
     }
 
     func activeColorAdjustmentPreviewTexture(for layerID: LayerID) -> MTLTexture? {
-        guard workspace.toolSession.activeTool == .brightnessAdjust else { return nil }
         guard let session = colorAdjustmentSession, session.layerID == layerID else { return nil }
         guard !session.showsOriginalPreview, session.hasVisiblePreview else { return nil }
         return session.previewTexture
@@ -313,15 +395,11 @@ extension WorkspaceViewModel {
 
     private func makePaintedColorAdjustmentSession(
         layerID: LayerID,
-        sourceTexture: MTLTexture
+        sourceTexture: MTLTexture,
+        parameters: ColorAdjustmentParameters = .neutral
     ) -> ColorAdjustmentSession? {
         guard
-            let previewTexture = layerSurfaceStore.makeTexture(
-                width: sourceTexture.width,
-                height: sourceTexture.height,
-                pixelFormat: sourceTexture.pixelFormat,
-                metal: metalContext
-            ),
+            let previewTexture = makeColorAdjustmentPreviewTexture(from: sourceTexture),
             let maskTexture = layerSurfaceStore.makeTexture(
                 width: sourceTexture.width,
                 height: sourceTexture.height,
@@ -345,6 +423,73 @@ extension WorkspaceViewModel {
                 )
             ),
             previewTexture: previewTexture,
+            parameters: parameters,
+            brushMode: colorAdjustmentBrushMode
+        )
+    }
+
+    private func makeSelectionColorAdjustmentSession(
+        layerID: LayerID,
+        sourceTexture: MTLTexture,
+        selectionShape: SelectionShape,
+        parameters: ColorAdjustmentParameters
+    ) -> ColorAdjustmentSession? {
+        let canvasSize = CanvasSize(width: sourceTexture.width, height: sourceTexture.height)
+        let clampedSelection = selectionShape.clamped(to: canvasSize)
+        guard let boundsRegion = effectRegion(from: clampedSelection.bounds) else {
+            return nil
+        }
+        guard let previewTexture = makeColorAdjustmentPreviewTexture(from: sourceTexture),
+              let maskTexture = makeSelectionMaskTexture(
+                for: clampedSelection,
+                canvasSize: canvasSize
+              ) else {
+            return nil
+        }
+
+        return ColorAdjustmentSession(
+            layerID: layerID,
+            source: .selection(
+                SelectionMaskState(
+                    maskTexture: maskTexture,
+                    bounds: CanvasRect(
+                        origin: .init(
+                            x: Double(boundsRegion.origin.x),
+                            y: Double(boundsRegion.origin.y)
+                        ),
+                        size: .init(
+                            x: Double(boundsRegion.size.width),
+                            y: Double(boundsRegion.size.height)
+                        )
+                    ),
+                    capturedSelectionRevision: selectionRevision
+                )
+            ),
+            previewTexture: previewTexture,
+            parameters: parameters,
+            brushMode: colorAdjustmentBrushMode
+        )
+    }
+
+    private func makeWholeLayerColorAdjustmentSession(
+        layerID: LayerID,
+        sourceTexture: MTLTexture,
+        parameters: ColorAdjustmentParameters
+    ) -> ColorAdjustmentSession? {
+        guard let previewTexture = makeColorAdjustmentPreviewTexture(from: sourceTexture) else {
+            return nil
+        }
+
+        return ColorAdjustmentSession(
+            layerID: layerID,
+            source: .wholeLayer(
+                WholeLayerMaskState(
+                    effectBounds: nil,
+                    capturedCanvasRevision: canvasContentRevision
+                )
+            ),
+            previewTexture: previewTexture,
+            parameters: parameters,
             brushMode: colorAdjustmentBrushMode
         )
     }
@@ -420,15 +565,23 @@ extension WorkspaceViewModel {
     private func scheduleColorAdjustmentPreviewUpdate(force: Bool = false) {
         guard let session = colorAdjustmentSession else { return }
         guard let sourceTexture = sourceTextureForColorAdjustment(layerID: session.layerID) else { return }
-        guard case .painted(let paintedState) = session.source else { return }
-        guard let effectRegion = effectRegion(from: paintedState.paintedBounds) else { return }
+        guard let renderPlan = renderPlan(for: session) else { return }
+        let isPaintedMaskSession: Bool = {
+            if case .painted = session.source {
+                return true
+            }
+            return false
+        }()
 
         if colorAdjustmentPreviewRenderInFlight {
             colorAdjustmentPreviewRenderNeedsResubmit = true
             return
         }
 
-        if !force, colorAdjustmentStrokePacketCount > 1, !colorAdjustmentStrokePacketCount.isMultiple(of: 3) {
+        if isPaintedMaskSession,
+           !force,
+           colorAdjustmentStrokePacketCount > 1,
+           !colorAdjustmentStrokePacketCount.isMultiple(of: 3) {
             return
         }
 
@@ -438,11 +591,11 @@ extension WorkspaceViewModel {
         colorAdjustmentRenderer.renderPreview(
             sourceTexture: sourceTexture,
             previewTexture: session.previewTexture,
-            maskTexture: paintedState.maskTexture,
-            maskReadMode: .maskRed,
+            maskTexture: renderPlan.maskTexture,
+            maskReadMode: renderPlan.maskReadMode,
             parameters: session.parameters,
             overlayOnly: session.parameters.isNeutral,
-            effectRegion: effectRegion,
+            effectRegion: renderPlan.effectRegion,
             commandQueue: metalContext.commandQueue
         ) { [weak self] in
             Task { @MainActor in
@@ -472,6 +625,50 @@ extension WorkspaceViewModel {
         session.brushMode = colorAdjustmentBrushMode
         colorAdjustmentSession = session
         syncColorAdjustmentOverlayState()
+    }
+
+    private func confirmColorAdjustmentResolution(
+        reason: ColorAdjustmentResolutionReason
+    ) -> ColorAdjustmentResolutionDecision {
+#if DEBUG
+        if let override = debugColorAdjustmentResolutionDecisionOverride {
+            return override
+        }
+#endif
+
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "当前色彩调整还未确认"
+        alert.informativeText = colorAdjustmentResolutionInformativeText(for: reason)
+        alert.addButton(withTitle: "确认效果")
+        alert.addButton(withTitle: "放弃")
+        alert.addButton(withTitle: "取消")
+
+        switch alert.runModal() {
+        case .alertFirstButtonReturn:
+            return .apply
+        case .alertSecondButtonReturn:
+            return .discard
+        default:
+            return .cancel
+        }
+    }
+
+    private func colorAdjustmentResolutionInformativeText(
+        for reason: ColorAdjustmentResolutionReason
+    ) -> String {
+        switch reason {
+        case .toolChange:
+            return "切换工具前，要先确认当前色彩调整效果，还是放弃这次调整？"
+        case .layerChange:
+            return "切换图层前，要先确认当前色彩调整效果，还是放弃这次调整？"
+        case .historyNavigation:
+            return "继续撤销或重做前，要先确认当前色彩调整效果，还是放弃这次调整？"
+        case .documentOpen:
+            return "继续打开或新建画布前，要先确认当前色彩调整效果，还是放弃这次调整？"
+        case .closeOrQuit:
+            return "关闭当前画布前，要先确认当前色彩调整效果，还是放弃这次调整？"
+        }
     }
 
     private func discardColorAdjustmentSession() {
@@ -545,8 +742,8 @@ extension WorkspaceViewModel {
     private func updateColorAdjustmentParameters(
         _ mutate: (inout ColorAdjustmentParameters) -> Void
     ) {
-        guard canEditColorAdjustmentPaintedSession else { return }
-        guard var session = colorAdjustmentSession else { return }
+        guard canEditColorAdjustmentParameters else { return }
+        guard var session = preparedColorAdjustmentSessionForParameterEditing() else { return }
 
         var nextParameters = session.parameters
         mutate(&nextParameters)
@@ -573,5 +770,120 @@ extension WorkspaceViewModel {
 
     private func clampSignedColorAdjustmentValue(_ value: Float) -> Float {
         min(max(value, -1), 1)
+    }
+
+    private func preparedColorAdjustmentSessionForParameterEditing() -> ColorAdjustmentSession? {
+        guard let layerID = activeEditableLayerIDForColorAdjustment(),
+              let sourceTexture = sourceTextureForColorAdjustment(layerID: layerID) else {
+            return nil
+        }
+        if let session = colorAdjustmentSession, session.layerID == layerID {
+            return session
+        }
+
+        let parameters = colorAdjustmentSession?.parameters ?? .neutral
+        let nextSession: ColorAdjustmentSession?
+        if let selectionShape = preferredColorAdjustmentSelectionShape() {
+            nextSession = makeSelectionColorAdjustmentSession(
+                layerID: layerID,
+                sourceTexture: sourceTexture,
+                selectionShape: selectionShape,
+                parameters: parameters
+            )
+        } else {
+            nextSession = makeWholeLayerColorAdjustmentSession(
+                layerID: layerID,
+                sourceTexture: sourceTexture,
+                parameters: parameters
+            )
+        }
+
+        colorAdjustmentSession = nextSession
+        return nextSession
+    }
+
+    private func preferredColorAdjustmentSelectionShape() -> SelectionShape? {
+        let canvasSize = workspace.document.canvasSize
+        guard let selectionShape = workspace.selection.committedShape?.clamped(to: canvasSize) else {
+            return nil
+        }
+        guard effectRegion(from: selectionShape.bounds) != nil else {
+            return nil
+        }
+        return selectionShape
+    }
+
+    private func renderPlan(for session: ColorAdjustmentSession) -> ColorAdjustmentRenderPlan? {
+        switch session.source {
+        case .painted(let paintedState):
+            guard let effectRegion = effectRegion(from: paintedState.paintedBounds) else {
+                return nil
+            }
+            return ColorAdjustmentRenderPlan(
+                maskTexture: paintedState.maskTexture,
+                maskReadMode: .maskRed,
+                effectRegion: effectRegion
+            )
+        case .selection(let selectionState):
+            guard let effectRegion = effectRegion(from: selectionState.bounds) else {
+                return nil
+            }
+            return ColorAdjustmentRenderPlan(
+                maskTexture: selectionState.maskTexture,
+                maskReadMode: .maskRed,
+                effectRegion: effectRegion
+            )
+        case .wholeLayer(let wholeLayerState):
+            return ColorAdjustmentRenderPlan(
+                maskTexture: nil,
+                maskReadMode: .sourceAlpha,
+                effectRegion: effectRegion(from: wholeLayerState.effectBounds)
+            )
+        }
+    }
+
+    private func makeColorAdjustmentPreviewTexture(from sourceTexture: MTLTexture) -> MTLTexture? {
+        guard let previewTexture = layerSurfaceStore.makeTexture(
+            width: sourceTexture.width,
+            height: sourceTexture.height,
+            pixelFormat: sourceTexture.pixelFormat,
+            metal: metalContext
+        ) else {
+            return nil
+        }
+        copyTextureContents(from: sourceTexture, to: previewTexture)
+        return previewTexture
+    }
+
+    private func makeSelectionMaskTexture(
+        for selectionShape: SelectionShape,
+        canvasSize: CanvasSize
+    ) -> MTLTexture? {
+        let alphaBytes = selectionMaskBytesForColorAdjustment(
+            shape: selectionShape,
+            canvasSize: canvasSize
+        )
+        guard !alphaBytes.isEmpty else { return nil }
+        guard let maskTexture = layerSurfaceStore.makeTexture(
+            width: canvasSize.width,
+            height: canvasSize.height,
+            pixelFormat: .r8Unorm,
+            usage: [.shaderRead],
+            storageMode: .shared,
+            metal: metalContext
+        ) else {
+            return nil
+        }
+
+        alphaBytes.withUnsafeBufferPointer { rawBuffer in
+            guard let baseAddress = rawBuffer.baseAddress else { return }
+            maskTexture.replace(
+                region: MTLRegionMake2D(0, 0, canvasSize.width, canvasSize.height),
+                mipmapLevel: 0,
+                withBytes: baseAddress,
+                bytesPerRow: canvasSize.width
+            )
+        }
+        return maskTexture
     }
 }

@@ -230,6 +230,194 @@ struct WorkspaceViewModelPixelHistoryTests {
 
     @Test
     @MainActor
+    func colorAdjustmentToolSwitchPromptApplyCommitsPixelsBeforeSwitching() throws {
+        let harness = try PixelHistoryHarness()
+        let layerID = harness.viewModel.workspace.document.activeLayerID
+        let sampleX = 24
+        let sampleY = 24
+
+        try fillOpaqueRect(
+            in: harness,
+            layerID: layerID,
+            originX: 12,
+            originY: 12,
+            width: 28,
+            height: 28,
+            color: .init(red: 0.24, green: 0.28, blue: 0.32, alpha: 1)
+        )
+        let basePixel = try harness.color(atX: sampleX, y: sampleY, layerID: layerID)
+
+        harness.viewModel.selectTool(.brightnessAdjust)
+        harness.viewModel.beginStrokeIfNeeded()
+        harness.viewModel.applyStroke(samples: [
+            .init(location: .init(x: Double(sampleX), y: Double(sampleY)), pressure: 1)
+        ])
+        harness.viewModel.endStroke()
+        harness.viewModel.setColorAdjustmentBrightness(0.55)
+        harness.viewModel.debugColorAdjustmentResolutionDecisionOverride = .apply
+
+        harness.viewModel.selectTool(.brush)
+
+        let committedPixel = try harness.color(atX: sampleX, y: sampleY, layerID: layerID)
+        #expect(committedPixel.red > basePixel.red + 0.05)
+        #expect(committedPixel.green > basePixel.green + 0.05)
+        #expect(committedPixel.blue > basePixel.blue + 0.05)
+        #expect(harness.viewModel.colorAdjustmentSession == nil)
+        #expect(harness.viewModel.workspace.toolSession.activeTool == .brush)
+    }
+
+    @Test
+    @MainActor
+    func colorAdjustmentUndoPromptDiscardConsumesSessionBeforeHistoryNavigation() throws {
+        let harness = try PixelHistoryHarness()
+        let layerID = harness.addLayer()
+
+        try fillOpaqueRect(
+            in: harness,
+            layerID: layerID,
+            originX: 12,
+            originY: 12,
+            width: 28,
+            height: 28,
+            color: .init(red: 0.22, green: 0.26, blue: 0.3, alpha: 1)
+        )
+
+        harness.viewModel.selectTool(.brightnessAdjust)
+        harness.viewModel.beginStrokeIfNeeded()
+        harness.viewModel.applyStroke(samples: [.init(location: .init(x: 24, y: 24), pressure: 1)])
+        harness.viewModel.endStroke()
+        harness.viewModel.setColorAdjustmentBrightness(0.45)
+        harness.viewModel.debugColorAdjustmentResolutionDecisionOverride = .discard
+
+        harness.viewModel.undo()
+
+        #expect(harness.viewModel.colorAdjustmentSession == nil)
+        #expect(harness.viewModel.workspace.document.layers.count == 3)
+        #expect(harness.viewModel.workspace.document.activeLayerID == layerID)
+
+        harness.viewModel.undo()
+
+        #expect(harness.viewModel.workspace.document.layers.count == 2)
+    }
+
+    @Test
+    @MainActor
+    func colorAdjustmentSelectionConfirmSupportsUndoRedo() throws {
+        let harness = try PixelHistoryHarness()
+        let layerID = harness.viewModel.workspace.document.activeLayerID
+        let insideSelectionX = 24
+        let insideSelectionY = 24
+        let outsideSelectionX = 42
+        let outsideSelectionY = 42
+
+        try fillOpaqueRect(
+            in: harness,
+            layerID: layerID,
+            originX: 12,
+            originY: 12,
+            width: 40,
+            height: 40,
+            color: .init(red: 0.24, green: 0.28, blue: 0.32, alpha: 1)
+        )
+        harness.viewModel.selectTool(.rectangleSelection)
+        harness.viewModel.beginSelection(kind: .rectangle, at: .init(x: 18, y: 18))
+        harness.viewModel.updateSelection(to: .init(x: 32, y: 32))
+        harness.viewModel.commitSelection(at: .init(x: 32, y: 32))
+
+        let insideBasePixel = try harness.color(atX: insideSelectionX, y: insideSelectionY, layerID: layerID)
+        let outsideBasePixel = try harness.color(atX: outsideSelectionX, y: outsideSelectionY, layerID: layerID)
+
+        #expect(harness.viewModel.workspace.toolSession.activeTool == .rectangleSelection)
+        harness.viewModel.setColorAdjustmentBrightness(0.55)
+        harness.viewModel.confirmColorAdjustmentSession()
+
+        let insideCommittedPixel = try harness.color(atX: insideSelectionX, y: insideSelectionY, layerID: layerID)
+        let outsideCommittedPixel = try harness.color(atX: outsideSelectionX, y: outsideSelectionY, layerID: layerID)
+        #expect(insideCommittedPixel.red > insideBasePixel.red + 0.05)
+        #expect(insideCommittedPixel.green > insideBasePixel.green + 0.05)
+        #expect(insideCommittedPixel.blue > insideBasePixel.blue + 0.05)
+        #expect(abs(outsideCommittedPixel.red - outsideBasePixel.red) < 0.02)
+        #expect(abs(outsideCommittedPixel.green - outsideBasePixel.green) < 0.02)
+        #expect(abs(outsideCommittedPixel.blue - outsideBasePixel.blue) < 0.02)
+
+        harness.viewModel.undo()
+
+        let insideUndonePixel = try harness.color(atX: insideSelectionX, y: insideSelectionY, layerID: layerID)
+        let outsideUndonePixel = try harness.color(atX: outsideSelectionX, y: outsideSelectionY, layerID: layerID)
+        #expect(abs(insideUndonePixel.red - insideBasePixel.red) < 0.02)
+        #expect(abs(insideUndonePixel.green - insideBasePixel.green) < 0.02)
+        #expect(abs(insideUndonePixel.blue - insideBasePixel.blue) < 0.02)
+        #expect(abs(outsideUndonePixel.red - outsideBasePixel.red) < 0.02)
+        #expect(abs(outsideUndonePixel.green - outsideBasePixel.green) < 0.02)
+        #expect(abs(outsideUndonePixel.blue - outsideBasePixel.blue) < 0.02)
+
+        harness.viewModel.redo()
+
+        let insideRedonePixel = try harness.color(atX: insideSelectionX, y: insideSelectionY, layerID: layerID)
+        let outsideRedonePixel = try harness.color(atX: outsideSelectionX, y: outsideSelectionY, layerID: layerID)
+        #expect(abs(insideRedonePixel.red - insideCommittedPixel.red) < 0.02)
+        #expect(abs(insideRedonePixel.green - insideCommittedPixel.green) < 0.02)
+        #expect(abs(insideRedonePixel.blue - insideCommittedPixel.blue) < 0.02)
+        #expect(abs(outsideRedonePixel.red - outsideCommittedPixel.red) < 0.02)
+        #expect(abs(outsideRedonePixel.green - outsideCommittedPixel.green) < 0.02)
+        #expect(abs(outsideRedonePixel.blue - outsideCommittedPixel.blue) < 0.02)
+    }
+
+    @Test
+    @MainActor
+    func colorAdjustmentWholeLayerConfirmSupportsUndoRedo() throws {
+        let harness = try PixelHistoryHarness()
+        let layerID = harness.viewModel.workspace.document.activeLayerID
+        let opaqueX = 24
+        let opaqueY = 24
+        let transparentX = 4
+        let transparentY = 4
+
+        try fillOpaqueRect(
+            in: harness,
+            layerID: layerID,
+            originX: 12,
+            originY: 12,
+            width: 28,
+            height: 28,
+            color: .init(red: 0.24, green: 0.28, blue: 0.32, alpha: 1)
+        )
+
+        let opaqueBasePixel = try harness.color(atX: opaqueX, y: opaqueY, layerID: layerID)
+        let transparentBasePixel = try harness.color(atX: transparentX, y: transparentY, layerID: layerID)
+
+        #expect(harness.viewModel.workspace.toolSession.activeTool != .brightnessAdjust)
+        harness.viewModel.setColorAdjustmentBrightness(0.55)
+        harness.viewModel.confirmColorAdjustmentSession()
+
+        let opaqueCommittedPixel = try harness.color(atX: opaqueX, y: opaqueY, layerID: layerID)
+        let transparentCommittedPixel = try harness.color(atX: transparentX, y: transparentY, layerID: layerID)
+        #expect(opaqueCommittedPixel.red > opaqueBasePixel.red + 0.05)
+        #expect(opaqueCommittedPixel.green > opaqueBasePixel.green + 0.05)
+        #expect(opaqueCommittedPixel.blue > opaqueBasePixel.blue + 0.05)
+        #expect(abs(transparentCommittedPixel.alpha - transparentBasePixel.alpha) < 0.02)
+
+        harness.viewModel.undo()
+
+        let opaqueUndonePixel = try harness.color(atX: opaqueX, y: opaqueY, layerID: layerID)
+        let transparentUndonePixel = try harness.color(atX: transparentX, y: transparentY, layerID: layerID)
+        #expect(abs(opaqueUndonePixel.red - opaqueBasePixel.red) < 0.02)
+        #expect(abs(opaqueUndonePixel.green - opaqueBasePixel.green) < 0.02)
+        #expect(abs(opaqueUndonePixel.blue - opaqueBasePixel.blue) < 0.02)
+        #expect(abs(transparentUndonePixel.alpha - transparentBasePixel.alpha) < 0.02)
+
+        harness.viewModel.redo()
+
+        let opaqueRedonePixel = try harness.color(atX: opaqueX, y: opaqueY, layerID: layerID)
+        let transparentRedonePixel = try harness.color(atX: transparentX, y: transparentY, layerID: layerID)
+        #expect(abs(opaqueRedonePixel.red - opaqueCommittedPixel.red) < 0.02)
+        #expect(abs(opaqueRedonePixel.green - opaqueCommittedPixel.green) < 0.02)
+        #expect(abs(opaqueRedonePixel.blue - opaqueCommittedPixel.blue) < 0.02)
+        #expect(abs(transparentRedonePixel.alpha - transparentCommittedPixel.alpha) < 0.02)
+    }
+
+    @Test
+    @MainActor
     func cutAndPastePixelsSupportUndoRedo() throws {
         let harness = try PixelHistoryHarness()
         let layerID = harness.viewModel.workspace.document.activeLayerID

@@ -498,6 +498,111 @@ struct WorkspaceViewModelSafetyTests {
 
     @Test
     @MainActor
+    func colorAdjustmentSelectionPreviewUsesCommittedSelectionWithoutPainting() async throws {
+        let harness = try BrushEditingBoundaryHarness()
+        let activeLayerID = harness.viewModel.workspace.document.activeLayerID
+        let insideSelectionX = 96
+        let insideSelectionY = 96
+        let outsideSelectionX = 150
+        let outsideSelectionY = 150
+
+        try fillOpaqueRect(
+            in: harness,
+            layerID: activeLayerID,
+            originX: 48,
+            originY: 48,
+            width: 140,
+            height: 140,
+            color: .init(red: 0.24, green: 0.28, blue: 0.32, alpha: 1)
+        )
+        makeRectangleSelection(
+            in: harness.viewModel,
+            minX: 72,
+            minY: 72,
+            maxX: 124,
+            maxY: 124
+        )
+
+        let insideBasePixel = try harness.color(atX: insideSelectionX, y: insideSelectionY, layerID: activeLayerID)
+        let outsideBasePixel = try harness.color(atX: outsideSelectionX, y: outsideSelectionY, layerID: activeLayerID)
+
+        #expect(harness.viewModel.workspace.toolSession.activeTool == .rectangleSelection)
+        harness.viewModel.setColorAdjustmentBrightness(0.55)
+        try await waitForColorAdjustmentPreview(in: harness)
+
+        let insidePreviewPixel = try harness.colorAdjustmentPreviewColor(atX: insideSelectionX, y: insideSelectionY)
+        let outsidePreviewPixel = try harness.colorAdjustmentPreviewColor(atX: outsideSelectionX, y: outsideSelectionY)
+        #expect(insidePreviewPixel.red > insideBasePixel.red + 0.05)
+        #expect(insidePreviewPixel.green > insideBasePixel.green + 0.05)
+        #expect(insidePreviewPixel.blue > insideBasePixel.blue + 0.05)
+        #expect(abs(outsidePreviewPixel.red - outsideBasePixel.red) < 0.02)
+        #expect(abs(outsidePreviewPixel.green - outsideBasePixel.green) < 0.02)
+        #expect(abs(outsidePreviewPixel.blue - outsideBasePixel.blue) < 0.02)
+        #expect(harness.viewModel.colorAdjustmentOverlayState.sourceKind == .selection)
+
+        guard let session = harness.viewModel.colorAdjustmentSession else {
+            Issue.record("Expected selection color adjustment session")
+            return
+        }
+
+        switch session.source {
+        case .selection:
+            break
+        case .painted, .wholeLayer:
+            Issue.record("Expected committed selection source")
+        }
+    }
+
+    @Test
+    @MainActor
+    func colorAdjustmentWholeLayerPreviewUsesActiveLayerWithoutPainting() async throws {
+        let harness = try BrushEditingBoundaryHarness()
+        let activeLayerID = harness.viewModel.workspace.document.activeLayerID
+        let opaqueX = 96
+        let opaqueY = 96
+        let transparentX = 16
+        let transparentY = 16
+
+        try fillOpaqueRect(
+            in: harness,
+            layerID: activeLayerID,
+            originX: 48,
+            originY: 48,
+            width: 120,
+            height: 120,
+            color: .init(red: 0.24, green: 0.28, blue: 0.32, alpha: 1)
+        )
+
+        let opaqueBasePixel = try harness.color(atX: opaqueX, y: opaqueY, layerID: activeLayerID)
+        let transparentBasePixel = try harness.color(atX: transparentX, y: transparentY, layerID: activeLayerID)
+
+        #expect(harness.viewModel.workspace.toolSession.activeTool != .brightnessAdjust)
+        harness.viewModel.setColorAdjustmentBrightness(0.55)
+        try await waitForColorAdjustmentPreview(in: harness)
+
+        let opaquePreviewPixel = try harness.colorAdjustmentPreviewColor(atX: opaqueX, y: opaqueY)
+        let transparentPreviewPixel = try harness.colorAdjustmentPreviewColor(atX: transparentX, y: transparentY)
+        #expect(opaquePreviewPixel.red > opaqueBasePixel.red + 0.05)
+        #expect(opaquePreviewPixel.green > opaqueBasePixel.green + 0.05)
+        #expect(opaquePreviewPixel.blue > opaqueBasePixel.blue + 0.05)
+        #expect(abs(transparentPreviewPixel.alpha - transparentBasePixel.alpha) < 0.02)
+        #expect(harness.viewModel.colorAdjustmentOverlayState.sourceKind == .wholeLayer)
+
+        guard let session = harness.viewModel.colorAdjustmentSession else {
+            Issue.record("Expected whole-layer color adjustment session")
+            return
+        }
+
+        switch session.source {
+        case .wholeLayer:
+            break
+        case .painted, .selection:
+            Issue.record("Expected whole-layer source")
+        }
+    }
+
+    @Test
+    @MainActor
     func colorAdjustmentConfirmReleasesBEKeysBackToToolShortcuts() throws {
         let harness = try BrushEditingBoundaryHarness()
         let activeLayerID = harness.viewModel.workspace.document.activeLayerID
@@ -528,6 +633,108 @@ struct WorkspaceViewModelSafetyTests {
 
         #expect(handled == true)
         #expect(harness.viewModel.workspace.toolSession.activeTool == .brush)
+    }
+
+    @Test
+    @MainActor
+    func colorAdjustmentToolSwitchPromptCancelKeepsCurrentSessionActive() throws {
+        let harness = try BrushEditingBoundaryHarness()
+        let activeLayerID = harness.viewModel.workspace.document.activeLayerID
+
+        try fillOpaqueRect(
+            in: harness,
+            layerID: activeLayerID,
+            originX: 48,
+            originY: 48,
+            width: 120,
+            height: 120,
+            color: .init(red: 0.3, green: 0.3, blue: 0.3, alpha: 1)
+        )
+
+        harness.viewModel.selectTool(.brightnessAdjust)
+        harness.viewModel.beginStrokeIfNeeded()
+        harness.viewModel.applyStroke(samples: [.init(location: .init(x: 96, y: 96), pressure: 1)])
+        harness.viewModel.endStroke()
+        harness.viewModel.setColorAdjustmentBrightness(0.5)
+        harness.viewModel.debugColorAdjustmentResolutionDecisionOverride = .cancel
+
+        harness.viewModel.selectTool(.brush)
+
+        #expect(harness.viewModel.workspace.toolSession.activeTool == .brightnessAdjust)
+        #expect(harness.viewModel.colorAdjustmentSession != nil)
+        #expect(harness.viewModel.colorAdjustmentOverlayState.isActive)
+    }
+
+    @Test
+    @MainActor
+    func colorAdjustmentLayerSwitchPromptDiscardDropsSessionAndContinues() throws {
+        let harness = try BrushEditingBoundaryHarness()
+        let backgroundLayerID = try #require(harness.viewModel.workspace.document.layers.first?.id)
+        let activeLayerID = harness.viewModel.workspace.document.activeLayerID
+        let sampleX = 96
+        let sampleY = 96
+
+        try fillOpaqueRect(
+            in: harness,
+            layerID: activeLayerID,
+            originX: 48,
+            originY: 48,
+            width: 120,
+            height: 120,
+            color: .init(red: 0.32, green: 0.28, blue: 0.24, alpha: 1)
+        )
+        let basePixel = try harness.color(atX: sampleX, y: sampleY, layerID: activeLayerID)
+
+        harness.viewModel.selectTool(.brightnessAdjust)
+        harness.viewModel.beginStrokeIfNeeded()
+        harness.viewModel.applyStroke(samples: [.init(location: .init(x: Double(sampleX), y: Double(sampleY)), pressure: 1)])
+        harness.viewModel.endStroke()
+        harness.viewModel.setColorAdjustmentBrightness(0.5)
+        harness.viewModel.debugColorAdjustmentResolutionDecisionOverride = .discard
+
+        harness.viewModel.selectLayer(backgroundLayerID)
+
+        #expect(harness.viewModel.workspace.document.activeLayerID == backgroundLayerID)
+        #expect(harness.viewModel.colorAdjustmentSession == nil)
+        #expect(harness.viewModel.status?.message == "已放弃当前色彩调整")
+        let retainedPixel = try harness.color(atX: sampleX, y: sampleY, layerID: activeLayerID)
+        #expect(abs(retainedPixel.red - basePixel.red) < 0.02)
+        #expect(abs(retainedPixel.green - basePixel.green) < 0.02)
+        #expect(abs(retainedPixel.blue - basePixel.blue) < 0.02)
+    }
+
+    @Test
+    @MainActor
+    func colorAdjustmentNewCanvasPromptDiscardContinuesCreation() throws {
+        let harness = try BrushEditingBoundaryHarness()
+        let activeLayerID = harness.viewModel.workspace.document.activeLayerID
+
+        try fillOpaqueRect(
+            in: harness,
+            layerID: activeLayerID,
+            originX: 48,
+            originY: 48,
+            width: 120,
+            height: 120,
+            color: .init(red: 0.24, green: 0.26, blue: 0.28, alpha: 1)
+        )
+
+        harness.viewModel.selectTool(.brightnessAdjust)
+        harness.viewModel.beginStrokeIfNeeded()
+        harness.viewModel.applyStroke(samples: [.init(location: .init(x: 96, y: 96), pressure: 1)])
+        harness.viewModel.endStroke()
+        harness.viewModel.setColorAdjustmentBrightness(0.45)
+        harness.viewModel.debugColorAdjustmentResolutionDecisionOverride = .discard
+
+        harness.viewModel.createNewCanvasDiscardingUnsavedChanges(
+            name: "Color Adjustment Prompt",
+            canvasSize: .init(width: 40, height: 40),
+            resolutionDPI: 72
+        )
+
+        #expect(harness.viewModel.colorAdjustmentSession == nil)
+        #expect(harness.viewModel.workspace.document.canvasSize == .init(width: 40, height: 40))
+        #expect(harness.viewModel.workspace.document.layers.count == 2)
     }
 
     @Test
