@@ -62,6 +62,37 @@ struct BrushInputDispatchTests {
     }
 
     @Test
+    func colorAdjustmentToolAlsoUsesBrushCursorAndTipIndicator() {
+        #expect(
+            preferredBrushCursorMode(
+                activeTool: .brightnessAdjust,
+                isEyedropperCursorActive: false,
+                hasHoverLocation: true
+            ) == .crosshair
+        )
+
+        #expect(
+            shouldShowBrushOutlineIndicator(
+                activeTool: .brightnessAdjust,
+                hasHoverLocation: true,
+                isAdjustingBrushSizePreview: false,
+                isBrushOutlineForcedVisible: false,
+                suppressesBrushOutline: false,
+                isBrushStrokeActive: false,
+                showsBrushOutlineDuringStroke: true,
+                hasContinuousStrokeGrace: false
+            ) == true
+        )
+
+        #expect(
+            shouldShowBrushTipIndicator(
+                activeTool: .brightnessAdjust,
+                hasHoverLocation: true
+            ) == true
+        )
+    }
+
+    @Test
     func pendingBrushInputQueueFlushesAndClears() {
         var queue = PendingBrushInputQueue()
         let sample = CanvasStrokeSample(location: .init(x: 5, y: 7), pressure: 1)

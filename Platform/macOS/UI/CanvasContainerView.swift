@@ -30,7 +30,7 @@ struct CanvasContainerView: View {
 
                     MetalCanvasHost(
                         sceneSnapshot: viewModel.sceneSnapshot,
-                        externalRedrawRevision: 0,
+                        externalRedrawRevision: viewModel.colorAdjustmentRedrawRevision,
                         transformSelectionShape: viewModel.transformPreparationSelectionShape,
                         metalContext: viewModel.metalContext,
                         layerSurfaceStore: viewModel.layerSurfaceStore,

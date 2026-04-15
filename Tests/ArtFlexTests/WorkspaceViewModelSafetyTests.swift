@@ -155,6 +155,158 @@ struct WorkspaceViewModelSafetyTests {
 
     @Test
     @MainActor
+    func colorAdjustmentToolFirstStrokeCreatesBlueMaskPreview() async throws {
+        let harness = try BrushEditingBoundaryHarness()
+        let activeLayerID = harness.viewModel.workspace.document.activeLayerID
+
+        try fillOpaqueRect(
+            in: harness,
+            layerID: activeLayerID,
+            originX: 48,
+            originY: 48,
+            width: 120,
+            height: 120,
+            color: .init(red: 1, green: 1, blue: 1, alpha: 1)
+        )
+
+        harness.viewModel.selectTool(.brightnessAdjust)
+        harness.viewModel.beginStrokeIfNeeded()
+        harness.viewModel.applyStroke(samples: [
+            .init(location: .init(x: 96, y: 96), pressure: 1),
+            .init(location: .init(x: 112, y: 112), pressure: 1)
+        ])
+        harness.viewModel.endStroke()
+
+        try await waitForColorAdjustmentPreview(in: harness)
+
+        #expect(harness.viewModel.colorAdjustmentOverlayState.isActive)
+        #expect(harness.viewModel.colorAdjustmentOverlayState.sourceKind == .paintedMask)
+
+        let previewPixel = try harness.colorAdjustmentPreviewColor(atX: 104, y: 104)
+        #expect(previewPixel.blue > previewPixel.red)
+        #expect(previewPixel.blue > previewPixel.green)
+    }
+
+    @Test
+    @MainActor
+    func colorAdjustmentToolEKeySwitchesToEraseMaskMode() throws {
+        let harness = try BrushEditingBoundaryHarness()
+
+        harness.viewModel.selectTool(.brightnessAdjust)
+        let handled = harness.viewModel.handleKeyDown(
+            makeCanvasKeyEvent(type: .keyDown, characters: "e", charactersIgnoringModifiers: "e", modifiers: [], keyCode: 14)
+        )
+
+        #expect(handled == true)
+        #expect(harness.viewModel.workspace.toolSession.activeTool == .brightnessAdjust)
+        #expect(harness.viewModel.colorAdjustmentBrushMode == .erase)
+    }
+
+    @Test
+    @MainActor
+    func colorAdjustmentToolBKeyReturnsMaskModeToPaint() throws {
+        let harness = try BrushEditingBoundaryHarness()
+        harness.viewModel.selectTool(.brightnessAdjust)
+        _ = harness.viewModel.handleKeyDown(
+            makeCanvasKeyEvent(type: .keyDown, characters: "e", charactersIgnoringModifiers: "e", modifiers: [], keyCode: 14)
+        )
+
+        let handled = harness.viewModel.handleKeyDown(
+            makeCanvasKeyEvent(type: .keyDown, characters: "b", charactersIgnoringModifiers: "b", modifiers: [], keyCode: 11)
+        )
+
+        #expect(handled == true)
+        #expect(harness.viewModel.workspace.toolSession.activeTool == .brightnessAdjust)
+        #expect(harness.viewModel.colorAdjustmentBrushMode == .paint)
+    }
+
+    @Test
+    @MainActor
+    func colorAdjustmentToolSwitchingToEraseKeepsExistingMaskPreviewVisible() async throws {
+        let harness = try BrushEditingBoundaryHarness()
+        let activeLayerID = harness.viewModel.workspace.document.activeLayerID
+
+        try fillOpaqueRect(
+            in: harness,
+            layerID: activeLayerID,
+            originX: 48,
+            originY: 48,
+            width: 120,
+            height: 120,
+            color: .init(red: 1, green: 1, blue: 1, alpha: 1)
+        )
+
+        harness.viewModel.selectTool(.brightnessAdjust)
+        harness.viewModel.beginStrokeIfNeeded()
+        harness.viewModel.applyStroke(samples: [.init(location: .init(x: 96, y: 96), pressure: 1)])
+        harness.viewModel.endStroke()
+        try await waitForColorAdjustmentPreview(in: harness)
+
+        let previewTextureBefore = harness.viewModel.brushDisplayTexture(for: activeLayerID)
+        _ = harness.viewModel.handleKeyDown(
+            makeCanvasKeyEvent(type: .keyDown, characters: "e", charactersIgnoringModifiers: "e", modifiers: [], keyCode: 14)
+        )
+        let previewTextureAfter = harness.viewModel.brushDisplayTexture(for: activeLayerID)
+
+        #expect(harness.viewModel.colorAdjustmentBrushMode == .erase)
+        #expect(harness.viewModel.colorAdjustmentSession != nil)
+        #expect(harness.viewModel.colorAdjustmentOverlayState.isActive)
+        #expect(previewTextureBefore != nil)
+        #expect(previewTextureAfter != nil)
+    }
+
+    @Test
+    @MainActor
+    func colorAdjustmentToolEscDiscardsSessionAndPreview() async throws {
+        let harness = try BrushEditingBoundaryHarness()
+        let activeLayerID = harness.viewModel.workspace.document.activeLayerID
+
+        try fillOpaqueRect(
+            in: harness,
+            layerID: activeLayerID,
+            originX: 48,
+            originY: 48,
+            width: 120,
+            height: 120,
+            color: .init(red: 1, green: 1, blue: 1, alpha: 1)
+        )
+
+        harness.viewModel.selectTool(.brightnessAdjust)
+        harness.viewModel.beginStrokeIfNeeded()
+        harness.viewModel.applyStroke(samples: [.init(location: .init(x: 96, y: 96), pressure: 1)])
+        harness.viewModel.endStroke()
+
+        try await waitForColorAdjustmentPreview(in: harness)
+
+        let handled = harness.viewModel.handleKeyDown(
+            makeCanvasKeyEvent(type: .keyDown, characters: "\u{1b}", charactersIgnoringModifiers: "\u{1b}", modifiers: [], keyCode: 53)
+        )
+
+        #expect(handled == true)
+        #expect(harness.viewModel.colorAdjustmentSession == nil)
+        #expect(harness.viewModel.colorAdjustmentOverlayState.isActive == false)
+        #expect(harness.viewModel.brushDisplayTexture(for: activeLayerID) == nil)
+    }
+
+    @Test
+    @MainActor
+    func applyingBrushPresetWhileColorAdjustmentToolIsActiveKeepsToolSelected() throws {
+        let harness = try BrushEditingBoundaryHarness()
+
+        harness.viewModel.selectTool(.brightnessAdjust)
+        harness.viewModel.saveCurrentBrushPreset()
+        let presetID = try #require(
+            harness.viewModel.workspace.brushLibrary.selectedPresetID
+            ?? harness.viewModel.workspace.brushLibrary.presets.first?.id
+        )
+
+        harness.viewModel.applyBrushPreset(presetID)
+
+        #expect(harness.viewModel.workspace.toolSession.activeTool == .brightnessAdjust)
+    }
+
+    @Test
+    @MainActor
     func copyPixelsAndPastePixelsInsertNewLayerAboveCurrentActiveLayer() throws {
         let harness = try BrushEditingBoundaryHarness()
         let sourceLayerID = harness.viewModel.workspace.document.activeLayerID
@@ -764,6 +916,14 @@ private struct BrushEditingBoundaryHarness {
         return try bootstrap.textureSerializer.samplePixel(texture: texture, x: x, y: y)
     }
 
+    func colorAdjustmentPreviewColor(atX x: Int, y: Int) throws -> RGBAColor {
+        let activeLayerID = viewModel.workspace.document.activeLayerID
+        guard let texture = viewModel.brushDisplayTexture(for: activeLayerID) else {
+            throw BoundaryHarnessError.textureUnavailable
+        }
+        return try bootstrap.textureSerializer.samplePixel(texture: texture, x: x, y: y)
+    }
+
     func waitForSelectedReferenceImageSlotID(timeoutIterations: Int = 400) async throws -> Int {
         for _ in 0..<timeoutIterations {
             if let slotID = viewModel.selectedReferenceImageSlotID,
@@ -1079,6 +1239,23 @@ private func maskRowMasses(_ maskData: Data, resolution: Int) -> [Double] {
         }
     }
     return rows
+}
+
+@MainActor
+private func waitForColorAdjustmentPreview(
+    in harness: BrushEditingBoundaryHarness,
+    timeoutIterations: Int = 200
+) async throws {
+    let activeLayerID = harness.viewModel.workspace.document.activeLayerID
+    for _ in 0..<timeoutIterations {
+        if harness.viewModel.brushDisplayTexture(for: activeLayerID) != nil,
+           harness.viewModel.colorAdjustmentOverlayState.isActive {
+            return
+        }
+        await Task.yield()
+        try? await Task.sleep(for: .milliseconds(10))
+    }
+    throw BoundaryHarnessError.textureUnavailable
 }
 
 private func makeVerticalTipMask(side: Int) -> Data {

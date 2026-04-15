@@ -33,6 +33,7 @@ struct ToolSidebarView: View {
         .group("straight-line"),
         .group("gradient-j"),
         .group("smudge"),
+        .group("color-adjust"),
         .group("canvas-rotate"),
         .group("free-transform")
     ]

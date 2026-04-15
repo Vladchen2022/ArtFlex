@@ -159,6 +159,8 @@ final class WorkspaceViewModel: ObservableObject {
     @Published private(set) var snapshotCompareSession: SnapshotCompareSessionState?
     @Published private(set) var quickColorPickerState: QuickColorPickerState?
     @Published private(set) var isWorkspaceChromeHidden = false
+    @Published var colorAdjustmentOverlayState = ColorAdjustmentOverlayState.inactive
+    @Published var colorAdjustmentRedrawRevision: UInt64 = 0
     @Published private(set) var referenceImageSlots = WorkspaceViewModel.makeDefaultReferenceImageSlots()
     @Published private(set) var selectedReferenceImageSlotID: Int?
     @Published private(set) var referenceImagePreviewColor: RGBAColor?
@@ -180,6 +182,12 @@ final class WorkspaceViewModel: ObservableObject {
     private var isQuickColorPickerShortcutActive = false
     private var documentChangeRevision: UInt64 = 0
     private var strokePacketCount = 0
+    var colorAdjustmentSession: ColorAdjustmentSession?
+    var colorAdjustmentBrushMode: ColorAdjustmentBrushMode = .paint
+    var colorAdjustmentStrokePacketCount = 0
+    var colorAdjustmentPreviewRenderInFlight = false
+    var colorAdjustmentPreviewRenderNeedsResubmit = false
+    var colorAdjustmentPreviewToken: UInt64 = 0
 #if DEBUG
     var debugPixelOperationHistoryCaptureModeOverride: HistoryCaptureMode?
     var debugFillAtPointHistoryCaptureModeOverride: HistoryCaptureMode?
@@ -1273,6 +1281,18 @@ final class WorkspaceViewModel: ObservableObject {
 
     private func resolvedToolSessionForCanvasStrokes() -> ToolSessionState {
         return bootstrap.workspaceStore.state.toolSession
+    }
+
+    var colorAdjustmentRenderer: ColorAdjustmentRenderer {
+        bootstrap.colorAdjustmentRenderer
+    }
+
+    var colorAdjustmentStrokeEngine: MetalStrokeEngine {
+        bootstrap.strokeEngine
+    }
+
+    func activeEditableLayerIDForColorAdjustment() -> LayerID? {
+        bootstrap.interactionController.activeEditableLayerID()
     }
 
     private func discardPendingBrushTipDraft() {
@@ -2802,8 +2822,8 @@ final class WorkspaceViewModel: ObservableObject {
 
         let currentTool = workspace.toolSession.activeTool
 
-        if currentTool == .smudge || currentTool == .eraser {
-            // Smudge/eraser: assign brush to that tool's slot only, don't affect drawing brush
+        if currentTool == .smudge || currentTool == .eraser || currentTool == .brightnessAdjust {
+            // Smudge/eraser/color-adjust: keep current tool active while updating its brush
             bootstrap.workspaceStore.updateToolSession { session in
                 session.brush = preset.brush
             }
@@ -6441,6 +6461,11 @@ final class WorkspaceViewModel: ObservableObject {
     func handleKeyDown(_ event: NSEvent) -> Bool {
         let normalizedModifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
 
+        if workspace.toolSession.activeTool == .brightnessAdjust,
+           handleColorAdjustmentKeyDown(event, modifiers: normalizedModifiers) {
+            return true
+        }
+
         if normalizedModifiers.isEmpty,
            event.charactersIgnoringModifiers?.lowercased() == "a" {
             toggleLayerTransparentPixelLock(workspace.document.activeLayerID)
@@ -6726,6 +6751,10 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func applyStroke(samples: [CanvasStrokeSample]) {
+        if workspace.toolSession.activeTool == .brightnessAdjust {
+            applyColorAdjustmentStroke(samples: samples)
+            return
+        }
         let applyStartNs = DispatchTime.now().uptimeNanoseconds
         ideationBranchActivityHandler?()
         let packetIndex = strokePacketCount
@@ -6777,6 +6806,11 @@ final class WorkspaceViewModel: ObservableObject {
         ideationBranchActivityHandler?()
         strokePacketCount = 0
 
+        if workspace.toolSession.activeTool == .brightnessAdjust {
+            beginColorAdjustmentStrokeIfNeeded()
+            return
+        }
+
         guard let layerID = bootstrap.interactionController.activeEditableLayerID() else {
             return
         }
@@ -6799,6 +6833,10 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func endStroke() {
+        if workspace.toolSession.activeTool == .brightnessAdjust {
+            endColorAdjustmentStroke()
+            return
+        }
         ideationBranchActivityHandler?()
         bootstrap.strokeEngine.endStroke()
         strokePacketCount = 0
@@ -6817,7 +6855,10 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func brushDisplayTexture(for layerID: LayerID) -> MTLTexture? {
-        bootstrap.strokeEngine.displayTexture(for: layerID)
+        if let liveTexture = bootstrap.strokeEngine.displayTexture(for: layerID) {
+            return liveTexture
+        }
+        return activeColorAdjustmentPreviewTexture(for: layerID)
     }
 
     func opportunisticallyDrainBrushCommits(hadLiveBrushWorkThisFrame: Bool) {

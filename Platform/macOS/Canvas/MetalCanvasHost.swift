@@ -480,7 +480,7 @@ func preferredBrushCursorMode(
     if isEyedropperCursorActive {
         return .eyedropper
     }
-    if activeTool == .brush || activeTool == .eraser || activeTool == .smudge {
+    if activeTool == .brush || activeTool == .eraser || activeTool == .smudge || activeTool == .brightnessAdjust {
         return .crosshair
     }
     return .arrow
@@ -496,7 +496,7 @@ func shouldShowBrushOutlineIndicator(
     showsBrushOutlineDuringStroke: Bool,
     hasContinuousStrokeGrace: Bool
 ) -> Bool {
-    guard (activeTool == .brush || activeTool == .eraser || activeTool == .smudge), hasHoverLocation else {
+    guard (activeTool == .brush || activeTool == .eraser || activeTool == .smudge || activeTool == .brightnessAdjust), hasHoverLocation else {
         return false
     }
     if isAdjustingBrushSizePreview { return true }
@@ -511,7 +511,7 @@ func shouldShowBrushTipIndicator(
     activeTool: ToolKind,
     hasHoverLocation: Bool
 ) -> Bool {
-    guard activeTool == .brush || activeTool == .eraser || activeTool == .smudge else {
+    guard activeTool == .brush || activeTool == .eraser || activeTool == .smudge || activeTool == .brightnessAdjust else {
         return false
     }
     return hasHoverLocation
@@ -1384,7 +1384,7 @@ final class StrokeCaptureMTKView: MTKView {
     }
 
     private func isBrushLikeToolActive() -> Bool {
-        activeTool == .brush || activeTool == .eraser || activeTool == .smudge
+        activeTool == .brush || activeTool == .eraser || activeTool == .smudge || activeTool == .brightnessAdjust
     }
 
     private func isTabletLikeEvent(_ event: NSEvent) -> Bool {
@@ -1779,7 +1779,7 @@ final class StrokeCaptureMTKView: MTKView {
 
     private var allowsTemporaryEyedropperOverride: Bool {
         switch activeTool {
-        case .brush, .eraser, .smudge, .straightLine, .linearGradient, .sectorGradient:
+        case .brush, .eraser, .smudge, .straightLine, .linearGradient, .sectorGradient, .brightnessAdjust:
             return true
         case .eyedropper, .bucket, .polygonSelection, .lassoFill, .rectangleSelection, .ellipseSelection, .lassoSelection, .canvasRotate, .freeTransform:
             return false

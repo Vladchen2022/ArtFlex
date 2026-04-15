@@ -324,6 +324,47 @@ final class MetalStrokeEngine: StrokeEngine {
         liveSession = nil
     }
 
+    func makeOpacityCapSessionForImmediateStroke(texture: MTLTexture) -> OpacityCapSessionResources? {
+        brushRenderer.makeOpacityCapSession(
+            for: texture,
+            commandQueue: metalContext.commandQueue
+        )
+    }
+
+    @discardableResult
+    func renderImmediateStroke(
+        _ stroke: StrokeDescriptor,
+        to texture: MTLTexture,
+        alphaLockTexture: MTLTexture? = nil,
+        samplingState: inout BrushStrokeSamplingState?
+    ) -> Int {
+        brushRenderer.render(
+            stroke: stroke,
+            into: texture,
+            commandQueue: metalContext.commandQueue,
+            alphaLockTexture: alphaLockTexture,
+            samplingState: &samplingState
+        )
+    }
+
+    @discardableResult
+    func renderImmediateOpacityCapStroke(
+        _ stroke: StrokeDescriptor,
+        session: OpacityCapSessionResources,
+        to texture: MTLTexture,
+        alphaLockTexture: MTLTexture? = nil,
+        samplingState: inout BrushStrokeSamplingState?
+    ) -> Int {
+        brushRenderer.renderOpacityCap(
+            stroke: stroke,
+            session: session,
+            into: texture,
+            commandQueue: metalContext.commandQueue,
+            alphaLockTexture: alphaLockTexture,
+            samplingState: &samplingState
+        )
+    }
+
     private func ensureLiveSession(for layerID: LayerID, now: UInt64) -> LiveSessionReuseState? {
         let startNs = DispatchTime.now().uptimeNanoseconds
         defer {
