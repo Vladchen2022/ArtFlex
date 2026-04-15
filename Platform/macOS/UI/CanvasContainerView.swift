@@ -416,7 +416,11 @@ private struct CanvasWorkspaceBackdrop: View {
         green: 136.0 / 255.0,
         blue: 136.0 / 255.0
     )
-    private let stripeSpacing: CGFloat = 50
+    private let majorGridSpacing: CGFloat = 100
+    private let minorGridSpacing: CGFloat = 50
+    private let majorGridColor = Color.white.opacity(0.16)
+    private let minorGridColor = Color.white.opacity(0.08)
+    private let gridLineThickness: CGFloat = 1
 
     var body: some View {
         Canvas(opaque: true, colorMode: .nonLinear, rendersAsynchronously: true) { context, size in
@@ -425,22 +429,61 @@ private struct CanvasWorkspaceBackdrop: View {
                 with: .color(baseColor)
             )
 
-            var stripePath = Path()
+            var majorGridPath = Path()
+            var minorGridPath = Path()
 
-            for x in stride(from: CGFloat.zero, through: size.width, by: stripeSpacing) {
-                stripePath.move(to: CGPoint(x: x, y: 0))
-                stripePath.addLine(to: CGPoint(x: x, y: size.height))
+            for x in stride(from: CGFloat.zero, through: size.width, by: majorGridSpacing) {
+                majorGridPath.addRect(
+                    CGRect(
+                        x: x,
+                        y: 0,
+                        width: gridLineThickness,
+                        height: size.height
+                    )
+                )
             }
 
-            for y in stride(from: CGFloat.zero, through: size.height, by: stripeSpacing) {
-                stripePath.move(to: CGPoint(x: 0, y: y))
-                stripePath.addLine(to: CGPoint(x: size.width, y: y))
+            for y in stride(from: CGFloat.zero, through: size.height, by: majorGridSpacing) {
+                majorGridPath.addRect(
+                    CGRect(
+                        x: 0,
+                        y: y,
+                        width: size.width,
+                        height: gridLineThickness
+                    )
+                )
             }
 
-            context.stroke(
-                stripePath,
-                with: .color(Color.white.opacity(0.16)),
-                lineWidth: 1
+            context.fill(
+                majorGridPath,
+                with: .color(majorGridColor),
+            )
+
+            for x in stride(from: minorGridSpacing, through: size.width, by: majorGridSpacing) {
+                minorGridPath.addRect(
+                    CGRect(
+                        x: x,
+                        y: 0,
+                        width: gridLineThickness,
+                        height: size.height
+                    )
+                )
+            }
+
+            for y in stride(from: minorGridSpacing, through: size.height, by: majorGridSpacing) {
+                minorGridPath.addRect(
+                    CGRect(
+                        x: 0,
+                        y: y,
+                        width: size.width,
+                        height: gridLineThickness
+                    )
+                )
+            }
+
+            context.fill(
+                minorGridPath,
+                with: .color(minorGridColor),
             )
         }
     }
