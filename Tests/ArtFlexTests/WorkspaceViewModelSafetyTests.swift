@@ -307,6 +307,22 @@ struct WorkspaceViewModelSafetyTests {
 
     @Test
     @MainActor
+    func brushPresetShortcutWhileColorAdjustmentToolIsActiveKeepsToolSelected() throws {
+        let harness = try BrushEditingBoundaryHarness()
+
+        harness.viewModel.selectTool(.brightnessAdjust)
+        harness.viewModel.saveCurrentBrushPreset()
+
+        let handled = harness.viewModel.handleKeyDown(
+            makeCanvasKeyEvent(type: .keyDown, characters: "1", charactersIgnoringModifiers: "1", modifiers: [], keyCode: 18)
+        )
+
+        #expect(handled == true)
+        #expect(harness.viewModel.workspace.toolSession.activeTool == .brightnessAdjust)
+    }
+
+    @Test
+    @MainActor
     func copyPixelsAndPastePixelsInsertNewLayerAboveCurrentActiveLayer() throws {
         let harness = try BrushEditingBoundaryHarness()
         let sourceLayerID = harness.viewModel.workspace.document.activeLayerID

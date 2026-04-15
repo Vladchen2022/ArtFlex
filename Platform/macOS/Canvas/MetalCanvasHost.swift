@@ -51,6 +51,17 @@ private func emitSelectionTraceHost(_ message: String) {
     appendSelectionTrace(message)
 }
 
+func shouldPrioritizeCanvasKeyHandlerBeforeToolShortcut(
+    activeTool: ToolKind,
+    event: NSEvent,
+    modifiers: NSEvent.ModifierFlags
+) -> Bool {
+    guard activeTool == .brightnessAdjust else { return false }
+    guard modifiers.isDisjoint(with: [.command, .option, .control]) else { return false }
+    guard let key = event.charactersIgnoringModifiers?.lowercased(), key.count == 1 else { return false }
+    return key == "b" || key == "e"
+}
+
 struct MetalCanvasHost: NSViewRepresentable {
     let sceneSnapshot: CanvasSceneSnapshot
     let externalRedrawRevision: UInt64
@@ -1209,6 +1220,15 @@ final class StrokeCaptureMTKView: MTKView {
         if event.charactersIgnoringModifiers == "]" {
             previewAdjustBrushSize(by: 1)
             strokeDelegate?.strokeCaptureView(self, didRequestBrushSizeAdjustment: 1)
+            return
+        }
+
+        if shouldPrioritizeCanvasKeyHandlerBeforeToolShortcut(
+            activeTool: activeTool,
+            event: event,
+            modifiers: normalizedModifiers
+        ),
+           keyDownEventHandler?(event) == true {
             return
         }
 

@@ -93,6 +93,30 @@ struct BrushInputDispatchTests {
     }
 
     @Test
+    func colorAdjustmentToolPrioritizesLocalEBKeysBeforeToolShortcuts() {
+        let event = NSEvent.keyEvent(
+            with: .keyDown,
+            location: .zero,
+            modifierFlags: [],
+            timestamp: 0,
+            windowNumber: 0,
+            context: nil,
+            characters: "e",
+            charactersIgnoringModifiers: "e",
+            isARepeat: false,
+            keyCode: 14
+        )
+
+        let shouldPrioritize = shouldPrioritizeCanvasKeyHandlerBeforeToolShortcut(
+            activeTool: .brightnessAdjust,
+            event: try! #require(event),
+            modifiers: []
+        )
+
+        #expect(shouldPrioritize == true)
+    }
+
+    @Test
     func pendingBrushInputQueueFlushesAndClears() {
         var queue = PendingBrushInputQueue()
         let sample = CanvasStrokeSample(location: .init(x: 5, y: 7), pressure: 1)

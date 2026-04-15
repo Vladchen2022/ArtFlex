@@ -7814,7 +7814,6 @@ final class WorkspaceViewModel: ObservableObject {
         guard let preset = workspace.brushLibrary.preset(atSlot: slotIndex) else {
             return false
         }
-        selectTool(.brush)
         applyBrushPreset(preset.id, showFeedback: false)
         return true
     }
