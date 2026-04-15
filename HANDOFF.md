@@ -86,16 +86,21 @@
 
 不要只修其中一层。
 
-### 3.6 色彩调整当前只做到阶段 A
+### 3.6 色彩调整已经不再是阶段 A-only
 
-当前不要把 `色彩调整` 理解成“参数面板和正式调整已经完成，只是在修 bug”。
+当前不要再把 `色彩调整` 理解成“只有蓝色蒙版绘制 demo”。
 
 当前真实状态是：
 
-- 阶段 A 已完成并手测通过
-- 只支持工具态蓝色蒙版绘制
-- `E/B/Esc` 已接通
-- 参数面板、确认链、正式色彩调整应用还没开始
+- `painted mask`、`selection`、`wholeLayer` 三条 source 都已经接通
+- 右侧参数面板、参数预览、`确认应用`、`恢复默认`、`按住预览` 都已接通
+- 正式写回和对应 undo / redo 已接通
+- 切工具 / 切图层 / 打开新文档 / 关闭 / history navigation 前的确认弹窗已接通
+- `undo / redo` 现在会在弹窗处理后自动继续原 history navigation
+- `selection / wholeLayer` session 会根据当前上下文自动重建
+- whole-layer `effectBounds` 已接入 preview / commit 的局部 redraw
+- `brightnessAdjust` 主要承担 painted-mask 路径；选区 / 整层直调可以直接从参数面板创建 session
+- 这几项最近一轮已经过针对性测试，当前可以阶段性暂停，不需要继续把它当成紧急未闭环工作
 
 继续接手这块时，先读：
 

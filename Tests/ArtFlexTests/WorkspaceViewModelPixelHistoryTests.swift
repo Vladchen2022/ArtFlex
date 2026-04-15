@@ -268,6 +268,48 @@ struct WorkspaceViewModelPixelHistoryTests {
 
     @Test
     @MainActor
+    func colorAdjustmentUndoPromptApplyCommitsThenContinuesHistoryNavigation() throws {
+        let harness = try PixelHistoryHarness()
+        let layerID = harness.viewModel.workspace.document.activeLayerID
+        let sampleX = 24
+        let sampleY = 24
+
+        try fillOpaqueRect(
+            in: harness,
+            layerID: layerID,
+            originX: 12,
+            originY: 12,
+            width: 28,
+            height: 28,
+            color: .init(red: 0.24, green: 0.28, blue: 0.32, alpha: 1)
+        )
+        let basePixel = try harness.color(atX: sampleX, y: sampleY, layerID: layerID)
+
+        harness.viewModel.selectTool(.brightnessAdjust)
+        harness.viewModel.beginStrokeIfNeeded()
+        harness.viewModel.applyStroke(samples: [.init(location: .init(x: 24, y: 24), pressure: 1)])
+        harness.viewModel.endStroke()
+        harness.viewModel.setColorAdjustmentBrightness(0.45)
+        harness.viewModel.debugColorAdjustmentResolutionDecisionOverride = .apply
+
+        harness.viewModel.undo()
+
+        let undonePixel = try harness.color(atX: sampleX, y: sampleY, layerID: layerID)
+        #expect(harness.viewModel.colorAdjustmentSession == nil)
+        #expect(abs(undonePixel.red - basePixel.red) < 0.02)
+        #expect(abs(undonePixel.green - basePixel.green) < 0.02)
+        #expect(abs(undonePixel.blue - basePixel.blue) < 0.02)
+
+        harness.viewModel.redo()
+
+        let redonePixel = try harness.color(atX: sampleX, y: sampleY, layerID: layerID)
+        #expect(redonePixel.red > basePixel.red + 0.05)
+        #expect(redonePixel.green > basePixel.green + 0.05)
+        #expect(redonePixel.blue > basePixel.blue + 0.05)
+    }
+
+    @Test
+    @MainActor
     func colorAdjustmentUndoPromptDiscardConsumesSessionBeforeHistoryNavigation() throws {
         let harness = try PixelHistoryHarness()
         let layerID = harness.addLayer()
@@ -292,11 +334,6 @@ struct WorkspaceViewModelPixelHistoryTests {
         harness.viewModel.undo()
 
         #expect(harness.viewModel.colorAdjustmentSession == nil)
-        #expect(harness.viewModel.workspace.document.layers.count == 3)
-        #expect(harness.viewModel.workspace.document.activeLayerID == layerID)
-
-        harness.viewModel.undo()
-
         #expect(harness.viewModel.workspace.document.layers.count == 2)
     }
 

@@ -362,7 +362,7 @@ final class ColorAdjustmentRenderer {
         effectRegion: MTLRegion?,
         commandBuffer: MTLCommandBuffer
     ) {
-        let copyRegion = effectRegion ?? MTLRegionMake2D(0, 0, sourceTexture.width, sourceTexture.height)
+        let copyRegion = MTLRegionMake2D(0, 0, sourceTexture.width, sourceTexture.height)
         if let blitEncoder = commandBuffer.makeBlitCommandEncoder() {
             blitEncoder.copy(
                 from: sourceTexture,

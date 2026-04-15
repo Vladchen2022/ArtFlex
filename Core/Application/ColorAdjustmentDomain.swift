@@ -34,7 +34,7 @@ enum ColorAdjustmentResolutionReason: Equatable, Sendable {
     var continuesTriggeringActionAfterResolution: Bool {
         switch self {
         case .historyNavigation:
-            return false
+            return true
         case .toolChange, .layerChange, .documentOpen, .closeOrQuit:
             return true
         }
@@ -62,6 +62,7 @@ struct PaintedMaskState {
 struct SelectionMaskState {
     var maskTexture: MTLTexture
     var bounds: CanvasRect
+    var capturedSelectionShape: SelectionShape
     var capturedSelectionRevision: UInt64
 }
 

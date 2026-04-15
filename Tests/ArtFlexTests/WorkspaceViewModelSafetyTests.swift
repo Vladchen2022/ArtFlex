@@ -555,6 +555,74 @@ struct WorkspaceViewModelSafetyTests {
 
     @Test
     @MainActor
+    func colorAdjustmentSelectionSessionRebuildsWhenCommittedSelectionChanges() async throws {
+        let harness = try BrushEditingBoundaryHarness()
+        let activeLayerID = harness.viewModel.workspace.document.activeLayerID
+        let firstSelectionX = 92
+        let firstSelectionY = 92
+        let secondSelectionX = 152
+        let secondSelectionY = 152
+
+        try fillOpaqueRect(
+            in: harness,
+            layerID: activeLayerID,
+            originX: 48,
+            originY: 48,
+            width: 140,
+            height: 140,
+            color: .init(red: 0.24, green: 0.28, blue: 0.32, alpha: 1)
+        )
+        makeRectangleSelection(
+            in: harness.viewModel,
+            minX: 72,
+            minY: 72,
+            maxX: 116,
+            maxY: 116
+        )
+
+        let firstBasePixel = try harness.color(atX: firstSelectionX, y: firstSelectionY, layerID: activeLayerID)
+        let secondBasePixel = try harness.color(atX: secondSelectionX, y: secondSelectionY, layerID: activeLayerID)
+
+        harness.viewModel.setColorAdjustmentBrightness(0.55)
+        try await waitForColorAdjustmentPreview(in: harness)
+
+        let baselineRevision = harness.viewModel.colorAdjustmentRedrawRevision
+        makeRectangleSelection(
+            in: harness.viewModel,
+            minX: 136,
+            minY: 136,
+            maxX: 172,
+            maxY: 172
+        )
+        try await waitForColorAdjustmentRedrawRevision(
+            in: harness,
+            after: baselineRevision
+        )
+
+        let firstPreviewPixel = try harness.colorAdjustmentPreviewColor(atX: firstSelectionX, y: firstSelectionY)
+        let secondPreviewPixel = try harness.colorAdjustmentPreviewColor(atX: secondSelectionX, y: secondSelectionY)
+        #expect(abs(firstPreviewPixel.red - firstBasePixel.red) < 0.02)
+        #expect(abs(firstPreviewPixel.green - firstBasePixel.green) < 0.02)
+        #expect(abs(firstPreviewPixel.blue - firstBasePixel.blue) < 0.02)
+        #expect(secondPreviewPixel.red > secondBasePixel.red + 0.05)
+        #expect(secondPreviewPixel.green > secondBasePixel.green + 0.05)
+        #expect(secondPreviewPixel.blue > secondBasePixel.blue + 0.05)
+
+        guard let session = harness.viewModel.colorAdjustmentSession else {
+            Issue.record("Expected rebuilt selection color adjustment session")
+            return
+        }
+        switch session.source {
+        case .selection(let selectionState):
+            #expect(selectionState.capturedSelectionRevision == harness.viewModel.selectionRevision)
+            #expect(selectionState.capturedSelectionShape.bounds.origin.x > 130)
+        case .painted, .wholeLayer:
+            Issue.record("Expected rebuilt selection source")
+        }
+    }
+
+    @Test
+    @MainActor
     func colorAdjustmentWholeLayerPreviewUsesActiveLayerWithoutPainting() async throws {
         let harness = try BrushEditingBoundaryHarness()
         let activeLayerID = harness.viewModel.workspace.document.activeLayerID
@@ -598,6 +666,71 @@ struct WorkspaceViewModelSafetyTests {
             break
         case .painted, .selection:
             Issue.record("Expected whole-layer source")
+        }
+    }
+
+    @Test
+    @MainActor
+    func colorAdjustmentWholeLayerSessionRebuildsWhenCanvasContentChanges() async throws {
+        let harness = try BrushEditingBoundaryHarness()
+        let activeLayerID = harness.viewModel.workspace.document.activeLayerID
+        let initialOpaqueX = 64
+        let initialOpaqueY = 64
+        let newStrokeX = 172
+        let newStrokeY = 172
+
+        try fillOpaqueRect(
+            in: harness,
+            layerID: activeLayerID,
+            originX: 48,
+            originY: 48,
+            width: 36,
+            height: 36,
+            color: .init(red: 0.24, green: 0.28, blue: 0.32, alpha: 1)
+        )
+
+        harness.viewModel.setColorAdjustmentBrightness(0.55)
+        try await waitForColorAdjustmentPreview(in: harness)
+
+        let initialBasePixel = try harness.color(atX: initialOpaqueX, y: initialOpaqueY, layerID: activeLayerID)
+        let initialPreviewPixel = try harness.colorAdjustmentPreviewColor(atX: initialOpaqueX, y: initialOpaqueY)
+        #expect(initialPreviewPixel.red > initialBasePixel.red + 0.05)
+
+        harness.viewModel.setSelectedColor(.init(red: 0.32, green: 0.46, blue: 0.58, alpha: 1))
+        let baselineRevision = harness.viewModel.colorAdjustmentRedrawRevision
+        try drawSingleMainCanvasStamp(
+            in: harness.viewModel,
+            at: .init(x: Double(newStrokeX), y: Double(newStrokeY))
+        )
+        _ = harness.viewModel.flushBrushEditingBoundary(
+            reason: "test.colorAdjustmentWholeLayerSessionRebuildsWhenCanvasContentChanges"
+        )
+        try await waitForColorAdjustmentRedrawRevision(
+            in: harness,
+            after: baselineRevision
+        )
+
+        let newBasePixel = try harness.color(atX: newStrokeX, y: newStrokeY, layerID: activeLayerID)
+        let newPreviewPixel = try harness.colorAdjustmentPreviewColor(atX: newStrokeX, y: newStrokeY)
+        #expect(newBasePixel.alpha > 0.05)
+        #expect(newPreviewPixel.red > newBasePixel.red + 0.03)
+        #expect(newPreviewPixel.green > newBasePixel.green + 0.03)
+        #expect(newPreviewPixel.blue > newBasePixel.blue + 0.03)
+
+        guard let session = harness.viewModel.colorAdjustmentSession else {
+            Issue.record("Expected rebuilt whole-layer color adjustment session")
+            return
+        }
+        switch session.source {
+        case .wholeLayer(let wholeLayerState):
+            #expect(wholeLayerState.capturedCanvasRevision == harness.viewModel.canvasContentRevision)
+            let effectBounds = try #require(wholeLayerState.effectBounds)
+            #expect(effectBounds.size.x < Double(harness.viewModel.workspace.document.canvasSize.width))
+            #expect(effectBounds.size.y < Double(harness.viewModel.workspace.document.canvasSize.height))
+            #expect(effectBounds.origin.x <= Double(newStrokeX))
+            #expect(effectBounds.origin.y <= Double(newStrokeY))
+        case .painted, .selection:
+            Issue.record("Expected rebuilt whole-layer source")
         }
     }
 

@@ -1316,6 +1316,37 @@ final class WorkspaceViewModel: ObservableObject {
         selectionMaskBytes(for: shape, canvasSize: canvasSize)
     }
 
+    func activeEditableLayerEffectBoundsForColorAdjustment() -> CanvasRect? {
+        guard let layerID = activeEditableLayerIDForColorAdjustment(),
+              let surfaceID = layerSurfaceStore.surfaceID(for: layerID) else {
+            return nil
+        }
+
+        let key = WholeLayerInteractionBoundsKey(
+            surfaceID: surfaceID,
+            canvasContentRevision: canvasContentRevision
+        )
+        if wholeLayerInteractionBoundsCacheKey == key,
+           case .ready(let bounds) = wholeLayerInteractionBoundsCacheEntry {
+            return bounds
+        }
+
+        guard let texture = layerSurfaceStore.texture(for: surfaceID),
+              let snapshot = try? bootstrap.textureSerializer.snapshot(texture: texture) else {
+            return nil
+        }
+
+        let entry = Self.wholeLayerInteractionBounds(from: snapshot)
+        wholeLayerInteractionBoundsCacheKey = key
+        wholeLayerInteractionBoundsCacheEntry = entry
+        switch entry {
+        case .ready(let bounds):
+            return bounds
+        case .empty:
+            return nil
+        }
+    }
+
     private func discardPendingBrushTipDraft() {
         brushTipDraftMaskData = nil
         hasPendingBrushTipDraft = false
@@ -6706,6 +6737,7 @@ final class WorkspaceViewModel: ObservableObject {
             layerThumbnailCache.removeAll()
         }
         workspace = state
+        syncColorAdjustmentSessionToCurrentContextIfNeeded()
         let updatedSceneSnapshot = currentSceneSnapshot(for: state)
         sceneSnapshot = updatedSceneSnapshot
         syncNavigatorPreviewProxy()
@@ -6732,6 +6764,7 @@ final class WorkspaceViewModel: ObservableObject {
             viewportRevision &+= 1
         }
         workspace = state
+        syncColorAdjustmentSessionToCurrentContextIfNeeded()
         let updatedSceneSnapshot = currentSceneSnapshot(for: state)
         sceneSnapshot = updatedSceneSnapshot
         syncNavigatorPreviewProxy()

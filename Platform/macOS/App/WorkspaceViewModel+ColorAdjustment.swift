@@ -173,7 +173,7 @@ extension WorkspaceViewModel {
             maskReadMode: renderPlan.maskReadMode,
             parameters: session.parameters,
             overlayOnly: false,
-            effectRegion: nil,
+            effectRegion: renderPlan.effectRegion,
             commandBuffer: commandBuffer
         )
         commandBuffer.commit()
@@ -393,6 +393,64 @@ extension WorkspaceViewModel {
         return session.previewTexture
     }
 
+    func syncColorAdjustmentSessionToCurrentContextIfNeeded() {
+        guard let session = colorAdjustmentSession else { return }
+        guard let activeLayerID = activeEditableLayerIDForColorAdjustment(),
+              session.layerID == activeLayerID,
+              let sourceTexture = sourceTextureForColorAdjustment(layerID: activeLayerID) else {
+            return
+        }
+
+        let replacementSession: ColorAdjustmentSession?
+        switch session.source {
+        case .painted:
+            replacementSession = nil
+        case .selection(let selectionState):
+            guard let selectionShape = preferredColorAdjustmentSelectionShape() else {
+                replacementSession = rebuiltDirectColorAdjustmentSession(
+                    layerID: activeLayerID,
+                    sourceTexture: sourceTexture,
+                    preserving: session,
+                    preferredSelectionShape: nil
+                )
+                break
+            }
+            guard selectionShape != selectionState.capturedSelectionShape else {
+                replacementSession = nil
+                break
+            }
+            replacementSession = rebuiltDirectColorAdjustmentSession(
+                layerID: activeLayerID,
+                sourceTexture: sourceTexture,
+                preserving: session,
+                preferredSelectionShape: selectionShape
+            )
+        case .wholeLayer(let wholeLayerState):
+            if let selectionShape = preferredColorAdjustmentSelectionShape() {
+                replacementSession = rebuiltDirectColorAdjustmentSession(
+                    layerID: activeLayerID,
+                    sourceTexture: sourceTexture,
+                    preserving: session,
+                    preferredSelectionShape: selectionShape
+                )
+            } else if wholeLayerState.capturedCanvasRevision != canvasContentRevision {
+                replacementSession = rebuiltDirectColorAdjustmentSession(
+                    layerID: activeLayerID,
+                    sourceTexture: sourceTexture,
+                    preserving: session,
+                    preferredSelectionShape: nil
+                )
+            } else {
+                replacementSession = nil
+            }
+        }
+
+        guard let replacementSession else { return }
+        colorAdjustmentSession = replacementSession
+        scheduleColorAdjustmentPreviewUpdate(force: true)
+        syncColorAdjustmentOverlayState()
+    }
+
     private func makePaintedColorAdjustmentSession(
         layerID: LayerID,
         sourceTexture: MTLTexture,
@@ -462,6 +520,7 @@ extension WorkspaceViewModel {
                             y: Double(boundsRegion.size.height)
                         )
                     ),
+                    capturedSelectionShape: clampedSelection,
                     capturedSelectionRevision: selectionRevision
                 )
             ),
@@ -484,7 +543,7 @@ extension WorkspaceViewModel {
             layerID: layerID,
             source: .wholeLayer(
                 WholeLayerMaskState(
-                    effectBounds: nil,
+                    effectBounds: activeEditableLayerEffectBoundsForColorAdjustment(),
                     capturedCanvasRevision: canvasContentRevision
                 )
             ),
@@ -778,7 +837,8 @@ extension WorkspaceViewModel {
             return nil
         }
         if let session = colorAdjustmentSession, session.layerID == layerID {
-            return session
+            syncColorAdjustmentSessionToCurrentContextIfNeeded()
+            return colorAdjustmentSession
         }
 
         let parameters = colorAdjustmentSession?.parameters ?? .neutral
@@ -800,6 +860,34 @@ extension WorkspaceViewModel {
 
         colorAdjustmentSession = nextSession
         return nextSession
+    }
+
+    private func rebuiltDirectColorAdjustmentSession(
+        layerID: LayerID,
+        sourceTexture: MTLTexture,
+        preserving session: ColorAdjustmentSession,
+        preferredSelectionShape: SelectionShape?
+    ) -> ColorAdjustmentSession? {
+        let rebuiltSession: ColorAdjustmentSession?
+        if let preferredSelectionShape {
+            rebuiltSession = makeSelectionColorAdjustmentSession(
+                layerID: layerID,
+                sourceTexture: sourceTexture,
+                selectionShape: preferredSelectionShape,
+                parameters: session.parameters
+            )
+        } else {
+            rebuiltSession = makeWholeLayerColorAdjustmentSession(
+                layerID: layerID,
+                sourceTexture: sourceTexture,
+                parameters: session.parameters
+            )
+        }
+
+        guard var rebuiltSession else { return nil }
+        rebuiltSession.brushMode = session.brushMode
+        rebuiltSession.showsOriginalPreview = session.showsOriginalPreview
+        return rebuiltSession
     }
 
     private func preferredColorAdjustmentSelectionShape() -> SelectionShape? {

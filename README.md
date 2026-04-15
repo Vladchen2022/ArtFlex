@@ -13,6 +13,7 @@ ArtFlex 是旧版 `BrushCanvas` 的 Metal-first 重构版 macOS 绘图软件。
 - 多图层基础系统
 - 撤销 / 重做
 - 选区与自由变形主链
+- 色彩调整主链：painted mask、选区 / 整层直调、确认应用、undo / redo
 - PNG 导出与工程保存 / 打开
 - 自定义笔尖设计
 - 画笔库与 tip image library
