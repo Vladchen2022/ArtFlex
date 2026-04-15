@@ -181,6 +181,55 @@ struct WorkspaceViewModelPixelHistoryTests {
 
     @Test
     @MainActor
+    func colorAdjustmentConfirmPaintedMaskSupportsUndoRedo() throws {
+        let harness = try PixelHistoryHarness()
+        let layerID = harness.viewModel.workspace.document.activeLayerID
+
+        try fillOpaqueRect(
+            in: harness,
+            layerID: layerID,
+            originX: 12,
+            originY: 12,
+            width: 28,
+            height: 28,
+            color: .init(red: 0.24, green: 0.28, blue: 0.32, alpha: 1)
+        )
+
+        let sampleX = 24
+        let sampleY = 24
+        let basePixel = try harness.color(atX: sampleX, y: sampleY, layerID: layerID)
+
+        harness.viewModel.selectTool(.brightnessAdjust)
+        harness.viewModel.beginStrokeIfNeeded()
+        harness.viewModel.applyStroke(samples: [
+            .init(location: .init(x: Double(sampleX), y: Double(sampleY)), pressure: 1)
+        ])
+        harness.viewModel.endStroke()
+        harness.viewModel.setColorAdjustmentBrightness(0.55)
+        harness.viewModel.confirmColorAdjustmentPaintedSession()
+
+        let committedPixel = try harness.color(atX: sampleX, y: sampleY, layerID: layerID)
+        #expect(committedPixel.red > basePixel.red + 0.05)
+        #expect(committedPixel.green > basePixel.green + 0.05)
+        #expect(committedPixel.blue > basePixel.blue + 0.05)
+        #expect(harness.viewModel.colorAdjustmentSession == nil)
+        #expect(harness.viewModel.workspace.toolSession.activeTool == .brightnessAdjust)
+
+        harness.viewModel.undo()
+        let undonePixel = try harness.color(atX: sampleX, y: sampleY, layerID: layerID)
+        #expect(abs(undonePixel.red - basePixel.red) < 0.02)
+        #expect(abs(undonePixel.green - basePixel.green) < 0.02)
+        #expect(abs(undonePixel.blue - basePixel.blue) < 0.02)
+
+        harness.viewModel.redo()
+        let redonePixel = try harness.color(atX: sampleX, y: sampleY, layerID: layerID)
+        #expect(abs(redonePixel.red - committedPixel.red) < 0.02)
+        #expect(abs(redonePixel.green - committedPixel.green) < 0.02)
+        #expect(abs(redonePixel.blue - committedPixel.blue) < 0.02)
+    }
+
+    @Test
+    @MainActor
     func cutAndPastePixelsSupportUndoRedo() throws {
         let harness = try PixelHistoryHarness()
         let layerID = harness.viewModel.workspace.document.activeLayerID

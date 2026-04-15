@@ -901,6 +901,7 @@ struct RightInspectorView: View {
     private var colorAdjustmentSection: some View {
         let parameters = viewModel.colorAdjustmentParameters
         let canAdjust = viewModel.canEditColorAdjustmentPaintedSession
+        let canConfirm = viewModel.canConfirmColorAdjustmentPaintedSession
         let wrappedHue = ColorBlocksEngine.wrapHue(parameters.selectedHueDegrees)
         let strengthDisplayValue = parameters.hueStrength * 2
 
@@ -1001,6 +1002,13 @@ struct RightInspectorView: View {
                 .padding(.vertical, 2)
 
             HStack(spacing: 8) {
+                Button("确认应用") {
+                    viewModel.confirmColorAdjustmentPaintedSession()
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+                .disabled(!canConfirm)
+
                 Button("恢复默认") {
                     viewModel.resetColorAdjustmentParameters()
                 }

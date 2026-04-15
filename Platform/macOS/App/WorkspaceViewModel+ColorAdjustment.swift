@@ -26,6 +26,14 @@ extension WorkspaceViewModel {
         return true
     }
 
+    var canConfirmColorAdjustmentPaintedSession: Bool {
+        guard canEditColorAdjustmentPaintedSession,
+              let session = colorAdjustmentSession else {
+            return false
+        }
+        return !session.parameters.isNeutral
+    }
+
     func setColorAdjustmentSelectedHueDegrees(_ value: Float) {
         updateColorAdjustmentParameters { parameters in
             parameters.selectedHueDegrees = ColorBlocksEngine.wrapHue(value)
@@ -70,6 +78,75 @@ extension WorkspaceViewModel {
         colorAdjustmentSession = session
         colorAdjustmentRedrawRevision &+= 1
         syncColorAdjustmentOverlayState()
+    }
+
+    func confirmColorAdjustmentPaintedSession() {
+        guard canEditColorAdjustmentPaintedSession else {
+            presentWorkspaceStatus(kind: .info, message: "先在画布上涂出影响区域")
+            return
+        }
+        guard let layerID = activeEditableLayerIDForColorAdjustment(),
+              let surfaceID = layerSurfaceStore.surfaceID(for: layerID),
+              let sourceTexture = sourceTextureForColorAdjustment(layerID: layerID),
+              let session = colorAdjustmentSession,
+              session.layerID == layerID else {
+            presentWorkspaceStatus(kind: .error, message: "无法访问当前图层")
+            return
+        }
+        guard case .painted(let paintedState) = session.source else {
+            presentWorkspaceStatus(kind: .info, message: "当前阶段只支持蒙版模式确认")
+            return
+        }
+        guard paintedState.paintedBounds != nil else {
+            presentWorkspaceStatus(kind: .info, message: "先在画布上涂出影响区域")
+            return
+        }
+        guard !session.parameters.isNeutral else {
+            presentWorkspaceStatus(kind: .info, message: "当前还没有可应用的调整")
+            return
+        }
+        guard let targetTexture = layerSurfaceStore.makeTexture(
+            width: sourceTexture.width,
+            height: sourceTexture.height,
+            pixelFormat: sourceTexture.pixelFormat,
+            metal: metalContext
+        ) else {
+            presentWorkspaceStatus(kind: .error, message: "无法创建色彩调整结果纹理")
+            return
+        }
+        guard let commandBuffer = metalContext.commandQueue.makeCommandBuffer() else {
+            presentWorkspaceStatus(kind: .error, message: "无法创建色彩调整提交命令")
+            return
+        }
+
+        checkpointSingleLayerHistoryIfPossible(
+            layerID: layerID,
+            operationKind: "colorAdjustment.commit"
+        )
+
+        colorAdjustmentRenderer.encodePreview(
+            sourceTexture: sourceTexture,
+            previewTexture: targetTexture,
+            maskTexture: paintedState.maskTexture,
+            maskReadMode: .maskRed,
+            parameters: session.parameters,
+            overlayOnly: false,
+            effectRegion: nil,
+            commandBuffer: commandBuffer
+        )
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+
+        guard commandBuffer.status == .completed else {
+            let message = commandBuffer.error?.localizedDescription ?? "色彩调整提交失败"
+            presentWorkspaceStatus(kind: .error, message: message)
+            return
+        }
+
+        layerSurfaceStore.swapTexture(for: surfaceID, with: targetTexture)
+        discardColorAdjustmentSession()
+        finalizeCommittedSingleLayerMutation(layerID)
+        presentWorkspaceStatus(kind: .success, message: "已应用色彩调整")
     }
 
     func beginColorAdjustmentStrokeIfNeeded() {
@@ -203,6 +280,9 @@ extension WorkspaceViewModel {
         modifiers: NSEvent.ModifierFlags
     ) -> Bool {
         guard modifiers.isEmpty else { return false }
+        guard colorAdjustmentSession != nil || colorAdjustmentAllowsIdleModeHotkeys else {
+            return false
+        }
 
         if event.keyCode == 53 {
             guard colorAdjustmentSession != nil else { return false }
@@ -396,6 +476,7 @@ extension WorkspaceViewModel {
 
     private func discardColorAdjustmentSession() {
         colorAdjustmentSession = nil
+        colorAdjustmentAllowsIdleModeHotkeys = false
         colorAdjustmentBrushMode = .paint
         colorAdjustmentStrokePacketCount = 0
         colorAdjustmentPreviewToken &+= 1

@@ -498,6 +498,40 @@ struct WorkspaceViewModelSafetyTests {
 
     @Test
     @MainActor
+    func colorAdjustmentConfirmReleasesBEKeysBackToToolShortcuts() throws {
+        let harness = try BrushEditingBoundaryHarness()
+        let activeLayerID = harness.viewModel.workspace.document.activeLayerID
+
+        try fillOpaqueRect(
+            in: harness,
+            layerID: activeLayerID,
+            originX: 48,
+            originY: 48,
+            width: 120,
+            height: 120,
+            color: .init(red: 0.24, green: 0.24, blue: 0.24, alpha: 1)
+        )
+
+        harness.viewModel.selectTool(.brightnessAdjust)
+        harness.viewModel.beginStrokeIfNeeded()
+        harness.viewModel.applyStroke(samples: [.init(location: .init(x: 96, y: 96), pressure: 1)])
+        harness.viewModel.endStroke()
+        harness.viewModel.setColorAdjustmentBrightness(0.6)
+        harness.viewModel.confirmColorAdjustmentPaintedSession()
+
+        #expect(harness.viewModel.colorAdjustmentSession == nil)
+        #expect(harness.viewModel.workspace.toolSession.activeTool == .brightnessAdjust)
+
+        let handled = harness.viewModel.handleKeyDown(
+            makeCanvasKeyEvent(type: .keyDown, characters: "b", charactersIgnoringModifiers: "b", modifiers: [], keyCode: 11)
+        )
+
+        #expect(handled == true)
+        #expect(harness.viewModel.workspace.toolSession.activeTool == .brush)
+    }
+
+    @Test
+    @MainActor
     func copyPixelsAndPastePixelsInsertNewLayerAboveCurrentActiveLayer() throws {
         let harness = try BrushEditingBoundaryHarness()
         let sourceLayerID = harness.viewModel.workspace.document.activeLayerID

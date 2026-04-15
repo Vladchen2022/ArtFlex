@@ -188,6 +188,7 @@ final class WorkspaceViewModel: ObservableObject {
     var colorAdjustmentPreviewRenderInFlight = false
     var colorAdjustmentPreviewRenderNeedsResubmit = false
     var colorAdjustmentPreviewToken: UInt64 = 0
+    var colorAdjustmentAllowsIdleModeHotkeys = false
 #if DEBUG
     var debugPixelOperationHistoryCaptureModeOverride: HistoryCaptureMode?
     var debugFillAtPointHistoryCaptureModeOverride: HistoryCaptureMode?
@@ -352,6 +353,11 @@ final class WorkspaceViewModel: ObservableObject {
         polygonSelectionState = .init()
         bootstrap.workspaceStore.updateToolSession { session in
             session.activeTool = tool
+        }
+        if tool == .brightnessAdjust {
+            colorAdjustmentAllowsIdleModeHotkeys = true
+        } else {
+            colorAdjustmentAllowsIdleModeHotkeys = false
         }
         if let group = ToolSidebarGroup.group(containing: tool) {
             toolGroupSurfaceTools[group.id] = tool
@@ -6751,6 +6757,32 @@ final class WorkspaceViewModel: ObservableObject {
 
     var layerSurfaceStore: StageOneLayerSurfaceStore {
         bootstrap.layerSurfaceStore
+    }
+
+    func checkpointSingleLayerHistoryIfPossible(
+        layerID: LayerID,
+        operationKind: String
+    ) {
+        checkpointHistoryIfPossible(
+            operationKind: operationKind,
+            candidateChangedLayerIDs: [layerID],
+            captureMode: .inPlaceChangedLayers([layerID])
+        )
+    }
+
+    func finalizeCommittedSingleLayerMutation(_ layerID: LayerID) {
+        layerThumbnailCache.removeValue(forKey: layerID)
+        bootstrap.strokeEngine.resetBrushPipelineState()
+        noteCanvasContentChanged()
+        refresh(invalidatedLayerIDs: [layerID])
+        recordDrawingActivityIfNeeded()
+    }
+
+    func presentWorkspaceStatus(
+        kind: WorkspaceStatus.Kind,
+        message: String
+    ) {
+        showStatus(.init(kind: kind, message: message))
     }
 
     func applyStroke(samples: [CanvasStrokeSample]) {
