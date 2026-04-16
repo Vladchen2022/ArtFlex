@@ -90,4 +90,19 @@ struct CurveAdjustmentDomainTests {
         #expect(abs(curved.composite[255] - 0.9) < 0.0001)
         #expect(curved.red == identity.red)
     }
+
+    @Test
+    func lutBuilderUsesSmoothMonotoneInterpolationInsteadOfPiecewiseLinearSegments() {
+        let state = CurveChannelState(points: [
+            .init(x: 0.2, y: 0.1),
+            .init(x: 0.5, y: 0.25),
+            .init(x: 0.82, y: 0.9)
+        ])
+
+        let sampled = CurveLUTBuilder.sampleChannelValue(from: state, at: 0.35)
+        let linearBetweenFirstTwoPoints: Float = 0.175
+
+        #expect(abs(sampled - linearBetweenFirstTwoPoints) > 0.005)
+        #expect(sampled > 0.1 && sampled < 0.25)
+    }
 }

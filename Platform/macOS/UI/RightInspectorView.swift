@@ -90,7 +90,7 @@ struct RightInspectorView: View {
 
     private enum ParameterInspectorTab: String {
         case brush = "画笔参数"
-        case colorAdjustment = "色彩调整参数"
+        case colorAdjustment = "色彩参数"
         case curves = "曲线"
     }
 
@@ -184,9 +184,13 @@ struct RightInspectorView: View {
         .background(Color(red: 0.12, green: 0.12, blue: 0.13))
         .onAppear {
             syncNavigatorZoomPercentText()
+            syncBrightnessAdjustmentEditorModeToTab()
         }
         .onChange(of: viewModel.workspace.viewport.zoomScale) { _, _ in
             syncNavigatorZoomPercentText()
+        }
+        .onChange(of: parameterInspectorTab) { _, _ in
+            syncBrightnessAdjustmentEditorModeToTab()
         }
         .onChange(of: viewModel.workspace.toolSession.activeTool) { oldTool, newTool in
             guard oldTool != newTool else { return }
@@ -252,18 +256,17 @@ struct RightInspectorView: View {
         case .brush:
             parameterInspectorTab = .brush
         case .colorAdjustment:
-            if viewModel.curveAdjustmentOverlayState.isActive {
+            guard viewModel.resolveCurveAdjustmentSessionIfNeeded(reason: .panelChange) else {
                 return
             }
             parameterInspectorTab = .colorAdjustment
             lastUsedAdjustmentTab = .colorAdjustment
         case .curves:
-            if viewModel.colorAdjustmentOverlayState.isActive {
+            guard viewModel.resolveColorAdjustmentSessionIfNeeded(reason: .panelChange) else {
                 return
             }
             parameterInspectorTab = .curves
             lastUsedAdjustmentTab = .curves
-            _ = viewModel.beginCurveAdjustmentFromWholeLayerIfNeeded(showFeedback: true)
         }
     }
 
@@ -298,6 +301,17 @@ struct RightInspectorView: View {
             return true
         default:
             return false
+        }
+    }
+
+    private func syncBrightnessAdjustmentEditorModeToTab() {
+        switch parameterInspectorTab {
+        case .colorAdjustment:
+            viewModel.setBrightnessAdjustmentEditorMode(.colorParameters)
+        case .curves:
+            viewModel.setBrightnessAdjustmentEditorMode(.curves)
+        case .brush:
+            break
         }
     }
 
@@ -985,8 +999,8 @@ struct RightInspectorView: View {
                 .popover(isPresented: $showsPressureSizeCurveEditor, arrowEdge: .bottom) {
                     pressureSizeCurveEditor
                         .padding(14)
-                        .frame(width: 280)
-                        .background(Color(nsColor: .windowBackgroundColor))
+                        .frame(width: 296, height: 236, alignment: .topLeading)
+                        .background(Color(red: 0.965, green: 0.965, blue: 0.955))
                 }
 
                 compactIconButton(systemImage: "drop", tooltip: "透明压感曲线") {
@@ -995,8 +1009,8 @@ struct RightInspectorView: View {
                 .popover(isPresented: $showsPressureCurveEditor, arrowEdge: .bottom) {
                     pressureCurveEditor
                         .padding(14)
-                        .frame(width: 280)
-                        .background(Color(nsColor: .windowBackgroundColor))
+                        .frame(width: 296, height: 236, alignment: .topLeading)
+                        .background(Color(red: 0.965, green: 0.965, blue: 0.955))
                 }
 
                 Spacer(minLength: 0)
@@ -1287,117 +1301,57 @@ struct RightInspectorView: View {
     }
 
     private var pressureSizeCurveEditor: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("大小压感曲线")
-                .font(.system(size: 13, weight: .bold))
-
+        VStack(alignment: .leading, spacing: 10) {
             curvePresetRow(
                 applyPreset: viewModel.applySizeCurvePreset,
                 reset: viewModel.resetSizeCurveToDefault
             )
+            .fixedSize(horizontal: false, vertical: true)
+            .layoutPriority(1)
+            .zIndex(2)
 
-            PressureCurvePreview(
-                low: Double(viewModel.workspace.toolSession.brush.sizeCurveLow),
-                mid: Double(viewModel.workspace.toolSession.brush.sizeCurveMid),
-                high: Double(viewModel.workspace.toolSession.brush.sizeCurveHigh)
-            )
-            .frame(height: 88)
-
-            // ⚡️ 优化：使用防抖滑块
-            OptimizedLabeledSlider(
-                title: "轻压",
-                valueText: "\(Int(viewModel.workspace.toolSession.brush.sizeCurveLow * 100))%",
-                value: Binding(
-                    get: { Double(viewModel.workspace.toolSession.brush.sizeCurveLow) },
-                    set: { _ in }
-                ),
-                range: 0...0.85,
-                onCommit: { viewModel.setSizeCurveLow(Float($0)) }
-            )
-
-            OptimizedLabeledSlider(
-                title: "中压",
-                valueText: "\(Int(viewModel.workspace.toolSession.brush.sizeCurveMid * 100))%",
-                value: Binding(
-                    get: { Double(viewModel.workspace.toolSession.brush.sizeCurveMid) },
-                    set: { _ in }
-                ),
-                range: 0...0.95,
-                onCommit: { viewModel.setSizeCurveMid(Float($0)) }
-            )
-
-            OptimizedLabeledSlider(
-                title: "高压",
-                valueText: "\(Int(viewModel.workspace.toolSession.brush.sizeCurveHigh * 100))%",
-                value: Binding(
-                    get: { Double(viewModel.workspace.toolSession.brush.sizeCurveHigh) },
-                    set: { _ in }
-                ),
-                range: 0...1,
-                onCommit: { viewModel.setSizeCurveHigh(Float($0)) }
-            )
-
-            Text("轻压控制最细起笔，中压控制中段增长，高压控制笔刷多快接近最大尺寸。")
-                .font(.system(size: 11))
-                .foregroundStyle(Color.secondary)
+            CurveEditorView(
+                state: viewModel.sizePressureCurveState,
+                isEnabled: true,
+                appearance: .light,
+                allowsEndpointMovement: false,
+                allowsPointInsertion: true,
+                allowsPointRemoval: true
+            ) { nextState in
+                viewModel.setSizePressureCurveState(nextState)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .layoutPriority(0)
+            .zIndex(1)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
     private var pressureCurveEditor: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("透明压感曲线")
-                .font(.system(size: 13, weight: .bold))
-
+        VStack(alignment: .leading, spacing: 10) {
             curvePresetRow(
                 applyPreset: viewModel.applyOpacityCurvePreset,
                 reset: viewModel.resetOpacityCurveToDefault
             )
+            .fixedSize(horizontal: false, vertical: true)
+            .layoutPriority(1)
+            .zIndex(2)
 
-            PressureCurvePreview(
-                low: Double(viewModel.workspace.toolSession.brush.opacityCurveLow),
-                mid: Double(viewModel.workspace.toolSession.brush.opacityCurveMid),
-                high: Double(viewModel.workspace.toolSession.brush.opacityCurveHigh)
-            )
-            .frame(height: 88)
-
-            // ⚡️ 优化：使用防抖滑块
-            OptimizedLabeledSlider(
-                title: "轻压",
-                valueText: "\(Int(viewModel.workspace.toolSession.brush.opacityCurveLow * 100))%",
-                value: Binding(
-                    get: { Double(viewModel.workspace.toolSession.brush.opacityCurveLow) },
-                    set: { _ in }
-                ),
-                range: 0...0.85,
-                onCommit: { viewModel.setOpacityCurveLow(Float($0)) }
-            )
-
-            OptimizedLabeledSlider(
-                title: "中压",
-                valueText: "\(Int(viewModel.workspace.toolSession.brush.opacityCurveMid * 100))%",
-                value: Binding(
-                    get: { Double(viewModel.workspace.toolSession.brush.opacityCurveMid) },
-                    set: { _ in }
-                ),
-                range: 0...0.95,
-                onCommit: { viewModel.setOpacityCurveMid(Float($0)) }
-            )
-
-            OptimizedLabeledSlider(
-                title: "高压",
-                valueText: "\(Int(viewModel.workspace.toolSession.brush.opacityCurveHigh * 100))%",
-                value: Binding(
-                    get: { Double(viewModel.workspace.toolSession.brush.opacityCurveHigh) },
-                    set: { _ in }
-                ),
-                range: 0...1,
-                onCommit: { viewModel.setOpacityCurveHigh(Float($0)) }
-            )
-
-            Text("轻压保持很淡的起笔，中压控制中段响应，高压控制多早进入更深颜色。")
-                .font(.system(size: 11))
-                .foregroundStyle(Color.secondary)
+            CurveEditorView(
+                state: viewModel.opacityPressureCurveState,
+                isEnabled: true,
+                appearance: .light,
+                allowsEndpointMovement: false,
+                allowsPointInsertion: true,
+                allowsPointRemoval: true
+            ) { nextState in
+                viewModel.setOpacityPressureCurveState(nextState)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .layoutPriority(0)
+            .zIndex(1)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
     private func curvePresetRow(
@@ -1405,26 +1359,41 @@ struct RightInspectorView: View {
         reset: @escaping () -> Void
     ) -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("预设")
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(Color.secondary)
-
-            HStack(spacing: 6) {
+            HStack(spacing: 8) {
                 ForEach(PressureCurvePreset.allCases, id: \.self) { preset in
-                    Button(preset.displayName) {
+                    pressureCurvePresetChip(title: preset.displayName) {
                         applyPreset(preset)
                     }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
+                }
+                pressureCurvePresetChip(title: "恢复默认") {
+                    reset()
                 }
             }
-
-            Button("恢复默认") {
-                reset()
-            }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func pressureCurvePresetChip(
+        title: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        Text(title)
+            .font(.system(size: 11, weight: .semibold))
+            .foregroundStyle(Color.black)
+            .lineLimit(1)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(
+                RoundedRectangle(cornerRadius: 9)
+                    .fill(Color(red: 0.80, green: 0.80, blue: 0.78))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 9)
+                    .stroke(Color.black.opacity(0.22), lineWidth: 1)
+            )
+            .shadow(color: Color.black.opacity(0.05), radius: 1, y: 1)
+            .contentShape(RoundedRectangle(cornerRadius: 9))
+            .onTapGesture(perform: action)
     }
 
     private var brushLibrarySection: some View {
@@ -3149,18 +3118,11 @@ struct RightInspectorView: View {
         _ pressure: Double,
         brush: BrushSettings
     ) -> Double {
-        let low = min(max(Double(brush.sizeCurveLow), 0), 0.85)
-        let mid = min(max(Double(brush.sizeCurveMid), low), 0.95)
-        let high = min(max(Double(brush.sizeCurveHigh), mid), 1)
-        return previewSamplePiecewiseCurve(
-            pressure: pressure,
-            points: [
-                (0.0, 0.0),
-                (0.2, low),
-                (0.5, mid),
-                (0.8, high),
-                (1.0, 1.0)
-            ]
+        Double(
+            BrushSettings.samplePressureCurve(
+                pressure: Float(pressure),
+                state: brush.resolvedSizePressureCurveState
+            )
         )
     }
 
@@ -3172,31 +3134,9 @@ struct RightInspectorView: View {
             BrushSettings.resolvedOpacityCurvePressure(
                 pressure: Float(pressure),
                 pressureSensitivity: brush.pressureSensitivity,
-                low: brush.opacityCurveLow,
-                mid: brush.opacityCurveMid,
-                high: brush.opacityCurveHigh
+                state: brush.resolvedOpacityPressureCurveState
             )
         )
-    }
-
-    private func previewSamplePiecewiseCurve(
-        pressure: Double,
-        points: [(x: Double, y: Double)]
-    ) -> Double {
-        let clamped = min(max(pressure, 0), 1)
-
-        for index in 1..<points.count {
-            let previous = points[index - 1]
-            let current = points[index]
-            if clamped <= current.x {
-                let segmentLength = max(current.x - previous.x, 0.0001)
-                let t = min(max((clamped - previous.x) / segmentLength, 0), 1)
-                let smoothT = t * t * (3 - (2 * t))
-                return previous.y + ((current.y - previous.y) * smoothT)
-            }
-        }
-
-        return points.last?.y ?? clamped
     }
 
     private func brushPreviewGlyph(
@@ -5329,42 +5269,4 @@ private func resampledMaskData(_ data: Data?, targetResolution: Int) -> Data? {
     }
 
     return Data(destination)
-}
-
-private struct PressureCurvePreview: View {
-    let low: Double
-    let mid: Double
-    let high: Double
-
-    var body: some View {
-        GeometryReader { proxy in
-            let rect = proxy.frame(in: .local)
-
-            ZStack {
-                RoundedRectangle(cornerRadius: 10)
-                    .fill(Color.black.opacity(0.06))
-
-                Path { path in
-                    path.move(to: CGPoint(x: 10, y: rect.height - 10))
-                    path.addLine(to: CGPoint(x: rect.width - 10, y: 10))
-                }
-                .stroke(Color.secondary.opacity(0.25), style: StrokeStyle(lineWidth: 1, dash: [4, 4]))
-
-                Path { path in
-                    let points = [
-                        CGPoint(x: 10, y: rect.height - 10),
-                        CGPoint(x: rect.width * 0.25, y: (rect.height - 10) - ((rect.height - 20) * low)),
-                        CGPoint(x: rect.width * 0.5, y: (rect.height - 10) - ((rect.height - 20) * mid)),
-                        CGPoint(x: rect.width * 0.75, y: (rect.height - 10) - ((rect.height - 20) * high)),
-                        CGPoint(x: rect.width - 10, y: 10)
-                    ]
-
-                    path.move(to: points[0])
-                    path.addCurve(to: points[2], control1: points[1], control2: points[1])
-                    path.addCurve(to: points[4], control1: points[3], control2: points[3])
-                }
-                .stroke(Color.accentColor, lineWidth: 2.5)
-            }
-        }
-    }
 }

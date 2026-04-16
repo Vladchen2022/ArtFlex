@@ -302,6 +302,22 @@ enum PressureCurvePreset: String, CaseIterable, Sendable {
             return (0.28, 0.68, 0.95)
         }
     }
+
+    var opacityCurveState: CurveChannelState {
+        BrushSettings.legacyPressureCurveState(
+            low: opacityValues.low,
+            mid: opacityValues.mid,
+            high: opacityValues.high
+        )
+    }
+
+    var sizeCurveState: CurveChannelState {
+        BrushSettings.legacyPressureCurveState(
+            low: sizeValues.low,
+            mid: sizeValues.mid,
+            high: sizeValues.high
+        )
+    }
 }
 
 struct CompoundPressureMixSettings: Codable, Equatable, Sendable {
@@ -696,9 +712,11 @@ struct BrushSettings: Codable, Sendable, Equatable {
     var sizeCurveLow: Float
     var sizeCurveMid: Float
     var sizeCurveHigh: Float
+    var sizePressureCurve: CurveChannelState?
     var opacityCurveLow: Float
     var opacityCurveMid: Float
     var opacityCurveHigh: Float
+    var opacityPressureCurve: CurveChannelState?
     var compoundBrush: CompoundBrushSettings
 
     static let stageOneDefault = BrushSettings(
@@ -730,9 +748,11 @@ struct BrushSettings: Codable, Sendable, Equatable {
         sizeCurveLow: 0.18,
         sizeCurveMid: 0.52,
         sizeCurveHigh: 0.88,
+        sizePressureCurve: nil,
         opacityCurveLow: 0.05,
         opacityCurveMid: 0.4,
         opacityCurveHigh: 0.82,
+        opacityPressureCurve: nil,
         compoundBrush: .disabledDefault
     )
 
@@ -765,9 +785,11 @@ struct BrushSettings: Codable, Sendable, Equatable {
         case sizeCurveLow
         case sizeCurveMid
         case sizeCurveHigh
+        case sizePressureCurve
         case opacityCurveLow
         case opacityCurveMid
         case opacityCurveHigh
+        case opacityPressureCurve
         case compoundBrush
     }
 
@@ -800,9 +822,11 @@ struct BrushSettings: Codable, Sendable, Equatable {
         sizeCurveLow: Float,
         sizeCurveMid: Float,
         sizeCurveHigh: Float,
+        sizePressureCurve: CurveChannelState? = nil,
         opacityCurveLow: Float,
         opacityCurveMid: Float,
         opacityCurveHigh: Float,
+        opacityPressureCurve: CurveChannelState? = nil,
         compoundBrush: CompoundBrushSettings = .disabledDefault
     ) {
         self.size = size
@@ -833,9 +857,11 @@ struct BrushSettings: Codable, Sendable, Equatable {
         self.sizeCurveLow = sizeCurveLow
         self.sizeCurveMid = sizeCurveMid
         self.sizeCurveHigh = sizeCurveHigh
+        self.sizePressureCurve = sizePressureCurve.map(Self.normalizedPressureCurveState(_:))
         self.opacityCurveLow = opacityCurveLow
         self.opacityCurveMid = opacityCurveMid
         self.opacityCurveHigh = opacityCurveHigh
+        self.opacityPressureCurve = opacityPressureCurve.map(Self.normalizedPressureCurveState(_:))
         self.compoundBrush = compoundBrush
     }
 
@@ -872,9 +898,13 @@ struct BrushSettings: Codable, Sendable, Equatable {
         sizeCurveLow = try container.decodeIfPresent(Float.self, forKey: .sizeCurveLow) ?? defaults.sizeCurveLow
         sizeCurveMid = try container.decodeIfPresent(Float.self, forKey: .sizeCurveMid) ?? defaults.sizeCurveMid
         sizeCurveHigh = try container.decodeIfPresent(Float.self, forKey: .sizeCurveHigh) ?? defaults.sizeCurveHigh
+        sizePressureCurve = try container.decodeIfPresent(CurveChannelState.self, forKey: .sizePressureCurve)
+            .map(Self.normalizedPressureCurveState(_:))
         opacityCurveLow = try container.decodeIfPresent(Float.self, forKey: .opacityCurveLow) ?? defaults.opacityCurveLow
         opacityCurveMid = try container.decodeIfPresent(Float.self, forKey: .opacityCurveMid) ?? defaults.opacityCurveMid
         opacityCurveHigh = try container.decodeIfPresent(Float.self, forKey: .opacityCurveHigh) ?? defaults.opacityCurveHigh
+        opacityPressureCurve = try container.decodeIfPresent(CurveChannelState.self, forKey: .opacityPressureCurve)
+            .map(Self.normalizedPressureCurveState(_:))
         compoundBrush = try container.decodeIfPresent(CompoundBrushSettings.self, forKey: .compoundBrush) ?? defaults.compoundBrush
     }
 
@@ -906,10 +936,64 @@ struct BrushSettings: Codable, Sendable, Equatable {
         try container.encode(sizeCurveLow, forKey: .sizeCurveLow)
         try container.encode(sizeCurveMid, forKey: .sizeCurveMid)
         try container.encode(sizeCurveHigh, forKey: .sizeCurveHigh)
+        try container.encodeIfPresent(sizePressureCurve, forKey: .sizePressureCurve)
         try container.encode(opacityCurveLow, forKey: .opacityCurveLow)
         try container.encode(opacityCurveMid, forKey: .opacityCurveMid)
         try container.encode(opacityCurveHigh, forKey: .opacityCurveHigh)
+        try container.encodeIfPresent(opacityPressureCurve, forKey: .opacityPressureCurve)
         try container.encode(compoundBrush, forKey: .compoundBrush)
+    }
+
+    var resolvedSizePressureCurveState: CurveChannelState {
+        sizePressureCurve ?? Self.legacyPressureCurveState(
+            low: sizeCurveLow,
+            mid: sizeCurveMid,
+            high: sizeCurveHigh
+        )
+    }
+
+    var resolvedOpacityPressureCurveState: CurveChannelState {
+        opacityPressureCurve ?? Self.legacyPressureCurveState(
+            low: opacityCurveLow,
+            mid: opacityCurveMid,
+            high: opacityCurveHigh
+        )
+    }
+
+    mutating func setLegacySizeCurveValues(
+        low: Float,
+        mid: Float,
+        high: Float
+    ) {
+        let state = Self.legacyPressureCurveState(low: low, mid: mid, high: high)
+        setSizePressureCurveState(state)
+    }
+
+    mutating func setLegacyOpacityCurveValues(
+        low: Float,
+        mid: Float,
+        high: Float
+    ) {
+        let state = Self.legacyPressureCurveState(low: low, mid: mid, high: high)
+        setOpacityPressureCurveState(state)
+    }
+
+    mutating func setSizePressureCurveState(_ state: CurveChannelState) {
+        let normalized = Self.normalizedPressureCurveState(state)
+        sizePressureCurve = normalized
+        let compatibilityValues = Self.legacyPressureCurveValues(from: normalized)
+        sizeCurveLow = compatibilityValues.low
+        sizeCurveMid = compatibilityValues.mid
+        sizeCurveHigh = compatibilityValues.high
+    }
+
+    mutating func setOpacityPressureCurveState(_ state: CurveChannelState) {
+        let normalized = Self.normalizedPressureCurveState(state)
+        opacityPressureCurve = normalized
+        let compatibilityValues = Self.legacyPressureCurveValues(from: normalized)
+        opacityCurveLow = compatibilityValues.low
+        opacityCurveMid = compatibilityValues.mid
+        opacityCurveHigh = compatibilityValues.high
     }
 
     static func samplePressureCurve(
@@ -918,26 +1002,68 @@ struct BrushSettings: Codable, Sendable, Equatable {
         mid: Float,
         high: Float
     ) -> Float {
-        let clampedPressure = min(max(pressure, 0), 1)
-        let points: [(x: Float, y: Float)] = [
-            (0.0, 0.0),
-            (0.2, min(max(low, 0), 0.85)),
-            (0.5, min(max(mid, low), 0.95)),
-            (0.8, min(max(high, mid), 1)),
-            (1.0, 1.0)
+        samplePressureCurve(
+            pressure: pressure,
+            state: legacyPressureCurveState(low: low, mid: mid, high: high)
+        )
+    }
+
+    static func samplePressureCurve(
+        pressure: Float,
+        state: CurveChannelState
+    ) -> Float {
+        CurveLUTBuilder.sampleChannelValue(
+            from: normalizedPressureCurveState(state),
+            at: pressure
+        )
+    }
+
+    static func pressureCurveControlPoints(
+        low: Float,
+        mid: Float,
+        high: Float
+    ) -> [CurveControlPoint] {
+        let clampedLow = min(max(low, 0), 0.85)
+        let clampedMid = min(max(mid, clampedLow), 0.95)
+        let clampedHigh = min(max(high, clampedMid), 1)
+        return [
+            .init(x: 0.0, y: 0.0),
+            .init(x: 0.2, y: clampedLow),
+            .init(x: 0.5, y: clampedMid),
+            .init(x: 0.8, y: clampedHigh),
+            .init(x: 1.0, y: 1.0)
         ]
+    }
 
-        for index in 1..<points.count {
-            let previous = points[index - 1]
-            let current = points[index]
-            if clampedPressure <= current.x {
-                let segmentLength = max(current.x - previous.x, 0.0001)
-                let t = min(max((clampedPressure - previous.x) / segmentLength, 0), 1)
-                return previous.y + ((current.y - previous.y) * t)
-            }
+    static func legacyPressureCurveState(
+        low: Float,
+        mid: Float,
+        high: Float
+    ) -> CurveChannelState {
+        normalizedPressureCurveState(
+            CurveChannelState(points: pressureCurveControlPoints(low: low, mid: mid, high: high))
+        )
+    }
+
+    static func legacyPressureCurveValues(
+        from state: CurveChannelState
+    ) -> (low: Float, mid: Float, high: Float) {
+        let normalized = normalizedPressureCurveState(state)
+        return (
+            low: CurveLUTBuilder.sampleChannelValue(from: normalized, at: 0.2),
+            mid: CurveLUTBuilder.sampleChannelValue(from: normalized, at: 0.5),
+            high: CurveLUTBuilder.sampleChannelValue(from: normalized, at: 0.8)
+        )
+    }
+
+    static func normalizedPressureCurveState(_ state: CurveChannelState) -> CurveChannelState {
+        var points = state.points
+        if points.count < 2 {
+            points = [.init(x: 0, y: 0), .init(x: 1, y: 1)]
         }
-
-        return points.last?.y ?? 1
+        points[0] = .init(x: 0, y: 0)
+        points[points.count - 1] = .init(x: 1, y: 1)
+        return CurveChannelState(points: points)
     }
 
     static func resolvedPressureFactor(
@@ -986,6 +1112,21 @@ struct BrushSettings: Codable, Sendable, Equatable {
             low: low,
             mid: mid,
             high: high
+        )
+    }
+
+    static func resolvedOpacityCurvePressure(
+        pressure: Float,
+        pressureSensitivity: Float,
+        state: CurveChannelState
+    ) -> Float {
+        let remapped = remappedOpacityPressure(
+            pressure: pressure,
+            pressureSensitivity: pressureSensitivity
+        )
+        return samplePressureCurve(
+            pressure: remapped,
+            state: state
         )
     }
 

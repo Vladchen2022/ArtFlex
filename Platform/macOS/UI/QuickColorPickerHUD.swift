@@ -474,18 +474,11 @@ private func quickColorPickerPreviewSizeCurvePressure(
     _ pressure: Double,
     brush: BrushSettings
 ) -> Double {
-    let low = min(max(Double(brush.sizeCurveLow), 0), 0.85)
-    let mid = min(max(Double(brush.sizeCurveMid), low), 0.95)
-    let high = min(max(Double(brush.sizeCurveHigh), mid), 1)
-    return quickColorPickerPreviewSamplePiecewiseCurve(
-        pressure: pressure,
-        points: [
-            (0.0, 0.0),
-            (0.2, low),
-            (0.5, mid),
-            (0.8, high),
-            (1.0, 1.0)
-        ]
+    Double(
+        BrushSettings.samplePressureCurve(
+            pressure: Float(pressure),
+            state: brush.resolvedSizePressureCurveState
+        )
     )
 }
 
@@ -497,31 +490,9 @@ private func quickColorPickerPreviewOpacityCurvePressure(
         BrushSettings.resolvedOpacityCurvePressure(
             pressure: Float(pressure),
             pressureSensitivity: brush.pressureSensitivity,
-            low: brush.opacityCurveLow,
-            mid: brush.opacityCurveMid,
-            high: brush.opacityCurveHigh
+            state: brush.resolvedOpacityPressureCurveState
         )
     )
-}
-
-private func quickColorPickerPreviewSamplePiecewiseCurve(
-    pressure: Double,
-    points: [(x: Double, y: Double)]
-) -> Double {
-    let clamped = min(max(pressure, 0), 1)
-
-    for index in 1..<points.count {
-        let previous = points[index - 1]
-        let current = points[index]
-        if clamped <= current.x {
-            let segmentLength = max(current.x - previous.x, 0.0001)
-            let t = min(max((clamped - previous.x) / segmentLength, 0), 1)
-            let smoothT = t * t * (3 - (2 * t))
-            return previous.y + ((current.y - previous.y) * smoothT)
-        }
-    }
-
-    return points.last?.y ?? clamped
 }
 
 private func quickColorPickerPreviewRasterResolution(

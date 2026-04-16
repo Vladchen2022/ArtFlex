@@ -20,6 +20,7 @@ extension WorkspaceViewModel {
 
     var canConfirmCurveAdjustmentSession: Bool {
         guard
+            canStartOrEditCurveAdjustmentFromPanel,
             let activeLayerID = activeEditableLayerIDForCurveAdjustment(),
             let session = curveAdjustmentSession,
             session.layerID == activeLayerID
@@ -51,7 +52,62 @@ extension WorkspaceViewModel {
                     : "当前影响区域：已绘制蒙版。调参时仍可继续补画或擦除蒙版。"
             }
         }
+        if workspace.toolSession.activeTool == .brightnessAdjust {
+            if preferredCurveAdjustmentSelectionShape() != nil {
+                return "当前影响区域：还未开始调整。直接拖动曲线可作用于选区；在画布上绘制可切换到蒙版模式。"
+            }
+            return "当前影响区域：还未开始调整。直接拖动曲线可作用于当前图层已有像素；在画布上绘制可切换到蒙版模式。"
+        }
+        if preferredCurveAdjustmentSelectionShape() != nil {
+            return "当前影响区域：选区内像素。此模式下不需要绘制蒙版。"
+        }
         return "当前影响区域：当前图层全部已有像素。点击曲线图开始调整。"
+    }
+
+    func beginCurveAdjustmentFromCurrentContextIfNeeded(showFeedback: Bool = true) -> Bool {
+        if let issue = curveAdjustmentAvailabilityIssueMessage {
+            if showFeedback {
+                presentWorkspaceStatus(kind: .info, message: issue)
+            }
+            return false
+        }
+        guard let preparedContext = preparedEditableAdjustmentLayerContext(reason: "curveAdjustment.beginFromCurrentContext") else {
+            if showFeedback {
+                presentWorkspaceStatus(kind: .error, message: "无法访问当前图层")
+            }
+            return false
+        }
+        let layerID = preparedContext.layerID
+        let sourceTexture = preparedContext.sourceTexture
+
+        if let session = curveAdjustmentSession, session.layerID == layerID {
+            syncCurveAdjustmentSessionToCurrentContextIfNeeded()
+            return curveAdjustmentSession?.layerID == layerID
+        }
+
+        let parameters = curveAdjustmentSession?.parameters ?? .neutral
+        let nextSession: CurveAdjustmentSession?
+        if let selectionShape = preferredCurveAdjustmentSelectionShape() {
+            nextSession = makeSelectionCurveAdjustmentSession(
+                layerID: layerID,
+                sourceTexture: sourceTexture,
+                selectionShape: selectionShape,
+                parameters: parameters
+            )
+        } else {
+            nextSession = makeWholeLayerCurveAdjustmentSession(
+                layerID: layerID,
+                sourceTexture: sourceTexture,
+                parameters: parameters
+            )
+        }
+
+        curveAdjustmentSession = nextSession
+        if nextSession?.hasVisiblePreview == true {
+            scheduleCurveAdjustmentPreviewUpdate(force: true)
+        }
+        syncCurveAdjustmentOverlayState()
+        return nextSession != nil
     }
 
     func beginCurveAdjustmentFromWholeLayerIfNeeded(showFeedback: Bool = true) -> Bool {
@@ -61,13 +117,14 @@ extension WorkspaceViewModel {
             }
             return false
         }
-        guard let layerID = activeEditableLayerIDForCurveAdjustment(),
-              let sourceTexture = sourceTextureForCurveAdjustment(layerID: layerID) else {
+        guard let preparedContext = preparedEditableAdjustmentLayerContext(reason: "curveAdjustment.beginWholeLayer") else {
             if showFeedback {
                 presentWorkspaceStatus(kind: .error, message: "无法访问当前图层")
             }
             return false
         }
+        let layerID = preparedContext.layerID
+        let sourceTexture = preparedContext.sourceTexture
 
         if let session = curveAdjustmentSession,
            session.layerID == layerID,
@@ -82,7 +139,9 @@ extension WorkspaceViewModel {
             sourceTexture: sourceTexture,
             parameters: carriedParameters
         )
-        scheduleCurveAdjustmentPreviewUpdate()
+        if curveAdjustmentSession?.hasVisiblePreview == true {
+            scheduleCurveAdjustmentPreviewUpdate(force: true)
+        }
         syncCurveAdjustmentOverlayState()
         return curveAdjustmentSession != nil
     }
@@ -134,16 +193,17 @@ extension WorkspaceViewModel {
 
     @discardableResult
     func confirmCurveAdjustmentIfNeeded(showFeedback: Bool = true) -> Bool {
-        guard let layerID = activeEditableLayerIDForCurveAdjustment(),
-              let surfaceID = layerSurfaceStore.surfaceID(for: layerID),
-              let sourceTexture = sourceTextureForCurveAdjustment(layerID: layerID),
+        guard let preparedContext = preparedEditableAdjustmentLayerContext(reason: "curveAdjustment.confirm"),
+              let surfaceID = layerSurfaceStore.surfaceID(for: preparedContext.layerID),
               let session = curveAdjustmentSession,
-              session.layerID == layerID else {
+              session.layerID == preparedContext.layerID else {
             if showFeedback {
                 presentWorkspaceStatus(kind: .error, message: "无法访问当前图层")
             }
             return false
         }
+        let layerID = preparedContext.layerID
+        let sourceTexture = preparedContext.sourceTexture
         guard session.hasPendingCommittedEffect else {
             if showFeedback {
                 presentWorkspaceStatus(kind: .info, message: "当前还没有可应用的曲线调整")
@@ -174,9 +234,18 @@ extension WorkspaceViewModel {
             return false
         }
 
+        let shouldClearCommittedSelectionAfterApply: Bool = {
+            guard case .selection = session.source else { return false }
+            return workspace.selection.committedShape != nil
+        }()
+        let historyWorkspaceOverride = shouldClearCommittedSelectionAfterApply
+            ? workspaceSnapshotClearingSelection()
+            : nil
+
         checkpointSingleLayerHistoryIfPossible(
             layerID: layerID,
-            operationKind: "curveAdjustment.commit"
+            operationKind: "curveAdjustment.commit",
+            workspaceOverride: historyWorkspaceOverride
         )
 
         curveAdjustmentRenderer.encodePreview(
@@ -201,10 +270,16 @@ extension WorkspaceViewModel {
         }
 
         layerSurfaceStore.swapTexture(for: surfaceID, with: targetTexture)
+        if shouldClearCommittedSelectionAfterApply {
+            clearCommittedSelectionAfterCurveAdjustmentApply()
+        }
         discardCurveAdjustmentSession()
         finalizeCommittedSingleLayerMutation(layerID)
         if showFeedback {
-            presentWorkspaceStatus(kind: .success, message: "已应用曲线调整")
+            presentWorkspaceStatus(
+                kind: .success,
+                message: shouldClearCommittedSelectionAfterApply ? "已应用曲线调整，并取消选区" : "已应用曲线调整"
+            )
         }
         return true
     }
@@ -217,6 +292,147 @@ extension WorkspaceViewModel {
             presentWorkspaceStatus(kind: .info, message: "已放弃当前曲线调整")
         }
         return true
+    }
+
+    func beginCurveAdjustmentStrokeIfNeeded() {
+        guard let activeContext = activeEditableAdjustmentLayerContext() else { return }
+        let layerID = activeContext.layerID
+        let sourceTexture = activeContext.sourceTexture
+
+        let carriedParameters = curveAdjustmentSession?.parameters ?? .neutral
+        let requiresPaintedMaskSession: Bool = {
+            guard let session = curveAdjustmentSession, session.layerID == layerID else {
+                return true
+            }
+            if case .painted = session.source {
+                return false
+            }
+            return true
+        }()
+
+        if requiresPaintedMaskSession {
+            curveAdjustmentPreviewToken &+= 1
+            curveAdjustmentPreviewRenderInFlight = false
+            curveAdjustmentPreviewRenderNeedsResubmit = false
+            curveAdjustmentSession = makePaintedCurveAdjustmentSession(
+                layerID: layerID,
+                sourceTexture: sourceTexture,
+                parameters: carriedParameters
+            )
+        }
+
+        curveAdjustmentStrokePacketCount = 0
+        curveAdjustmentPreviewRenderNeedsResubmit = false
+        syncCurveAdjustmentOverlayState()
+    }
+
+    func applyCurveAdjustmentStroke(samples: [CanvasStrokeSample]) {
+        guard !samples.isEmpty else { return }
+        guard let activeContext = activeEditableAdjustmentLayerContext() else { return }
+        let layerID = activeContext.layerID
+        let sourceTexture = activeContext.sourceTexture
+        guard var session = curveAdjustmentSession, session.layerID == layerID else { return }
+        guard case .painted(var paintedState) = session.source else { return }
+
+        let skipLeadingStamp = curveAdjustmentStrokePacketCount > 0
+        let stroke = makeCurveAdjustmentMaskStrokeDescriptor(
+            samples: samples,
+            skipLeadingStamp: skipLeadingStamp
+        )
+
+        if stroke.brush.buildMode == .opacityCap {
+            if paintedState.opacityCapSession == nil {
+                paintedState.opacityCapSession = colorAdjustmentStrokeEngine.makeOpacityCapSessionForImmediateStroke(
+                    texture: paintedState.maskTexture
+                )
+            }
+            if let opacityCapSession = paintedState.opacityCapSession {
+                _ = colorAdjustmentStrokeEngine.renderImmediateOpacityCapStroke(
+                    stroke,
+                    session: opacityCapSession,
+                    to: paintedState.maskTexture,
+                    alphaLockTexture: sourceTexture,
+                    samplingState: &paintedState.brushSamplingState
+                )
+            }
+        } else {
+            _ = colorAdjustmentStrokeEngine.renderImmediateStroke(
+                stroke,
+                to: paintedState.maskTexture,
+                alphaLockTexture: sourceTexture,
+                samplingState: &paintedState.brushSamplingState
+            )
+        }
+
+        paintedState.paintedBounds = unionCurveAdjustmentPaintedBounds(
+            paintedState.paintedBounds,
+            with: samples,
+            brushSize: stroke.brush.size
+        )
+
+        session.source = .painted(paintedState)
+        session.brushMode = curveAdjustmentBrushMode
+        curveAdjustmentSession = session
+        curveAdjustmentStrokePacketCount += 1
+        let shouldRenderPreviewNow =
+            curveAdjustmentStrokePacketCount == 1
+            || curveAdjustmentStrokePacketCount.isMultiple(of: 3)
+        if shouldRenderPreviewNow {
+            scheduleCurveAdjustmentPreviewUpdate(force: true)
+        }
+        syncCurveAdjustmentOverlayState()
+    }
+
+    func endCurveAdjustmentStroke() {
+        guard var session = curveAdjustmentSession else { return }
+        guard case .painted(var paintedState) = session.source else { return }
+        guard let activeContext = activeEditableAdjustmentLayerContext() else { return }
+        let sourceTexture = activeContext.sourceTexture
+
+        defer {
+            session.source = .painted(paintedState)
+            curveAdjustmentSession = session
+            curveAdjustmentStrokePacketCount = 0
+            scheduleCurveAdjustmentPreviewUpdate(force: true)
+            syncCurveAdjustmentOverlayState()
+        }
+
+        guard paintedState.brushSamplingState != nil else { return }
+
+        var flushSamplingState = paintedState.brushSamplingState
+        flushSamplingState?.isFlushing = true
+        let flushStroke = StrokeDescriptor(
+            tool: .brush,
+            color: curveAdjustmentBrushMode == .paint
+                ? .init(red: 1, green: 1, blue: 1, alpha: 1)
+                : .init(red: 0, green: 0, blue: 0, alpha: 1),
+            brush: workspace.toolSession.brush,
+            points: [],
+            selectionShape: workspace.selection.committedShape,
+            alphaLockEnabled: true,
+            skipLeadingStamp: true
+        )
+
+        if flushStroke.brush.buildMode == .opacityCap,
+           let opacityCapSession = paintedState.opacityCapSession {
+            _ = colorAdjustmentStrokeEngine.renderImmediateOpacityCapStroke(
+                flushStroke,
+                session: opacityCapSession,
+                to: paintedState.maskTexture,
+                alphaLockTexture: sourceTexture,
+                samplingState: &flushSamplingState
+            )
+            paintedState.opacityCapSession = nil
+        } else {
+            _ = colorAdjustmentStrokeEngine.renderImmediateStroke(
+                flushStroke,
+                to: paintedState.maskTexture,
+                alphaLockTexture: sourceTexture,
+                samplingState: &flushSamplingState
+            )
+        }
+        flushSamplingState?.isFlushing = false
+        paintedState.brushSamplingState = nil
     }
 
     @discardableResult
@@ -246,21 +462,32 @@ extension WorkspaceViewModel {
         _ event: NSEvent,
         modifiers: NSEvent.ModifierFlags
     ) -> Bool {
-        guard curveAdjustmentSession != nil else { return false }
         guard modifiers.isEmpty else { return false }
+        let isCurveMaskToolContext =
+            workspace.toolSession.activeTool == .brightnessAdjust
+            && brightnessAdjustmentEditorMode == .curves
+        guard curveAdjustmentSession != nil || curveAdjustmentAllowsIdleModeHotkeys else { return false }
 
         if event.keyCode == 53 {
+            guard curveAdjustmentSession != nil else { return false }
             cancelCurveAdjustmentIfNeeded(showFeedback: true)
             return true
         }
 
         if event.keyCode == 36 || event.keyCode == 76 {
+            guard curveAdjustmentSession != nil else { return false }
             confirmCurveAdjustmentIfNeeded(showFeedback: true)
             return true
         }
 
         switch event.charactersIgnoringModifiers?.lowercased() {
-        case "b", "e":
+        case "e" where isCurveMaskToolContext:
+            curveAdjustmentBrushMode = .erase
+            updateCurveAdjustmentBrushModeIfNeeded()
+            return true
+        case "b" where isCurveMaskToolContext:
+            curveAdjustmentBrushMode = .paint
+            updateCurveAdjustmentBrushModeIfNeeded()
             return true
         default:
             return false
@@ -280,23 +507,83 @@ extension WorkspaceViewModel {
         if colorAdjustmentSession != nil {
             return "请先确认或取消当前色彩调整。"
         }
-        if workspace.toolSession.activeTool == .brightnessAdjust {
-            return "曲线的蒙版路径将在下一阶段接通；当前先支持整层直调。"
-        }
-        if workspace.selection.committedShape != nil {
-            return "曲线的选区直调将在下一阶段接通；当前先支持整层直调。"
-        }
         return nil
     }
 
     private func preparedCurveAdjustmentSessionForParameterEditing(showFeedback: Bool) -> CurveAdjustmentSession? {
-        if let session = curveAdjustmentSession {
-            return session
+        guard let preparedContext = preparedEditableAdjustmentLayerContext(reason: "curveAdjustment.prepareParameters") else {
+            return nil
         }
-        guard beginCurveAdjustmentFromWholeLayerIfNeeded(showFeedback: showFeedback) else {
+        let layerID = preparedContext.layerID
+        if let session = curveAdjustmentSession, session.layerID == layerID {
+            syncCurveAdjustmentSessionToCurrentContextIfNeeded()
+            return curveAdjustmentSession
+        }
+        guard beginCurveAdjustmentFromCurrentContextIfNeeded(showFeedback: showFeedback) else {
             return nil
         }
         return curveAdjustmentSession
+    }
+
+    func syncCurveAdjustmentSessionToCurrentContextIfNeeded() {
+        guard let session = curveAdjustmentSession else { return }
+        guard let activeContext = activeEditableAdjustmentLayerContext(),
+              session.layerID == activeContext.layerID else {
+            return
+        }
+        let activeLayerID = activeContext.layerID
+        let sourceTexture = activeContext.sourceTexture
+
+        let replacementSession: CurveAdjustmentSession?
+        switch session.source {
+        case .painted:
+            replacementSession = nil
+        case .selection(let selectionState):
+            guard let selectionShape = preferredCurveAdjustmentSelectionShape() else {
+                replacementSession = rebuiltDirectCurveAdjustmentSession(
+                    layerID: activeLayerID,
+                    sourceTexture: sourceTexture,
+                    preserving: session,
+                    preferredSelectionShape: nil
+                )
+                break
+            }
+            guard selectionShape != selectionState.capturedSelectionShape else {
+                replacementSession = nil
+                break
+            }
+            replacementSession = rebuiltDirectCurveAdjustmentSession(
+                layerID: activeLayerID,
+                sourceTexture: sourceTexture,
+                preserving: session,
+                preferredSelectionShape: selectionShape
+            )
+        case .wholeLayer(let wholeLayerState):
+            if let selectionShape = preferredCurveAdjustmentSelectionShape() {
+                replacementSession = rebuiltDirectCurveAdjustmentSession(
+                    layerID: activeLayerID,
+                    sourceTexture: sourceTexture,
+                    preserving: session,
+                    preferredSelectionShape: selectionShape
+                )
+            } else if wholeLayerState.capturedCanvasRevision != canvasContentRevision {
+                replacementSession = rebuiltDirectCurveAdjustmentSession(
+                    layerID: activeLayerID,
+                    sourceTexture: sourceTexture,
+                    preserving: session,
+                    preferredSelectionShape: nil
+                )
+            } else {
+                replacementSession = nil
+            }
+        }
+
+        guard let replacementSession else { return }
+        curveAdjustmentSession = replacementSession
+        if replacementSession.hasVisiblePreview {
+            scheduleCurveAdjustmentPreviewUpdate(force: true)
+        }
+        syncCurveAdjustmentOverlayState()
     }
 
     private func makeWholeLayerCurveAdjustmentSession(
@@ -317,11 +604,94 @@ extension WorkspaceViewModel {
                 )
             ),
             previewTexture: previewTexture,
-            parameters: parameters
+            parameters: parameters,
+            brushMode: curveAdjustmentBrushMode
+        )
+    }
+
+    private func makePaintedCurveAdjustmentSession(
+        layerID: LayerID,
+        sourceTexture: MTLTexture,
+        parameters: CurveAdjustmentParameters = .neutral
+    ) -> CurveAdjustmentSession? {
+        guard
+            let previewTexture = makeCurveAdjustmentPreviewTexture(from: sourceTexture),
+            let maskTexture = layerSurfaceStore.makeTexture(
+                width: sourceTexture.width,
+                height: sourceTexture.height,
+                pixelFormat: .bgra8Unorm_srgb,
+                metal: metalContext
+            )
+        else {
+            return nil
+        }
+
+        clearCurveAdjustmentMaskTexture(maskTexture)
+        return CurveAdjustmentSession(
+            layerID: layerID,
+            source: .painted(
+                CurvePaintedMaskState(
+                    maskTexture: maskTexture,
+                    paintedBounds: nil,
+                    brushSamplingState: nil,
+                    opacityCapSession: nil
+                )
+            ),
+            previewTexture: previewTexture,
+            parameters: parameters,
+            brushMode: curveAdjustmentBrushMode
+        )
+    }
+
+    private func makeSelectionCurveAdjustmentSession(
+        layerID: LayerID,
+        sourceTexture: MTLTexture,
+        selectionShape: SelectionShape,
+        parameters: CurveAdjustmentParameters
+    ) -> CurveAdjustmentSession? {
+        let canvasSize = CanvasSize(width: sourceTexture.width, height: sourceTexture.height)
+        let clampedSelection = selectionShape.clamped(to: canvasSize)
+        guard let boundsRegion = curveEffectRegion(from: clampedSelection.bounds) else {
+            return nil
+        }
+        guard let previewTexture = makeCurveAdjustmentPreviewTexture(from: sourceTexture),
+              let maskTexture = makeCurveSelectionMaskTexture(
+                for: clampedSelection,
+                canvasSize: canvasSize
+              ) else {
+            return nil
+        }
+
+        return CurveAdjustmentSession(
+            layerID: layerID,
+            source: .selection(
+                CurveSelectionMaskState(
+                    maskTexture: maskTexture,
+                    bounds: CanvasRect(
+                        origin: .init(
+                            x: Double(boundsRegion.origin.x),
+                            y: Double(boundsRegion.origin.y)
+                        ),
+                        size: .init(
+                            x: Double(boundsRegion.size.width),
+                            y: Double(boundsRegion.size.height)
+                        )
+                    ),
+                    capturedSelectionShape: clampedSelection,
+                    capturedSelectionRevision: selectionRevision
+                )
+            ),
+            previewTexture: previewTexture,
+            parameters: parameters,
+            brushMode: curveAdjustmentBrushMode
         )
     }
 
     private func sourceTextureForCurveAdjustment(layerID: LayerID) -> MTLTexture? {
+        if let activeContext = activeEditableAdjustmentLayerContext(),
+           activeContext.layerID == layerID {
+            return activeContext.sourceTexture
+        }
         guard
             let surfaceID = layerSurfaceStore.surfaceID(for: layerID),
             let texture = layerSurfaceStore.texture(for: surfaceID)
@@ -331,10 +701,31 @@ extension WorkspaceViewModel {
         return texture
     }
 
-    private func scheduleCurveAdjustmentPreviewUpdate() {
+    private func scheduleCurveAdjustmentPreviewUpdate(force: Bool = false) {
         guard let session = curveAdjustmentSession else { return }
         guard let sourceTexture = sourceTextureForCurveAdjustment(layerID: session.layerID) else { return }
         guard let renderPlan = curveRenderPlan(for: session) else { return }
+        let isPaintedMaskSession: Bool = {
+            if case .painted = session.source {
+                return true
+            }
+            return false
+        }()
+
+        if curveAdjustmentPreviewRenderInFlight {
+            curveAdjustmentPreviewRenderNeedsResubmit = true
+            return
+        }
+
+        if isPaintedMaskSession,
+           !force,
+           curveAdjustmentStrokePacketCount > 1,
+           !curveAdjustmentStrokePacketCount.isMultiple(of: 3) {
+            return
+        }
+
+        curveAdjustmentPreviewRenderInFlight = true
+        let previewToken = curveAdjustmentPreviewToken
 
         curveAdjustmentRenderer.renderPreview(
             sourceTexture: sourceTexture,
@@ -347,9 +738,55 @@ extension WorkspaceViewModel {
             commandQueue: metalContext.commandQueue
         ) { [weak self] in
             Task { @MainActor in
-                self?.colorAdjustmentRedrawRevision &+= 1
+                guard let self else { return }
+                guard self.curveAdjustmentPreviewToken == previewToken else { return }
+                self.curveAdjustmentPreviewRenderInFlight = false
+                self.colorAdjustmentRedrawRevision &+= 1
+                if self.curveAdjustmentPreviewRenderNeedsResubmit {
+                    self.curveAdjustmentPreviewRenderNeedsResubmit = false
+                    self.scheduleCurveAdjustmentPreviewUpdate(force: true)
+                }
             }
         }
+    }
+
+    private func rebuiltDirectCurveAdjustmentSession(
+        layerID: LayerID,
+        sourceTexture: MTLTexture,
+        preserving session: CurveAdjustmentSession,
+        preferredSelectionShape: SelectionShape?
+    ) -> CurveAdjustmentSession? {
+        let rebuiltSession: CurveAdjustmentSession?
+        if let preferredSelectionShape {
+            rebuiltSession = makeSelectionCurveAdjustmentSession(
+                layerID: layerID,
+                sourceTexture: sourceTexture,
+                selectionShape: preferredSelectionShape,
+                parameters: session.parameters
+            )
+        } else {
+            rebuiltSession = makeWholeLayerCurveAdjustmentSession(
+                layerID: layerID,
+                sourceTexture: sourceTexture,
+                parameters: session.parameters
+            )
+        }
+
+        guard var rebuiltSession else { return nil }
+        rebuiltSession.brushMode = session.brushMode
+        rebuiltSession.showsOriginalPreview = session.showsOriginalPreview
+        return rebuiltSession
+    }
+
+    private func preferredCurveAdjustmentSelectionShape() -> SelectionShape? {
+        let canvasSize = workspace.document.canvasSize
+        guard let selectionShape = workspace.selection.committedShape?.clamped(to: canvasSize) else {
+            return nil
+        }
+        guard curveEffectRegion(from: selectionShape.bounds) != nil else {
+            return nil
+        }
+        return selectionShape
     }
 
     private func confirmCurveAdjustmentResolution(
@@ -385,6 +822,8 @@ extension WorkspaceViewModel {
         switch reason {
         case .toolChange:
             return "切换工具前，要先确认当前曲线调整效果，还是放弃这次调整？"
+        case .panelChange:
+            return "切换到另一种调整面板前，要先确认当前曲线调整效果，还是放弃这次调整？"
         case .layerChange:
             return "切换图层前，要先确认当前曲线调整效果，还是放弃这次调整？"
         case .historyNavigation:
@@ -398,6 +837,12 @@ extension WorkspaceViewModel {
 
     private func discardCurveAdjustmentSession() {
         curveAdjustmentSession = nil
+        curveAdjustmentAllowsIdleModeHotkeys = false
+        curveAdjustmentBrushMode = .paint
+        curveAdjustmentStrokePacketCount = 0
+        curveAdjustmentPreviewToken &+= 1
+        curveAdjustmentPreviewRenderInFlight = false
+        curveAdjustmentPreviewRenderNeedsResubmit = false
         curveAdjustmentOverlayState = .inactive
         colorAdjustmentRedrawRevision &+= 1
     }
@@ -405,6 +850,7 @@ extension WorkspaceViewModel {
     private func syncCurveAdjustmentOverlayState() {
         guard let session = curveAdjustmentSession else {
             curveAdjustmentOverlayState = .inactive
+            syncSelectionOverlayForAdjustmentState()
             return
         }
 
@@ -415,6 +861,7 @@ extension WorkspaceViewModel {
             effectiveBounds: session.source.effectiveBounds,
             sourceKind: session.source.sourceKindForOverlay
         )
+        syncSelectionOverlayForAdjustmentState()
     }
 
     private func curveRenderPlan(for session: CurveAdjustmentSession) -> CurveAdjustmentRenderPlan? {
@@ -489,5 +936,115 @@ extension WorkspaceViewModel {
         blitEncoder.endEncoding()
         commandBuffer.commit()
         commandBuffer.waitUntilCompleted()
+    }
+
+    private func clearCurveAdjustmentMaskTexture(_ texture: MTLTexture) {
+        guard let commandBuffer = metalContext.commandQueue.makeCommandBuffer() else { return }
+        let descriptor = MTLRenderPassDescriptor()
+        descriptor.colorAttachments[0].texture = texture
+        descriptor.colorAttachments[0].loadAction = .clear
+        descriptor.colorAttachments[0].storeAction = .store
+        descriptor.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
+        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: descriptor) else { return }
+        encoder.endEncoding()
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+    }
+
+    private func makeCurveAdjustmentMaskStrokeDescriptor(
+        samples: [CanvasStrokeSample],
+        skipLeadingStamp: Bool
+    ) -> StrokeDescriptor {
+        StrokeDescriptor(
+            tool: .brush,
+            color: curveAdjustmentBrushMode == .paint
+                ? .init(red: 1, green: 1, blue: 1, alpha: 1)
+                : .init(red: 0, green: 0, blue: 0, alpha: 1),
+            brush: workspace.toolSession.brush,
+            points: samples.map { .init(x: $0.location.x, y: $0.location.y, pressure: $0.pressure) },
+            selectionShape: workspace.selection.committedShape,
+            alphaLockEnabled: true,
+            skipLeadingStamp: skipLeadingStamp
+        )
+    }
+
+    private func unionCurveAdjustmentPaintedBounds(
+        _ existing: CanvasRect?,
+        with samples: [CanvasStrokeSample],
+        brushSize: Float
+    ) -> CanvasRect? {
+        guard !samples.isEmpty else { return existing }
+
+        let radius = Double(max(brushSize * 0.5, 1))
+        let minX = samples.map(\.location.x).min()! - radius
+        let minY = samples.map(\.location.y).min()! - radius
+        let maxX = samples.map(\.location.x).max()! + radius
+        let maxY = samples.map(\.location.y).max()! + radius
+        let strokeBounds = CanvasRect(
+            origin: .init(x: minX, y: minY),
+            size: .init(x: maxX - minX, y: maxY - minY)
+        ).clamped(to: workspace.document.canvasSize)
+
+        guard let existing else { return strokeBounds }
+        let unionMinX = min(existing.origin.x, strokeBounds.origin.x)
+        let unionMinY = min(existing.origin.y, strokeBounds.origin.y)
+        let unionMaxX = max(existing.origin.x + existing.size.x, strokeBounds.origin.x + strokeBounds.size.x)
+        let unionMaxY = max(existing.origin.y + existing.size.y, strokeBounds.origin.y + strokeBounds.size.y)
+        return CanvasRect(
+            origin: .init(x: unionMinX, y: unionMinY),
+            size: .init(x: unionMaxX - unionMinX, y: unionMaxY - unionMinY)
+        ).clamped(to: workspace.document.canvasSize)
+    }
+
+    private func updateCurveAdjustmentBrushModeIfNeeded() {
+        guard var session = curveAdjustmentSession else {
+            syncCurveAdjustmentOverlayState()
+            return
+        }
+        if case .painted(var paintedState) = session.source {
+            paintedState.brushSamplingState = nil
+            paintedState.opacityCapSession = nil
+            session.source = .painted(paintedState)
+            curveAdjustmentStrokePacketCount = 0
+        }
+        session.brushMode = curveAdjustmentBrushMode
+        curveAdjustmentSession = session
+        syncCurveAdjustmentOverlayState()
+    }
+
+    private func makeCurveSelectionMaskTexture(
+        for selectionShape: SelectionShape,
+        canvasSize: CanvasSize
+    ) -> MTLTexture? {
+        let alphaBytes = selectionMaskBytesForCurveAdjustment(
+            shape: selectionShape,
+            canvasSize: canvasSize
+        )
+        guard !alphaBytes.isEmpty else { return nil }
+        guard let maskTexture = layerSurfaceStore.makeTexture(
+            width: canvasSize.width,
+            height: canvasSize.height,
+            pixelFormat: .r8Unorm,
+            usage: [.shaderRead],
+            storageMode: .shared,
+            metal: metalContext
+        ) else {
+            return nil
+        }
+
+        alphaBytes.withUnsafeBufferPointer { rawBuffer in
+            guard let baseAddress = rawBuffer.baseAddress else { return }
+            maskTexture.replace(
+                region: MTLRegionMake2D(0, 0, canvasSize.width, canvasSize.height),
+                mipmapLevel: 0,
+                withBytes: baseAddress,
+                bytesPerRow: canvasSize.width
+            )
+        }
+        return maskTexture
+    }
+
+    private func clearCommittedSelectionAfterCurveAdjustmentApply() {
+        clearCommittedSelectionWithoutHistory()
     }
 }

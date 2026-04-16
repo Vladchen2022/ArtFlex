@@ -1,19 +1,44 @@
 import AppKit
 import SwiftUI
 
+enum CurveEditorAppearance {
+    case dark
+    case light
+}
+
 struct CurveEditorView: NSViewRepresentable {
     var state: CurveChannelState
     var isEnabled: Bool
+    var appearance: CurveEditorAppearance = .dark
+    var allowsEndpointMovement: Bool = true
+    var allowsPointInsertion: Bool = true
+    var allowsPointRemoval: Bool = true
     var onChange: (CurveChannelState) -> Void
 
     func makeNSView(context: Context) -> CurveEditorNSView {
         let view = CurveEditorNSView()
-        view.update(state: state, isEnabled: isEnabled, onChange: onChange)
+        view.update(
+            state: state,
+            isEnabled: isEnabled,
+            appearance: appearance,
+            allowsEndpointMovement: allowsEndpointMovement,
+            allowsPointInsertion: allowsPointInsertion,
+            allowsPointRemoval: allowsPointRemoval,
+            onChange: onChange
+        )
         return view
     }
 
     func updateNSView(_ nsView: CurveEditorNSView, context: Context) {
-        nsView.update(state: state, isEnabled: isEnabled, onChange: onChange)
+        nsView.update(
+            state: state,
+            isEnabled: isEnabled,
+            appearance: appearance,
+            allowsEndpointMovement: allowsEndpointMovement,
+            allowsPointInsertion: allowsPointInsertion,
+            allowsPointRemoval: allowsPointRemoval,
+            onChange: onChange
+        )
     }
 }
 
@@ -25,6 +50,10 @@ final class CurveEditorNSView: NSView {
 
     private var channelState: CurveChannelState = .identity
     private var isEditorEnabled = true
+    private var editorAppearance: CurveEditorAppearance = .dark
+    private var allowsEndpointMovement = true
+    private var allowsPointInsertion = true
+    private var allowsPointRemoval = true
     private var onChange: ((CurveChannelState) -> Void)?
     private var selectedPointIndex: Int?
     private var draggingPointIndex: Int?
@@ -35,10 +64,18 @@ final class CurveEditorNSView: NSView {
     func update(
         state: CurveChannelState,
         isEnabled: Bool,
+        appearance: CurveEditorAppearance,
+        allowsEndpointMovement: Bool,
+        allowsPointInsertion: Bool,
+        allowsPointRemoval: Bool,
         onChange: @escaping (CurveChannelState) -> Void
     ) {
         channelState = state
         isEditorEnabled = isEnabled
+        self.editorAppearance = appearance
+        self.allowsEndpointMovement = allowsEndpointMovement
+        self.allowsPointInsertion = allowsPointInsertion
+        self.allowsPointRemoval = allowsPointRemoval
         self.onChange = onChange
         if let selectedPointIndex, !state.points.indices.contains(selectedPointIndex) {
             self.selectedPointIndex = nil
@@ -52,13 +89,13 @@ final class CurveEditorNSView: NSView {
         let drawBounds = bounds.insetBy(dx: 0.5, dy: 0.5)
         let graphRect = graphBounds
 
-        NSColor(calibratedWhite: 0.10, alpha: 1).setFill()
+        colors.background.setFill()
         dirtyRect.fill()
 
         let panelPath = NSBezierPath(roundedRect: drawBounds, xRadius: 10, yRadius: 10)
-        NSColor.white.withAlphaComponent(0.06).setFill()
+        colors.panelFill.setFill()
         panelPath.fill()
-        NSColor.white.withAlphaComponent(0.08).setStroke()
+        colors.panelStroke.setStroke()
         panelPath.lineWidth = 1
         panelPath.stroke()
 
@@ -75,19 +112,19 @@ final class CurveEditorNSView: NSView {
             gridPath.move(to: CGPoint(x: graphRect.minX, y: y))
             gridPath.line(to: CGPoint(x: graphRect.maxX, y: y))
         }
-        NSColor.white.withAlphaComponent(0.10).setStroke()
+        colors.grid.setStroke()
         gridPath.lineWidth = 1
         gridPath.stroke()
 
         let diagonalPath = NSBezierPath()
         diagonalPath.move(to: CGPoint(x: graphRect.minX, y: graphRect.minY))
         diagonalPath.line(to: CGPoint(x: graphRect.maxX, y: graphRect.maxY))
-        NSColor.white.withAlphaComponent(0.18).setStroke()
+        colors.diagonal.setStroke()
         diagonalPath.lineWidth = 1
         diagonalPath.stroke()
 
         let curvePath = sampledCurvePath(in: graphRect)
-        NSColor.white.withAlphaComponent(isEditorEnabled ? 0.96 : 0.36).setStroke()
+        colors.curve(isEnabled: isEditorEnabled).setStroke()
         curvePath.lineWidth = 2
         curvePath.stroke()
 
@@ -98,16 +135,16 @@ final class CurveEditorNSView: NSView {
             let circle = NSBezierPath(ovalIn: rect)
             let fillColor: NSColor = isSelected
                 ? NSColor.controlAccentColor
-                : NSColor.white.withAlphaComponent(isEditorEnabled ? 0.94 : 0.34)
+                : colors.pointFill(isEnabled: isEditorEnabled)
             fillColor.setFill()
             circle.fill()
-            NSColor.black.withAlphaComponent(isSelected ? 0.18 : 0.34).setStroke()
+            colors.pointStroke(isSelected: isSelected).setStroke()
             circle.lineWidth = 1
             circle.stroke()
         }
 
         if !isEditorEnabled {
-            NSColor.black.withAlphaComponent(0.18).setFill()
+            colors.disabledOverlay.setFill()
             graphRect.fill()
         }
 
@@ -129,7 +166,10 @@ final class CurveEditorNSView: NSView {
 
         if let hitIndex = hitPointIndex(at: clickPoint, in: graphRect) {
             selectedPointIndex = hitIndex
-            if event.clickCount >= 2, hitIndex != 0, hitIndex != channelState.points.count - 1 {
+            if allowsPointRemoval,
+               event.clickCount >= 2,
+               hitIndex != 0,
+               hitIndex != channelState.points.count - 1 {
                 channelState = channelState.removingPoint(at: hitIndex)
                 selectedPointIndex = nil
                 draggingPointIndex = nil
@@ -142,7 +182,8 @@ final class CurveEditorNSView: NSView {
         }
 
         let normalizedPoint = normalizedPoint(for: clickPoint, in: graphRect)
-        if distanceToCurve(from: clickPoint, in: graphRect) <= curveHitDistance,
+        if allowsPointInsertion,
+           distanceToCurve(from: clickPoint, in: graphRect) <= curveHitDistance,
            let insertion = channelState.insertingPoint(normalizedPoint) {
             channelState = insertion.state
             selectedPointIndex = insertion.insertedIndex
@@ -160,6 +201,10 @@ final class CurveEditorNSView: NSView {
     override func mouseDragged(with event: NSEvent) {
         guard isEditorEnabled else { return }
         guard let draggingPointIndex else { return }
+        if !allowsEndpointMovement,
+           (draggingPointIndex == 0 || draggingPointIndex == channelState.points.count - 1) {
+            return
+        }
 
         let point = convert(event.locationInWindow, from: nil)
         let nextState = channelState.movingPoint(
@@ -178,7 +223,7 @@ final class CurveEditorNSView: NSView {
     }
 
     override func menu(for event: NSEvent) -> NSMenu? {
-        guard isEditorEnabled else { return nil }
+        guard isEditorEnabled, allowsPointRemoval else { return nil }
         let clickPoint = convert(event.locationInWindow, from: nil)
         let graphRect = graphBounds
         guard graphRect.contains(clickPoint) else { return nil }
@@ -268,25 +313,7 @@ final class CurveEditorNSView: NSView {
     }
 
     private func sampledValue(at x: Float) -> Float {
-        let points = channelState.points
-        guard points.count >= 2 else { return x }
-        if x <= points[0].x {
-            return points[0].y
-        }
-        if let last = points.last, x >= last.x {
-            return last.y
-        }
-
-        for index in 0..<(points.count - 1) {
-            let start = points[index]
-            let end = points[index + 1]
-            if x >= start.x && x <= end.x {
-                let span = max(end.x - start.x, 0.0001)
-                let t = (x - start.x) / span
-                return start.y + ((end.y - start.y) * t)
-            }
-        }
-        return points.last?.y ?? x
+        CurveLUTBuilder.sampleChannelValue(from: channelState, at: x)
     }
 
     private func distanceToCurve(from point: CGPoint, in rect: CGRect) -> CGFloat {
@@ -339,5 +366,67 @@ final class CurveEditorNSView: NSView {
         onChange?(channelState)
         needsDisplay = true
         return true
+    }
+
+    private var colors: CurveEditorPalette {
+        switch editorAppearance {
+        case .dark:
+            return CurveEditorPalette(
+                background: NSColor(calibratedWhite: 0.10, alpha: 1),
+                panelFill: NSColor.white.withAlphaComponent(0.06),
+                panelStroke: NSColor.white.withAlphaComponent(0.08),
+                grid: NSColor.white.withAlphaComponent(0.10),
+                diagonal: NSColor.white.withAlphaComponent(0.18),
+                curveEnabled: NSColor.white.withAlphaComponent(0.96),
+                curveDisabled: NSColor.white.withAlphaComponent(0.36),
+                pointEnabled: NSColor.white.withAlphaComponent(0.94),
+                pointDisabled: NSColor.white.withAlphaComponent(0.34),
+                pointStrokeSelected: NSColor.black.withAlphaComponent(0.18),
+                pointStrokeNormal: NSColor.black.withAlphaComponent(0.34),
+                disabledOverlay: NSColor.black.withAlphaComponent(0.18)
+            )
+        case .light:
+            return CurveEditorPalette(
+                background: NSColor(calibratedWhite: 0.96, alpha: 1),
+                panelFill: NSColor.white,
+                panelStroke: NSColor.black.withAlphaComponent(0.08),
+                grid: NSColor.black.withAlphaComponent(0.08),
+                diagonal: NSColor.black.withAlphaComponent(0.12),
+                curveEnabled: NSColor.controlAccentColor.withAlphaComponent(0.96),
+                curveDisabled: NSColor.controlAccentColor.withAlphaComponent(0.36),
+                pointEnabled: NSColor.white,
+                pointDisabled: NSColor(calibratedWhite: 0.90, alpha: 1),
+                pointStrokeSelected: NSColor.controlAccentColor.withAlphaComponent(0.68),
+                pointStrokeNormal: NSColor.black.withAlphaComponent(0.18),
+                disabledOverlay: NSColor.white.withAlphaComponent(0.36)
+            )
+        }
+    }
+}
+
+private struct CurveEditorPalette {
+    let background: NSColor
+    let panelFill: NSColor
+    let panelStroke: NSColor
+    let grid: NSColor
+    let diagonal: NSColor
+    let curveEnabled: NSColor
+    let curveDisabled: NSColor
+    let pointEnabled: NSColor
+    let pointDisabled: NSColor
+    let pointStrokeSelected: NSColor
+    let pointStrokeNormal: NSColor
+    let disabledOverlay: NSColor
+
+    func curve(isEnabled: Bool) -> NSColor {
+        isEnabled ? curveEnabled : curveDisabled
+    }
+
+    func pointFill(isEnabled: Bool) -> NSColor {
+        isEnabled ? pointEnabled : pointDisabled
+    }
+
+    func pointStroke(isSelected: Bool) -> NSColor {
+        isSelected ? pointStrokeSelected : pointStrokeNormal
     }
 }

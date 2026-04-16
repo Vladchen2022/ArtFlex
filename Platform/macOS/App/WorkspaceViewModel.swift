@@ -30,6 +30,16 @@ private enum WholeLayerInteractionBoundsCacheEntry: Equatable {
     case empty
 }
 
+enum BrightnessAdjustmentEditorMode: Equatable {
+    case colorParameters
+    case curves
+}
+
+struct PreparedAdjustmentLayerContext {
+    let layerID: LayerID
+    let sourceTexture: MTLTexture
+}
+
 @MainActor
 final class WorkspaceViewModel: ObservableObject {
     struct TipImageLibraryReferenceSummary: Equatable {
@@ -185,12 +195,19 @@ final class WorkspaceViewModel: ObservableObject {
     private var strokePacketCount = 0
     var colorAdjustmentSession: ColorAdjustmentSession?
     var curveAdjustmentSession: CurveAdjustmentSession?
+    var brightnessAdjustmentEditorMode: BrightnessAdjustmentEditorMode = .colorParameters
     var colorAdjustmentBrushMode: ColorAdjustmentBrushMode = .paint
     var colorAdjustmentStrokePacketCount = 0
     var colorAdjustmentPreviewRenderInFlight = false
     var colorAdjustmentPreviewRenderNeedsResubmit = false
     var colorAdjustmentPreviewToken: UInt64 = 0
     var colorAdjustmentAllowsIdleModeHotkeys = false
+    var curveAdjustmentBrushMode: CurveAdjustmentBrushMode = .paint
+    var curveAdjustmentStrokePacketCount = 0
+    var curveAdjustmentPreviewRenderInFlight = false
+    var curveAdjustmentPreviewRenderNeedsResubmit = false
+    var curveAdjustmentPreviewToken: UInt64 = 0
+    var curveAdjustmentAllowsIdleModeHotkeys = false
 #if DEBUG
     var debugColorAdjustmentResolutionDecisionOverride: ColorAdjustmentResolutionDecision?
     var debugCurveAdjustmentResolutionDecisionOverride: CurveAdjustmentResolutionDecision?
@@ -366,11 +383,7 @@ final class WorkspaceViewModel: ObservableObject {
         bootstrap.workspaceStore.updateToolSession { session in
             session.activeTool = tool
         }
-        if tool == .brightnessAdjust {
-            colorAdjustmentAllowsIdleModeHotkeys = true
-        } else {
-            colorAdjustmentAllowsIdleModeHotkeys = false
-        }
+        syncBrightnessAdjustmentHotkeyState(for: tool)
         if let group = ToolSidebarGroup.group(containing: tool) {
             toolGroupSurfaceTools[group.id] = tool
         }
@@ -385,6 +398,16 @@ final class WorkspaceViewModel: ObservableObject {
         } else {
             refresh()
         }
+    }
+
+    private func syncBrightnessAdjustmentHotkeyState(for activeTool: ToolKind? = nil) {
+        let resolvedTool = activeTool ?? workspace.toolSession.activeTool
+        colorAdjustmentAllowsIdleModeHotkeys =
+            resolvedTool == .brightnessAdjust
+            && brightnessAdjustmentEditorMode == .colorParameters
+        curveAdjustmentAllowsIdleModeHotkeys =
+            resolvedTool == .brightnessAdjust
+            && brightnessAdjustmentEditorMode == .curves
     }
 
     func presentNewCanvasSheet() {
@@ -732,70 +755,75 @@ final class WorkspaceViewModel: ObservableObject {
         workspace.toolSession.brush.effectivePaintContrastAmount
     }
 
-    func setSizeCurveLow(_ value: Float) {
+    var sizePressureCurveState: CurveChannelState {
+        workspace.toolSession.brush.resolvedSizePressureCurveState
+    }
+
+    var opacityPressureCurveState: CurveChannelState {
+        workspace.toolSession.brush.resolvedOpacityPressureCurveState
+    }
+
+    func setSizePressureCurveState(_ state: CurveChannelState) {
         bootstrap.workspaceStore.updateToolSession { session in
-            session.brush.sizeCurveLow = min(max(value, 0), 0.85)
-            session.brush.sizeCurveMid = max(session.brush.sizeCurveMid, session.brush.sizeCurveLow)
-            session.brush.sizeCurveHigh = max(session.brush.sizeCurveHigh, session.brush.sizeCurveMid)
+            session.brush.setSizePressureCurveState(state)
         }
         refresh()
+    }
+
+    func setOpacityPressureCurveState(_ state: CurveChannelState) {
+        bootstrap.workspaceStore.updateToolSession { session in
+            session.brush.setOpacityPressureCurveState(state)
+        }
+        refresh()
+    }
+
+    func setSizeCurveValues(low: Float, mid: Float, high: Float) {
+        bootstrap.workspaceStore.updateToolSession { session in
+            session.brush.setLegacySizeCurveValues(low: low, mid: mid, high: high)
+        }
+        refresh()
+    }
+
+    func setSizeCurveLow(_ value: Float) {
+        let brush = workspace.toolSession.brush
+        setSizeCurveValues(low: value, mid: brush.sizeCurveMid, high: brush.sizeCurveHigh)
     }
 
     func setSizeCurveMid(_ value: Float) {
-        bootstrap.workspaceStore.updateToolSession { session in
-            let clamped = min(max(value, 0), 0.95)
-            session.brush.sizeCurveMid = clamped
-            session.brush.sizeCurveLow = min(session.brush.sizeCurveLow, session.brush.sizeCurveMid)
-            session.brush.sizeCurveHigh = max(session.brush.sizeCurveHigh, session.brush.sizeCurveMid)
-        }
-        refresh()
+        let brush = workspace.toolSession.brush
+        setSizeCurveValues(low: brush.sizeCurveLow, mid: value, high: brush.sizeCurveHigh)
     }
 
     func setSizeCurveHigh(_ value: Float) {
+        let brush = workspace.toolSession.brush
+        setSizeCurveValues(low: brush.sizeCurveLow, mid: brush.sizeCurveMid, high: value)
+    }
+
+    func setOpacityCurveValues(low: Float, mid: Float, high: Float) {
         bootstrap.workspaceStore.updateToolSession { session in
-            let clamped = min(max(value, 0), 1)
-            session.brush.sizeCurveHigh = clamped
-            session.brush.sizeCurveMid = min(session.brush.sizeCurveMid, session.brush.sizeCurveHigh)
-            session.brush.sizeCurveLow = min(session.brush.sizeCurveLow, session.brush.sizeCurveMid)
+            session.brush.setLegacyOpacityCurveValues(low: low, mid: mid, high: high)
         }
         refresh()
     }
 
     func setOpacityCurveLow(_ value: Float) {
-        bootstrap.workspaceStore.updateToolSession { session in
-            session.brush.opacityCurveLow = min(max(value, 0), 0.85)
-            session.brush.opacityCurveMid = max(session.brush.opacityCurveMid, session.brush.opacityCurveLow)
-            session.brush.opacityCurveHigh = max(session.brush.opacityCurveHigh, session.brush.opacityCurveMid)
-        }
-        refresh()
+        let brush = workspace.toolSession.brush
+        setOpacityCurveValues(low: value, mid: brush.opacityCurveMid, high: brush.opacityCurveHigh)
     }
 
     func setOpacityCurveMid(_ value: Float) {
-        bootstrap.workspaceStore.updateToolSession { session in
-            let clamped = min(max(value, 0), 0.95)
-            session.brush.opacityCurveMid = clamped
-            session.brush.opacityCurveLow = min(session.brush.opacityCurveLow, session.brush.opacityCurveMid)
-            session.brush.opacityCurveHigh = max(session.brush.opacityCurveHigh, session.brush.opacityCurveMid)
-        }
-        refresh()
+        let brush = workspace.toolSession.brush
+        setOpacityCurveValues(low: brush.opacityCurveLow, mid: value, high: brush.opacityCurveHigh)
     }
 
     func setOpacityCurveHigh(_ value: Float) {
-        bootstrap.workspaceStore.updateToolSession { session in
-            let clamped = min(max(value, 0), 1)
-            session.brush.opacityCurveHigh = clamped
-            session.brush.opacityCurveMid = min(session.brush.opacityCurveMid, session.brush.opacityCurveHigh)
-            session.brush.opacityCurveLow = min(session.brush.opacityCurveLow, session.brush.opacityCurveMid)
-        }
-        refresh()
+        let brush = workspace.toolSession.brush
+        setOpacityCurveValues(low: brush.opacityCurveLow, mid: brush.opacityCurveMid, high: value)
     }
 
     func applyOpacityCurvePreset(_ preset: PressureCurvePreset) {
-        let values = preset.opacityValues
         bootstrap.workspaceStore.updateToolSession { session in
-            session.brush.opacityCurveLow = values.low
-            session.brush.opacityCurveMid = values.mid
-            session.brush.opacityCurveHigh = values.high
+            session.brush.setOpacityPressureCurveState(preset.opacityCurveState)
         }
         refresh()
     }
@@ -803,19 +831,14 @@ final class WorkspaceViewModel: ObservableObject {
     func resetOpacityCurveToDefault() {
         let defaults = BrushSettings.stageOneDefault
         bootstrap.workspaceStore.updateToolSession { session in
-            session.brush.opacityCurveLow = defaults.opacityCurveLow
-            session.brush.opacityCurveMid = defaults.opacityCurveMid
-            session.brush.opacityCurveHigh = defaults.opacityCurveHigh
+            session.brush.setOpacityPressureCurveState(defaults.resolvedOpacityPressureCurveState)
         }
         refresh()
     }
 
     func applySizeCurvePreset(_ preset: PressureCurvePreset) {
-        let values = preset.sizeValues
         bootstrap.workspaceStore.updateToolSession { session in
-            session.brush.sizeCurveLow = values.low
-            session.brush.sizeCurveMid = values.mid
-            session.brush.sizeCurveHigh = values.high
+            session.brush.setSizePressureCurveState(preset.sizeCurveState)
         }
         refresh()
     }
@@ -823,9 +846,7 @@ final class WorkspaceViewModel: ObservableObject {
     func resetSizeCurveToDefault() {
         let defaults = BrushSettings.stageOneDefault
         bootstrap.workspaceStore.updateToolSession { session in
-            session.brush.sizeCurveLow = defaults.sizeCurveLow
-            session.brush.sizeCurveMid = defaults.sizeCurveMid
-            session.brush.sizeCurveHigh = defaults.sizeCurveHigh
+            session.brush.setSizePressureCurveState(defaults.resolvedSizePressureCurveState)
         }
         refresh()
     }
@@ -1316,8 +1337,28 @@ final class WorkspaceViewModel: ObservableObject {
         bootstrap.strokeEngine
     }
 
+    func activeEditableAdjustmentLayerContext() -> PreparedAdjustmentLayerContext? {
+        guard
+            let layerID = bootstrap.interactionController.activeEditableLayerID(),
+            let surfaceID = layerSurfaceStore.surfaceID(for: layerID),
+            let texture = layerSurfaceStore.texture(for: surfaceID)
+        else {
+            return nil
+        }
+
+        return PreparedAdjustmentLayerContext(
+            layerID: layerID,
+            sourceTexture: texture
+        )
+    }
+
+    func preparedEditableAdjustmentLayerContext(reason: String) -> PreparedAdjustmentLayerContext? {
+        _ = flushBrushEditingBoundary(reason: reason)
+        return activeEditableAdjustmentLayerContext()
+    }
+
     func activeEditableLayerIDForColorAdjustment() -> LayerID? {
-        bootstrap.interactionController.activeEditableLayerID()
+        activeEditableAdjustmentLayerContext()?.layerID
     }
 
     func activeEditableLayerIDForCurveAdjustment() -> LayerID? {
@@ -1325,6 +1366,13 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func selectionMaskBytesForColorAdjustment(
+        shape: SelectionShape?,
+        canvasSize: CanvasSize
+    ) -> [UInt8] {
+        selectionMaskBytes(for: shape, canvasSize: canvasSize)
+    }
+
+    func selectionMaskBytesForCurveAdjustment(
         shape: SelectionShape?,
         canvasSize: CanvasSize
     ) -> [UInt8] {
@@ -6534,12 +6582,18 @@ final class WorkspaceViewModel: ObservableObject {
     func handleKeyDown(_ event: NSEvent) -> Bool {
         let normalizedModifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
 
-        if handleCurveAdjustmentKeyDown(event, modifiers: normalizedModifiers) {
-            return true
-        }
-
-        if workspace.toolSession.activeTool == .brightnessAdjust,
-           handleColorAdjustmentKeyDown(event, modifiers: normalizedModifiers) {
+        if workspace.toolSession.activeTool == .brightnessAdjust {
+            switch brightnessAdjustmentEditorMode {
+            case .colorParameters:
+                if handleColorAdjustmentKeyDown(event, modifiers: normalizedModifiers) {
+                    return true
+                }
+            case .curves:
+                if handleCurveAdjustmentKeyDown(event, modifiers: normalizedModifiers) {
+                    return true
+                }
+            }
+        } else if handleCurveAdjustmentKeyDown(event, modifiers: normalizedModifiers) {
             return true
         }
 
@@ -6762,6 +6816,7 @@ final class WorkspaceViewModel: ObservableObject {
         }
         workspace = state
         syncColorAdjustmentSessionToCurrentContextIfNeeded()
+        syncCurveAdjustmentSessionToCurrentContextIfNeeded()
         let updatedSceneSnapshot = currentSceneSnapshot(for: state)
         sceneSnapshot = updatedSceneSnapshot
         syncNavigatorPreviewProxy()
@@ -6789,6 +6844,7 @@ final class WorkspaceViewModel: ObservableObject {
         }
         workspace = state
         syncColorAdjustmentSessionToCurrentContextIfNeeded()
+        syncCurveAdjustmentSessionToCurrentContextIfNeeded()
         let updatedSceneSnapshot = currentSceneSnapshot(for: state)
         sceneSnapshot = updatedSceneSnapshot
         syncNavigatorPreviewProxy()
@@ -6831,12 +6887,14 @@ final class WorkspaceViewModel: ObservableObject {
 
     func checkpointSingleLayerHistoryIfPossible(
         layerID: LayerID,
-        operationKind: String
+        operationKind: String,
+        workspaceOverride: WorkspaceState? = nil
     ) {
         checkpointHistoryIfPossible(
             operationKind: operationKind,
             candidateChangedLayerIDs: [layerID],
-            captureMode: .inPlaceChangedLayers([layerID])
+            captureMode: .inPlaceChangedLayers([layerID]),
+            workspaceOverride: workspaceOverride
         )
     }
 
@@ -6848,6 +6906,25 @@ final class WorkspaceViewModel: ObservableObject {
         recordDrawingActivityIfNeeded()
     }
 
+    func clearCommittedSelectionWithoutHistory() {
+        selectionEpoch += 1
+        cancelActiveRasterizationTask()
+        pendingCombineMode = nil
+        pendingCombineBaseShape = nil
+        activeLassoRawPoints = []
+        activeLassoBounds = nil
+        lassoSamplingDebugPoints = []
+        samePathPreviewDebugShape = nil
+        samePathCommittedDebugShape = nil
+        bootstrap.workspaceStore.updateSelection { selection in
+            selection = .empty
+        }
+    }
+
+    func syncSelectionOverlayForAdjustmentState() {
+        syncSelectionOverlayProxy()
+    }
+
     func presentWorkspaceStatus(
         kind: WorkspaceStatus.Kind,
         message: String
@@ -6855,9 +6932,19 @@ final class WorkspaceViewModel: ObservableObject {
         showStatus(.init(kind: kind, message: message))
     }
 
+    func setBrightnessAdjustmentEditorMode(_ mode: BrightnessAdjustmentEditorMode) {
+        brightnessAdjustmentEditorMode = mode
+        syncBrightnessAdjustmentHotkeyState()
+    }
+
     func applyStroke(samples: [CanvasStrokeSample]) {
         if workspace.toolSession.activeTool == .brightnessAdjust {
-            applyColorAdjustmentStroke(samples: samples)
+            switch brightnessAdjustmentEditorMode {
+            case .colorParameters:
+                applyColorAdjustmentStroke(samples: samples)
+            case .curves:
+                applyCurveAdjustmentStroke(samples: samples)
+            }
             return
         }
         let applyStartNs = DispatchTime.now().uptimeNanoseconds
@@ -6912,7 +6999,12 @@ final class WorkspaceViewModel: ObservableObject {
         strokePacketCount = 0
 
         if workspace.toolSession.activeTool == .brightnessAdjust {
-            beginColorAdjustmentStrokeIfNeeded()
+            switch brightnessAdjustmentEditorMode {
+            case .colorParameters:
+                beginColorAdjustmentStrokeIfNeeded()
+            case .curves:
+                beginCurveAdjustmentStrokeIfNeeded()
+            }
             return
         }
 
@@ -6939,7 +7031,12 @@ final class WorkspaceViewModel: ObservableObject {
 
     func endStroke() {
         if workspace.toolSession.activeTool == .brightnessAdjust {
-            endColorAdjustmentStroke()
+            switch brightnessAdjustmentEditorMode {
+            case .colorParameters:
+                endColorAdjustmentStroke()
+            case .curves:
+                endCurveAdjustmentStroke()
+            }
             return
         }
         ideationBranchActivityHandler?()
@@ -6960,13 +7057,13 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func brushDisplayTexture(for layerID: LayerID) -> MTLTexture? {
-        if let liveTexture = bootstrap.strokeEngine.displayTexture(for: layerID) {
-            return liveTexture
-        }
         if let liveTexture = activeCurveAdjustmentPreviewTexture(for: layerID) {
             return liveTexture
         }
-        return activeColorAdjustmentPreviewTexture(for: layerID)
+        if let liveTexture = activeColorAdjustmentPreviewTexture(for: layerID) {
+            return liveTexture
+        }
+        return bootstrap.strokeEngine.displayTexture(for: layerID)
     }
 
     func opportunisticallyDrainBrushCommits(hadLiveBrushWorkThisFrame: Bool) {
@@ -8398,11 +8495,13 @@ final class WorkspaceViewModel: ObservableObject {
         candidateChangedLayerIDs: [LayerID] = [],
         topologyOperation: Bool = false,
         additionalOperationKinds: [String] = [],
-        captureMode: HistoryCaptureMode = .full
+        captureMode: HistoryCaptureMode = .full,
+        workspaceOverride: WorkspaceState? = nil
     ) {
         _ = flushBrushEditingBoundary(reason: "checkpointHistoryIfPossible")
         do {
             try bootstrap.historyController.captureCheckpoint(
+                workspaceOverride: workspaceOverride,
                 captureMode: captureMode,
                 auditContext: HistoryEligibilityAuditContext(
                     operationKind: operationKind,
@@ -8485,6 +8584,9 @@ final class WorkspaceViewModel: ObservableObject {
         _ = reason
         let hadPendingWork = flushPendingBrushWorkAtEditingBoundaryIfNeeded()
         let hadPendingCommits = drainPendingBrushCommitsIfNeeded(resetLiveSession: true)
+        if hadPendingWork || hadPendingCommits {
+            invalidateWholeLayerInteractionBoundsCache()
+        }
         return hadPendingWork || hadPendingCommits
     }
 
@@ -8531,6 +8633,15 @@ final class WorkspaceViewModel: ObservableObject {
 
     private func isBrushLikeTool(_ tool: ToolKind) -> Bool {
         tool == .brush || tool == .eraser || tool == .smudge
+    }
+
+    private func invalidateWholeLayerInteractionBoundsCache() {
+        wholeLayerInteractionBoundsTask?.cancel()
+        wholeLayerInteractionBoundsTask = nil
+        wholeLayerInteractionBoundsBuildingKey = nil
+        wholeLayerInteractionBoundsCacheKey = nil
+        wholeLayerInteractionBoundsCacheEntry = nil
+        lastLoggedWholeLayerOverlayUsesInteractionBounds = nil
     }
 
     private func captureBrushCommitCheckpoint(for job: BrushCommitJob) throws {
@@ -8770,14 +8881,20 @@ final class WorkspaceViewModel: ObservableObject {
         }
     }
 
-    private func creativeShapeGeneratorClearedSelectionWorkspaceSnapshot() -> WorkspaceState {
-        var workspaceSnapshot = workspace
+    func workspaceSnapshotClearingSelection(
+        from base: WorkspaceState? = nil
+    ) -> WorkspaceState {
+        var workspaceSnapshot = base ?? workspace
         workspaceSnapshot.selection.committedShape = nil
         workspaceSnapshot.selection.inProgressShape = nil
         workspaceSnapshot.selection.anchorPoint = nil
         workspaceSnapshot.selection.activeKind = nil
         workspaceSnapshot.selection.activeCombineMode = .replace
         return workspaceSnapshot
+    }
+
+    private func creativeShapeGeneratorClearedSelectionWorkspaceSnapshot() -> WorkspaceState {
+        workspaceSnapshotClearingSelection()
     }
 
     private func activateCreativeShapeGeneratorCurrentColorSourceIfNeeded() {
@@ -10879,6 +10996,7 @@ final class WorkspaceViewModel: ObservableObject {
         @Published var displayShape: SelectionShape?
         @Published var committedShape: SelectionShape?
         @Published var inProgressShape: SelectionShape?
+        @Published var isHiddenForTransientAdjustment: Bool = false
         @Published var activeCombineMode: SelectionCombineMode = .replace
         @Published var isApplyingTransformCommit: Bool = false
         @Published var isTransformingSelection: Bool = false
@@ -10894,6 +11012,20 @@ final class WorkspaceViewModel: ObservableObject {
         SelectionOverlayProxy()
     }()
 
+    private var hidesSelectionOverlayForAdjustmentPreview: Bool {
+        if let colorAdjustmentSession,
+           colorAdjustmentSession.hasPendingCommittedEffect,
+           case .selection = colorAdjustmentSession.source {
+            return true
+        }
+        if let curveAdjustmentSession,
+           curveAdjustmentSession.hasPendingCommittedEffect,
+           case .selection = curveAdjustmentSession.source {
+            return true
+        }
+        return false
+    }
+
     // 选区变化时同步到 proxy（由 refreshLightweight 调用）
     private func syncSelectionOverlayProxy() {
         let state = bootstrap.workspaceStore.state
@@ -10901,6 +11033,7 @@ final class WorkspaceViewModel: ObservableObject {
         selectionOverlayProxy.displayShape = sel.displayShape
         selectionOverlayProxy.committedShape = sel.committedShape
         selectionOverlayProxy.inProgressShape = sel.inProgressShape
+        selectionOverlayProxy.isHiddenForTransientAdjustment = hidesSelectionOverlayForAdjustmentPreview
         selectionOverlayProxy.activeCombineMode = sel.activeCombineMode
         selectionOverlayProxy.isApplyingTransformCommit = isApplyingTransformCommit
         selectionOverlayProxy.isTransformingSelection = isTransformingSelection

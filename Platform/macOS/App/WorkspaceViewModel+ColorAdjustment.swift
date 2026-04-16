@@ -117,14 +117,15 @@ extension WorkspaceViewModel {
             presentWorkspaceStatus(kind: .info, message: "请先切到可编辑图层")
             return false
         }
-        guard let layerID = activeEditableLayerIDForColorAdjustment(),
-              let surfaceID = layerSurfaceStore.surfaceID(for: layerID),
-              let sourceTexture = sourceTextureForColorAdjustment(layerID: layerID),
+        guard let preparedContext = preparedEditableAdjustmentLayerContext(reason: "colorAdjustment.confirm"),
+              let surfaceID = layerSurfaceStore.surfaceID(for: preparedContext.layerID),
               let session = colorAdjustmentSession,
-              session.layerID == layerID else {
+              session.layerID == preparedContext.layerID else {
             presentWorkspaceStatus(kind: .error, message: "无法访问当前图层")
             return false
         }
+        let layerID = preparedContext.layerID
+        let sourceTexture = preparedContext.sourceTexture
         guard !session.parameters.isNeutral else {
             presentWorkspaceStatus(kind: .info, message: "当前还没有可应用的调整")
             return false
@@ -161,9 +162,18 @@ extension WorkspaceViewModel {
             return false
         }
 
+        let shouldClearCommittedSelectionAfterApply: Bool = {
+            guard case .selection = session.source else { return false }
+            return workspace.selection.committedShape != nil
+        }()
+        let historyWorkspaceOverride = shouldClearCommittedSelectionAfterApply
+            ? workspaceSnapshotClearingSelection()
+            : nil
+
         checkpointSingleLayerHistoryIfPossible(
             layerID: layerID,
-            operationKind: "colorAdjustment.commit"
+            operationKind: "colorAdjustment.commit",
+            workspaceOverride: historyWorkspaceOverride
         )
 
         colorAdjustmentRenderer.encodePreview(
@@ -186,9 +196,15 @@ extension WorkspaceViewModel {
         }
 
         layerSurfaceStore.swapTexture(for: surfaceID, with: targetTexture)
+        if shouldClearCommittedSelectionAfterApply {
+            clearCommittedSelectionAfterColorAdjustmentApply()
+        }
         discardColorAdjustmentSession()
         finalizeCommittedSingleLayerMutation(layerID)
-        presentWorkspaceStatus(kind: .success, message: "已应用色彩调整")
+        presentWorkspaceStatus(
+            kind: .success,
+            message: shouldClearCommittedSelectionAfterApply ? "已应用色彩调整，并取消选区" : "已应用色彩调整"
+        )
         return true
     }
 
@@ -221,8 +237,9 @@ extension WorkspaceViewModel {
     }
 
     func beginColorAdjustmentStrokeIfNeeded() {
-        guard let layerID = activeEditableLayerIDForColorAdjustment() else { return }
-        guard let sourceTexture = sourceTextureForColorAdjustment(layerID: layerID) else { return }
+        guard let activeContext = activeEditableAdjustmentLayerContext() else { return }
+        let layerID = activeContext.layerID
+        let sourceTexture = activeContext.sourceTexture
 
         let carriedParameters = colorAdjustmentSession?.parameters ?? .neutral
         let requiresPaintedMaskSession: Bool = {
@@ -253,8 +270,9 @@ extension WorkspaceViewModel {
 
     func applyColorAdjustmentStroke(samples: [CanvasStrokeSample]) {
         guard !samples.isEmpty else { return }
-        guard let layerID = activeEditableLayerIDForColorAdjustment() else { return }
-        guard let sourceTexture = sourceTextureForColorAdjustment(layerID: layerID) else { return }
+        guard let activeContext = activeEditableAdjustmentLayerContext() else { return }
+        let layerID = activeContext.layerID
+        let sourceTexture = activeContext.sourceTexture
         guard var session = colorAdjustmentSession, session.layerID == layerID else { return }
         guard case .painted(var paintedState) = session.source else { return }
 
@@ -310,8 +328,8 @@ extension WorkspaceViewModel {
     func endColorAdjustmentStroke() {
         guard var session = colorAdjustmentSession else { return }
         guard case .painted(var paintedState) = session.source else { return }
-        guard let layerID = activeEditableLayerIDForColorAdjustment() else { return }
-        guard let sourceTexture = sourceTextureForColorAdjustment(layerID: layerID) else { return }
+        guard let activeContext = activeEditableAdjustmentLayerContext() else { return }
+        let sourceTexture = activeContext.sourceTexture
 
         defer {
             session.source = .painted(paintedState)
@@ -373,6 +391,11 @@ extension WorkspaceViewModel {
             return true
         }
 
+        if event.keyCode == 36 || event.keyCode == 76 {
+            guard colorAdjustmentSession != nil else { return false }
+            return confirmColorAdjustmentSession()
+        }
+
         switch event.charactersIgnoringModifiers?.lowercased() {
         case "e":
             colorAdjustmentBrushMode = .erase
@@ -395,11 +418,12 @@ extension WorkspaceViewModel {
 
     func syncColorAdjustmentSessionToCurrentContextIfNeeded() {
         guard let session = colorAdjustmentSession else { return }
-        guard let activeLayerID = activeEditableLayerIDForColorAdjustment(),
-              session.layerID == activeLayerID,
-              let sourceTexture = sourceTextureForColorAdjustment(layerID: activeLayerID) else {
+        guard let activeContext = activeEditableAdjustmentLayerContext(),
+              session.layerID == activeContext.layerID else {
             return
         }
+        let activeLayerID = activeContext.layerID
+        let sourceTexture = activeContext.sourceTexture
 
         let replacementSession: ColorAdjustmentSession?
         switch session.source {
@@ -571,6 +595,10 @@ extension WorkspaceViewModel {
     }
 
     private func sourceTextureForColorAdjustment(layerID: LayerID) -> MTLTexture? {
+        if let activeContext = activeEditableAdjustmentLayerContext(),
+           activeContext.layerID == layerID {
+            return activeContext.sourceTexture
+        }
         guard
             let surfaceID = layerSurfaceStore.surfaceID(for: layerID),
             let texture = layerSurfaceStore.texture(for: surfaceID)
@@ -719,6 +747,8 @@ extension WorkspaceViewModel {
         switch reason {
         case .toolChange:
             return "切换工具前，要先确认当前色彩调整效果，还是放弃这次调整？"
+        case .panelChange:
+            return "切换到另一种调整面板前，要先确认当前色彩调整效果，还是放弃这次调整？"
         case .layerChange:
             return "切换图层前，要先确认当前色彩调整效果，还是放弃这次调整？"
         case .historyNavigation:
@@ -742,9 +772,14 @@ extension WorkspaceViewModel {
         syncColorAdjustmentOverlayState()
     }
 
+    private func clearCommittedSelectionAfterColorAdjustmentApply() {
+        clearCommittedSelectionWithoutHistory()
+    }
+
     private func syncColorAdjustmentOverlayState() {
         guard let session = colorAdjustmentSession else {
             colorAdjustmentOverlayState = .inactive
+            syncSelectionOverlayForAdjustmentState()
             return
         }
 
@@ -760,6 +795,7 @@ extension WorkspaceViewModel {
             effectiveBounds: session.source.effectiveBounds,
             sourceKind: session.source.sourceKindForOverlay
         )
+        syncSelectionOverlayForAdjustmentState()
     }
 
     private func effectRegion(from bounds: CanvasRect?) -> MTLRegion? {
@@ -832,10 +868,11 @@ extension WorkspaceViewModel {
     }
 
     private func preparedColorAdjustmentSessionForParameterEditing() -> ColorAdjustmentSession? {
-        guard let layerID = activeEditableLayerIDForColorAdjustment(),
-              let sourceTexture = sourceTextureForColorAdjustment(layerID: layerID) else {
+        guard let preparedContext = preparedEditableAdjustmentLayerContext(reason: "colorAdjustment.prepareParameters") else {
             return nil
         }
+        let layerID = preparedContext.layerID
+        let sourceTexture = preparedContext.sourceTexture
         if let session = colorAdjustmentSession, session.layerID == layerID {
             syncColorAdjustmentSessionToCurrentContextIfNeeded()
             return colorAdjustmentSession

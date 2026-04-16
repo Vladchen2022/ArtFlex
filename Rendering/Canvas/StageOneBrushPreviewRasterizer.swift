@@ -714,9 +714,11 @@ enum StageOneBrushPreviewRasterizer {
         hasher.combine(brush.sizeCurveLow)
         hasher.combine(brush.sizeCurveMid)
         hasher.combine(brush.sizeCurveHigh)
+        combineCurveState(brush.sizePressureCurve, into: &hasher)
         hasher.combine(brush.opacityCurveLow)
         hasher.combine(brush.opacityCurveMid)
         hasher.combine(brush.opacityCurveHigh)
+        combineCurveState(brush.opacityPressureCurve, into: &hasher)
         hasher.combine(brush.compoundBrush.enabled)
         hasher.combine(brush.compoundBrush.mode.rawValue)
         hasher.combine(brush.compoundBrush.globalPressureSizeAmount)
@@ -781,6 +783,23 @@ enum StageOneBrushPreviewRasterizer {
         hasher.combine(brush.customTipAngleDegrees)
         hasher.combine(maskFingerprint(for: brush.customTipMaskData))
         hasher.combine(maskFingerprint(for: brush.customTipEnvelopeMaskData))
+    }
+
+    private static func combineCurveState(
+        _ state: CurveChannelState?,
+        into hasher: inout Hasher
+    ) {
+        guard let state else {
+            hasher.combine(0 as UInt8)
+            return
+        }
+
+        hasher.combine(1 as UInt8)
+        hasher.combine(state.points.count)
+        for point in state.points {
+            hasher.combine(point.x)
+            hasher.combine(point.y)
+        }
     }
 
     private static func stableMaskDigest(_ data: Data?) -> String {

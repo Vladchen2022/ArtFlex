@@ -21,7 +21,7 @@ struct PressureInputTests {
     }
 
     @Test
-    func opacityPressureCurveUsesBrushPiecewiseControlPoints() {
+    func opacityPressureCurveUsesBrushControlPoints() {
         let curved = BrushSettings.resolvedOpacityCurvePressure(
             pressure: 0.5,
             pressureSensitivity: 1,
@@ -31,6 +31,44 @@ struct PressureInputTests {
         )
 
         #expect(abs(curved - 0.4) < 0.0001)
+    }
+
+    @Test
+    func pressureCurveUsesSmoothInterpolationBetweenControlPoints() {
+        let sampled = BrushSettings.samplePressureCurve(
+            pressure: 0.35,
+            low: 0.05,
+            mid: 0.4,
+            high: 0.82
+        )
+
+        let linearMidSegment: Float = 0.225
+        #expect(abs(sampled - linearMidSegment) > 0.005)
+        #expect(sampled > 0.05 && sampled < 0.4)
+    }
+
+    @Test
+    func pressureCurveStateRoundTripsCustomAnchors() throws {
+        var brush = BrushSettings.stageOneDefault
+        let customState = CurveChannelState(points: [
+            .init(x: 0, y: 0),
+            .init(x: 0.12, y: 0.03),
+            .init(x: 0.34, y: 0.18),
+            .init(x: 0.57, y: 0.63),
+            .init(x: 0.76, y: 0.82),
+            .init(x: 1, y: 1)
+        ])
+        let normalizedState = BrushSettings.normalizedPressureCurveState(customState)
+        brush.setSizePressureCurveState(customState)
+
+        let encoded = try JSONEncoder().encode(brush)
+        let decoded = try JSONDecoder().decode(BrushSettings.self, from: encoded)
+
+        #expect(decoded.sizePressureCurve == normalizedState)
+        #expect(decoded.resolvedSizePressureCurveState == normalizedState)
+        #expect(abs(decoded.sizeCurveLow - CurveLUTBuilder.sampleChannelValue(from: normalizedState, at: 0.2)) < 0.0001)
+        #expect(abs(decoded.sizeCurveMid - CurveLUTBuilder.sampleChannelValue(from: normalizedState, at: 0.5)) < 0.0001)
+        #expect(abs(decoded.sizeCurveHigh - CurveLUTBuilder.sampleChannelValue(from: normalizedState, at: 0.8)) < 0.0001)
     }
 
     @Test

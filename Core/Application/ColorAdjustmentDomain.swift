@@ -26,6 +26,7 @@ enum ColorAdjustmentBrushMode: Equatable, Sendable {
 
 enum ColorAdjustmentResolutionReason: Equatable, Sendable {
     case toolChange
+    case panelChange
     case layerChange
     case historyNavigation
     case documentOpen
@@ -35,7 +36,7 @@ enum ColorAdjustmentResolutionReason: Equatable, Sendable {
         switch self {
         case .historyNavigation:
             return true
-        case .toolChange, .layerChange, .documentOpen, .closeOrQuit:
+        case .toolChange, .panelChange, .layerChange, .documentOpen, .closeOrQuit:
             return true
         }
     }

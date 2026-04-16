@@ -2503,9 +2503,7 @@ final class StageOneBrushRenderer {
         BrushSettings.resolvedOpacityCurvePressure(
             pressure: pressure,
             pressureSensitivity: stroke.brush.pressureSensitivity,
-            low: stroke.brush.opacityCurveLow,
-            mid: stroke.brush.opacityCurveMid,
-            high: stroke.brush.opacityCurveHigh
+            state: stroke.brush.resolvedOpacityPressureCurveState
         )
     }
 
@@ -2517,18 +2515,9 @@ final class StageOneBrushRenderer {
     }
 
     private func sizeCurvePressure(for pressure: Float, stroke: StrokeDescriptor) -> Float {
-        let low = min(max(stroke.brush.sizeCurveLow, 0), 0.85)
-        let mid = min(max(stroke.brush.sizeCurveMid, low), 0.95)
-        let high = min(max(stroke.brush.sizeCurveHigh, mid), 1)
-        return samplePiecewiseCurve(
+        BrushSettings.samplePressureCurve(
             pressure: pressure,
-            points: [
-                (0.0, 0.0),
-                (0.2, low),
-                (0.5, mid),
-                (0.8, high),
-                (1.0, 1.0)
-            ]
+            state: stroke.brush.resolvedSizePressureCurveState
         )
     }
 
@@ -2546,26 +2535,6 @@ final class StageOneBrushRenderer {
             : 1
         let sizeFactor = primarySizeFactor * globalSizeFactor
         return max(Double((stroke.brush.size * sizeFactor) / 2), 0.5)
-    }
-
-    private func samplePiecewiseCurve(
-        pressure: Float,
-        points: [(x: Float, y: Float)]
-    ) -> Float {
-        let clamped = min(max(pressure, 0), 1)
-
-        for index in 1..<points.count {
-            let previous = points[index - 1]
-            let current = points[index]
-            if clamped <= current.x {
-                let segmentLength = max(current.x - previous.x, 0.0001)
-                let t = min(max((clamped - previous.x) / segmentLength, 0), 1)
-                let smoothT = t * t * (3 - (2 * t))
-                return previous.y + ((current.y - previous.y) * smoothT)
-            }
-        }
-
-        return points.last?.y ?? clamped
     }
 
     private func makeSelectionMaskTexture(

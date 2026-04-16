@@ -543,7 +543,9 @@ private struct SelectionOverlayHost: View {
         let isFreeTransform = proxy.activeTool == .freeTransform
         let isApplying = proxy.isApplyingTransformCommit
 
-        if !isApplying, !(isFreeTransform && isTransforming),
+        if proxy.isHiddenForTransientAdjustment {
+            EmptyView()
+        } else if !isApplying, !(isFreeTransform && isTransforming),
            let committed = proxy.committedShape,
            let inProgress = proxy.inProgressShape,
            proxy.activeCombineMode != .replace {

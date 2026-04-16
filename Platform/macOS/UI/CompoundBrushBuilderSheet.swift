@@ -659,16 +659,27 @@ private struct CompoundPressureCurvePreview: View {
                 .stroke(Color.white.opacity(0.18), style: StrokeStyle(lineWidth: 1, dash: [4, 4]))
 
                 Path { path in
-                    let points = [
-                        CGPoint(x: 10, y: rect.height - 10),
-                        CGPoint(x: rect.width * 0.25, y: (rect.height - 10) - ((rect.height - 20) * low)),
-                        CGPoint(x: rect.width * 0.5, y: (rect.height - 10) - ((rect.height - 20) * mid)),
-                        CGPoint(x: rect.width * 0.75, y: (rect.height - 10) - ((rect.height - 20) * high)),
-                        CGPoint(x: rect.width - 10, y: 10)
-                    ]
-                    path.move(to: points[0])
-                    path.addCurve(to: points[2], control1: points[1], control2: points[1])
-                    path.addCurve(to: points[4], control1: points[3], control2: points[3])
+                    let sampleCount = 128
+                    for sampleIndex in 0..<sampleCount {
+                        let pressure = Double(sampleIndex) / Double(sampleCount - 1)
+                        let sampled = Double(
+                            BrushSettings.samplePressureCurve(
+                                pressure: Float(pressure),
+                                low: Float(low),
+                                mid: Float(mid),
+                                high: Float(high)
+                            )
+                        )
+                        let point = CGPoint(
+                            x: 10 + ((rect.width - 20) * pressure),
+                            y: (rect.height - 10) - ((rect.height - 20) * sampled)
+                        )
+                        if sampleIndex == 0 {
+                            path.move(to: point)
+                        } else {
+                            path.addLine(to: point)
+                        }
+                    }
                 }
                 .stroke(Color.accentColor, lineWidth: 2.5)
             }

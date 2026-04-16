@@ -168,6 +168,7 @@ struct CurveAdjustmentParameters: Equatable, Sendable, Codable {
 
 enum CurveAdjustmentResolutionReason: Equatable, Sendable {
     case toolChange
+    case panelChange
     case layerChange
     case historyNavigation
     case documentOpen
@@ -271,16 +272,20 @@ enum CurveLUTBuilder {
         output.reserveCapacity(sampleCount)
         for sampleIndex in 0..<sampleCount {
             let x = Float(sampleIndex) / Float(sampleCount - 1)
-            output.append(samplePiecewiseLinear(points: points, x: x))
+            output.append(sampleMonotoneCubic(points: points, x: x))
         }
         return output
+    }
+
+    static func sampleChannelValue(from state: CurveChannelState, at x: Float) -> Float {
+        sampleMonotoneCubic(points: normalizedSortedPoints(state.points), x: x)
     }
 
     static func normalizedSortedPoints(_ input: [CurveControlPoint]) -> [CurveControlPoint] {
         CurveChannelState(points: input).points
     }
 
-    private static func samplePiecewiseLinear(points: [CurveControlPoint], x: Float) -> Float {
+    private static func sampleMonotoneCubic(points: [CurveControlPoint], x: Float) -> Float {
         let x = min(max(x, 0), 1)
         guard points.count >= 2 else { return x }
         if x <= points[0].x {
@@ -290,17 +295,69 @@ enum CurveLUTBuilder {
             return last.y
         }
 
+        let tangents = monotoneTangents(for: points)
+
         for index in 0..<(points.count - 1) {
             let a = points[index]
             let b = points[index + 1]
             if x >= a.x && x <= b.x {
                 let span = max(b.x - a.x, 0.0001)
-                let localT = (x - a.x) / span
-                return min(max(a.y + ((b.y - a.y) * localT), 0), 1)
+                let t = min(max((x - a.x) / span, 0), 1)
+                let t2 = t * t
+                let t3 = t2 * t
+
+                let h00 = (2 * t3) - (3 * t2) + 1
+                let h10 = t3 - (2 * t2) + t
+                let h01 = (-2 * t3) + (3 * t2)
+                let h11 = t3 - t2
+
+                let value =
+                    (h00 * a.y)
+                    + (h10 * span * tangents[index])
+                    + (h01 * b.y)
+                    + (h11 * span * tangents[index + 1])
+                return min(max(value, a.y), b.y)
             }
         }
 
         return points.last?.y ?? x
+    }
+
+    private static func monotoneTangents(for points: [CurveControlPoint]) -> [Float] {
+        guard points.count >= 2 else { return points.map(\.y) }
+
+        let segmentCount = points.count - 1
+        var spans = [Float](repeating: 0, count: segmentCount)
+        var slopes = [Float](repeating: 0, count: segmentCount)
+
+        for index in 0..<segmentCount {
+            let span = max(points[index + 1].x - points[index].x, 0.0001)
+            spans[index] = span
+            slopes[index] = (points[index + 1].y - points[index].y) / span
+        }
+
+        var tangents = [Float](repeating: 0, count: points.count)
+        tangents[0] = slopes[0]
+        tangents[points.count - 1] = slopes[segmentCount - 1]
+
+        guard points.count > 2 else { return tangents }
+
+        for index in 1..<(points.count - 1) {
+            let previousSlope = slopes[index - 1]
+            let nextSlope = slopes[index]
+            if previousSlope <= 0 || nextSlope <= 0 {
+                tangents[index] = 0
+                continue
+            }
+
+            let previousSpan = spans[index - 1]
+            let nextSpan = spans[index]
+            let w1 = (2 * nextSpan) + previousSpan
+            let w2 = nextSpan + (2 * previousSpan)
+            tangents[index] = (w1 + w2) / ((w1 / previousSlope) + (w2 / nextSlope))
+        }
+
+        return tangents
     }
 }
 
@@ -335,7 +392,7 @@ struct CurveAdjustmentSession {
         case .painted(let state):
             return state.paintedBounds != nil || !parameters.isNeutral
         case .selection, .wholeLayer:
-            return true
+            return !parameters.isNeutral
         }
     }
 
