@@ -2,6 +2,7 @@ import Foundation
 
 final class AppSharedMetalServices {
     let canvasPresenter: StageOneCanvasPresenter
+    let patternPlacementRenderer: PatternPlacementRenderer
     let linearGradientRenderer: LinearGradientRenderer
     let sectorGradientRenderer: SectorGradientRenderer
     let selectionFillRenderer: SelectionFillRenderer
@@ -19,6 +20,7 @@ final class AppSharedMetalServices {
 
     init(metalContext: MetalDeviceContext) throws {
         self.canvasPresenter = try StageOneCanvasPresenter(device: metalContext.device)
+        self.patternPlacementRenderer = try PatternPlacementRenderer(device: metalContext.device)
         self.linearGradientRenderer = LinearGradientRenderer(device: metalContext.device)
         self.sectorGradientRenderer = SectorGradientRenderer(device: metalContext.device)
         self.selectionFillRenderer = SelectionFillRenderer(device: metalContext.device)
@@ -46,6 +48,7 @@ struct AppBootstrap {
     let layerSurfaceStore: StageOneLayerSurfaceStore
     let sharedMetalServices: AppSharedMetalServices
     let canvasPresenter: StageOneCanvasPresenter
+    let patternPlacementRenderer: PatternPlacementRenderer
     let interactionController: CanvasInteractionController
     let strokeEngine: MetalStrokeEngine
     let linearGradientRenderer: LinearGradientRenderer
@@ -92,6 +95,7 @@ struct AppBootstrap {
         self.layerSurfaceStore = layerSurfaceStore
         self.sharedMetalServices = resolvedSharedMetalServices
         self.canvasPresenter = resolvedSharedMetalServices.canvasPresenter
+        self.patternPlacementRenderer = resolvedSharedMetalServices.patternPlacementRenderer
         self.interactionController = CanvasInteractionController(workspaceStore: workspaceStore)
         self.strokeEngine = try MetalStrokeEngine(
             metalContext: metalContext,

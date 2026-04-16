@@ -79,6 +79,7 @@ struct MetalCanvasHost: NSViewRepresentable {
     let transformPreview: FreeTransformPreview
     let linearGradientPreview: LinearGradientPreview?
     let sectorGradientPreview: SectorGradientPreview?
+    let patternPlacementPhase: PatternPlacementPhase
     let gradientPreviewColor: RGBAColor
     let gradientPaintJitterAmount: Float
     let gradientPaintContrastAmount: Float
@@ -89,6 +90,7 @@ struct MetalCanvasHost: NSViewRepresentable {
     let onFlushPendingBrushWork: (MTLCommandBuffer) -> BrushFlushMetrics?
     let onDrainPendingBrushCommitsInteractively: (Bool) -> Void
     let resolveBrushDisplayTexture: (LayerID) -> MTLTexture?
+    let resolvePatternPlacementTexture: (UUID) -> MTLTexture?
     let onEyedropperSample: (CanvasPoint) -> Void
     let onBucketFill: (CanvasPoint) -> Void
     let onCanvasClick: (CanvasPoint, NSEvent.ModifierFlags, Int) -> Void
@@ -112,6 +114,9 @@ struct MetalCanvasHost: NSViewRepresentable {
     let onGradientDragBegan: (CanvasPoint, NSEvent.ModifierFlags) -> Void
     let onGradientDragChanged: (CanvasPoint, NSEvent.ModifierFlags) -> Void
     let onGradientDragEnded: (CanvasPoint, NSEvent.ModifierFlags) -> Void
+    let onPatternPlacementBegan: (CanvasPoint, Bool) -> Void
+    let onPatternPlacementChanged: (CanvasPoint) -> Void
+    let onPatternPlacementEnded: (CanvasPoint) -> Void
     let onEnterGradientEditing: () -> Void
     let onCancelCanvasTool: () -> Void
     let onApplyGradientSession: () -> Void
@@ -132,6 +137,7 @@ struct MetalCanvasHost: NSViewRepresentable {
             transformPreview: transformPreview,
             linearGradientPreview: linearGradientPreview,
             sectorGradientPreview: sectorGradientPreview,
+            patternPlacementPhase: patternPlacementPhase,
             gradientPreviewColor: gradientPreviewColor,
             gradientPaintJitterAmount: gradientPaintJitterAmount,
             gradientPaintContrastAmount: gradientPaintContrastAmount,
@@ -143,6 +149,7 @@ struct MetalCanvasHost: NSViewRepresentable {
             onFlushPendingBrushWork: onFlushPendingBrushWork,
             onDrainPendingBrushCommitsInteractively: onDrainPendingBrushCommitsInteractively,
             resolveBrushDisplayTexture: resolveBrushDisplayTexture,
+            resolvePatternPlacementTexture: resolvePatternPlacementTexture,
             onEyedropperSample: onEyedropperSample,
             onBucketFill: onBucketFill,
             onCanvasClick: onCanvasClick,
@@ -162,6 +169,9 @@ struct MetalCanvasHost: NSViewRepresentable {
             onGradientDragBegan: onGradientDragBegan,
             onGradientDragChanged: onGradientDragChanged,
             onGradientDragEnded: onGradientDragEnded,
+            onPatternPlacementBegan: onPatternPlacementBegan,
+            onPatternPlacementChanged: onPatternPlacementChanged,
+            onPatternPlacementEnded: onPatternPlacementEnded,
             onEnterGradientEditing: onEnterGradientEditing,
             onCancelCanvasTool: onCancelCanvasTool,
             onApplyGradientSession: onApplyGradientSession,
@@ -214,6 +224,7 @@ struct MetalCanvasHost: NSViewRepresentable {
         context.coordinator.transformPreview = transformPreview
         context.coordinator.linearGradientPreview = linearGradientPreview
         context.coordinator.sectorGradientPreview = sectorGradientPreview
+        context.coordinator.patternPlacementPhase = patternPlacementPhase
         context.coordinator.gradientPreviewColor = gradientPreviewColor
         context.coordinator.gradientPaintJitterAmount = gradientPaintJitterAmount
         context.coordinator.gradientPaintContrastAmount = gradientPaintContrastAmount
@@ -224,6 +235,7 @@ struct MetalCanvasHost: NSViewRepresentable {
             let previousCanvasSize = view.canvasSize
             let previousViewportRotation = view.viewportRotationDegrees
             let previousPanMode = view.isPanModeActive
+            let previousPatternPlacementPhase = view.patternPlacementPhase
             let previousStrokeResetToken = view.strokeResetToken
             let previousBrushSize = view.brushSize
             let previousCanvasContentRevision = previousSnapshot?.renderSnapshot.canvasContentRevision
@@ -247,6 +259,7 @@ struct MetalCanvasHost: NSViewRepresentable {
                 previousExternalRedrawRevision != externalRedrawRevision ||
                 previousIsTransforming != isTransformingSelection ||
                 previousTransformPreview != transformPreview ||
+                previousPatternPlacementPhase != patternPlacementPhase ||
                 previousLinearGradientPreview != linearGradientPreview ||
                 previousSectorGradientPreview != sectorGradientPreview ||
                 previousGradientPreviewColor != gradientPreviewColor ||
@@ -275,6 +288,7 @@ struct MetalCanvasHost: NSViewRepresentable {
             view.activeTool = activeTool
             view.viewportRotationDegrees = viewportRotationDegrees
             view.isPanModeActive = isPanModeActive
+            view.patternPlacementPhase = patternPlacementPhase
             view.keyDownEventHandler = onKeyDown
             view.keyUpEventHandler = onKeyUp
             view.modifierFlagsChangedEventHandler = onModifierFlagsChanged
@@ -299,6 +313,7 @@ struct MetalCanvasHost: NSViewRepresentable {
                 previousExternalRedrawRevision != externalRedrawRevision ||
                 previousIsTransforming != isTransformingSelection ||
                 previousTransformPreview != transformPreview ||
+                previousPatternPlacementPhase != patternPlacementPhase ||
                 previousLinearGradientPreview != linearGradientPreview ||
                 previousSectorGradientPreview != sectorGradientPreview ||
                 previousGradientPreviewColor != gradientPreviewColor ||
@@ -376,6 +391,13 @@ protocol StrokeCaptureDelegate: AnyObject {
     func strokeCaptureView(_ view: StrokeCaptureMTKView, didBeginGradientDragAt point: CanvasPoint, modifiers: NSEvent.ModifierFlags)
     func strokeCaptureView(_ view: StrokeCaptureMTKView, didChangeGradientDragAt point: CanvasPoint, modifiers: NSEvent.ModifierFlags)
     func strokeCaptureView(_ view: StrokeCaptureMTKView, didEndGradientDragAt point: CanvasPoint, modifiers: NSEvent.ModifierFlags)
+    func strokeCaptureView(
+        _ view: StrokeCaptureMTKView,
+        didBeginPatternPlacementAt point: CanvasPoint,
+        placeIntoNewLayer: Bool
+    )
+    func strokeCaptureView(_ view: StrokeCaptureMTKView, didChangePatternPlacementAt point: CanvasPoint)
+    func strokeCaptureView(_ view: StrokeCaptureMTKView, didEndPatternPlacementAt point: CanvasPoint)
     func strokeCaptureViewDidRequestEnterGradientEditing(_ view: StrokeCaptureMTKView)
     func strokeCaptureViewDidRequestCanvasToolCancel(_ view: StrokeCaptureMTKView)
     func strokeCaptureViewDidRequestApplyGradientSession(_ view: StrokeCaptureMTKView)
@@ -647,6 +669,7 @@ final class StrokeCaptureMTKView: MTKView {
     }
     var viewportRotationDegrees: Double = 0
     var isPanModeActive = false
+    var patternPlacementPhase: PatternPlacementPhase = .idle
     var strokeResetToken = 0
     var brushSize: Float = 24 {
         didSet {
@@ -795,6 +818,16 @@ final class StrokeCaptureMTKView: MTKView {
             return
         }
 
+        if patternPlacementPhase != .idle {
+            strokeDelegate?.strokeCaptureView(
+                self,
+                didBeginPatternPlacementAt: sample(from: event).location,
+                placeIntoNewLayer: activeModifierFlags.contains(.shift)
+            )
+            setNeedsDisplay(bounds)
+            return
+        }
+
         if activeTool == .eyedropper || shouldUseEyedropperOverride(for: event) {
             strokeDelegate?.strokeCaptureView(self, didSampleColorAt: sample(from: event).location)
             setNeedsDisplay(bounds)
@@ -909,6 +942,13 @@ final class StrokeCaptureMTKView: MTKView {
         let handlerStartNs = DispatchTime.now().uptimeNanoseconds
         activeModifierFlags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         updateCursorAppearance()
+
+        if patternPlacementPhase != .idle {
+            strokeDelegate?.strokeCaptureView(self, didChangePatternPlacementAt: sample(from: event).location)
+            setNeedsDisplay(bounds)
+            return
+        }
+
         if activeTool == .polygonSelection {
             switch selectionInteractionMode {
             case .beginMoving:
@@ -1079,6 +1119,15 @@ final class StrokeCaptureMTKView: MTKView {
         hoverLocation = convert(event.locationInWindow, from: nil)
         updateCursorIndicator()
         updateCursorAppearance()
+
+        if patternPlacementPhase != .idle {
+            strokeDelegate?.strokeCaptureView(self, didEndPatternPlacementAt: sample(from: event).location)
+            lastSample = nil
+            lastPressure = nil
+            setNeedsDisplay(bounds)
+            return
+        }
+
         if activeTool == .polygonSelection {
             switch selectionInteractionMode {
             case .beginMoving:
@@ -1229,6 +1278,10 @@ final class StrokeCaptureMTKView: MTKView {
 
         // ESC：取消 freeTransform 或其他工具
         if event.keyCode == 53 {
+            if patternPlacementPhase != .idle {
+                strokeDelegate?.strokeCaptureViewDidRequestCanvasToolCancel(self)
+                return
+            }
             if activeTool == .freeTransform {
                 endContinuousTransformRendering()
                 strokeDelegate?.strokeCaptureViewDidRequestCancelTransform(self)
@@ -1962,6 +2015,7 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
     private let transformPreviewBuilder: TransformPreviewSessionBuilder
     private let linearGradientRenderer: LinearGradientRenderer
     private let sectorGradientRenderer: SectorGradientRenderer
+    private let patternPlacementRenderer: PatternPlacementRenderer
     var activeTool: ToolKind
     var previousExternalRedrawRevision: UInt64 = 0
     var transformSelectionShape: SelectionShape?
@@ -1971,6 +2025,7 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
     private let onFlushPendingBrushWork: (MTLCommandBuffer) -> BrushFlushMetrics?
     private let onDrainPendingBrushCommitsInteractively: (Bool) -> Void
     private let resolveBrushDisplayTexture: (LayerID) -> MTLTexture?
+    private let resolvePatternPlacementTexture: (UUID) -> MTLTexture?
     private let onEyedropperSample: (CanvasPoint) -> Void
     private let onBucketFill: (CanvasPoint) -> Void
     private let onCanvasClick: (CanvasPoint, NSEvent.ModifierFlags, Int) -> Void
@@ -1991,6 +2046,9 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
     private let onGradientDragBegan: (CanvasPoint, NSEvent.ModifierFlags) -> Void
     private let onGradientDragChanged: (CanvasPoint, NSEvent.ModifierFlags) -> Void
     private let onGradientDragEnded: (CanvasPoint, NSEvent.ModifierFlags) -> Void
+    private let onPatternPlacementBegan: (CanvasPoint, Bool) -> Void
+    private let onPatternPlacementChanged: (CanvasPoint) -> Void
+    private let onPatternPlacementEnded: (CanvasPoint) -> Void
     private let onEnterGradientEditing: () -> Void
     private let onCancelCanvasTool: () -> Void
     private let onApplyGradientSession: () -> Void
@@ -2021,6 +2079,7 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
     fileprivate var isLiveTransformDragging = false
     var linearGradientPreview: LinearGradientPreview?
     var sectorGradientPreview: SectorGradientPreview?
+    var patternPlacementPhase: PatternPlacementPhase = .idle
     var gradientPreviewColor: RGBAColor = .black
     var gradientPaintJitterAmount: Float = 0
     var gradientPaintContrastAmount: Float = 0
@@ -2055,6 +2114,7 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
         transformPreview: FreeTransformPreview,
         linearGradientPreview: LinearGradientPreview?,
         sectorGradientPreview: SectorGradientPreview?,
+        patternPlacementPhase: PatternPlacementPhase,
         gradientPreviewColor: RGBAColor,
         gradientPaintJitterAmount: Float,
         gradientPaintContrastAmount: Float,
@@ -2066,6 +2126,7 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
         onFlushPendingBrushWork: @escaping (MTLCommandBuffer) -> BrushFlushMetrics?,
         onDrainPendingBrushCommitsInteractively: @escaping (Bool) -> Void,
         resolveBrushDisplayTexture: @escaping (LayerID) -> MTLTexture?,
+        resolvePatternPlacementTexture: @escaping (UUID) -> MTLTexture?,
         onEyedropperSample: @escaping (CanvasPoint) -> Void,
         onBucketFill: @escaping (CanvasPoint) -> Void,
         onCanvasClick: @escaping (CanvasPoint, NSEvent.ModifierFlags, Int) -> Void,
@@ -2085,6 +2146,9 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
         onGradientDragBegan: @escaping (CanvasPoint, NSEvent.ModifierFlags) -> Void,
         onGradientDragChanged: @escaping (CanvasPoint, NSEvent.ModifierFlags) -> Void,
         onGradientDragEnded: @escaping (CanvasPoint, NSEvent.ModifierFlags) -> Void,
+        onPatternPlacementBegan: @escaping (CanvasPoint, Bool) -> Void,
+        onPatternPlacementChanged: @escaping (CanvasPoint) -> Void,
+        onPatternPlacementEnded: @escaping (CanvasPoint) -> Void,
         onEnterGradientEditing: @escaping () -> Void,
         onCancelCanvasTool: @escaping () -> Void,
         onApplyGradientSession: @escaping () -> Void,
@@ -2106,6 +2170,11 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
         self.linearGradientRenderer = LinearGradientRenderer(device: metalContext.device)
         self.sectorGradientRenderer = SectorGradientRenderer(device: metalContext.device)
         do {
+            self.patternPlacementRenderer = try PatternPlacementRenderer(device: metalContext.device)
+        } catch {
+            fatalError("Failed to initialize PatternPlacementRenderer: \(error.localizedDescription)")
+        }
+        do {
             self.labLuminosityPostProcessor = try LABLuminosityPostProcessor(device: metalContext.device)
             self.labLuminosityPostProcessorError = nil
         } catch {
@@ -2118,6 +2187,7 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
         self.transformPreview = transformPreview
         self.linearGradientPreview = linearGradientPreview
         self.sectorGradientPreview = sectorGradientPreview
+        self.patternPlacementPhase = patternPlacementPhase
         self.gradientPreviewColor = gradientPreviewColor
         self.gradientPaintJitterAmount = gradientPaintJitterAmount
         self.gradientPaintContrastAmount = gradientPaintContrastAmount
@@ -2135,6 +2205,7 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
         self.onFlushPendingBrushWork = onFlushPendingBrushWork
         self.onDrainPendingBrushCommitsInteractively = onDrainPendingBrushCommitsInteractively
         self.resolveBrushDisplayTexture = resolveBrushDisplayTexture
+        self.resolvePatternPlacementTexture = resolvePatternPlacementTexture
         self.onEyedropperSample = onEyedropperSample
         self.onBucketFill = onBucketFill
         self.onCanvasClick = onCanvasClick
@@ -2154,6 +2225,9 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
         self.onGradientDragBegan = onGradientDragBegan
         self.onGradientDragChanged = onGradientDragChanged
         self.onGradientDragEnded = onGradientDragEnded
+        self.onPatternPlacementBegan = onPatternPlacementBegan
+        self.onPatternPlacementChanged = onPatternPlacementChanged
+        self.onPatternPlacementEnded = onPatternPlacementEnded
         self.onEnterGradientEditing = onEnterGradientEditing
         self.onCancelCanvasTool = onCancelCanvasTool
         self.onApplyGradientSession = onApplyGradientSession
@@ -2231,6 +2305,12 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
                 activeTool == .sectorGradient
                 ? sectorGradientPreview.flatMap { resolvedSectorGradientPreviewGeometry(preview: $0) }
                 : nil
+            let activePatternPlacementDraft = patternPlacementPhase.draft
+            let activePatternPlacementTexture =
+                activePatternPlacementDraft.flatMap { resolvePatternPlacementTexture($0.itemID) }
+            let hasPatternPlacementPreview =
+                activePatternPlacementDraft != nil &&
+                activePatternPlacementTexture != nil
             let hasLinearGradientPreview = resolvedLinearGradientGeometry != nil
             let hasSectorGradientPreview = resolvedSectorGradientGeometry != nil
             let hasGradientPreview = hasLinearGradientPreview || hasSectorGradientPreview
@@ -2274,7 +2354,42 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
                 return (surface.surfaceID, texture, surface.opacity)
             }
 
-            if hasGradientPreview, let activeLayerSurfaceID {
+            if hasPatternPlacementPreview,
+               let activeLayerSurfaceID,
+               let patternDraft = activePatternPlacementDraft,
+               let patternTexture = activePatternPlacementTexture {
+                let lowerPrefix = Array(orderedVisibleLayers.prefix { $0.0 != activeLayerSurfaceID })
+                let activeLayerEntries = orderedVisibleLayers.filter { $0.0 == activeLayerSurfaceID }
+                let lowerLayers = lowerPrefix + activeLayerEntries
+                canvasPresenter.encode(
+                    layerTextures: lowerLayers.map { ($0.1, $0.2) },
+                    into: descriptor,
+                    commandBuffer: commandBuffer
+                )
+
+                descriptor.colorAttachments[0].loadAction = .load
+                descriptor.colorAttachments[0].storeAction = .store
+                patternPlacementRenderer.encode(
+                    into: descriptor,
+                    commandBuffer: commandBuffer,
+                    sourceTexture: patternTexture,
+                    canvasSize: canvasSize,
+                    destinationRect: patternDraft.destinationRect,
+                    flipHorizontally: patternDraft.flipsHorizontally,
+                    opacity: activeLayerOpacity
+                )
+
+                let upperLayers = Array(orderedVisibleLayers.drop { $0.0 != activeLayerSurfaceID }.dropFirst())
+                if !upperLayers.isEmpty {
+                    descriptor.colorAttachments[0].loadAction = .load
+                    descriptor.colorAttachments[0].storeAction = .store
+                    canvasPresenter.encode(
+                        layerTextures: upperLayers.map { ($0.1, $0.2) },
+                        into: descriptor,
+                        commandBuffer: commandBuffer
+                    )
+                }
+            } else if hasGradientPreview, let activeLayerSurfaceID {
                 let lowerPrefix = Array(orderedVisibleLayers.prefix { $0.0 != activeLayerSurfaceID })
                 let activeLayerEntries = orderedVisibleLayers.filter { $0.0 == activeLayerSurfaceID }
                 let lowerLayers = lowerPrefix + activeLayerEntries
@@ -2371,11 +2486,15 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
                 }
             }
 
-            if hasActivePreview || hasGradientPreview {
+            if hasActivePreview || hasGradientPreview || hasPatternPlacementPreview {
                 previewTimingFrameCounter &+= 1
                 if previewTimingFrameCounter % 15 == 0 {
                     let previewEncodeDurationMs = Double(DispatchTime.now().uptimeNanoseconds - previewEncodeStart) / 1_000_000
-                    if hasGradientPreview {
+                    if hasPatternPlacementPreview {
+                        transformLogger.debug(
+                            "[pattern-placement] previewEncodeMs=\(previewEncodeDurationMs, privacy: .public)"
+                        )
+                    } else if hasGradientPreview {
                         transformLogger.debug("[gradient] previewEncodeMs=\(previewEncodeDurationMs, privacy: .public) sessionTool=\(hasLinearGradientPreview ? "linear" : "sector", privacy: .public)")
                     } else {
                         transformLogger.debug(
@@ -2499,6 +2618,22 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
         modifiers: NSEvent.ModifierFlags
     ) {
         onGradientDragEnded(point, modifiers)
+    }
+
+    func strokeCaptureView(
+        _ view: StrokeCaptureMTKView,
+        didBeginPatternPlacementAt point: CanvasPoint,
+        placeIntoNewLayer: Bool
+    ) {
+        onPatternPlacementBegan(point, placeIntoNewLayer)
+    }
+
+    func strokeCaptureView(_ view: StrokeCaptureMTKView, didChangePatternPlacementAt point: CanvasPoint) {
+        onPatternPlacementChanged(point)
+    }
+
+    func strokeCaptureView(_ view: StrokeCaptureMTKView, didEndPatternPlacementAt point: CanvasPoint) {
+        onPatternPlacementEnded(point)
     }
 
     func strokeCaptureViewDidRequestEnterGradientEditing(_ view: StrokeCaptureMTKView) {

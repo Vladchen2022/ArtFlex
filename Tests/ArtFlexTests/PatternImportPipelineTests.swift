@@ -118,13 +118,47 @@ struct PatternImportPipelineTests {
         )
 
         let importedItem = try #require(result.importedItems.first)
+        let renderImage = try #require(controller.loadRenderImage(for: importedItem))
+        #expect(renderImage.rgbaBytes[3] < 5)
+        let retainedPixelAlphaIndex = ((0 * renderImage.width) + (renderImage.width - 1)) * 4 + 3
+        #expect(renderImage.rgbaBytes[retainedPixelAlphaIndex] > 250)
+    }
+
+    @Test
+    func eraseMaskSupportsPartialAlphaForSoftEdgeOriginalColorImport() throws {
+        let tempRootURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ArtFlexPatternImportTests-\(UUID().uuidString)", isDirectory: true)
+        let redirectedFileManager = RedirectedPatternApplicationSupportFileManager(
+            applicationSupportRootURL: tempRootURL
+        )
+        let controller = PatternLibraryPersistenceController(fileManager: redirectedFileManager)
+        defer { try? FileManager.default.removeItem(at: tempRootURL) }
+
+        let sourceURL = tempRootURL.appendingPathComponent("soft-erase.png")
+        try writeTestPNG(
+            to: sourceURL,
+            width: 1,
+            height: 1,
+            rgbaBytes: [0, 0, 0, 255]
+        )
+
+        let partialMask = Data([UInt8](repeating: 128, count: 256 * 256))
+        let result = try controller.importFiles(
+            [sourceURL],
+            recipe: PatternImportRecipe(mode: .originalColor, contrast: 0, autoCropToContent: false),
+            eraseMaskDataByFileURL: [sourceURL: partialMask],
+            into: .init()
+        )
+
+        let importedItem = try #require(result.importedItems.first)
         let renderURL = try #require(controller.resolveAssetURL(for: importedItem.renderAssetLocation))
         let renderPreview = try #require(controller.makePreview(
             for: renderURL,
             recipe: PatternImportRecipe(mode: .originalColor, contrast: 0, autoCropToContent: false)
         ))
         let processed = [UInt8](renderPreview.processedPreviewRGBABytes)
-        #expect(processed[3] < 5)
+        #expect(processed[3] > 120)
+        #expect(processed[3] < 136)
     }
 
     @Test
@@ -156,6 +190,90 @@ struct PatternImportPipelineTests {
         #expect(secondBatch.importedItems.isEmpty)
         #expect(secondBatch.skippedDuplicateCount == 1)
         #expect(secondBatch.updatedLibrary.items.count == 1)
+    }
+
+    @Test
+    func largeImportedImagesAreDownscaledToMaximumDimension1000() throws {
+        let tempRootURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ArtFlexPatternImportTests-\(UUID().uuidString)", isDirectory: true)
+        let redirectedFileManager = RedirectedPatternApplicationSupportFileManager(
+            applicationSupportRootURL: tempRootURL
+        )
+        let controller = PatternLibraryPersistenceController(fileManager: redirectedFileManager)
+
+        defer {
+            try? FileManager.default.removeItem(at: tempRootURL)
+        }
+
+        let sourceURL = tempRootURL.appendingPathComponent("large.png")
+        let width = 1400
+        let height = 700
+        let rgbaBytes = [UInt8](repeating: 255, count: width * height * 4)
+        try writeTestPNG(to: sourceURL, width: width, height: height, rgbaBytes: rgbaBytes)
+
+        let preview = try #require(controller.makePreview(
+            for: sourceURL,
+            recipe: PatternImportRecipe(mode: .originalColor, contrast: 0, autoCropToContent: false)
+        ))
+        #expect(preview.sourcePixelWidth == 1000)
+        #expect(preview.sourcePixelHeight == 500)
+
+        let result = try controller.importFiles(
+            [sourceURL],
+            recipe: PatternImportRecipe(mode: .originalColor, contrast: 0, autoCropToContent: false),
+            into: .init()
+        )
+
+        let importedItem = try #require(result.importedItems.first)
+        #expect(importedItem.sourcePixelWidth == 1000)
+        #expect(importedItem.sourcePixelHeight == 500)
+
+        let renderImage = try #require(controller.loadRenderImage(for: importedItem))
+        #expect(renderImage.width == 1000)
+        #expect(renderImage.height == 500)
+    }
+
+    @Test
+    func rebuildThumbnailRegeneratesManagedThumbnailAsset() throws {
+        let tempRootURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ArtFlexPatternImportTests-\(UUID().uuidString)", isDirectory: true)
+        let redirectedFileManager = RedirectedPatternApplicationSupportFileManager(
+            applicationSupportRootURL: tempRootURL
+        )
+        let controller = PatternLibraryPersistenceController(fileManager: redirectedFileManager)
+
+        defer {
+            try? FileManager.default.removeItem(at: tempRootURL)
+        }
+
+        let sourceURL = tempRootURL.appendingPathComponent("rebuild-thumb.png")
+        try writeTestPNG(
+            to: sourceURL,
+            width: 4,
+            height: 4,
+            rgbaBytes: [
+                0, 0, 0, 0,   0, 0, 0, 0,   0, 0, 0, 0,   0, 0, 0, 0,
+                0, 0, 0, 0,   0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 0,
+                0, 0, 0, 0,   0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 0,
+                0, 0, 0, 0,   0, 0, 0, 0,   0, 0, 0, 0,   0, 0, 0, 0
+            ]
+        )
+
+        let result = try controller.importFiles(
+            [sourceURL],
+            recipe: PatternImportRecipe(mode: .originalColor, contrast: 0, autoCropToContent: false),
+            into: .init()
+        )
+        let item = try #require(result.importedItems.first)
+        let thumbnailURL = try #require(controller.resolveAssetURL(for: item.thumbnailLocation))
+
+        try Data().write(to: thumbnailURL, options: .atomic)
+        #expect((try Data(contentsOf: thumbnailURL)).isEmpty)
+
+        try controller.rebuildThumbnail(for: item)
+
+        let rebuiltData = try Data(contentsOf: thumbnailURL)
+        #expect(rebuiltData.isEmpty == false)
     }
 }
 

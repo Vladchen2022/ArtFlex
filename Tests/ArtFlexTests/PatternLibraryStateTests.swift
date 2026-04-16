@@ -148,4 +148,79 @@ struct PatternLibraryStateTests {
         #expect(state.items.count == 1)
         #expect(state.selectedItemID == first.id)
     }
+
+    @Test
+    func colorTagAndRecentUsagePersistOnLibraryState() {
+        let firstID = UUID(uuidString: "00000000-0000-0000-0000-000000000030")!
+        let secondID = UUID(uuidString: "00000000-0000-0000-0000-000000000031")!
+        let thirdID = UUID(uuidString: "00000000-0000-0000-0000-000000000032")!
+        let fourthID = UUID(uuidString: "00000000-0000-0000-0000-000000000033")!
+        let fifthID = UUID(uuidString: "00000000-0000-0000-0000-000000000034")!
+
+        var state = PatternLibraryState(
+            items: [
+                PatternLibraryItem(
+                    id: firstID,
+                    displayName: "A",
+                    importRecipe: PatternImportRecipe(),
+                    originalFilename: "a.png",
+                    sourcePixelWidth: 32,
+                    sourcePixelHeight: 32,
+                    renderAssetLocation: .managedCopy(relativePath: "render/a.png"),
+                    thumbnailLocation: .managedCopy(relativePath: "thumb/a.png")
+                ),
+                PatternLibraryItem(
+                    id: secondID,
+                    displayName: "B",
+                    importRecipe: PatternImportRecipe(),
+                    originalFilename: "b.png",
+                    sourcePixelWidth: 32,
+                    sourcePixelHeight: 32,
+                    renderAssetLocation: .managedCopy(relativePath: "render/b.png"),
+                    thumbnailLocation: .managedCopy(relativePath: "thumb/b.png")
+                ),
+                PatternLibraryItem(
+                    id: thirdID,
+                    displayName: "C",
+                    importRecipe: PatternImportRecipe(),
+                    originalFilename: "c.png",
+                    sourcePixelWidth: 32,
+                    sourcePixelHeight: 32,
+                    renderAssetLocation: .managedCopy(relativePath: "render/c.png"),
+                    thumbnailLocation: .managedCopy(relativePath: "thumb/c.png")
+                ),
+                PatternLibraryItem(
+                    id: fourthID,
+                    displayName: "D",
+                    importRecipe: PatternImportRecipe(),
+                    originalFilename: "d.png",
+                    sourcePixelWidth: 32,
+                    sourcePixelHeight: 32,
+                    renderAssetLocation: .managedCopy(relativePath: "render/d.png"),
+                    thumbnailLocation: .managedCopy(relativePath: "thumb/d.png")
+                ),
+                PatternLibraryItem(
+                    id: fifthID,
+                    displayName: "E",
+                    importRecipe: PatternImportRecipe(),
+                    originalFilename: "e.png",
+                    sourcePixelWidth: 32,
+                    sourcePixelHeight: 32,
+                    renderAssetLocation: .managedCopy(relativePath: "render/e.png"),
+                    thumbnailLocation: .managedCopy(relativePath: "thumb/e.png")
+                )
+            ]
+        )
+
+        state.setColorTag(.blue, forItemID: secondID)
+        state.noteItemUsed(secondID)
+        state.noteItemUsed(fourthID)
+        state.noteItemUsed(firstID)
+        state.noteItemUsed(fifthID)
+        state.noteItemUsed(thirdID)
+
+        #expect(state.item(id: secondID)?.colorTag == .blue)
+        #expect(state.recentItemIDs == [thirdID, fifthID, firstID, fourthID])
+        #expect(state.recentItems().map(\.id) == [thirdID, fifthID, firstID, fourthID])
+    }
 }

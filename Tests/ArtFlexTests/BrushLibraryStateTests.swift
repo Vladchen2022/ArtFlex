@@ -4,6 +4,33 @@ import Testing
 
 struct BrushLibraryStateTests {
     @Test
+    func recentPresetUsageTracksLastFourAppliedBrushes() {
+        let ids = (1...5).map { "preset-\($0)" }
+        let presets = ids.enumerated().map { index, id in
+            BrushPreset(
+                id: id,
+                name: "笔刷 \(index + 1)",
+                brush: .stageOneDefault,
+                isBuiltIn: false,
+                slotIndex: index
+            )
+        }
+        var library = BrushLibraryState(
+            presets: presets,
+            selectedPresetID: nil
+        )
+
+        library.notePresetUsed(ids[1])
+        library.notePresetUsed(ids[3])
+        library.notePresetUsed(ids[0])
+        library.notePresetUsed(ids[4])
+        library.notePresetUsed(ids[2])
+
+        #expect(library.recentPresetIDs == [ids[2], ids[4], ids[0], ids[3]])
+        #expect(library.recentPresets().map(\.id) == [ids[2], ids[4], ids[0], ids[3]])
+    }
+
+    @Test
     func savingCurrentPresetReusesExistingMatchingCustomBrush() {
         var brush = BrushSettings.stageOneDefault
         brush.size = 23

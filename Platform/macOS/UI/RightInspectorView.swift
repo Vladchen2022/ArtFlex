@@ -353,6 +353,12 @@ struct RightInspectorView: View {
         .onChange(of: viewModel.workspace.toolSession.activeTool) { oldTool, newTool in
             guard oldTool != newTool else { return }
             handleToolDrivenParameterInspectorTabChange(oldTool: oldTool, newTool: newTool)
+            if newTool == .brush {
+                libraryInspectorTab = .brush
+            }
+        }
+        .onChange(of: viewModel.brushLibraryRevealRequestID) { _, _ in
+            libraryInspectorTab = .brush
         }
         .sheet(item: $tipImageLibrarySheetTarget) { target in
             tipImageLibrarySheet(for: target) {
@@ -386,27 +392,9 @@ struct RightInspectorView: View {
 
     private func parameterInspectorTabButton(_ tab: ParameterInspectorTab) -> some View {
         let isSelected = parameterInspectorTab == tab
-        return Button {
+        return inspectorTabButton(title: tab.rawValue, isSelected: isSelected) {
             handleParameterInspectorTabSelection(tab)
-        } label: {
-            Text(tab.rawValue)
-                .font(.system(size: 12, weight: .bold))
-                .foregroundStyle(Color.white.opacity(isSelected ? 0.96 : 0.72))
-                .frame(maxWidth: .infinity, minHeight: 28)
-                .padding(.horizontal, 10)
-                .background(
-                    RoundedRectangle(cornerRadius: 10)
-                        .fill(isSelected ? Color.accentColor.opacity(0.24) : Color.white.opacity(0.04))
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 10)
-                        .stroke(
-                            isSelected ? Color.accentColor.opacity(0.86) : Color.white.opacity(0.08),
-                            lineWidth: 1
-                        )
-                )
         }
-        .buttonStyle(.plain)
     }
 
     private func handleParameterInspectorTabSelection(_ tab: ParameterInspectorTab) {
@@ -616,27 +604,9 @@ struct RightInspectorView: View {
 
     private func leftInspectorTabButton(_ tab: LeftInspectorTab) -> some View {
         let isSelected = leftInspectorTab == tab
-        return Button {
+        return inspectorTabButton(title: tab.rawValue, isSelected: isSelected) {
             leftInspectorTab = tab
-        } label: {
-            Text(tab.rawValue)
-                .font(.system(size: 12, weight: .bold))
-                .foregroundStyle(Color.white.opacity(isSelected ? 0.96 : 0.72))
-                .frame(maxWidth: .infinity, minHeight: 28)
-                .padding(.horizontal, 10)
-                .background(
-                    RoundedRectangle(cornerRadius: 10)
-                        .fill(isSelected ? Color.accentColor.opacity(0.24) : Color.white.opacity(0.04))
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 10)
-                        .stroke(
-                            isSelected ? Color.accentColor.opacity(0.86) : Color.white.opacity(0.08),
-                            lineWidth: 1
-                        )
-                )
         }
-        .buttonStyle(.plain)
     }
 
     private var referenceImageSection: some View {
@@ -865,30 +835,12 @@ struct RightInspectorView: View {
 
     private func topInspectorTabButton(_ tab: TopInspectorTab) -> some View {
         let isSelected = topInspectorTab == tab
-        return Button {
+        return inspectorTabButton(title: tab.rawValue, isSelected: isSelected) {
             topInspectorTab = tab
             if tab == .tipShape, parameterInspectorTab == .colorAdjustment {
                 parameterInspectorTab = .brush
             }
-        } label: {
-            Text(tab.rawValue)
-                .font(.system(size: 12, weight: .bold))
-                .foregroundStyle(Color.white.opacity(isSelected ? 0.96 : 0.72))
-                .frame(maxWidth: .infinity, minHeight: 28)
-                .padding(.horizontal, 10)
-                .background(
-                    RoundedRectangle(cornerRadius: 10)
-                        .fill(isSelected ? Color.accentColor.opacity(0.24) : Color.white.opacity(0.04))
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 10)
-                        .stroke(
-                            isSelected ? Color.accentColor.opacity(0.86) : Color.white.opacity(0.08),
-                            lineWidth: 1
-                        )
-                )
         }
-        .buttonStyle(.plain)
     }
 
     private var navigatorSection: some View {
@@ -1558,30 +1510,39 @@ struct RightInspectorView: View {
         GeometryReader { geometry in
             let columnCount = 4
             let spacing = 8.0
+            let recentSectionSpacing = 14.0
             let outerInset = 12.0
             let usableWidth = max(0.0, geometry.size.width - outerInset * 2)
             let slotWidth = max(40.0, floor((usableWidth - spacing * Double(columnCount - 1)) / Double(columnCount)))
             let contentWidth = (slotWidth * Double(columnCount)) + (spacing * Double(columnCount - 1))
             let horizontalInset = max(0.0, floor((usableWidth - contentWidth) * 0.5)) + outerInset
             let resolvedSlotMap = viewModel.workspace.brushLibrary.resolvedSlotMap()
+            let recentPresets = viewModel.workspace.brushLibrary.recentPresets(limit: columnCount)
             let occupiedSlotCount = max((resolvedSlotMap.values.max() ?? -1) + 1, 0)
-            let estimatedRowHeight = max(slotWidth + spacing, 1)
-            let visibleRowCount = max(2, Int(ceil(max(geometry.size.height - 4, 0) / estimatedRowHeight)))
-            let visibleSlotCapacity = visibleRowCount * columnCount
+            let remainingHeight = max(0.0, geometry.size.height - slotWidth - recentSectionSpacing)
+            let minimumLibraryRows = max(1, Int(ceil((remainingHeight + spacing) / (slotWidth + spacing))))
+            let visibleSlotCapacity = minimumLibraryRows * columnCount
             let rawSlotCount = max(occupiedSlotCount, visibleSlotCapacity)
             let totalSlotCount = max(
-                columnCount * 2,
+                columnCount,
                 ((rawSlotCount + columnCount - 1) / columnCount) * columnCount
             )
+            let columns = Array(repeating: GridItem(.fixed(slotWidth), spacing: spacing), count: columnCount)
 
             VStack(alignment: .leading, spacing: 0) {
                 ScrollView(.vertical, showsIndicators: true) {
-                    LazyVGrid(
-                        columns: Array(repeating: GridItem(.fixed(slotWidth), spacing: spacing), count: columnCount),
-                        spacing: spacing
-                    ) {
-                        ForEach(0..<totalSlotCount, id: \.self) { slotIndex in
-                            brushLibrarySlotCell(slotIndex: slotIndex)
+                    VStack(spacing: recentSectionSpacing) {
+                        LazyVGrid(columns: columns, spacing: spacing) {
+                            ForEach(0..<columnCount, id: \.self) { recentIndex in
+                                let preset = recentIndex < recentPresets.count ? recentPresets[recentIndex] : nil
+                                recentBrushLibrarySlotCell(preset: preset)
+                            }
+                        }
+
+                        LazyVGrid(columns: columns, spacing: spacing) {
+                            ForEach(0..<totalSlotCount, id: \.self) { slotIndex in
+                                brushLibrarySlotCell(slotIndex: slotIndex)
+                            }
                         }
                     }
                     .padding(.horizontal, horizontalInset)
@@ -1626,21 +1587,30 @@ struct RightInspectorView: View {
     private func libraryInspectorTabButton(_ tab: LibraryInspectorTab) -> some View {
         let isSelected = libraryInspectorTab == tab
 
-        return Button {
+        return inspectorTabButton(title: tab.rawValue, isSelected: isSelected) {
             libraryInspectorTab = tab
-        } label: {
-            Text(tab.rawValue)
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(Color.white.opacity(isSelected ? 0.96 : 0.7))
+        }
+    }
+
+    private func inspectorTabButton(
+        title: String,
+        isSelected: Bool,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Text(title)
+                .font(.system(size: 12, weight: .bold))
+                .foregroundStyle(Color.white.opacity(isSelected ? 0.96 : 0.72))
                 .frame(maxWidth: .infinity, minHeight: 28)
+                .padding(.horizontal, 10)
                 .background(
-                    RoundedRectangle(cornerRadius: 9)
-                        .fill(isSelected ? Color.accentColor.opacity(0.9) : Color.white.opacity(0.06))
+                    RoundedRectangle(cornerRadius: 10)
+                        .fill(isSelected ? Color.accentColor.opacity(0.24) : Color.white.opacity(0.04))
                 )
                 .overlay(
-                    RoundedRectangle(cornerRadius: 9)
+                    RoundedRectangle(cornerRadius: 10)
                         .stroke(
-                            isSelected ? Color.accentColor.opacity(0.98) : Color.white.opacity(0.08),
+                            isSelected ? Color.accentColor.opacity(0.86) : Color.white.opacity(0.08),
                             lineWidth: 1
                         )
                 )
@@ -1649,40 +1619,34 @@ struct RightInspectorView: View {
     }
 
     private var patternLibrarySection: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 8) {
-                Button("导入图案…") {
-                    viewModel.presentPatternImportSheet()
-                }
-                .buttonStyle(.borderedProminent)
-
-                Spacer(minLength: 0)
-
-                if !viewModel.workspace.patternLibrary.items.isEmpty {
-                    Text("\(viewModel.workspace.patternLibrary.items.count) 项")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(Color.white.opacity(0.64))
-                }
-            }
-            .padding(.horizontal, 12)
-
-            GeometryReader { geometry in
+        GeometryReader { geometry in
                 let columnCount = 4
                 let spacing = 8.0
+                let recentSectionSpacing = 14.0
                 let outerInset = 12.0
                 let usableWidth = max(0.0, geometry.size.width - outerInset * 2)
                 let slotWidth = max(40.0, floor((usableWidth - spacing * Double(columnCount - 1)) / Double(columnCount)))
                 let contentWidth = (slotWidth * Double(columnCount)) + (spacing * Double(columnCount - 1))
                 let horizontalInset = max(0.0, floor((usableWidth - contentWidth) * 0.5)) + outerInset
-                let totalSlotCount = viewModel.workspace.patternLibrary.slotCount(minRows: 2, columns: columnCount)
+                let recentItems = viewModel.workspace.patternLibrary.recentItems(limit: columnCount)
+                let remainingHeight = max(0.0, geometry.size.height - slotWidth - recentSectionSpacing)
+                let minimumLibraryRows = max(1, Int(ceil((remainingHeight + spacing) / (slotWidth + spacing))))
+                let totalSlotCount = viewModel.workspace.patternLibrary.slotCount(minRows: minimumLibraryRows, columns: columnCount)
+                let columns = Array(repeating: GridItem(.fixed(slotWidth), spacing: spacing), count: columnCount)
 
                 ScrollView(.vertical, showsIndicators: true) {
-                    LazyVGrid(
-                        columns: Array(repeating: GridItem(.fixed(slotWidth), spacing: spacing), count: columnCount),
-                        spacing: spacing
-                    ) {
-                        ForEach(0..<totalSlotCount, id: \.self) { slotIndex in
-                            patternLibrarySlotCell(slotIndex: slotIndex)
+                    VStack(spacing: recentSectionSpacing) {
+                        LazyVGrid(columns: columns, spacing: spacing) {
+                            ForEach(0..<columnCount, id: \.self) { recentIndex in
+                                let item = recentIndex < recentItems.count ? recentItems[recentIndex] : nil
+                                recentPatternLibrarySlotCell(item: item)
+                            }
+                        }
+
+                        LazyVGrid(columns: columns, spacing: spacing) {
+                            ForEach(0..<totalSlotCount, id: \.self) { slotIndex in
+                                patternLibrarySlotCell(slotIndex: slotIndex)
+                            }
                         }
                     }
                     .padding(.horizontal, horizontalInset)
@@ -1690,9 +1654,21 @@ struct RightInspectorView: View {
                     .frame(maxWidth: .infinity, alignment: .top)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .contentShape(Rectangle())
+        .contextMenu {
+            Button("导入图片") {
+                viewModel.presentPatternImportSheet()
+            }
+
+            Divider()
+
+            Button("重建全部缩略图") {
+                viewModel.rebuildAllPatternLibraryThumbnails()
+            }
+            .disabled(viewModel.workspace.patternLibrary.items.isEmpty)
+        }
     }
 
     @ViewBuilder
@@ -1705,16 +1681,19 @@ struct RightInspectorView: View {
                     movePatternLibraryItemFromDrop(providers: providers, toSlot: slotIndex)
                 }
         } else {
-            RoundedRectangle(cornerRadius: 10)
-                .fill(Color.white.opacity(0.03))
-                .overlay {
-                    RoundedRectangle(cornerRadius: 10)
-                        .stroke(Color.white.opacity(0.05), lineWidth: 1)
-                }
-                .aspectRatio(1, contentMode: .fit)
+            patternLibraryEmptyCell()
                 .onDrop(of: [UTType.plainText.identifier], isTargeted: nil) { providers in
                     movePatternLibraryItemFromDrop(providers: providers, toSlot: slotIndex)
                 }
+        }
+    }
+
+    @ViewBuilder
+    private func recentPatternLibrarySlotCell(item: PatternLibraryItem?) -> some View {
+        if let item {
+            patternLibraryItemCell(item)
+        } else {
+            patternLibraryEmptyCell()
         }
     }
 
@@ -1753,6 +1732,11 @@ struct RightInspectorView: View {
                 .clipShape(RoundedRectangle(cornerRadius: 10))
                 .padding(1.5)
                 .allowsHitTesting(false)
+
+                if let tag = item.colorTag {
+                    brushColorTagCorner(tag)
+                        .allowsHitTesting(false)
+                }
             }
         }
         .aspectRatio(1, contentMode: .fit)
@@ -1761,6 +1745,32 @@ struct RightInspectorView: View {
             Button("使用") {
                 viewModel.selectPatternLibraryItem(item.id)
             }
+            Button("重建缩略图") {
+                viewModel.rebuildPatternLibraryThumbnail(item.id)
+            }
+            Divider()
+            Menu("色标") {
+                ForEach(BrushColorTag.allCases, id: \.self) { tag in
+                    Button {
+                        viewModel.setPatternLibraryItemColorTag(tag, forItemID: item.id)
+                    } label: {
+                        HStack {
+                            Circle()
+                                .fill(colorForBrushTag(tag))
+                                .frame(width: 10, height: 10)
+                            Text(labelForBrushTag(tag))
+                        }
+                    }
+                }
+
+                Divider()
+
+                Button("清除色标") {
+                    viewModel.setPatternLibraryItemColorTag(nil, forItemID: item.id)
+                }
+                .disabled(item.colorTag == nil)
+            }
+            Divider()
             Button("在 Finder 中显示") {
                 viewModel.revealPatternLibraryItemInFinder(item.id)
             }
@@ -1771,12 +1781,22 @@ struct RightInspectorView: View {
         }
     }
 
+    private func patternLibraryEmptyCell() -> some View {
+        RoundedRectangle(cornerRadius: 10)
+            .fill(Color.white.opacity(0.03))
+            .overlay {
+                RoundedRectangle(cornerRadius: 10)
+                    .stroke(Color.white.opacity(0.05), lineWidth: 1)
+            }
+            .aspectRatio(1, contentMode: .fit)
+    }
+
     @ViewBuilder
     private func brushLibrarySlotCell(slotIndex: Int) -> some View {
         let preset = viewModel.workspace.brushLibrary.preset(atSlot: slotIndex)
 
         if let preset {
-            brushPresetCell(preset, slotIndex: slotIndex)
+            brushPresetCell(preset, slotIndex: slotIndex, showsShortcutLabel: true)
                 .onDrop(of: [UTType.plainText.identifier], isTargeted: nil) { providers in
                     moveBrushPresetFromDrop(providers: providers, toSlot: slotIndex)
                 }
@@ -1796,6 +1816,21 @@ struct RightInspectorView: View {
                 }
 
             emptyCell
+        }
+    }
+
+    @ViewBuilder
+    private func recentBrushLibrarySlotCell(preset: BrushPreset?) -> some View {
+        if let preset {
+            brushPresetCell(preset, slotIndex: nil, showsShortcutLabel: false)
+        } else {
+            RoundedRectangle(cornerRadius: 10)
+                .fill(Color.white.opacity(0.03))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 10)
+                        .stroke(Color.white.opacity(0.05), lineWidth: 1)
+                }
+                .aspectRatio(1, contentMode: .fit)
         }
     }
 
@@ -3107,7 +3142,11 @@ struct RightInspectorView: View {
         return Data(mask)
     }
 
-    private func brushPresetCell(_ preset: BrushPreset, slotIndex: Int) -> some View {
+    private func brushPresetCell(
+        _ preset: BrushPreset,
+        slotIndex: Int?,
+        showsShortcutLabel: Bool
+    ) -> some View {
         let isSelected = viewModel.workspace.brushLibrary.selectedPresetID == preset.id
         let strokeColor: Color = isSelected ? Color.accentColor.opacity(0.9) : Color.white.opacity(0.06)
         let strokeWidth: CGFloat = isSelected ? 1.5 : 1.0
@@ -3161,8 +3200,10 @@ struct RightInspectorView: View {
                         .allowsHitTesting(false)
                 }
 
-                shortcutSlotLabel(for: slotIndex)
-                    .allowsHitTesting(false)
+                if showsShortcutLabel, let slotIndex {
+                    shortcutSlotLabel(for: slotIndex)
+                        .allowsHitTesting(false)
+                }
             }
         }
         .aspectRatio(1, contentMode: .fit)
@@ -4224,6 +4265,7 @@ private struct NavigatorPreviewPanel: View {
                     transformPreview: .identity,
                     linearGradientPreview: nil,
                     sectorGradientPreview: nil,
+                    patternPlacementPhase: .idle,
                     gradientPreviewColor: .white,
                     gradientPaintJitterAmount: 0,
                     gradientPaintContrastAmount: 0,
@@ -4236,6 +4278,7 @@ private struct NavigatorPreviewPanel: View {
                     resolveBrushDisplayTexture: { layerID in
                         viewModel.brushDisplayTexture(for: layerID)
                     },
+                    resolvePatternPlacementTexture: { _ in nil },
                     onEyedropperSample: { _ in },
                     onBucketFill: { _ in },
                     onCanvasClick: { _, _, _ in },
@@ -4259,6 +4302,9 @@ private struct NavigatorPreviewPanel: View {
                     onGradientDragBegan: { _, _ in },
                     onGradientDragChanged: { _, _ in },
                     onGradientDragEnded: { _, _ in },
+                    onPatternPlacementBegan: { _, _ in },
+                    onPatternPlacementChanged: { _ in },
+                    onPatternPlacementEnded: { _ in },
                     onEnterGradientEditing: {},
                     onCancelCanvasTool: {},
                     onApplyGradientSession: {},

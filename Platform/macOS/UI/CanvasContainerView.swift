@@ -45,6 +45,7 @@ struct CanvasContainerView: View {
                         transformPreview: viewModel.freeTransformPreview,
                         linearGradientPreview: viewModel.linearGradientState.preview,
                         sectorGradientPreview: viewModel.sectorGradientState.preview,
+                        patternPlacementPhase: viewModel.patternPlacementPhase,
                         gradientPreviewColor: viewModel.gradientPreviewColor,
                         gradientPaintJitterAmount: viewModel.displayedPaintJitterAmount,
                         gradientPaintContrastAmount: viewModel.displayedPaintContrastAmount,
@@ -70,6 +71,9 @@ struct CanvasContainerView: View {
                         },
                         resolveBrushDisplayTexture: { layerID in
                             viewModel.brushDisplayTexture(for: layerID)
+                        },
+                        resolvePatternPlacementTexture: { itemID in
+                            viewModel.patternPlacementTexture(for: itemID)
                         },
                         onEyedropperSample: { point in
                             onCanvasInteraction?()
@@ -164,6 +168,21 @@ struct CanvasContainerView: View {
                         onGradientDragEnded: { point, modifiers in
                             onCanvasInteraction?()
                             viewModel.endGradientDrag(at: point, modifiers: modifiers)
+                        },
+                        onPatternPlacementBegan: { point, placeIntoNewLayer in
+                            onCanvasInteraction?()
+                            viewModel.beginPatternPlacementDrag(
+                                at: point,
+                                placeIntoNewLayer: placeIntoNewLayer
+                            )
+                        },
+                        onPatternPlacementChanged: { point in
+                            onCanvasInteraction?()
+                            viewModel.updatePatternPlacementDrag(to: point)
+                        },
+                        onPatternPlacementEnded: { point in
+                            onCanvasInteraction?()
+                            viewModel.endPatternPlacementDrag(at: point)
                         },
                         onEnterGradientEditing: {
                             onCanvasInteraction?()

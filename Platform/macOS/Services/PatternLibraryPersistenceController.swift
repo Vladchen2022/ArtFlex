@@ -81,6 +81,7 @@ struct CroppedPatternImage {
 }
 
 final class PatternLibraryPersistenceController: @unchecked Sendable {
+    private static let maximumImportDimension = 1000
     private let fileManager: FileManager
     private let rootDirectoryURL: URL?
     private let encoder = JSONEncoder()
@@ -139,6 +140,13 @@ final class PatternLibraryPersistenceController: @unchecked Sendable {
         resolveAssetURL(for: item.renderAssetLocation)
     }
 
+    func loadRenderImage(for item: PatternLibraryItem) -> DecodedPatternImage? {
+        guard let url = resolveAssetURL(for: item.renderAssetLocation) else {
+            return nil
+        }
+        return decodeImage(at: url)
+    }
+
     func removeAssets(for item: PatternLibraryItem) {
         if case .managedCopy(let relativePath) = item.renderAssetLocation,
            let url = patternLibraryRootURL(createDirectories: false)?.appendingPathComponent(relativePath) {
@@ -151,8 +159,33 @@ final class PatternLibraryPersistenceController: @unchecked Sendable {
         }
     }
 
+    func rebuildThumbnail(for item: PatternLibraryItem) throws {
+        guard let renderURL = resolveAssetURL(for: item.renderAssetLocation),
+              let sourceImage = decodeImage(at: renderURL) else {
+            throw NSError(domain: "ArtFlex.PatternLibraryPersistence", code: 7, userInfo: [
+                NSLocalizedDescriptionKey: "无法读取图案渲染素材"
+            ])
+        }
+
+        guard let thumbnailURL = resolveAssetURL(for: item.thumbnailLocation) else {
+            throw NSError(domain: "ArtFlex.PatternLibraryPersistence", code: 8, userInfo: [
+                NSLocalizedDescriptionKey: "无法定位图案缩略图"
+            ])
+        }
+
+        try ensureParentDirectoryExists(for: thumbnailURL)
+        let thumbnail = makeThumbnailImage(from: sourceImage, maxDimension: 256)
+        try writePNG(image: thumbnail, to: thumbnailURL)
+    }
+
+    func rebuildAllThumbnails(in library: PatternLibraryState) throws {
+        for item in library.items {
+            try rebuildThumbnail(for: item)
+        }
+    }
+
     func makePreviewSource(for fileURL: URL) -> PatternImportPreviewSourceAsset? {
-        guard let sourceImage = decodeImage(at: fileURL) else {
+        guard let sourceImage = preparedImportSourceImage(at: fileURL) else {
             return nil
         }
 
@@ -232,7 +265,7 @@ final class PatternLibraryPersistenceController: @unchecked Sendable {
         var nextSlotIndex = mutableLibrary.firstEmptySlotIndex()
 
         for fileURL in normalizedURLs {
-            guard let sourceImage = decodeImage(at: fileURL) else {
+            guard let sourceImage = preparedImportSourceImage(at: fileURL) else {
                 failedFileNames.append(fileURL.lastPathComponent)
                 continue
             }
@@ -316,6 +349,10 @@ final class PatternLibraryPersistenceController: @unchecked Sendable {
             sanitized.selectedItemID = sanitized.items.first?.id
         }
 
+        sanitized.recentItemIDs = sanitized.recentItemIDs.filter { recentID in
+            sanitized.items.contains(where: { $0.id == recentID })
+        }
+
         return sanitized
     }
 
@@ -388,6 +425,13 @@ final class PatternLibraryPersistenceController: @unchecked Sendable {
                 count: width * height * 4
             ))
         )
+    }
+
+    private func preparedImportSourceImage(at url: URL) -> DecodedPatternImage? {
+        guard let decoded = decodeImage(at: url) else {
+            return nil
+        }
+        return scaledImage(from: decoded, maxDimension: Self.maximumImportDimension)
     }
 
     private func processDecodedImage(

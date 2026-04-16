@@ -121,6 +121,9 @@ final class WorkspaceViewModel: ObservableObject {
     @Published private(set) var patternImportCurrentEraseMaskData: Data?
     @Published private(set) var isPatternImportPreviewLoading = false
     @Published private(set) var isPatternImporting = false
+    @Published private(set) var patternPlacementPhase = PatternPlacementPhase.idle
+    @Published private(set) var isApplyingPatternPlacementCommit = false
+    @Published private(set) var brushLibraryRevealRequestID: UInt64 = 0
     @Published private(set) var isTransformingSelection = false
     @Published private(set) var canMergeDown = false
     @Published private(set) var canMergeVisible = false
@@ -188,6 +191,7 @@ final class WorkspaceViewModel: ObservableObject {
     private var shouldResumeTimelapseAfterSnapshotCompare = false
     private var snapshotPreviewPreparationTasks: [UUID: Task<Void, Never>] = [:]
     private var frozenSnapshotPreviewPreparationTask: Task<Void, Never>?
+    private var patternPlacementTextureCache: [UUID: MTLTexture] = [:]
     private var referenceImageUpgradeTasks: [Int: Task<Void, Never>] = [:]
     private var deferredGradientAction: DeferredGradientAction?
     private let selectionTraceLogger = Logger(subsystem: "ArtFlex", category: "SelectionTrace")
@@ -324,6 +328,7 @@ final class WorkspaceViewModel: ObservableObject {
         ideationBranchActivityHandler?()
         let normalizedTool = Self.normalizedAvailableTool(tool)
         let currentTool = workspace.toolSession.activeTool
+        let shouldRevealBrushLibrary = normalizedTool == .brush
         if currentTool != normalizedTool
             && !resolveColorAdjustmentSessionIfNeeded(reason: .toolChange) {
             return
@@ -331,6 +336,9 @@ final class WorkspaceViewModel: ObservableObject {
         if currentTool != normalizedTool
             && !resolveCurveAdjustmentSessionIfNeeded(reason: .toolChange) {
             return
+        }
+        if patternPlacementPhase != .idle {
+            cancelPatternPlacement(keepSelection: true)
         }
         if shouldAutoApplyGradientBeforeSelectingTool(normalizedTool) {
             deferredGradientAction = .toolSwitch(normalizedTool)
@@ -344,6 +352,9 @@ final class WorkspaceViewModel: ObservableObject {
             _ = drainPendingBrushCommitsIfNeeded(resetLiveSession: true)
         }
         performToolSelection(normalizedTool)
+        if shouldRevealBrushLibrary {
+            revealBrushLibraryPanel()
+        }
     }
 
     func selectToolFromUI(_ tool: ToolKind, shortcutLabel: String? = nil) {
@@ -421,6 +432,10 @@ final class WorkspaceViewModel: ObservableObject {
         curveAdjustmentAllowsIdleModeHotkeys =
             resolvedTool == .brightnessAdjust
             && brightnessAdjustmentEditorMode == .curves
+    }
+
+    private func revealBrushLibraryPanel() {
+        brushLibraryRevealRequestID &+= 1
     }
 
     func presentNewCanvasSheet() {
@@ -2971,7 +2986,9 @@ final class WorkspaceViewModel: ObservableObject {
 
         bootstrap.workspaceStore.updateBrushLibrary { library in
             library.selectPreset(id: presetID)
+            library.notePresetUsed(presetID)
         }
+        persistBrushLibrary()
         _ = synchronizeTipImageLibraryFromWorkspace(persistIfChanged: true)
         refresh()
         if showFeedback {
@@ -3048,7 +3065,10 @@ final class WorkspaceViewModel: ObservableObject {
         bootstrap.workspaceStore.updatePatternLibrary { library in
             library.selectItem(id: itemID)
         }
+        patternPlacementPhase = .armed(itemID: itemID)
+        _ = patternPlacementTexture(for: itemID)
         refreshLightweight()
+        showStatus(.init(kind: .info, message: "已准备放置图案"))
     }
 
     func movePatternLibraryItem(_ itemID: UUID, toSlot targetSlotIndex: Int) {
@@ -3062,6 +3082,14 @@ final class WorkspaceViewModel: ObservableObject {
         }
     }
 
+    func setPatternLibraryItemColorTag(_ tag: BrushColorTag?, forItemID itemID: UUID) {
+        bootstrap.workspaceStore.updatePatternLibrary { library in
+            library.setColorTag(tag, forItemID: itemID)
+        }
+        persistPatternLibrary()
+        refreshLightweight()
+    }
+
     func deletePatternLibraryItem(_ itemID: UUID) {
         let deletedItem = workspace.patternLibrary.item(id: itemID)
         var didDelete = false
@@ -3069,6 +3097,10 @@ final class WorkspaceViewModel: ObservableObject {
             didDelete = library.removeItem(id: itemID)
         }
         if didDelete {
+            patternPlacementTextureCache.removeValue(forKey: itemID)
+            if patternPlacementPhase.itemID == itemID {
+                patternPlacementPhase = .idle
+            }
             if let deletedItem {
                 bootstrap.patternLibraryPersistenceController.removeAssets(for: deletedItem)
             }
@@ -3085,6 +3117,278 @@ final class WorkspaceViewModel: ObservableObject {
         }
 
         bootstrap.filePanelService.revealInFinder(url)
+    }
+
+    func rebuildPatternLibraryThumbnail(_ itemID: UUID) {
+        guard let item = workspace.patternLibrary.item(id: itemID) else {
+            showStatus(.init(kind: .info, message: "未找到图案"))
+            return
+        }
+
+        do {
+            try bootstrap.patternLibraryPersistenceController.rebuildThumbnail(for: item)
+            refreshLightweight()
+            showStatus(.init(kind: .success, message: "已重建缩略图"))
+        } catch {
+            showStatus(.init(kind: .error, message: error.localizedDescription))
+        }
+    }
+
+    func rebuildAllPatternLibraryThumbnails() {
+        do {
+            try bootstrap.patternLibraryPersistenceController.rebuildAllThumbnails(in: workspace.patternLibrary)
+            refreshLightweight()
+            showStatus(.init(kind: .success, message: "已重建全部图案缩略图"))
+        } catch {
+            showStatus(.init(kind: .error, message: error.localizedDescription))
+        }
+    }
+
+    func patternPlacementTexture(for itemID: UUID) -> MTLTexture? {
+        if let cached = patternPlacementTextureCache[itemID] {
+            return cached
+        }
+
+        guard let item = workspace.patternLibrary.item(id: itemID),
+              let decodedImage = bootstrap.patternLibraryPersistenceController.loadRenderImage(for: item)
+        else {
+            return nil
+        }
+
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .rgba8Unorm_srgb,
+            width: decodedImage.width,
+            height: decodedImage.height,
+            mipmapped: false
+        )
+        descriptor.usage = .shaderRead
+        descriptor.storageMode = .shared
+
+        guard let texture = bootstrap.metalContext.device.makeTexture(descriptor: descriptor) else {
+            return nil
+        }
+
+        decodedImage.rgbaBytes.withUnsafeBytes { rawBuffer in
+            guard let baseAddress = rawBuffer.baseAddress else { return }
+            texture.replace(
+                region: MTLRegionMake2D(0, 0, decodedImage.width, decodedImage.height),
+                mipmapLevel: 0,
+                withBytes: baseAddress,
+                bytesPerRow: decodedImage.width * 4
+            )
+        }
+        texture.label = "PatternPlacement-\(itemID.uuidString)"
+        patternPlacementTextureCache[itemID] = texture
+        return texture
+    }
+
+    func beginPatternPlacementDrag(at point: CanvasPoint, placeIntoNewLayer: Bool = false) {
+        guard let itemID = patternPlacementPhase.itemID,
+              workspace.patternLibrary.item(id: itemID) != nil else {
+            return
+        }
+
+        if !placeIntoNewLayer,
+           bootstrap.interactionController.activeEditableLayerID() == nil {
+            showStatus(.init(kind: .info, message: "当前图层已锁定"))
+            return
+        }
+
+        _ = flushBrushEditingBoundary(reason: "beginPatternPlacementDrag")
+
+        guard patternPlacementTexture(for: itemID) != nil else {
+            showStatus(.init(kind: .error, message: "无法加载图案素材"))
+            return
+        }
+
+        patternPlacementPhase = .dragging(
+            PatternPlacementDraft(
+                itemID: itemID,
+                startCanvasPoint: point,
+                currentCanvasPoint: point,
+                destinationRect: PatternPlacementDraft.destinationRect(
+                    startCanvasPoint: point,
+                    currentCanvasPoint: point
+                ),
+                placementModeAtDragStart: placeIntoNewLayer ? .newLayer : .currentLayer
+            )
+        )
+    }
+
+    func updatePatternPlacementDrag(to point: CanvasPoint) {
+        guard case .dragging(let draft) = patternPlacementPhase else { return }
+        patternPlacementPhase = .dragging(
+            PatternPlacementDraft(
+                itemID: draft.itemID,
+                startCanvasPoint: draft.startCanvasPoint,
+                currentCanvasPoint: point,
+                destinationRect: PatternPlacementDraft.destinationRect(
+                    startCanvasPoint: draft.startCanvasPoint,
+                    currentCanvasPoint: point
+                ),
+                placementModeAtDragStart: draft.placementModeAtDragStart
+            )
+        )
+    }
+
+    func endPatternPlacementDrag(at point: CanvasPoint) {
+        guard case .dragging(let draft) = patternPlacementPhase else { return }
+
+        let finalizedDraft = PatternPlacementDraft(
+            itemID: draft.itemID,
+            startCanvasPoint: draft.startCanvasPoint,
+            currentCanvasPoint: point,
+            destinationRect: PatternPlacementDraft.destinationRect(
+                startCanvasPoint: draft.startCanvasPoint,
+                currentCanvasPoint: point
+            ),
+            placementModeAtDragStart: draft.placementModeAtDragStart
+        )
+
+        guard finalizedDraft.destinationRect.width >= 4, finalizedDraft.destinationRect.height >= 4 else {
+            patternPlacementPhase = .armed(itemID: finalizedDraft.itemID)
+            return
+        }
+
+        commitPatternPlacement(finalizedDraft)
+    }
+
+    func cancelPatternPlacement(keepSelection: Bool) {
+        guard patternPlacementPhase != .idle else { return }
+        patternPlacementPhase = .idle
+        if !keepSelection {
+            bootstrap.workspaceStore.updatePatternLibrary { library in
+                library.selectItem(id: nil)
+            }
+            refreshLightweight()
+        }
+        showStatus(.init(kind: .info, message: "已取消图案放置"))
+    }
+
+    private func commitPatternPlacement(_ draft: PatternPlacementDraft) {
+        guard let item = workspace.patternLibrary.item(id: draft.itemID) else {
+            patternPlacementPhase = .idle
+            showStatus(.init(kind: .info, message: "当前图案已不存在"))
+            return
+        }
+
+        guard let sourceTexture = patternPlacementTexture(for: draft.itemID) else {
+            patternPlacementPhase = .armed(itemID: draft.itemID)
+            showStatus(.init(kind: .error, message: "无法加载图案素材"))
+            return
+        }
+
+        guard let commandBuffer = bootstrap.metalContext.commandQueue.makeCommandBuffer() else {
+            patternPlacementPhase = .armed(itemID: draft.itemID)
+            showStatus(.init(kind: .error, message: "无法创建图案命令缓冲"))
+            return
+        }
+
+        let targetLayerID: LayerID
+        let targetTexture: MTLTexture
+        let successMessage: String
+
+        switch draft.placementModeAtDragStart {
+        case .currentLayer:
+            guard let layerID = bootstrap.interactionController.activeEditableLayerID() else {
+                patternPlacementPhase = .armed(itemID: draft.itemID)
+                showStatus(.init(kind: .info, message: "当前图层已锁定"))
+                return
+            }
+
+            guard
+                let texture = bootstrap.layerSurfaceStore.surfaceID(for: layerID).flatMap(bootstrap.layerSurfaceStore.texture(for:))
+            else {
+                patternPlacementPhase = .armed(itemID: draft.itemID)
+                showStatus(.init(kind: .error, message: "无法访问当前图层"))
+                return
+            }
+
+            checkpointSingleLayerHistoryIfPossible(
+                layerID: layerID,
+                operationKind: "patternPlacement.apply"
+            )
+            targetLayerID = layerID
+            targetTexture = texture
+            successMessage = "已贴入当前图层：\(item.displayName)"
+
+        case .newLayer:
+            checkpointHistoryIfPossible(
+                operationKind: "patternPlacement.apply",
+                topologyOperation: true,
+                additionalOperationKinds: ["document.addLayer"],
+                captureMode: .full
+            )
+
+            var addedLayer: LayerRecord?
+            bootstrap.workspaceStore.updateDocument { document in
+                addedLayer = document.addLayer(named: item.displayName)
+            }
+            let updatedDocument = bootstrap.workspaceStore.state.document
+            bootstrap.layerSurfaceStore.prepareTextures(
+                for: updatedDocument,
+                metal: bootstrap.metalContext
+            )
+
+            guard let addedLayer,
+                  let surfaceID = bootstrap.layerSurfaceStore.surfaceID(for: addedLayer.id),
+                  let texture = bootstrap.layerSurfaceStore.texture(for: surfaceID) else {
+                patternPlacementPhase = .armed(itemID: draft.itemID)
+                refresh()
+                showStatus(.init(kind: .error, message: "无法创建图案图层"))
+                return
+            }
+
+            targetLayerID = addedLayer.id
+            targetTexture = texture
+            successMessage = "已新建图层并放置图案：\(item.displayName)"
+        }
+
+        let renderPassDescriptor = MTLRenderPassDescriptor()
+        renderPassDescriptor.colorAttachments[0].texture = targetTexture
+        renderPassDescriptor.colorAttachments[0].loadAction = .load
+        renderPassDescriptor.colorAttachments[0].storeAction = .store
+
+        bootstrap.patternPlacementRenderer.encode(
+            into: renderPassDescriptor,
+            commandBuffer: commandBuffer,
+            sourceTexture: sourceTexture,
+            canvasSize: workspace.document.canvasSize,
+            destinationRect: draft.destinationRect,
+            flipHorizontally: draft.flipsHorizontally,
+            opacity: 1
+        )
+
+        isApplyingPatternPlacementCommit = true
+        patternPlacementPhase = .armed(itemID: draft.itemID)
+        commandBuffer.addCompletedHandler { [weak self] completedBuffer in
+            Task { @MainActor in
+                guard let self else { return }
+                self.isApplyingPatternPlacementCommit = false
+
+                guard completedBuffer.status == .completed else {
+                    let message = completedBuffer.error?.localizedDescription ?? "无法完成图案放置"
+                    self.showStatus(.init(kind: .error, message: message))
+                    return
+                }
+
+                self.bootstrap.workspaceStore.updatePatternLibrary { library in
+                    library.noteItemUsed(draft.itemID)
+                }
+                self.persistPatternLibrary()
+
+                switch draft.placementModeAtDragStart {
+                case .currentLayer:
+                    self.finalizeCommittedSingleLayerMutation(targetLayerID)
+                case .newLayer:
+                    self.noteCanvasContentChanged()
+                    self.refresh()
+                    self.recordDrawingActivityIfNeeded()
+                }
+                self.showStatus(.init(kind: .success, message: successMessage))
+            }
+        }
+        commandBuffer.commit()
     }
 
     var isPatternImportSheetPresented: Bool {
@@ -3180,6 +3484,23 @@ final class WorkspaceViewModel: ObservableObject {
         guard patternImportSheetState.recipe.contrast != clamped else { return }
         patternImportSheetState.recipe.contrast = clamped
         refreshPatternImportPreview()
+    }
+
+    func setPatternImportUsesSoftEdgeEraser(_ usesSoftEdge: Bool) {
+        guard patternImportSheetState.usesSoftEdgeEraser != usesSoftEdge else { return }
+        patternImportSheetState.usesSoftEdgeEraser = usesSoftEdge
+    }
+
+    func setPatternImportEraserRadius(_ value: Float) {
+        let clamped = min(max(value, 6), 48)
+        guard patternImportSheetState.eraserRadius != clamped else { return }
+        patternImportSheetState.eraserRadius = clamped
+    }
+
+    func setPatternImportSoftEdgeEraserAmount(_ value: Float) {
+        let clamped = min(max(value, 0), 1)
+        guard patternImportSheetState.softEdgeEraserAmount != clamped else { return }
+        patternImportSheetState.softEdgeEraserAmount = clamped
     }
 
     func updatePatternImportEraseMask(_ data: Data?) {
@@ -4455,6 +4776,10 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func cancelCanvasToolInteraction() {
+        if patternPlacementPhase != .idle {
+            cancelPatternPlacement(keepSelection: true)
+            return
+        }
         switch workspace.toolSession.activeTool {
         case .straightLine:
             cancelStraightLineInteraction()
@@ -6960,6 +7285,11 @@ final class WorkspaceViewModel: ObservableObject {
 
         if shortcutSettings.quickColorPickerShortcut.matchesKeyDown(event) {
             armQuickColorPickerShortcutIfNeeded()
+            return true
+        }
+
+        if event.keyCode == 53, patternPlacementPhase != .idle {
+            cancelPatternPlacement(keepSelection: true)
             return true
         }
 

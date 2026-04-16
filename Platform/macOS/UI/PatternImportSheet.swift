@@ -244,7 +244,11 @@ struct PatternImportSheet: View {
                     previewRGBABytes: preview.processedPreviewRGBABytes,
                     pixelWidth: preview.processedPreviewPixelWidth,
                     pixelHeight: preview.processedPreviewPixelHeight,
-                    maskData: viewModel.patternImportCurrentEraseMaskData
+                    maskData: viewModel.patternImportCurrentEraseMaskData,
+                    eraserRadius: CGFloat(viewModel.patternImportSheetState.eraserRadius),
+                    usesSoftEdgeEraser: viewModel.patternImportSheetState.recipe.mode == .originalColor
+                        && viewModel.patternImportSheetState.usesSoftEdgeEraser,
+                    softEdgeAmount: CGFloat(viewModel.patternImportSheetState.softEdgeEraserAmount)
                 ) { updatedMask in
                     viewModel.updatePatternImportEraseMask(updatedMask)
                 }
@@ -330,6 +334,70 @@ struct PatternImportSheet: View {
                 .opacity(viewModel.patternImportSheetState.recipe.mode == .transparentMonochrome ? 1 : 0.45)
             }
 
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text("橡皮尺寸")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(Color.secondary)
+                    Spacer()
+                    Text("\(Int(viewModel.patternImportSheetState.eraserRadius.rounded()))")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(Color.secondary)
+                }
+
+                Slider(
+                    value: Binding(
+                        get: { Double(viewModel.patternImportSheetState.eraserRadius) },
+                        set: { viewModel.setPatternImportEraserRadius(Float($0)) }
+                    ),
+                    in: 6...48
+                )
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text("橡皮边缘")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(Color.secondary)
+                    Spacer()
+                    if viewModel.patternImportSheetState.recipe.mode == .originalColor,
+                       viewModel.patternImportSheetState.usesSoftEdgeEraser {
+                        Text("\(Int((viewModel.patternImportSheetState.softEdgeEraserAmount * 100).rounded()))%")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(Color.secondary)
+                    }
+                }
+
+                HStack(spacing: 8) {
+                    eraseModeButton(
+                        title: "硬边",
+                        isSelected: !viewModel.patternImportSheetState.usesSoftEdgeEraser
+                    ) {
+                        viewModel.setPatternImportUsesSoftEdgeEraser(false)
+                    }
+
+                    eraseModeButton(
+                        title: "柔边",
+                        isSelected: viewModel.patternImportSheetState.usesSoftEdgeEraser
+                    ) {
+                        viewModel.setPatternImportUsesSoftEdgeEraser(true)
+                    }
+                }
+                .disabled(viewModel.patternImportSheetState.recipe.mode != .originalColor)
+                .opacity(viewModel.patternImportSheetState.recipe.mode == .originalColor ? 1 : 0.45)
+
+                if viewModel.patternImportSheetState.recipe.mode == .originalColor,
+                   viewModel.patternImportSheetState.usesSoftEdgeEraser {
+                    Slider(
+                        value: Binding(
+                            get: { Double(viewModel.patternImportSheetState.softEdgeEraserAmount) },
+                            set: { viewModel.setPatternImportSoftEdgeEraserAmount(Float($0)) }
+                        ),
+                        in: 0...1
+                    )
+                }
+            }
+
             Text("在“导入后”预览里拖拽即可用橡皮擦去不需要的区域。当前这一批文件会共用同一套导入模式和对比度设置。")
                 .font(.system(size: 11))
                 .foregroundStyle(Color.secondary)
@@ -365,6 +433,31 @@ struct PatternImportSheet: View {
         }
         .buttonStyle(.plain)
     }
+
+    private func eraseModeButton(
+        title: String,
+        isSelected: Bool,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Text(title)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(isSelected ? Color.white : Color.primary.opacity(0.76))
+                .frame(maxWidth: .infinity, minHeight: 30)
+                .background(
+                    RoundedRectangle(cornerRadius: 10)
+                        .fill(isSelected ? Color.accentColor.opacity(0.92) : Color.black.opacity(0.05))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10)
+                        .stroke(
+                            isSelected ? Color.accentColor.opacity(0.98) : Color.black.opacity(0.08),
+                            lineWidth: 1
+                        )
+                )
+        }
+        .buttonStyle(.plain)
+    }
 }
 
 private struct PatternEraseEditorView: NSViewRepresentable {
@@ -372,6 +465,9 @@ private struct PatternEraseEditorView: NSViewRepresentable {
     let pixelWidth: Int
     let pixelHeight: Int
     let maskData: Data?
+    let eraserRadius: CGFloat
+    let usesSoftEdgeEraser: Bool
+    let softEdgeAmount: CGFloat
     let onUpdateMask: (Data?) -> Void
 
     func makeCoordinator() -> Coordinator {
@@ -385,7 +481,10 @@ private struct PatternEraseEditorView: NSViewRepresentable {
             previewRGBABytes: previewRGBABytes,
             pixelWidth: pixelWidth,
             pixelHeight: pixelHeight,
-            maskData: maskData
+            maskData: maskData,
+            eraserRadius: eraserRadius,
+            usesSoftEdgeEraser: usesSoftEdgeEraser,
+            softEdgeAmount: softEdgeAmount
         )
         return view
     }
@@ -396,7 +495,10 @@ private struct PatternEraseEditorView: NSViewRepresentable {
             previewRGBABytes: previewRGBABytes,
             pixelWidth: pixelWidth,
             pixelHeight: pixelHeight,
-            maskData: maskData
+            maskData: maskData,
+            eraserRadius: eraserRadius,
+            usesSoftEdgeEraser: usesSoftEdgeEraser,
+            softEdgeAmount: softEdgeAmount
         )
     }
 
@@ -420,7 +522,9 @@ private final class PatternEraseEditorNSView: NSView {
     private var displayImageDirty = true
     private var hoverLocation: CGPoint?
     private var lastMaskPoint: CGPoint?
-    private let eraserRadius: CGFloat = 14
+    private var eraserRadius: CGFloat = 18
+    private var usesSoftEdgeEraser = false
+    private var softEdgeAmount: CGFloat = 0.75
 
     override var isFlipped: Bool { true }
     override var isOpaque: Bool { false }
@@ -439,7 +543,10 @@ private final class PatternEraseEditorNSView: NSView {
         previewRGBABytes: Data,
         pixelWidth: Int,
         pixelHeight: Int,
-        maskData: Data?
+        maskData: Data?,
+        eraserRadius: CGFloat,
+        usesSoftEdgeEraser: Bool,
+        softEdgeAmount: CGFloat
     ) {
         let normalizedMask = Self.normalizedMaskData(maskData)
         let bytesChanged = self.previewRGBABytes != previewRGBABytes
@@ -456,6 +563,10 @@ private final class PatternEraseEditorNSView: NSView {
             displayImageDirty = true
             needsDisplay = true
         }
+
+        self.eraserRadius = min(max(eraserRadius, 6), 48)
+        self.usesSoftEdgeEraser = usesSoftEdgeEraser
+        self.softEdgeAmount = min(max(softEdgeAmount, 0), 1)
     }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -582,13 +693,33 @@ private final class PatternEraseEditorNSView: NSView {
         let minY = max(0, Int(floor(centerY - eraserRadius)))
         let maxY = min(patternImportMaskResolution - 1, Int(ceil(centerY + eraserRadius)))
         let radiusSquared = eraserRadius * eraserRadius
+        let softenedInnerFactor = pow(max(0, 1 - softEdgeAmount), 3.8)
+        let innerRadius = eraserRadius * softenedInnerFactor
+        let innerRadiusSquared = innerRadius * innerRadius
 
         for y in minY...maxY {
             for x in minX...maxX {
                 let dx = CGFloat(x) - centerX
                 let dy = CGFloat(y) - centerY
-                guard (dx * dx) + (dy * dy) <= radiusSquared else { continue }
-                maskBytes[(y * patternImportMaskResolution) + x] = 0
+                let distanceSquared = (dx * dx) + (dy * dy)
+                guard distanceSquared <= radiusSquared else { continue }
+
+                let maskIndex = (y * patternImportMaskResolution) + x
+                guard usesSoftEdgeEraser, innerRadius < eraserRadius else {
+                    maskBytes[maskIndex] = 0
+                    continue
+                }
+
+                if distanceSquared <= innerRadiusSquared {
+                    maskBytes[maskIndex] = 0
+                    continue
+                }
+
+                let distance = sqrt(distanceSquared)
+                let falloff = min(max((distance - innerRadius) / (eraserRadius - innerRadius), 0), 1)
+                let softenedFalloff = pow(falloff, 1.9)
+                let keepValue = UInt8(clamping: Int((softenedFalloff * 255).rounded()))
+                maskBytes[maskIndex] = min(maskBytes[maskIndex], keepValue)
             }
         }
     }

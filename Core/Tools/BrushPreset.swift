@@ -46,11 +46,52 @@ extension BrushPreset {
 struct BrushLibraryState: Codable, Sendable, Equatable {
     var presets: [BrushPreset]
     var selectedPresetID: String?
+    var recentPresetIDs: [String]
 
     static let stageOneDefault = BrushLibraryState(
         presets: [],
-        selectedPresetID: nil
+        selectedPresetID: nil,
+        recentPresetIDs: []
     )
+
+    enum CodingKeys: String, CodingKey {
+        case presets
+        case selectedPresetID
+        case recentPresetIDs
+    }
+
+    init(
+        presets: [BrushPreset],
+        selectedPresetID: String?,
+        recentPresetIDs: [String] = []
+    ) {
+        self.presets = presets
+        self.selectedPresetID = selectedPresetID
+        self.recentPresetIDs = Self.sanitizedRecentPresetIDs(
+            recentPresetIDs,
+            validPresetIDs: Set(presets.map(\.id))
+        )
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let presets = try container.decode([BrushPreset].self, forKey: .presets)
+        let selectedPresetID = try container.decodeIfPresent(String.self, forKey: .selectedPresetID)
+        let recentPresetIDs = try container.decodeIfPresent([String].self, forKey: .recentPresetIDs) ?? []
+
+        self.init(
+            presets: presets,
+            selectedPresetID: selectedPresetID,
+            recentPresetIDs: recentPresetIDs
+        )
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(presets, forKey: .presets)
+        try container.encode(selectedPresetID, forKey: .selectedPresetID)
+        try container.encode(recentPresetIDs, forKey: .recentPresetIDs)
+    }
 
     func preset(id: String) -> BrushPreset? {
         presets.first(where: { $0.id == id })
@@ -58,6 +99,20 @@ struct BrushLibraryState: Codable, Sendable, Equatable {
 
     mutating func selectPreset(id: String?) {
         selectedPresetID = id
+    }
+
+    mutating func notePresetUsed(_ id: String) {
+        guard preset(id: id) != nil else { return }
+        recentPresetIDs.removeAll { $0 == id }
+        recentPresetIDs.insert(id, at: 0)
+        if recentPresetIDs.count > 4 {
+            recentPresetIDs = Array(recentPresetIDs.prefix(4))
+        }
+    }
+
+    func recentPresets(limit: Int = 4) -> [BrushPreset] {
+        let limitedIDs = recentPresetIDs.prefix(limit)
+        return limitedIDs.compactMap { preset(id: $0) }
     }
 
     mutating func saveCurrentPreset(brush: BrushSettings) -> BrushPreset {
@@ -86,6 +141,7 @@ struct BrushLibraryState: Codable, Sendable, Equatable {
         }
 
         presets.remove(at: index)
+        recentPresetIDs.removeAll { $0 == id }
         if selectedPresetID == id {
             selectedPresetID = presets.first?.id
         }
@@ -168,7 +224,11 @@ struct BrushLibraryState: Codable, Sendable, Equatable {
 
         return BrushLibraryState(
             presets: filteredPresets,
-            selectedPresetID: resolvedSelectedPresetID
+            selectedPresetID: resolvedSelectedPresetID,
+            recentPresetIDs: Self.sanitizedRecentPresetIDs(
+                recentPresetIDs,
+                validPresetIDs: Set(filteredPresets.map(\.id))
+            )
         )
     }
 
@@ -196,8 +256,29 @@ struct BrushLibraryState: Codable, Sendable, Equatable {
 
         return BrushLibraryState(
             presets: filteredPresets,
-            selectedPresetID: resolvedSelectedPresetID
+            selectedPresetID: resolvedSelectedPresetID,
+            recentPresetIDs: Self.sanitizedRecentPresetIDs(
+                recentPresetIDs,
+                validPresetIDs: Set(filteredPresets.map(\.id))
+            )
         )
+    }
+
+    private static func sanitizedRecentPresetIDs(
+        _ ids: [String],
+        validPresetIDs: Set<String>
+    ) -> [String] {
+        var seen = Set<String>()
+        var sanitized: [String] = []
+
+        for id in ids where validPresetIDs.contains(id) && seen.insert(id).inserted {
+            sanitized.append(id)
+            if sanitized.count == 4 {
+                break
+            }
+        }
+
+        return sanitized
     }
 }
 
