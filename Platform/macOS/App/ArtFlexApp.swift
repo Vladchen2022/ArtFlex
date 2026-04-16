@@ -220,13 +220,25 @@ final class ArtFlexApplicationDelegate: NSObject, NSApplicationDelegate, NSWindo
 
     @MainActor
     private func applyApplicationIconIfAvailable() {
-        guard
-            let iconURL = Bundle.module.url(forResource: "AppIcon", withExtension: "png"),
-            let iconImage = NSImage(contentsOf: iconURL)
-        else {
+        let candidateURLs: [URL?] = [
+            Bundle.main.url(forResource: "AppIcon", withExtension: "png"),
+            Bundle.main.resourceURL?.appendingPathComponent("ArtFlex_ArtFlex.bundle/AppIcon.png"),
+            Bundle.allBundles.first(where: {
+                $0.bundleURL.lastPathComponent == "ArtFlex_ArtFlex.bundle"
+            })?.url(forResource: "AppIcon", withExtension: "png"),
+            URL(fileURLWithPath: #filePath)
+                .deletingLastPathComponent()
+                .deletingLastPathComponent()
+                .appendingPathComponent("Resources/AppIcon.png")
+        ]
+
+        for candidateURL in candidateURLs {
+            guard let candidateURL,
+                  let iconImage = NSImage(contentsOf: candidateURL) else {
+                continue
+            }
+            NSApp.applicationIconImage = iconImage
             return
         }
-
-        NSApp.applicationIconImage = iconImage
     }
 }

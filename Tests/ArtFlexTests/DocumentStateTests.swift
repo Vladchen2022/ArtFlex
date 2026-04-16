@@ -41,6 +41,8 @@ struct DocumentStateTests {
 
         #expect(workspace.brushLibrary.presets.isEmpty)
         #expect(workspace.brushLibrary.selectedPresetID == nil)
+        #expect(workspace.patternLibrary.items.isEmpty)
+        #expect(workspace.patternLibrary.selectedItemID == nil)
         #expect(workspace.toolSession.brush.tipShape == .hardRound)
         #expect(workspace.toolSession.brush.size == 60)
         #expect(workspace.toolSession.brush.customTipSourceSemantic == .procedural)

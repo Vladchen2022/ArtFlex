@@ -5,6 +5,7 @@ struct ProjectPackage: Codable, Sendable, Equatable {
     var toolSession: ToolSessionState
     var colorPanel: ColorPanelState
     var brushLibrary: BrushLibraryState
+    var patternLibrary: PatternLibraryState
     var tipImageLibrary: TipImageLibraryState
     var generator: GeneratorSettings
     var creativeShapeGenerator: CreativeShapeGeneratorState
@@ -18,6 +19,7 @@ struct ProjectPackage: Codable, Sendable, Equatable {
         case toolSession
         case colorPanel
         case brushLibrary
+        case patternLibrary
         case tipImageLibrary
         case generator
         case creativeShapeGenerator
@@ -32,6 +34,7 @@ struct ProjectPackage: Codable, Sendable, Equatable {
         toolSession: ToolSessionState,
         colorPanel: ColorPanelState,
         brushLibrary: BrushLibraryState,
+        patternLibrary: PatternLibraryState = .init(),
         tipImageLibrary: TipImageLibraryState,
         generator: GeneratorSettings,
         creativeShapeGenerator: CreativeShapeGeneratorState = .stageOneDefault,
@@ -44,6 +47,7 @@ struct ProjectPackage: Codable, Sendable, Equatable {
         self.toolSession = toolSession
         self.colorPanel = colorPanel
         self.brushLibrary = brushLibrary
+        self.patternLibrary = patternLibrary
         self.tipImageLibrary = tipImageLibrary
         self.generator = generator
         self.creativeShapeGenerator = creativeShapeGenerator
@@ -59,6 +63,7 @@ struct ProjectPackage: Codable, Sendable, Equatable {
         toolSession = try container.decode(ToolSessionState.self, forKey: .toolSession)
         colorPanel = try container.decode(ColorPanelState.self, forKey: .colorPanel)
         brushLibrary = try container.decode(BrushLibraryState.self, forKey: .brushLibrary)
+        patternLibrary = try container.decodeIfPresent(PatternLibraryState.self, forKey: .patternLibrary) ?? .init()
         tipImageLibrary = try container.decodeIfPresent(TipImageLibraryState.self, forKey: .tipImageLibrary) ?? .empty
         generator = try container.decode(GeneratorSettings.self, forKey: .generator)
         creativeShapeGenerator = try container.decodeIfPresent(CreativeShapeGeneratorState.self, forKey: .creativeShapeGenerator) ?? .stageOneDefault
@@ -74,6 +79,7 @@ struct ProjectPackage: Codable, Sendable, Equatable {
         try container.encode(toolSession, forKey: .toolSession)
         try container.encode(colorPanel, forKey: .colorPanel)
         try container.encode(brushLibrary, forKey: .brushLibrary)
+        try container.encode(patternLibrary, forKey: .patternLibrary)
         try container.encode(tipImageLibrary, forKey: .tipImageLibrary)
         try container.encode(generator, forKey: .generator)
         try container.encode(creativeShapeGenerator, forKey: .creativeShapeGenerator)
@@ -93,6 +99,7 @@ struct ProjectPackage: Codable, Sendable, Equatable {
             toolSession: normalized.workspace.toolSession,
             colorPanel: normalized.workspace.colorPanel,
             brushLibrary: normalized.workspace.brushLibrary,
+            patternLibrary: normalized.workspace.patternLibrary,
             tipImageLibrary: normalized.workspace.tipImageLibrary,
             generator: normalized.workspace.generator,
             creativeShapeGenerator: normalized.workspace.creativeShapeGenerator,
@@ -110,6 +117,7 @@ struct ProjectPackage: Codable, Sendable, Equatable {
                 toolSession: toolSession,
                 colorPanel: colorPanel,
                 brushLibrary: brushLibrary,
+                patternLibrary: patternLibrary,
                 tipImageLibrary: tipImageLibrary,
                 generator: generator,
                 creativeShapeGenerator: creativeShapeGenerator,

@@ -116,6 +116,11 @@ final class WorkspaceViewModel: ObservableObject {
     @Published private(set) var canRedo = false
     @Published private(set) var hasUnsavedChanges = false
     @Published var isNewCanvasSheetPresented = false
+    @Published private(set) var patternImportSheetState = PatternImportSheetState()
+    @Published private(set) var patternImportPreviewAsset: PatternImportPreviewAsset?
+    @Published private(set) var patternImportCurrentEraseMaskData: Data?
+    @Published private(set) var isPatternImportPreviewLoading = false
+    @Published private(set) var isPatternImporting = false
     @Published private(set) var isTransformingSelection = false
     @Published private(set) var canMergeDown = false
     @Published private(set) var canMergeVisible = false
@@ -236,6 +241,10 @@ final class WorkspaceViewModel: ObservableObject {
     private var navigatorPreviewRefreshTask: Task<Void, Never>?
     private var isNavigatorPreviewVisible = false
     private var navigatorPreviewHasPendingRefresh = false
+    private var patternImportPreviewTask: Task<Void, Never>?
+    private var patternImportPreviewSourceFileURL: URL?
+    private var patternImportPreviewSourceAsset: PatternImportPreviewSourceAsset?
+    private var patternImportEraseMasksByFileURL: [URL: Data] = [:]
     private lazy var luminosityPresenter: StageOneCanvasPresenter? = {
         try? StageOneCanvasPresenter(device: bootstrap.metalContext.device)
     }()
@@ -250,6 +259,7 @@ final class WorkspaceViewModel: ObservableObject {
         self.bootstrap = bootstrap
         resetSelectionTraceLog()
         let didSanitizePersistedBrushResources = Self.restorePersistedBrushLibraryIfAvailable(in: bootstrap)
+        let didSanitizePersistedPatternLibrary = Self.restorePersistedPatternLibraryIfAvailable(in: bootstrap)
         Self.normalizeLegacySelectionIfNeeded(in: bootstrap.workspaceStore)
         Self.normalizeDisabledToolsIfNeeded(in: bootstrap.workspaceStore)
         let state = bootstrap.workspaceStore.state
@@ -280,6 +290,9 @@ final class WorkspaceViewModel: ObservableObject {
         }
         if didSanitizePersistedBrushResources {
             persistBrushLibrary()
+        }
+        if didSanitizePersistedPatternLibrary {
+            persistPatternLibrary()
         }
     }
 
@@ -3028,6 +3041,348 @@ final class WorkspaceViewModel: ObservableObject {
         }
         persistBrushLibrary()
         refresh()
+    }
+
+    func selectPatternLibraryItem(_ itemID: UUID) {
+        guard workspace.patternLibrary.item(id: itemID) != nil else { return }
+        bootstrap.workspaceStore.updatePatternLibrary { library in
+            library.selectItem(id: itemID)
+        }
+        refreshLightweight()
+    }
+
+    func movePatternLibraryItem(_ itemID: UUID, toSlot targetSlotIndex: Int) {
+        var moved = false
+        bootstrap.workspaceStore.updatePatternLibrary { library in
+            moved = library.moveItem(id: itemID, toSlot: targetSlotIndex)
+        }
+        if moved {
+            persistPatternLibrary()
+            refreshLightweight()
+        }
+    }
+
+    func deletePatternLibraryItem(_ itemID: UUID) {
+        let deletedItem = workspace.patternLibrary.item(id: itemID)
+        var didDelete = false
+        bootstrap.workspaceStore.updatePatternLibrary { library in
+            didDelete = library.removeItem(id: itemID)
+        }
+        if didDelete {
+            if let deletedItem {
+                bootstrap.patternLibraryPersistenceController.removeAssets(for: deletedItem)
+            }
+            persistPatternLibrary()
+            refreshLightweight()
+        }
+    }
+
+    func revealPatternLibraryItemInFinder(_ itemID: UUID) {
+        guard let item = workspace.patternLibrary.item(id: itemID),
+              let url = bootstrap.patternLibraryPersistenceController.revealableURL(for: item) else {
+            showStatus(.init(kind: .info, message: "未找到图案资源"))
+            return
+        }
+
+        bootstrap.filePanelService.revealInFinder(url)
+    }
+
+    var isPatternImportSheetPresented: Bool {
+        patternImportSheetState.isPresented
+    }
+
+    func setPatternImportSheetPresented(_ isPresented: Bool) {
+        if isPresented {
+            presentPatternImportSheet()
+        } else {
+            dismissPatternImportSheet()
+        }
+    }
+
+    func presentPatternImportSheet() {
+        patternImportPreviewTask?.cancel()
+        patternImportPreviewTask = nil
+        patternImportSheetState = .init(isPresented: true)
+        patternImportPreviewAsset = nil
+        patternImportPreviewSourceFileURL = nil
+        patternImportPreviewSourceAsset = nil
+        patternImportEraseMasksByFileURL = [:]
+        patternImportCurrentEraseMaskData = nil
+        isPatternImportPreviewLoading = false
+        isPatternImporting = false
+    }
+
+    func dismissPatternImportSheet() {
+        patternImportPreviewTask?.cancel()
+        patternImportPreviewTask = nil
+        patternImportSheetState = .init()
+        patternImportPreviewAsset = nil
+        patternImportPreviewSourceFileURL = nil
+        patternImportPreviewSourceAsset = nil
+        patternImportEraseMasksByFileURL = [:]
+        patternImportCurrentEraseMaskData = nil
+        isPatternImportPreviewLoading = false
+        isPatternImporting = false
+    }
+
+    func appendPatternImportFilesFromPanel() {
+        guard let urls = bootstrap.filePanelService.presentImageOpenPanelURLs(allowsMultipleSelection: true) else {
+            return
+        }
+        appendPatternImportFiles(urls)
+    }
+
+    func appendPatternImportFolderFromPanel() {
+        guard let directoryURL = bootstrap.filePanelService.presentDirectorySelectionPanel(
+            title: "选择图案素材文件夹",
+            prompt: "加入"
+        ) else {
+            return
+        }
+
+        let fileURLs = patternImportImageURLs(in: directoryURL)
+        guard !fileURLs.isEmpty else {
+            showStatus(.init(kind: .info, message: "所选文件夹中没有可导入的图片"))
+            return
+        }
+
+        appendPatternImportFiles(fileURLs)
+    }
+
+    func clearPatternImportFiles() {
+        patternImportSheetState.selectedFileURLs = []
+        patternImportSheetState.previewFileURL = nil
+        patternImportPreviewTask?.cancel()
+        patternImportPreviewTask = nil
+        patternImportPreviewAsset = nil
+        patternImportPreviewSourceFileURL = nil
+        patternImportPreviewSourceAsset = nil
+        patternImportEraseMasksByFileURL = [:]
+        patternImportCurrentEraseMaskData = nil
+        isPatternImportPreviewLoading = false
+    }
+
+    func selectPatternImportPreviewFile(_ url: URL) {
+        guard patternImportSheetState.selectedFileURLs.contains(url) else { return }
+        patternImportSheetState.previewFileURL = url
+        patternImportCurrentEraseMaskData = patternImportEraseMasksByFileURL[url]
+        refreshPatternImportPreview()
+    }
+
+    func setPatternImportMode(_ mode: PatternImportMode) {
+        guard patternImportSheetState.recipe.mode != mode else { return }
+        patternImportSheetState.recipe.mode = mode
+        refreshPatternImportPreview()
+    }
+
+    func setPatternImportContrast(_ value: Float) {
+        let clamped = min(max(value, -1), 1)
+        guard patternImportSheetState.recipe.contrast != clamped else { return }
+        patternImportSheetState.recipe.contrast = clamped
+        refreshPatternImportPreview()
+    }
+
+    func updatePatternImportEraseMask(_ data: Data?) {
+        guard let previewFileURL = patternImportSheetState.previewFileURL else { return }
+        if let data, !data.isEmpty {
+            patternImportEraseMasksByFileURL[previewFileURL] = data
+            patternImportCurrentEraseMaskData = data
+        } else {
+            patternImportEraseMasksByFileURL.removeValue(forKey: previewFileURL)
+            patternImportCurrentEraseMaskData = nil
+        }
+    }
+
+    func clearPatternImportEraseMask() {
+        guard let previewFileURL = patternImportSheetState.previewFileURL else { return }
+        patternImportEraseMasksByFileURL.removeValue(forKey: previewFileURL)
+        patternImportCurrentEraseMaskData = nil
+        refreshPatternImportPreview()
+    }
+
+    func importPatternsFromSheet() {
+        let selectedFileURLs = patternImportSheetState.selectedFileURLs
+        guard !selectedFileURLs.isEmpty else {
+            showStatus(.init(kind: .info, message: "请先选择至少一张图片"))
+            return
+        }
+
+        let recipe = patternImportSheetState.recipe
+        let controller = bootstrap.patternLibraryPersistenceController
+        let currentLibrary = workspace.patternLibrary
+        let eraseMaskDataByFileURL = patternImportEraseMasksByFileURL
+        isPatternImporting = true
+
+        Task.detached(priority: .userInitiated) { [weak self] in
+            do {
+                let result = try controller.importFiles(
+                    selectedFileURLs,
+                    recipe: recipe,
+                    eraseMaskDataByFileURL: eraseMaskDataByFileURL,
+                    into: currentLibrary
+                )
+                await MainActor.run {
+                    guard let self else { return }
+                    self.bootstrap.workspaceStore.updatePatternLibrary { library in
+                        library = result.updatedLibrary
+                    }
+                    self.isPatternImporting = false
+                    self.patternImportPreviewTask?.cancel()
+                    self.patternImportPreviewTask = nil
+                    self.patternImportSheetState = .init()
+                    self.patternImportPreviewAsset = nil
+                    self.patternImportPreviewSourceFileURL = nil
+                    self.patternImportPreviewSourceAsset = nil
+                    self.patternImportEraseMasksByFileURL = [:]
+                    self.patternImportCurrentEraseMaskData = nil
+                    self.isPatternImportPreviewLoading = false
+                    self.refreshLightweight()
+                    self.showPatternImportResultStatus(result)
+                }
+            } catch {
+                await MainActor.run {
+                    guard let self else { return }
+                    self.isPatternImporting = false
+                    self.showStatus(.init(kind: .error, message: error.localizedDescription))
+                }
+            }
+        }
+    }
+
+    func patternLibraryThumbnailURL(for item: PatternLibraryItem) -> URL? {
+        bootstrap.patternLibraryPersistenceController.resolveAssetURL(for: item.thumbnailLocation)
+    }
+
+    private func appendPatternImportFiles(_ urls: [URL]) {
+        let normalizedURLs = uniqueNormalizedPatternImportURLs(
+            patternImportSheetState.selectedFileURLs + urls
+        )
+        patternImportSheetState.selectedFileURLs = normalizedURLs
+        patternImportEraseMasksByFileURL = patternImportEraseMasksByFileURL.filter { normalizedURLs.contains($0.key) }
+
+        if let previewFileURL = patternImportSheetState.previewFileURL,
+           normalizedURLs.contains(previewFileURL) == false {
+            patternImportSheetState.previewFileURL = normalizedURLs.first
+        } else if patternImportSheetState.previewFileURL == nil {
+            patternImportSheetState.previewFileURL = normalizedURLs.first
+        }
+
+        patternImportCurrentEraseMaskData = patternImportSheetState.previewFileURL.flatMap {
+            patternImportEraseMasksByFileURL[$0]
+        }
+        refreshPatternImportPreview()
+    }
+
+    private func refreshPatternImportPreview() {
+        patternImportPreviewTask?.cancel()
+        patternImportPreviewTask = nil
+
+        guard let previewFileURL = patternImportSheetState.previewFileURL else {
+            patternImportPreviewAsset = nil
+            patternImportCurrentEraseMaskData = nil
+            isPatternImportPreviewLoading = false
+            return
+        }
+
+        let recipe = patternImportSheetState.recipe
+        let controller = bootstrap.patternLibraryPersistenceController
+        let cachedSourceFileURL = patternImportPreviewSourceFileURL
+        let cachedSourceAsset = patternImportPreviewSourceAsset
+        isPatternImportPreviewLoading = true
+        patternImportCurrentEraseMaskData = patternImportEraseMasksByFileURL[previewFileURL]
+
+        patternImportPreviewTask = Task.detached(priority: .userInitiated) { [weak self] in
+            let sourceAsset: PatternImportPreviewSourceAsset?
+            if cachedSourceFileURL == previewFileURL, let cachedSourceAsset {
+                sourceAsset = cachedSourceAsset
+            } else {
+                sourceAsset = controller.makePreviewSource(for: previewFileURL)
+            }
+            let preview = sourceAsset.flatMap {
+                controller.makePreview(from: $0, recipe: recipe)
+            }
+            await MainActor.run {
+                guard let self else { return }
+                guard self.patternImportSheetState.previewFileURL == previewFileURL else { return }
+                if let sourceAsset {
+                    self.patternImportPreviewSourceFileURL = previewFileURL
+                    self.patternImportPreviewSourceAsset = sourceAsset
+                } else {
+                    self.patternImportPreviewSourceFileURL = nil
+                    self.patternImportPreviewSourceAsset = nil
+                }
+                self.patternImportPreviewAsset = preview
+                self.isPatternImportPreviewLoading = false
+            }
+        }
+    }
+
+    private func showPatternImportResultStatus(_ result: PatternLibraryImportBatchResult) {
+        let importedCount = result.importedItems.count
+        let skippedCount = result.skippedDuplicateCount
+        let failedCount = result.failedFileNames.count
+
+        if importedCount == 0, skippedCount == 0, failedCount > 0 {
+            showStatus(.init(kind: .error, message: "图案导入失败，共 \(failedCount) 个文件未能处理"))
+            return
+        }
+
+        var fragments: [String] = []
+        if importedCount > 0 {
+            fragments.append("已导入 \(importedCount) 个图案")
+        }
+        if skippedCount > 0 {
+            fragments.append("跳过 \(skippedCount) 个重复图案")
+        }
+        if failedCount > 0 {
+            fragments.append("\(failedCount) 个文件处理失败")
+        }
+
+        let message = fragments.joined(separator: "，")
+        showStatus(.init(
+            kind: failedCount > 0 ? .info : .success,
+            message: message.isEmpty ? "没有可导入的图案" : message
+        ))
+    }
+
+    private func patternImportImageURLs(in directoryURL: URL) -> [URL] {
+        let keys: [URLResourceKey] = [.isRegularFileKey, .contentTypeKey]
+        guard let enumerator = FileManager.default.enumerator(
+            at: directoryURL,
+            includingPropertiesForKeys: keys,
+            options: [.skipsHiddenFiles]
+        ) else {
+            return []
+        }
+
+        var results: [URL] = []
+        for case let url as URL in enumerator {
+            guard let values = try? url.resourceValues(forKeys: Set(keys)),
+                  values.isRegularFile == true,
+                  let contentType = values.contentType,
+                  contentType.conforms(to: .image) else {
+                continue
+            }
+            results.append(url)
+        }
+
+        return results.sorted {
+            $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending
+        }
+    }
+
+    private func uniqueNormalizedPatternImportURLs(_ urls: [URL]) -> [URL] {
+        var seen = Set<String>()
+        var result: [URL] = []
+
+        for url in urls {
+            let normalized = url.standardizedFileURL.resolvingSymlinksInPath()
+            if seen.insert(normalized.path).inserted {
+                result.append(normalized)
+            }
+        }
+
+        return result
     }
 
     func exportBrushLibrary() {
@@ -7667,6 +8022,7 @@ final class WorkspaceViewModel: ObservableObject {
             toolSession: resetToolSession,
             colorPanel: workspace.colorPanel,
             brushLibrary: workspace.brushLibrary,
+            patternLibrary: workspace.patternLibrary,
             tipImageLibrary: workspace.tipImageLibrary,
             generator: workspace.generator,
             creativeShapeGenerator: workspace.creativeShapeGenerator,
@@ -7993,6 +8349,20 @@ final class WorkspaceViewModel: ObservableObject {
         }
     }
 
+    private func persistPatternLibrary() {
+        let library = bootstrap.workspaceStore.state.patternLibrary
+        let controller = bootstrap.patternLibraryPersistenceController
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            do {
+                try controller.saveLibrary(library)
+            } catch {
+                DispatchQueue.main.async {
+                    self?.showStatus(.init(kind: .error, message: "保存图案库失败：\(error.localizedDescription)"))
+                }
+            }
+        }
+    }
+
     @discardableResult
     private static func restorePersistedBrushLibraryIfAvailable(in bootstrap: AppBootstrap) -> Bool {
         guard let restored = bootstrap.brushLibraryPersistenceController.loadResources() else {
@@ -8011,6 +8381,22 @@ final class WorkspaceViewModel: ObservableObject {
             tipImageLibrary = normalizedTipImageLibrary
         }
         return normalizedLibrary != restored.library || normalizedTipImageLibrary != restored.tipImageLibrary
+    }
+
+    @discardableResult
+    private static func restorePersistedPatternLibraryIfAvailable(in bootstrap: AppBootstrap) -> Bool {
+        guard let restored = bootstrap.patternLibraryPersistenceController.loadLibrary() else {
+            return false
+        }
+
+        bootstrap.workspaceStore.updatePatternLibrary { library in
+            library = restored.library
+            if library.selectedItemID == nil {
+                library.selectedItemID = library.items.first?.id
+            }
+        }
+
+        return restored.didSanitize
     }
 
     @discardableResult
@@ -8228,6 +8614,7 @@ final class WorkspaceViewModel: ObservableObject {
             toolSession: workspace.toolSession,
             colorPanel: workspace.colorPanel,
             brushLibrary: workspace.brushLibrary,
+            patternLibrary: workspace.patternLibrary,
             tipImageLibrary: workspace.tipImageLibrary,
             generator: workspace.generator,
             creativeShapeGenerator: workspace.creativeShapeGenerator
@@ -8238,6 +8625,7 @@ final class WorkspaceViewModel: ObservableObject {
         bootstrap.workspaceStore.updateToolSession { $0 = context.toolSession }
         bootstrap.workspaceStore.updateColorPanel { $0 = context.colorPanel }
         bootstrap.workspaceStore.updateBrushLibrary { $0 = context.brushLibrary }
+        bootstrap.workspaceStore.updatePatternLibrary { $0 = context.patternLibrary }
         bootstrap.workspaceStore.updateTipImageLibrary { $0 = context.tipImageLibrary }
         bootstrap.workspaceStore.updateGenerator { $0 = context.generator }
         bootstrap.workspaceStore.updateCreativeShapeGenerator { $0 = context.creativeShapeGenerator }

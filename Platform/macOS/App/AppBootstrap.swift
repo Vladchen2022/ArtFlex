@@ -67,6 +67,7 @@ struct AppBootstrap {
     let historyController: HistoryController
     let filePanelService: FilePanelService
     let brushLibraryPersistenceController: BrushLibraryPersistenceController
+    let patternLibraryPersistenceController: PatternLibraryPersistenceController
     let imagePaletteExtractor: ImagePaletteExtractor
     let timelapseRecorder: TimelapseRecorderController
     let drawingStatsController: DrawingStatsController
@@ -77,6 +78,7 @@ struct AppBootstrap {
         metalContext: MetalDeviceContext? = MetalDeviceContext(),
         layerSurfaceStore: StageOneLayerSurfaceStore = StageOneLayerSurfaceStore(),
         brushLibraryPersistenceController: BrushLibraryPersistenceController? = nil,
+        patternLibraryPersistenceController: PatternLibraryPersistenceController? = nil,
         sharedMetalServices: AppSharedMetalServices? = nil,
         drawingStatsController: DrawingStatsController? = nil
     ) throws {
@@ -129,6 +131,7 @@ struct AppBootstrap {
         )
         self.filePanelService = FilePanelService()
         self.brushLibraryPersistenceController = brushLibraryPersistenceController ?? BrushLibraryPersistenceController()
+        self.patternLibraryPersistenceController = patternLibraryPersistenceController ?? PatternLibraryPersistenceController()
         self.imagePaletteExtractor = ImagePaletteExtractor()
         self.timelapseRecorder = TimelapseRecorderController(
             workspaceStore: workspaceStore,

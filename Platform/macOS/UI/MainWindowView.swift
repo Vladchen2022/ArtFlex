@@ -37,6 +37,14 @@ struct MainWindowView: View {
         .sheet(isPresented: $viewModel.isNewCanvasSheetPresented) {
             NewCanvasSheetView(viewModel: viewModel)
         }
+        .sheet(
+            isPresented: Binding(
+                get: { viewModel.isPatternImportSheetPresented },
+                set: { viewModel.setPatternImportSheetPresented($0) }
+            )
+        ) {
+            PatternImportSheet(viewModel: viewModel)
+        }
         .background(
             SettingsSheetPresenter(
                 presentationState: presentationState,

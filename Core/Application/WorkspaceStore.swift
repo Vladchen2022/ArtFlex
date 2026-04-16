@@ -5,6 +5,7 @@ struct WorkspaceState: Codable, Sendable, Equatable {
     var toolSession: ToolSessionState
     var colorPanel: ColorPanelState
     var brushLibrary: BrushLibraryState
+    var patternLibrary: PatternLibraryState
     var tipImageLibrary: TipImageLibraryState
     var generator: GeneratorSettings
     var creativeShapeGenerator: CreativeShapeGeneratorState
@@ -16,6 +17,7 @@ struct WorkspaceState: Codable, Sendable, Equatable {
         toolSession: ToolSessionState,
         colorPanel: ColorPanelState,
         brushLibrary: BrushLibraryState,
+        patternLibrary: PatternLibraryState = .init(),
         tipImageLibrary: TipImageLibraryState = .empty,
         generator: GeneratorSettings,
         creativeShapeGenerator: CreativeShapeGeneratorState = .stageOneDefault,
@@ -26,6 +28,7 @@ struct WorkspaceState: Codable, Sendable, Equatable {
         self.toolSession = toolSession
         self.colorPanel = colorPanel
         self.brushLibrary = brushLibrary
+        self.patternLibrary = patternLibrary
         self.tipImageLibrary = tipImageLibrary
         self.generator = generator
         self.creativeShapeGenerator = creativeShapeGenerator
@@ -38,6 +41,7 @@ struct WorkspaceState: Codable, Sendable, Equatable {
         toolSession: .stageOneDefault,
         colorPanel: .stageOneDefault,
         brushLibrary: .stageOneDefault,
+        patternLibrary: .init(),
         tipImageLibrary: .empty,
         generator: .stageOneDefault,
         creativeShapeGenerator: .stageOneDefault,
@@ -72,6 +76,10 @@ final class WorkspaceStore {
 
     func updateBrushLibrary(_ transform: (inout BrushLibraryState) -> Void) {
         transform(&state.brushLibrary)
+    }
+
+    func updatePatternLibrary(_ transform: (inout PatternLibraryState) -> Void) {
+        transform(&state.patternLibrary)
     }
 
     func updateTipImageLibrary(_ transform: (inout TipImageLibraryState) -> Void) {

@@ -82,10 +82,166 @@ private struct PressAndHoldActionButton: View {
     }
 }
 
+private struct PatternThumbnailTile: View {
+    let url: URL?
+    let usesCheckerboard: Bool
+
+    @State private var image: NSImage?
+
+    var body: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 8)
+                .fill(Color.white.opacity(usesCheckerboard ? 0.08 : 0.04))
+
+            if usesCheckerboard {
+                PatternTransparencyBackdrop(squareSize: 8)
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                    .padding(2)
+            }
+
+            if let image {
+                Image(nsImage: image)
+                    .resizable()
+                    .interpolation(.high)
+                    .scaledToFill()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+            } else {
+                Image(systemName: usesCheckerboard ? "circle.lefthalf.filled" : "photo")
+                    .font(.system(size: 18, weight: .medium))
+                    .foregroundStyle(Color.white.opacity(0.72))
+            }
+        }
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(Color.white.opacity(0.05), lineWidth: 1)
+        )
+        .contentShape(RoundedRectangle(cornerRadius: 8))
+        .task(id: url) {
+            image = url.flatMap(loadPatternThumbnailImage(from:))
+        }
+    }
+}
+
+private func loadPatternThumbnailImage(from url: URL) -> NSImage? {
+    guard let image = NSImage(contentsOf: url) else { return nil }
+    guard
+        let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil),
+        let squareFilledImage = squareFilledPatternThumbnailImage(from: cgImage, targetDimension: 256)
+    else {
+        return image
+    }
+    return NSImage(
+        cgImage: squareFilledImage,
+        size: NSSize(width: squareFilledImage.width, height: squareFilledImage.height)
+    )
+}
+
+private func cropVisibleContentIfPossible(_ image: CGImage) -> CGImage? {
+    let width = image.width
+    let height = image.height
+    guard width > 0, height > 0 else { return nil }
+
+    guard
+        let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
+        let context = CGContext(
+            data: nil,
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: width * 4,
+            space: colorSpace,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        )
+    else {
+        return nil
+    }
+
+    context.interpolationQuality = .none
+    context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+
+    guard let data = context.data else { return nil }
+    let bytes = data.assumingMemoryBound(to: UInt8.self)
+
+    var minX = width
+    var minY = height
+    var maxX = -1
+    var maxY = -1
+
+    for y in 0..<height {
+        for x in 0..<width {
+            let alphaIndex = ((y * width) + x) * 4 + 3
+            if bytes[alphaIndex] > 0 {
+                minX = min(minX, x)
+                minY = min(minY, y)
+                maxX = max(maxX, x)
+                maxY = max(maxY, y)
+            }
+        }
+    }
+
+    guard maxX >= minX, maxY >= minY else {
+        return image
+    }
+
+    let cropRect = CGRect(
+        x: minX,
+        y: minY,
+        width: maxX - minX + 1,
+        height: maxY - minY + 1
+    )
+
+    return image.cropping(to: cropRect) ?? image
+}
+
+private func squareFilledPatternThumbnailImage(
+    from image: CGImage,
+    targetDimension: Int
+) -> CGImage? {
+    let contentImage = cropVisibleContentIfPossible(image) ?? image
+    guard targetDimension > 0,
+          let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
+          let context = CGContext(
+            data: nil,
+            width: targetDimension,
+            height: targetDimension,
+            bitsPerComponent: 8,
+            bytesPerRow: targetDimension * 4,
+            space: colorSpace,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+          )
+    else {
+        return nil
+    }
+
+    let dimension = CGFloat(targetDimension)
+    let sourceWidth = CGFloat(contentImage.width)
+    let sourceHeight = CGFloat(contentImage.height)
+    let scale = max(dimension / sourceWidth, dimension / sourceHeight)
+    let drawWidth = sourceWidth * scale
+    let drawHeight = sourceHeight * scale
+    let drawRect = CGRect(
+        x: (dimension - drawWidth) * 0.5,
+        y: (dimension - drawHeight) * 0.5,
+        width: drawWidth,
+        height: drawHeight
+    )
+
+    context.interpolationQuality = .high
+    context.clear(CGRect(x: 0, y: 0, width: dimension, height: dimension))
+    context.draw(contentImage, in: drawRect)
+    return context.makeImage()
+}
+
 struct RightInspectorView: View {
     private enum LeftInspectorTab: String {
         case generator = "图形生成器"
         case referenceImages = "参考图"
+    }
+
+    private enum LibraryInspectorTab: String {
+        case brush = "画笔库"
+        case pattern = "图案库"
     }
 
     private enum ParameterInspectorTab: String {
@@ -106,6 +262,7 @@ struct RightInspectorView: View {
     @State private var presetShapeIndex = 0
     @State private var sprayPatternIndex = 0
     @State private var draggedBrushPresetID: String?
+    @State private var draggedPatternLibraryItemID: UUID?
     @State private var draggedLayerID: LayerID?
     @State private var editingLayerID: LayerID?
     @State private var editingLayerName = ""
@@ -123,6 +280,7 @@ struct RightInspectorView: View {
     @State private var tipImageLibraryDropTargetID: BrushTipImageAssetID?
     @State private var showsCompoundBrushBuilder = false
     @State private var leftInspectorTab: LeftInspectorTab = .referenceImages
+    @State private var libraryInspectorTab: LibraryInspectorTab = .brush
     @State private var parameterInspectorTab: ParameterInspectorTab = .colorAdjustment
     @State private var lastUsedAdjustmentTab: ParameterInspectorTab = .colorAdjustment
     @State private var parameterInspectorAutoRestoreTab: ParameterInspectorTab?
@@ -142,8 +300,8 @@ struct RightInspectorView: View {
                             )
                         }
 
-                        InspectorPanel(title: "画笔库") {
-                            brushLibrarySection
+                        InspectorPanel(title: "") {
+                            libraryInspectorSection
                         }
                         .frame(maxHeight: .infinity, alignment: .top)
                     }
@@ -1447,6 +1605,170 @@ struct RightInspectorView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    private var libraryInspectorSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                libraryInspectorTabButton(.brush)
+                libraryInspectorTabButton(.pattern)
+            }
+
+            switch libraryInspectorTab {
+            case .brush:
+                brushLibrarySection
+            case .pattern:
+                patternLibrarySection
+            }
+        }
+    }
+
+    private func libraryInspectorTabButton(_ tab: LibraryInspectorTab) -> some View {
+        let isSelected = libraryInspectorTab == tab
+
+        return Button {
+            libraryInspectorTab = tab
+        } label: {
+            Text(tab.rawValue)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(Color.white.opacity(isSelected ? 0.96 : 0.7))
+                .frame(maxWidth: .infinity, minHeight: 28)
+                .background(
+                    RoundedRectangle(cornerRadius: 9)
+                        .fill(isSelected ? Color.accentColor.opacity(0.9) : Color.white.opacity(0.06))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 9)
+                        .stroke(
+                            isSelected ? Color.accentColor.opacity(0.98) : Color.white.opacity(0.08),
+                            lineWidth: 1
+                        )
+                )
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var patternLibrarySection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Button("导入图案…") {
+                    viewModel.presentPatternImportSheet()
+                }
+                .buttonStyle(.borderedProminent)
+
+                Spacer(minLength: 0)
+
+                if !viewModel.workspace.patternLibrary.items.isEmpty {
+                    Text("\(viewModel.workspace.patternLibrary.items.count) 项")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(Color.white.opacity(0.64))
+                }
+            }
+            .padding(.horizontal, 12)
+
+            GeometryReader { geometry in
+                let columnCount = 4
+                let spacing = 8.0
+                let outerInset = 12.0
+                let usableWidth = max(0.0, geometry.size.width - outerInset * 2)
+                let slotWidth = max(40.0, floor((usableWidth - spacing * Double(columnCount - 1)) / Double(columnCount)))
+                let contentWidth = (slotWidth * Double(columnCount)) + (spacing * Double(columnCount - 1))
+                let horizontalInset = max(0.0, floor((usableWidth - contentWidth) * 0.5)) + outerInset
+                let totalSlotCount = viewModel.workspace.patternLibrary.slotCount(minRows: 2, columns: columnCount)
+
+                ScrollView(.vertical, showsIndicators: true) {
+                    LazyVGrid(
+                        columns: Array(repeating: GridItem(.fixed(slotWidth), spacing: spacing), count: columnCount),
+                        spacing: spacing
+                    ) {
+                        ForEach(0..<totalSlotCount, id: \.self) { slotIndex in
+                            patternLibrarySlotCell(slotIndex: slotIndex)
+                        }
+                    }
+                    .padding(.horizontal, horizontalInset)
+                    .padding(.vertical, 2)
+                    .frame(maxWidth: .infinity, alignment: .top)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    @ViewBuilder
+    private func patternLibrarySlotCell(slotIndex: Int) -> some View {
+        let item = viewModel.workspace.patternLibrary.item(atSlot: slotIndex)
+
+        if let item {
+            patternLibraryItemCell(item)
+                .onDrop(of: [UTType.plainText.identifier], isTargeted: nil) { providers in
+                    movePatternLibraryItemFromDrop(providers: providers, toSlot: slotIndex)
+                }
+        } else {
+            RoundedRectangle(cornerRadius: 10)
+                .fill(Color.white.opacity(0.03))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 10)
+                        .stroke(Color.white.opacity(0.05), lineWidth: 1)
+                }
+                .aspectRatio(1, contentMode: .fit)
+                .onDrop(of: [UTType.plainText.identifier], isTargeted: nil) { providers in
+                    movePatternLibraryItemFromDrop(providers: providers, toSlot: slotIndex)
+                }
+        }
+    }
+
+    private func patternLibraryItemCell(_ item: PatternLibraryItem) -> some View {
+        let isSelected = viewModel.workspace.patternLibrary.selectedItemID == item.id
+        let strokeColor: Color = isSelected ? Color.accentColor.opacity(0.9) : Color.white.opacity(0.06)
+        let strokeWidth: CGFloat = isSelected ? 1.5 : 1.0
+        let thumbnailURL = viewModel.patternLibraryThumbnailURL(for: item)
+        let usesCheckerboard = item.importRecipe.mode == .transparentMonochrome
+
+        return LongPressDraggableCell(
+            dragPayload: item.id.uuidString,
+            onActivate: {
+                viewModel.selectPatternLibraryItem(item.id)
+            },
+            onDragBegan: {
+                draggedPatternLibraryItemID = item.id
+            },
+            onDragEnded: {
+                draggedPatternLibraryItemID = nil
+            }
+        ) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 10)
+                    .fill(isSelected ? Color.accentColor.opacity(0.18) : Color.white.opacity(0.03))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 10)
+                            .stroke(strokeColor, lineWidth: strokeWidth)
+                    }
+
+                PatternThumbnailTile(
+                    url: thumbnailURL,
+                    usesCheckerboard: usesCheckerboard
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .clipShape(RoundedRectangle(cornerRadius: 10))
+                .padding(1.5)
+                .allowsHitTesting(false)
+            }
+        }
+        .aspectRatio(1, contentMode: .fit)
+        .help(item.displayName)
+        .contextMenu {
+            Button("使用") {
+                viewModel.selectPatternLibraryItem(item.id)
+            }
+            Button("在 Finder 中显示") {
+                viewModel.revealPatternLibraryItemInFinder(item.id)
+            }
+            Divider()
+            Button("删除") {
+                viewModel.deletePatternLibraryItem(item.id)
+            }
+        }
     }
 
     @ViewBuilder
@@ -2948,6 +3270,29 @@ struct RightInspectorView: View {
             let presetIDString = String(presetID)
             DispatchQueue.main.async {
                 viewModel.moveBrushPreset(presetIDString, toSlot: slotIndex)
+            }
+        }
+        return true
+    }
+
+    private func movePatternLibraryItemFromDrop(providers: [NSItemProvider], toSlot slotIndex: Int) -> Bool {
+        if let draggedPatternLibraryItemID {
+            viewModel.movePatternLibraryItem(draggedPatternLibraryItemID, toSlot: slotIndex)
+            self.draggedPatternLibraryItemID = nil
+            return true
+        }
+
+        guard let provider = providers.first(where: { $0.canLoadObject(ofClass: NSString.self) }) else {
+            return false
+        }
+
+        provider.loadObject(ofClass: NSString.self) { object, _ in
+            guard let itemID = object as? NSString,
+                  let uuid = UUID(uuidString: String(itemID)) else {
+                return
+            }
+            DispatchQueue.main.async {
+                viewModel.movePatternLibraryItem(uuid, toSlot: slotIndex)
             }
         }
         return true

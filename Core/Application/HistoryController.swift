@@ -171,6 +171,7 @@ final class HistoryController {
             toolSession: current.toolSession,
             colorPanel: current.colorPanel,
             brushLibrary: current.brushLibrary,
+            patternLibrary: current.patternLibrary,
             tipImageLibrary: current.tipImageLibrary,
             generator: current.generator,
             creativeShapeGenerator: current.creativeShapeGenerator,

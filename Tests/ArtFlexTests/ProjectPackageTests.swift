@@ -55,6 +55,23 @@ struct ProjectPackageTests {
             ],
             selectedPresetID: "custom-test"
         )
+        let patternID = UUID(uuidString: "00000000-0000-0000-0000-000000000111")!
+        workspace.patternLibrary = PatternLibraryState(
+            items: [
+                PatternLibraryItem(
+                    id: patternID,
+                    displayName: "Pattern Test",
+                    slotIndex: 5,
+                    importRecipe: PatternImportRecipe(mode: .transparentMonochrome, contrast: 0.31),
+                    originalFilename: "pattern.png",
+                    sourcePixelWidth: 180,
+                    sourcePixelHeight: 96,
+                    renderAssetLocation: .managedCopy(relativePath: "Patterns/render/pattern.png"),
+                    thumbnailLocation: .managedCopy(relativePath: "Patterns/thumb/pattern.png")
+                )
+            ],
+            selectedItemID: patternID
+        )
         workspace.tipImageLibrary = TipImageLibraryState(
             items: [
                 TipImageLibraryItem(
@@ -109,8 +126,10 @@ struct ProjectPackageTests {
         #expect(package.brushLibrary.presets.first?.brush.customTipAssetID != nil)
         #expect(package.tipImageLibrary.items.count == 1)
         #expect(package.tipImageLibrary.items.allSatisfy { $0.maskData == nil })
+        #expect(package.patternLibrary == workspace.patternLibrary)
         #expect(package.workspaceState.brushLibrary.selectedPresetID == workspace.brushLibrary.selectedPresetID)
         #expect(package.workspaceState.brushLibrary.presets.count == workspace.brushLibrary.presets.count)
+        #expect(package.workspaceState.patternLibrary == workspace.patternLibrary)
         #expect(package.workspaceState.brushLibrary.presets.first?.brush.customTipMaskData == primaryMask)
         #expect(package.workspaceState.brushLibrary.presets.first?.brush.customTipImportedSourceInfo == primarySourceInfo)
         #expect(package.workspaceState.brushLibrary.presets.first?.brush.buildUpOpacityCompensationAmount == 0.44)
