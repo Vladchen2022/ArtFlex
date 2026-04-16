@@ -1,6 +1,6 @@
 # ArtFlex Handoff
 
-最后更新：2026-04-15
+最后更新：2026-04-16
 
 ## 1. 先记住这三句话
 
@@ -15,6 +15,7 @@
 3. [Docs/reference/REPO_MAP.md](Docs/reference/REPO_MAP.md)
 4. [Docs/reference/COLOR_PIXEL_SPEC.md](Docs/reference/COLOR_PIXEL_SPEC.md)
 5. [Docs/reference/COLOR_ADJUSTMENT_STATUS.md](Docs/reference/COLOR_ADJUSTMENT_STATUS.md)
+6. [Docs/reference/PRESSURE_CURVE_STATUS.md](Docs/reference/PRESSURE_CURVE_STATUS.md)
 
 如果任务和组合笔刷直接相关，再看：
 
@@ -72,6 +73,16 @@
 - 整体表现类：`杂色 / 杂色对比 / 大小压感 / 透明压感 / 透明修正`
   - 普通笔刷时作用于当前笔刷
   - 组合笔刷时作用于整支组合笔刷，而不是只等于主笔尖内部参数
+
+另外需要记住：
+
+- `大小压感 / 透明压感` 当前已经升级成真实曲线编辑器，不再是旧的“三滑块示意曲线”阶段
+- 实际出笔、右侧预览和 HUD 预览已经统一使用真实曲线状态
+- 压感弹窗顶部预设条当前已经恢复可见，这条线不要再按“预设区看不见”的旧问题接手
+
+继续接手这块时，先读：
+
+- [Docs/reference/PRESSURE_CURVE_STATUS.md](Docs/reference/PRESSURE_CURVE_STATUS.md)
 
 ### 3.5 颜色面板拾色器和 HUD 快速拾色器不能分开改
 
