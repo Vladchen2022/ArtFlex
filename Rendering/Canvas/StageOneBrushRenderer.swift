@@ -1533,11 +1533,13 @@ final class StageOneBrushRenderer {
             for: selectionShape,
             canvasSize: CanvasSize(width: texture.width, height: texture.height)
         )
-        let dirtyRect = opacityCapDirtyRect(
+        guard let dirtyRect = opacityCapDirtyRect(
             for: samples,
             stroke: stroke,
             texture: texture
-        )
+        ) else {
+            return 0
+        }
 
         let accumulationPassDescriptor = MTLRenderPassDescriptor()
         accumulationPassDescriptor.colorAttachments[0].texture = session.alphaTexture
@@ -1647,7 +1649,7 @@ final class StageOneBrushRenderer {
         for samples: [StampSample],
         stroke: StrokeDescriptor,
         texture: MTLTexture
-    ) -> MTLScissorRect {
+    ) -> MTLScissorRect? {
         guard !samples.isEmpty else {
             return MTLScissorRect(x: 0, y: 0, width: texture.width, height: texture.height)
         }
@@ -1669,16 +1671,25 @@ final class StageOneBrushRenderer {
             return MTLScissorRect(x: 0, y: 0, width: texture.width, height: texture.height)
         }
 
-        let originX = max(Int(floor(minX)) - 1, 0)
-        let originY = max(Int(floor(minY)) - 1, 0)
-        let endX = min(Int(ceil(maxX)) + 1, texture.width)
-        let endY = min(Int(ceil(maxY)) + 1, texture.height)
+        let unclampedOriginX = Int(floor(minX)) - 1
+        let unclampedOriginY = Int(floor(minY)) - 1
+        let unclampedEndX = Int(ceil(maxX)) + 1
+        let unclampedEndY = Int(ceil(maxY)) + 1
+
+        let originX = min(max(unclampedOriginX, 0), texture.width)
+        let originY = min(max(unclampedOriginY, 0), texture.height)
+        let endX = min(max(unclampedEndX, 0), texture.width)
+        let endY = min(max(unclampedEndY, 0), texture.height)
+
+        guard originX < endX, originY < endY else {
+            return nil
+        }
 
         return MTLScissorRect(
             x: originX,
             y: originY,
-            width: max(endX - originX, 1),
-            height: max(endY - originY, 1)
+            width: endX - originX,
+            height: endY - originY
         )
     }
 

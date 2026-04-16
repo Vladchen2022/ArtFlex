@@ -4,6 +4,66 @@ import Testing
 
 struct MetalStrokeEngineQueueTests {
     @Test
+    func opacityCapStrokeOutsideCanvasSkipsInvalidScissorRect() throws {
+        guard
+            let metalContext = MetalDeviceContext(),
+            let commandBuffer = metalContext.commandQueue.makeCommandBuffer()
+        else {
+            Issue.record("Metal unavailable")
+            return
+        }
+
+        let surfaceStore = StageOneLayerSurfaceStore()
+        let renderer = try StageOneBrushRenderer(device: metalContext.device)
+        let canvasSize = CanvasSize.stageOneDefault
+
+        guard
+            let texture = surfaceStore.makeTexture(
+                width: canvasSize.width,
+                height: canvasSize.height,
+                metal: metalContext
+            ),
+            let session = renderer.makeOpacityCapSession(
+                for: texture,
+                commandQueue: metalContext.commandQueue
+            )
+        else {
+            Issue.record("Texture unavailable")
+            return
+        }
+
+        var brush = BrushSettings.stageOneDefault
+        brush.buildMode = .opacityCap
+        brush.size = 80
+
+        let stroke = StrokeDescriptor(
+            tool: .brush,
+            color: .black,
+            brush: brush,
+            points: [
+                .init(x: Double(canvasSize.width) * 0.5, y: Double(canvasSize.height) + 120, pressure: 1),
+                .init(x: Double(canvasSize.width) * 0.5, y: Double(canvasSize.height) + 240, pressure: 1)
+            ],
+            selectionShape: nil,
+            skipLeadingStamp: false
+        )
+
+        var samplingState: BrushStrokeSamplingState?
+        let emitted = renderer.encodeOpacityCapStroke(
+            stroke: stroke,
+            session: session,
+            into: texture,
+            commandBuffer: commandBuffer,
+            samplingState: &samplingState
+        )
+
+        #expect(emitted == 0)
+
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+    }
+
+    @Test
     func brushPacketsEnqueueAndFlushFromFrameCommandBuffer() throws {
         guard
             let metalContext = MetalDeviceContext(),
