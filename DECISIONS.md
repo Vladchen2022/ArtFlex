@@ -225,5 +225,6 @@
 - 应用图标仍然由 `Platform/macOS/Resources/AppIcon.png` 提供
 - 运行时通过 `ArtFlexApp.applyApplicationIconIfAvailable()` 设置到 `NSApp.applicationIconImage`
 - 当前不要默认假设项目已经切到 `.appiconset` / `.icns` 主链
+- 最近一次应用图标更新是替换内部 artwork，同时保留现有图标的整体大小与圆角轮廓
 
 后续如果只是继续调整应用图标外观，默认先继续修这张 PNG 资源，不要为了小改动就先扩出另一套图标资源体系。

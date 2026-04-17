@@ -68,6 +68,7 @@
 
 - 资源文件：`Platform/macOS/Resources/AppIcon.png`
 - 运行时设置：`ArtFlexApp.applyApplicationIconIfAvailable()`
+- 最近一次更新是替换内部 artwork，同时保留现有图标的整体大小与圆角轮廓
 
 也就是说，当前主工程还没有单独维护 `.appiconset` / `.icns` 主链；如果后续只是在调图标外观，默认先继续修这张 PNG 资源。
 

@@ -39,7 +39,8 @@ ArtFlex 是旧版 `BrushCanvas` 的 Metal-first 重构版 macOS 绘图软件。
 当前应用图标也有一条实现约束：
 
 - 仍然使用 `Platform/macOS/Resources/AppIcon.png` 这条单资源链，由运行时设置 `NSApp.applicationIconImage`
-- 当前这张图标已经按 mac 风格做了圆角底板与更保守的安全区处理；后续如果要继续调图标，优先继续修这张资源，不要先分叉到另一套 iconset 方案
+- 当前这张图标最近一次是替换内部 artwork，同时保留现有图标的整体大小与圆角轮廓
+- 后续如果要继续调图标，优先继续修这张资源，不要先分叉到另一套 iconset 方案
 
 ## 文档入口
 

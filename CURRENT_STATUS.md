@@ -48,7 +48,8 @@ ArtFlex 当前已经是一个功能面明显超出最小 MVP 的 macOS Metal 绘
 
 - 单资源文件：[Platform/macOS/Resources/AppIcon.png](Platform/macOS/Resources/AppIcon.png)
 - 运行时由 [Platform/macOS/App/ArtFlexApp.swift](Platform/macOS/App/ArtFlexApp.swift) 设置 `NSApp.applicationIconImage`
-- 当前图标已经按 mac app icon 的圆角底板与更保守安全区做过一轮标准化处理；如果后续继续调整，默认先改这张资源图，而不是假设项目已经有 `.appiconset` / `.icns` 主链
+- 当前图标最近一次是替换内部 artwork，并保留现有图标的整体大小和圆角轮廓
+- 如果后续继续调整，默认先改这张资源图，而不是假设项目已经有 `.appiconset` / `.icns` 主链
 
 ### 2.3 当前已接入主链的工具
 
