@@ -11,8 +11,23 @@ struct QuickColorPickerHUD: View {
     let onSetPoint: (Float, Float) -> Void
     let onSetHue: (Float) -> Void
     let onSelectBrushSlot: (Int) -> Void
+    let onSetRecentBrushSelectionCount: (Int) -> Void
+    let onSetRecentBrushOpacity: (Float) -> Void
+    let onSetRecentBrushBrightness: (Float) -> Void
+    let onSetRecentBrushSaturation: (Float) -> Void
+    let onSetRecentBrushSelectionEditing: (Bool) -> Void
+    let onSetRecentBrushOpacityEditing: (Bool) -> Void
 
-    private let hudSize = CGSize(width: 198, height: 226)
+    private var hudSize: CGSize {
+        let baseHeight = (hudPadding * 2) + 18 + 8 + squareSize.height
+        let selectionSliderHeight: CGFloat = state.recentBrushSelectionLimit > 0 ? 28 : 0
+        let adjustmentSliderCount: CGFloat = state.recentBrushSelectionLimit > 0 ? 3 : 0
+        let adjustmentSliderHeight: CGFloat = adjustmentSliderCount * 28
+        return CGSize(
+            width: 198,
+            height: baseHeight + selectionSliderHeight + adjustmentSliderHeight
+        )
+    }
     private let squareSize = CGSize(width: 144, height: 144)
     private let hueStripWidth: CGFloat = 16
     private let hudPadding: CGFloat = 10
@@ -22,7 +37,22 @@ struct QuickColorPickerHUD: View {
         let anchor = viewportPoint(for: state.anchorPoint)
         let center = clampedCenter(near: anchor)
 
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                ForEach(0..<4, id: \.self) { slotIndex in
+                    let slotPreset = brushSlots[safe: slotIndex] ?? nil
+                    QuickColorPickerBrushSlotDot(
+                        slotIndex: slotIndex,
+                        preset: slotPreset,
+                        isSelected: selectedBrushPresetID == slotPreset?.id,
+                        onSelect: {
+                            onSelectBrushSlot(slotIndex)
+                        }
+                    )
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
             HStack(alignment: .top, spacing: 10) {
                 QuickColorPickerSVSquare(
                     panel: state.panel,
@@ -37,17 +67,52 @@ struct QuickColorPickerHUD: View {
                 .frame(width: hueStripWidth, height: squareSize.height)
             }
 
-            HStack(spacing: 8) {
-                ForEach(0..<4, id: \.self) { slotIndex in
-                    let slotPreset = brushSlots[safe: slotIndex] ?? nil
-                    QuickColorPickerBrushSlotCell(
-                        slotIndex: slotIndex,
-                        preset: slotPreset,
-                        isSelected: selectedBrushPresetID == slotPreset?.id,
-                        onSelect: {
-                            onSelectBrushSlot(slotIndex)
-                        }
-                    )
+            if state.recentBrushSelectionLimit > 0 {
+                VStack(alignment: .leading, spacing: 6) {
+                    QuickColorPickerMiniSliderRow(
+                        title: "最近",
+                        valueLabel: "\(state.recentBrushSelectionCount)",
+                        value: Double(state.recentBrushSelectionCount),
+                        range: 1...Double(max(1, state.recentBrushSelectionLimit)),
+                        step: 1,
+                        isReversed: true,
+                        onEditingChanged: onSetRecentBrushSelectionEditing
+                    ) { value in
+                        onSetRecentBrushSelectionCount(Int(value.rounded()))
+                    }
+
+                    QuickColorPickerMiniSliderRow(
+                        title: "透明度",
+                        valueLabel: "\(Int((state.recentBrushOpacity * 100).rounded()))%",
+                        value: Double(state.recentBrushOpacity),
+                        range: 0...1,
+                        step: 0.01,
+                        onEditingChanged: onSetRecentBrushOpacityEditing
+                    ) { value in
+                        onSetRecentBrushOpacity(Float(value))
+                    }
+
+                    QuickColorPickerMiniSliderRow(
+                        title: "明度",
+                        valueLabel: signedPercentLabel(for: state.recentBrushBrightness),
+                        value: Double(state.recentBrushBrightness),
+                        range: -1...1,
+                        step: 0.01,
+                        onEditingChanged: onSetRecentBrushOpacityEditing
+                    ) { value in
+                        onSetRecentBrushBrightness(Float(value))
+                    }
+
+                    QuickColorPickerMiniSliderRow(
+                        title: "饱和",
+                        valueLabel: signedPercentLabel(for: state.recentBrushSaturation),
+                        value: Double(state.recentBrushSaturation),
+                        range: -1...1,
+                        step: 0.01,
+                        onEditingChanged: onSetRecentBrushOpacityEditing
+                    ) { value in
+                        onSetRecentBrushSaturation(Float(value))
+                    }
                 }
             }
         }
@@ -96,56 +161,120 @@ struct QuickColorPickerHUD: View {
             opacity: Double(color.alpha)
         )
     }
+
+    private func signedPercentLabel(for value: Float) -> String {
+        let percent = Int((value * 100).rounded())
+        return percent > 0 ? "+\(percent)" : "\(percent)"
+    }
 }
 
-private struct QuickColorPickerBrushSlotCell: View {
+private struct QuickColorPickerMiniSliderRow: View {
+    let title: String
+    let valueLabel: String
+    let value: Double
+    let range: ClosedRange<Double>
+    let step: Double
+    let isReversed: Bool
+    let onEditingChanged: (Bool) -> Void
+    let onChange: (Double) -> Void
+
+    init(
+        title: String,
+        valueLabel: String,
+        value: Double,
+        range: ClosedRange<Double>,
+        step: Double,
+        isReversed: Bool = false,
+        onEditingChanged: @escaping (Bool) -> Void,
+        onChange: @escaping (Double) -> Void
+    ) {
+        self.title = title
+        self.valueLabel = valueLabel
+        self.value = value
+        self.range = range
+        self.step = step
+        self.isReversed = isReversed
+        self.onEditingChanged = onEditingChanged
+        self.onChange = onChange
+    }
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text(title)
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(Color.white.opacity(0.78))
+                .frame(width: 32, alignment: .leading)
+            Slider(
+                value: Binding(
+                    get: { displayedValue },
+                    set: { onChange(resolvedValue(fromDisplayedValue: $0)) }
+                ),
+                in: range,
+                step: step,
+                onEditingChanged: onEditingChanged
+            )
+            .tint(Color.accentColor)
+            .controlSize(.mini)
+            .disabled(range.lowerBound == range.upperBound)
+
+            Text(valueLabel)
+                .font(.system(size: 10, weight: .bold).monospacedDigit())
+                .foregroundStyle(Color.white.opacity(0.92))
+                .frame(width: 34, alignment: .trailing)
+        }
+    }
+
+    private var displayedValue: Double {
+        guard isReversed else {
+            return value
+        }
+        return range.upperBound - (value - range.lowerBound)
+    }
+
+    private func resolvedValue(fromDisplayedValue displayedValue: Double) -> Double {
+        guard isReversed else {
+            return displayedValue
+        }
+        return range.upperBound - (displayedValue - range.lowerBound)
+    }
+}
+
+private struct QuickColorPickerBrushSlotDot: View {
     let slotIndex: Int
     let preset: BrushPreset?
     let isSelected: Bool
     let onSelect: () -> Void
 
-    private let cellSize: CGFloat = 40
+    private let dotSize: CGFloat = 14
 
     var body: some View {
         Button(action: onSelect) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(isSelected ? Color.accentColor.opacity(0.18) : Color.black.opacity(0.75))
-                    .overlay {
-                        RoundedRectangle(cornerRadius: 10, style: .continuous)
-                            .stroke(
-                                isSelected ? Color.accentColor.opacity(0.92) : Color.white.opacity(0.08),
-                                lineWidth: isSelected ? 1.4 : 1
-                            )
-                    }
-
-                if let preset {
-                    ZStack(alignment: .bottomTrailing) {
-                        QuickColorPickerBrushStrokePreview(brush: preset.brush)
-                            .frame(width: cellSize * 0.72, height: cellSize * 0.72)
-                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                            .padding(.leading, cellSize * 0.10)
-                            .padding(.top, cellSize * 0.08)
-
-                        QuickColorPickerBrushGlyph(brush: preset.brush)
-                            .frame(width: cellSize * 0.22, height: cellSize * 0.22)
-                            .padding(.trailing, cellSize * 0.09)
-                            .padding(.bottom, cellSize * 0.08)
-                    }
+            Circle()
+                .fill(dotFillColor)
+                .overlay {
+                    Circle()
+                        .stroke(dotStrokeColor, lineWidth: isSelected ? 1.4 : 1)
                 }
-
-                Text("\(slotIndex + 1)")
-                    .font(.system(size: 8, weight: .semibold).monospacedDigit())
-                    .foregroundStyle(Color.accentColor.opacity(0.95))
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
-                    .padding(.leading, 6)
-                    .padding(.bottom, 5)
-            }
-            .frame(width: cellSize, height: cellSize)
+                .frame(width: dotSize, height: dotSize)
         }
         .buttonStyle(.plain)
         .disabled(preset == nil)
-        .opacity(preset == nil ? 0.72 : 1)
+        .opacity(preset == nil ? 0.32 : 1)
+        .help("快捷画笔 \(slotIndex + 1)")
+    }
+
+    private var dotFillColor: Color {
+        guard preset != nil else {
+            return Color.white.opacity(0.08)
+        }
+        return isSelected ? Color.accentColor.opacity(0.92) : Color.white.opacity(0.88)
+    }
+
+    private var dotStrokeColor: Color {
+        guard preset != nil else {
+            return Color.white.opacity(0.08)
+        }
+        return isSelected ? Color.accentColor.opacity(0.96) : Color.white.opacity(0.18)
     }
 }
 

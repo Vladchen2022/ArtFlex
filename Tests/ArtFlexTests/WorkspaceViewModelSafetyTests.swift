@@ -6,6 +6,15 @@ import Testing
 
 struct WorkspaceViewModelSafetyTests {
     @Test
+    func recentBrushAdjustmentDefaultsToOneSelectionWhenRecentStrokesExist() {
+        #expect(WorkspaceViewModel.resolvedRecentBrushAdjustmentSelectionCount(preferredCount: 0, limit: 0) == 0)
+        #expect(WorkspaceViewModel.resolvedRecentBrushAdjustmentSelectionCount(preferredCount: 0, limit: 1) == 1)
+        #expect(WorkspaceViewModel.resolvedRecentBrushAdjustmentSelectionCount(preferredCount: 0, limit: 7) == 1)
+        #expect(WorkspaceViewModel.resolvedRecentBrushAdjustmentSelectionCount(preferredCount: 3, limit: 7) == 3)
+        #expect(WorkspaceViewModel.resolvedRecentBrushAdjustmentSelectionCount(preferredCount: 12, limit: 7) == 7)
+    }
+
+    @Test
     func openingProjectKeepsGlobalBrushAndPatternLibraries() {
         var currentWorkspace = WorkspaceState.stageOneDefault
         currentWorkspace.brushLibrary = BrushLibraryState(
@@ -228,6 +237,168 @@ struct WorkspaceViewModelSafetyTests {
         #expect(harness.viewModel.workspace.toolSession.activeTool == .brush)
         #expect(harness.viewModel.status?.message == "选择了画笔")
         #expect(harness.viewModel.status?.shortcutLabel == "B")
+    }
+
+    @Test
+    @MainActor
+    func selectingNonBrushToolBakesRecentBrushAdjustmentIntoLayerPixels() throws {
+        let harness = try BrushEditingBoundaryHarness()
+        let activeLayerID = harness.viewModel.workspace.document.activeLayerID
+
+        try enqueueRecentBrushAdjustmentStroke(
+            in: harness,
+            point: .init(location: .init(x: 96, y: 96), pressure: 1)
+        )
+        try enqueueRecentBrushAdjustmentStroke(
+            in: harness,
+            point: .init(location: .init(x: 320, y: 320), pressure: 1)
+        )
+
+        harness.viewModel.setQuickColorPickerRecentBrushSelectionCount(1)
+        harness.viewModel.setQuickColorPickerRecentBrushOpacity(0.2)
+
+        #expect(harness.bootstrap.strokeEngine.hasPendingBrushCommitJobs)
+        #expect(harness.viewModel.brushDisplayTexture(for: activeLayerID) != nil)
+
+        harness.viewModel.selectTool(.eraser)
+
+        let earlierStrokeAlpha = try harness.alpha(atX: 96, y: 96, layerID: activeLayerID)
+        let adjustedRecentStrokeAlpha = try harness.alpha(atX: 320, y: 320, layerID: activeLayerID)
+
+        #expect(harness.viewModel.workspace.toolSession.activeTool == .eraser)
+        #expect(harness.bootstrap.strokeEngine.hasPendingBrushCommitJobs == false)
+        #expect(earlierStrokeAlpha > 0.25)
+        #expect(adjustedRecentStrokeAlpha > 0.01)
+        #expect(adjustedRecentStrokeAlpha < earlierStrokeAlpha * 0.5)
+        #expect(harness.viewModel.brushDisplayTexture(for: activeLayerID) == nil)
+    }
+
+    @Test
+    @MainActor
+    func undoAfterForcedDrainOfMultiplePendingBrushCommitsRevertsOneStrokePerUndo() throws {
+        let harness = try BrushEditingBoundaryHarness()
+        let activeLayerID = harness.viewModel.workspace.document.activeLayerID
+
+        try enqueueRecentBrushAdjustmentStroke(
+            in: harness,
+            point: .init(location: .init(x: 96, y: 96), pressure: 1)
+        )
+        try enqueueRecentBrushAdjustmentStroke(
+            in: harness,
+            point: .init(location: .init(x: 320, y: 320), pressure: 1)
+        )
+
+        #expect(harness.bootstrap.strokeEngine.hasPendingBrushCommitJobs)
+
+        harness.viewModel.undo()
+
+        let earlierStrokeAlphaAfterFirstUndo = try harness.alpha(atX: 96, y: 96, layerID: activeLayerID)
+        let recentStrokeAlphaAfterFirstUndo = try harness.alpha(atX: 320, y: 320, layerID: activeLayerID)
+
+        #expect(harness.bootstrap.strokeEngine.hasPendingBrushCommitJobs == false)
+        #expect(earlierStrokeAlphaAfterFirstUndo > 0.25)
+        #expect(recentStrokeAlphaAfterFirstUndo < 0.01)
+
+        harness.viewModel.undo()
+
+        let earlierStrokeAlphaAfterSecondUndo = try harness.alpha(atX: 96, y: 96, layerID: activeLayerID)
+        #expect(earlierStrokeAlphaAfterSecondUndo < 0.01)
+    }
+
+    @Test
+    @MainActor
+    func startingNewBrushStrokeBakesRecentBrushAdjustmentSuffixBeforeContinuing() throws {
+        let harness = try BrushEditingBoundaryHarness()
+        let activeLayerID = harness.viewModel.workspace.document.activeLayerID
+
+        try enqueueRecentBrushAdjustmentStroke(
+            in: harness,
+            point: .init(location: .init(x: 96, y: 96), pressure: 1)
+        )
+        try enqueueRecentBrushAdjustmentStroke(
+            in: harness,
+            point: .init(location: .init(x: 320, y: 320), pressure: 1)
+        )
+
+        harness.viewModel.setQuickColorPickerRecentBrushSelectionCount(1)
+        harness.viewModel.setQuickColorPickerRecentBrushOpacity(0.2)
+
+        #expect(harness.bootstrap.strokeEngine.hasPendingBrushCommitJobs)
+
+        harness.viewModel.beginStrokeIfNeeded()
+
+        let earlierStrokeAlpha = try harness.alpha(atX: 96, y: 96, layerID: activeLayerID)
+        let adjustedRecentStrokeAlpha = try harness.alpha(atX: 320, y: 320, layerID: activeLayerID)
+
+        #expect(harness.bootstrap.strokeEngine.hasPendingBrushCommitJobs == false)
+        #expect(earlierStrokeAlpha > 0.25)
+        #expect(adjustedRecentStrokeAlpha > 0.01)
+        #expect(adjustedRecentStrokeAlpha < earlierStrokeAlpha * 0.5)
+    }
+
+    @Test
+    @MainActor
+    func selectingDifferentLayerBakesRecentBrushAdjustmentIntoPreviousLayerPixels() throws {
+        let harness = try BrushEditingBoundaryHarness()
+        let originalLayerID = harness.viewModel.workspace.document.activeLayerID
+
+        harness.viewModel.addLayer()
+        let secondaryLayerID = harness.viewModel.workspace.document.activeLayerID
+        harness.viewModel.selectLayer(originalLayerID)
+
+        try enqueueRecentBrushAdjustmentStroke(
+            in: harness,
+            point: .init(location: .init(x: 96, y: 96), pressure: 1)
+        )
+        try enqueueRecentBrushAdjustmentStroke(
+            in: harness,
+            point: .init(location: .init(x: 320, y: 320), pressure: 1)
+        )
+
+        harness.viewModel.setQuickColorPickerRecentBrushSelectionCount(1)
+        harness.viewModel.setQuickColorPickerRecentBrushOpacity(0.2)
+
+        #expect(harness.bootstrap.strokeEngine.hasPendingBrushCommitJobs)
+
+        harness.viewModel.selectLayer(secondaryLayerID)
+
+        let earlierStrokeAlpha = try harness.alpha(atX: 96, y: 96, layerID: originalLayerID)
+        let adjustedRecentStrokeAlpha = try harness.alpha(atX: 320, y: 320, layerID: originalLayerID)
+
+        #expect(harness.viewModel.workspace.document.activeLayerID == secondaryLayerID)
+        #expect(harness.bootstrap.strokeEngine.hasPendingBrushCommitJobs == false)
+        #expect(earlierStrokeAlpha > 0.25)
+        #expect(adjustedRecentStrokeAlpha > 0.01)
+        #expect(adjustedRecentStrokeAlpha < earlierStrokeAlpha * 0.5)
+    }
+
+    @Test
+    @MainActor
+    func recentBrushAdjustmentSettersIgnoreNoOpValuesToAvoidExtraRedrawChurn() throws {
+        let harness = try BrushEditingBoundaryHarness()
+
+        try enqueueRecentBrushAdjustmentStroke(
+            in: harness,
+            point: .init(location: .init(x: 96, y: 96), pressure: 1)
+        )
+        try enqueueRecentBrushAdjustmentStroke(
+            in: harness,
+            point: .init(location: .init(x: 320, y: 320), pressure: 1)
+        )
+
+        harness.viewModel.setQuickColorPickerRecentBrushSelectionCount(1)
+        harness.viewModel.setQuickColorPickerRecentBrushOpacity(0.6)
+
+        let redrawRevisionAfterAdjustment = harness.viewModel.recentBrushAdjustmentRedrawRevision
+
+        harness.viewModel.setQuickColorPickerRecentBrushSelectionCount(1)
+        harness.viewModel.setQuickColorPickerRecentBrushOpacity(0.6)
+        harness.viewModel.setQuickColorPickerRecentBrushBrightness(0)
+        harness.viewModel.setQuickColorPickerRecentBrushSaturation(0)
+        harness.viewModel.setQuickColorPickerRecentBrushSelectionEditing(false)
+        harness.viewModel.setQuickColorPickerRecentBrushOpacityEditing(false)
+
+        #expect(harness.viewModel.recentBrushAdjustmentRedrawRevision == redrawRevisionAfterAdjustment)
     }
 
     @Test
@@ -2072,6 +2243,24 @@ private enum BoundaryHarnessError: Error {
     case commandBufferUnavailable
     case textureUnavailable
     case referenceImageTimeout
+}
+
+@MainActor
+private func enqueueRecentBrushAdjustmentStroke(
+    in harness: BrushEditingBoundaryHarness,
+    point: CanvasStrokeSample
+) throws {
+    harness.viewModel.beginStrokeIfNeeded()
+    harness.viewModel.applyStroke(samples: [point])
+    harness.viewModel.endStroke()
+
+    guard let commandBuffer = harness.bootstrap.metalContext.commandQueue.makeCommandBuffer() else {
+        throw BoundaryHarnessError.commandBufferUnavailable
+    }
+
+    _ = harness.viewModel.flushPendingBrushWork(into: commandBuffer)
+    commandBuffer.commit()
+    commandBuffer.waitUntilCompleted()
 }
 
 @MainActor

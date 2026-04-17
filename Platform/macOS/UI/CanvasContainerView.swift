@@ -30,7 +30,7 @@ struct CanvasContainerView: View {
 
                     MetalCanvasHost(
                         sceneSnapshot: viewModel.sceneSnapshot,
-                        externalRedrawRevision: viewModel.colorAdjustmentRedrawRevision,
+                        externalRedrawRevision: viewModel.colorAdjustmentRedrawRevision &+ viewModel.recentBrushAdjustmentRedrawRevision,
                         transformSelectionShape: viewModel.transformPreparationSelectionShape,
                         metalContext: viewModel.metalContext,
                         layerSurfaceStore: viewModel.layerSurfaceStore,
@@ -410,6 +410,24 @@ struct CanvasContainerView: View {
                             if let preset = viewModel.workspace.brushLibrary.preset(atSlot: slotIndex) {
                                 viewModel.applyBrushPreset(preset.id)
                             }
+                        },
+                        onSetRecentBrushSelectionCount: { count in
+                            viewModel.setQuickColorPickerRecentBrushSelectionCount(count)
+                        },
+                        onSetRecentBrushOpacity: { opacity in
+                            viewModel.setQuickColorPickerRecentBrushOpacity(opacity)
+                        },
+                        onSetRecentBrushBrightness: { brightness in
+                            viewModel.setQuickColorPickerRecentBrushBrightness(brightness)
+                        },
+                        onSetRecentBrushSaturation: { saturation in
+                            viewModel.setQuickColorPickerRecentBrushSaturation(saturation)
+                        },
+                        onSetRecentBrushSelectionEditing: { isEditing in
+                            viewModel.setQuickColorPickerRecentBrushSelectionEditing(isEditing)
+                        },
+                        onSetRecentBrushOpacityEditing: { isEditing in
+                            viewModel.setQuickColorPickerRecentBrushOpacityEditing(isEditing)
                         }
                     )
                 }

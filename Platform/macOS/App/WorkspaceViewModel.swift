@@ -25,6 +25,16 @@ private struct WholeLayerInteractionBoundsKey: Equatable {
     let canvasContentRevision: UInt64
 }
 
+private struct RecentBrushAdjustmentSyncState: Equatable {
+    let layerID: LayerID?
+    let selectionLimit: Int
+    let selectionCount: Int
+    let opacity: Float
+    let brightness: Float
+    let saturation: Float
+    let showsSelectionHighlight: Bool
+}
+
 private enum WholeLayerInteractionBoundsCacheEntry: Equatable {
     case ready(CanvasRect)
     case empty
@@ -176,6 +186,7 @@ final class WorkspaceViewModel: ObservableObject {
     @Published private(set) var ideationSession: IdeationSessionState?
     @Published private(set) var snapshotCompareSession: SnapshotCompareSessionState?
     @Published private(set) var quickColorPickerState: QuickColorPickerState?
+    @Published var recentBrushAdjustmentRedrawRevision: UInt64 = 0
     @Published private(set) var isWorkspaceChromeHidden = false
     @Published var colorAdjustmentOverlayState = ColorAdjustmentOverlayState.inactive
     @Published var curveAdjustmentOverlayState = CurveAdjustmentOverlayState.inactive
@@ -200,6 +211,12 @@ final class WorkspaceViewModel: ObservableObject {
     private var latestCanvasViewportSize: CGSize = .zero
     private var lastCanvasHoverPoint: CanvasPoint?
     private var isQuickColorPickerShortcutActive = false
+    private var recentBrushAdjustmentSelectedCount = 0
+    private var recentBrushAdjustmentOpacity: Float = 1
+    private var recentBrushAdjustmentBrightness: Float = 0
+    private var recentBrushAdjustmentSaturation: Float = 0
+    private var isRecentBrushSelectionHighlightActive = false
+    private var lastRecentBrushAdjustmentSyncState: RecentBrushAdjustmentSyncState?
     private var documentChangeRevision: UInt64 = 0
     private var strokePacketCount = 0
     var colorAdjustmentSession: ColorAdjustmentSession?
@@ -348,7 +365,8 @@ final class WorkspaceViewModel: ObservableObject {
             applyActiveGradientSession()
             return
         }
-        if isBrushLikeTool(currentTool) && !isBrushLikeTool(normalizedTool) {
+        if (currentTool == .brush && normalizedTool != .brush)
+            || (currentTool != .brush && isBrushLikeTool(currentTool) && !isBrushLikeTool(normalizedTool)) {
             _ = drainPendingBrushCommitsIfNeeded(resetLiveSession: true)
         }
         performToolSelection(normalizedTool)
@@ -2890,6 +2908,60 @@ final class WorkspaceViewModel: ObservableObject {
         previewQuickColorPickerState(state)
     }
 
+    func setQuickColorPickerRecentBrushSelectionCount(_ count: Int) {
+        let clampedCount = max(count, 0)
+        guard recentBrushAdjustmentSelectedCount != clampedCount else {
+            return
+        }
+        recentBrushAdjustmentSelectedCount = clampedCount
+        syncRecentBrushAdjustmentState()
+    }
+
+    func setQuickColorPickerRecentBrushOpacity(_ opacity: Float) {
+        let clampedOpacity = min(max(opacity, 0), 1)
+        guard !recentBrushAdjustmentValuesMatch(recentBrushAdjustmentOpacity, clampedOpacity) else {
+            return
+        }
+        recentBrushAdjustmentOpacity = clampedOpacity
+        syncRecentBrushAdjustmentState(showsSelectionHighlight: false)
+    }
+
+    func setQuickColorPickerRecentBrushBrightness(_ brightness: Float) {
+        let clampedBrightness = min(max(brightness, -1), 1)
+        guard !recentBrushAdjustmentValuesMatch(recentBrushAdjustmentBrightness, clampedBrightness) else {
+            return
+        }
+        recentBrushAdjustmentBrightness = clampedBrightness
+        syncRecentBrushAdjustmentState(showsSelectionHighlight: false)
+    }
+
+    func setQuickColorPickerRecentBrushSaturation(_ saturation: Float) {
+        let clampedSaturation = min(max(saturation, -1), 1)
+        guard !recentBrushAdjustmentValuesMatch(recentBrushAdjustmentSaturation, clampedSaturation) else {
+            return
+        }
+        recentBrushAdjustmentSaturation = clampedSaturation
+        syncRecentBrushAdjustmentState(showsSelectionHighlight: false)
+    }
+
+    func setQuickColorPickerRecentBrushSelectionEditing(_ isEditing: Bool) {
+        guard isRecentBrushSelectionHighlightActive != isEditing else {
+            return
+        }
+        isRecentBrushSelectionHighlightActive = isEditing
+        syncRecentBrushAdjustmentState(showsSelectionHighlight: isEditing)
+    }
+
+    func setQuickColorPickerRecentBrushOpacityEditing(_ isEditing: Bool) {
+        guard isEditing || isRecentBrushSelectionHighlightActive else {
+            return
+        }
+        if isEditing {
+            isRecentBrushSelectionHighlightActive = false
+        }
+        syncRecentBrushAdjustmentState(showsSelectionHighlight: false)
+    }
+
     func resetColorPanel() {
         bootstrap.workspaceStore.updateColorPanel { state in
             if state.mode == .picker {
@@ -3764,6 +3836,7 @@ final class WorkspaceViewModel: ObservableObject {
             )
             layerThumbnailCache.removeValue(forKey: layerID)
             bootstrap.strokeEngine.resetBrushPipelineState()
+            clearRecentBrushAdjustmentState()
             refresh(invalidatedLayerIDs: [layerID])
             noteCanvasContentChanged()
             recordDrawingActivityIfNeeded()
@@ -4231,7 +4304,7 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func selectLayer(_ layerID: LayerID) {
-        _ = drainPendingBrushCommitsIfNeeded(resetLiveSession: true)
+        _ = flushBrushEditingBoundary(reason: "selectLayer")
         if workspace.document.activeLayerID != layerID {
             guard resolveColorAdjustmentSessionIfNeeded(reason: .layerChange) else { return }
             guard resolveCurveAdjustmentSessionIfNeeded(reason: .layerChange) else { return }
@@ -7586,6 +7659,7 @@ final class WorkspaceViewModel: ObservableObject {
     func finalizeCommittedSingleLayerMutation(_ layerID: LayerID) {
         layerThumbnailCache.removeValue(forKey: layerID)
         bootstrap.strokeEngine.resetBrushPipelineState()
+        clearRecentBrushAdjustmentState()
         noteCanvasContentChanged()
         refresh(invalidatedLayerIDs: [layerID])
         recordDrawingActivityIfNeeded()
@@ -7696,6 +7770,10 @@ final class WorkspaceViewModel: ObservableObject {
         guard let layerID = bootstrap.interactionController.activeEditableLayerID() else {
             return
         }
+
+        if shouldBakeRecentBrushAdjustmentBeforeStartingNewBrushStroke() {
+            _ = drainPendingBrushCommitsIfNeeded(resetLiveSession: true)
+        }
         if isGeneratorStrokeModeEnabled,
            workspace.toolSession.activeTool == .brush,
            workspace.generator.kind != .automaticLines {
@@ -7765,7 +7843,10 @@ final class WorkspaceViewModel: ObservableObject {
             let result = try bootstrap.strokeEngine.opportunisticDrainPendingBrushCommitJobs(
                 hadLiveBrushWorkThisFrame: hadLiveBrushWorkThisFrame,
                 maxJobs: 1,
-                maxCpuMs: 0.75
+                maxCpuMs: 0.75,
+                retainedRecentBrushCommitJobs: workspace.toolSession.activeTool == .brush
+                    ? bootstrap.strokeEngine.recentAdjustableBrushCommitLimit
+                    : 0
             ) { [self] job in
                 try captureBrushCommitCheckpoint(for: job)
                 hasUnsavedChanges = true
@@ -7774,6 +7855,11 @@ final class WorkspaceViewModel: ObservableObject {
             if result.drainedJobs > 0 {
                 canUndo = bootstrap.historyController.canUndo
                 canRedo = bootstrap.historyController.canRedo
+                if workspace.toolSession.activeTool != .brush || !bootstrap.strokeEngine.hasPendingBrushCommitJobs {
+                    clearRecentBrushAdjustmentState()
+                } else {
+                    syncRecentBrushAdjustmentState()
+                }
             }
         } catch {
             showStatus(.init(kind: .error, message: error.localizedDescription))
@@ -9357,6 +9443,10 @@ final class WorkspaceViewModel: ObservableObject {
             bootstrap.strokeEngine.resetBrushPipelineState()
         }
 
+        if hadPendingCommits || resetLiveSession {
+            clearRecentBrushAdjustmentState()
+        }
+
         return hadPendingCommits
     }
 
@@ -9764,6 +9854,7 @@ final class WorkspaceViewModel: ObservableObject {
                 }
                 self.layerThumbnailCache.removeValue(forKey: layerID)
                 self.bootstrap.strokeEngine.resetBrushPipelineState()
+                self.clearRecentBrushAdjustmentState()
                 self.noteCanvasContentChanged()
                 self.refresh(invalidatedLayerIDs: [layerID])
                 self.recordDrawingActivityIfNeeded()
@@ -9877,6 +9968,7 @@ final class WorkspaceViewModel: ObservableObject {
 
         layerThumbnailCache.removeValue(forKey: layerID)
         bootstrap.strokeEngine.resetBrushPipelineState()
+        clearRecentBrushAdjustmentState()
         noteCanvasContentChanged()
         refresh(invalidatedLayerIDs: [layerID])
         recordDrawingActivityIfNeeded()
@@ -11626,6 +11718,8 @@ final class WorkspaceViewModel: ObservableObject {
         if quickColorPickerState != nil {
             commitQuickColorPickerSelectionIfNeeded()
             quickColorPickerState = nil
+            isRecentBrushSelectionHighlightActive = false
+            syncRecentBrushAdjustmentState(showsSelectionHighlight: false)
         }
     }
 
@@ -11637,11 +11731,23 @@ final class WorkspaceViewModel: ObservableObject {
         let selectedColor = workspace.toolSession.selectedColor
         ColorBlocksEngine.syncPicker(to: selectedColor, state: &panel)
         panel.baseHSV = ColorBlocksEngine.rgbToHsv(selectedColor)
+        let recentBrushSelectionLimit = currentRecentBrushAdjustmentLimit()
+        recentBrushAdjustmentSelectedCount = Self.resolvedRecentBrushAdjustmentSelectionCount(
+            preferredCount: recentBrushAdjustmentSelectedCount,
+            limit: recentBrushSelectionLimit
+        )
 
         quickColorPickerState = QuickColorPickerState(
             anchorPoint: anchorPoint,
-            panel: panel
+            panel: panel,
+            recentBrushSelectionCount: recentBrushAdjustmentSelectedCount,
+            recentBrushSelectionLimit: recentBrushSelectionLimit,
+            recentBrushOpacity: recentBrushAdjustmentOpacity,
+            recentBrushBrightness: recentBrushAdjustmentBrightness,
+            recentBrushSaturation: recentBrushAdjustmentSaturation
         )
+        isRecentBrushSelectionHighlightActive = false
+        syncRecentBrushAdjustmentState(showsSelectionHighlight: false)
     }
 
     private func previewQuickColorPickerState(_ state: QuickColorPickerState) {
@@ -11669,6 +11775,144 @@ final class WorkspaceViewModel: ObservableObject {
             panel.baseName = ""
         }
         refreshColorPanelOnly(includeSelectedColor: true)
+    }
+
+    private func currentRecentBrushAdjustmentLayerID() -> LayerID? {
+        guard workspace.toolSession.activeTool == .brush else {
+            return nil
+        }
+        return bootstrap.interactionController.activeEditableLayerID()
+    }
+
+    private func currentRecentBrushAdjustmentLimit() -> Int {
+        guard let layerID = currentRecentBrushAdjustmentLayerID() else {
+            return 0
+        }
+        return bootstrap.strokeEngine.recentAdjustableBrushCommitCount(for: layerID)
+    }
+
+    nonisolated static func resolvedRecentBrushAdjustmentSelectionCount(
+        preferredCount: Int,
+        limit: Int
+    ) -> Int {
+        guard limit > 0 else {
+            return 0
+        }
+        return min(max(preferredCount, 1), limit)
+    }
+
+    private func recentBrushAdjustmentValuesMatch(_ lhs: Float, _ rhs: Float) -> Bool {
+        abs(lhs - rhs) < 0.0005
+    }
+
+    private func shouldBakeRecentBrushAdjustmentBeforeStartingNewBrushStroke() -> Bool {
+        guard workspace.toolSession.activeTool == .brush else {
+            return false
+        }
+        guard recentBrushAdjustmentSelectedCount > 0 else {
+            return false
+        }
+        guard quickColorPickerState == nil else {
+            return false
+        }
+        return bootstrap.strokeEngine.hasPendingBrushCommitJobs
+    }
+
+    private func syncRecentBrushAdjustmentState(showsSelectionHighlight: Bool? = nil) {
+        let recentBrushSelectionLimit = currentRecentBrushAdjustmentLimit()
+        recentBrushAdjustmentSelectedCount = Self.resolvedRecentBrushAdjustmentSelectionCount(
+            preferredCount: recentBrushAdjustmentSelectedCount,
+            limit: recentBrushSelectionLimit
+        )
+        recentBrushAdjustmentOpacity = min(max(recentBrushAdjustmentOpacity, 0), 1)
+        recentBrushAdjustmentBrightness = min(max(recentBrushAdjustmentBrightness, -1), 1)
+        recentBrushAdjustmentSaturation = min(max(recentBrushAdjustmentSaturation, -1), 1)
+        if recentBrushSelectionLimit == 0 {
+            recentBrushAdjustmentOpacity = 1
+            recentBrushAdjustmentBrightness = 0
+            recentBrushAdjustmentSaturation = 0
+        }
+
+        let resolvedShowsSelectionHighlight = showsSelectionHighlight ?? isRecentBrushSelectionHighlightActive
+        let resolvedLayerID = currentRecentBrushAdjustmentLayerID()
+        let hasActiveAdjustment = resolvedLayerID != nil && recentBrushAdjustmentSelectedCount > 0
+        let targetSyncState = RecentBrushAdjustmentSyncState(
+            layerID: hasActiveAdjustment ? resolvedLayerID : nil,
+            selectionLimit: recentBrushSelectionLimit,
+            selectionCount: recentBrushAdjustmentSelectedCount,
+            opacity: recentBrushAdjustmentOpacity,
+            brightness: recentBrushAdjustmentBrightness,
+            saturation: recentBrushAdjustmentSaturation,
+            showsSelectionHighlight: hasActiveAdjustment ? resolvedShowsSelectionHighlight : false
+        )
+
+        let didUpdateQuickColorPickerState: Bool
+        if var state = quickColorPickerState {
+            let updatedState = QuickColorPickerState(
+                anchorPoint: state.anchorPoint,
+                panel: state.panel,
+                recentBrushSelectionCount: recentBrushAdjustmentSelectedCount,
+                recentBrushSelectionLimit: recentBrushSelectionLimit,
+                recentBrushOpacity: recentBrushAdjustmentOpacity,
+                recentBrushBrightness: recentBrushAdjustmentBrightness,
+                recentBrushSaturation: recentBrushAdjustmentSaturation
+            )
+            didUpdateQuickColorPickerState = updatedState != state
+            if updatedState != state {
+                state = updatedState
+                quickColorPickerState = state
+            }
+        } else {
+            didUpdateQuickColorPickerState = false
+        }
+
+        guard lastRecentBrushAdjustmentSyncState != targetSyncState || didUpdateQuickColorPickerState else {
+            return
+        }
+
+        if let layerID = resolvedLayerID,
+           recentBrushAdjustmentSelectedCount > 0 {
+            bootstrap.strokeEngine.setRecentBrushAdjustment(
+                layerID: layerID,
+                selectedRecentCount: recentBrushAdjustmentSelectedCount,
+                opacity: recentBrushAdjustmentOpacity,
+                brightness: recentBrushAdjustmentBrightness,
+                saturation: recentBrushAdjustmentSaturation,
+                showsSelectionHighlight: resolvedShowsSelectionHighlight
+            )
+        } else {
+            bootstrap.strokeEngine.clearRecentBrushAdjustment()
+        }
+
+        lastRecentBrushAdjustmentSyncState = targetSyncState
+        recentBrushAdjustmentRedrawRevision &+= 1
+    }
+
+    private func clearRecentBrushAdjustmentState() {
+        recentBrushAdjustmentSelectedCount = 0
+        recentBrushAdjustmentOpacity = 1
+        recentBrushAdjustmentBrightness = 0
+        recentBrushAdjustmentSaturation = 0
+        isRecentBrushSelectionHighlightActive = false
+        bootstrap.strokeEngine.clearRecentBrushAdjustment()
+        lastRecentBrushAdjustmentSyncState = RecentBrushAdjustmentSyncState(
+            layerID: nil,
+            selectionLimit: currentRecentBrushAdjustmentLimit(),
+            selectionCount: 0,
+            opacity: 1,
+            brightness: 0,
+            saturation: 0,
+            showsSelectionHighlight: false
+        )
+        if var state = quickColorPickerState {
+            state.recentBrushSelectionCount = 0
+            state.recentBrushSelectionLimit = currentRecentBrushAdjustmentLimit()
+            state.recentBrushOpacity = 1
+            state.recentBrushBrightness = 0
+            state.recentBrushSaturation = 0
+            quickColorPickerState = state
+        }
+        recentBrushAdjustmentRedrawRevision &+= 1
     }
 
     private func refreshColorPanelOnly(includeSelectedColor: Bool = false) {

@@ -284,6 +284,191 @@ struct MetalStrokeEngineQueueTests {
     }
 
     @Test
+    func interactiveDrainRetainsMostRecentBrushCommitJobsForAdjustment() throws {
+        guard
+            let metalContext = MetalDeviceContext(),
+            let firstCommandBuffer = metalContext.commandQueue.makeCommandBuffer(),
+            let secondCommandBuffer = metalContext.commandQueue.makeCommandBuffer(),
+            let thirdCommandBuffer = metalContext.commandQueue.makeCommandBuffer()
+        else {
+            Issue.record("Metal unavailable")
+            return
+        }
+
+        let surfaceStore = StageOneLayerSurfaceStore()
+        let document = ArtDocument.stageOneDefault()
+        surfaceStore.prepareTextures(for: document, metal: metalContext)
+        let layerID = document.activeLayerID
+
+        let engine = try MetalStrokeEngine(
+            metalContext: metalContext,
+            layerSurfaceStore: surfaceStore
+        )
+
+        try enqueueBrushCommitJob(
+            engine: engine,
+            layerID: layerID,
+            point: .init(x: 24, y: 24, pressure: 1),
+            commandBuffer: firstCommandBuffer
+        )
+        try enqueueBrushCommitJob(
+            engine: engine,
+            layerID: layerID,
+            point: .init(x: 96, y: 96, pressure: 1),
+            commandBuffer: secondCommandBuffer
+        )
+        try enqueueBrushCommitJob(
+            engine: engine,
+            layerID: layerID,
+            point: .init(x: 168, y: 168, pressure: 1),
+            commandBuffer: thirdCommandBuffer
+        )
+
+        #expect(engine.recentAdjustableBrushCommitCount(for: layerID) == 3)
+        engine.resetBrushPipelineState()
+
+        let drainResult = try engine.opportunisticDrainPendingBrushCommitJobs(
+            hadLiveBrushWorkThisFrame: false,
+            maxJobs: 10,
+            maxCpuMs: 5,
+            retainedRecentBrushCommitJobs: 2
+        ) { _ in }
+
+        #expect(drainResult.drainedJobs == 1)
+        #expect(drainResult.remainingQueueDepth == 2)
+        #expect(engine.recentAdjustableBrushCommitCount(for: layerID) == 2)
+    }
+
+    @Test
+    func forcedDrainAppliesOpacityToSelectedRecentBrushCommitJobs() throws {
+        guard
+            let metalContext = MetalDeviceContext(),
+            let firstCommandBuffer = metalContext.commandQueue.makeCommandBuffer(),
+            let secondCommandBuffer = metalContext.commandQueue.makeCommandBuffer()
+        else {
+            Issue.record("Metal unavailable")
+            return
+        }
+
+        let surfaceStore = StageOneLayerSurfaceStore()
+        let document = ArtDocument.stageOneDefault()
+        surfaceStore.prepareTextures(for: document, metal: metalContext)
+        let layerID = document.activeLayerID
+
+        let engine = try MetalStrokeEngine(
+            metalContext: metalContext,
+            layerSurfaceStore: surfaceStore
+        )
+
+        try enqueueBrushCommitJob(
+            engine: engine,
+            layerID: layerID,
+            point: .init(x: 96, y: 96, pressure: 1),
+            commandBuffer: firstCommandBuffer
+        )
+        try enqueueBrushCommitJob(
+            engine: engine,
+            layerID: layerID,
+            point: .init(x: 320, y: 320, pressure: 1),
+            commandBuffer: secondCommandBuffer
+        )
+
+        engine.setRecentBrushAdjustment(
+            layerID: layerID,
+            selectedRecentCount: 1,
+            opacity: 0.2,
+            brightness: 0,
+            saturation: 0,
+            showsSelectionHighlight: false
+        )
+
+        try engine.drainPendingBrushCommitJobs { _ in }
+
+        let serializer = LayerTextureSerializer(metalContext: metalContext)
+        guard
+            let surfaceID = surfaceStore.surfaceID(for: layerID),
+            let texture = surfaceStore.texture(for: surfaceID)
+        else {
+            Issue.record("Texture unavailable")
+            return
+        }
+
+        let earlierStrokeAlpha = try serializer.samplePixel(texture: texture, x: 96, y: 96).alpha
+        let adjustedRecentStrokeAlpha = try serializer.samplePixel(texture: texture, x: 320, y: 320).alpha
+
+        #expect(earlierStrokeAlpha > 0.25)
+        #expect(adjustedRecentStrokeAlpha > 0.01)
+        #expect(adjustedRecentStrokeAlpha < earlierStrokeAlpha * 0.5)
+        #expect(engine.hasPendingBrushCommitJobs == false)
+    }
+
+    @Test
+    func forcedDrainAppliesBrightnessAndSaturationToSelectedRecentBrushCommitJobs() throws {
+        guard
+            let metalContext = MetalDeviceContext(),
+            let firstCommandBuffer = metalContext.commandQueue.makeCommandBuffer(),
+            let secondCommandBuffer = metalContext.commandQueue.makeCommandBuffer()
+        else {
+            Issue.record("Metal unavailable")
+            return
+        }
+
+        let surfaceStore = StageOneLayerSurfaceStore()
+        let document = ArtDocument.stageOneDefault()
+        surfaceStore.prepareTextures(for: document, metal: metalContext)
+        let layerID = document.activeLayerID
+
+        let engine = try MetalStrokeEngine(
+            metalContext: metalContext,
+            layerSurfaceStore: surfaceStore
+        )
+
+        let strokeColor = RGBAColor(red: 0.82, green: 0.42, blue: 0.12, alpha: 1)
+
+        try enqueueBrushCommitJob(
+            engine: engine,
+            layerID: layerID,
+            point: .init(x: 96, y: 96, pressure: 1),
+            color: strokeColor,
+            commandBuffer: firstCommandBuffer
+        )
+        try enqueueBrushCommitJob(
+            engine: engine,
+            layerID: layerID,
+            point: .init(x: 320, y: 320, pressure: 1),
+            color: strokeColor,
+            commandBuffer: secondCommandBuffer
+        )
+
+        engine.setRecentBrushAdjustment(
+            layerID: layerID,
+            selectedRecentCount: 1,
+            opacity: 1,
+            brightness: -0.35,
+            saturation: -0.6,
+            showsSelectionHighlight: false
+        )
+
+        try engine.drainPendingBrushCommitJobs { _ in }
+
+        let serializer = LayerTextureSerializer(metalContext: metalContext)
+        guard
+            let surfaceID = surfaceStore.surfaceID(for: layerID),
+            let texture = surfaceStore.texture(for: surfaceID)
+        else {
+            Issue.record("Texture unavailable")
+            return
+        }
+
+        let earlierStrokePixel = try serializer.samplePixel(texture: texture, x: 96, y: 96)
+        let adjustedRecentStrokePixel = try serializer.samplePixel(texture: texture, x: 320, y: 320)
+
+        #expect(adjustedRecentStrokePixel.red < earlierStrokePixel.red - 0.08)
+        #expect(abs(adjustedRecentStrokePixel.red - adjustedRecentStrokePixel.green) < abs(earlierStrokePixel.red - earlierStrokePixel.green))
+        #expect(abs(adjustedRecentStrokePixel.green - adjustedRecentStrokePixel.blue) < abs(earlierStrokePixel.green - earlierStrokePixel.blue))
+    }
+
+    @Test
     func smudgeLiveSessionDoesNotUseFullSizeSnapshotCopiesAcrossPackets() throws {
         guard
             let metalContext = MetalDeviceContext(),
@@ -494,6 +679,38 @@ struct MetalStrokeEngineQueueTests {
 
         #expect(maxDelta <= 1)
     }
+}
+
+private func enqueueBrushCommitJob(
+    engine: MetalStrokeEngine,
+    layerID: LayerID,
+    point: StrokePoint,
+    color: RGBAColor = .black,
+    commandBuffer: MTLCommandBuffer
+) throws {
+    var brush = BrushSettings.stageOneDefault
+    brush.size = 24
+    brush.opacity = 1
+
+    engine.beginStrokeIfNeeded(
+        toolSession: .stageOneDefault,
+        layerID: layerID
+    )
+    _ = engine.applyStroke(
+        StrokeDescriptor(
+            tool: .brush,
+            color: color,
+            brush: brush,
+            points: [point],
+            selectionShape: nil,
+            skipLeadingStamp: false
+        ),
+        to: layerID
+    )
+    engine.endStroke()
+    _ = engine.flushPendingStrokePackets(into: commandBuffer)
+    commandBuffer.commit()
+    commandBuffer.waitUntilCompleted()
 }
 
 private func gradientSnapshot(width: Int, height: Int) -> LayerTextureSnapshot {

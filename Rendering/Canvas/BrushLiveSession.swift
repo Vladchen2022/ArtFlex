@@ -62,6 +62,11 @@ final class BrushCommitQueue {
     var isEmpty: Bool { count == 0 }
     var count: Int { jobs.count - headIndex }
 
+    func snapshot() -> [BrushCommitJob] {
+        guard headIndex < jobs.count else { return [] }
+        return Array(jobs[headIndex...])
+    }
+
     func enqueue(_ job: BrushCommitJob) {
         jobs.append(job)
     }

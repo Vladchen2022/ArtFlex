@@ -9,15 +9,51 @@ final class MetalStrokeEngine: StrokeEngine {
         case warmReused
     }
 
+    private struct RecentBrushAdjustmentState: Equatable {
+        let layerID: LayerID
+        var selectedRecentCount: Int
+        var opacity: Float
+        var brightness: Float
+        var saturation: Float
+        var showsSelectionHighlight: Bool
+    }
+
+    private struct RecentBrushPreviewKey: Equatable {
+        let layerID: LayerID
+        let selectedRecentCount: Int
+        let opacity: Float
+        let brightness: Float
+        let saturation: Float
+        let showsSelectionHighlight: Bool
+        let committedRevision: UInt64
+        let displayRevision: UInt64
+        let pendingCommitRevisions: [UInt64]
+    }
+
+    private struct RecentBrushPreviewBaseKey: Equatable {
+        let layerID: LayerID
+        let selectedRecentCount: Int
+        let committedRevision: UInt64
+        let displayRevision: UInt64
+        let pendingCommitRevisions: [UInt64]
+    }
+
     private let metalContext: MetalDeviceContext
     private let layerSurfaceStore: StageOneLayerSurfaceStore
     private let brushRenderer: StageOneBrushRenderer
     private let logger = Logger(subsystem: "ArtFlex", category: "BrushStroke")
     private let warmIdleDurationNs: UInt64 = 300_000_000
+    private let maxRetainedRecentBrushCommitJobs = 20
+    private let recentBrushHighlightColor = RGBAColor(red: 0.22, green: 0.58, blue: 1, alpha: 1)
 
     private var liveSession: BrushLiveSession?
     private let commitQueue = BrushCommitQueue()
     private var nextCommitRevision: UInt64 = 0
+    private var recentBrushAdjustmentState: RecentBrushAdjustmentState?
+    private var recentBrushPreviewBaseTexture: MTLTexture?
+    private var recentBrushPreviewBaseKey: RecentBrushPreviewBaseKey?
+    private var recentBrushPreviewTexture: MTLTexture?
+    private var recentBrushPreviewKey: RecentBrushPreviewKey?
     private(set) var debugLastFlushSmudgeFullSizeCopyCount = 0
     private(set) var debugLastCommitSmudgeFullSizeCopyCount = 0
 
@@ -49,6 +85,7 @@ final class MetalStrokeEngine: StrokeEngine {
         liveSession?.liveEvents.append(
             .begin(layerID: layerID, enqueuedAt: now)
         )
+        invalidateRecentBrushPreviewCache()
         logger.debug("[brush-live] sessionWarmReused=\(reuseState == .warmReused, privacy: .public)")
         logger.debug("[brush-live] commitQueueDepth=\(self.commitQueue.count, privacy: .public)")
     }
@@ -66,6 +103,7 @@ final class MetalStrokeEngine: StrokeEngine {
             liveSession?.liveEvents.append(
                 .packet(stroke, layerID: layerID, enqueuedAt: now)
             )
+            invalidateRecentBrushPreviewCache()
             let queuedPackets = liveSession?.liveEvents.reduce(into: 0) { count, event in
                 if case .packet = event {
                     count += 1
@@ -106,6 +144,7 @@ final class MetalStrokeEngine: StrokeEngine {
             .end(layerID: session.layerID, enqueuedAt: now)
         )
         liveSession = session
+        invalidateRecentBrushPreviewCache()
     }
 
     var hasPendingBrushWork: Bool {
@@ -114,6 +153,63 @@ final class MetalStrokeEngine: StrokeEngine {
 
     var hasPendingBrushCommitJobs: Bool {
         !commitQueue.isEmpty
+    }
+
+    var recentAdjustableBrushCommitLimit: Int {
+        maxRetainedRecentBrushCommitJobs
+    }
+
+    func recentAdjustableBrushCommitCount(for layerID: LayerID) -> Int {
+        min(
+            maxRetainedRecentBrushCommitJobs,
+            commitQueue.snapshot().filter {
+                $0.layerID == layerID && $0.packets.last?.tool == .brush
+            }.count
+        )
+    }
+
+    func setRecentBrushAdjustment(
+        layerID: LayerID,
+        selectedRecentCount: Int,
+        opacity: Float,
+        brightness: Float,
+        saturation: Float,
+        showsSelectionHighlight: Bool
+    ) {
+        let previousState = recentBrushAdjustmentState
+        let clampedCount = max(selectedRecentCount, 0)
+        let clampedOpacity = min(max(opacity, 0), 1)
+        let clampedBrightness = min(max(brightness, -1), 1)
+        let clampedSaturation = min(max(saturation, -1), 1)
+        let isNeutralAdjustment =
+            clampedOpacity >= 0.999
+            && abs(clampedBrightness) < 0.001
+            && abs(clampedSaturation) < 0.001
+        if clampedCount == 0 || (isNeutralAdjustment && showsSelectionHighlight == false) {
+            recentBrushAdjustmentState = nil
+        } else {
+            recentBrushAdjustmentState = RecentBrushAdjustmentState(
+                layerID: layerID,
+                selectedRecentCount: clampedCount,
+                opacity: clampedOpacity,
+                brightness: clampedBrightness,
+                saturation: clampedSaturation,
+                showsSelectionHighlight: showsSelectionHighlight
+            )
+        }
+        let shouldInvalidateBase =
+            previousState?.layerID != recentBrushAdjustmentState?.layerID
+            || previousState?.selectedRecentCount != recentBrushAdjustmentState?.selectedRecentCount
+        if shouldInvalidateBase {
+            invalidateRecentBrushPreviewCache()
+        } else {
+            invalidateRecentBrushPreviewResult()
+        }
+    }
+
+    func clearRecentBrushAdjustment() {
+        recentBrushAdjustmentState = nil
+        invalidateRecentBrushPreviewCache()
     }
 
     @discardableResult
@@ -254,6 +350,7 @@ final class MetalStrokeEngine: StrokeEngine {
                     value: commitQueue.count
                 )
                 session.currentStrokePackets = []
+                invalidateRecentBrushPreviewCache()
                 logger.debug("[brush-live] commitQueueDepth=\(self.commitQueue.count, privacy: .public)")
             }
         }
@@ -294,11 +391,15 @@ final class MetalStrokeEngine: StrokeEngine {
         guard liveSession?.layerID == layerID, liveSession?.shouldRetainWorkingTexture == true else {
             return nil
         }
+        if let previewTexture = recentBrushPreviewTextureIfNeeded(for: layerID) {
+            return previewTexture
+        }
         return liveSession?.workingTexture
     }
 
     func drainPendingBrushCommitJobs(beforeEachCommit: (BrushCommitJob) throws -> Void) throws {
         _ = try drainPendingBrushCommitJobs(
+            retainedRecentBrushCommitJobs: 0,
             mode: .forced,
             hadLiveBrushWorkThisFrame: false,
             beforeEachCommit: beforeEachCommit
@@ -313,6 +414,23 @@ final class MetalStrokeEngine: StrokeEngine {
         beforeEachCommit: (BrushCommitJob) throws -> Void
     ) throws -> BrushCommitDrainResult {
         try drainPendingBrushCommitJobs(
+            retainedRecentBrushCommitJobs: 0,
+            mode: .interactiveBudget(maxJobs: maxJobs, maxCpuMs: maxCpuMs),
+            hadLiveBrushWorkThisFrame: hadLiveBrushWorkThisFrame,
+            beforeEachCommit: beforeEachCommit
+        )
+    }
+
+    @discardableResult
+    func opportunisticDrainPendingBrushCommitJobs(
+        hadLiveBrushWorkThisFrame: Bool,
+        maxJobs: Int,
+        maxCpuMs: Double,
+        retainedRecentBrushCommitJobs: Int,
+        beforeEachCommit: (BrushCommitJob) throws -> Void
+    ) throws -> BrushCommitDrainResult {
+        try drainPendingBrushCommitJobs(
+            retainedRecentBrushCommitJobs: retainedRecentBrushCommitJobs,
             mode: .interactiveBudget(maxJobs: maxJobs, maxCpuMs: maxCpuMs),
             hadLiveBrushWorkThisFrame: hadLiveBrushWorkThisFrame,
             beforeEachCommit: beforeEachCommit
@@ -322,6 +440,7 @@ final class MetalStrokeEngine: StrokeEngine {
     func resetBrushPipelineState() {
         liveSession?.shouldRetainWorkingTexture = false
         liveSession = nil
+        clearRecentBrushAdjustment()
     }
 
     func makeOpacityCapSessionForImmediateStroke(texture: MTLTexture) -> OpacityCapSessionResources? {
@@ -414,12 +533,15 @@ final class MetalStrokeEngine: StrokeEngine {
     }
 
     private func drainPendingBrushCommitJobs(
+        retainedRecentBrushCommitJobs: Int,
         mode: BrushCommitDrainMode,
         hadLiveBrushWorkThisFrame: Bool,
         beforeEachCommit: (BrushCommitJob) throws -> Void
     ) throws -> BrushCommitDrainResult {
         let now = DispatchTime.now().uptimeNanoseconds
         updateInteractiveState(now: now)
+        let queueSnapshot = commitQueue.snapshot()
+        let selectedRecentCommitRevisions = selectedRecentCommitRevisions(in: queueSnapshot)
 
         let warmIdleHit = liveSession.map { session in
             if case .warmIdle(let untilUptimeNs) = session.interactiveState {
@@ -467,12 +589,31 @@ final class MetalStrokeEngine: StrokeEngine {
 
         let drainStartNs = DispatchTime.now().uptimeNanoseconds
         var drainedJobs = 0
+        var lastCommittedRevisionForLiveLayer: UInt64?
+        let protectedRecentBrushCommits = protectedRecentBrushCommitCount(
+            in: queueSnapshot,
+            retainedRecentBrushCommitJobs: retainedRecentBrushCommitJobs
+        )
 
-        while drainedJobs < maxJobs, let job = commitQueue.dequeue() {
+        while drainedJobs < maxJobs {
+            if case .interactiveBudget = mode,
+               protectedRecentBrushCommits > 0,
+               commitQueue.count <= protectedRecentBrushCommits {
+                break
+            }
+            guard let job = commitQueue.dequeue() else {
+                break
+            }
             try beforeEachCommit(job)
-            try commit(job: job)
-            if liveSession?.layerID == job.layerID {
-                liveSession?.committedRevision = job.commitRevision
+            // History checkpoints are captured before each commit. We must advance the
+            // texture one job at a time here so the next checkpoint sees the latest
+            // committed pixels rather than the original pre-drain texture.
+            try commit(
+                job: job,
+                selectedRecentCommitRevisions: selectedRecentCommitRevisions
+            )
+            if job.layerID == liveSession?.layerID {
+                lastCommittedRevisionForLiveLayer = job.commitRevision
             }
             drainedJobs += 1
 
@@ -482,6 +623,13 @@ final class MetalStrokeEngine: StrokeEngine {
                     break
                 }
             }
+        }
+
+        if drainedJobs > 0 {
+            if let lastCommittedRevisionForLiveLayer {
+                liveSession?.committedRevision = lastCommittedRevisionForLiveLayer
+            }
+            invalidateRecentBrushPreviewCache()
         }
 
         logger.debug("[brush-live] commitQueueDepth=\(self.commitQueue.count, privacy: .public)")
@@ -502,75 +650,252 @@ final class MetalStrokeEngine: StrokeEngine {
         liveSession = session
     }
 
-    private func commit(job: BrushCommitJob) throws {
+    private func commit(job: BrushCommitJob, selectedRecentCommitRevisions: Set<UInt64>) throws {
+        try commitBatch([job], selectedRecentCommitRevisions: selectedRecentCommitRevisions)
+    }
+
+    private func commitBatch(
+        _ jobs: [BrushCommitJob],
+        selectedRecentCommitRevisions: Set<UInt64>
+    ) throws {
         let startNs = DispatchTime.now().uptimeNanoseconds
         defer {
             let ms = Double(DispatchTime.now().uptimeNanoseconds - startNs) / 1_000_000
             PerformanceAuditStore.shared.recordDuration("MetalStrokeEngine.commit(job:)", ms: ms)
         }
-        guard
-            let surfaceID = layerSurfaceStore.surfaceID(for: job.layerID),
-            let texture = layerSurfaceStore.texture(for: surfaceID),
-            let commandBuffer = metalContext.commandQueue.makeCommandBuffer()
-        else {
+        guard let commandBuffer = metalContext.commandQueue.makeCommandBuffer() else {
             return
         }
 
+        debugLastCommitSmudgeFullSizeCopyCount = 0
+        for job in jobs {
+            guard
+                let surfaceID = layerSurfaceStore.surfaceID(for: job.layerID),
+                let texture = layerSurfaceStore.texture(for: surfaceID)
+            else {
+                continue
+            }
+
+            let opacityMultiplier = selectedRecentCommitRevisions.contains(job.commitRevision)
+                ? recentBrushAdjustmentState?.opacity ?? 1
+                : 1
+            let brightnessAdjustment = selectedRecentCommitRevisions.contains(job.commitRevision)
+                ? recentBrushAdjustmentState?.brightness ?? 0
+                : 0
+            let saturationAdjustment = selectedRecentCommitRevisions.contains(job.commitRevision)
+                ? recentBrushAdjustmentState?.saturation ?? 0
+                : 0
+            encode(
+                job: job,
+                into: texture,
+                commandBuffer: commandBuffer,
+                opacityMultiplier: opacityMultiplier,
+                brightnessAdjustment: brightnessAdjustment,
+                saturationAdjustment: saturationAdjustment
+            )
+        }
+
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+    }
+
+    private func recentBrushPreviewTextureIfNeeded(for layerID: LayerID) -> MTLTexture? {
+        guard let liveSession,
+              liveSession.layerID == layerID,
+              liveSession.liveEvents.isEmpty,
+              let adjustmentState = recentBrushAdjustmentState,
+              adjustmentState.layerID == layerID else {
+            return nil
+        }
+
+        let queueSnapshot = commitQueue.snapshot().filter { $0.layerID == layerID }
+        let selectedRecentCommitRevisions = selectedRecentCommitRevisions(in: queueSnapshot)
+        guard !selectedRecentCommitRevisions.isEmpty,
+              let sourceSurfaceID = layerSurfaceStore.surfaceID(for: layerID),
+              let sourceTexture = layerSurfaceStore.texture(for: sourceSurfaceID) else {
+            return nil
+        }
+
+        let previewKey = RecentBrushPreviewKey(
+            layerID: layerID,
+            selectedRecentCount: adjustmentState.selectedRecentCount,
+            opacity: adjustmentState.opacity,
+            brightness: adjustmentState.brightness,
+            saturation: adjustmentState.saturation,
+            showsSelectionHighlight: adjustmentState.showsSelectionHighlight,
+            committedRevision: liveSession.committedRevision,
+            displayRevision: liveSession.displayRevision,
+            pendingCommitRevisions: queueSnapshot.map(\.commitRevision)
+        )
+        if recentBrushPreviewKey == previewKey, let recentBrushPreviewTexture {
+            return recentBrushPreviewTexture
+        }
+
+        guard let previewBaseTexture = recentBrushPreviewBaseTextureIfNeeded(
+            for: layerID,
+            sourceTexture: sourceTexture,
+            queueSnapshot: queueSnapshot,
+            selectedRecentCommitRevisions: selectedRecentCommitRevisions,
+            committedRevision: liveSession.committedRevision,
+            displayRevision: liveSession.displayRevision
+        ), let previewTexture = layerSurfaceStore.makeTexture(
+            width: sourceTexture.width,
+            height: sourceTexture.height,
+            pixelFormat: sourceTexture.pixelFormat,
+            metal: metalContext
+        ), let commandBuffer = metalContext.commandQueue.makeCommandBuffer() else {
+            return nil
+        }
+
+        layerSurfaceStore.copyTexture(from: previewBaseTexture, to: previewTexture, metal: metalContext)
+        for job in queueSnapshot where selectedRecentCommitRevisions.contains(job.commitRevision) {
+            encode(
+                job: job,
+                into: previewTexture,
+                commandBuffer: commandBuffer,
+                opacityMultiplier: adjustmentState.opacity,
+                brightnessAdjustment: adjustmentState.brightness,
+                saturationAdjustment: adjustmentState.saturation,
+                colorTint: adjustmentState.showsSelectionHighlight ? recentBrushHighlightColor : nil,
+                colorTintAmount: adjustmentState.showsSelectionHighlight ? 0.22 : 0
+            )
+        }
+
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+        recentBrushPreviewTexture = previewTexture
+        recentBrushPreviewKey = previewKey
+        return previewTexture
+    }
+
+    private func recentBrushPreviewBaseTextureIfNeeded(
+        for layerID: LayerID,
+        sourceTexture: MTLTexture,
+        queueSnapshot: [BrushCommitJob],
+        selectedRecentCommitRevisions: Set<UInt64>,
+        committedRevision: UInt64,
+        displayRevision: UInt64
+    ) -> MTLTexture? {
+        let baseKey = RecentBrushPreviewBaseKey(
+            layerID: layerID,
+            selectedRecentCount: recentBrushAdjustmentState?.selectedRecentCount ?? 0,
+            committedRevision: committedRevision,
+            displayRevision: displayRevision,
+            pendingCommitRevisions: queueSnapshot.map(\.commitRevision)
+        )
+        if recentBrushPreviewBaseKey == baseKey, let recentBrushPreviewBaseTexture {
+            return recentBrushPreviewBaseTexture
+        }
+
+        guard let previewBaseTexture = layerSurfaceStore.makeTexture(
+            width: sourceTexture.width,
+            height: sourceTexture.height,
+            pixelFormat: sourceTexture.pixelFormat,
+            metal: metalContext
+        ), let commandBuffer = metalContext.commandQueue.makeCommandBuffer() else {
+            return nil
+        }
+
+        layerSurfaceStore.copyTexture(from: sourceTexture, to: previewBaseTexture, metal: metalContext)
+        for job in queueSnapshot where !selectedRecentCommitRevisions.contains(job.commitRevision) {
+            encode(
+                job: job,
+                into: previewBaseTexture,
+                commandBuffer: commandBuffer,
+                opacityMultiplier: 1
+            )
+        }
+
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+        recentBrushPreviewBaseTexture = previewBaseTexture
+        recentBrushPreviewBaseKey = baseKey
+        return previewBaseTexture
+    }
+
+    private func encode(
+        job: BrushCommitJob,
+        into texture: MTLTexture,
+        commandBuffer: MTLCommandBuffer,
+        opacityMultiplier: Float,
+        brightnessAdjustment: Float = 0,
+        saturationAdjustment: Float = 0,
+        colorOverride: RGBAColor? = nil,
+        colorTint: RGBAColor? = nil,
+        colorTintAmount: Float = 0
+    ) {
         var samplingState: BrushStrokeSamplingState?
         var opacityCapSession: OpacityCapSessionResources?
-        debugLastCommitSmudgeFullSizeCopyCount = 0
         let usesAlphaLock = job.packets.contains(where: \.alphaLockEnabled)
-        let commitAlphaLockTexture = usesAlphaLock ? makeAlphaLockTextureCopy(from: texture) : nil
+        let alphaLockTexture = usesAlphaLock ? makeAlphaLockTextureCopy(from: texture) : nil
 
         for packet in job.packets {
-            if requiresOpacityCap(packet), opacityCapSession == nil {
+            let adjustedPacket = adjustedStroke(
+                packet,
+                opacityMultiplier: opacityMultiplier,
+                brightnessAdjustment: brightnessAdjustment,
+                saturationAdjustment: saturationAdjustment,
+                colorOverride: colorOverride,
+                colorTint: colorTint,
+                colorTintAmount: colorTintAmount
+            )
+            if requiresOpacityCap(adjustedPacket), opacityCapSession == nil {
                 opacityCapSession = brushRenderer.makeOpacityCapSession(
                     for: texture,
                     commandQueue: metalContext.commandQueue
                 )
             }
 
-            if requiresOpacityCap(packet), let opacityCapSession {
+            if requiresOpacityCap(adjustedPacket), let opacityCapSession {
                 _ = brushRenderer.encodeOpacityCapStroke(
-                    stroke: packet,
+                    stroke: adjustedPacket,
                     session: opacityCapSession,
                     into: texture,
                     commandBuffer: commandBuffer,
-                    alphaLockTexture: packet.alphaLockEnabled ? commitAlphaLockTexture : nil,
+                    alphaLockTexture: adjustedPacket.alphaLockEnabled ? alphaLockTexture : nil,
                     samplingState: &samplingState
                 )
             } else {
                 _ = brushRenderer.encodeStroke(
-                    stroke: packet,
+                    stroke: adjustedPacket,
                     into: texture,
                     commandQueue: metalContext.commandQueue,
                     commandBuffer: commandBuffer,
-                    alphaLockTexture: packet.alphaLockEnabled ? commitAlphaLockTexture : nil,
+                    alphaLockTexture: adjustedPacket.alphaLockEnabled ? alphaLockTexture : nil,
                     samplingState: &samplingState
                 )
             }
         }
 
         if job.needsTailFlush, let lastStroke = job.packets.last {
+            let adjustedLastStroke = adjustedStroke(
+                lastStroke,
+                opacityMultiplier: opacityMultiplier,
+                brightnessAdjustment: brightnessAdjustment,
+                saturationAdjustment: saturationAdjustment,
+                colorOverride: colorOverride,
+                colorTint: colorTint,
+                colorTintAmount: colorTintAmount
+            )
             var flushSamplingState = samplingState
             flushSamplingState?.isFlushing = true
             let flushStroke = StrokeDescriptor(
-                tool: lastStroke.tool,
-                color: lastStroke.color,
-                brush: lastStroke.brush,
+                tool: adjustedLastStroke.tool,
+                color: adjustedLastStroke.color,
+                brush: adjustedLastStroke.brush,
                 points: [],
-                selectionShape: lastStroke.selectionShape,
-                alphaLockEnabled: lastStroke.alphaLockEnabled,
+                selectionShape: adjustedLastStroke.selectionShape,
+                alphaLockEnabled: adjustedLastStroke.alphaLockEnabled,
                 skipLeadingStamp: true
             )
 
-            if requiresOpacityCap(lastStroke), let opacityCapSession {
+            if requiresOpacityCap(adjustedLastStroke), let opacityCapSession {
                 _ = brushRenderer.encodeOpacityCapStroke(
                     stroke: flushStroke,
                     session: opacityCapSession,
                     into: texture,
                     commandBuffer: commandBuffer,
-                    alphaLockTexture: lastStroke.alphaLockEnabled ? commitAlphaLockTexture : nil,
+                    alphaLockTexture: adjustedLastStroke.alphaLockEnabled ? alphaLockTexture : nil,
                     samplingState: &flushSamplingState
                 )
             } else {
@@ -579,14 +904,106 @@ final class MetalStrokeEngine: StrokeEngine {
                     into: texture,
                     commandQueue: metalContext.commandQueue,
                     commandBuffer: commandBuffer,
-                    alphaLockTexture: lastStroke.alphaLockEnabled ? commitAlphaLockTexture : nil,
+                    alphaLockTexture: adjustedLastStroke.alphaLockEnabled ? alphaLockTexture : nil,
                     samplingState: &flushSamplingState
                 )
             }
         }
+    }
 
-        commandBuffer.commit()
-        commandBuffer.waitUntilCompleted()
+    private func adjustedStroke(
+        _ stroke: StrokeDescriptor,
+        opacityMultiplier: Float,
+        brightnessAdjustment: Float,
+        saturationAdjustment: Float,
+        colorOverride: RGBAColor?,
+        colorTint: RGBAColor?,
+        colorTintAmount: Float
+    ) -> StrokeDescriptor {
+        var adjustedStroke = stroke
+        adjustedStroke.brush.opacity = min(max(stroke.brush.opacity * opacityMultiplier, 0), 1)
+        var adjustedColor = stroke.color
+        if let colorOverride {
+            adjustedColor = colorOverride.withAlpha(stroke.color.alpha)
+        } else if let colorTint, colorTintAmount > 0 {
+            adjustedColor = blendedColor(
+                from: stroke.color,
+                toward: colorTint,
+                amount: colorTintAmount
+            )
+        }
+        adjustedStroke.color = applyRecentBrushColorAdjustments(
+            to: adjustedColor,
+            brightnessAdjustment: brightnessAdjustment,
+            saturationAdjustment: saturationAdjustment
+        )
+        return adjustedStroke
+    }
+
+    private func blendedColor(from source: RGBAColor, toward target: RGBAColor, amount: Float) -> RGBAColor {
+        let clampedAmount = min(max(amount, 0), 1)
+        let inverseAmount = 1 - clampedAmount
+        return RGBAColor(
+            red: (source.red * inverseAmount) + (target.red * clampedAmount),
+            green: (source.green * inverseAmount) + (target.green * clampedAmount),
+            blue: (source.blue * inverseAmount) + (target.blue * clampedAmount),
+            alpha: source.alpha
+        )
+    }
+
+    private func applyRecentBrushColorAdjustments(
+        to color: RGBAColor,
+        brightnessAdjustment: Float,
+        saturationAdjustment: Float
+    ) -> RGBAColor {
+        guard abs(brightnessAdjustment) > 0.001 || abs(saturationAdjustment) > 0.001 else {
+            return color
+        }
+
+        var hsv = ColorBlocksEngine.rgbToHsv(color)
+        hsv.v = min(max(hsv.v + brightnessAdjustment, 0), 1)
+        hsv.s = min(max(hsv.s + saturationAdjustment, 0), 1)
+        return ColorBlocksEngine.hsvToRgb(hsv, alpha: color.alpha)
+    }
+
+    private func selectedRecentCommitRevisions(in queueSnapshot: [BrushCommitJob]) -> Set<UInt64> {
+        guard let adjustmentState = recentBrushAdjustmentState else {
+            return []
+        }
+        let recentBrushJobs = queueSnapshot
+            .filter { $0.layerID == adjustmentState.layerID && $0.packets.last?.tool == .brush }
+        guard !recentBrushJobs.isEmpty, adjustmentState.selectedRecentCount > 0 else {
+            return []
+        }
+        let selectedJobs = recentBrushJobs.suffix(adjustmentState.selectedRecentCount)
+        return Set(selectedJobs.map(\.commitRevision))
+    }
+
+    private func protectedRecentBrushCommitCount(
+        in queueSnapshot: [BrushCommitJob],
+        retainedRecentBrushCommitJobs: Int
+    ) -> Int {
+        guard retainedRecentBrushCommitJobs > 0 else {
+            return 0
+        }
+        let protectedBrushCount = min(
+            retainedRecentBrushCommitJobs,
+            queueSnapshot.reversed().prefix {
+                $0.packets.last?.tool == .brush
+            }.count
+        )
+        return max(protectedBrushCount, selectedRecentCommitRevisions(in: queueSnapshot).count)
+    }
+
+    private func invalidateRecentBrushPreviewCache() {
+        recentBrushPreviewBaseTexture = nil
+        recentBrushPreviewBaseKey = nil
+        invalidateRecentBrushPreviewResult()
+    }
+
+    private func invalidateRecentBrushPreviewResult() {
+        recentBrushPreviewTexture = nil
+        recentBrushPreviewKey = nil
     }
 
     private func isBrushLike(_ tool: ToolKind) -> Bool {
