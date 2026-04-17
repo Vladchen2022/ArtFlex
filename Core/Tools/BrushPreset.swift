@@ -67,10 +67,8 @@ struct BrushLibraryState: Codable, Sendable, Equatable {
     ) {
         self.presets = presets
         self.selectedPresetID = selectedPresetID
-        self.recentPresetIDs = Self.sanitizedRecentPresetIDs(
-            recentPresetIDs,
-            validPresetIDs: Set(presets.map(\.id))
-        )
+        self.recentPresetIDs = []
+        self.recentPresetIDs = sanitizedRecentPresetIDs(recentPresetIDs)
     }
 
     init(from decoder: Decoder) throws {
@@ -102,7 +100,7 @@ struct BrushLibraryState: Codable, Sendable, Equatable {
     }
 
     mutating func notePresetUsed(_ id: String) {
-        guard preset(id: id) != nil else { return }
+        guard isEligibleForRecentPresetUsage(id) else { return }
         recentPresetIDs.removeAll { $0 == id }
         recentPresetIDs.insert(id, at: 0)
         if recentPresetIDs.count > 4 {
@@ -113,6 +111,22 @@ struct BrushLibraryState: Codable, Sendable, Equatable {
     func recentPresets(limit: Int = 4) -> [BrushPreset] {
         let limitedIDs = recentPresetIDs.prefix(limit)
         return limitedIDs.compactMap { preset(id: $0) }
+    }
+
+    func launchDefaultPreset() -> BrushPreset? {
+        preset(atSlot: 0) ?? presets.first
+    }
+
+    func resolvedSlotIndex(forPresetID id: String) -> Int? {
+        resolvedSlotMap()[id]
+    }
+
+    func isEligibleForRecentPresetUsage(_ id: String) -> Bool {
+        guard preset(id: id) != nil,
+              let slotIndex = resolvedSlotIndex(forPresetID: id) else {
+            return false
+        }
+        return slotIndex >= 4
     }
 
     mutating func saveCurrentPreset(brush: BrushSettings) -> BrushPreset {
@@ -208,6 +222,8 @@ struct BrushLibraryState: Codable, Sendable, Equatable {
             presets[targetIndex].slotIndex = sourceSlotIndex
         }
 
+        recentPresetIDs = sanitizedRecentPresetIDs(recentPresetIDs)
+
         return true
     }
 
@@ -225,10 +241,7 @@ struct BrushLibraryState: Codable, Sendable, Equatable {
         return BrushLibraryState(
             presets: filteredPresets,
             selectedPresetID: resolvedSelectedPresetID,
-            recentPresetIDs: Self.sanitizedRecentPresetIDs(
-                recentPresetIDs,
-                validPresetIDs: Set(filteredPresets.map(\.id))
-            )
+            recentPresetIDs: recentPresetIDs
         )
     }
 
@@ -257,21 +270,15 @@ struct BrushLibraryState: Codable, Sendable, Equatable {
         return BrushLibraryState(
             presets: filteredPresets,
             selectedPresetID: resolvedSelectedPresetID,
-            recentPresetIDs: Self.sanitizedRecentPresetIDs(
-                recentPresetIDs,
-                validPresetIDs: Set(filteredPresets.map(\.id))
-            )
+            recentPresetIDs: recentPresetIDs
         )
     }
 
-    private static func sanitizedRecentPresetIDs(
-        _ ids: [String],
-        validPresetIDs: Set<String>
-    ) -> [String] {
+    private func sanitizedRecentPresetIDs(_ ids: [String]) -> [String] {
         var seen = Set<String>()
         var sanitized: [String] = []
 
-        for id in ids where validPresetIDs.contains(id) && seen.insert(id).inserted {
+        for id in ids where isEligibleForRecentPresetUsage(id) && seen.insert(id).inserted {
             sanitized.append(id)
             if sanitized.count == 4 {
                 break

@@ -283,6 +283,7 @@ final class WorkspaceViewModel: ObservableObject {
         let didSanitizePersistedPatternLibrary = Self.restorePersistedPatternLibraryIfAvailable(in: bootstrap)
         Self.normalizeLegacySelectionIfNeeded(in: bootstrap.workspaceStore)
         Self.normalizeDisabledToolsIfNeeded(in: bootstrap.workspaceStore)
+        let didApplyLaunchDefaultBrushPreset = Self.applyLaunchDefaultBrushPresetIfNeeded(in: bootstrap.workspaceStore)
         let state = bootstrap.workspaceStore.state
         if preparesInitialTextures {
             bootstrap.layerSurfaceStore.prepareTextures(
@@ -309,7 +310,7 @@ final class WorkspaceViewModel: ObservableObject {
         if installsZoomKeyboardMonitor {
             setupZoomKeyboardMonitor()
         }
-        if didSanitizePersistedBrushResources {
+        if didSanitizePersistedBrushResources || didApplyLaunchDefaultBrushPreset {
             persistBrushLibrary()
         }
         if didSanitizePersistedPatternLibrary {
@@ -8801,13 +8802,37 @@ final class WorkspaceViewModel: ObservableObject {
         bootstrap.workspaceStore.updateBrushLibrary { library in
             library = normalizedLibrary
             if library.selectedPresetID == nil {
-                library.selectedPresetID = library.presets.first?.id
+                library.selectedPresetID = library.launchDefaultPreset()?.id
             }
         }
         bootstrap.workspaceStore.updateTipImageLibrary { tipImageLibrary in
             tipImageLibrary = normalizedTipImageLibrary
         }
         return normalizedLibrary != restored.library || normalizedTipImageLibrary != restored.tipImageLibrary
+    }
+
+    @discardableResult
+    private static func applyLaunchDefaultBrushPresetIfNeeded(in workspaceStore: WorkspaceStore) -> Bool {
+        guard let firstPreset = workspaceStore.state.brushLibrary.launchDefaultPreset() else {
+            return false
+        }
+
+        var didChange = false
+        if workspaceStore.state.brushLibrary.selectedPresetID != firstPreset.id {
+            workspaceStore.updateBrushLibrary { library in
+                library.selectedPresetID = firstPreset.id
+            }
+            didChange = true
+        }
+
+        if workspaceStore.state.toolSession.brush != firstPreset.brush {
+            workspaceStore.updateToolSession { session in
+                session.brush = firstPreset.brush
+            }
+            didChange = true
+        }
+
+        return didChange
     }
 
     @discardableResult

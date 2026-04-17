@@ -44,6 +44,12 @@ ArtFlex 当前已经是一个功能面明显超出最小 MVP 的 macOS Metal 绘
 - 画笔参数
 - 图层
 
+另外，当前应用图标的真实实现仍然是：
+
+- 单资源文件：[Platform/macOS/Resources/AppIcon.png](Platform/macOS/Resources/AppIcon.png)
+- 运行时由 [Platform/macOS/App/ArtFlexApp.swift](Platform/macOS/App/ArtFlexApp.swift) 设置 `NSApp.applicationIconImage`
+- 当前图标已经按 mac app icon 的圆角底板与更保守安全区做过一轮标准化处理；如果后续继续调整，默认先改这张资源图，而不是假设项目已经有 `.appiconset` / `.icns` 主链
+
 ### 2.3 当前已接入主链的工具
 
 以 [Core/Tools/ToolKind.swift](Core/Tools/ToolKind.swift) 为准，当前工具集合包括：
@@ -168,6 +174,13 @@ ArtFlex 当前已经是一个功能面明显超出最小 MVP 的 macOS Metal 绘
 - 实际出笔、右侧预览和 HUD 预览已统一到同一套曲线采样
 - 仍兼容旧 `low / mid / high` 三值存档
 - 弹窗顶部预设条当前已经恢复可见，当前这条线的剩余问题不再集中在预设区 UI 可见性
+
+当前画笔库网格的正式语义还包括：
+
+- 第一排是“最近使用”，但它只记录第三排及之后的正式库画笔
+- 第二排 `1/2/3/4` 快捷槽位不进入最近使用首行
+- `Shift+Z` HUD 里的 4 个快捷笔刷仍然对应第二排 `1/2/3/4` 正式槽位，不对应最近使用首行
+- 软件启动时默认使用的是第二排第一个正式画笔（`slot 0`），不是最近使用首行
 
 单独状态文档见：
 

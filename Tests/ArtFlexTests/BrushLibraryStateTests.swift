@@ -12,7 +12,7 @@ struct BrushLibraryStateTests {
                 name: "笔刷 \(index + 1)",
                 brush: .stageOneDefault,
                 isBuiltIn: false,
-                slotIndex: index
+                slotIndex: index + 4
             )
         }
         var library = BrushLibraryState(
@@ -28,6 +28,82 @@ struct BrushLibraryStateTests {
 
         #expect(library.recentPresetIDs == [ids[2], ids[4], ids[0], ids[3]])
         #expect(library.recentPresets().map(\.id) == [ids[2], ids[4], ids[0], ids[3]])
+    }
+
+    @Test
+    func quickAccessShortcutSlotsDoNotEnterRecentPresetUsageRow() {
+        let shortcutPresetIDs = (1...4).map { "shortcut-\($0)" }
+        let libraryPresetIDs = (1...2).map { "library-\($0)" }
+        let presets =
+            shortcutPresetIDs.enumerated().map { index, id in
+                BrushPreset(
+                    id: id,
+                    name: "快捷笔刷 \(index + 1)",
+                    brush: .stageOneDefault,
+                    isBuiltIn: false,
+                    slotIndex: index
+                )
+            } +
+            libraryPresetIDs.enumerated().map { index, id in
+                BrushPreset(
+                    id: id,
+                    name: "库笔刷 \(index + 1)",
+                    brush: .stageOneDefault,
+                    isBuiltIn: false,
+                    slotIndex: index + 4
+                )
+            }
+
+        var library = BrushLibraryState(
+            presets: presets,
+            selectedPresetID: nil
+        )
+
+        library.notePresetUsed(shortcutPresetIDs[0])
+        library.notePresetUsed(shortcutPresetIDs[2])
+        library.notePresetUsed(libraryPresetIDs[0])
+        library.notePresetUsed(shortcutPresetIDs[1])
+        library.notePresetUsed(libraryPresetIDs[1])
+
+        #expect(library.recentPresetIDs == [libraryPresetIDs[1], libraryPresetIDs[0]])
+        #expect(library.recentPresets().map(\.id) == [libraryPresetIDs[1], libraryPresetIDs[0]])
+    }
+
+    @Test
+    func movingRecentPresetIntoQuickAccessRowRemovesItFromRecentUsageRow() {
+        let quickPresetIDs = (1...4).map { "quick-\($0)" }
+        let recentEligiblePresetID = "library-1"
+        let presets =
+            quickPresetIDs.enumerated().map { index, id in
+                BrushPreset(
+                    id: id,
+                    name: "快捷笔刷 \(index + 1)",
+                    brush: .stageOneDefault,
+                    isBuiltIn: false,
+                    slotIndex: index
+                )
+            } + [
+                BrushPreset(
+                    id: recentEligiblePresetID,
+                    name: "库笔刷 1",
+                    brush: .stageOneDefault,
+                    isBuiltIn: false,
+                    slotIndex: 4
+                )
+            ]
+
+        var library = BrushLibraryState(
+            presets: presets,
+            selectedPresetID: nil
+        )
+
+        library.notePresetUsed(recentEligiblePresetID)
+        #expect(library.recentPresetIDs == [recentEligiblePresetID])
+
+        let didMovePreset = library.movePreset(id: recentEligiblePresetID, toSlot: 1)
+        #expect(didMovePreset)
+        #expect(library.recentPresetIDs.isEmpty)
+        #expect(library.recentPresets().isEmpty)
     }
 
     @Test
@@ -206,6 +282,105 @@ struct BrushLibraryStateTests {
         let cleanedPersistedLibrary = try #require(persistedLibrary)
         #expect(cleanedPersistedLibrary.presets.map(\.id) == expectedPresetIDs)
         #expect(cleanedPersistedLibrary.selectedPresetID == keptAutoPreset.id)
+    }
+
+    @Test
+    @MainActor
+    func workspaceViewModelLaunchDefaultsToFirstBrushPresetInLibrary() async throws {
+        let tempRootURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ArtFlexBrushLibraryDefaultPresetTests-\(UUID().uuidString)", isDirectory: true)
+        let redirectedFileManager = RedirectedApplicationSupportFileManager(
+            applicationSupportRootURL: tempRootURL
+        )
+        let persistenceController = BrushLibraryPersistenceController(
+            fileManager: redirectedFileManager
+        )
+
+        defer {
+            try? FileManager.default.removeItem(at: tempRootURL)
+        }
+
+        var firstBrush = BrushSettings.stageOneDefault
+        firstBrush.size = 21
+        firstBrush.opacity = 0.35
+
+        var secondBrush = BrushSettings.stageOneDefault
+        secondBrush.size = 82
+        secondBrush.opacity = 0.91
+
+        let firstPreset = BrushPreset(
+            id: "first-brush",
+            name: "第一支笔",
+            brush: firstBrush,
+            isBuiltIn: false,
+            slotIndex: 0
+        )
+        let secondPreset = BrushPreset(
+            id: "second-brush",
+            name: "第二支笔",
+            brush: secondBrush,
+            isBuiltIn: false,
+            slotIndex: 1
+        )
+
+        var workspaceState = WorkspaceState.stageOneDefault
+        workspaceState.brushLibrary = BrushLibraryState(
+            presets: [secondPreset, firstPreset],
+            selectedPresetID: secondPreset.id
+        )
+        workspaceState.toolSession.brush = secondBrush
+
+        guard let metalContext = MetalDeviceContext() else {
+            Issue.record("Metal is required to validate startup default brush preset selection.")
+            return
+        }
+
+        let bootstrap = try AppBootstrap(
+            workspaceStore: WorkspaceStore(state: workspaceState),
+            metalContext: metalContext,
+            layerSurfaceStore: StageOneLayerSurfaceStore(),
+            brushLibraryPersistenceController: persistenceController
+        )
+        let viewModel = WorkspaceViewModel(
+            bootstrap: bootstrap,
+            installsZoomKeyboardMonitor: false,
+            preparesInitialTextures: false
+        )
+
+        #expect(viewModel.workspace.brushLibrary.selectedPresetID == firstPreset.id)
+        #expect(viewModel.workspace.toolSession.brush == firstBrush)
+
+        var persistedLibrary = persistenceController.loadResources()?.library
+        for _ in 0..<20 where persistedLibrary?.selectedPresetID != firstPreset.id {
+            try await Task.sleep(for: .milliseconds(50))
+            persistedLibrary = persistenceController.loadResources()?.library
+        }
+
+        #expect(persistedLibrary?.selectedPresetID == firstPreset.id)
+    }
+
+    @Test
+    func launchDefaultPresetPrefersFirstVisibleShortcutSlotOverArrayOrder() {
+        let firstPreset = BrushPreset(
+            id: "slot-zero",
+            name: "第一支笔",
+            brush: .stageOneDefault,
+            isBuiltIn: false,
+            slotIndex: 0
+        )
+        let fourthPreset = BrushPreset(
+            id: "slot-three",
+            name: "第四支笔",
+            brush: .stageOneDefault,
+            isBuiltIn: false,
+            slotIndex: 3
+        )
+        let library = BrushLibraryState(
+            presets: [fourthPreset, firstPreset],
+            selectedPresetID: fourthPreset.id
+        )
+
+        #expect(library.launchDefaultPreset()?.id == firstPreset.id)
     }
 }
 
