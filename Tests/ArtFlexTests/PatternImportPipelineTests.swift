@@ -47,6 +47,16 @@ struct PatternImportPipelineTests {
         let importedItem = try #require(result.importedItems.first)
         let renderURL = try #require(controller.resolveAssetURL(for: importedItem.renderAssetLocation))
         let thumbnailURL = try #require(controller.resolveAssetURL(for: importedItem.thumbnailLocation))
+        if case .managedCopy(let renderRelativePath) = importedItem.renderAssetLocation {
+            #expect(renderRelativePath.split(separator: "/").count == 3)
+        } else {
+            Issue.record("Expected imported render asset to be stored as a managed copy.")
+        }
+        if case .managedCopy(let thumbnailRelativePath) = importedItem.thumbnailLocation {
+            #expect(thumbnailRelativePath.split(separator: "/").count == 3)
+        } else {
+            Issue.record("Expected imported thumbnail asset to be stored as a managed copy.")
+        }
         #expect(FileManager.default.fileExists(atPath: renderURL.path))
         #expect(FileManager.default.fileExists(atPath: thumbnailURL.path))
         #expect(controller.loadLibrary()?.library == result.updatedLibrary)
@@ -274,6 +284,56 @@ struct PatternImportPipelineTests {
 
         let rebuiltData = try Data(contentsOf: thumbnailURL)
         #expect(rebuiltData.isEmpty == false)
+    }
+
+    @Test
+    func savingLibraryPurgesUnreferencedManagedAssets() throws {
+        let tempRootURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ArtFlexPatternImportTests-\(UUID().uuidString)", isDirectory: true)
+        let redirectedFileManager = RedirectedPatternApplicationSupportFileManager(
+            applicationSupportRootURL: tempRootURL
+        )
+        let controller = PatternLibraryPersistenceController(fileManager: redirectedFileManager)
+
+        defer {
+            try? FileManager.default.removeItem(at: tempRootURL)
+        }
+
+        let sourceURL = tempRootURL.appendingPathComponent("purge.png")
+        try writeTestPNG(
+            to: sourceURL,
+            width: 2,
+            height: 2,
+            rgbaBytes: [
+                0, 0, 0, 255, 255, 255, 255, 255,
+                0, 0, 0, 255, 255, 255, 255, 255
+            ]
+        )
+
+        let result = try controller.importFiles(
+            [sourceURL],
+            recipe: PatternImportRecipe(mode: .originalColor, contrast: 0, autoCropToContent: false),
+            into: .init()
+        )
+        let item = try #require(result.importedItems.first)
+        let root = try #require(
+            controller.resolveAssetURL(for: item.renderAssetLocation)?
+                .deletingLastPathComponent()
+                .deletingLastPathComponent()
+                .deletingLastPathComponent()
+        )
+
+        let orphanRenderURL = root.appendingPathComponent("renders/zz/orphan.png")
+        let orphanThumbnailURL = root.appendingPathComponent("thumbnails/zz/orphan.png")
+        try FileManager.default.createDirectory(at: orphanRenderURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: orphanThumbnailURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data([1, 2, 3]).write(to: orphanRenderURL)
+        try Data([4, 5, 6]).write(to: orphanThumbnailURL)
+
+        try controller.saveLibrary(result.updatedLibrary)
+
+        #expect(FileManager.default.fileExists(atPath: orphanRenderURL.path) == false)
+        #expect(FileManager.default.fileExists(atPath: orphanThumbnailURL.path) == false)
     }
 }
 

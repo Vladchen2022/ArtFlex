@@ -119,6 +119,7 @@ final class PatternLibraryPersistenceController: @unchecked Sendable {
 
         let data = try encoder.encode(library)
         try data.write(to: url, options: .atomic)
+        purgeOrphanedManagedAssets(for: library)
     }
 
     func resolveAssetURL(for location: PatternAssetLocation) -> URL? {
@@ -281,8 +282,14 @@ final class PatternLibraryPersistenceController: @unchecked Sendable {
                 continue
             }
 
-            let renderRelativePath = "renders/\(renderDigest).png"
-            let thumbnailRelativePath = "thumbnails/\(renderDigest).png"
+            let renderRelativePath = managedAssetRelativePath(
+                category: "renders",
+                digest: renderDigest
+            )
+            let thumbnailRelativePath = managedAssetRelativePath(
+                category: "thumbnails",
+                digest: renderDigest
+            )
             let renderURL = root.appendingPathComponent(renderRelativePath)
             let thumbnailURL = root.appendingPathComponent(thumbnailRelativePath)
 
@@ -766,5 +773,50 @@ final class PatternLibraryPersistenceController: @unchecked Sendable {
             return nil
         }
         return root.appendingPathComponent("pattern-library.json")
+    }
+
+    private func managedAssetRelativePath(category: String, digest: String) -> String {
+        let shard = String(digest.prefix(2))
+        return "\(category)/\(shard)/\(digest).png"
+    }
+
+    private func purgeOrphanedManagedAssets(for library: PatternLibraryState) {
+        guard let root = patternLibraryRootURL(createDirectories: false) else { return }
+
+        let referencedRelativePaths = Set(
+            library.items.flatMap { item -> [String] in
+                var paths: [String] = []
+                if case .managedCopy(let relativePath) = item.renderAssetLocation {
+                    paths.append(relativePath)
+                }
+                if case .managedCopy(let relativePath) = item.thumbnailLocation {
+                    paths.append(relativePath)
+                }
+                return paths
+            }
+        )
+
+        for category in ["renders", "thumbnails"] {
+            let categoryURL = root.appendingPathComponent(category, isDirectory: true).standardizedFileURL
+            guard let enumerator = fileManager.enumerator(
+                at: categoryURL,
+                includingPropertiesForKeys: [.isRegularFileKey],
+                options: [.skipsHiddenFiles]
+            ) else {
+                continue
+            }
+
+            for case let fileURL as URL in enumerator {
+                let standardizedFileURL = fileURL.standardizedFileURL
+                let resourceValues = try? standardizedFileURL.resourceValues(forKeys: [.isRegularFileKey])
+                guard resourceValues?.isRegularFile == true else { continue }
+                let categoryPrefix = categoryURL.path + "/"
+                guard standardizedFileURL.path.hasPrefix(categoryPrefix) else { continue }
+                let relativeWithinCategory = String(standardizedFileURL.path.dropFirst(categoryPrefix.count))
+                let relativePath = "\(category)/\(relativeWithinCategory)"
+                guard referencedRelativePaths.contains(relativePath) == false else { continue }
+                try? fileManager.removeItem(at: standardizedFileURL)
+            }
+        }
     }
 }

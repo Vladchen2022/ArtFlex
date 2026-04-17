@@ -6,6 +6,83 @@ import Testing
 
 struct WorkspaceViewModelSafetyTests {
     @Test
+    func openingProjectKeepsGlobalBrushAndPatternLibraries() {
+        var currentWorkspace = WorkspaceState.stageOneDefault
+        currentWorkspace.brushLibrary = BrushLibraryState(
+            presets: [
+                BrushPreset(
+                    id: "global-brush",
+                    name: "Global Brush",
+                    brush: .stageOneDefault,
+                    isBuiltIn: false,
+                    slotIndex: 0
+                )
+            ],
+            selectedPresetID: "global-brush",
+            recentPresetIDs: ["global-brush"]
+        )
+        let globalPatternID = UUID(uuidString: "00000000-0000-0000-0000-000000001001")!
+        currentWorkspace.patternLibrary = PatternLibraryState(
+            items: [
+                PatternLibraryItem(
+                    id: globalPatternID,
+                    displayName: "Global Pattern",
+                    slotIndex: 0,
+                    importRecipe: PatternImportRecipe(),
+                    originalFilename: "global.png",
+                    sourcePixelWidth: 64,
+                    sourcePixelHeight: 64,
+                    renderAssetLocation: .managedCopy(relativePath: "renders/aa/global.png"),
+                    thumbnailLocation: .managedCopy(relativePath: "thumbnails/aa/global.png")
+                )
+            ],
+            selectedItemID: globalPatternID,
+            recentItemIDs: [globalPatternID]
+        )
+
+        var openedWorkspace = WorkspaceState.stageOneDefault
+        openedWorkspace.document.metadata.name = "Opened Project"
+        openedWorkspace.brushLibrary = BrushLibraryState(
+            presets: [
+                BrushPreset(
+                    id: "project-brush",
+                    name: "Project Brush",
+                    brush: .stageOneDefault,
+                    isBuiltIn: false,
+                    slotIndex: 0
+                )
+            ],
+            selectedPresetID: "project-brush"
+        )
+        let projectPatternID = UUID(uuidString: "00000000-0000-0000-0000-000000001002")!
+        openedWorkspace.patternLibrary = PatternLibraryState(
+            items: [
+                PatternLibraryItem(
+                    id: projectPatternID,
+                    displayName: "Project Pattern",
+                    slotIndex: 0,
+                    importRecipe: PatternImportRecipe(),
+                    originalFilename: "project.png",
+                    sourcePixelWidth: 64,
+                    sourcePixelHeight: 64,
+                    renderAssetLocation: .managedCopy(relativePath: "renders/bb/project.png"),
+                    thumbnailLocation: .managedCopy(relativePath: "thumbnails/bb/project.png")
+                )
+            ],
+            selectedItemID: projectPatternID
+        )
+
+        let resolvedWorkspace = WorkspaceViewModel.workspaceForOpenedProject(
+            openedWorkspace,
+            currentWorkspace: currentWorkspace
+        )
+
+        #expect(resolvedWorkspace.document.metadata.name == "Opened Project")
+        #expect(resolvedWorkspace.brushLibrary == currentWorkspace.brushLibrary)
+        #expect(resolvedWorkspace.patternLibrary == currentWorkspace.patternLibrary)
+    }
+
+    @Test
     @MainActor
     func initialWorkspaceStartsWithOpaqueWhiteBackgroundLayer() throws {
         let harness = try BrushEditingBoundaryHarness()

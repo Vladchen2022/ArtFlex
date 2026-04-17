@@ -8236,13 +8236,10 @@ final class WorkspaceViewModel: ObservableObject {
         do {
             resetSnapshotToolState(resumeTimelapseIfNeeded: false)
             let result = try bootstrap.persistenceController.openProject(from: url)
-            let existingBrushLibrary = bootstrap.workspaceStore.state.brushLibrary
-            let existingTipImageLibrary = bootstrap.workspaceStore.state.tipImageLibrary
-            var openedWorkspace = result.workspace
-            openedWorkspace.brushLibrary = existingBrushLibrary
-            openedWorkspace.tipImageLibrary = Self.mergeTipImageLibraries(
-                base: existingTipImageLibrary,
-                imported: Self.normalizeImportedTipImageLibrary(result.workspace.tipImageLibrary)
+            let existingWorkspace = bootstrap.workspaceStore.state
+            let openedWorkspace = Self.workspaceForOpenedProject(
+                result.workspace,
+                currentWorkspace: existingWorkspace
             )
             bootstrap.workspaceStore.replaceState(openedWorkspace)
             _ = synchronizeTipImageLibraryFromWorkspace(persistIfChanged: false)
@@ -8549,7 +8546,7 @@ final class WorkspaceViewModel: ObservableObject {
         return didRealignCurrentBrush
     }
 
-    private static func normalizeImportedBrushLibrary(_ library: BrushLibraryState) -> BrushLibraryState {
+    private nonisolated static func normalizeImportedBrushLibrary(_ library: BrushLibraryState) -> BrushLibraryState {
         var seen = Set<String>()
         var presets: [BrushPreset] = []
 
@@ -8577,7 +8574,7 @@ final class WorkspaceViewModel: ObservableObject {
         ).removingLikelyAutoSavedDuplicatePresets()
     }
 
-    private static func mergeBrushLibraries(base: BrushLibraryState, imported: BrushLibraryState) -> BrushLibraryState {
+    private nonisolated static func mergeBrushLibraries(base: BrushLibraryState, imported: BrushLibraryState) -> BrushLibraryState {
         var merged = base
         var existingIDs = Set(merged.presets.map(\.id))
 
@@ -8600,17 +8597,31 @@ final class WorkspaceViewModel: ObservableObject {
         return merged
     }
 
-    private static func normalizeImportedTipImageLibrary(_ library: TipImageLibraryState) -> TipImageLibraryState {
+    private nonisolated static func normalizeImportedTipImageLibrary(_ library: TipImageLibraryState) -> TipImageLibraryState {
         library.normalizedMergingDuplicates()
     }
 
-    private static func mergeTipImageLibraries(
+    private nonisolated static func mergeTipImageLibraries(
         base: TipImageLibraryState,
         imported: TipImageLibraryState
     ) -> TipImageLibraryState {
         var merged = base
         _ = merged.mergeItems(from: imported.normalizedMergingDuplicates())
         return merged
+    }
+
+    nonisolated static func workspaceForOpenedProject(
+        _ openedWorkspace: WorkspaceState,
+        currentWorkspace: WorkspaceState
+    ) -> WorkspaceState {
+        var resolvedWorkspace = openedWorkspace
+        resolvedWorkspace.brushLibrary = currentWorkspace.brushLibrary
+        resolvedWorkspace.patternLibrary = currentWorkspace.patternLibrary
+        resolvedWorkspace.tipImageLibrary = mergeTipImageLibraries(
+            base: currentWorkspace.tipImageLibrary,
+            imported: normalizeImportedTipImageLibrary(openedWorkspace.tipImageLibrary)
+        )
+        return resolvedWorkspace
     }
 
     @discardableResult
