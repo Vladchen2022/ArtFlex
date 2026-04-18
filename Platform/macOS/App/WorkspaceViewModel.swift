@@ -56,6 +56,7 @@ final class WorkspaceViewModel: ObservableObject {
         var currentBrushUsesPrimary = false
         var currentBrushUsesCompoundSecondary = false
         var smudgeBrushUsesPrimary = false
+        var currentTextureFillUsesImportedTip = false
         var presetPrimaryNames: [String] = []
         var presetCompoundSecondaryNames: [String] = []
 
@@ -79,12 +80,16 @@ final class WorkspaceViewModel: ObservableObject {
             smudgeBrushPrimaryCount
         }
 
+        var currentTextureFillCount: Int {
+            currentTextureFillUsesImportedTip ? 1 : 0
+        }
+
         var presetCount: Int {
             presetPrimaryCount + presetCompoundSecondaryNames.count
         }
 
         var totalCount: Int {
-            currentBrushCount + smudgeBrushCount + presetCount
+            currentBrushCount + smudgeBrushCount + currentTextureFillCount + presetCount
         }
 
         var isReferenced: Bool {
@@ -1856,7 +1861,7 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func applyPrimaryTipImageLibraryItem(_ assetID: BrushTipImageAssetID) {
-        guard let item = workspace.tipImageLibrary.item(id: assetID),
+        guard let item = bootstrap.workspaceStore.state.tipImageLibrary.item(id: assetID),
               let maskData = item.maskData else {
             showStatus(.init(kind: .error, message: "无法读取该笔尖图片"))
             return
@@ -1878,7 +1883,7 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func applyCompoundSecondaryTipImageLibraryItem(_ assetID: BrushTipImageAssetID) {
-        guard let item = workspace.tipImageLibrary.item(id: assetID),
+        guard let item = bootstrap.workspaceStore.state.tipImageLibrary.item(id: assetID),
               let maskData = item.maskData else {
             showStatus(.init(kind: .error, message: "无法读取该笔尖图片"))
             return
@@ -1894,6 +1899,31 @@ final class WorkspaceViewModel: ObservableObject {
         StageOneBrushPreviewRasterizer.resetCache()
         refresh()
         showStatus(.init(kind: .success, message: "已应用组合笔刷次笔尖"))
+    }
+
+    func applyTextureFillTipImageLibraryItem(_ assetID: BrushTipImageAssetID) {
+        guard let item = bootstrap.workspaceStore.state.tipImageLibrary.item(id: assetID),
+              let maskData = item.maskData else {
+            showStatus(.init(kind: .error, message: "无法读取该笔尖图片"))
+            return
+        }
+
+        bootstrap.workspaceStore.updateToolSession { session in
+            session.textureFillTip.sourceSemantic = .importedImage
+            session.textureFillTip.tipAssetID = item.id
+            session.textureFillTip.importedSourceInfo = item.sourceInfo
+            session.textureFillTip.customTipMaskData = maskData
+        }
+        refresh()
+        showStatus(.init(kind: .success, message: "已应用肌理填充素材"))
+    }
+
+    func resetTextureFillTipToProcedural() {
+        bootstrap.workspaceStore.updateToolSession { session in
+            session.textureFillTip = .proceduralDefault
+        }
+        refresh()
+        showStatus(.init(kind: .success, message: "已切回程序化肌理"))
     }
 
     func moveTipImageLibraryItem(_ assetID: BrushTipImageAssetID, to targetIndex: Int) {
@@ -1951,6 +1981,11 @@ final class WorkspaceViewModel: ObservableObject {
             }
         }
 
+        if state.toolSession.textureFillTip.sourceSemantic == .importedImage,
+           state.toolSession.textureFillTip.tipAssetID == assetID {
+            summary.currentTextureFillUsesImportedTip = true
+        }
+
         for preset in state.brushLibrary.presets {
             if preset.brush.customTipSourceSemantic == .importedImage,
                preset.brush.customTipAssetID == assetID {
@@ -1981,6 +2016,9 @@ final class WorkspaceViewModel: ObservableObject {
         }
         if summary.smudgeBrushUsesPrimary {
             parts.append("涂抹主笔尖")
+        }
+        if summary.currentTextureFillUsesImportedTip {
+            parts.append("当前肌理填充素材")
         }
         if summary.presetCount > 0 {
             let previewNames = Array((summary.presetPrimaryNames + summary.presetCompoundSecondaryNames).prefix(3))
@@ -5323,6 +5361,21 @@ final class WorkspaceViewModel: ObservableObject {
         relayIdeationOperation(.updateSelection(point: point, modifiers: .init(flags: modifiers)))
     }
 
+    func updateSelection(to points: [CanvasPoint], modifiers: NSEvent.ModifierFlags = []) {
+        guard points.isEmpty == false else { return }
+        if workspace.toolSession.activeTool == .textureFill {
+            updateTextureFillGesture(to: points)
+            for point in points {
+                relayIdeationOperation(.updateSelection(point: point, modifiers: .init(flags: modifiers)))
+            }
+            return
+        }
+
+        for point in points {
+            updateSelection(to: point, modifiers: modifiers)
+        }
+    }
+
     func commitSelection(at end: CanvasPoint, modifiers: NSEvent.ModifierFlags = []) {
         ideationBranchActivityHandler?()
         let storeSelection = bootstrap.workspaceStore.state.selection
@@ -5700,7 +5753,8 @@ final class WorkspaceViewModel: ObservableObject {
             anchorPoint: point,
             sessionSeed: TextureFillProceduralField.sessionSeed(anchorPoint: point),
             baseTexture: makeTextureFillReplayTextureCopy(from: texture),
-            rawEdgePoints: [point]
+            rawEdgePoints: [point],
+            tipSettings: workspace.toolSession.textureFillTip
         )
         return true
     }
@@ -5742,6 +5796,47 @@ final class WorkspaceViewModel: ObservableObject {
         state.lastEdgePoint = point
         state.rawEdgePoints.append(point)
         textureFillGestureState = state
+    }
+
+    private func updateTextureFillGesture(to points: [CanvasPoint]) {
+        guard var state = textureFillGestureState else { return }
+
+        var slices: [TextureFillSlice] = []
+        slices.reserveCapacity(points.count)
+
+        for point in points {
+            if let previousEdgePoint = state.lastEdgePoint {
+                guard textureFillDistance(from: previousEdgePoint, to: point) >= Self.textureFillMinimumSliceDistance else {
+                    continue
+                }
+
+                slices.append(
+                    TextureFillSlice(
+                        anchorPoint: state.anchorPoint,
+                        previousEdgePoint: previousEdgePoint,
+                        currentEdgePoint: point
+                    )
+                )
+                state.lastEdgePoint = point
+                state.rawEdgePoints.append(point)
+                continue
+            }
+
+            guard textureFillDistance(from: state.anchorPoint, to: point) >= Self.textureFillMinimumSliceDistance else {
+                continue
+            }
+
+            state.lastEdgePoint = point
+            state.rawEdgePoints.append(point)
+        }
+
+        let didRender = slices.isEmpty == false
+            ? renderTextureFillSliceBatch(slices, state: &state)
+            : false
+        textureFillGestureState = state
+        if didRender {
+            refreshSelectionOverlayOnly()
+        }
     }
 
     private func commitTextureFillGesture(
@@ -5801,11 +5896,27 @@ final class WorkspaceViewModel: ObservableObject {
             state.didCheckpointHistory = true
         }
 
+        if state.tipSettings.sourceSemantic == .importedImage,
+           state.tipSettings.customTipMaskData != nil {
+            let liveEdgePoints = state.rawEdgePoints + slices.map(\.currentEdgePoint)
+            let didRender = renderImportedTextureFillLiveField(
+                edgePoints: liveEdgePoints,
+                into: texture,
+                layerID: state.layerID,
+                state: &state
+            )
+            if didRender {
+                state.renderedSliceCount += 1
+            }
+            return didRender
+        }
+
         let renderedSliceCount = renderTextureFillSlices(
             slices,
             into: texture,
             layerID: state.layerID,
             sessionSeed: state.sessionSeed,
+            tipSettings: state.tipSettings,
             waitForCompletion: false
         )
         guard renderedSliceCount > 0 else {
@@ -5816,11 +5927,149 @@ final class WorkspaceViewModel: ObservableObject {
         return true
     }
 
+    @discardableResult
+    private func renderImportedTextureFillLiveField(
+        edgePoints: [CanvasPoint],
+        into texture: MTLTexture,
+        layerID: LayerID,
+        state: inout TextureFillGestureState
+    ) -> Bool {
+        guard
+            let baseTexture = state.baseTexture,
+            let stampMaskData = state.tipSettings.customTipMaskData
+        else {
+            return false
+        }
+
+        let canvasSize = CanvasSize(width: texture.width, height: texture.height)
+        let currentShape = textureFillSmoothFinalSelectionShape(
+            from: edgePoints,
+            anchorPoint: state.anchorPoint,
+            canvasSize: canvasSize
+        ) ?? textureFillLiveSelectionShape(from: edgePoints, canvasSize: canvasSize)
+        guard let currentShape else {
+            return false
+        }
+
+        let currentBounds = currentShape.bounds
+        let restoreBounds = unionCanvasRects(currentBounds, state.lastImportedLiveBounds)
+        let restoreMinX = max(Int(restoreBounds.minX.rounded(.down)), 0)
+        let restoreMinY = max(Int(restoreBounds.minY.rounded(.down)), 0)
+        let restoreMaxX = min(Int(restoreBounds.maxX.rounded(.up)), texture.width)
+        let restoreMaxY = min(Int(restoreBounds.maxY.rounded(.up)), texture.height)
+        guard restoreMinX < restoreMaxX, restoreMinY < restoreMaxY else {
+            return false
+        }
+
+        let minX = max(Int(currentBounds.minX.rounded(.down)), 0)
+        let minY = max(Int(currentBounds.minY.rounded(.down)), 0)
+        let maxX = min(Int(currentBounds.maxX.rounded(.up)), texture.width)
+        let maxY = min(Int(currentBounds.maxY.rounded(.up)), texture.height)
+        guard minX < maxX, minY < maxY else {
+            return false
+        }
+
+        let selectionMask = selectionMaskRegion(
+            for: currentShape,
+            canvasSize: canvasSize,
+            originX: minX,
+            originY: minY,
+            width: maxX - minX,
+            height: maxY - minY
+        )
+        guard selectionMask.width > 0, selectionMask.height > 0, !selectionMask.alphaBytes.isEmpty else {
+            return false
+        }
+
+        let texturedMask = TextureFillProceduralField.importedRegionAlphaBytes(
+            baseMaskOriginX: selectionMask.originX,
+            baseMaskOriginY: selectionMask.originY,
+            width: selectionMask.width,
+            height: selectionMask.height,
+            baseMaskAlphaBytes: selectionMask.alphaBytes,
+            fieldBounds: currentBounds,
+            stampMaskData: stampMaskData,
+            importedSourceInfo: state.tipSettings.importedSourceInfo
+        )
+        guard !texturedMask.isEmpty else {
+            return false
+        }
+
+        let alphaLockTexture = makeAlphaLockTextureCopyIfNeeded(for: layerID, sourceTexture: baseTexture)
+        guard alphaLockTexture != nil || !layerTransparentPixelLockEnabled(layerID) else {
+            showStatus(.init(kind: .error, message: "无法创建锁定透明像素遮罩"))
+            return false
+        }
+        guard let commandBuffer = bootstrap.metalContext.commandQueue.makeCommandBuffer() else {
+            showStatus(.init(kind: .error, message: "无法创建肌理填充命令缓冲"))
+            return false
+        }
+        guard let blitEncoder = commandBuffer.makeBlitCommandEncoder() else {
+            showStatus(.init(kind: .error, message: "无法创建肌理填充恢复编码器"))
+            return false
+        }
+
+        blitEncoder.copy(
+            from: baseTexture,
+            sourceSlice: 0,
+            sourceLevel: 0,
+            sourceOrigin: MTLOrigin(x: restoreMinX, y: restoreMinY, z: 0),
+            sourceSize: MTLSize(
+                width: restoreMaxX - restoreMinX,
+                height: restoreMaxY - restoreMinY,
+                depth: 1
+            ),
+            to: texture,
+            destinationSlice: 0,
+            destinationLevel: 0,
+            destinationOrigin: MTLOrigin(x: restoreMinX, y: restoreMinY, z: 0)
+        )
+        blitEncoder.endEncoding()
+
+        let renderPassDescriptor = MTLRenderPassDescriptor()
+        renderPassDescriptor.colorAttachments[0].texture = texture
+        renderPassDescriptor.colorAttachments[0].loadAction = .load
+        renderPassDescriptor.colorAttachments[0].storeAction = .store
+
+        bootstrap.selectionFillRenderer.encode(
+            into: renderPassDescriptor,
+            commandBuffer: commandBuffer,
+            canvasSize: canvasSize,
+            selectionMaskOriginX: selectionMask.originX,
+            selectionMaskOriginY: selectionMask.originY,
+            selectionMaskWidth: selectionMask.width,
+            selectionMaskHeight: selectionMask.height,
+            selectionMaskAlphaBytes: texturedMask,
+            fillCenter: state.anchorPoint,
+            color: resolvedFillToolColor(from: workspace.toolSession.selectedColor),
+            paintJitterAmount: 0,
+            paintContrastAmount: 0,
+            distortionAmount: 0,
+            alphaLockTexture: alphaLockTexture
+        )
+
+        commandBuffer.addCompletedHandler { [weak self] completedBuffer in
+            Task { @MainActor in
+                guard let self else { return }
+                guard completedBuffer.status == .completed else { return }
+                self.layerThumbnailCache.removeValue(forKey: layerID)
+                self.bootstrap.strokeEngine.resetBrushPipelineState()
+                self.clearRecentBrushAdjustmentState()
+                self.noteCanvasContentChanged()
+                self.refresh(invalidatedLayerIDs: [layerID])
+            }
+        }
+        commandBuffer.commit()
+        state.lastImportedLiveBounds = currentBounds
+        return true
+    }
+
     private func renderTextureFillSlices(
         _ slices: [TextureFillSlice],
         into texture: MTLTexture,
         layerID: LayerID,
         sessionSeed: UInt64,
+        tipSettings: TextureFillTipSettings,
         waitForCompletion: Bool
     ) -> Int {
         let alphaLockTexture = makeAlphaLockTextureCopyIfNeeded(for: layerID, sourceTexture: texture)
@@ -5882,7 +6131,10 @@ final class WorkspaceViewModel: ObservableObject {
                 anchorPoint: slice.anchorPoint,
                 previousEdgePoint: slice.previousEdgePoint,
                 currentEdgePoint: slice.currentEdgePoint,
-                sessionSeed: sessionSeed
+                sessionSeed: sessionSeed,
+                stampMaskData: tipSettings.customTipMaskData,
+                importedSourceInfo: tipSettings.importedSourceInfo,
+                configuration: .phase3Default
             )
             guard texturedMask.isEmpty == false else { continue }
 
@@ -5939,6 +6191,21 @@ final class WorkspaceViewModel: ObservableObject {
             return false
         }
 
+        if state.tipSettings.sourceSemantic == .importedImage,
+           state.tipSettings.customTipMaskData != nil,
+           applyTextureFillImportedFinalField(
+               replayTexture: replayTexture,
+               liveTexture: liveTexture,
+               state: state
+           ) {
+            layerThumbnailCache.removeValue(forKey: state.layerID)
+            bootstrap.strokeEngine.resetBrushPipelineState()
+            clearRecentBrushAdjustmentState()
+            noteCanvasContentChanged()
+            refresh(invalidatedLayerIDs: [state.layerID])
+            return true
+        }
+
         let edgePoints = Array(state.rawEdgePoints.dropFirst())
         guard edgePoints.count >= 2 else {
             return false
@@ -5961,6 +6228,7 @@ final class WorkspaceViewModel: ObservableObject {
             into: replayTexture,
             layerID: state.layerID,
             sessionSeed: state.sessionSeed,
+            tipSettings: state.tipSettings,
             waitForCompletion: true
         )
         guard renderedSliceCount > 0 else {
@@ -5985,6 +6253,97 @@ final class WorkspaceViewModel: ObservableObject {
         clearRecentBrushAdjustmentState()
         noteCanvasContentChanged()
         refresh(invalidatedLayerIDs: [state.layerID])
+        return true
+    }
+
+    private func applyTextureFillImportedFinalField(
+        replayTexture: MTLTexture,
+        liveTexture: MTLTexture,
+        state: TextureFillGestureState
+    ) -> Bool {
+        let canvasSize = CanvasSize(width: replayTexture.width, height: replayTexture.height)
+        guard let smoothShape = textureFillSmoothFinalSelectionShape(
+            from: state.rawEdgePoints,
+            anchorPoint: state.anchorPoint,
+            canvasSize: canvasSize
+        ) else {
+            return false
+        }
+        guard let stampMaskData = state.tipSettings.customTipMaskData else {
+            return false
+        }
+
+        let minX = max(Int(smoothShape.bounds.minX.rounded(.down)), 0)
+        let minY = max(Int(smoothShape.bounds.minY.rounded(.down)), 0)
+        let maxX = min(Int(smoothShape.bounds.maxX.rounded(.up)), replayTexture.width)
+        let maxY = min(Int(smoothShape.bounds.maxY.rounded(.up)), replayTexture.height)
+        guard minX < maxX, minY < maxY else {
+            return false
+        }
+
+        let boundedMask = selectionMaskRegion(
+            for: smoothShape,
+            canvasSize: canvasSize,
+            originX: minX,
+            originY: minY,
+            width: maxX - minX,
+            height: maxY - minY
+        )
+        guard boundedMask.width > 0, boundedMask.height > 0, !boundedMask.alphaBytes.isEmpty else {
+            return false
+        }
+
+        let texturedMask = TextureFillProceduralField.importedRegionAlphaBytes(
+            baseMaskOriginX: boundedMask.originX,
+            baseMaskOriginY: boundedMask.originY,
+            width: boundedMask.width,
+            height: boundedMask.height,
+            baseMaskAlphaBytes: boundedMask.alphaBytes,
+            fieldBounds: smoothShape.bounds,
+            stampMaskData: stampMaskData,
+            importedSourceInfo: state.tipSettings.importedSourceInfo
+        )
+        guard !texturedMask.isEmpty else {
+            return false
+        }
+
+        let alphaLockTexture = makeAlphaLockTextureCopyIfNeeded(for: state.layerID, sourceTexture: replayTexture)
+        guard alphaLockTexture != nil || !layerTransparentPixelLockEnabled(state.layerID) else {
+            return false
+        }
+        guard let commandBuffer = bootstrap.metalContext.commandQueue.makeCommandBuffer() else {
+            return false
+        }
+
+        let renderPassDescriptor = MTLRenderPassDescriptor()
+        renderPassDescriptor.colorAttachments[0].texture = replayTexture
+        renderPassDescriptor.colorAttachments[0].loadAction = .load
+        renderPassDescriptor.colorAttachments[0].storeAction = .store
+
+        bootstrap.selectionFillRenderer.encode(
+            into: renderPassDescriptor,
+            commandBuffer: commandBuffer,
+            canvasSize: canvasSize,
+            selectionMaskOriginX: boundedMask.originX,
+            selectionMaskOriginY: boundedMask.originY,
+            selectionMaskWidth: boundedMask.width,
+            selectionMaskHeight: boundedMask.height,
+            selectionMaskAlphaBytes: texturedMask,
+            fillCenter: state.anchorPoint,
+            color: resolvedFillToolColor(from: workspace.toolSession.selectedColor),
+            paintJitterAmount: 0,
+            paintContrastAmount: 0,
+            distortionAmount: 0,
+            alphaLockTexture: alphaLockTexture
+        )
+
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+        bootstrap.layerSurfaceStore.copyTexture(
+            from: replayTexture,
+            to: liveTexture,
+            metal: bootstrap.metalContext
+        )
         return true
     }
 
@@ -6072,6 +6431,36 @@ final class WorkspaceViewModel: ObservableObject {
             bounds: CanvasRect.bounding(points: smoothedPoints),
             pathPoints: smoothedPoints
         ).clamped(to: canvasSize)
+    }
+
+    private func textureFillLiveSelectionShape(
+        from rawEdgePoints: [CanvasPoint],
+        canvasSize: CanvasSize
+    ) -> SelectionShape? {
+        guard rawEdgePoints.count >= 3 else {
+            return nil
+        }
+
+        return SelectionShape(
+            kind: .lasso,
+            bounds: CanvasRect.bounding(points: rawEdgePoints),
+            pathPoints: rawEdgePoints
+        ).clamped(to: canvasSize)
+    }
+
+    private func unionCanvasRects(_ first: CanvasRect, _ second: CanvasRect?) -> CanvasRect {
+        guard let second else {
+            return first
+        }
+
+        let minX = min(first.minX, second.minX)
+        let minY = min(first.minY, second.minY)
+        let maxX = max(first.maxX, second.maxX)
+        let maxY = max(first.maxY, second.maxY)
+        return CanvasRect(
+            origin: CanvasPoint(x: minX, y: minY),
+            size: CanvasPoint(x: maxX - minX, y: maxY - minY)
+        )
     }
 
     private func makeTextureFillReplayTextureCopy(from sourceTexture: MTLTexture) -> MTLTexture? {
@@ -12719,7 +13108,9 @@ private struct TextureFillGestureState {
     var sessionSeed: UInt64
     var baseTexture: MTLTexture?
     var rawEdgePoints: [CanvasPoint]
+    var tipSettings: TextureFillTipSettings
     var lastEdgePoint: CanvasPoint?
+    var lastImportedLiveBounds: CanvasRect?
     var didCheckpointHistory = false
     var renderedSliceCount = 0
 }

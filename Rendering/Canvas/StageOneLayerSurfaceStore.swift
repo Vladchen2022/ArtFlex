@@ -127,6 +127,60 @@ final class StageOneLayerSurfaceStore {
         )
     }
 
+    func copyTextureRegion(
+        from sourceTexture: MTLTexture,
+        to destinationTexture: MTLTexture,
+        sourceOriginX: Int,
+        sourceOriginY: Int,
+        width: Int,
+        height: Int,
+        destinationOriginX: Int,
+        destinationOriginY: Int,
+        metal: MetalDeviceContext,
+        waitUntilCompleted: Bool = true
+    ) {
+        guard width > 0, height > 0 else {
+            return
+        }
+
+        guard
+            sourceOriginX >= 0,
+            sourceOriginY >= 0,
+            destinationOriginX >= 0,
+            destinationOriginY >= 0,
+            sourceOriginX + width <= sourceTexture.width,
+            sourceOriginY + height <= sourceTexture.height,
+            destinationOriginX + width <= destinationTexture.width,
+            destinationOriginY + height <= destinationTexture.height
+        else {
+            return
+        }
+
+        guard
+            let commandBuffer = metal.commandQueue.makeCommandBuffer(),
+            let blitEncoder = commandBuffer.makeBlitCommandEncoder()
+        else {
+            return
+        }
+
+        blitEncoder.copy(
+            from: sourceTexture,
+            sourceSlice: 0,
+            sourceLevel: 0,
+            sourceOrigin: MTLOrigin(x: sourceOriginX, y: sourceOriginY, z: 0),
+            sourceSize: MTLSize(width: width, height: height, depth: 1),
+            to: destinationTexture,
+            destinationSlice: 0,
+            destinationLevel: 0,
+            destinationOrigin: MTLOrigin(x: destinationOriginX, y: destinationOriginY, z: 0)
+        )
+        blitEncoder.endEncoding()
+        commandBuffer.commit()
+        if waitUntilCompleted {
+            commandBuffer.waitUntilCompleted()
+        }
+    }
+
     private func copyTexture(
         from sourceTexture: MTLTexture,
         to destinationTexture: MTLTexture,

@@ -4,7 +4,7 @@ ArtFlex 是旧版 `BrushCanvas` 的 Metal-first 重构版 macOS 绘图软件。
 
 项目目标不是复制旧项目的 CPU 画布实现，而是在保留成熟产品结构、工具集合和主工作流的前提下，用更稳定的 Metal 渲染、图层、文档和工具架构重建整套编辑链。
 
-## 当前基线（2026-04-17）
+## 当前基线（2026-04-18）
 
 当前仓库已经不是“第一阶段 MVP”状态，也不是“旧 dual-tip / 回退基线”。
 
@@ -31,6 +31,15 @@ ArtFlex 是旧版 `BrushCanvas` 的 Metal-first 重构版 macOS 绘图软件。
 2. 颜色 / 色标 / 黑白参考 / 画笔库工作流继续打磨
 3. HUD 拾色器、颜色面板拾色器和参考图 UI 等交互一致性继续打磨
 
+另外，`肌理填充 / textureFill` 当前也已经是一条活动中的正式开发线：
+
+- 当前基线已推进到 `phase 4.3 + imported final cover`
+- 程序化模式和最终定稿链已接通
+- imported 模式当前真实边界是：
+  - 拖动中仍是小阵列 live field
+  - 松手后是区域纹理映射 final field
+- 后续继续开发时，优先看专项状态文档，不要从历史线程零散结论重新猜
+
 当前画笔库还有两条已经收口的交互约束：
 
 - 第一排“最近使用”只记录第三排及之后的正式库画笔；第二排 `1/2/3/4` 快捷槽位不进入最近使用首行
@@ -53,6 +62,7 @@ ArtFlex 是旧版 `BrushCanvas` 的 Metal-first 重构版 macOS 绘图软件。
 5. [Docs/reference/COLOR_PIXEL_SPEC.md](Docs/reference/COLOR_PIXEL_SPEC.md)
 6. [Docs/reference/COLOR_ADJUSTMENT_STATUS.md](Docs/reference/COLOR_ADJUSTMENT_STATUS.md)
 7. [Docs/reference/PRESSURE_CURVE_STATUS.md](Docs/reference/PRESSURE_CURVE_STATUS.md)
+8. [Docs/reference/TEXTURE_FILL_STATUS.md](Docs/reference/TEXTURE_FILL_STATUS.md)
 
 ## 常用验证
 

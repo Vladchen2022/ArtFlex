@@ -972,6 +972,27 @@ struct WorkspaceViewModelPixelHistoryTests {
 
     @Test
     @MainActor
+    func textureFillBatchedDragUpdatesWritePixelsDuringDrag() async throws {
+        let harness = try PixelHistoryHarness()
+        let layerID = harness.viewModel.workspace.document.activeLayerID
+
+        harness.beginTextureFill(at: .init(x: 8, y: 8))
+        harness.viewModel.updateSelection(
+            to: [
+                .init(x: 32, y: 8),
+                .init(x: 32, y: 32)
+            ],
+            modifiers: []
+        )
+
+        try await waitForCondition {
+            try harness.alpha(atX: 20, y: 12, layerID: layerID) > 0.01
+        }
+        #expect(try harness.alpha(atX: 20, y: 12, layerID: layerID) > 0.01)
+    }
+
+    @Test
+    @MainActor
     func textureFillProducesGapsInsideRenderedSlice() async throws {
         let harness = try PixelHistoryHarness()
         let layerID = harness.viewModel.workspace.document.activeLayerID
@@ -1103,6 +1124,108 @@ struct WorkspaceViewModelPixelHistoryTests {
                 step: 2
             )
         )
+    }
+
+    @Test
+    @MainActor
+    func textureFillImportedTipBlocksTipLibraryDeletion() throws {
+        let harness = try PixelHistoryHarness()
+        let maskData = makeTextureFillLibraryMask(resolution: 256)
+        let assetID = BrushTipImageAssetID(maskData: maskData)
+
+        harness.bootstrap.workspaceStore.updateTipImageLibrary { library in
+            _ = library.upsertImportedItem(
+                id: assetID,
+                sourceInfo: .init(sourceLabel: "Test Tip", pixelWidth: 256, pixelHeight: 256),
+                maskData: maskData
+            )
+        }
+
+        harness.viewModel.applyTextureFillTipImageLibraryItem(assetID)
+
+        let tipSettings = harness.viewModel.workspace.toolSession.textureFillTip
+        #expect(tipSettings.sourceSemantic == .importedImage)
+        #expect(tipSettings.tipAssetID == assetID)
+        #expect(tipSettings.customTipMaskData == maskData)
+
+        let summary = harness.viewModel.tipImageLibraryReferenceSummary(for: assetID)
+        #expect(summary.currentTextureFillUsesImportedTip)
+        #expect(harness.viewModel.deleteTipImageLibraryItem(assetID) == false)
+    }
+
+    @Test
+    @MainActor
+    func textureFillImportedLiveFieldUsesRegionMappingInsteadOfRepeatingTiles() async throws {
+        let harness = try PixelHistoryHarness()
+        let gradientMask = makeTextureFillGradientLibraryMask(resolution: 256)
+        let assetID = BrushTipImageAssetID(maskData: gradientMask)
+
+        harness.bootstrap.workspaceStore.updateTipImageLibrary { library in
+            _ = library.upsertImportedItem(
+                id: assetID,
+                sourceInfo: .init(sourceLabel: "Gradient Tip", pixelWidth: 64, pixelHeight: 64),
+                maskData: gradientMask
+            )
+        }
+        harness.viewModel.applyTextureFillTipImageLibraryItem(assetID)
+
+        harness.beginTextureFill(at: .init(x: 8, y: 8))
+        harness.updateTextureFill(to: .init(x: 56, y: 8))
+        harness.updateTextureFill(to: .init(x: 56, y: 56))
+
+        try await waitForCondition {
+            try harness.alpha(atX: 12, y: 12, layerID: harness.viewModel.workspace.document.activeLayerID) > 0.01
+        }
+
+        let layerID = harness.viewModel.workspace.document.activeLayerID
+        let left = try harness.alpha(atX: 12, y: 12, layerID: layerID)
+        let repeatedTileOffset = try harness.alpha(atX: 40, y: 12, layerID: layerID)
+        let middle = try harness.alpha(atX: 26, y: 12, layerID: layerID)
+
+        #expect(abs(left - repeatedTileOffset) > 0.05)
+        #expect(abs(left - middle) > 0.05 || abs(middle - repeatedTileOffset) > 0.05)
+    }
+
+    @Test
+    @MainActor
+    func textureFillImportedFinalCloselyMatchesLivePreviewAwayFromEdges() async throws {
+        let harness = try PixelHistoryHarness()
+        let gradientMask = makeTextureFillGradientLibraryMask(resolution: 256)
+        let assetID = BrushTipImageAssetID(maskData: gradientMask)
+
+        harness.bootstrap.workspaceStore.updateTipImageLibrary { library in
+            _ = library.upsertImportedItem(
+                id: assetID,
+                sourceInfo: .init(sourceLabel: "Gradient Tip", pixelWidth: 64, pixelHeight: 64),
+                maskData: gradientMask
+            )
+        }
+        harness.viewModel.applyTextureFillTipImageLibraryItem(assetID)
+
+        let layerID = harness.viewModel.workspace.document.activeLayerID
+        let liveEndPoint = CanvasPoint(x: 56, y: 56)
+        harness.beginTextureFill(at: .init(x: 8, y: 8))
+        harness.updateTextureFill(to: .init(x: 56, y: 8))
+        harness.updateTextureFill(to: liveEndPoint)
+
+        try await waitForCondition {
+            try harness.alpha(atX: 24, y: 16, layerID: layerID) > 0.01
+        }
+
+        let samplePoints = [(24, 16), (36, 16), (44, 24)]
+        let liveAlphas = try samplePoints.map { point in
+            try harness.alpha(atX: point.0, y: point.1, layerID: layerID)
+        }
+
+        harness.endTextureFill(at: liveEndPoint)
+
+        let finalAlphas = try samplePoints.map { point in
+            try harness.alpha(atX: point.0, y: point.1, layerID: layerID)
+        }
+
+        for (live, final) in zip(liveAlphas, finalAlphas) {
+            #expect(abs(live - final) < 0.08)
+        }
     }
 
     @Test
@@ -1511,6 +1634,34 @@ private func regionHasVisiblePixels(
         y += step
     }
     return false
+}
+
+private func makeTextureFillLibraryMask(resolution: Int) -> Data {
+    var bytes = [UInt8](repeating: 0, count: resolution * resolution)
+    let minX = resolution / 4
+    let maxX = resolution * 3 / 4
+    let minY = resolution / 4
+    let maxY = resolution * 3 / 4
+    for y in minY..<maxY {
+        for x in minX..<maxX {
+            bytes[(y * resolution) + x] = 255
+        }
+    }
+    return Data(bytes)
+}
+
+private func makeTextureFillGradientLibraryMask(resolution: Int) -> Data {
+    var bytes = [UInt8](repeating: 0, count: resolution * resolution)
+    let denominator = max(resolution - 1, 1)
+
+    for y in 0..<resolution {
+        for x in 0..<resolution {
+            let alpha = UInt8((Double(x) / Double(denominator) * 255).rounded())
+            bytes[(y * resolution) + x] = alpha
+        }
+    }
+
+    return Data(bytes)
 }
 
 @MainActor

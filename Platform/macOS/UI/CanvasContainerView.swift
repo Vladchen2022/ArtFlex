@@ -107,6 +107,10 @@ struct CanvasContainerView: View {
                             onCanvasInteraction?()
                             viewModel.updateSelection(to: point, modifiers: modifiers)
                         },
+                        onSelectionChangedBatch: { points, modifiers in
+                            onCanvasInteraction?()
+                            viewModel.updateSelection(to: points, modifiers: modifiers)
+                        },
                         onSelectionEnded: { point, modifiers in
                             onCanvasInteraction?()
                             viewModel.commitSelection(at: point, modifiers: modifiers)

@@ -1,6 +1,6 @@
 # DECISIONS
 
-最后更新：2026-04-17
+最后更新：2026-04-18
 
 本文件记录当前代码和产品层已经确认、后续线程不应随意推翻的决策。
 
@@ -182,6 +182,34 @@
 - 后续应继续沿现在这条统一 session / renderer / confirm chain 往前收口，而不是重新发散旧状态机
 - 当前这套滑块算法与面板主交互已经冻结；如果没有明确产品决策，不要再随意改手感
 
+### 2.7 肌理填充当前继续沿“套索输入复用 + final-only 修正”理解
+
+当前 `textureFill` 已确认的实现策略是：
+
+- 继续复用 `lassoFill` 的输入骨架
+- 程序化模式 live 路径继续沿第三阶段 direct-to-layer 方案
+- 第四阶段的修正只允许主要落在 final 定稿链
+
+当前 accepted 基线是：
+
+- `phase 4.3 + imported mapped live/final + final cover`
+
+也就是说：
+
+- 程序化模式：继续保持当前可用基线
+- imported 模式：live / final 都已经走区域映射语义，而且 final field 不再留白
+
+当前不要再默认重开这些已失败路线：
+
+- live 路径 densify 修边缘
+- 首段 cap + 长段 densify
+- 把开放路径平滑直接塞进 live 切片链
+
+如果后续继续开发 `textureFill`，当前优先级应是：
+
+- 默认先看程序化模式的 live 多边形感和残余轻微延迟
+- 不要再把 imported live/final 统一当成当前头号缺口
+
 ## 3. 当前不要随意改动的地方
 
 ### 3.1 参考图与 LAB 黑白参考已经接通
@@ -228,3 +256,17 @@
 - 最近一次应用图标更新是替换内部 artwork，同时保留现有图标的整体大小与圆角轮廓
 
 后续如果只是继续调整应用图标外观，默认先继续修这张 PNG 资源，不要为了小改动就先扩出另一套图标资源体系。
+
+### 3.5 肌理填充专项状态默认看独立文档
+
+当前 `textureFill` 已经有独立状态文档：
+
+- [Docs/reference/TEXTURE_FILL_STATUS.md](Docs/reference/TEXTURE_FILL_STATUS.md)
+
+后续线程如果继续处理：
+
+- `phase 4.x`
+- imported 模式
+- `tipImageLibrary` 对接
+
+默认先读这份专项文档，不要从零散线程结论重新猜当前 accepted 基线。

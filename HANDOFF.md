@@ -1,6 +1,6 @@
 # ArtFlex Handoff
 
-最后更新：2026-04-17
+最后更新：2026-04-18
 
 ## 1. 先记住这三句话
 
@@ -16,6 +16,7 @@
 4. [Docs/reference/COLOR_PIXEL_SPEC.md](Docs/reference/COLOR_PIXEL_SPEC.md)
 5. [Docs/reference/COLOR_ADJUSTMENT_STATUS.md](Docs/reference/COLOR_ADJUSTMENT_STATUS.md)
 6. [Docs/reference/PRESSURE_CURVE_STATUS.md](Docs/reference/PRESSURE_CURVE_STATUS.md)
+7. [Docs/reference/TEXTURE_FILL_STATUS.md](Docs/reference/TEXTURE_FILL_STATUS.md)
 
 如果任务和组合笔刷直接相关，再看：
 
@@ -165,6 +166,42 @@
 继续接手这块时，先读：
 
 - [Docs/reference/COLOR_ADJUSTMENT_STATUS.md](Docs/reference/COLOR_ADJUSTMENT_STATUS.md)
+
+### 3.7 肌理填充当前以 `phase 4.3 + imported mapped live/final + final cover` 为 accepted 基线
+
+当前 `textureFill` 已经是一条正式活动线，不要再把它理解成“未开始的试验工具”。
+
+当前更准确的状态是：
+
+- 程序化模式已经跑通到可用基线
+- 最终定稿链已经推进到 `phase 4.3`
+- imported 模式已经接通共享 `tipImageLibrary`
+- imported live 已经切到区域映射，并优先复用 smooth final shape
+- imported final field 当前已修到 `cover`，最终区域不会再留白
+
+当前接手时要先记住：
+
+1. 当前 accepted 基线是：
+   - `phase 4.3 + imported mapped live/final + final cover`
+2. 当前 imported 模式不要再按旧 mismatch 理解：
+   - 拖动中：区域映射 live field
+   - 松手后：区域纹理映射 final field
+3. 当前程序化模式的 live 多边形感与残余轻微延迟，已经比 imported mismatch 更值得关注
+
+当前不要再重复这些失败路线：
+
+- 只靠 `densify` 修 live 边缘
+- 首段 cap + 长段 densify
+- 把开放路径平滑直接塞进 live 切片链
+
+如果后续继续做 `textureFill`，当前更合理的下一步是：
+
+- 观察程序化模式的 live 多边形感是否值得继续收口
+- 在有实际体感问题时再继续压 imported / 整体 live 延迟
+
+专项状态文档先读：
+
+- [Docs/reference/TEXTURE_FILL_STATUS.md](Docs/reference/TEXTURE_FILL_STATUS.md)
 
 ## 4. 当前 working tree 状态
 

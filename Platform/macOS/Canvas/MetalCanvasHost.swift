@@ -97,6 +97,7 @@ struct MetalCanvasHost: NSViewRepresentable {
     let onCanvasHover: (CanvasPoint) -> Void
     let onSelectionBegan: (CanvasPoint, NSEvent.ModifierFlags) -> Void
     let onSelectionChanged: (CanvasPoint, NSEvent.ModifierFlags) -> Void
+    let onSelectionChangedBatch: ([CanvasPoint], NSEvent.ModifierFlags) -> Void
     let onSelectionEnded: (CanvasPoint, NSEvent.ModifierFlags) -> Void
     let onSelectionMouseDown: (CanvasPoint, NSEvent.ModifierFlags) -> SelectionMouseDownAction
     let onMoveSelectionPreview: (Double, Double) -> Void
@@ -156,6 +157,7 @@ struct MetalCanvasHost: NSViewRepresentable {
             onCanvasHover: onCanvasHover,
             onSelectionBegan: onSelectionBegan,
             onSelectionChanged: onSelectionChanged,
+            onSelectionChangedBatch: onSelectionChangedBatch,
             onSelectionEnded: onSelectionEnded,
             onSelectionMouseDown: onSelectionMouseDown,
             onMoveSelectionPreview: onMoveSelectionPreview,
@@ -377,6 +379,7 @@ protocol StrokeCaptureDelegate: AnyObject {
     func strokeCaptureView(_ view: StrokeCaptureMTKView, didHoverCanvasAt point: CanvasPoint)
     func strokeCaptureView(_ view: StrokeCaptureMTKView, didBeginSelectionAt point: CanvasPoint, modifiers: NSEvent.ModifierFlags)
     func strokeCaptureView(_ view: StrokeCaptureMTKView, didChangeSelectionAt point: CanvasPoint, modifiers: NSEvent.ModifierFlags)
+    func strokeCaptureView(_ view: StrokeCaptureMTKView, didChangeSelectionAlong points: [CanvasPoint], modifiers: NSEvent.ModifierFlags)
     func strokeCaptureView(_ view: StrokeCaptureMTKView, didEndSelectionAt point: CanvasPoint, modifiers: NSEvent.ModifierFlags)
     func strokeCaptureView(_ view: StrokeCaptureMTKView, selectionToolMouseDownAt point: CanvasPoint, modifiers: NSEvent.ModifierFlags) -> SelectionMouseDownAction
     func strokeCaptureView(_ view: StrokeCaptureMTKView, didMoveSelectionPreviewBy deltaX: Double, deltaY: Double)
@@ -1027,6 +1030,15 @@ final class StrokeCaptureMTKView: MTKView {
                     let message = "[sampleBatch] draggedEvents=\(samples.count) finalCanvas=(\(samples.last?.location.x ?? 0),\(samples.last?.location.y ?? 0))"
                     selectionTraceLogger.debug("\(message, privacy: .public)")
                     emitSelectionTraceHost(message)
+                }
+                if activeTool == .textureFill, samples.count > 1 {
+                    strokeDelegate?.strokeCaptureView(
+                        self,
+                        didChangeSelectionAlong: samples.map(\.location),
+                        modifiers: modifiers
+                    )
+                    setNeedsDisplay(bounds)
+                    return
                 }
                 for sample in samples {
                     strokeDelegate?.strokeCaptureView(
@@ -2032,6 +2044,7 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
     private let onCanvasHover: (CanvasPoint) -> Void
     private let onSelectionBegan: (CanvasPoint, NSEvent.ModifierFlags) -> Void
     private let onSelectionChanged: (CanvasPoint, NSEvent.ModifierFlags) -> Void
+    private let onSelectionChangedBatch: ([CanvasPoint], NSEvent.ModifierFlags) -> Void
     private let onSelectionEnded: (CanvasPoint, NSEvent.ModifierFlags) -> Void
     private let onSelectionMouseDown: (CanvasPoint, NSEvent.ModifierFlags) -> SelectionMouseDownAction
     private let onMoveSelectionPreview: (Double, Double) -> Void
@@ -2133,6 +2146,7 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
         onCanvasHover: @escaping (CanvasPoint) -> Void,
         onSelectionBegan: @escaping (CanvasPoint, NSEvent.ModifierFlags) -> Void,
         onSelectionChanged: @escaping (CanvasPoint, NSEvent.ModifierFlags) -> Void,
+        onSelectionChangedBatch: @escaping ([CanvasPoint], NSEvent.ModifierFlags) -> Void,
         onSelectionEnded: @escaping (CanvasPoint, NSEvent.ModifierFlags) -> Void,
         onSelectionMouseDown: @escaping (CanvasPoint, NSEvent.ModifierFlags) -> SelectionMouseDownAction,
         onMoveSelectionPreview: @escaping (Double, Double) -> Void,
@@ -2212,6 +2226,7 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
         self.onCanvasHover = onCanvasHover
         self.onSelectionBegan = onSelectionBegan
         self.onSelectionChanged = onSelectionChanged
+        self.onSelectionChangedBatch = onSelectionChangedBatch
         self.onSelectionEnded = onSelectionEnded
         self.onSelectionMouseDown = onSelectionMouseDown
         self.onMoveSelectionPreview = onMoveSelectionPreview
@@ -2652,6 +2667,15 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
         selectionTraceLogger.debug("\(message, privacy: .public)")
         emitSelectionTraceHost(message)
         onSelectionChanged(point, modifiers)
+    }
+
+    func strokeCaptureView(_ view: StrokeCaptureMTKView, didChangeSelectionAlong points: [CanvasPoint], modifiers: NSEvent.ModifierFlags) {
+        guard points.isEmpty == false else { return }
+        let lastPoint = points[points.count - 1]
+        let message = "[coordinator.didChangeSelectionAlong] count=\(points.count) finalPoint=(\(lastPoint.x),\(lastPoint.y)) modifiers=\(modifiers.rawValue)"
+        selectionTraceLogger.debug("\(message, privacy: .public)")
+        emitSelectionTraceHost(message)
+        onSelectionChangedBatch(points, modifiers)
     }
 
     func strokeCaptureView(_ view: StrokeCaptureMTKView, didEndSelectionAt point: CanvasPoint, modifiers: NSEvent.ModifierFlags) {

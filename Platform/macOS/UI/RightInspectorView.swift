@@ -15,6 +15,7 @@ private let topInspectorControlIconSize: CGFloat = 11.5
 private enum TipImageLibrarySheetTarget: String, Identifiable {
     case primary
     case compoundSecondary
+    case textureFill
 
     var id: String { rawValue }
 
@@ -24,6 +25,8 @@ private enum TipImageLibrarySheetTarget: String, Identifiable {
             return "主笔尖图片资料库"
         case .compoundSecondary:
             return "组合笔刷次笔尖图片资料库"
+        case .textureFill:
+            return "肌理填充素材库"
         }
     }
 }
@@ -276,6 +279,7 @@ struct RightInspectorView: View {
     @State private var tipImageLibrarySheetTarget: TipImageLibrarySheetTarget?
     @State private var primaryTipImageLibraryPendingSelection: BrushTipImageAssetID?
     @State private var compoundSecondaryTipImageLibraryPendingSelection: BrushTipImageAssetID?
+    @State private var textureFillTipImageLibraryPendingSelection: BrushTipImageAssetID?
     @State private var draggedTipImageLibraryAssetID: BrushTipImageAssetID?
     @State private var tipImageLibraryDropTargetID: BrushTipImageAssetID?
     @State private var showsCompoundBrushBuilder = false
@@ -993,9 +997,31 @@ struct RightInspectorView: View {
                         .font(.system(size: 12, weight: .semibold))
                         .foregroundStyle(Color.white.opacity(0.92))
 
-                    Text("阶段 0：当前无参数")
+                    Text(textureFillTipSourceSummary)
                         .font(.system(size: 11, weight: .medium))
                         .foregroundStyle(Color.white.opacity(0.62))
+
+                    HStack(spacing: 8) {
+                        compactTextActionButton(
+                            title: "共享图库…",
+                            tooltip: "从共享笔尖图片资料库选择肌理填充素材",
+                            fillsAvailableWidth: true
+                        ) {
+                            prepareTipImageLibraryPresentation(for: .textureFill)
+                            tipImageLibrarySheetTarget = .textureFill
+                        }
+
+                        if viewModel.workspace.toolSession.textureFillTip.sourceSemantic == .importedImage {
+                            compactTextActionButton(
+                                title: "切回程序化",
+                                tooltip: "改回内置程序化纹理",
+                                fillsAvailableWidth: true
+                            ) {
+                                viewModel.resetTextureFillTipToProcedural()
+                            }
+                        }
+                    }
+
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             } else {
@@ -1150,6 +1176,21 @@ struct RightInspectorView: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var textureFillTipSourceSummary: String {
+        let source = viewModel.workspace.toolSession.textureFillTip
+        switch source.sourceSemantic {
+        case .procedural:
+            return "当前使用程序化纹理 stamp"
+        case .customMask:
+            return "当前使用自定义纹理 stamp"
+        case .importedImage:
+            if let sourceInfo = source.importedSourceInfo {
+                return "当前素材：\(sourceInfo.formattedSummary)"
+            }
+            return "当前使用共享图库导入素材"
+        }
     }
 
     private var colorAdjustmentSection: some View {
@@ -2744,6 +2785,14 @@ struct RightInspectorView: View {
                 )
             }
 
+            if summary.currentTextureFillUsesImportedTip {
+                tipImageLibraryReferenceChip(
+                    title: "肌理填充",
+                    tint: Color(red: 0.82, green: 0.34, blue: 0.14),
+                    tooltip: "当前肌理填充正在使用这张图片"
+                )
+            }
+
             if summary.presetCount > 0 {
                 tipImageLibraryReferenceChip(
                     title: "\(summary.presetCount) 个预设",
@@ -2756,7 +2805,7 @@ struct RightInspectorView: View {
                 tipImageLibraryReferenceChip(
                     title: "未引用",
                     tint: Color.secondary,
-                    tooltip: "当前没有主笔尖、次笔尖或已保存预设引用这张图片"
+                    tooltip: "当前没有主笔尖、次笔尖、肌理填充或已保存预设引用这张图片"
                 )
             }
         }
@@ -2813,6 +2862,9 @@ struct RightInspectorView: View {
         if summary.currentBrushUsesCompoundSecondary {
             parts.append("当前组合笔刷次笔尖")
         }
+        if summary.currentTextureFillUsesImportedTip {
+            parts.append("当前肌理填充素材")
+        }
         if summary.presetPrimaryNames.isEmpty == false {
             parts.append("主笔尖预设：\(tipImageLibraryPresetNameSummary(summary.presetPrimaryNames))")
         }
@@ -2838,6 +2890,11 @@ struct RightInspectorView: View {
                 return nil
             }
             return brush.compoundBrush.secondary.tipAssetID
+        case .textureFill:
+            guard viewModel.workspace.toolSession.textureFillTip.sourceSemantic == .importedImage else {
+                return nil
+            }
+            return viewModel.workspace.toolSession.textureFillTip.tipAssetID
         }
     }
 
@@ -2847,6 +2904,8 @@ struct RightInspectorView: View {
             return primaryTipImageLibraryPendingSelection
         case .compoundSecondary:
             return compoundSecondaryTipImageLibraryPendingSelection
+        case .textureFill:
+            return textureFillTipImageLibraryPendingSelection
         }
     }
 
@@ -2859,6 +2918,8 @@ struct RightInspectorView: View {
             primaryTipImageLibraryPendingSelection = assetID
         case .compoundSecondary:
             compoundSecondaryTipImageLibraryPendingSelection = assetID
+        case .textureFill:
+            textureFillTipImageLibraryPendingSelection = assetID
         }
     }
 
@@ -2904,6 +2965,8 @@ struct RightInspectorView: View {
             viewModel.applyPrimaryTipImageLibraryItem(assetID)
         case .compoundSecondary:
             viewModel.applyCompoundSecondaryTipImageLibraryItem(assetID)
+        case .textureFill:
+            viewModel.applyTextureFillTipImageLibraryItem(assetID)
         }
     }
 
@@ -4304,6 +4367,7 @@ private struct NavigatorPreviewPanel: View {
                     onCanvasHover: { _ in },
                     onSelectionBegan: { _, _ in },
                     onSelectionChanged: { _, _ in },
+                    onSelectionChangedBatch: { _, _ in },
                     onSelectionEnded: { _, _ in },
                     onSelectionMouseDown: { _, _ in .idle },
                     onMoveSelectionPreview: { _, _ in },

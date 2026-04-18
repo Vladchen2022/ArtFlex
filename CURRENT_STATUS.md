@@ -1,6 +1,6 @@
 # ArtFlex 当前状态
 
-最后更新：2026-04-17
+最后更新：2026-04-18
 
 ## 1. 一句话概览
 
@@ -253,6 +253,49 @@ ArtFlex 当前已经是一个功能面明显超出最小 MVP 的 macOS Metal 绘
 
 - [Docs/reference/COLOR_ADJUSTMENT_STATUS.md](Docs/reference/COLOR_ADJUSTMENT_STATUS.md)
 
+### 2.10 当前肌理填充的真实状态
+
+当前仓库里的 `肌理填充 / textureFill` 已经不是占位工具。
+
+当前这条线的真实状态应当理解为：
+
+- 正式工具入口已接通
+- 复用现有 `lassoFill` 输入链
+- 程序化模式已经跑通到可用基线
+- 最终定稿链已经推进到 `phase 4.3`
+- imported 模式已经接通共享 `tipImageLibrary`
+
+当前更准确的阶段描述是：
+
+- phase 0：工具入口与参数区占位
+- phase 1：独立提交路径
+- phase 2：拖动中实时切片
+- phase 3：程序化断续纹理
+- phase 4.0 / 4.1 / 4.2 / 4.3：final replay + smooth final mask + 状态清理
+- imported final field：当前已从 `contain` 改成 `cover`
+
+当前程序化模式的手测结论是：
+
+- 可用
+- 有轻微延迟，但目前可接受
+- live 边缘仍有多边形感
+
+当前 imported 模式要特别区分：
+
+- 拖动中：已经改成区域映射 live field，默认优先复用 smooth final shape
+- 松手后：仍然是区域纹理映射 final field，并且当前不会再留白
+
+当前这条线最重要的结论是：
+
+- 当前不要再把 `textureFill` 当成“未开始主线”
+- 当前也不要再从失败的 `densify / open-path smoothing` 路线继续 patch
+- imported 模式的 live / final 统一已经接通，后续默认不要再按旧 mismatch 基线接手
+- 后续如果继续，优先方向更接近程序化模式的 live 多边形感与残余轻微延迟，而不是回头重做 imported 映射语义
+
+专项状态文档见：
+
+- [Docs/reference/TEXTURE_FILL_STATUS.md](Docs/reference/TEXTURE_FILL_STATUS.md)
+
 ## 3. 当前架构现实
 
 ### 3.1 分层仍然基本成立
@@ -324,6 +367,7 @@ ArtFlex 当前已经是一个功能面明显超出最小 MVP 的 macOS Metal 绘
 2. [DECISIONS.md](DECISIONS.md)
 3. [Docs/reference/REPO_MAP.md](Docs/reference/REPO_MAP.md)
 4. [Docs/reference/COLOR_PIXEL_SPEC.md](Docs/reference/COLOR_PIXEL_SPEC.md)
+5. [Docs/reference/TEXTURE_FILL_STATUS.md](Docs/reference/TEXTURE_FILL_STATUS.md)
 
 如果任务明确与组合笔刷相关，再继续看：
 
