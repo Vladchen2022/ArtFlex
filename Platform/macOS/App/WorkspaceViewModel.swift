@@ -5805,18 +5805,14 @@ final class WorkspaceViewModel: ObservableObject {
             slices,
             into: texture,
             layerID: state.layerID,
-            sessionSeed: state.sessionSeed
+            sessionSeed: state.sessionSeed,
+            waitForCompletion: false
         )
         guard renderedSliceCount > 0 else {
             return false
         }
 
         state.renderedSliceCount += renderedSliceCount
-        layerThumbnailCache.removeValue(forKey: state.layerID)
-        bootstrap.strokeEngine.resetBrushPipelineState()
-        clearRecentBrushAdjustmentState()
-        noteCanvasContentChanged()
-        refresh(invalidatedLayerIDs: [state.layerID])
         return true
     }
 
@@ -5824,7 +5820,8 @@ final class WorkspaceViewModel: ObservableObject {
         _ slices: [TextureFillSlice],
         into texture: MTLTexture,
         layerID: LayerID,
-        sessionSeed: UInt64
+        sessionSeed: UInt64,
+        waitForCompletion: Bool
     ) -> Int {
         let alphaLockTexture = makeAlphaLockTextureCopyIfNeeded(for: layerID, sourceTexture: texture)
         guard alphaLockTexture != nil || !layerTransparentPixelLockEnabled(layerID) else {
@@ -5912,8 +5909,24 @@ final class WorkspaceViewModel: ObservableObject {
             return 0
         }
 
+        if waitForCompletion {
+            commandBuffer.commit()
+            commandBuffer.waitUntilCompleted()
+            return renderedSliceCount
+        }
+
+        commandBuffer.addCompletedHandler { [weak self] completedBuffer in
+            Task { @MainActor in
+                guard let self else { return }
+                guard completedBuffer.status == .completed else { return }
+                self.layerThumbnailCache.removeValue(forKey: layerID)
+                self.bootstrap.strokeEngine.resetBrushPipelineState()
+                self.clearRecentBrushAdjustmentState()
+                self.noteCanvasContentChanged()
+                self.refresh(invalidatedLayerIDs: [layerID])
+            }
+        }
         commandBuffer.commit()
-        commandBuffer.waitUntilCompleted()
         return renderedSliceCount
     }
 
@@ -5947,7 +5960,8 @@ final class WorkspaceViewModel: ObservableObject {
             slices,
             into: replayTexture,
             layerID: state.layerID,
-            sessionSeed: state.sessionSeed
+            sessionSeed: state.sessionSeed,
+            waitForCompletion: true
         )
         guard renderedSliceCount > 0 else {
             return false

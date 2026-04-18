@@ -956,7 +956,7 @@ struct WorkspaceViewModelPixelHistoryTests {
 
     @Test
     @MainActor
-    func textureFillSolidWritesPixelsDuringDrag() throws {
+    func textureFillSolidWritesPixelsDuringDrag() async throws {
         let harness = try PixelHistoryHarness()
         let layerID = harness.viewModel.workspace.document.activeLayerID
 
@@ -964,12 +964,15 @@ struct WorkspaceViewModelPixelHistoryTests {
         harness.updateTextureFill(to: .init(x: 32, y: 8))
         harness.updateTextureFill(to: .init(x: 32, y: 32))
 
+        try await waitForCondition {
+            try harness.alpha(atX: 20, y: 12, layerID: layerID) > 0.01
+        }
         #expect(try harness.alpha(atX: 20, y: 12, layerID: layerID) > 0.01)
     }
 
     @Test
     @MainActor
-    func textureFillProducesGapsInsideRenderedSlice() throws {
+    func textureFillProducesGapsInsideRenderedSlice() async throws {
         let harness = try PixelHistoryHarness()
         let layerID = harness.viewModel.workspace.document.activeLayerID
         let anchor = CanvasPoint(x: 8, y: 8)
@@ -979,6 +982,18 @@ struct WorkspaceViewModelPixelHistoryTests {
         harness.beginTextureFill(at: anchor)
         harness.updateTextureFill(to: previous)
         harness.updateTextureFill(to: current)
+
+        try await waitForCondition {
+            try regionHasVisiblePixels(
+                harness: harness,
+                layerID: layerID,
+                minX: 8,
+                maxX: 31,
+                minY: 8,
+                maxY: 31,
+                step: 2
+            )
+        }
 
         var filledInteriorPixels = 0
         var emptyInteriorPixels = 0
@@ -1496,6 +1511,22 @@ private func regionHasVisiblePixels(
         y += step
     }
     return false
+}
+
+@MainActor
+private func waitForCondition(
+    timeoutIterations: Int = 80,
+    pollIntervalMilliseconds: UInt64 = 10,
+    _ condition: () throws -> Bool
+) async throws {
+    for _ in 0..<timeoutIterations {
+        if try condition() {
+            return
+        }
+        await Task.yield()
+        try? await Task.sleep(for: .milliseconds(Int(pollIntervalMilliseconds)))
+    }
+    #expect(try condition())
 }
 
 private func isPointInsideTriangle(
