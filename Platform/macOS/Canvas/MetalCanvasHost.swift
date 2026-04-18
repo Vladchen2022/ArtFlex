@@ -903,7 +903,7 @@ final class StrokeCaptureMTKView: MTKView {
             }
             return
         }
-        if activeTool == .rectangleSelection || activeTool == .ellipseSelection || activeTool == .lassoSelection || activeTool == .lassoFill {
+        if activeTool == .rectangleSelection || activeTool == .ellipseSelection || activeTool == .lassoSelection || activeTool == .lassoFill || activeTool == .textureFill {
             let point = sample(from: event).location
             let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
             // 同步询问 ViewModel 应该进入哪种模式
@@ -1006,7 +1006,7 @@ final class StrokeCaptureMTKView: MTKView {
             return
         }
 
-        if activeTool == .rectangleSelection || activeTool == .ellipseSelection || activeTool == .lassoSelection || activeTool == .lassoFill {
+        if activeTool == .rectangleSelection || activeTool == .ellipseSelection || activeTool == .lassoSelection || activeTool == .lassoFill || activeTool == .textureFill {
             switch selectionInteractionMode {
             case .beginMoving:
                 let point = sample(from: event).location
@@ -1023,7 +1023,7 @@ final class StrokeCaptureMTKView: MTKView {
             case .beginDrawing:
                 let samples = selectionSamples(from: event)
                 let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-                if activeTool == .lassoSelection || activeTool == .lassoFill {
+                if activeTool == .lassoSelection || activeTool == .lassoFill || activeTool == .textureFill {
                     let message = "[sampleBatch] draggedEvents=\(samples.count) finalCanvas=(\(samples.last?.location.x ?? 0),\(samples.last?.location.y ?? 0))"
                     selectionTraceLogger.debug("\(message, privacy: .public)")
                     emitSelectionTraceHost(message)
@@ -1184,7 +1184,7 @@ final class StrokeCaptureMTKView: MTKView {
             setNeedsDisplay(bounds)
             return
         }
-        if activeTool == .rectangleSelection || activeTool == .ellipseSelection || activeTool == .lassoSelection || activeTool == .lassoFill {
+        if activeTool == .rectangleSelection || activeTool == .ellipseSelection || activeTool == .lassoSelection || activeTool == .lassoFill || activeTool == .textureFill {
             switch selectionInteractionMode {
             case .beginMoving:
                 selectionMoveLastPoint = nil
@@ -1481,7 +1481,7 @@ final class StrokeCaptureMTKView: MTKView {
             sample: sample
         )
 
-        if activeTool == .lassoSelection || activeTool == .lassoFill {
+        if activeTool == .lassoSelection || activeTool == .lassoFill || activeTool == .textureFill {
             let message =
                 """
                 [sample] event=\(event.type.rawValue) \
@@ -1632,7 +1632,7 @@ final class StrokeCaptureMTKView: MTKView {
     }
 
     private func selectionSamples(from event: NSEvent) -> [CanvasStrokeSample] {
-        guard activeTool == .lassoSelection || activeTool == .lassoFill else {
+        guard activeTool == .lassoSelection || activeTool == .lassoFill || activeTool == .textureFill else {
             return [sample(from: event)]
         }
 
@@ -1894,7 +1894,7 @@ final class StrokeCaptureMTKView: MTKView {
         switch activeTool {
         case .brush, .eraser, .smudge, .straightLine, .linearGradient, .sectorGradient, .brightnessAdjust:
             return true
-        case .eyedropper, .bucket, .polygonSelection, .lassoFill, .rectangleSelection, .ellipseSelection, .lassoSelection, .canvasRotate, .freeTransform:
+        case .eyedropper, .bucket, .polygonSelection, .lassoFill, .textureFill, .rectangleSelection, .ellipseSelection, .lassoSelection, .canvasRotate, .freeTransform:
             return false
         }
     }

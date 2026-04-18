@@ -932,6 +932,75 @@ struct WorkspaceViewModelPixelHistoryTests {
 
     @Test
     @MainActor
+    func textureFillSolidSupportsUndoRedo() throws {
+        let harness = try PixelHistoryHarness()
+        let layerID = harness.viewModel.workspace.document.activeLayerID
+
+        harness.beginTextureFill(at: .init(x: 8, y: 8))
+        harness.updateTextureFill(to: .init(x: 32, y: 8))
+        harness.updateTextureFill(to: .init(x: 32, y: 32))
+        harness.endTextureFill(at: .init(x: 8, y: 32))
+
+        #expect(try harness.alpha(atX: 12, y: 12, layerID: layerID) > 0.01)
+
+        harness.viewModel.undo()
+        let restoredPixel = try harness.color(atX: 12, y: 12, layerID: layerID)
+        #expect(restoredPixel.alpha < 0.01)
+        #expect(restoredPixel.red < 0.01)
+        #expect(restoredPixel.green < 0.01)
+        #expect(restoredPixel.blue < 0.01)
+
+        harness.viewModel.redo()
+        #expect(try harness.alpha(atX: 12, y: 12, layerID: layerID) > 0.01)
+    }
+
+    @Test
+    @MainActor
+    func textureFillSolidWritesPixelsDuringDrag() throws {
+        let harness = try PixelHistoryHarness()
+        let layerID = harness.viewModel.workspace.document.activeLayerID
+
+        harness.beginTextureFill(at: .init(x: 8, y: 8))
+        harness.updateTextureFill(to: .init(x: 32, y: 8))
+        harness.updateTextureFill(to: .init(x: 32, y: 32))
+
+        #expect(try harness.alpha(atX: 20, y: 12, layerID: layerID) > 0.01)
+    }
+
+    @Test
+    @MainActor
+    func textureFillProducesGapsInsideRenderedSlice() throws {
+        let harness = try PixelHistoryHarness()
+        let layerID = harness.viewModel.workspace.document.activeLayerID
+        let anchor = CanvasPoint(x: 8, y: 8)
+        let previous = CanvasPoint(x: 32, y: 8)
+        let current = CanvasPoint(x: 32, y: 32)
+
+        harness.beginTextureFill(at: anchor)
+        harness.updateTextureFill(to: previous)
+        harness.updateTextureFill(to: current)
+
+        var filledInteriorPixels = 0
+        var emptyInteriorPixels = 0
+        for y in 8...31 {
+            for x in 8...31 {
+                let point = CanvasPoint(x: Double(x) + 0.5, y: Double(y) + 0.5)
+                guard isPointInsideTriangle(point, anchor, previous, current) else { continue }
+                let alpha = try harness.alpha(atX: x, y: y, layerID: layerID)
+                if alpha > 0.01 {
+                    filledInteriorPixels += 1
+                } else {
+                    emptyInteriorPixels += 1
+                }
+            }
+        }
+
+        #expect(filledInteriorPixels > 0)
+        #expect(emptyInteriorPixels > 0)
+    }
+
+    @Test
+    @MainActor
     func pixelOperationsAcrossLayersPreserveUntouchedLayerContent() throws {
         let harness = try PixelHistoryHarness()
         let firstLayerID = harness.viewModel.workspace.document.layers[0].id
@@ -1190,6 +1259,19 @@ private struct PixelHistoryHarness {
         viewModel.commitSelection(at: points.last ?? first)
     }
 
+    func beginTextureFill(at point: CanvasPoint) {
+        viewModel.selectTool(.textureFill)
+        _ = viewModel.handleSelectionMouseDown(at: point, modifiers: [])
+    }
+
+    func updateTextureFill(to point: CanvasPoint) {
+        viewModel.updateSelection(to: point)
+    }
+
+    func endTextureFill(at point: CanvasPoint) {
+        viewModel.commitSelection(at: point)
+    }
+
     func drawBrushStroke(on layerID: LayerID, points: [CanvasStrokeSample]) throws {
         viewModel.selectLayer(layerID)
         viewModel.selectTool(.brush)
@@ -1313,4 +1395,22 @@ private func regionHasVisiblePixels(
         y += step
     }
     return false
+}
+
+private func isPointInsideTriangle(
+    _ point: CanvasPoint,
+    _ a: CanvasPoint,
+    _ b: CanvasPoint,
+    _ c: CanvasPoint
+) -> Bool {
+    func signedArea(_ p1: CanvasPoint, _ p2: CanvasPoint, _ p3: CanvasPoint) -> Double {
+        (p1.x - p3.x) * (p2.y - p3.y) - (p2.x - p3.x) * (p1.y - p3.y)
+    }
+
+    let d1 = signedArea(point, a, b)
+    let d2 = signedArea(point, b, c)
+    let d3 = signedArea(point, c, a)
+    let hasNegative = d1 < 0 || d2 < 0 || d3 < 0
+    let hasPositive = d1 > 0 || d2 > 0 || d3 > 0
+    return !(hasNegative && hasPositive)
 }

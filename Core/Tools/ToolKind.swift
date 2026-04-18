@@ -103,6 +103,7 @@ enum ToolKind: String, Codable, Sendable {
     case bucket
     case polygonSelection
     case lassoFill
+    case textureFill
     case straightLine
     case linearGradient
     case sectorGradient
@@ -130,6 +131,8 @@ extension ToolKind {
             return "point.3.connected.trianglepath.dotted"
         case .lassoFill:
             return "wand.and.stars"
+        case .textureFill:
+            return "square.grid.3x3.fill"
         case .rectangleSelection:
             return "rectangle.dashed"
         case .ellipseSelection:
@@ -167,6 +170,8 @@ extension ToolKind {
             return "几何选区"
         case .lassoFill:
             return "套索填充"
+        case .textureFill:
+            return "肌理填充"
         case .rectangleSelection:
             return "矩形选区"
         case .ellipseSelection:
@@ -202,6 +207,8 @@ extension ToolKind {
             return "L"
         case .lassoFill:
             return "K"
+        case .textureFill:
+            return nil
         case .rectangleSelection, .ellipseSelection:
             return "M"
         case .straightLine:
@@ -244,6 +251,7 @@ struct ToolSidebarGroup: Identifiable, Equatable, Sendable {
         .init(id: "bucket", tools: [.bucket, .linearGradient, .sectorGradient], shortcutKey: "G"),
         .init(id: "selection-l", tools: [.lassoSelection, .polygonSelection], shortcutKey: "L"),
         .init(id: "lasso-fill", tools: [.lassoFill], shortcutKey: "K"),
+        .init(id: "texture-fill", tools: [.textureFill], shortcutKey: nil),
         .init(id: "selection-m", tools: [.rectangleSelection, .ellipseSelection], shortcutKey: "M"),
         .init(id: "straight-line", tools: [.straightLine], shortcutKey: "U"),
         .init(id: "smudge", tools: [.smudge], shortcutKey: "T"),

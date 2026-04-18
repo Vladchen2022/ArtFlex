@@ -29,6 +29,7 @@ struct ToolSidebarView: View {
         .group("bucket"),
         .group("selection-l"),
         .group("lasso-fill"),
+        .group("texture-fill"),
         .group("selection-m"),
         .group("straight-line"),
         .group("gradient-j"),

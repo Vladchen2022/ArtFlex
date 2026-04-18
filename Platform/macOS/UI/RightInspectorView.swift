@@ -420,6 +420,12 @@ struct RightInspectorView: View {
         oldTool: ToolKind,
         newTool: ToolKind
     ) {
+        if newTool == .textureFill {
+            parameterInspectorTab = .brush
+            parameterInspectorAutoRestoreTab = nil
+            return
+        }
+
         let oldToolUsesColorAdjustmentPanel = usesColorAdjustmentParameterPanel(oldTool)
         let newToolUsesColorAdjustmentPanel = usesColorAdjustmentParameterPanel(newTool)
 
@@ -981,6 +987,18 @@ struct RightInspectorView: View {
 
     private var brushSection: some View {
         VStack(alignment: .leading, spacing: 8) {
+            if viewModel.workspace.toolSession.activeTool == .textureFill {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("肌理填充")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(Color.white.opacity(0.92))
+
+                    Text("阶段 0：当前无参数")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(Color.white.opacity(0.62))
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            } else {
             // ⚡️ 优化：使用防抖滑块，拖动结束时才更新
             OptimizedCompactSlider(
                 title: "间距",
@@ -1078,6 +1096,7 @@ struct RightInspectorView: View {
                     range: 0...1,
                     onCommit: { viewModel.setBuildUpOpacityCompensationAmount(Float($0)) }
                 )
+            }
             }
 
             HStack(spacing: 8) {
