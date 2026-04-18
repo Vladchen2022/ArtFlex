@@ -1001,6 +1001,26 @@ struct WorkspaceViewModelPixelHistoryTests {
 
     @Test
     @MainActor
+    func textureFillFinalReplayPreservesPhase3ResultWhenEndAddsNoNewSlice() throws {
+        let harness = try PixelHistoryHarness()
+        let layerID = harness.viewModel.workspace.document.activeLayerID
+        let anchor = CanvasPoint(x: 8, y: 8)
+        let previous = CanvasPoint(x: 32, y: 8)
+        let current = CanvasPoint(x: 32, y: 32)
+
+        harness.beginTextureFill(at: anchor)
+        harness.updateTextureFill(to: previous)
+        harness.updateTextureFill(to: current)
+
+        let beforeCommit = try harness.snapshot(layerID: layerID)
+        harness.endTextureFill(at: current)
+        let afterCommit = try harness.snapshot(layerID: layerID)
+
+        #expect(afterCommit == beforeCommit)
+    }
+
+    @Test
+    @MainActor
     func pixelOperationsAcrossLayersPreserveUntouchedLayerContent() throws {
         let harness = try PixelHistoryHarness()
         let firstLayerID = harness.viewModel.workspace.document.layers[0].id
@@ -1294,6 +1314,16 @@ private struct PixelHistoryHarness {
             throw PixelHistoryHarnessError.textureUnavailable
         }
         return try bootstrap.textureSerializer.samplePixel(texture: texture, x: x, y: y)
+    }
+
+    func snapshot(layerID: LayerID) throws -> LayerTextureSnapshot {
+        guard
+            let surfaceID = bootstrap.layerSurfaceStore.surfaceID(for: layerID),
+            let texture = bootstrap.layerSurfaceStore.texture(for: surfaceID)
+        else {
+            throw PixelHistoryHarnessError.textureUnavailable
+        }
+        return try bootstrap.textureSerializer.snapshot(texture: texture)
     }
 
     func waitForGradientCommitToFinish(timeoutIterations: Int = 80) async throws {

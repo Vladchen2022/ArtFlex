@@ -243,10 +243,6 @@ final class WorkspaceViewModel: ObservableObject {
 #endif
 
     private static let textureFillMinimumSliceDistance: Double = 2.5
-    private static let textureFillBaseStampRadius: Double = 5
-    private static let textureFillRadialSpacing: Double = 9
-    private static let textureFillChordSpacing: Double = 11
-    private static let textureFillGapProbability: Double = 0.35
     private var freeTransformMoveLogCount = 0
     private var wholeLayerInteractionBoundsCacheKey: WholeLayerInteractionBoundsKey?
     private var wholeLayerInteractionBoundsCacheEntry: WholeLayerInteractionBoundsCacheEntry?
@@ -5676,7 +5672,10 @@ final class WorkspaceViewModel: ObservableObject {
 
         _ = flushBrushEditingBoundary(reason: "beginTextureFillGesture")
 
-        guard let surfaceID = bootstrap.layerSurfaceStore.surfaceID(for: layerID) else {
+        guard
+            let surfaceID = bootstrap.layerSurfaceStore.surfaceID(for: layerID),
+            let texture = bootstrap.layerSurfaceStore.texture(for: surfaceID)
+        else {
             showStatus(.init(kind: .error, message: "无法访问当前图层"))
             textureFillGestureState = nil
             return false
@@ -5686,7 +5685,9 @@ final class WorkspaceViewModel: ObservableObject {
             layerID: layerID,
             surfaceID: surfaceID,
             anchorPoint: point,
-            sessionSeed: textureFillSessionSeed(anchorPoint: point)
+            sessionSeed: TextureFillProceduralField.sessionSeed(anchorPoint: point),
+            baseTexture: makeTextureFillReplayTextureCopy(from: texture),
+            rawEdgePoints: [point]
         )
         return true
     }
@@ -5708,6 +5709,7 @@ final class WorkspaceViewModel: ObservableObject {
                 state: &state
             )
             state.lastEdgePoint = point
+            state.rawEdgePoints.append(point)
             textureFillGestureState = state
             if didRender {
                 refreshSelectionOverlayOnly()
@@ -5720,6 +5722,7 @@ final class WorkspaceViewModel: ObservableObject {
         }
 
         state.lastEdgePoint = point
+        state.rawEdgePoints.append(point)
         textureFillGestureState = state
     }
 
@@ -5740,12 +5743,14 @@ final class WorkspaceViewModel: ObservableObject {
                 ),
                 state: &state
             )
+            state.rawEdgePoints.append(point)
         }
 
         guard state.renderedSliceCount > 0 else {
             return false
         }
 
+        _ = rebuildTextureFillFinalResult(from: state)
         recordDrawingActivityIfNeeded()
         showStatus(.init(kind: .success, message: "已填充肌理区域"))
         return true
@@ -5768,12 +5773,6 @@ final class WorkspaceViewModel: ObservableObject {
             return false
         }
 
-        let alphaLockTexture = makeAlphaLockTextureCopyIfNeeded(for: state.layerID, sourceTexture: texture)
-        guard alphaLockTexture != nil || !layerTransparentPixelLockEnabled(state.layerID) else {
-            showStatus(.init(kind: .error, message: "无法创建锁定透明像素遮罩"))
-            return false
-        }
-
         if !state.didCheckpointHistory {
             checkpointHistoryIfPossible(
                 operationKind: "textureFill.drag",
@@ -5784,9 +5783,40 @@ final class WorkspaceViewModel: ObservableObject {
             state.didCheckpointHistory = true
         }
 
+        let renderedSliceCount = renderTextureFillSlices(
+            slices,
+            into: texture,
+            layerID: state.layerID,
+            sessionSeed: state.sessionSeed
+        )
+        guard renderedSliceCount > 0 else {
+            return false
+        }
+
+        state.renderedSliceCount += renderedSliceCount
+        layerThumbnailCache.removeValue(forKey: state.layerID)
+        bootstrap.strokeEngine.resetBrushPipelineState()
+        clearRecentBrushAdjustmentState()
+        noteCanvasContentChanged()
+        refresh(invalidatedLayerIDs: [state.layerID])
+        return true
+    }
+
+    private func renderTextureFillSlices(
+        _ slices: [TextureFillSlice],
+        into texture: MTLTexture,
+        layerID: LayerID,
+        sessionSeed: UInt64
+    ) -> Int {
+        let alphaLockTexture = makeAlphaLockTextureCopyIfNeeded(for: layerID, sourceTexture: texture)
+        guard alphaLockTexture != nil || !layerTransparentPixelLockEnabled(layerID) else {
+            showStatus(.init(kind: .error, message: "无法创建锁定透明像素遮罩"))
+            return 0
+        }
+
         guard let commandBuffer = bootstrap.metalContext.commandQueue.makeCommandBuffer() else {
             showStatus(.init(kind: .error, message: "无法创建肌理填充命令缓冲"))
-            return false
+            return 0
         }
 
         let renderPassDescriptor = MTLRenderPassDescriptor()
@@ -5828,10 +5858,16 @@ final class WorkspaceViewModel: ObservableObject {
                 width: maxX - minX,
                 height: maxY - minY
             )
-            let texturedMask = texturedTextureFillSliceAlphaBytes(
-                selectionMaskRegion: selectionMask,
-                slice: slice,
-                sessionSeed: state.sessionSeed
+            let texturedMask = TextureFillProceduralField.alphaBytes(
+                baseMaskOriginX: selectionMask.originX,
+                baseMaskOriginY: selectionMask.originY,
+                width: selectionMask.width,
+                height: selectionMask.height,
+                baseMaskAlphaBytes: selectionMask.alphaBytes,
+                anchorPoint: slice.anchorPoint,
+                previousEdgePoint: slice.previousEdgePoint,
+                currentEdgePoint: slice.currentEdgePoint,
+                sessionSeed: sessionSeed
             )
             guard texturedMask.isEmpty == false else { continue }
 
@@ -5855,13 +5891,55 @@ final class WorkspaceViewModel: ObservableObject {
         }
 
         guard renderedSliceCount > 0 else {
-            return false
+            return 0
         }
 
         commandBuffer.commit()
         commandBuffer.waitUntilCompleted()
+        return renderedSliceCount
+    }
 
-        state.renderedSliceCount += renderedSliceCount
+    private func rebuildTextureFillFinalResult(from state: TextureFillGestureState) -> Bool {
+        guard
+            let liveTexture = bootstrap.layerSurfaceStore.texture(for: state.surfaceID),
+            let baseTexture = state.baseTexture,
+            let replayTexture = makeTextureFillReplayTextureCopy(from: baseTexture)
+        else {
+            return false
+        }
+
+        let edgePoints = Array(state.rawEdgePoints.dropFirst())
+        guard edgePoints.count >= 2 else {
+            return false
+        }
+
+        var slices: [TextureFillSlice] = []
+        slices.reserveCapacity(edgePoints.count - 1)
+        for index in 1..<edgePoints.count {
+            slices.append(
+                TextureFillSlice(
+                    anchorPoint: state.anchorPoint,
+                    previousEdgePoint: edgePoints[index - 1],
+                    currentEdgePoint: edgePoints[index]
+                )
+            )
+        }
+
+        let renderedSliceCount = renderTextureFillSlices(
+            slices,
+            into: replayTexture,
+            layerID: state.layerID,
+            sessionSeed: state.sessionSeed
+        )
+        guard renderedSliceCount > 0 else {
+            return false
+        }
+
+        bootstrap.layerSurfaceStore.copyTexture(
+            from: replayTexture,
+            to: liveTexture,
+            metal: bootstrap.metalContext
+        )
         layerThumbnailCache.removeValue(forKey: state.layerID)
         bootstrap.strokeEngine.resetBrushPipelineState()
         clearRecentBrushAdjustmentState()
@@ -5870,144 +5948,28 @@ final class WorkspaceViewModel: ObservableObject {
         return true
     }
 
-    private func texturedTextureFillSliceAlphaBytes(
-        selectionMaskRegion: SelectionMaskRegion,
-        slice: TextureFillSlice,
-        sessionSeed: UInt64
-    ) -> Data {
-        guard selectionMaskRegion.width > 0, selectionMaskRegion.height > 0 else {
-            return Data()
+    private func makeTextureFillReplayTextureCopy(from sourceTexture: MTLTexture) -> MTLTexture? {
+        guard let copyTexture = bootstrap.layerSurfaceStore.makeTexture(
+            width: sourceTexture.width,
+            height: sourceTexture.height,
+            pixelFormat: sourceTexture.pixelFormat,
+            usage: [.shaderRead, .shaderWrite, .renderTarget],
+            storageMode: .private,
+            metal: bootstrap.metalContext
+        ) else {
+            return nil
         }
 
-        let totalCount = selectionMaskRegion.width * selectionMaskRegion.height
-        var baseMask = [UInt8](repeating: 0, count: totalCount)
-        selectionMaskRegion.withAlphaBytes { alphaBytes in
-            guard let source = alphaBytes.baseAddress else { return }
-            baseMask.withUnsafeMutableBufferPointer { destination in
-                guard let target = destination.baseAddress else { return }
-                target.update(from: source, count: totalCount)
-            }
-        }
-
-        let previousDistance = max(textureFillDistance(from: slice.anchorPoint, to: slice.previousEdgePoint), 0.0001)
-        let currentDistance = max(textureFillDistance(from: slice.anchorPoint, to: slice.currentEdgePoint), 0.0001)
-        let maxRadius = max(previousDistance, currentDistance)
-        guard maxRadius > 0 else { return Data(baseMask) }
-
-        var dabMask = [UInt8](repeating: 0, count: totalCount)
-        let baseRadius = Self.textureFillBaseStampRadius
-        var randomIndex = 0
-        var radius = baseRadius
-
-        while radius <= maxRadius + baseRadius {
-            let previousT = min(max(radius / previousDistance, 0), 1)
-            let currentT = min(max(radius / currentDistance, 0), 1)
-            let previousPoint = interpolatedPoint(slice.anchorPoint, slice.previousEdgePoint, t: previousT)
-            let currentPoint = interpolatedPoint(slice.anchorPoint, slice.currentEdgePoint, t: currentT)
-            let spanLength = textureFillDistance(from: previousPoint, to: currentPoint)
-            let stepCount = max(Int((spanLength / Self.textureFillChordSpacing).rounded(.up)), 1)
-            let rotation = atan2(currentPoint.y - previousPoint.y, currentPoint.x - previousPoint.x)
-
-            for index in 0...stepCount {
-                let t = stepCount == 0 ? 0.5 : Double(index) / Double(stepCount)
-                let gapRoll = textureFillRandomUnit(sessionSeed: sessionSeed, index: randomIndex)
-                randomIndex += 1
-                if gapRoll < Self.textureFillGapProbability {
-                    continue
-                }
-
-                let center = interpolatedPoint(previousPoint, currentPoint, t: t)
-                let radiusScale = 0.8 + (0.4 * textureFillRandomUnit(sessionSeed: sessionSeed, index: randomIndex))
-                randomIndex += 1
-                let secondaryScale = 0.55 + (0.25 * textureFillRandomUnit(sessionSeed: sessionSeed, index: randomIndex))
-                randomIndex += 1
-                let jitterX = (textureFillRandomUnit(sessionSeed: sessionSeed, index: randomIndex) - 0.5) * 1.5
-                randomIndex += 1
-                let jitterY = (textureFillRandomUnit(sessionSeed: sessionSeed, index: randomIndex) - 0.5) * 1.5
-                randomIndex += 1
-
-                stampEllipse(
-                    into: &dabMask,
-                    region: selectionMaskRegion,
-                    center: CanvasPoint(x: center.x + jitterX, y: center.y + jitterY),
-                    radiusX: max(baseRadius * radiusScale, 1),
-                    radiusY: max(baseRadius * secondaryScale, 1),
-                    rotationRadians: rotation
-                )
-            }
-
-            radius += Self.textureFillRadialSpacing
-        }
-
-        var output = [UInt8](repeating: 0, count: totalCount)
-        for index in 0..<totalCount where baseMask[index] > 0 && dabMask[index] > 0 {
-            output[index] = min(baseMask[index], dabMask[index])
-        }
-        return Data(output)
-    }
-
-    private func textureFillSessionSeed(anchorPoint: CanvasPoint) -> UInt64 {
-        let quantizedX = UInt64(bitPattern: Int64((anchorPoint.x * 1024).rounded()))
-        let quantizedY = UInt64(bitPattern: Int64((anchorPoint.y * 1024).rounded()))
-        return textureFillSplitMix64(quantizedX ^ (quantizedY &* 0x9E37_79B9_7F4A_7C15))
-    }
-
-    private func textureFillRandomUnit(sessionSeed: UInt64, index: Int) -> Double {
-        let mixed = textureFillSplitMix64(sessionSeed &+ (UInt64(index) &* 0x9E37_79B9_7F4A_7C15))
-        return Double(mixed >> 11) / Double(1 << 53)
-    }
-
-    private func textureFillSplitMix64(_ value: UInt64) -> UInt64 {
-        var state = value &+ 0x9E37_79B9_7F4A_7C15
-        state = (state ^ (state >> 30)) &* 0xBF58_476D_1CE4_E5B9
-        state = (state ^ (state >> 27)) &* 0x94D0_49BB_1331_11EB
-        return state ^ (state >> 31)
-    }
-
-    private func interpolatedPoint(_ start: CanvasPoint, _ end: CanvasPoint, t: Double) -> CanvasPoint {
-        CanvasPoint(
-            x: start.x + ((end.x - start.x) * t),
-            y: start.y + ((end.y - start.y) * t)
+        bootstrap.layerSurfaceStore.copyTexture(
+            from: sourceTexture,
+            to: copyTexture,
+            metal: bootstrap.metalContext
         )
+        return copyTexture
     }
 
     private func textureFillDistance(from start: CanvasPoint, to end: CanvasPoint) -> Double {
         hypot(end.x - start.x, end.y - start.y)
-    }
-
-    private func stampEllipse(
-        into alphaBytes: inout [UInt8],
-        region: SelectionMaskRegion,
-        center: CanvasPoint,
-        radiusX: Double,
-        radiusY: Double,
-        rotationRadians: Double
-    ) {
-        guard radiusX > 0, radiusY > 0 else { return }
-
-        let minX = max(Int(floor(center.x - radiusX)) - region.originX, 0)
-        let minY = max(Int(floor(center.y - radiusY)) - region.originY, 0)
-        let maxX = min(Int(ceil(center.x + radiusX)) - region.originX, region.width - 1)
-        let maxY = min(Int(ceil(center.y + radiusY)) - region.originY, region.height - 1)
-        guard minX <= maxX, minY <= maxY else { return }
-
-        let cosTheta = cos(rotationRadians)
-        let sinTheta = sin(rotationRadians)
-
-        for localY in minY...maxY {
-            let worldY = Double(region.originY + localY) + 0.5
-            for localX in minX...maxX {
-                let worldX = Double(region.originX + localX) + 0.5
-                let translatedX = worldX - center.x
-                let translatedY = worldY - center.y
-                let rotatedX = (translatedX * cosTheta) + (translatedY * sinTheta)
-                let rotatedY = (-translatedX * sinTheta) + (translatedY * cosTheta)
-                let normalized = (rotatedX * rotatedX) / (radiusX * radiusX) + (rotatedY * rotatedY) / (radiusY * radiusY)
-                if normalized <= 1 {
-                    alphaBytes[(localY * region.width) + localX] = 255
-                }
-            }
-        }
     }
 
     // MARK: - 选区鼠标交互
@@ -12571,6 +12533,8 @@ private struct TextureFillGestureState {
     var surfaceID: LayerSurfaceID
     var anchorPoint: CanvasPoint
     var sessionSeed: UInt64
+    var baseTexture: MTLTexture?
+    var rawEdgePoints: [CanvasPoint]
     var lastEdgePoint: CanvasPoint?
     var didCheckpointHistory = false
     var renderedSliceCount = 0
