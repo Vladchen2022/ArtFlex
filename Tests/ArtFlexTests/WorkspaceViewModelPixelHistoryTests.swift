@@ -1001,7 +1001,7 @@ struct WorkspaceViewModelPixelHistoryTests {
 
     @Test
     @MainActor
-    func textureFillFinalReplayPreservesPhase3ResultWhenEndAddsNoNewSlice() throws {
+    func textureFillFinalReplayPreservesTextureGapsWhenEndAddsNoNewSlice() throws {
         let harness = try PixelHistoryHarness()
         let layerID = harness.viewModel.workspace.document.activeLayerID
         let anchor = CanvasPoint(x: 8, y: 8)
@@ -1011,12 +1011,83 @@ struct WorkspaceViewModelPixelHistoryTests {
         harness.beginTextureFill(at: anchor)
         harness.updateTextureFill(to: previous)
         harness.updateTextureFill(to: current)
-
-        let beforeCommit = try harness.snapshot(layerID: layerID)
         harness.endTextureFill(at: current)
-        let afterCommit = try harness.snapshot(layerID: layerID)
 
-        #expect(afterCommit == beforeCommit)
+        var filledInteriorPixels = 0
+        var emptyInteriorPixels = 0
+        for y in 8...31 {
+            for x in 8...31 {
+                let point = CanvasPoint(x: Double(x) + 0.5, y: Double(y) + 0.5)
+                guard isPointInsideTriangle(point, anchor, previous, current) else { continue }
+                let alpha = try harness.alpha(atX: x, y: y, layerID: layerID)
+                if alpha > 0.01 {
+                    filledInteriorPixels += 1
+                } else {
+                    emptyInteriorPixels += 1
+                }
+            }
+        }
+
+        #expect(filledInteriorPixels > 0)
+        #expect(emptyInteriorPixels > 0)
+    }
+
+    @Test
+    @MainActor
+    func textureFillGestureResetsWhenSwitchingTools() throws {
+        let harness = try PixelHistoryHarness()
+        let layerID = harness.viewModel.workspace.document.activeLayerID
+
+        harness.beginTextureFill(at: .init(x: 8, y: 8))
+        harness.updateTextureFill(to: .init(x: 24, y: 8))
+        harness.viewModel.selectTool(.brush)
+
+        harness.beginTextureFill(at: .init(x: 40, y: 40))
+        harness.updateTextureFill(to: .init(x: 56, y: 40))
+        harness.updateTextureFill(to: .init(x: 56, y: 56))
+        harness.endTextureFill(at: .init(x: 40, y: 56))
+
+        #expect(try harness.alpha(atX: 12, y: 12, layerID: layerID) < 0.01)
+        #expect(
+            try regionHasVisiblePixels(
+                harness: harness,
+                layerID: layerID,
+                minX: 42,
+                maxX: 56,
+                minY: 42,
+                maxY: 56,
+                step: 2
+            )
+        )
+    }
+
+    @Test
+    @MainActor
+    func textureFillGestureCancelsCleanly() throws {
+        let harness = try PixelHistoryHarness()
+        let layerID = harness.viewModel.workspace.document.activeLayerID
+
+        harness.beginTextureFill(at: .init(x: 8, y: 8))
+        harness.updateTextureFill(to: .init(x: 24, y: 8))
+        harness.viewModel.cancelCanvasToolInteraction()
+
+        harness.beginTextureFill(at: .init(x: 40, y: 40))
+        harness.updateTextureFill(to: .init(x: 56, y: 40))
+        harness.updateTextureFill(to: .init(x: 56, y: 56))
+        harness.endTextureFill(at: .init(x: 40, y: 56))
+
+        #expect(try harness.alpha(atX: 12, y: 12, layerID: layerID) < 0.01)
+        #expect(
+            try regionHasVisiblePixels(
+                harness: harness,
+                layerID: layerID,
+                minX: 42,
+                maxX: 56,
+                minY: 42,
+                maxY: 56,
+                step: 2
+            )
+        )
     }
 
     @Test

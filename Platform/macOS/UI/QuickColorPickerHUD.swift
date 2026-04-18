@@ -1,5 +1,18 @@
 import SwiftUI
 
+func quickColorPickerCanUseSteppedSlider(
+    range: ClosedRange<Double>,
+    step: Double
+) -> Bool {
+    guard step.isFinite, step > 0 else {
+        return false
+    }
+    guard range.lowerBound.isFinite, range.upperBound.isFinite else {
+        return false
+    }
+    return range.upperBound > range.lowerBound
+}
+
 struct QuickColorPickerHUD: View {
     let state: QuickColorPickerState
     let presentation: CanvasPresentation
@@ -204,18 +217,29 @@ private struct QuickColorPickerMiniSliderRow: View {
                 .font(.system(size: 10, weight: .semibold))
                 .foregroundStyle(Color.white.opacity(0.78))
                 .frame(width: 32, alignment: .leading)
-            Slider(
-                value: Binding(
-                    get: { displayedValue },
-                    set: { onChange(resolvedValue(fromDisplayedValue: $0)) }
-                ),
-                in: range,
-                step: step,
-                onEditingChanged: onEditingChanged
-            )
-            .tint(Color.accentColor)
-            .controlSize(.mini)
-            .disabled(range.lowerBound == range.upperBound)
+            if quickColorPickerCanUseSteppedSlider(range: range, step: step) {
+                Slider(
+                    value: Binding(
+                        get: { displayedValue },
+                        set: { onChange(resolvedValue(fromDisplayedValue: $0)) }
+                    ),
+                    in: range,
+                    step: step,
+                    onEditingChanged: onEditingChanged
+                )
+                .tint(Color.accentColor)
+                .controlSize(.mini)
+            } else {
+                Capsule()
+                    .fill(Color.white.opacity(0.16))
+                    .frame(height: 4)
+                    .overlay {
+                        Capsule()
+                            .stroke(Color.white.opacity(0.10), lineWidth: 1)
+                    }
+                    .padding(.horizontal, 2)
+                    .accessibilityHidden(true)
+            }
 
             Text(valueLabel)
                 .font(.system(size: 10, weight: .bold).monospacedDigit())

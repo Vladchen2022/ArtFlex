@@ -373,6 +373,9 @@ final class WorkspaceViewModel: ObservableObject {
             || (currentTool != .brush && isBrushLikeTool(currentTool) && !isBrushLikeTool(normalizedTool)) {
             _ = drainPendingBrushCommitsIfNeeded(resetLiveSession: true)
         }
+        if currentTool == .textureFill, normalizedTool != .textureFill {
+            resetTextureFillGesture(reason: "toolChange")
+        }
         performToolSelection(normalizedTool)
         if shouldRevealBrushLibrary {
             revealBrushLibraryPanel()
@@ -4313,6 +4316,9 @@ final class WorkspaceViewModel: ObservableObject {
             guard resolveColorAdjustmentSessionIfNeeded(reason: .layerChange) else { return }
             guard resolveCurveAdjustmentSessionIfNeeded(reason: .layerChange) else { return }
             resolveTransformSession(reason: .layerChange)
+            if workspace.toolSession.activeTool == .textureFill {
+                resetTextureFillGesture(reason: "layerChange")
+            }
         }
         bootstrap.workspaceStore.updateDocument { document in
             document.setActiveLayer(layerID)
@@ -4333,6 +4339,11 @@ final class WorkspaceViewModel: ObservableObject {
         checkpointHistoryIfPossible()
         bootstrap.workspaceStore.updateDocument { document in
             document.toggleLayerLock(layerID)
+        }
+        if workspace.toolSession.activeTool == .textureFill,
+           workspace.document.activeLayerID == layerID,
+           workspace.document.layers.first(where: { $0.id == layerID })?.isLocked == true {
+            resetTextureFillGesture(reason: "layerLock")
         }
         refresh()
     }
@@ -4858,6 +4869,8 @@ final class WorkspaceViewModel: ObservableObject {
             return
         }
         switch workspace.toolSession.activeTool {
+        case .textureFill:
+            resetTextureFillGesture(reason: "cancel")
         case .straightLine:
             cancelStraightLineInteraction()
         case .linearGradient:
@@ -5666,7 +5679,7 @@ final class WorkspaceViewModel: ObservableObject {
     private func beginTextureFillGesture(at point: CanvasPoint) -> Bool {
         guard let layerID = bootstrap.interactionController.activeEditableLayerID() else {
             showStatus(.init(kind: .info, message: "当前图层已锁定"))
-            textureFillGestureState = nil
+            resetTextureFillGesture(reason: "beginLockedLayer")
             return false
         }
 
@@ -5677,7 +5690,7 @@ final class WorkspaceViewModel: ObservableObject {
             let texture = bootstrap.layerSurfaceStore.texture(for: surfaceID)
         else {
             showStatus(.init(kind: .error, message: "无法访问当前图层"))
-            textureFillGestureState = nil
+            resetTextureFillGesture(reason: "beginMissingSurface")
             return false
         }
 
@@ -5690,6 +5703,11 @@ final class WorkspaceViewModel: ObservableObject {
             rawEdgePoints: [point]
         )
         return true
+    }
+
+    private func resetTextureFillGesture(reason: String) {
+        _ = reason
+        textureFillGestureState = nil
     }
 
     private func updateTextureFillGesture(to point: CanvasPoint) {
@@ -5935,17 +5953,111 @@ final class WorkspaceViewModel: ObservableObject {
             return false
         }
 
-        bootstrap.layerSurfaceStore.copyTexture(
-            from: replayTexture,
-            to: liveTexture,
-            metal: bootstrap.metalContext
+        let didApplySmoothFinalMask = applyTextureFillSmoothFinalMask(
+            replayTexture: replayTexture,
+            baseTexture: baseTexture,
+            liveTexture: liveTexture,
+            state: state
         )
+        if !didApplySmoothFinalMask {
+            bootstrap.layerSurfaceStore.copyTexture(
+                from: replayTexture,
+                to: liveTexture,
+                metal: bootstrap.metalContext
+            )
+        }
         layerThumbnailCache.removeValue(forKey: state.layerID)
         bootstrap.strokeEngine.resetBrushPipelineState()
         clearRecentBrushAdjustmentState()
         noteCanvasContentChanged()
         refresh(invalidatedLayerIDs: [state.layerID])
         return true
+    }
+
+    private func applyTextureFillSmoothFinalMask(
+        replayTexture: MTLTexture,
+        baseTexture: MTLTexture,
+        liveTexture: MTLTexture,
+        state: TextureFillGestureState
+    ) -> Bool {
+        let canvasSize = CanvasSize(width: replayTexture.width, height: replayTexture.height)
+        guard let smoothShape = textureFillSmoothFinalSelectionShape(
+            from: state.rawEdgePoints,
+            anchorPoint: state.anchorPoint,
+            canvasSize: canvasSize
+        ) else {
+            return false
+        }
+
+        let minX = max(Int(smoothShape.bounds.minX.rounded(.down)), 0)
+        let minY = max(Int(smoothShape.bounds.minY.rounded(.down)), 0)
+        let maxX = min(Int(smoothShape.bounds.maxX.rounded(.up)), replayTexture.width)
+        let maxY = min(Int(smoothShape.bounds.maxY.rounded(.up)), replayTexture.height)
+        guard minX < maxX, minY < maxY else {
+            return false
+        }
+
+        let boundedMask = selectionMaskRegion(
+            for: smoothShape,
+            canvasSize: canvasSize,
+            originX: minX,
+            originY: minY,
+            width: maxX - minX,
+            height: maxY - minY
+        )
+        guard boundedMask.width > 0, boundedMask.height > 0, !boundedMask.alphaBytes.isEmpty else {
+            return false
+        }
+
+        do {
+            let replaySnapshot = try bootstrap.textureSerializer.snapshot(
+                texture: replayTexture,
+                originX: minX,
+                originY: minY,
+                width: maxX - minX,
+                height: maxY - minY
+            )
+            let baseSnapshot = try bootstrap.textureSerializer.snapshot(
+                texture: baseTexture,
+                originX: minX,
+                originY: minY,
+                width: maxX - minX,
+                height: maxY - minY
+            )
+            let finalSnapshot = Self.maskCompositedSnapshot(
+                base: baseSnapshot,
+                overlay: replaySnapshot,
+                using: boundedMask
+            )
+            try bootstrap.textureSerializer.restore(
+                snapshot: finalSnapshot,
+                into: liveTexture,
+                destinationX: minX,
+                destinationY: minY
+            )
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    private func textureFillSmoothFinalSelectionShape(
+        from rawEdgePoints: [CanvasPoint],
+        anchorPoint: CanvasPoint,
+        canvasSize: CanvasSize
+    ) -> SelectionShape? {
+        let smoothedPoints = smoothedClosedLassoPoints(
+            rawPoints: rawEdgePoints,
+            closingTo: anchorPoint
+        )
+        guard smoothedPoints.count >= 3 else {
+            return nil
+        }
+        return SelectionShape(
+            kind: .lasso,
+            bounds: CanvasRect.bounding(points: smoothedPoints),
+            pathPoints: smoothedPoints
+        ).clamped(to: canvasSize)
     }
 
     private func makeTextureFillReplayTextureCopy(from sourceTexture: MTLTexture) -> MTLTexture? {
@@ -7227,6 +7339,64 @@ final class WorkspaceViewModel: ObservableObject {
             height: snapshot.height,
             bytesPerRow: snapshot.bytesPerRow,
             pixelData: Data(bytes)
+        )
+    }
+
+    private static func maskCompositedSnapshot(
+        base: LayerTextureSnapshot,
+        overlay: LayerTextureSnapshot,
+        using selectionMaskRegion: SelectionMaskRegion
+    ) -> LayerTextureSnapshot {
+        guard
+            base.width == overlay.width,
+            base.height == overlay.height,
+            base.bytesPerRow == overlay.bytesPerRow,
+            base.width == selectionMaskRegion.width,
+            base.height == selectionMaskRegion.height
+        else {
+            return overlay
+        }
+
+        let bytesPerPixel = 4
+        var output = [UInt8](base.pixelData)
+        let overlayBytes = [UInt8](overlay.pixelData)
+
+        selectionMaskRegion.withAlphaBytes { maskBytes in
+            guard let maskBaseAddress = maskBytes.baseAddress else { return }
+
+            for y in 0..<base.height {
+                let maskRow = y * selectionMaskRegion.width
+                let byteRow = y * base.bytesPerRow
+                for x in 0..<base.width {
+                    let maskAlpha = Int(maskBaseAddress[maskRow + x])
+                    guard maskAlpha > 0 else { continue }
+
+                    let index = byteRow + (x * bytesPerPixel)
+                    if maskAlpha == 255 {
+                        output[index] = overlayBytes[index]
+                        output[index + 1] = overlayBytes[index + 1]
+                        output[index + 2] = overlayBytes[index + 2]
+                        output[index + 3] = overlayBytes[index + 3]
+                        continue
+                    }
+
+                    let inverse = 255 - maskAlpha
+                    for channel in 0..<bytesPerPixel {
+                        let baseValue = Int(output[index + channel])
+                        let overlayValue = Int(overlayBytes[index + channel])
+                        output[index + channel] = UInt8(
+                            (baseValue * inverse + overlayValue * maskAlpha + 127) / 255
+                        )
+                    }
+                }
+            }
+        }
+
+        return LayerTextureSnapshot(
+            width: base.width,
+            height: base.height,
+            bytesPerRow: base.bytesPerRow,
+            pixelData: Data(output)
         )
     }
 
