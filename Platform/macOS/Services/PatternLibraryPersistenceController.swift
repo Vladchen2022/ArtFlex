@@ -84,8 +84,6 @@ final class PatternLibraryPersistenceController: @unchecked Sendable {
     private static let maximumImportDimension = 1000
     private let fileManager: FileManager
     private let rootDirectoryURL: URL?
-    private let encoder = JSONEncoder()
-    private let decoder = JSONDecoder()
 
     init(
         fileManager: FileManager = .default,
@@ -93,13 +91,12 @@ final class PatternLibraryPersistenceController: @unchecked Sendable {
     ) {
         self.fileManager = fileManager
         self.rootDirectoryURL = rootDirectoryURL
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
     }
 
     func loadLibrary() -> PatternLibraryLoadResult? {
         guard let url = persistentLibraryURL() else { return nil }
         guard let data = try? Data(contentsOf: url) else { return nil }
-        guard let library = try? decoder.decode(PatternLibraryState.self, from: data) else {
+        guard let library = try? JSONDecoder().decode(PatternLibraryState.self, from: data) else {
             return nil
         }
 
@@ -117,7 +114,7 @@ final class PatternLibraryPersistenceController: @unchecked Sendable {
             ])
         }
 
-        let data = try encoder.encode(library)
+        let data = try Self.makeEncoder().encode(library)
         try data.write(to: url, options: .atomic)
         purgeOrphanedManagedAssets(for: library)
     }
@@ -239,7 +236,8 @@ final class PatternLibraryPersistenceController: @unchecked Sendable {
         _ fileURLs: [URL],
         recipe: PatternImportRecipe,
         eraseMaskDataByFileURL: [URL: Data] = [:],
-        into library: PatternLibraryState
+        into library: PatternLibraryState,
+        persistsLibrary: Bool = true
     ) throws -> PatternLibraryImportBatchResult {
         guard !fileURLs.isEmpty else {
             return PatternLibraryImportBatchResult(
@@ -325,7 +323,9 @@ final class PatternLibraryPersistenceController: @unchecked Sendable {
             mutableLibrary.selectedItemID = firstImportedID
         }
 
-        try saveLibrary(mutableLibrary)
+        if persistsLibrary {
+            try saveLibrary(mutableLibrary)
+        }
 
         return PatternLibraryImportBatchResult(
             updatedLibrary: mutableLibrary,
@@ -333,6 +333,12 @@ final class PatternLibraryPersistenceController: @unchecked Sendable {
             skippedDuplicateCount: skippedDuplicateCount,
             failedFileNames: failedFileNames
         )
+    }
+
+    private static func makeEncoder() -> JSONEncoder {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        return encoder
     }
 
     private func sanitizedLibraryRemovingMissingAssets(

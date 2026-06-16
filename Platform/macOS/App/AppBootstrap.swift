@@ -134,8 +134,13 @@ struct AppBootstrap {
             metalContext: metalContext
         )
         self.filePanelService = FilePanelService()
-        self.brushLibraryPersistenceController = brushLibraryPersistenceController ?? BrushLibraryPersistenceController()
-        self.patternLibraryPersistenceController = patternLibraryPersistenceController ?? PatternLibraryPersistenceController()
+        let testPersistenceRoot = Self.testPersistenceRootURL()
+        self.brushLibraryPersistenceController = brushLibraryPersistenceController ?? BrushLibraryPersistenceController(
+            rootDirectoryURL: testPersistenceRoot
+        )
+        self.patternLibraryPersistenceController = patternLibraryPersistenceController ?? PatternLibraryPersistenceController(
+            rootDirectoryURL: testPersistenceRoot
+        )
         self.imagePaletteExtractor = ImagePaletteExtractor()
         self.timelapseRecorder = TimelapseRecorderController(
             workspaceStore: workspaceStore,
@@ -143,5 +148,16 @@ struct AppBootstrap {
             serializer: textureSerializer
         )
         self.drawingStatsController = drawingStatsController ?? DrawingStatsController()
+    }
+
+    private static func testPersistenceRootURL() -> URL? {
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["XCTestConfigurationFilePath"] != nil else {
+            return nil
+        }
+        return FileManager.default.temporaryDirectory
+            .appendingPathComponent("ArtFlexTests-\(ProcessInfo.processInfo.globallyUniqueString)", isDirectory: true)
+            .appendingPathComponent("ApplicationSupport", isDirectory: true)
+            .appendingPathComponent("ArtFlex", isDirectory: true)
     }
 }

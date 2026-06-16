@@ -246,6 +246,51 @@ struct LayerTextureSerializerQueueSafetyTests {
     }
 
     @Test
+    func eyedropperSamplerPrefersDisplayedLayerTextureOverCommittedLayerTexture() throws {
+        guard let metalContext = MetalDeviceContext() else {
+            Issue.record("Metal unavailable")
+            return
+        }
+
+        let document = makeAuditDocument(canvasSize: .init(width: 8, height: 8))
+        let layerSurfaceStore = StageOneLayerSurfaceStore()
+        layerSurfaceStore.prepareTextures(for: document, metal: metalContext)
+        let serializer = LayerTextureSerializer(metalContext: metalContext)
+        let eyedropper = EyedropperSampler(serializer: serializer)
+
+        guard
+            let surfaceID = layerSurfaceStore.surfaceID(for: document.activeLayerID),
+            let committedTexture = layerSurfaceStore.texture(for: surfaceID),
+            let displayedTexture = layerSurfaceStore.makeTexture(
+                width: 8,
+                height: 8,
+                pixelFormat: committedTexture.pixelFormat,
+                metal: metalContext
+            )
+        else {
+            Issue.record("Textures missing")
+            return
+        }
+
+        try serializer.restore(snapshot: opaqueSnapshot(width: 8, height: 8, red: 255), into: committedTexture)
+        try serializer.restore(snapshot: opaqueSnapshot(width: 8, height: 8, green: 255), into: displayedTexture)
+
+        let color = try eyedropper.sampleVisibleColor(
+            at: .init(x: 0, y: 0),
+            document: document,
+            layerSurfaceStore: layerSurfaceStore,
+            displayTextureForLayer: { layerID in
+                layerID == document.activeLayerID ? displayedTexture : nil
+            }
+        )
+
+        #expect(color.red < 0.01)
+        #expect(color.green > 0.99)
+        #expect(color.blue < 0.01)
+        #expect(color.alpha > 0.99)
+    }
+
+    @Test
     func trimAndPurgePreserveSerializerCorrectness() throws {
         guard let metalContext = MetalDeviceContext() else {
             Issue.record("Metal unavailable")
@@ -333,11 +378,21 @@ private func makeAuditDocument(canvasSize: CanvasSize) -> ArtDocument {
 }
 
 private func opaqueRedSnapshot(width: Int, height: Int, red: UInt8 = 255) -> LayerTextureSnapshot {
+    opaqueSnapshot(width: width, height: height, red: red)
+}
+
+private func opaqueSnapshot(
+    width: Int,
+    height: Int,
+    red: UInt8 = 0,
+    green: UInt8 = 0,
+    blue: UInt8 = 0
+) -> LayerTextureSnapshot {
     let bytesPerRow = width * 4
     var pixels = [UInt8](repeating: 0, count: bytesPerRow * height)
     for offset in stride(from: 0, to: pixels.count, by: 4) {
-        pixels[offset] = 0
-        pixels[offset + 1] = 0
+        pixels[offset] = blue
+        pixels[offset + 1] = green
         pixels[offset + 2] = red
         pixels[offset + 3] = 255
     }

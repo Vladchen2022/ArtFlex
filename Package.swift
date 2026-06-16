@@ -29,6 +29,7 @@ let package = Package(
                 "DECISIONS.md",
                 "Docs",
                 "HANDOFF.md",
+                "LICENSE",
                 "README.md",
                 "selection-trace.log",
                 "Tests"

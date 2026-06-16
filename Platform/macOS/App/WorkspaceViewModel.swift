@@ -166,6 +166,8 @@ final class WorkspaceViewModel: ObservableObject {
     private(set) var samePathPreviewDebugShape: SelectionShape?
 
     private let bootstrap: AppBootstrap
+    private let brushLibraryPersistenceQueue = PersistenceSaveQueue(label: "ArtFlex.BrushLibraryPersistence")
+    private let patternLibraryPersistenceQueue = PersistenceSaveQueue(label: "ArtFlex.PatternLibraryPersistence")
     var ideationBranchActivityHandler: (() -> Void)?
     var ideationOperationHandler: ((IdeationCanvasOperation) -> Void)?
     var ideationUndoHandler: (() -> Bool)?
@@ -3046,7 +3048,10 @@ final class WorkspaceViewModel: ObservableObject {
             let sampledColor = try bootstrap.eyedropperSampler.sampleVisibleColor(
                 at: point,
                 document: workspace.document,
-                layerSurfaceStore: bootstrap.layerSurfaceStore
+                layerSurfaceStore: bootstrap.layerSurfaceStore,
+                displayTextureForLayer: { [weak self] layerID in
+                    self?.brushDisplayTexture(for: layerID)
+                }
             )
             rememberReferenceImagePreviousColor(before: sampledColor)
             bootstrap.workspaceStore.updateToolSession { session in
@@ -3657,12 +3662,21 @@ final class WorkspaceViewModel: ObservableObject {
                     selectedFileURLs,
                     recipe: recipe,
                     eraseMaskDataByFileURL: eraseMaskDataByFileURL,
-                    into: currentLibrary
+                    into: currentLibrary,
+                    persistsLibrary: false
                 )
                 await MainActor.run {
                     guard let self else { return }
+                    let mergedResult = Self.mergedPatternImportResult(
+                        result,
+                        into: self.bootstrap.workspaceStore.state.patternLibrary
+                    )
+                    let libraryDidChange = mergedResult.updatedLibrary != self.bootstrap.workspaceStore.state.patternLibrary
                     self.bootstrap.workspaceStore.updatePatternLibrary { library in
-                        library = result.updatedLibrary
+                        library = mergedResult.updatedLibrary
+                    }
+                    if libraryDidChange {
+                        self.persistPatternLibrary()
                     }
                     self.isPatternImporting = false
                     self.patternImportPreviewTask?.cancel()
@@ -3675,7 +3689,7 @@ final class WorkspaceViewModel: ObservableObject {
                     self.patternImportCurrentEraseMaskData = nil
                     self.isPatternImportPreviewLoading = false
                     self.refreshLightweight()
-                    self.showPatternImportResultStatus(result)
+                    self.showPatternImportResultStatus(mergedResult)
                 }
             } catch {
                 await MainActor.run {
@@ -3753,6 +3767,41 @@ final class WorkspaceViewModel: ObservableObject {
                 self.isPatternImportPreviewLoading = false
             }
         }
+    }
+
+    nonisolated static func mergedPatternImportResult(
+        _ result: PatternLibraryImportBatchResult,
+        into currentLibrary: PatternLibraryState
+    ) -> PatternLibraryImportBatchResult {
+        var mergedLibrary = currentLibrary
+        var mergedImportedItems: [PatternLibraryItem] = []
+        var skippedDuplicateCount = result.skippedDuplicateCount
+
+        for item in result.importedItems {
+            let alreadyPresent = mergedLibrary.items.contains { existing in
+                existing.id == item.id || existing.renderAssetLocation == item.renderAssetLocation
+            }
+            guard !alreadyPresent else {
+                skippedDuplicateCount += 1
+                continue
+            }
+
+            var mergedItem = item
+            mergedItem.slotIndex = mergedLibrary.firstEmptySlotIndex()
+            mergedLibrary.items.append(mergedItem)
+            mergedImportedItems.append(mergedItem)
+        }
+
+        if let firstImportedID = mergedImportedItems.first?.id {
+            mergedLibrary.selectedItemID = firstImportedID
+        }
+
+        return PatternLibraryImportBatchResult(
+            updatedLibrary: mergedLibrary,
+            importedItems: mergedImportedItems,
+            skippedDuplicateCount: skippedDuplicateCount,
+            failedFileNames: result.failedFileNames
+        )
     }
 
     private func showPatternImportResultStatus(_ result: PatternLibraryImportBatchResult) {
@@ -9683,16 +9732,14 @@ final class WorkspaceViewModel: ObservableObject {
         let library = bootstrap.workspaceStore.state.brushLibrary
         let tipImageLibrary = bootstrap.workspaceStore.state.tipImageLibrary
         let controller = bootstrap.brushLibraryPersistenceController
-        DispatchQueue.global(qos: .utility).async { [weak self] in
-            do {
-                try controller.saveResources(
-                    library: library,
-                    tipImageLibrary: tipImageLibrary
-                )
-            } catch {
-                DispatchQueue.main.async {
-                    self?.showStatus(.init(kind: .error, message: "保存画笔库失败：\(error.localizedDescription)"))
-                }
+        brushLibraryPersistenceQueue.enqueue {
+            try controller.saveResources(
+                library: library,
+                tipImageLibrary: tipImageLibrary
+            )
+        } onError: { [weak self] error in
+            DispatchQueue.main.async {
+                self?.showStatus(.init(kind: .error, message: "保存画笔库失败：\(error.localizedDescription)"))
             }
         }
     }
@@ -9700,13 +9747,11 @@ final class WorkspaceViewModel: ObservableObject {
     private func persistPatternLibrary() {
         let library = bootstrap.workspaceStore.state.patternLibrary
         let controller = bootstrap.patternLibraryPersistenceController
-        DispatchQueue.global(qos: .utility).async { [weak self] in
-            do {
-                try controller.saveLibrary(library)
-            } catch {
-                DispatchQueue.main.async {
-                    self?.showStatus(.init(kind: .error, message: "保存图案库失败：\(error.localizedDescription)"))
-                }
+        patternLibraryPersistenceQueue.enqueue {
+            try controller.saveLibrary(library)
+        } onError: { [weak self] error in
+            DispatchQueue.main.async {
+                self?.showStatus(.init(kind: .error, message: "保存图案库失败：\(error.localizedDescription)"))
             }
         }
     }

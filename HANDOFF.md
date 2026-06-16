@@ -1,12 +1,13 @@
 # ArtFlex Handoff
 
-最后更新：2026-04-18
+最后更新：2026-05-23
 
-## 1. 先记住这三句话
+## 1. 先记住这四句话
 
 1. 当前仓库已经不是第一阶段 MVP，也不是“旧 dual-tip 回退基线”。
 2. 当前最值得关注的产品主线是组合笔刷参数语义、颜色工作流，以及局部交互一致性。
 3. 当前不要再默认假设仓库挂着一批历史性 dirty 性能 patch；接手前先看 `git status` 再判断。
+4. `~/Library/Application Support/ArtFlex/brush-library.json` 是用户真实画笔库，测试不能写这里。
 
 ## 2. 推荐阅读顺序
 
@@ -108,6 +109,28 @@
 - 软件启动默认使用的也是第二排第一个正式画笔（`slot 0`），不是最近使用首行
 
 后续线程如果继续动画笔库，默认不要改坏这层区分。
+
+### 3.4B 画笔库持久化和测试隔离是当前硬约束
+
+当前真实持久化文件是：
+
+- `~/Library/Application Support/ArtFlex/brush-library.json`
+
+当前 archive 保存的不只是 preset 列表，还包括：
+
+- `library`
+- `tipImageLibrary`
+- `tipImageAssets`
+
+本机这次已经发生过一次测试 fixture 污染真实画笔库的问题。当前修正后的状态是：
+
+- `BrushLibraryPersistenceController` 支持 `rootDirectoryURL`
+- `AppBootstrap` 在 XCTest 环境下会把画笔库 / 图案库根目录默认指向临时目录
+- `BrushLibraryStateTests` 通过后，真实用户文件仍保持 `13` 个 preset、`53` 个 tip image library item、`53` 个 tip image asset
+- 被污染的旧文件保留为 `~/Library/Application Support/ArtFlex/brush-library.json.corrupted-test-fixture-20260523_104544`
+- 可用备份文件是 `~/Library/Application Support/ArtFlex/brush-library.json.sb-76b8f964-AfHU39`
+
+后续线程如果继续改画笔库，先确认测试不会写真实用户目录。
 
 ### 3.5 颜色面板拾色器和 HUD 快速拾色器不能分开改
 
@@ -214,6 +237,15 @@ git status --short
 git diff --stat   # 仅在 dirty 时再看
 ```
 
+截至 2026-05-23，代码侧已知未提交改动是：
+
+- `Core/Selection/TextureFillProceduralField.swift`
+- `Tests/ArtFlexTests/WorkspaceViewModelPixelHistoryTests.swift`
+- `Platform/macOS/App/AppBootstrap.swift`
+- `Platform/macOS/Services/BrushLibraryPersistenceController.swift`
+
+其中 `AppBootstrap` 和 `BrushLibraryPersistenceController` 是画笔库测试隔离修正。
+
 ## 5. 关键入口文件
 
 ### 5.1 应用壳与状态中心
@@ -259,6 +291,7 @@ swift test --filter WorkspaceViewModelSafetyTests
 swift test --filter BrushStrokeSamplingTests
 swift test --filter HistoryControllerTests
 swift test --filter StageOneBrushPreviewRasterizerTests
+swift test --filter BrushLibraryStateTests
 ```
 
 ## 7. 不要被这些旧叙事带偏

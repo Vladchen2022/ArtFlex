@@ -1,6 +1,6 @@
 # ArtFlex 当前状态
 
-最后更新：2026-04-18
+最后更新：2026-05-23
 
 ## 1. 一句话概览
 
@@ -90,7 +90,7 @@ ArtFlex 当前已经是一个功能面明显超出最小 MVP 的 macOS Metal 绘
 - 笔刷系统：基础笔刷、橡皮、涂抹、直线、渐变
 - 色彩调整：painted mask、参数面板、选区 / 整层直调、确认应用、undo / redo
 - 自定义笔尖设计：绘制、图片导入、旋转、翻转、预览
-- 画笔库：持久化、导入导出、快捷键槽位
+- 画笔库：持久化、导入导出、快捷键槽位、启动默认笔刷对齐、重复自动保存项清理
 - tip image library：导入、引用关系检查、主笔尖 / 次笔尖复用
 - 参考图系统：多槽位、浮窗、取色、LAB 黑白参考
 - 快照系统：保存快照、对比、导出
@@ -182,6 +182,16 @@ ArtFlex 当前已经是一个功能面明显超出最小 MVP 的 macOS Metal 绘
 - 第二排 `1/2/3/4` 快捷槽位不进入最近使用首行
 - `Shift+Z` HUD 里的 4 个快捷笔刷仍然对应第二排 `1/2/3/4` 正式槽位，不对应最近使用首行
 - 软件启动时默认使用的是第二排第一个正式画笔（`slot 0`），不是最近使用首行
+
+当前画笔库持久化的真实状态还包括：
+
+- 用户真实持久化文件是 `~/Library/Application Support/ArtFlex/brush-library.json`
+- 当前 archive 格式包含 `library`、`tipImageLibrary`、`tipImageAssets`
+- 启动时会加载持久化画笔库，清理疑似自动保存重复项，并把当前画笔同步到启动默认快捷槽位
+- `BrushLibraryPersistenceController` 支持注入 `rootDirectoryURL`
+- `AppBootstrap` 在 XCTest 环境下会把画笔库 / 图案库持久化根目录默认重定向到临时目录
+- 后续测试不允许再隐式写真实用户 Application Support 目录
+- 本机这次已确认的真实用户画笔库状态是：`13` 个 preset、`53` 个 tip image library item、`53` 个 tip image asset
 
 单独状态文档见：
 
@@ -312,11 +322,11 @@ ArtFlex 当前已经是一个功能面明显超出最小 MVP 的 macOS Metal 绘
 当前几个最大热点文件：
 
 - [Platform/macOS/App/WorkspaceViewModel.swift](Platform/macOS/App/WorkspaceViewModel.swift)
-  - 10378 行
+  - 13580 行
 - [Platform/macOS/UI/RightInspectorView.swift](Platform/macOS/UI/RightInspectorView.swift)
-  - 4658 行
+  - 5746 行
 - [Rendering/Canvas/StageOneBrushRenderer.swift](Rendering/Canvas/StageOneBrushRenderer.swift)
-  - 2943 行
+  - 2984 行
 
 这说明：
 
@@ -336,7 +346,7 @@ ArtFlex 当前已经是一个功能面明显超出最小 MVP 的 macOS Metal 绘
 
 ### 4.2 当前工作区状态
 
-截至 2026-04-14，这个仓库不应再被默认理解成“长期挂着一批历史性的性能 dirty tree”。
+截至 2026-05-23，这个仓库不应再被默认理解成“长期挂着一批历史性的性能 dirty tree”。
 
 当前接手前的正确做法是：
 
@@ -344,11 +354,25 @@ ArtFlex 当前已经是一个功能面明显超出最小 MVP 的 macOS Metal 绘
 - 如果是 dirty，再看 `git diff --stat`
 - 不要沿用“仓库默认带着旧性能 patch 尚未提交”的过期叙事
 
+本轮代码侧已知未提交改动集中在：
+
+- `Core/Selection/TextureFillProceduralField.swift`
+- `Tests/ArtFlexTests/WorkspaceViewModelPixelHistoryTests.swift`
+- `Platform/macOS/App/AppBootstrap.swift`
+- `Platform/macOS/Services/BrushLibraryPersistenceController.swift`
+
+其中后两项是为了阻止测试污染真实用户画笔库。
+
 ## 5. 构建与验证状态
 
-2026-04-14 本地确认：
+2026-05-23 本地确认：
 
 - `swift build` 通过
+- `swift test --filter BrushLibraryStateTests` 通过
+- 真实用户 `brush-library.json` 在测试后仍是 `13` 个 preset、`53` 个 tip image library item、`53` 个 tip image asset
+
+最近一次仍可参考的 2026-04-14 子集验证：
+
 - `swift test --filter WorkspaceViewModelSafetyTests` 通过
 - `swift test --filter BrushStrokeSamplingTests` 通过
 - `swift test --filter HistoryControllerTests` 通过

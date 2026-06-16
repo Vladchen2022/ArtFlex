@@ -223,4 +223,106 @@ struct PatternLibraryStateTests {
         #expect(state.recentItemIDs == [thirdID, fifthID, firstID, fourthID])
         #expect(state.recentItems().map(\.id) == [thirdID, fifthID, firstID, fourthID])
     }
+
+    @Test
+    func patternImportMergePreservesConcurrentTagMoveAndDeleteEdits() {
+        let kept = makePatternMergeItem(
+            id: UUID(uuidString: "00000000-0000-0000-0000-000000000040")!,
+            name: "A",
+            slotIndex: 0,
+            renderPath: "renders/a.png"
+        )
+        let deleted = makePatternMergeItem(
+            id: UUID(uuidString: "00000000-0000-0000-0000-000000000041")!,
+            name: "B",
+            slotIndex: 1,
+            renderPath: "renders/b.png"
+        )
+        let imported = makePatternMergeItem(
+            id: UUID(uuidString: "00000000-0000-0000-0000-000000000042")!,
+            name: "C",
+            slotIndex: 2,
+            renderPath: "renders/c.png"
+        )
+        var currentLibrary = PatternLibraryState(items: [kept, deleted], selectedItemID: deleted.id)
+        currentLibrary.setColorTag(.purple, forItemID: kept.id)
+        let didMove = currentLibrary.moveItem(id: kept.id, toSlot: 4)
+        let didRemove = currentLibrary.removeItem(id: deleted.id)
+        #expect(didMove)
+        #expect(didRemove)
+
+        let staleImportResult = PatternLibraryImportBatchResult(
+            updatedLibrary: PatternLibraryState(items: [kept, deleted, imported], selectedItemID: imported.id),
+            importedItems: [imported],
+            skippedDuplicateCount: 0,
+            failedFileNames: []
+        )
+
+        let mergedResult = WorkspaceViewModel.mergedPatternImportResult(
+            staleImportResult,
+            into: currentLibrary
+        )
+
+        #expect(mergedResult.updatedLibrary.item(id: kept.id)?.colorTag == .purple)
+        #expect(mergedResult.updatedLibrary.item(id: kept.id)?.slotIndex == 4)
+        #expect(mergedResult.updatedLibrary.item(id: deleted.id) == nil)
+        #expect(mergedResult.updatedLibrary.item(id: imported.id)?.slotIndex == 0)
+        #expect(mergedResult.updatedLibrary.selectedItemID == imported.id)
+        #expect(mergedResult.importedItems.map(\.id) == [imported.id])
+    }
+
+    @Test
+    func patternImportMergeSkipsItemsAlreadyPresentInCurrentLibrary() {
+        let imported = makePatternMergeItem(
+            id: UUID(uuidString: "00000000-0000-0000-0000-000000000050")!,
+            name: "Imported",
+            slotIndex: 0,
+            renderPath: "renders/shared.png"
+        )
+        let concurrentImported = makePatternMergeItem(
+            id: UUID(uuidString: "00000000-0000-0000-0000-000000000051")!,
+            name: "Concurrent",
+            slotIndex: 3,
+            renderPath: "renders/shared.png"
+        )
+        let currentLibrary = PatternLibraryState(
+            items: [concurrentImported],
+            selectedItemID: concurrentImported.id
+        )
+        let staleImportResult = PatternLibraryImportBatchResult(
+            updatedLibrary: PatternLibraryState(items: [imported], selectedItemID: imported.id),
+            importedItems: [imported],
+            skippedDuplicateCount: 1,
+            failedFileNames: []
+        )
+
+        let mergedResult = WorkspaceViewModel.mergedPatternImportResult(
+            staleImportResult,
+            into: currentLibrary
+        )
+
+        #expect(mergedResult.updatedLibrary.items.map(\.id) == [concurrentImported.id])
+        #expect(mergedResult.updatedLibrary.selectedItemID == concurrentImported.id)
+        #expect(mergedResult.importedItems.isEmpty)
+        #expect(mergedResult.skippedDuplicateCount == 2)
+    }
+}
+
+private func makePatternMergeItem(
+    id: UUID,
+    name: String,
+    slotIndex: Int?,
+    renderPath: String
+) -> PatternLibraryItem {
+    PatternLibraryItem(
+        id: id,
+        displayName: name,
+        slotIndex: slotIndex,
+        importRecipe: PatternImportRecipe(),
+        originalFilename: "\(name).png",
+        sourcePixelWidth: 32,
+        sourcePixelHeight: 32,
+        renderAssetLocation: .managedCopy(relativePath: renderPath),
+        thumbnailLocation: .managedCopy(relativePath: renderPath.replacingOccurrences(of: "renders", with: "thumbs"))
+    )
 }

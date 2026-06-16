@@ -1,6 +1,6 @@
 # ArtFlex Repo Map
 
-最后更新：2026-04-12
+最后更新：2026-05-23
 
 本文件给后续线程一个“从哪里读、往哪里改、改完怎么验证”的仓库地图。
 
@@ -27,6 +27,8 @@
 
 - `App/ArtFlexApp.swift`
 - `App/AppBootstrap.swift`
+  - 应用依赖装配
+  - XCTest 环境下会把画笔库 / 图案库持久化根目录重定向到临时目录
 - `App/WorkspaceViewModel.swift`
 - `UI/MainWindowView.swift`
 - `Canvas/MetalCanvasHost.swift`
@@ -156,6 +158,9 @@
 - `Core/Tools/BrushPreset.swift`
 - `Core/Tools/TipImageLibrary.swift`
 - `Platform/macOS/Services/BrushLibraryPersistenceController.swift`
+  - 读写 `brush-library.json`
+  - archive 包含 `library`、`tipImageLibrary`、`tipImageAssets`
+  - 支持测试注入 `rootDirectoryURL`
 - `Platform/macOS/UI/RightInspectorView.swift`
 - `Platform/macOS/App/WorkspaceViewModel.swift`
 
@@ -183,19 +188,16 @@
 
 ## 5. 当前 working tree 关注点
 
-截至 2026-04-12，未提交改动集中在：
+截至 2026-05-23，不要再使用 2026-04-12 的旧 dirty tree 清单。
 
-- `HistoryController`
-- `PerformanceAuditStore`
-- `LayerTextureSerializer`
-- `WorkspaceViewModel`
-- `MetalCanvasHost`
-- `RightInspectorView`
-- `StageOneBrushRenderer`
-- `StageOneCanvasPresenter`
-- `StageOneLayerSurfaceStore`
+当前代码侧已知未提交改动集中在：
 
-如果你的任务与性能、历史、renderer 或右侧 inspector 相关，先看这些 diff。
+- `Core/Selection/TextureFillProceduralField.swift`
+- `Tests/ArtFlexTests/WorkspaceViewModelPixelHistoryTests.swift`
+- `Platform/macOS/App/AppBootstrap.swift`
+- `Platform/macOS/Services/BrushLibraryPersistenceController.swift`
+
+接手时仍以 `git status --short` 为准；文档只能说明最近一次审查时的状态。
 
 ## 6. 测试地图
 
@@ -207,6 +209,9 @@
 - `Tests/ArtFlexTests/ProjectPackageTests.swift`
 - `Tests/ArtFlexTests/StageOneBrushPreviewRasterizerTests.swift`
 - `Tests/ArtFlexTests/WorkspaceViewModelPixelHistoryTests.swift`
+- `Tests/ArtFlexTests/BrushLibraryStateTests.swift`
+
+涉及 `AppBootstrap()`、画笔库或图案库持久化的测试，必须确认不会写入真实 `~/Library/Application Support/ArtFlex`。
 
 ## 7. 常用命令
 
@@ -218,4 +223,5 @@ swift test --filter BrushStrokeSamplingTests
 swift test --filter HistoryControllerTests
 swift test --filter ProjectPackageTests
 swift test --filter StageOneBrushPreviewRasterizerTests
+swift test --filter BrushLibraryStateTests
 ```

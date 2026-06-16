@@ -1897,6 +1897,34 @@ struct WorkspaceViewModelSafetyTests {
 
     @Test
     @MainActor
+    func canvasColorPickSamplesCurrentBrushDisplayTextureBeforeBrushCommit() throws {
+        let harness = try BrushEditingBoundaryHarness()
+        let activeLayerID = harness.viewModel.workspace.document.activeLayerID
+        let sampleX = 96
+        let sampleY = 96
+
+        harness.viewModel.setSelectedColor(.init(red: 0.88, green: 0.12, blue: 0.04, alpha: 1))
+        try enqueueRecentBrushAdjustmentStroke(
+            in: harness,
+            point: .init(location: .init(x: Double(sampleX), y: Double(sampleY)), pressure: 1)
+        )
+
+        #expect(harness.bootstrap.strokeEngine.hasPendingBrushCommitJobs)
+        #expect(harness.viewModel.brushDisplayTexture(for: activeLayerID) != nil)
+        #expect(try harness.color(atX: sampleX, y: sampleY, layerID: activeLayerID).alpha < 0.01)
+
+        harness.viewModel.setSelectedColor(.init(red: 0.05, green: 0.85, blue: 0.2, alpha: 1))
+        harness.viewModel.sampleColor(at: .init(x: Double(sampleX), y: Double(sampleY)))
+
+        let sampledColor = harness.viewModel.workspace.toolSession.selectedColor
+        #expect(sampledColor.red > 0.6)
+        #expect(sampledColor.green < 0.35)
+        #expect(sampledColor.blue < 0.25)
+        #expect(sampledColor.alpha > 0.99)
+    }
+
+    @Test
+    @MainActor
     func selectingColorBlockUpdatesReferenceImagePreviousColorMemory() throws {
         let harness = try BrushEditingBoundaryHarness()
         let originalColor = harness.viewModel.workspace.toolSession.selectedColor

@@ -1,6 +1,6 @@
 # DECISIONS
 
-最后更新：2026-04-18
+最后更新：2026-05-23
 
 本文件记录当前代码和产品层已经确认、后续线程不应随意推翻的决策。
 
@@ -36,6 +36,18 @@
 - 导出和采样不允许再各走一条独立“补格式”链
 
 任何通道交换、颜色补偿、premultiply / unpremultiply 的必要处理，都必须收敛在基础设施层，而不是散落在业务和工具层。
+
+### 0.4 测试不得写入真实用户数据目录
+
+`~/Library/Application Support/ArtFlex` 是用户真实数据目录，不是测试 fixture。
+
+后续任何测试只要会创建 `AppBootstrap`、`WorkspaceViewModel`、画笔库或图案库持久化控制器，都必须满足其中之一：
+
+- 依赖 `AppBootstrap` 在 XCTest 环境下的临时持久化根目录重定向
+- 显式注入临时 `BrushLibraryPersistenceController`
+- 显式注入临时 `PatternLibraryPersistenceController`
+
+不要再让测试默认写真实 `brush-library.json` 或真实图案库目录。
 
 ## 1. 当前真实实现层决策
 
@@ -236,6 +248,14 @@
 - 软件启动默认使用第二排第一个正式画笔（`slot 0`），不是最近使用首行
 
 后续线程不要再按“画笔库数组第一个”或“最近使用首行第一个”理解启动默认画笔。
+
+画笔库持久化的当前决策是：
+
+- 真实用户文件路径保持 `~/Library/Application Support/ArtFlex/brush-library.json`
+- archive 同时保存 `library`、`tipImageLibrary`、`tipImageAssets`
+- `BrushLibraryPersistenceController` 必须继续支持测试用 `rootDirectoryURL` 注入
+- `AppBootstrap` 在 XCTest 环境下默认把画笔库 / 图案库持久化根目录重定向到临时目录
+- 任何新增 `AppBootstrap()` 测试都不应再污染真实用户画笔库
 
 ### 3.3 当前警惕无界增长
 

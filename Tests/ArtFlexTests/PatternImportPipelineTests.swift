@@ -63,6 +63,50 @@ struct PatternImportPipelineTests {
     }
 
     @Test
+    func importFilesCanDeferLibraryPersistenceForMainActorMerge() throws {
+        let tempRootURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ArtFlexPatternImportTests-\(UUID().uuidString)", isDirectory: true)
+        let redirectedFileManager = RedirectedPatternApplicationSupportFileManager(
+            applicationSupportRootURL: tempRootURL
+        )
+        let controller = PatternLibraryPersistenceController(fileManager: redirectedFileManager)
+
+        defer {
+            try? FileManager.default.removeItem(at: tempRootURL)
+        }
+
+        let sourceURL = tempRootURL.appendingPathComponent("deferred.png")
+        try writeTestPNG(
+            to: sourceURL,
+            width: 2,
+            height: 2,
+            rgbaBytes: [
+                0, 0, 0, 255, 255, 255, 255, 255,
+                0, 0, 0, 255, 255, 255, 255, 255
+            ]
+        )
+
+        let result = try controller.importFiles(
+            [sourceURL],
+            recipe: .init(),
+            into: .init(),
+            persistsLibrary: false
+        )
+
+        let importedItem = try #require(result.importedItems.first)
+        let renderURL = try #require(controller.resolveAssetURL(for: importedItem.renderAssetLocation))
+        let thumbnailURL = try #require(controller.resolveAssetURL(for: importedItem.thumbnailLocation))
+
+        #expect(FileManager.default.fileExists(atPath: renderURL.path))
+        #expect(FileManager.default.fileExists(atPath: thumbnailURL.path))
+        #expect(controller.loadLibrary() == nil)
+
+        try controller.saveLibrary(result.updatedLibrary)
+
+        #expect(controller.loadLibrary()?.library == result.updatedLibrary)
+    }
+
+    @Test
     func transparentMonochromePreviewMakesWhitePixelsTransparent() throws {
         let tempRootURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("ArtFlexPatternImportTests-\(UUID().uuidString)", isDirectory: true)
@@ -71,11 +115,13 @@ struct PatternImportPipelineTests {
         let sourceURL = tempRootURL.appendingPathComponent("monochrome.png")
         try writeTestPNG(
             to: sourceURL,
-            width: 3,
+            width: 5,
             height: 1,
             rgbaBytes: [
+                0, 0, 0, 255,
                 255, 255, 255, 255,
                 128, 128, 128, 255,
+                0, 0, 0, 255,
                 0, 0, 0, 255
             ]
         )
@@ -87,13 +133,13 @@ struct PatternImportPipelineTests {
         ))
 
         let processed = [UInt8](preview.processedPreviewRGBABytes)
-        let whiteAlpha = processed[3]
-        let grayAlpha = processed[7]
-        let blackAlpha = processed[11]
+        let leadingBlackAlpha = processed[3]
+        let whiteAlpha = processed[7]
+        let grayAlpha = processed[11]
 
+        #expect(leadingBlackAlpha > 250)
         #expect(whiteAlpha < 5)
         #expect(grayAlpha < 5)
-        #expect(blackAlpha > 250)
     }
 
     @Test

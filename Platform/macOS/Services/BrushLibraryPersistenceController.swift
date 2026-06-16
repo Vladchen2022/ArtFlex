@@ -5,19 +5,22 @@ struct PersistedBrushResources {
     var tipImageLibrary: TipImageLibraryState
 }
 
-final class BrushLibraryPersistenceController {
+final class BrushLibraryPersistenceController: @unchecked Sendable {
     private let fileManager: FileManager
-    private let encoder = JSONEncoder()
-    private let decoder = JSONDecoder()
+    private let rootDirectoryURL: URL?
 
-    init(fileManager: FileManager = .default) {
+    init(
+        fileManager: FileManager = .default,
+        rootDirectoryURL: URL? = nil
+    ) {
         self.fileManager = fileManager
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        self.rootDirectoryURL = rootDirectoryURL
     }
 
     func loadResources() -> PersistedBrushResources? {
         guard let url = persistentLibraryURL() else { return nil }
         guard let data = try? Data(contentsOf: url) else { return nil }
+        let decoder = JSONDecoder()
         if let archive = try? decoder.decode(BrushLibraryArchive.self, from: data) {
             return PersistedBrushResources(
                 library: archive.resolvedLibrary,
@@ -43,7 +46,7 @@ final class BrushLibraryPersistenceController {
             ])
         }
 
-        let data = try encoder.encode(
+        let data = try Self.makeEncoder().encode(
             BrushLibraryArchive(
                 library: library,
                 tipImageLibrary: tipImageLibrary
@@ -57,7 +60,7 @@ final class BrushLibraryPersistenceController {
         tipImageLibrary: TipImageLibraryState,
         to url: URL
     ) throws {
-        let data = try encoder.encode(
+        let data = try Self.makeEncoder().encode(
             BrushLibraryArchive(
                 library: library,
                 tipImageLibrary: tipImageLibrary
@@ -68,6 +71,7 @@ final class BrushLibraryPersistenceController {
 
     func importLibrary(from url: URL) throws -> PersistedBrushResources {
         let data = try Data(contentsOf: url)
+        let decoder = JSONDecoder()
         if let archive = try? decoder.decode(BrushLibraryArchive.self, from: data) {
             return PersistedBrushResources(
                 library: archive.resolvedLibrary,
@@ -81,11 +85,22 @@ final class BrushLibraryPersistenceController {
         )
     }
 
+    private static func makeEncoder() -> JSONEncoder {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        return encoder
+    }
+
     private func persistentLibraryURL(createDirectories: Bool = false) -> URL? {
-        guard let appSupport = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
-            return nil
+        let directory: URL
+        if let rootDirectoryURL {
+            directory = rootDirectoryURL
+        } else {
+            guard let appSupport = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
+                return nil
+            }
+            directory = appSupport.appendingPathComponent("ArtFlex", isDirectory: true)
         }
-        let directory = appSupport.appendingPathComponent("ArtFlex", isDirectory: true)
         if createDirectories {
             try? fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
         }

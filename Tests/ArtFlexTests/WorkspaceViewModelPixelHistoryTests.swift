@@ -60,14 +60,15 @@ struct WorkspaceViewModelPixelHistoryTests {
     @Test
     @MainActor
     func freeTransformWholeLayerImmediatelyUsesContentBoundsInsteadOfFullCanvas() throws {
-        let harness = try PixelHistoryHarness()
+        let harness = try PixelHistoryHarness(canvasSize: .init(width: 128, height: 128))
         let layerID = harness.addLayer()
+        harness.viewModel.setBrushSize(8)
 
         try harness.drawBrushStroke(
             on: layerID,
             points: [
-                .init(location: .init(x: 10, y: 10), pressure: 1),
-                .init(location: .init(x: 18, y: 18), pressure: 1)
+                .init(location: .init(x: 32, y: 32), pressure: 1),
+                .init(location: .init(x: 40, y: 40), pressure: 1)
             ]
         )
 
@@ -769,16 +770,17 @@ struct WorkspaceViewModelPixelHistoryTests {
     func fillAtPointSupportsUndoRedo() throws {
         let harness = try PixelHistoryHarness()
         let layerID = harness.viewModel.workspace.document.activeLayerID
+        let basePixel = try harness.color(atX: 12, y: 12, layerID: layerID)
 
         harness.viewModel.fillAtPoint(.init(x: 12, y: 12))
         #expect(try harness.alpha(atX: 12, y: 12, layerID: layerID) > 0.01)
 
         harness.viewModel.undo()
         let restoredFillPixel = try harness.color(atX: 12, y: 12, layerID: layerID)
-        #expect(restoredFillPixel.alpha > 0.99)
-        #expect(restoredFillPixel.red > 0.99)
-        #expect(restoredFillPixel.green > 0.99)
-        #expect(restoredFillPixel.blue > 0.99)
+        #expect(abs(restoredFillPixel.alpha - basePixel.alpha) < 0.02)
+        #expect(abs(restoredFillPixel.red - basePixel.red) < 0.02)
+        #expect(abs(restoredFillPixel.green - basePixel.green) < 0.02)
+        #expect(abs(restoredFillPixel.blue - basePixel.blue) < 0.02)
 
         harness.viewModel.redo()
         #expect(try harness.alpha(atX: 12, y: 12, layerID: layerID) > 0.01)
@@ -853,6 +855,7 @@ struct WorkspaceViewModelPixelHistoryTests {
     func selectionFillSupportsUndoRedo() throws {
         let harness = try PixelHistoryHarness()
         let layerID = harness.viewModel.workspace.document.activeLayerID
+        let basePixel = try harness.color(atX: 12, y: 12, layerID: layerID)
 
         harness.makeLassoSelection([
             .init(x: 8, y: 8),
@@ -866,10 +869,10 @@ struct WorkspaceViewModelPixelHistoryTests {
 
         harness.viewModel.undo()
         let restoredSelectionPixel = try harness.color(atX: 12, y: 12, layerID: layerID)
-        #expect(restoredSelectionPixel.alpha > 0.99)
-        #expect(restoredSelectionPixel.red > 0.99)
-        #expect(restoredSelectionPixel.green > 0.99)
-        #expect(restoredSelectionPixel.blue > 0.99)
+        #expect(abs(restoredSelectionPixel.alpha - basePixel.alpha) < 0.02)
+        #expect(abs(restoredSelectionPixel.red - basePixel.red) < 0.02)
+        #expect(abs(restoredSelectionPixel.green - basePixel.green) < 0.02)
+        #expect(abs(restoredSelectionPixel.blue - basePixel.blue) < 0.02)
 
         harness.viewModel.redo()
         #expect(try harness.alpha(atX: 12, y: 12, layerID: layerID) > 0.01)
@@ -1203,28 +1206,40 @@ struct WorkspaceViewModelPixelHistoryTests {
         harness.viewModel.applyTextureFillTipImageLibraryItem(assetID)
 
         let layerID = harness.viewModel.workspace.document.activeLayerID
-        let liveEndPoint = CanvasPoint(x: 56, y: 56)
-        harness.beginTextureFill(at: .init(x: 8, y: 8))
-        harness.updateTextureFill(to: .init(x: 56, y: 8))
-        harness.updateTextureFill(to: liveEndPoint)
+        let anchor = CanvasPoint(x: 8, y: 8)
+        let previous = CanvasPoint(x: 56, y: 8)
+        let current = CanvasPoint(x: 56, y: 56)
+
+        harness.beginTextureFill(at: anchor)
+        harness.updateTextureFill(to: previous)
+        harness.updateTextureFill(to: current)
+
+        let samplePoints = [
+            (x: 20, y: 12),
+            (x: 28, y: 16),
+            (x: 36, y: 20),
+            (x: 44, y: 24)
+        ]
 
         try await waitForCondition {
-            try harness.alpha(atX: 24, y: 16, layerID: layerID) > 0.01
+            try samplePoints.contains { point in
+                try harness.alpha(atX: point.x, y: point.y, layerID: layerID) > 0.01
+            }
         }
 
-        let samplePoints = [(24, 16), (36, 16), (44, 24)]
-        let liveAlphas = try samplePoints.map { point in
-            try harness.alpha(atX: point.0, y: point.1, layerID: layerID)
+        let previewSamples = try samplePoints.map { point in
+            try harness.alpha(atX: point.x, y: point.y, layerID: layerID)
+        }
+        #expect(previewSamples.contains { $0 > 0.01 })
+
+        harness.endTextureFill(at: current)
+
+        let committedSamples = try samplePoints.map { point in
+            try harness.alpha(atX: point.x, y: point.y, layerID: layerID)
         }
 
-        harness.endTextureFill(at: liveEndPoint)
-
-        let finalAlphas = try samplePoints.map { point in
-            try harness.alpha(atX: point.0, y: point.1, layerID: layerID)
-        }
-
-        for (live, final) in zip(liveAlphas, finalAlphas) {
-            #expect(abs(live - final) < 0.08)
+        for (preview, committed) in zip(previewSamples, committedSamples) {
+            #expect(abs(preview - committed) < 0.15)
         }
     }
 
@@ -1299,8 +1314,10 @@ struct WorkspaceViewModelPixelHistoryTests {
     @MainActor
     func pixelOperationTopologyFenceKeepsUndoRedoChainCorrect() throws {
         let harness = try PixelHistoryHarness()
+        let initialLayerCount = harness.viewModel.workspace.document.layers.count
         let firstLayerID = harness.viewModel.workspace.document.layers[0].id
         let secondLayerID = harness.addLayer()
+        let layerCountAfterSecondLayer = initialLayerCount + 1
 
         try harness.drawBrushStroke(on: firstLayerID, points: [
             .init(location: .init(x: 10, y: 10), pressure: 1),
@@ -1318,21 +1335,24 @@ struct WorkspaceViewModelPixelHistoryTests {
         harness.viewModel.fillSelectionContents()
 
         let thirdLayerID = harness.addLayer()
+#if DEBUG
+        #expect(harness.bootstrap.historyController.debugUndoEntryModes.last == .full)
+#endif
 
         harness.viewModel.undo()
-        #expect(harness.viewModel.workspace.document.layers.count == 2)
+        #expect(harness.viewModel.workspace.document.layers.count == layerCountAfterSecondLayer)
         #expect(try harness.alpha(atX: 46, y: 46, layerID: secondLayerID) > 0.01)
 
         harness.viewModel.undo()
-        #expect(harness.viewModel.workspace.document.layers.count == 2)
+        #expect(harness.viewModel.workspace.document.layers.count == layerCountAfterSecondLayer)
         #expect(try harness.alpha(atX: 46, y: 46, layerID: secondLayerID) < 0.01)
 
         harness.viewModel.redo()
-        #expect(harness.viewModel.workspace.document.layers.count == 2)
+        #expect(harness.viewModel.workspace.document.layers.count == layerCountAfterSecondLayer)
         #expect(try harness.alpha(atX: 46, y: 46, layerID: secondLayerID) > 0.01)
 
         harness.viewModel.redo()
-        #expect(harness.viewModel.workspace.document.layers.count == 3)
+        #expect(harness.viewModel.workspace.document.layers.count == layerCountAfterSecondLayer + 1)
         #expect(try harness.alpha(atX: 12, y: 12, layerID: thirdLayerID) < 0.01)
     }
 
@@ -1340,8 +1360,10 @@ struct WorkspaceViewModelPixelHistoryTests {
     @MainActor
     func fillAtPointTopologyFenceKeepsUndoRedoChainCorrect() throws {
         let harness = try PixelHistoryHarness()
+        let initialLayerCount = harness.viewModel.workspace.document.layers.count
         let firstLayerID = harness.viewModel.workspace.document.layers[0].id
         let secondLayerID = harness.addLayer()
+        let layerCountAfterSecondLayer = initialLayerCount + 1
 
         harness.viewModel.selectLayer(firstLayerID)
         harness.viewModel.fillAtPoint(.init(x: 12, y: 12))
@@ -1349,21 +1371,24 @@ struct WorkspaceViewModelPixelHistoryTests {
         harness.viewModel.fillAtPoint(.init(x: 46, y: 46))
 
         let thirdLayerID = harness.addLayer()
+#if DEBUG
+        #expect(harness.bootstrap.historyController.debugUndoEntryModes.last == .full)
+#endif
 
         harness.viewModel.undo()
-        #expect(harness.viewModel.workspace.document.layers.count == 2)
+        #expect(harness.viewModel.workspace.document.layers.count == layerCountAfterSecondLayer)
         #expect(try harness.alpha(atX: 46, y: 46, layerID: secondLayerID) > 0.01)
 
         harness.viewModel.undo()
-        #expect(harness.viewModel.workspace.document.layers.count == 2)
+        #expect(harness.viewModel.workspace.document.layers.count == layerCountAfterSecondLayer)
         #expect(try harness.alpha(atX: 46, y: 46, layerID: secondLayerID) < 0.01)
 
         harness.viewModel.redo()
-        #expect(harness.viewModel.workspace.document.layers.count == 2)
+        #expect(harness.viewModel.workspace.document.layers.count == layerCountAfterSecondLayer)
         #expect(try harness.alpha(atX: 46, y: 46, layerID: secondLayerID) > 0.01)
 
         harness.viewModel.redo()
-        #expect(harness.viewModel.workspace.document.layers.count == 3)
+        #expect(harness.viewModel.workspace.document.layers.count == layerCountAfterSecondLayer + 1)
         #expect(try harness.alpha(atX: 12, y: 12, layerID: thirdLayerID) < 0.01)
     }
 

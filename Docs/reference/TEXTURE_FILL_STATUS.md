@@ -1,6 +1,6 @@
 # 肌理填充当前状态
 
-最后更新：2026-04-18
+最后更新：2026-05-23
 
 ## 1. 产品目标
 
@@ -255,7 +255,7 @@
 - imported 当前使用项会阻止删除
 - imported final field 不再 letterbox
 - imported live 不再按固定 tile 间隔重复
-- imported final 在远离边界的位置会接近 live 预览
+- imported final 在多个远离边界的位置会接近 live 预览；当前回归测试允许 preview / committed alpha 差异小于 `0.15`
 
 ## 8. 当前线程确认通过的点
 

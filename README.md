@@ -4,7 +4,7 @@ ArtFlex 是旧版 `BrushCanvas` 的 Metal-first 重构版 macOS 绘图软件。
 
 项目目标不是复制旧项目的 CPU 画布实现，而是在保留成熟产品结构、工具集合和主工作流的前提下，用更稳定的 Metal 渲染、图层、文档和工具架构重建整套编辑链。
 
-## 当前基线（2026-04-18）
+## 当前基线（2026-05-23）
 
 当前仓库已经不是“第一阶段 MVP”状态，也不是“旧 dual-tip / 回退基线”。
 
@@ -33,17 +33,24 @@ ArtFlex 是旧版 `BrushCanvas` 的 Metal-first 重构版 macOS 绘图软件。
 
 另外，`肌理填充 / textureFill` 当前也已经是一条活动中的正式开发线：
 
-- 当前基线已推进到 `phase 4.3 + imported final cover`
+- 当前基线已推进到 `phase 4.3 + imported mapped live/final + final cover`
 - 程序化模式和最终定稿链已接通
 - imported 模式当前真实边界是：
-  - 拖动中仍是小阵列 live field
-  - 松手后是区域纹理映射 final field
+  - 拖动中是区域映射 live field，并优先复用 smooth final shape
+  - 松手后是区域纹理映射 final field，并已从 `contain` 修到 `cover`
 - 后续继续开发时，优先看专项状态文档，不要从历史线程零散结论重新猜
 
 当前画笔库还有两条已经收口的交互约束：
 
 - 第一排“最近使用”只记录第三排及之后的正式库画笔；第二排 `1/2/3/4` 快捷槽位不进入最近使用首行
 - 软件启动时默认使用的是第二排第一个正式画笔（`slot 0`），不是最近使用首行
+
+当前画笔库持久化还有一条硬约束：
+
+- 用户画笔库文件是 `~/Library/Application Support/ArtFlex/brush-library.json`
+- archive 同时保存 `library`、`tipImageLibrary` 和 `tipImageAssets`
+- 测试环境下默认由 `AppBootstrap` 把画笔库 / 图案库持久化根目录重定向到临时目录
+- 后续测试如果需要持久化画笔库，必须注入临时 `BrushLibraryPersistenceController`，不能写真实用户目录
 
 当前应用图标也有一条实现约束：
 
@@ -73,9 +80,15 @@ swift test --filter BrushStrokeSamplingTests
 swift test --filter HistoryControllerTests
 swift test --filter ColorStandardTests
 swift test --filter StageOneBrushPreviewRasterizerTests
+swift test --filter BrushLibraryStateTests
 ```
+
+## 许可证
+
+本项目使用 [PolyForm Noncommercial License 1.0.0](LICENSE)。允许非商业用途使用、修改和分发；商业使用不在该许可证授权范围内。
 
 ## 说明
 
 - 旧的阶段计划、MVP 状态、临时编译修复记录和性能建议文档已经移除；如果需要历史上下文，请直接查 `git log` / `git show`。
 - 当前不要假设仓库一定带着一批历史性的 pending 性能 patch；接手前先看 [CURRENT_STATUS.md](CURRENT_STATUS.md) 里的 working tree 说明。
+- 不要写会触碰真实 `~/Library/Application Support/ArtFlex` 的测试；这是用户数据目录，不是测试 fixture。

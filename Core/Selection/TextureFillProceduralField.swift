@@ -140,7 +140,7 @@ enum TextureFillProceduralField {
         importedSourceInfo: ImportedTipSourceInfo? = nil
     ) -> Data {
         guard width > 0, height > 0 else { return Data() }
-        guard let stampMask = resolvedStampMask(from: stampMaskData) else { return Data() }
+        guard let resolvedMask = resolvedStampMask(from: stampMaskData) else { return Data() }
 
         let totalCount = width * height
         var baseMask = [UInt8](repeating: 0, count: totalCount)
@@ -153,8 +153,8 @@ enum TextureFillProceduralField {
             }
         }
 
-        let contentWidth = max(stampMask.contentMaxX - stampMask.contentMinX + 1, 1)
-        let contentHeight = max(stampMask.contentMaxY - stampMask.contentMinY + 1, 1)
+        let contentWidth = max(resolvedMask.contentMaxX - resolvedMask.contentMinX + 1, 1)
+        let contentHeight = max(resolvedMask.contentMaxY - resolvedMask.contentMinY + 1, 1)
         let sourceAspect = importedSourceInfo.map { Double($0.pixelWidth) / max(Double($0.pixelHeight), 1) }
             ?? (Double(contentWidth) / Double(contentHeight))
 
@@ -194,11 +194,11 @@ enum TextureFillProceduralField {
 
                 let normalizedX = min(max((worldX - sampleMinX) / max(sampleWidth, 0.0001), 0), 1)
                 let normalizedY = min(max((worldY - sampleMinY) / max(sampleHeight, 0.0001), 0), 1)
-                let sampleX = stampMask.contentMinX
+                let sampleX = resolvedMask.contentMinX
                     + min(max(Int((normalizedX * Double(contentWidth - 1)).rounded()), 0), contentWidth - 1)
-                let sampleY = stampMask.contentMinY
+                let sampleY = resolvedMask.contentMinY
                     + min(max(Int((normalizedY * Double(contentHeight - 1)).rounded()), 0), contentHeight - 1)
-                let sampleAlpha = stampMask.bytes[(sampleY * stampMask.resolution) + sampleX]
+                let sampleAlpha = resolvedMask.bytes[(sampleY * resolvedMask.resolution) + sampleX]
                 guard sampleAlpha > 0 else { continue }
                 output[index] = min(baseMask[index], sampleAlpha)
             }
