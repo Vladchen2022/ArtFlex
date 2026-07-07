@@ -28,6 +28,7 @@ private struct BrushUniforms {
     var selectionMin: SIMD2<Float>
     var selectionMax: SIMD2<Float>
     var usesAlphaLock: UInt32
+    var preservesAlphaLockAlpha: UInt32
     var compoundEnabled: UInt32
     var compoundMode: UInt32
     var compoundSecondaryShape: UInt32
@@ -75,6 +76,8 @@ private struct CompositeUniforms {
     var strokeCenterX: Float = 0
     var strokeCenterY: Float = 0
     var strokeRadius: Float = 0
+    var usesAlphaLock: UInt32 = 0
+    var paddingAlphaLock: SIMD3<UInt32> = .zero
 }
 
 struct StampSample: Equatable {
@@ -144,6 +147,7 @@ final class StageOneBrushRenderer {
     #endif
     private let device: MTLDevice
     private let brushPipelineState: MTLRenderPipelineState
+    private let alphaLockBrushPipelineState: MTLRenderPipelineState
     private let eraserPipelineState: MTLRenderPipelineState
     private let smudgePipelineState: MTLRenderPipelineState
     private let smudgeFrozenTexturePipelineState: MTLRenderPipelineState
@@ -200,6 +204,7 @@ final class StageOneBrushRenderer {
             float2 selectionMin;
             float2 selectionMax;
             uint usesAlphaLock;
+            uint preservesAlphaLockAlpha;
             uint compoundEnabled;
             uint compoundMode;
             uint compoundSecondaryShape;
@@ -259,6 +264,8 @@ final class StageOneBrushRenderer {
             float strokeCenterX;
             float strokeCenterY;
             float strokeRadius;
+            uint usesAlphaLock;
+            uint3 paddingAlphaLock;
         };
 
         float smoothHardnessAlpha(float distance, float hardness) {
@@ -739,10 +746,12 @@ final class StageOneBrushRenderer {
                 }
             }
 
+            float lockedDestinationAlpha = 1.0;
             if (uniforms.usesAlphaLock != 0) {
                 uint x = uint(clamp(in.pixelPoint.x, 0.0, uniforms.canvasSize.x - 1.0));
                 uint y = uint(clamp(in.pixelPoint.y, 0.0, uniforms.canvasSize.y - 1.0));
-                if (alphaLockTexture.read(uint2(x, y)).a <= 0.001) {
+                lockedDestinationAlpha = alphaLockTexture.read(uint2(x, y)).a;
+                if (lockedDestinationAlpha <= 0.001) {
                     discard_fragment();
                 }
             }
@@ -758,7 +767,8 @@ final class StageOneBrushRenderer {
             float brushAlpha = inputColor.a * alpha;
             float3 jitteredSrgb = paintJitteredSrgbColor(inputColor.rgb, in.localPoint, uniforms);
             float3 linearRGB = srgbToLinear(jitteredSrgb);
-            return float4(linearRGB * brushAlpha, brushAlpha);
+            float rgbAlphaScale = uniforms.preservesAlphaLockAlpha != 0 ? lockedDestinationAlpha : 1.0;
+            return float4(linearRGB * brushAlpha * rgbAlphaScale, brushAlpha);
         }
 
         fragment float4 stageOneSmudgeFragment(
@@ -1009,6 +1019,12 @@ final class StageOneBrushRenderer {
             float cappedAlpha = clamp(accumulatedAlpha * uniforms.brushColor.a, 0.0, 1.0);
 
             if (uniforms.mode == 1) {
+                if (uniforms.usesAlphaLock != 0) {
+                    return float4(
+                        original.rgb * (1.0 - cappedAlpha),
+                        original.a
+                    );
+                }
                 return float4(
                     original.rgb * (1.0 - cappedAlpha),
                     original.a * (1.0 - cappedAlpha)
@@ -1066,6 +1082,13 @@ final class StageOneBrushRenderer {
 
             float3 linearRGB = srgbToLinear(brushSrgb);
 
+            if (uniforms.usesAlphaLock != 0) {
+                return float4(
+                    (linearRGB * original.a * cappedAlpha) + (original.rgb * (1.0 - cappedAlpha)),
+                    original.a
+                );
+            }
+
             return float4(
                 (linearRGB * cappedAlpha) + (original.rgb * (1.0 - cappedAlpha)),
                 cappedAlpha + (original.a * (1.0 - cappedAlpha))
@@ -1103,6 +1126,26 @@ final class StageOneBrushRenderer {
             self.brushPipelineState = try device.makeRenderPipelineState(descriptor: brushDescriptor)
         } catch {
             throw StageOneBrushRendererInitializationError.pipelineState("brush", error)
+        }
+
+        let alphaLockBrushDescriptor = MTLRenderPipelineDescriptor()
+        alphaLockBrushDescriptor.vertexFunction = vertexFunction
+        alphaLockBrushDescriptor.fragmentFunction = fragmentFunction
+        alphaLockBrushDescriptor.colorAttachments[0].pixelFormat = .bgra8Unorm_srgb
+
+        let alphaLockBrushAttachment = alphaLockBrushDescriptor.colorAttachments[0]!
+        alphaLockBrushAttachment.isBlendingEnabled = true
+        alphaLockBrushAttachment.rgbBlendOperation = .add
+        alphaLockBrushAttachment.alphaBlendOperation = .add
+        alphaLockBrushAttachment.sourceRGBBlendFactor = .one
+        alphaLockBrushAttachment.sourceAlphaBlendFactor = .one
+        alphaLockBrushAttachment.destinationRGBBlendFactor = .oneMinusSourceAlpha
+        alphaLockBrushAttachment.destinationAlphaBlendFactor = .oneMinusSourceAlpha
+        alphaLockBrushAttachment.writeMask = [.red, .green, .blue]
+        do {
+            self.alphaLockBrushPipelineState = try device.makeRenderPipelineState(descriptor: alphaLockBrushDescriptor)
+        } catch {
+            throw StageOneBrushRendererInitializationError.pipelineState("alphaLockBrush", error)
         }
 
         let eraserDescriptor = MTLRenderPipelineDescriptor()
@@ -1303,6 +1346,7 @@ final class StageOneBrushRenderer {
         into texture: MTLTexture,
         commandQueue: MTLCommandQueue,
         alphaLockTexture: MTLTexture? = nil,
+        preservesAlphaWhenAlphaLocked: Bool = true,
         samplingState: inout BrushStrokeSamplingState?,
         completion: (() -> Void)? = nil
     ) -> Int {
@@ -1316,6 +1360,7 @@ final class StageOneBrushRenderer {
             commandQueue: commandQueue,
             commandBuffer: commandBuffer,
             alphaLockTexture: alphaLockTexture,
+            preservesAlphaWhenAlphaLocked: preservesAlphaWhenAlphaLocked,
             samplingState: &samplingState
         )
 
@@ -1332,10 +1377,13 @@ final class StageOneBrushRenderer {
         for texture: MTLTexture,
         commandQueue: MTLCommandQueue
     ) -> OpacityCapSessionResources? {
-        let startNs = DispatchTime.now().uptimeNanoseconds
+        let auditEnabled = PerformanceAuditStore.shared.isRecordingEnabled
+        let startNs = auditEnabled ? DispatchTime.now().uptimeNanoseconds : 0
         defer {
-            let ms = Double(DispatchTime.now().uptimeNanoseconds - startNs) / 1_000_000
-            PerformanceAuditStore.shared.recordDuration("StageOneBrushRenderer.makeOpacityCapSession", ms: ms)
+            if auditEnabled {
+                let ms = Double(DispatchTime.now().uptimeNanoseconds - startNs) / 1_000_000
+                PerformanceAuditStore.shared.recordDuration("StageOneBrushRenderer.makeOpacityCapSession", ms: ms)
+            }
         }
 
         let originalTexture: MTLTexture
@@ -1396,6 +1444,7 @@ final class StageOneBrushRenderer {
         into texture: MTLTexture,
         commandQueue: MTLCommandQueue,
         alphaLockTexture: MTLTexture? = nil,
+        preservesAlphaWhenAlphaLocked: Bool = true,
         samplingState: inout BrushStrokeSamplingState?,
         completion: (() -> Void)? = nil
     ) -> Int {
@@ -1410,6 +1459,7 @@ final class StageOneBrushRenderer {
             into: texture,
             commandBuffer: commandBuffer,
             alphaLockTexture: alphaLockTexture,
+            preservesAlphaWhenAlphaLocked: preservesAlphaWhenAlphaLocked,
             samplingState: &samplingState
         )
 
@@ -1429,6 +1479,7 @@ final class StageOneBrushRenderer {
         commandQueue: MTLCommandQueue,
         commandBuffer: MTLCommandBuffer,
         alphaLockTexture: MTLTexture? = nil,
+        preservesAlphaWhenAlphaLocked: Bool = true,
         samplingState: inout BrushStrokeSamplingState?
     ) -> Int {
         let samples = interpolatedPoints(for: stroke, samplingState: &samplingState)
@@ -1450,6 +1501,7 @@ final class StageOneBrushRenderer {
                 into: texture,
                 commandBuffer: commandBuffer,
                 alphaLockTexture: alphaLockTexture,
+                preservesAlphaWhenAlphaLocked: preservesAlphaWhenAlphaLocked,
                 gatheredColorsTexture: smudgeGatheredColorsTexture,
                 frozenSourceTexture: nil
             )
@@ -1469,7 +1521,9 @@ final class StageOneBrushRenderer {
         case .eraser:
             pipelineState = eraserPipelineState
         default:
-            pipelineState = brushPipelineState
+            pipelineState = alphaLockTexture != nil && preservesAlphaWhenAlphaLocked
+                ? alphaLockBrushPipelineState
+                : brushPipelineState
         }
 
         encoder.setRenderPipelineState(pipelineState)
@@ -1503,7 +1557,13 @@ final class StageOneBrushRenderer {
         encoder.setFragmentSamplerState(tipSamplerState, index: 1)
 
         var uniformsArray = samples.map {
-            makeUniforms(for: $0, stroke: stroke, texture: texture, selectionShape: selectionShape)
+            makeUniforms(
+                for: $0,
+                stroke: stroke,
+                texture: texture,
+                selectionShape: selectionShape,
+                preservesAlphaWhenAlphaLocked: preservesAlphaWhenAlphaLocked
+            )
         }
         setInstancedUniforms(&uniformsArray, encoder: encoder)
         encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4, instanceCount: uniformsArray.count)
@@ -1519,6 +1579,7 @@ final class StageOneBrushRenderer {
         into texture: MTLTexture,
         commandBuffer: MTLCommandBuffer,
         alphaLockTexture: MTLTexture? = nil,
+        preservesAlphaWhenAlphaLocked: Bool = true,
         samplingState: inout BrushStrokeSamplingState?
     ) -> Int {
         let samples = interpolatedPoints(for: stroke, samplingState: &samplingState)
@@ -1566,7 +1627,15 @@ final class StageOneBrushRenderer {
             encoder.setScissorRect(dirtyRect)
 
             var uniformsArray = samples.map {
-                makeUniforms(for: $0, stroke: stroke, texture: texture, selectionShape: selectionShape, modeOverride: 0, includeBrushOpacity: true)
+                makeUniforms(
+                    for: $0,
+                    stroke: stroke,
+                    texture: texture,
+                    selectionShape: selectionShape,
+                    modeOverride: 0,
+                    includeBrushOpacity: true,
+                    preservesAlphaWhenAlphaLocked: preservesAlphaWhenAlphaLocked
+                )
             }
             setInstancedUniforms(&uniformsArray, encoder: encoder)
             encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4, instanceCount: uniformsArray.count)
@@ -1628,7 +1697,8 @@ final class StageOneBrushRenderer {
                 canvasHeight: Float(texture.height),
                 strokeCenterX: strokeCenterX,
                 strokeCenterY: strokeCenterY,
-                strokeRadius: strokeRadius
+                strokeRadius: strokeRadius,
+                usesAlphaLock: alphaLockTexture != nil && preservesAlphaWhenAlphaLocked ? 1 : 0
             )
             encoder.setFragmentBytes(&uniforms, length: MemoryLayout<CompositeUniforms>.stride, index: 0)
             encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
@@ -1699,7 +1769,8 @@ final class StageOneBrushRenderer {
         texture: MTLTexture,
         selectionShape: SelectionShape?,
         modeOverride: UInt32? = nil,
-        includeBrushOpacity: Bool = true
+        includeBrushOpacity: Bool = true,
+        preservesAlphaWhenAlphaLocked: Bool = true
     ) -> BrushUniforms {
         let point = sample.point
         let effectivePressure = min(max(point.pressure, 0), 1)
@@ -1827,6 +1898,7 @@ final class StageOneBrushRenderer {
             selectionMin: selectionMin,
             selectionMax: selectionMax,
             usesAlphaLock: stroke.alphaLockEnabled ? 1 : 0,
+            preservesAlphaLockAlpha: stroke.alphaLockEnabled && preservesAlphaWhenAlphaLocked ? 1 : 0,
             compoundEnabled: compoundEnabled ? 1 : 0,
             compoundMode: compoundBrushModeCode(stroke.brush.compoundBrush.mode),
             compoundSecondaryShape: brushTipShapeCode(compoundSecondary.tipShape),
@@ -2643,10 +2715,13 @@ final class StageOneBrushRenderer {
         samples: [StampSample],
         commandBuffer: MTLCommandBuffer
     ) -> MTLTexture? {
-        let startNs = DispatchTime.now().uptimeNanoseconds
+        let auditEnabled = PerformanceAuditStore.shared.isRecordingEnabled
+        let startNs = auditEnabled ? DispatchTime.now().uptimeNanoseconds : 0
         defer {
-            let ms = Double(DispatchTime.now().uptimeNanoseconds - startNs) / 1_000_000
-            PerformanceAuditStore.shared.recordDuration("StageOneBrushRenderer.smudgeGatherPass", ms: ms)
+            if auditEnabled {
+                let ms = Double(DispatchTime.now().uptimeNanoseconds - startNs) / 1_000_000
+                PerformanceAuditStore.shared.recordDuration("StageOneBrushRenderer.smudgeGatherPass", ms: ms)
+            }
         }
 
         guard !samples.isEmpty else {
@@ -2724,6 +2799,7 @@ final class StageOneBrushRenderer {
         into texture: MTLTexture,
         commandBuffer: MTLCommandBuffer,
         alphaLockTexture: MTLTexture?,
+        preservesAlphaWhenAlphaLocked: Bool = true,
         gatheredColorsTexture: MTLTexture?,
         frozenSourceTexture: MTLTexture?
     ) -> Int {

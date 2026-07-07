@@ -21,6 +21,7 @@ private struct LinearGradientUniforms {
 final class LinearGradientRenderer {
     private let device: MTLDevice
     private let pipelineState: MTLRenderPipelineState
+    private let alphaLockPipelineState: MTLRenderPipelineState
     private let fallbackSelectionMaskTexture: MTLTexture
     private let fallbackAlphaLockTexture: MTLTexture
     private var cachedSelectionMaskShape: SelectionShape?
@@ -173,10 +174,12 @@ final class LinearGradientRenderer {
                 float2 uv = in.canvasPosition / canvasSize;
                 maskAlpha = selectionMask.sample(maskSampler, uv).r;
             }
+            float lockedDestinationAlpha = 1.0;
             if (uniforms.usesAlphaLock > 0.5) {
                 float2 canvasSize = max(uniforms.canvasSize, float2(1.0, 1.0));
                 float2 uv = in.canvasPosition / canvasSize;
-                if (alphaLockTexture.sample(maskSampler, uv).a <= 0.001) {
+                lockedDestinationAlpha = alphaLockTexture.sample(maskSampler, uv).a;
+                if (lockedDestinationAlpha <= 0.001) {
                     return float4(0.0);
                 }
             }
@@ -196,6 +199,9 @@ final class LinearGradientRenderer {
                 uniforms.paintContrastAmount
             );
             float3 premultiplied = jitteredColor * alpha;
+            if (uniforms.usesAlphaLock > 0.5) {
+                return float4(premultiplied * lockedDestinationAlpha, alpha);
+            }
             return float4(premultiplied, alpha);
         }
         """
@@ -222,6 +228,25 @@ final class LinearGradientRenderer {
             self.pipelineState = try device.makeRenderPipelineState(descriptor: descriptor)
         } catch {
             fatalError("Failed to create LinearGradientRenderer pipeline: \(error)")
+        }
+
+        let alphaLockDescriptor = MTLRenderPipelineDescriptor()
+        alphaLockDescriptor.vertexFunction = library.makeFunction(name: "linearGradientVertexShader")
+        alphaLockDescriptor.fragmentFunction = library.makeFunction(name: "linearGradientFragmentShader")
+        alphaLockDescriptor.colorAttachments[0].pixelFormat = .bgra8Unorm_srgb
+        let alphaLockAttachment = alphaLockDescriptor.colorAttachments[0]!
+        alphaLockAttachment.isBlendingEnabled = true
+        alphaLockAttachment.rgbBlendOperation = .add
+        alphaLockAttachment.alphaBlendOperation = .add
+        alphaLockAttachment.sourceRGBBlendFactor = .one
+        alphaLockAttachment.sourceAlphaBlendFactor = .one
+        alphaLockAttachment.destinationRGBBlendFactor = .oneMinusSourceAlpha
+        alphaLockAttachment.destinationAlphaBlendFactor = .oneMinusSourceAlpha
+        alphaLockAttachment.writeMask = [.red, .green, .blue]
+        do {
+            self.alphaLockPipelineState = try device.makeRenderPipelineState(descriptor: alphaLockDescriptor)
+        } catch {
+            fatalError("Failed to create LinearGradientRenderer alpha lock pipeline: \(error)")
         }
 
         let fallbackDescriptor = MTLTextureDescriptor.texture2DDescriptor(
@@ -305,7 +330,7 @@ final class LinearGradientRenderer {
             return
         }
 
-        encoder.setRenderPipelineState(pipelineState)
+        encoder.setRenderPipelineState(alphaLockTexture == nil ? pipelineState : alphaLockPipelineState)
         encoder.setVertexBytes(vertices, length: MemoryLayout<LinearGradientVertex>.stride * vertices.count, index: 0)
         encoder.setVertexBytes(&uniforms, length: MemoryLayout<LinearGradientUniforms>.stride, index: 1)
         encoder.setFragmentBytes(&uniforms, length: MemoryLayout<LinearGradientUniforms>.stride, index: 1)

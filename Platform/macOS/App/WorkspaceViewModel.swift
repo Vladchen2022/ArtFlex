@@ -8676,7 +8676,8 @@ final class WorkspaceViewModel: ObservableObject {
             }
             return
         }
-        let applyStartNs = DispatchTime.now().uptimeNanoseconds
+        let diagnosticsEnabled = RuntimeDiagnostics.brushHotPathLoggingEnabled
+        let applyStartNs = diagnosticsEnabled ? DispatchTime.now().uptimeNanoseconds : 0
         ideationBranchActivityHandler?()
         let packetIndex = strokePacketCount
         let skipLeadingStamp = packetIndex > 0
@@ -8685,8 +8686,10 @@ final class WorkspaceViewModel: ObservableObject {
             samples: samples,
             skipLeadingStamp: skipLeadingStamp
         ) else {
-            let applyDurationMs = Double(DispatchTime.now().uptimeNanoseconds - applyStartNs) / 1_000_000
-            brushStrokeLogger.debug("[brush-feel] applyStrokeMainThreadMs=\(applyDurationMs, privacy: .public)")
+            if diagnosticsEnabled {
+                let applyDurationMs = Double(DispatchTime.now().uptimeNanoseconds - applyStartNs) / 1_000_000
+                brushStrokeLogger.debug("[brush-feel] applyStrokeMainThreadMs=\(applyDurationMs, privacy: .public)")
+            }
             return
         }
 
@@ -8697,8 +8700,10 @@ final class WorkspaceViewModel: ObservableObject {
                 drawingStatsController.recordPaintingActivity()
             }
             strokePacketCount += 1
-            let applyDurationMs = Double(DispatchTime.now().uptimeNanoseconds - applyStartNs) / 1_000_000
-            brushStrokeLogger.debug("[brush-feel] applyStrokeMainThreadMs=\(applyDurationMs, privacy: .public)")
+            if diagnosticsEnabled {
+                let applyDurationMs = Double(DispatchTime.now().uptimeNanoseconds - applyStartNs) / 1_000_000
+                brushStrokeLogger.debug("[brush-feel] applyStrokeMainThreadMs=\(applyDurationMs, privacy: .public)")
+            }
             return
         }
 
@@ -8706,11 +8711,13 @@ final class WorkspaceViewModel: ObservableObject {
             strokePayload.stroke,
             to: strokePayload.layerID
         )
-        brushStrokeLogger.debug(
-            "[packet] index=\(packetIndex, privacy: .public) skipLeadingStamp=\(skipLeadingStamp, privacy: .public) incomingPoints=\(samples.count, privacy: .public) livePathMetric=\(livePathMetric, privacy: .public)"
-        )
-        let applyDurationMs = Double(DispatchTime.now().uptimeNanoseconds - applyStartNs) / 1_000_000
-        brushStrokeLogger.debug("[brush-feel] applyStrokeMainThreadMs=\(applyDurationMs, privacy: .public)")
+        if diagnosticsEnabled {
+            brushStrokeLogger.debug(
+                "[packet] index=\(packetIndex, privacy: .public) skipLeadingStamp=\(skipLeadingStamp, privacy: .public) incomingPoints=\(samples.count, privacy: .public) livePathMetric=\(livePathMetric, privacy: .public)"
+            )
+            let applyDurationMs = Double(DispatchTime.now().uptimeNanoseconds - applyStartNs) / 1_000_000
+            brushStrokeLogger.debug("[brush-feel] applyStrokeMainThreadMs=\(applyDurationMs, privacy: .public)")
+        }
         if !isApplyingMirroredIdeationOperation {
             drawingStatsController.recordPaintingActivity()
         }
@@ -8719,10 +8726,13 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func beginStrokeIfNeeded() {
-        let startNs = DispatchTime.now().uptimeNanoseconds
+        let auditEnabled = PerformanceAuditStore.shared.isRecordingEnabled
+        let startNs = auditEnabled ? DispatchTime.now().uptimeNanoseconds : 0
         defer {
-            let ms = Double(DispatchTime.now().uptimeNanoseconds - startNs) / 1_000_000
-            PerformanceAuditStore.shared.recordDuration("WorkspaceViewModel.beginStrokeIfNeeded", ms: ms)
+            if auditEnabled {
+                let ms = Double(DispatchTime.now().uptimeNanoseconds - startNs) / 1_000_000
+                PerformanceAuditStore.shared.recordDuration("WorkspaceViewModel.beginStrokeIfNeeded", ms: ms)
+            }
         }
         ideationBranchActivityHandler?()
         strokePacketCount = 0
@@ -8800,10 +8810,13 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func opportunisticallyDrainBrushCommits(hadLiveBrushWorkThisFrame: Bool) {
-        let startNs = DispatchTime.now().uptimeNanoseconds
+        let auditEnabled = PerformanceAuditStore.shared.isRecordingEnabled
+        let startNs = auditEnabled ? DispatchTime.now().uptimeNanoseconds : 0
         defer {
-            let ms = Double(DispatchTime.now().uptimeNanoseconds - startNs) / 1_000_000
-            PerformanceAuditStore.shared.recordDuration("WorkspaceViewModel.opportunisticallyDrainBrushCommits", ms: ms)
+            if auditEnabled {
+                let ms = Double(DispatchTime.now().uptimeNanoseconds - startNs) / 1_000_000
+                PerformanceAuditStore.shared.recordDuration("WorkspaceViewModel.opportunisticallyDrainBrushCommits", ms: ms)
+            }
         }
         guard bootstrap.strokeEngine.hasPendingBrushCommitJobs else {
             return
@@ -8837,10 +8850,13 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func undo() {
-        let startNs = DispatchTime.now().uptimeNanoseconds
+        let auditEnabled = PerformanceAuditStore.shared.isRecordingEnabled
+        let startNs = auditEnabled ? DispatchTime.now().uptimeNanoseconds : 0
         defer {
-            let ms = Double(DispatchTime.now().uptimeNanoseconds - startNs) / 1_000_000
-            PerformanceAuditStore.shared.recordDuration("WorkspaceViewModel.undo", ms: ms)
+            if auditEnabled {
+                let ms = Double(DispatchTime.now().uptimeNanoseconds - startNs) / 1_000_000
+                PerformanceAuditStore.shared.recordDuration("WorkspaceViewModel.undo", ms: ms)
+            }
         }
         ideationBranchActivityHandler?()
         _ = drainPendingBrushCommitsIfNeeded(resetLiveSession: true)
@@ -8875,10 +8891,13 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func redo() {
-        let startNs = DispatchTime.now().uptimeNanoseconds
+        let auditEnabled = PerformanceAuditStore.shared.isRecordingEnabled
+        let startNs = auditEnabled ? DispatchTime.now().uptimeNanoseconds : 0
         defer {
-            let ms = Double(DispatchTime.now().uptimeNanoseconds - startNs) / 1_000_000
-            PerformanceAuditStore.shared.recordDuration("WorkspaceViewModel.redo", ms: ms)
+            if auditEnabled {
+                let ms = Double(DispatchTime.now().uptimeNanoseconds - startNs) / 1_000_000
+                PerformanceAuditStore.shared.recordDuration("WorkspaceViewModel.redo", ms: ms)
+            }
         }
         ideationBranchActivityHandler?()
         _ = drainPendingBrushCommitsIfNeeded(resetLiveSession: true)
@@ -10730,6 +10749,26 @@ final class WorkspaceViewModel: ObservableObject {
         case fill(EditablePixel)
     }
 
+    private func renderInput(for operation: SelectionPixelOperation) -> (
+        mode: SelectionPixelOperationRenderMode,
+        premultipliedColor: RGBAColor
+    ) {
+        switch operation {
+        case .clear:
+            return (.clear, RGBAColor(red: 0, green: 0, blue: 0, alpha: 0))
+        case .fill(let fillPixel):
+            return (
+                .fill,
+                RGBAColor(
+                    red: Float(fillPixel.red) / 255,
+                    green: Float(fillPixel.green) / 255,
+                    blue: Float(fillPixel.blue) / 255,
+                    alpha: Float(fillPixel.alpha) / 255
+                )
+            )
+        }
+    }
+
     private func triggerCreativeShapeGeneratorIfNeeded(for selectionShape: SelectionShape) {
         guard workspace.toolSession.activeTool == .lassoSelection else { return }
         let generatorState = workspace.creativeShapeGenerator
@@ -11075,7 +11114,8 @@ final class WorkspaceViewModel: ObservableObject {
         historyOperationKind: String,
         successMessage: String
     ) -> Bool {
-        let totalStartNs = DispatchTime.now().uptimeNanoseconds
+        let auditEnabled = PerformanceAuditStore.shared.isRecordingEnabled
+        let totalStartNs = auditEnabled ? DispatchTime.now().uptimeNanoseconds : 0
         guard let layerID = bootstrap.interactionController.activeEditableLayerID() else {
             showStatus(.init(kind: .info, message: "当前图层已锁定"))
             return false
@@ -11089,6 +11129,12 @@ final class WorkspaceViewModel: ObservableObject {
             return false
         }
 
+        let alphaLockTexture = makeAlphaLockTextureCopyIfNeeded(for: layerID, sourceTexture: texture)
+        guard alphaLockTexture != nil || !layerTransparentPixelLockEnabled(layerID) else {
+            showStatus(.init(kind: .error, message: "无法创建锁定透明像素遮罩"))
+            return false
+        }
+
         let pixelOperationCaptureMode: HistoryCaptureMode
 #if DEBUG
         pixelOperationCaptureMode = debugPixelOperationHistoryCaptureModeOverride ?? .inPlaceChangedLayers([layerID])
@@ -11096,160 +11142,97 @@ final class WorkspaceViewModel: ObservableObject {
         pixelOperationCaptureMode = .inPlaceChangedLayers([layerID])
 #endif
 
-        let historyCheckpointStartNs = DispatchTime.now().uptimeNanoseconds
+        let historyCheckpointStartNs = auditEnabled ? DispatchTime.now().uptimeNanoseconds : 0
         checkpointHistoryIfPossible(
             operationKind: historyOperationKind,
             candidateChangedLayerIDs: [layerID],
             additionalOperationKinds: ["applyPixelOperation"],
             captureMode: pixelOperationCaptureMode
         )
-        let historyCheckpointMs = Double(DispatchTime.now().uptimeNanoseconds - historyCheckpointStartNs) / 1_000_000
-        PerformanceAuditStore.shared.recordDuration("WorkspaceViewModel.applyPixelOperation.historyCheckpoint", ms: historyCheckpointMs)
-        let alphaLockEnabled = layerTransparentPixelLockEnabled(layerID)
+        if auditEnabled {
+            let historyCheckpointMs = Double(DispatchTime.now().uptimeNanoseconds - historyCheckpointStartNs) / 1_000_000
+            PerformanceAuditStore.shared.recordDuration("WorkspaceViewModel.applyPixelOperation.historyCheckpoint", ms: historyCheckpointMs)
+        }
 
-        do {
-            let clampedSelection = selectionShape.clamped(
-                to: CanvasSize(width: texture.width, height: texture.height)
-            )
-            let minX = max(Int(clampedSelection.bounds.minX.rounded(.down)), 0)
-            let minY = max(Int(clampedSelection.bounds.minY.rounded(.down)), 0)
-            let maxX = min(Int(clampedSelection.bounds.maxX.rounded(.up)), texture.width)
-            let maxY = min(Int(clampedSelection.bounds.maxY.rounded(.up)), texture.height)
+        let clampedSelection = selectionShape.clamped(
+            to: CanvasSize(width: texture.width, height: texture.height)
+        )
+        let minX = max(Int(clampedSelection.bounds.minX.rounded(.down)), 0)
+        let minY = max(Int(clampedSelection.bounds.minY.rounded(.down)), 0)
+        let maxX = min(Int(clampedSelection.bounds.maxX.rounded(.up)), texture.width)
+        let maxY = min(Int(clampedSelection.bounds.maxY.rounded(.up)), texture.height)
 
-            guard minX < maxX, minY < maxY else {
-                showStatus(.init(kind: .info, message: "选区为空"))
-                return false
-            }
+        guard minX < maxX, minY < maxY else {
+            showStatus(.init(kind: .info, message: "选区为空"))
+            return false
+        }
 
-            let maskPreparationStartNs = DispatchTime.now().uptimeNanoseconds
-            let selectionMaskRegion = selectionMaskRegion(
-                for: clampedSelection,
-                canvasSize: CanvasSize(width: texture.width, height: texture.height),
-                originX: minX,
-                originY: minY,
-                width: maxX - minX,
-                height: maxY - minY
-            )
+        let maskPreparationStartNs = auditEnabled ? DispatchTime.now().uptimeNanoseconds : 0
+        let selectionMaskRegion = selectionMaskRegion(
+            for: clampedSelection,
+            canvasSize: CanvasSize(width: texture.width, height: texture.height),
+            originX: minX,
+            originY: minY,
+            width: maxX - minX,
+            height: maxY - minY
+        )
+        if auditEnabled {
             let maskPreparationMs = Double(DispatchTime.now().uptimeNanoseconds - maskPreparationStartNs) / 1_000_000
             PerformanceAuditStore.shared.recordDuration("WorkspaceViewModel.applyPixelOperation.maskPreparation", ms: maskPreparationMs)
+            PerformanceAuditStore.shared.recordDuration("WorkspaceViewModel.applyPixelOperation.snapshot", ms: 0)
+        }
 
-            let snapshotStartNs = DispatchTime.now().uptimeNanoseconds
-            let snapshot = try bootstrap.textureSerializer.snapshot(
-                texture: texture,
-                originX: minX,
-                originY: minY,
-                width: maxX - minX,
-                height: maxY - minY
-            )
-            let snapshotMs = Double(DispatchTime.now().uptimeNanoseconds - snapshotStartNs) / 1_000_000
-            PerformanceAuditStore.shared.recordDuration("WorkspaceViewModel.applyPixelOperation.snapshot", ms: snapshotMs)
-            var bytes = [UInt8](snapshot.pixelData)
-            let bytesPerPixel = 4
+        guard let commandBuffer = bootstrap.metalContext.commandQueue.makeCommandBuffer() else {
+            showStatus(.init(kind: .error, message: "无法创建选区像素操作命令缓冲"))
+            return false
+        }
 
-            let mutateStartNs = DispatchTime.now().uptimeNanoseconds
-            mutateSelectionPixels(
-                bytes: &bytes,
-                bytesPerRow: snapshot.bytesPerRow,
-                bytesPerPixel: bytesPerPixel,
-                selectionMaskRegion: selectionMaskRegion,
-                width: snapshot.width,
-                height: snapshot.height,
-                operation: operation,
-                alphaLockEnabled: alphaLockEnabled
-            )
-            let mutateMs = Double(DispatchTime.now().uptimeNanoseconds - mutateStartNs) / 1_000_000
-            PerformanceAuditStore.shared.recordDuration("WorkspaceViewModel.applyPixelOperation.pixelMutation", ms: mutateMs)
+        let renderPassDescriptor = MTLRenderPassDescriptor()
+        renderPassDescriptor.colorAttachments[0].texture = texture
+        renderPassDescriptor.colorAttachments[0].loadAction = .load
+        renderPassDescriptor.colorAttachments[0].storeAction = .store
 
-            let updatedSnapshot = LayerTextureSnapshot(
-                width: snapshot.width,
-                height: snapshot.height,
-                bytesPerRow: snapshot.bytesPerRow,
-                pixelData: Data(bytes)
-            )
-            let restoreStartNs = DispatchTime.now().uptimeNanoseconds
-            try bootstrap.textureSerializer.restore(
-                snapshot: updatedSnapshot,
-                into: texture,
-                destinationX: minX,
-                destinationY: minY
-            )
-            let restoreMs = Double(DispatchTime.now().uptimeNanoseconds - restoreStartNs) / 1_000_000
-            PerformanceAuditStore.shared.recordDuration("WorkspaceViewModel.applyPixelOperation.restore", ms: restoreMs)
-            let uiConfirmStartNs = DispatchTime.now().uptimeNanoseconds
-            refresh()
-            noteCanvasContentChanged()
-            recordDrawingActivityIfNeeded()
-            showStatus(.init(kind: .success, message: successMessage))
+        let renderInput = renderInput(for: operation)
+        let operationStartNs = auditEnabled ? DispatchTime.now().uptimeNanoseconds : 0
+        bootstrap.selectionPixelOperationRenderer.encode(
+            into: renderPassDescriptor,
+            commandBuffer: commandBuffer,
+            canvasSize: CanvasSize(width: texture.width, height: texture.height),
+            selectionMaskOriginX: selectionMaskRegion.originX,
+            selectionMaskOriginY: selectionMaskRegion.originY,
+            selectionMaskWidth: selectionMaskRegion.width,
+            selectionMaskHeight: selectionMaskRegion.height,
+            selectionMaskAlphaBytes: selectionMaskRegion.alphaBytes,
+            operationMode: renderInput.mode,
+            premultipliedFillColor: renderInput.premultipliedColor,
+            alphaLockTexture: alphaLockTexture
+        )
+
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+
+        if auditEnabled {
+            let operationMs = Double(DispatchTime.now().uptimeNanoseconds - operationStartNs) / 1_000_000
+            PerformanceAuditStore.shared.recordDuration("WorkspaceViewModel.applyPixelOperation.pixelMutation", ms: operationMs)
+            PerformanceAuditStore.shared.recordDuration("WorkspaceViewModel.applyPixelOperation.restore", ms: 0)
+        }
+
+        let uiConfirmStartNs = auditEnabled ? DispatchTime.now().uptimeNanoseconds : 0
+        refresh()
+        noteCanvasContentChanged()
+        recordDrawingActivityIfNeeded()
+        showStatus(.init(kind: .success, message: successMessage))
+        if auditEnabled {
             let uiConfirmMs = Double(DispatchTime.now().uptimeNanoseconds - uiConfirmStartNs) / 1_000_000
             PerformanceAuditStore.shared.recordDuration("WorkspaceViewModel.applyPixelOperation.uiConfirm", ms: uiConfirmMs)
             let totalMs = Double(DispatchTime.now().uptimeNanoseconds - totalStartNs) / 1_000_000
             PerformanceAuditStore.shared.recordDuration("WorkspaceViewModel.applyPixelOperation.total", ms: totalMs)
-            return true
-        } catch {
-            showStatus(.init(kind: .error, message: error.localizedDescription))
-            return false
         }
+        return true
     }
 
     private func captureHistoryEligibilityComparisonWorkspace() -> WorkspaceState? {
         bootstrap.historyController.latestUndoWorkspaceForAudit
-    }
-
-    private func mutateSelectionPixels(
-        bytes: inout [UInt8],
-        bytesPerRow: Int,
-        bytesPerPixel: Int,
-        selectionMaskRegion: SelectionMaskRegion,
-        width: Int,
-        height: Int,
-        operation: SelectionPixelOperation,
-        alphaLockEnabled: Bool
-    ) {
-        guard
-            width == selectionMaskRegion.width,
-            height == selectionMaskRegion.height
-        else {
-            return
-        }
-
-        selectionMaskRegion.withAlphaBytes { maskBytes in
-            guard let maskBaseAddress = maskBytes.baseAddress else { return }
-
-            switch operation {
-            case .clear:
-                for localY in 0..<height {
-                    let maskRow = localY * selectionMaskRegion.width
-                    let byteRow = localY * bytesPerRow
-                    for localX in 0..<width {
-                        guard maskBaseAddress[maskRow + localX] > 0 else { continue }
-                        let index = byteRow + (localX * bytesPerPixel)
-                        if alphaLockEnabled, bytes[index + 3] == 0 {
-                            continue
-                        }
-                        bytes[index] = 0
-                        bytes[index + 1] = 0
-                        bytes[index + 2] = 0
-                        bytes[index + 3] = 0
-                    }
-                }
-            case .fill(let fillPixel):
-                for localY in 0..<height {
-                    let maskRow = localY * selectionMaskRegion.width
-                    let byteRow = localY * bytesPerRow
-                    for localX in 0..<width {
-                        guard maskBaseAddress[maskRow + localX] > 0 else { continue }
-                        let index = byteRow + (localX * bytesPerPixel)
-                        if alphaLockEnabled, bytes[index + 3] == 0 {
-                            continue
-                        }
-                        bytes[index] = fillPixel.blue
-                        bytes[index + 1] = fillPixel.green
-                        bytes[index + 2] = fillPixel.red
-                        bytes[index + 3] = fillPixel.alpha
-                    }
-                }
-            }
-        }
     }
 
     private func resolvedGeneratorColor(from color: RGBAColor) -> RGBAColor {

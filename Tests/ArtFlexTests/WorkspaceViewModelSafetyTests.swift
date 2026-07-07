@@ -204,6 +204,93 @@ struct WorkspaceViewModelSafetyTests {
 
     @Test
     @MainActor
+    func brushWithTransparentPixelLockPreservesSemitransparentAlpha() throws {
+        let harness = try BrushEditingBoundaryHarness()
+        let activeLayerID = harness.viewModel.workspace.document.activeLayerID
+        let sampleX = 96
+        let sampleY = 96
+
+        try fillOpaqueRect(
+            in: harness,
+            layerID: activeLayerID,
+            originX: 72,
+            originY: 72,
+            width: 48,
+            height: 48,
+            color: .init(red: 0.08, green: 0.12, blue: 0.72, alpha: 0.36)
+        )
+        let basePixel = try harness.color(atX: sampleX, y: sampleY, layerID: activeLayerID)
+
+        harness.viewModel.setBrushSize(24)
+        harness.viewModel.setSelectedColor(.init(red: 0.88, green: 0.08, blue: 0.04, alpha: 1))
+        harness.viewModel.toggleLayerTransparentPixelLock(activeLayerID)
+        try drawSingleMainCanvasStamp(in: harness.viewModel, at: .init(x: Double(sampleX), y: Double(sampleY)))
+        _ = harness.viewModel.flushBrushEditingBoundary(reason: "test.transparentPixelLockBrush")
+
+        let paintedPixel = try harness.color(atX: sampleX, y: sampleY, layerID: activeLayerID)
+        #expect(abs(paintedPixel.alpha - basePixel.alpha) < 0.03)
+        #expect(paintedPixel.red > basePixel.red + 0.04)
+    }
+
+    @Test
+    @MainActor
+    func selectionFillWithTransparentPixelLockPreservesSemitransparentAlpha() throws {
+        let harness = try BrushEditingBoundaryHarness()
+        let activeLayerID = harness.viewModel.workspace.document.activeLayerID
+        let sampleX = 96
+        let sampleY = 96
+
+        try fillOpaqueRect(
+            in: harness,
+            layerID: activeLayerID,
+            originX: 72,
+            originY: 72,
+            width: 48,
+            height: 48,
+            color: .init(red: 0.08, green: 0.12, blue: 0.72, alpha: 0.36)
+        )
+        let basePixel = try harness.color(atX: sampleX, y: sampleY, layerID: activeLayerID)
+
+        makeRectangleSelection(in: harness.viewModel, minX: 80, minY: 80, maxX: 112, maxY: 112)
+        harness.viewModel.setSelectedColor(.init(red: 0.88, green: 0.08, blue: 0.04, alpha: 1))
+        harness.viewModel.toggleLayerTransparentPixelLock(activeLayerID)
+        harness.viewModel.fillSelectionContents()
+
+        let filledPixel = try harness.color(atX: sampleX, y: sampleY, layerID: activeLayerID)
+        #expect(abs(filledPixel.alpha - basePixel.alpha) < 0.03)
+        #expect(filledPixel.red > basePixel.red + 0.04)
+    }
+
+    @Test
+    @MainActor
+    func bucketFillWithTransparentPixelLockPreservesSemitransparentAlpha() throws {
+        let harness = try BrushEditingBoundaryHarness()
+        let activeLayerID = harness.viewModel.workspace.document.activeLayerID
+        let sampleX = 96
+        let sampleY = 96
+
+        try fillOpaqueRect(
+            in: harness,
+            layerID: activeLayerID,
+            originX: 72,
+            originY: 72,
+            width: 48,
+            height: 48,
+            color: .init(red: 0.08, green: 0.12, blue: 0.72, alpha: 0.36)
+        )
+        let basePixel = try harness.color(atX: sampleX, y: sampleY, layerID: activeLayerID)
+
+        harness.viewModel.setSelectedColor(.init(red: 0.88, green: 0.08, blue: 0.04, alpha: 1))
+        harness.viewModel.toggleLayerTransparentPixelLock(activeLayerID)
+        harness.viewModel.fillAtPoint(.init(x: Double(sampleX), y: Double(sampleY)))
+
+        let filledPixel = try harness.color(atX: sampleX, y: sampleY, layerID: activeLayerID)
+        #expect(abs(filledPixel.alpha - basePixel.alpha) < 0.03)
+        #expect(filledPixel.red > basePixel.red + 0.04)
+    }
+
+    @Test
+    @MainActor
     func toggleWorkspaceChromeVisibilityUpdatesUIState() throws {
         let harness = try BrushEditingBoundaryHarness()
 

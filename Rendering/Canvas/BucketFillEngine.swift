@@ -76,7 +76,9 @@ final class BucketFillEngine {
             red: bytes[startIndex + 2],
             alpha: bytes[startIndex + 3]
         )
-        let replacement = makePremultipliedBGRA(color: color)
+        let replacement = alphaLockEnabled
+            ? makePremultipliedBGRA(color: color, preservingAlpha: target.alpha)
+            : makePremultipliedBGRA(color: color)
 
         guard target != replacement else { return }
         if alphaLockEnabled && target.alpha == 0 {
@@ -128,10 +130,13 @@ final class BucketFillEngine {
                 continue
             }
 
-            bytes[index] = replacement.blue
-            bytes[index + 1] = replacement.green
-            bytes[index + 2] = replacement.red
-            bytes[index + 3] = replacement.alpha
+            let resolvedReplacement = alphaLockEnabled
+                ? makePremultipliedBGRA(color: color, preservingAlpha: currentPixel.alpha)
+                : replacement
+            bytes[index] = resolvedReplacement.blue
+            bytes[index + 1] = resolvedReplacement.green
+            bytes[index + 2] = resolvedReplacement.red
+            bytes[index + 3] = resolvedReplacement.alpha
 
             dirtyMinX = min(dirtyMinX, localX)
             dirtyMinY = min(dirtyMinY, localY)
@@ -265,6 +270,16 @@ final class BucketFillEngine {
             green: UInt8(clamping: Int((premultiplied.green * 255).rounded())),
             red: UInt8(clamping: Int((premultiplied.red * 255).rounded())),
             alpha: UInt8(clamping: Int((premultiplied.alpha * 255).rounded()))
+        )
+    }
+
+    private func makePremultipliedBGRA(color: RGBAColor, preservingAlpha alpha: UInt8) -> PixelBGRA {
+        let alphaScale = Float(alpha) / 255
+        return PixelBGRA(
+            blue: UInt8(clamping: Int((color.blue * alphaScale * 255).rounded())),
+            green: UInt8(clamping: Int((color.green * alphaScale * 255).rounded())),
+            red: UInt8(clamping: Int((color.red * alphaScale * 255).rounded())),
+            alpha: alpha
         )
     }
 }

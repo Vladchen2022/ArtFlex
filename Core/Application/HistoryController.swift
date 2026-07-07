@@ -243,19 +243,23 @@ final class HistoryController {
         auditContext: HistoryEligibilityAuditContext? = nil,
         durationMetricKey: String? = nil
     ) throws -> WorkspaceHistoryEntry {
-        let startedAt = DispatchTime.now().uptimeNanoseconds
+        let auditEnabled = PerformanceAuditStore.shared.isRecordingEnabled &&
+            (durationMetricKey != nil || auditContext != nil)
+        let startedAt = auditEnabled ? DispatchTime.now().uptimeNanoseconds : 0
         let entry = try makeEntry(
             workspaceOverride: workspaceOverride,
             captureMode: captureMode
         )
-        let ms = Double(DispatchTime.now().uptimeNanoseconds - startedAt) / 1_000_000
+        let ms = auditEnabled
+            ? Double(DispatchTime.now().uptimeNanoseconds - startedAt) / 1_000_000
+            : 0
 
-        if let durationMetricKey {
+        if auditEnabled, let durationMetricKey {
             PerformanceAuditStore.shared.recordDuration(durationMetricKey, ms: ms)
         }
 
 #if DEBUG
-        if let auditContext {
+        if auditEnabled, let auditContext {
             recordEligibilityAudit(
                 for: entry,
                 workspace: workspaceOverride ?? workspaceStore.state,

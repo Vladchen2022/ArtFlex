@@ -146,20 +146,37 @@ final class PerformanceAuditStore: @unchecked Sendable {
     private static let maxHistoryEligibilityRecords = 500
 
     private let lock = NSLock()
+    private var recordingEnabled = false
     private var durationsMs: [String: [Double]] = [:]
     private var integerSamples: [String: [Int]] = [:]
     private var historyEligibilityRecords: [HistoryEligibilityAuditRecord] = []
 
+    var isRecordingEnabled: Bool {
+        recordingEnabled
+    }
+
     func reset() {
         lock.lock()
+        recordingEnabled = true
         durationsMs.removeAll()
         integerSamples.removeAll()
         historyEligibilityRecords.removeAll()
         lock.unlock()
     }
 
-    func recordDuration(_ key: String, ms: Double) {
+    func setRecordingEnabled(_ isEnabled: Bool) {
         lock.lock()
+        recordingEnabled = isEnabled
+        lock.unlock()
+    }
+
+    func recordDuration(_ key: String, ms: Double) {
+        guard recordingEnabled else { return }
+        lock.lock()
+        guard recordingEnabled else {
+            lock.unlock()
+            return
+        }
         var samples = durationsMs[key, default: []]
         if samples.count >= Self.maxSamplesPerKey {
             samples.removeFirst(samples.count / 2)
@@ -170,7 +187,12 @@ final class PerformanceAuditStore: @unchecked Sendable {
     }
 
     func recordInt(_ key: String, value: Int) {
+        guard recordingEnabled else { return }
         lock.lock()
+        guard recordingEnabled else {
+            lock.unlock()
+            return
+        }
         var samples = integerSamples[key, default: []]
         if samples.count >= Self.maxSamplesPerKey {
             samples.removeFirst(samples.count / 2)
@@ -181,7 +203,12 @@ final class PerformanceAuditStore: @unchecked Sendable {
     }
 
     func recordHistoryEligibility(_ record: HistoryEligibilityAuditRecord) {
+        guard recordingEnabled else { return }
         lock.lock()
+        guard recordingEnabled else {
+            lock.unlock()
+            return
+        }
         if historyEligibilityRecords.count >= Self.maxHistoryEligibilityRecords {
             historyEligibilityRecords.removeFirst(historyEligibilityRecords.count / 2)
         }

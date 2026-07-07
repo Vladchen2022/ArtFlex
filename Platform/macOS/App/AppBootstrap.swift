@@ -6,6 +6,7 @@ final class AppSharedMetalServices {
     let linearGradientRenderer: LinearGradientRenderer
     let sectorGradientRenderer: SectorGradientRenderer
     let selectionFillRenderer: SelectionFillRenderer
+    let selectionPixelOperationRenderer: SelectionPixelOperationRenderer
     let colorAdjustmentRenderer: ColorAdjustmentRenderer
     let curveAdjustmentRenderer: CurveAdjustmentRenderer
     let creativeShapeGeneratorRenderer: CreativeShapeGeneratorRenderer
@@ -24,6 +25,7 @@ final class AppSharedMetalServices {
         self.linearGradientRenderer = LinearGradientRenderer(device: metalContext.device)
         self.sectorGradientRenderer = SectorGradientRenderer(device: metalContext.device)
         self.selectionFillRenderer = SelectionFillRenderer(device: metalContext.device)
+        self.selectionPixelOperationRenderer = SelectionPixelOperationRenderer(device: metalContext.device)
         self.colorAdjustmentRenderer = try ColorAdjustmentRenderer(device: metalContext.device)
         self.curveAdjustmentRenderer = try CurveAdjustmentRenderer(device: metalContext.device)
         self.creativeShapeGeneratorRenderer = CreativeShapeGeneratorRenderer(device: metalContext.device)
@@ -54,6 +56,7 @@ struct AppBootstrap {
     let linearGradientRenderer: LinearGradientRenderer
     let sectorGradientRenderer: SectorGradientRenderer
     let selectionFillRenderer: SelectionFillRenderer
+    let selectionPixelOperationRenderer: SelectionPixelOperationRenderer
     let colorAdjustmentRenderer: ColorAdjustmentRenderer
     let curveAdjustmentRenderer: CurveAdjustmentRenderer
     let creativeShapeGeneratorRenderer: CreativeShapeGeneratorRenderer
@@ -104,6 +107,7 @@ struct AppBootstrap {
         self.linearGradientRenderer = resolvedSharedMetalServices.linearGradientRenderer
         self.sectorGradientRenderer = resolvedSharedMetalServices.sectorGradientRenderer
         self.selectionFillRenderer = resolvedSharedMetalServices.selectionFillRenderer
+        self.selectionPixelOperationRenderer = resolvedSharedMetalServices.selectionPixelOperationRenderer
         self.colorAdjustmentRenderer = resolvedSharedMetalServices.colorAdjustmentRenderer
         self.curveAdjustmentRenderer = resolvedSharedMetalServices.curveAdjustmentRenderer
         self.creativeShapeGeneratorRenderer = resolvedSharedMetalServices.creativeShapeGeneratorRenderer

@@ -214,10 +214,14 @@ final class MetalStrokeEngine: StrokeEngine {
 
     @discardableResult
     func flushPendingStrokePackets(into commandBuffer: MTLCommandBuffer) -> BrushFlushMetrics? {
-        let startNs = DispatchTime.now().uptimeNanoseconds
+        let diagnosticsEnabled = RuntimeDiagnostics.brushHotPathLoggingEnabled
+        let auditEnabled = PerformanceAuditStore.shared.isRecordingEnabled
+        let startNs = auditEnabled ? DispatchTime.now().uptimeNanoseconds : 0
         defer {
-            let ms = Double(DispatchTime.now().uptimeNanoseconds - startNs) / 1_000_000
-            PerformanceAuditStore.shared.recordDuration("MetalStrokeEngine.flushPendingStrokePackets", ms: ms)
+            if auditEnabled {
+                let ms = Double(DispatchTime.now().uptimeNanoseconds - startNs) / 1_000_000
+                PerformanceAuditStore.shared.recordDuration("MetalStrokeEngine.flushPendingStrokePackets", ms: ms)
+            }
         }
         guard var session = liveSession, !session.liveEvents.isEmpty else {
             return nil
@@ -277,14 +281,18 @@ final class MetalStrokeEngine: StrokeEngine {
                 }
 
                 session.currentStrokePackets.append(stroke)
-                PerformanceAuditStore.shared.recordInt(
-                    "MetalStrokeEngine.currentStrokePackets.count",
-                    value: session.currentStrokePackets.count
-                )
+                if auditEnabled {
+                    PerformanceAuditStore.shared.recordInt(
+                        "MetalStrokeEngine.currentStrokePackets.count",
+                        value: session.currentStrokePackets.count
+                    )
+                }
                 flushedPacketCount += 1
                 if let strokeBeganAtUptimeNs = session.strokeBeganAtUptimeNs {
-                    let beginToFirstLiveEncodeMs = Double(flushStartNs - strokeBeganAtUptimeNs) / 1_000_000
-                    logger.debug("[brush-live] beginToFirstLiveEncodeMs=\(beginToFirstLiveEncodeMs, privacy: .public)")
+                    if diagnosticsEnabled {
+                        let beginToFirstLiveEncodeMs = Double(flushStartNs - strokeBeganAtUptimeNs) / 1_000_000
+                        logger.debug("[brush-live] beginToFirstLiveEncodeMs=\(beginToFirstLiveEncodeMs, privacy: .public)")
+                    }
                     session.strokeBeganAtUptimeNs = nil
                 }
 
@@ -341,17 +349,21 @@ final class MetalStrokeEngine: StrokeEngine {
                         commitRevision: nextCommitRevision
                     )
                 )
-                PerformanceAuditStore.shared.recordInt(
-                    "MetalStrokeEngine.stroke.packetCount",
-                    value: session.currentStrokePackets.count
-                )
-                PerformanceAuditStore.shared.recordInt(
-                    "MetalStrokeEngine.commitQueue.depth",
-                    value: commitQueue.count
-                )
+                if auditEnabled {
+                    PerformanceAuditStore.shared.recordInt(
+                        "MetalStrokeEngine.stroke.packetCount",
+                        value: session.currentStrokePackets.count
+                    )
+                    PerformanceAuditStore.shared.recordInt(
+                        "MetalStrokeEngine.commitQueue.depth",
+                        value: commitQueue.count
+                    )
+                }
                 session.currentStrokePackets = []
                 invalidateRecentBrushPreviewCache()
-                logger.debug("[brush-live] commitQueueDepth=\(self.commitQueue.count, privacy: .public)")
+                if diagnosticsEnabled {
+                    logger.debug("[brush-live] commitQueueDepth=\(self.commitQueue.count, privacy: .public)")
+                }
             }
         }
 
@@ -372,16 +384,18 @@ final class MetalStrokeEngine: StrokeEngine {
             usedSameFrameFlush: enqueueToFlushMs <= 16.7
         )
 
-        logger.debug("[brush-feel] flushPacketsThisFrame=\(flushedPacketCount, privacy: .public)")
-        logger.debug("[brush-feel] enqueueToFlushMs=\(enqueueToFlushMs, privacy: .public)")
-        logger.debug("[brush-feel] flushEncodeMs=\(flushEncodeMs, privacy: .public)")
-        logger.debug("[brush-feel] usedSameFrameFlush=\(metrics.usedSameFrameFlush, privacy: .public)")
+        if diagnosticsEnabled {
+            logger.debug("[brush-feel] flushPacketsThisFrame=\(flushedPacketCount, privacy: .public)")
+            logger.debug("[brush-feel] enqueueToFlushMs=\(enqueueToFlushMs, privacy: .public)")
+            logger.debug("[brush-feel] flushEncodeMs=\(flushEncodeMs, privacy: .public)")
+            logger.debug("[brush-feel] usedSameFrameFlush=\(metrics.usedSameFrameFlush, privacy: .public)")
 
-        commandBuffer.addCompletedHandler { [logger] _ in
-            let flushToPresentMs = Double(DispatchTime.now().uptimeNanoseconds - flushStartNs) / 1_000_000
-            let didProduceToPresentMs = Double(DispatchTime.now().uptimeNanoseconds - oldestEnqueueNs) / 1_000_000
-            logger.debug("[brush-feel] flushToPresentMs=\(flushToPresentMs, privacy: .public)")
-            logger.debug("[brush-feel] didProduceToPresentMs=\(didProduceToPresentMs, privacy: .public)")
+            commandBuffer.addCompletedHandler { [logger] _ in
+                let flushToPresentMs = Double(DispatchTime.now().uptimeNanoseconds - flushStartNs) / 1_000_000
+                let didProduceToPresentMs = Double(DispatchTime.now().uptimeNanoseconds - oldestEnqueueNs) / 1_000_000
+                logger.debug("[brush-feel] flushToPresentMs=\(flushToPresentMs, privacy: .public)")
+                logger.debug("[brush-feel] didProduceToPresentMs=\(didProduceToPresentMs, privacy: .public)")
+            }
         }
 
         return metrics
@@ -455,6 +469,7 @@ final class MetalStrokeEngine: StrokeEngine {
         _ stroke: StrokeDescriptor,
         to texture: MTLTexture,
         alphaLockTexture: MTLTexture? = nil,
+        preservesAlphaWhenAlphaLocked: Bool = true,
         samplingState: inout BrushStrokeSamplingState?
     ) -> Int {
         brushRenderer.render(
@@ -462,6 +477,7 @@ final class MetalStrokeEngine: StrokeEngine {
             into: texture,
             commandQueue: metalContext.commandQueue,
             alphaLockTexture: alphaLockTexture,
+            preservesAlphaWhenAlphaLocked: preservesAlphaWhenAlphaLocked,
             samplingState: &samplingState
         )
     }
@@ -472,6 +488,7 @@ final class MetalStrokeEngine: StrokeEngine {
         session: OpacityCapSessionResources,
         to texture: MTLTexture,
         alphaLockTexture: MTLTexture? = nil,
+        preservesAlphaWhenAlphaLocked: Bool = true,
         samplingState: inout BrushStrokeSamplingState?
     ) -> Int {
         brushRenderer.renderOpacityCap(
@@ -480,15 +497,19 @@ final class MetalStrokeEngine: StrokeEngine {
             into: texture,
             commandQueue: metalContext.commandQueue,
             alphaLockTexture: alphaLockTexture,
+            preservesAlphaWhenAlphaLocked: preservesAlphaWhenAlphaLocked,
             samplingState: &samplingState
         )
     }
 
     private func ensureLiveSession(for layerID: LayerID, now: UInt64) -> LiveSessionReuseState? {
-        let startNs = DispatchTime.now().uptimeNanoseconds
+        let auditEnabled = PerformanceAuditStore.shared.isRecordingEnabled
+        let startNs = auditEnabled ? DispatchTime.now().uptimeNanoseconds : 0
         defer {
-            let ms = Double(DispatchTime.now().uptimeNanoseconds - startNs) / 1_000_000
-            PerformanceAuditStore.shared.recordDuration("MetalStrokeEngine.ensureLiveSession", ms: ms)
+            if auditEnabled {
+                let ms = Double(DispatchTime.now().uptimeNanoseconds - startNs) / 1_000_000
+                PerformanceAuditStore.shared.recordDuration("MetalStrokeEngine.ensureLiveSession", ms: ms)
+            }
         }
         if let liveSession,
            liveSession.layerID == layerID,
@@ -658,10 +679,13 @@ final class MetalStrokeEngine: StrokeEngine {
         _ jobs: [BrushCommitJob],
         selectedRecentCommitRevisions: Set<UInt64>
     ) throws {
-        let startNs = DispatchTime.now().uptimeNanoseconds
+        let auditEnabled = PerformanceAuditStore.shared.isRecordingEnabled
+        let startNs = auditEnabled ? DispatchTime.now().uptimeNanoseconds : 0
         defer {
-            let ms = Double(DispatchTime.now().uptimeNanoseconds - startNs) / 1_000_000
-            PerformanceAuditStore.shared.recordDuration("MetalStrokeEngine.commit(job:)", ms: ms)
+            if auditEnabled {
+                let ms = Double(DispatchTime.now().uptimeNanoseconds - startNs) / 1_000_000
+                PerformanceAuditStore.shared.recordDuration("MetalStrokeEngine.commit(job:)", ms: ms)
+            }
         }
         guard let commandBuffer = metalContext.commandQueue.makeCommandBuffer() else {
             return

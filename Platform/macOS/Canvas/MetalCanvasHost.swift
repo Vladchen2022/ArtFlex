@@ -251,7 +251,7 @@ struct MetalCanvasHost: NSViewRepresentable {
             let previousGradientPaintContrastAmount = context.coordinator.previousGradientPaintContrastAmount
             let previousGradientDistortionAmount = context.coordinator.previousGradientDistortionAmount
 
-            let nonBrushStateChanged =
+            let requiresCanvasRedraw =
                 previousCanvasContentRevision != sceneSnapshot.renderSnapshot.canvasContentRevision ||
                 previousViewportRevision != sceneSnapshot.renderSnapshot.viewportRevision ||
                 previousSelectionRevision != sceneSnapshot.selectionRevision ||
@@ -276,11 +276,13 @@ struct MetalCanvasHost: NSViewRepresentable {
 
             view.transformPreviewDelegate = context.coordinator
 
-            if previousBrushSize != brushSize && !nonBrushStateChanged {
+            if previousBrushSize != brushSize && !requiresCanvasRedraw {
                 view.brushSize = brushSize
-                let updateDurationMs = Double(DispatchTime.now().uptimeNanoseconds - updateStartNs) / 1_000_000
-                brushFeelLogger.debug("[brush-size] updateNSViewFastPath=true")
-                brushFeelLogger.debug("[brush-size] updateNSViewFastPathMs=\(updateDurationMs, privacy: .public)")
+                if RuntimeDiagnostics.brushHotPathLoggingEnabled {
+                    let updateDurationMs = Double(DispatchTime.now().uptimeNanoseconds - updateStartNs) / 1_000_000
+                    brushFeelLogger.debug("[brush-size] updateNSViewFastPath=true")
+                    brushFeelLogger.debug("[brush-size] updateNSViewFastPathMs=\(updateDurationMs, privacy: .public)")
+                }
                 return
             }
 
@@ -305,29 +307,6 @@ struct MetalCanvasHost: NSViewRepresentable {
                 view.enableSetNeedsDisplay = true
             }
 
-            let requiresCanvasRedraw =
-                previousCanvasContentRevision != sceneSnapshot.renderSnapshot.canvasContentRevision ||
-                previousViewportRevision != sceneSnapshot.renderSnapshot.viewportRevision ||
-                previousSelectionRevision != sceneSnapshot.selectionRevision ||
-                previousSelectionShape?.kind != sceneSnapshot.selectionShape?.kind ||
-                previousSelectionShape?.bounds != sceneSnapshot.selectionShape?.bounds ||
-                previousActiveTool != activeTool ||
-                previousExternalRedrawRevision != externalRedrawRevision ||
-                previousIsTransforming != isTransformingSelection ||
-                previousTransformPreview != transformPreview ||
-                previousPatternPlacementPhase != patternPlacementPhase ||
-                previousLinearGradientPreview != linearGradientPreview ||
-                previousSectorGradientPreview != sectorGradientPreview ||
-                previousGradientPreviewColor != gradientPreviewColor ||
-                previousGradientPaintJitterAmount != gradientPaintJitterAmount ||
-                previousGradientPaintContrastAmount != gradientPaintContrastAmount ||
-                previousGradientDistortionAmount != gradientDistortionAmount ||
-                previousLuminosityPreview != isLuminosityPreviewEnabled ||
-                previousCanvasSize != view.canvasSize ||
-                previousViewportRotation != viewportRotationDegrees ||
-                previousPanMode != isPanModeActive ||
-                previousStrokeResetToken != strokeResetToken
-
             context.coordinator.previousLinearGradientPreview = linearGradientPreview
             context.coordinator.previousSectorGradientPreview = sectorGradientPreview
             context.coordinator.previousGradientPreviewColor = gradientPreviewColor
@@ -335,12 +314,13 @@ struct MetalCanvasHost: NSViewRepresentable {
             context.coordinator.previousGradientPaintContrastAmount = gradientPaintContrastAmount
             context.coordinator.previousGradientDistortionAmount = gradientDistortionAmount
 
-            let brushSizeOnlyChanged = previousBrushSize != brushSize && !requiresCanvasRedraw
-            let updateDurationMs = Double(DispatchTime.now().uptimeNanoseconds - updateStartNs) / 1_000_000
-            brushFeelLogger.debug("[brush-feel] updateNSViewMs=\(updateDurationMs, privacy: .public)")
-            brushFeelLogger.debug("[brush-feel] updateNSViewDuringActiveBrush=\(view.isBrushLikeStrokeActive, privacy: .public)")
-            brushFeelLogger.debug("[brush-feel] sceneSnapshotDeepCompare=false")
-            if brushSizeOnlyChanged {
+            if RuntimeDiagnostics.brushHotPathLoggingEnabled {
+                let updateDurationMs = Double(DispatchTime.now().uptimeNanoseconds - updateStartNs) / 1_000_000
+                brushFeelLogger.debug("[brush-feel] updateNSViewMs=\(updateDurationMs, privacy: .public)")
+                brushFeelLogger.debug("[brush-feel] updateNSViewDuringActiveBrush=\(view.isBrushLikeStrokeActive, privacy: .public)")
+                brushFeelLogger.debug("[brush-feel] sceneSnapshotDeepCompare=false")
+            }
+            if !requiresCanvasRedraw {
                 return
             }
         }
@@ -1735,7 +1715,8 @@ final class StrokeCaptureMTKView: MTKView {
     func flushPendingBrushInputQueue() -> Int {
         let batches = pendingBrushInputQueue.flush()
         guard !batches.isEmpty else { return 0 }
-        let flushStartNs = DispatchTime.now().uptimeNanoseconds
+        let diagnosticsEnabled = RuntimeDiagnostics.brushHotPathLoggingEnabled
+        let flushStartNs = diagnosticsEnabled ? DispatchTime.now().uptimeNanoseconds : 0
         let oldestEnqueueNs = batches.first?.enqueuedAt ?? flushStartNs
         var flushedSampleBatchCount = 0
 
@@ -1744,19 +1725,25 @@ final class StrokeCaptureMTKView: MTKView {
             case .begin:
                 strokeDelegate?.strokeCaptureViewDidBeginStroke(self)
             case .samples(let samples):
-                let didProduceStartNs = DispatchTime.now().uptimeNanoseconds
-                strokeDelegate?.strokeCaptureView(self, didProduce: samples)
-                let didProduceDurationMs = Double(DispatchTime.now().uptimeNanoseconds - didProduceStartNs) / 1_000_000
-                brushStrokeLogger.debug("[brush-feel] didProduceSyncMs=\(didProduceDurationMs, privacy: .public)")
+                if diagnosticsEnabled {
+                    let didProduceStartNs = DispatchTime.now().uptimeNanoseconds
+                    strokeDelegate?.strokeCaptureView(self, didProduce: samples)
+                    let didProduceDurationMs = Double(DispatchTime.now().uptimeNanoseconds - didProduceStartNs) / 1_000_000
+                    brushStrokeLogger.debug("[brush-feel] didProduceSyncMs=\(didProduceDurationMs, privacy: .public)")
+                } else {
+                    strokeDelegate?.strokeCaptureView(self, didProduce: samples)
+                }
                 flushedSampleBatchCount += 1
             case .end:
                 strokeDelegate?.strokeCaptureViewDidEndStroke(self)
             }
         }
 
-        let enqueueToFlushMs = Double(flushStartNs - oldestEnqueueNs) / 1_000_000
-        brushStrokeLogger.debug("[brush-feel] flushPacketsThisFrame=\(flushedSampleBatchCount, privacy: .public)")
-        brushStrokeLogger.debug("[brush-feel] enqueueToFlushMs=\(enqueueToFlushMs, privacy: .public)")
+        if diagnosticsEnabled {
+            let enqueueToFlushMs = Double(flushStartNs - oldestEnqueueNs) / 1_000_000
+            brushStrokeLogger.debug("[brush-feel] flushPacketsThisFrame=\(flushedSampleBatchCount, privacy: .public)")
+            brushStrokeLogger.debug("[brush-feel] enqueueToFlushMs=\(enqueueToFlushMs, privacy: .public)")
+        }
         return flushedSampleBatchCount
     }
 
@@ -2256,7 +2243,8 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
     func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {}
 
     func draw(in view: MTKView) {
-        let drawStartNs = DispatchTime.now().uptimeNanoseconds
+        let diagnosticsEnabled = RuntimeDiagnostics.brushHotPathLoggingEnabled
+        let drawStartNs = diagnosticsEnabled ? DispatchTime.now().uptimeNanoseconds : 0
         guard
             let drawable = view.currentDrawable,
             let descriptor = view.currentRenderPassDescriptor,
@@ -2560,7 +2548,9 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
         commandBuffer.present(drawable)
         commandBuffer.commit()
         scheduleInteractiveBrushCommitDrain(hadLiveBrushWorkThisFrame: hadLiveBrushWorkThisFrame)
-        if let strokeView = view as? StrokeCaptureMTKView, strokeView.isBrushLikeStrokeActive {
+        if diagnosticsEnabled,
+           let strokeView = view as? StrokeCaptureMTKView,
+           strokeView.isBrushLikeStrokeActive {
             let drawFrameMs = Double(DispatchTime.now().uptimeNanoseconds - drawStartNs) / 1_000_000
             brushFeelLogger.debug("[brush-feel] drawFrameMs=\(drawFrameMs, privacy: .public)")
         }

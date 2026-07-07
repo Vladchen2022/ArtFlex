@@ -21,6 +21,7 @@ private struct SelectionFillUniforms {
 final class SelectionFillRenderer {
     private let device: MTLDevice
     private let pipelineState: MTLRenderPipelineState
+    private let alphaLockPipelineState: MTLRenderPipelineState
     private let fallbackAlphaLockTexture: MTLTexture
     private var reusableSelectionMaskTexture: MTLTexture?
     private var reusableSelectionMaskTextureSize: SIMD2<Int>?
@@ -167,10 +168,12 @@ final class SelectionFillRenderer {
             if (maskAlpha <= 0.001) {
                 return float4(0.0);
             }
+            float lockedDestinationAlpha = 1.0;
             if (uniforms.usesAlphaLock > 0.5) {
                 float2 canvasSize = max(uniforms.canvasSize, float2(1.0, 1.0));
                 float2 canvasUV = in.canvasPosition / canvasSize;
-                if (alphaLockTexture.sample(maskSampler, canvasUV).a <= 0.001) {
+                lockedDestinationAlpha = alphaLockTexture.sample(maskSampler, canvasUV).a;
+                if (lockedDestinationAlpha <= 0.001) {
                     return float4(0.0);
                 }
             }
@@ -187,6 +190,9 @@ final class SelectionFillRenderer {
 
             float alpha = uniforms.color.a * maskAlpha;
             float3 premultiplied = jitteredColor * alpha;
+            if (uniforms.usesAlphaLock > 0.5) {
+                return float4(premultiplied * lockedDestinationAlpha, alpha);
+            }
             return float4(premultiplied, alpha);
         }
         """
@@ -215,6 +221,26 @@ final class SelectionFillRenderer {
             pipelineState = try device.makeRenderPipelineState(descriptor: descriptor)
         } catch {
             fatalError("Failed to create SelectionFillRenderer pipeline: \(error)")
+        }
+
+        let alphaLockDescriptor = MTLRenderPipelineDescriptor()
+        alphaLockDescriptor.vertexFunction = library.makeFunction(name: "selectionFillVertexShader")
+        alphaLockDescriptor.fragmentFunction = library.makeFunction(name: "selectionFillFragmentShader")
+        alphaLockDescriptor.colorAttachments[0].pixelFormat = .bgra8Unorm_srgb
+        let alphaLockAttachment = alphaLockDescriptor.colorAttachments[0]!
+        alphaLockAttachment.isBlendingEnabled = true
+        alphaLockAttachment.rgbBlendOperation = .add
+        alphaLockAttachment.alphaBlendOperation = .add
+        alphaLockAttachment.sourceRGBBlendFactor = .one
+        alphaLockAttachment.sourceAlphaBlendFactor = .one
+        alphaLockAttachment.destinationRGBBlendFactor = .oneMinusSourceAlpha
+        alphaLockAttachment.destinationAlphaBlendFactor = .oneMinusSourceAlpha
+        alphaLockAttachment.writeMask = [.red, .green, .blue]
+
+        do {
+            alphaLockPipelineState = try device.makeRenderPipelineState(descriptor: alphaLockDescriptor)
+        } catch {
+            fatalError("Failed to create SelectionFillRenderer alpha lock pipeline: \(error)")
         }
 
         let fallbackAlphaDescriptor = MTLTextureDescriptor.texture2DDescriptor(
@@ -296,7 +322,7 @@ final class SelectionFillRenderer {
             return
         }
 
-        encoder.setRenderPipelineState(pipelineState)
+        encoder.setRenderPipelineState(alphaLockTexture == nil ? pipelineState : alphaLockPipelineState)
         encoder.setScissorRect(MTLScissorRect(
             x: minX,
             y: minY,

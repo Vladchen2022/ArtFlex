@@ -352,6 +352,7 @@ extension WorkspaceViewModel {
                     session: opacityCapSession,
                     to: paintedState.maskTexture,
                     alphaLockTexture: sourceTexture,
+                    preservesAlphaWhenAlphaLocked: false,
                     samplingState: &paintedState.brushSamplingState
                 )
             }
@@ -360,6 +361,7 @@ extension WorkspaceViewModel {
                 stroke,
                 to: paintedState.maskTexture,
                 alphaLockTexture: sourceTexture,
+                preservesAlphaWhenAlphaLocked: false,
                 samplingState: &paintedState.brushSamplingState
             )
         }
@@ -420,6 +422,7 @@ extension WorkspaceViewModel {
                 session: opacityCapSession,
                 to: paintedState.maskTexture,
                 alphaLockTexture: sourceTexture,
+                preservesAlphaWhenAlphaLocked: false,
                 samplingState: &flushSamplingState
             )
             paintedState.opacityCapSession = nil
@@ -428,6 +431,7 @@ extension WorkspaceViewModel {
                 flushStroke,
                 to: paintedState.maskTexture,
                 alphaLockTexture: sourceTexture,
+                preservesAlphaWhenAlphaLocked: false,
                 samplingState: &flushSamplingState
             )
         }
