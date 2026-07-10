@@ -51,7 +51,7 @@ struct ThrottledSlider: View {
                 in: range,
                 onEditingChanged: handleEditingChanged
             )
-            .onChange(of: localValue) { newValue in
+            .onChange(of: localValue) { _, newValue in
                 handleValueChanged(newValue)
             }
             
@@ -60,7 +60,7 @@ struct ThrottledSlider: View {
                 .foregroundStyle(Color.white.opacity(0.96))
                 .frame(width: 48, alignment: .trailing)
         }
-        .onChange(of: value) { newValue in
+        .onChange(of: value) { _, newValue in
             // 外部值变化时同步（例如撤销/重做）
             if !isEditing {
                 localValue = newValue
@@ -106,6 +106,7 @@ struct OptimizedCompactSlider: View {
     let valueText: String
     @Binding var value: Double
     let range: ClosedRange<Double>
+    let liveValueText: ((Double) -> String)?
     let onCommit: (Double) -> Void
     
     @State private var localValue: Double
@@ -122,6 +123,24 @@ struct OptimizedCompactSlider: View {
         self.valueText = valueText
         self._value = value
         self.range = range
+        self.liveValueText = nil
+        self.onCommit = onCommit
+        self._localValue = State(initialValue: value.wrappedValue)
+    }
+
+    init(
+        title: String,
+        valueText: String,
+        value: Binding<Double>,
+        range: ClosedRange<Double>,
+        liveValueText: @escaping (Double) -> String,
+        onCommit: @escaping (Double) -> Void
+    ) {
+        self.title = title
+        self.valueText = valueText
+        self._value = value
+        self.range = range
+        self.liveValueText = liveValueText
         self.onCommit = onCommit
         self._localValue = State(initialValue: value.wrappedValue)
     }
@@ -139,12 +158,12 @@ struct OptimizedCompactSlider: View {
                 onEditingChanged: handleEditingChanged
             )
             
-            Text(valueText)
+            Text(isEditing ? (liveValueText?(localValue) ?? valueText) : valueText)
                 .font(.system(size: 11, weight: .semibold).monospacedDigit())
                 .foregroundStyle(Color.white.opacity(0.96))
                 .frame(width: 48, alignment: .trailing)
         }
-        .onChange(of: value) { newValue in
+        .onChange(of: value) { _, newValue in
             // 外部值变化时同步（撤销/重做等）
             if !isEditing {
                 localValue = newValue
@@ -208,7 +227,7 @@ struct OptimizedLabeledSlider: View {
                 onEditingChanged: handleEditingChanged
             )
         }
-        .onChange(of: value) { newValue in
+        .onChange(of: value) { _, newValue in
             if !isEditing {
                 localValue = newValue
             }
@@ -265,7 +284,7 @@ struct LayerOpacitySlider: View {
                 in: 0...1,
                 onEditingChanged: handleEditingChanged
             )
-            .onChange(of: localOpacity) { newValue in
+            .onChange(of: localOpacity) { _, newValue in
                 handleOpacityChanged(newValue)
             }
             
@@ -274,7 +293,7 @@ struct LayerOpacitySlider: View {
                 .foregroundStyle(Color.white.opacity(0.68))
                 .frame(width: 36, alignment: .trailing)
         }
-        .onChange(of: layer.opacity) { newValue in
+        .onChange(of: layer.opacity) { _, newValue in
             if !isEditing {
                 localOpacity = newValue
             }

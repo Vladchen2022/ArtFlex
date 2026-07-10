@@ -513,7 +513,7 @@ final class LayerTextureSerializer {
     }
 
     func restoreBatch(
-        _ items: [(snapshot: LayerTextureSnapshot, texture: MTLTexture)]
+        _ items: [(snapshot: LayerTextureSnapshot, texture: MTLTexture, destinationX: Int, destinationY: Int)]
     ) throws {
         guard !items.isEmpty else { return }
         let auditEnabled = PerformanceAuditStore.shared.isRecordingEnabled
@@ -537,8 +537,10 @@ final class LayerTextureSerializer {
         do {
             for item in items {
                 guard
-                    item.snapshot.width <= item.texture.width,
-                    item.snapshot.height <= item.texture.height
+                    item.destinationX >= 0,
+                    item.destinationY >= 0,
+                    item.destinationX + item.snapshot.width <= item.texture.width,
+                    item.destinationY + item.snapshot.height <= item.texture.height
                 else {
                     throw CocoaError(.fileReadCorruptFile)
                 }
@@ -573,7 +575,7 @@ final class LayerTextureSerializer {
                     to: item.texture,
                     destinationSlice: 0,
                     destinationLevel: 0,
-                    destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
+                    destinationOrigin: MTLOrigin(x: item.destinationX, y: item.destinationY, z: 0)
                 )
             }
 

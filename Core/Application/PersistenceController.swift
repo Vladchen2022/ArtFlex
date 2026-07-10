@@ -1,4 +1,5 @@
 import Foundation
+import Metal
 
 struct OpenProjectResult {
     var workspace: WorkspaceState
@@ -33,7 +34,10 @@ final class PersistenceController {
 
     func saveProject(to fileURL: URL) throws {
         let state = workspaceStore.state
-        let layerSnapshots = try state.document.layers.map { layer in
+        var snapshotLayers: [(layer: LayerRecord, texture: MTLTexture)] = []
+        snapshotLayers.reserveCapacity(state.document.layers.count)
+
+        for layer in state.document.layers {
             guard
                 let surfaceID = layerSurfaceStore.surfaceID(for: layer.id),
                 let texture = layerSurfaceStore.texture(for: surfaceID)
@@ -41,9 +45,16 @@ final class PersistenceController {
                 throw PersistenceError.missingLayerTexture(layer.id)
             }
 
+            snapshotLayers.append((layer: layer, texture: texture))
+        }
+
+        let textureSnapshots = try serializer.snapshotBatch(
+            textures: snapshotLayers.map(\.texture)
+        )
+        let layerSnapshots = zip(snapshotLayers, textureSnapshots).map { item, textureSnapshot in
             return LayerHistorySnapshot(
-                layerID: layer.id,
-                texture: try serializer.snapshot(texture: texture)
+                layerID: item.layer.id,
+                texture: textureSnapshot
             )
         }
 

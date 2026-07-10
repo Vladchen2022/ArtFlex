@@ -6,7 +6,24 @@ import Testing
 struct SavedSnapshotSessionTests {
     @Test
     @MainActor
-    func savingSnapshotsCapsAtSixAndAutoOpensCompareOnSixthSave() throws {
+    func requestedSnapshotSaveRunsAsynchronouslyAndIgnoresRepeatedClicks() async throws {
+        let harness = try SavedSnapshotHarness()
+
+        harness.viewModel.requestSnapshotSavePrimaryAction()
+        #expect(harness.viewModel.isSavingSnapshot)
+        harness.viewModel.requestSnapshotSavePrimaryAction()
+
+        for _ in 0..<200 where harness.viewModel.savedSnapshotCount == 0 {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+
+        #expect(harness.viewModel.isSavingSnapshot == false)
+        #expect(harness.viewModel.savedSnapshotCount == 1)
+    }
+
+    @Test
+    @MainActor
+    func savingSnapshotsCapsAtSixAndOpensCompareOnTheNextAction() throws {
         let harness = try SavedSnapshotHarness()
 
         for _ in 0..<6 {
@@ -14,9 +31,6 @@ struct SavedSnapshotSessionTests {
         }
 
         #expect(harness.viewModel.savedSnapshotCount == 6)
-        #expect(harness.viewModel.snapshotCompareSession != nil)
-
-        harness.viewModel.cancelSnapshotCompare()
         #expect(harness.viewModel.snapshotCompareSession == nil)
 
         harness.viewModel.handleSnapshotSavePrimaryAction()

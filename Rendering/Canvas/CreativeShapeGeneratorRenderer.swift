@@ -23,6 +23,8 @@ final class CreativeShapeGeneratorRenderer {
     private let device: MTLDevice
     private let polygonPipelineState: MTLRenderPipelineState
     private let stampPipelineState: MTLRenderPipelineState
+    private let alphaLockPolygonPipelineState: MTLRenderPipelineState
+    private let alphaLockStampPipelineState: MTLRenderPipelineState
     private let fallbackAlphaLockTexture: MTLTexture
     private var stampTextureCache: [BrushTipImageAssetID: MTLTexture] = [:]
     private var reusablePolygonVertexBuffer: MTLBuffer?
@@ -79,9 +81,11 @@ final class CreativeShapeGeneratorRenderer {
                 constexpr sampler alphaSampler(coord::normalized, address::clamp_to_edge, filter::nearest);
                 float2 canvasSize = max(uniforms.canvasSize, float2(1.0, 1.0));
                 float2 canvasUV = canvasPosition / canvasSize;
-                if (alphaLockTexture.sample(alphaSampler, canvasUV).a <= 0.001) {
+                float lockedDestinationAlpha = alphaLockTexture.sample(alphaSampler, canvasUV).a;
+                if (lockedDestinationAlpha <= 0.001) {
                     return float4(0.0);
                 }
+                return float4(color.rgb * lockedDestinationAlpha, color.a);
             }
             return color;
         }
@@ -208,6 +212,26 @@ final class CreativeShapeGeneratorRenderer {
             fatalError("Failed to create CreativeShapeGeneratorRenderer polygon pipeline: \(error)")
         }
 
+        let alphaLockPolygonDescriptor = MTLRenderPipelineDescriptor()
+        alphaLockPolygonDescriptor.vertexFunction = polygonDescriptor.vertexFunction
+        alphaLockPolygonDescriptor.fragmentFunction = polygonDescriptor.fragmentFunction
+        alphaLockPolygonDescriptor.colorAttachments[0].pixelFormat = .bgra8Unorm_srgb
+        let alphaLockPolygonAttachment = alphaLockPolygonDescriptor.colorAttachments[0]!
+        alphaLockPolygonAttachment.isBlendingEnabled = true
+        alphaLockPolygonAttachment.rgbBlendOperation = .add
+        alphaLockPolygonAttachment.alphaBlendOperation = .add
+        alphaLockPolygonAttachment.sourceRGBBlendFactor = .one
+        alphaLockPolygonAttachment.sourceAlphaBlendFactor = .one
+        alphaLockPolygonAttachment.destinationRGBBlendFactor = .oneMinusSourceAlpha
+        alphaLockPolygonAttachment.destinationAlphaBlendFactor = .oneMinusSourceAlpha
+        alphaLockPolygonAttachment.writeMask = [.red, .green, .blue]
+
+        do {
+            alphaLockPolygonPipelineState = try device.makeRenderPipelineState(descriptor: alphaLockPolygonDescriptor)
+        } catch {
+            fatalError("Failed to create CreativeShapeGeneratorRenderer alpha lock polygon pipeline: \(error)")
+        }
+
         let stampDescriptor = MTLRenderPipelineDescriptor()
         stampDescriptor.vertexFunction = library.makeFunction(name: "creativeShapeGeneratorStampVertexShader")
         stampDescriptor.fragmentFunction = library.makeFunction(name: "creativeShapeGeneratorStampFragmentShader")
@@ -225,6 +249,26 @@ final class CreativeShapeGeneratorRenderer {
             stampPipelineState = try device.makeRenderPipelineState(descriptor: stampDescriptor)
         } catch {
             fatalError("Failed to create CreativeShapeGeneratorRenderer stamp pipeline: \(error)")
+        }
+
+        let alphaLockStampDescriptor = MTLRenderPipelineDescriptor()
+        alphaLockStampDescriptor.vertexFunction = stampDescriptor.vertexFunction
+        alphaLockStampDescriptor.fragmentFunction = stampDescriptor.fragmentFunction
+        alphaLockStampDescriptor.colorAttachments[0].pixelFormat = .bgra8Unorm_srgb
+        let alphaLockStampAttachment = alphaLockStampDescriptor.colorAttachments[0]!
+        alphaLockStampAttachment.isBlendingEnabled = true
+        alphaLockStampAttachment.rgbBlendOperation = .add
+        alphaLockStampAttachment.alphaBlendOperation = .add
+        alphaLockStampAttachment.sourceRGBBlendFactor = .one
+        alphaLockStampAttachment.sourceAlphaBlendFactor = .one
+        alphaLockStampAttachment.destinationRGBBlendFactor = .oneMinusSourceAlpha
+        alphaLockStampAttachment.destinationAlphaBlendFactor = .oneMinusSourceAlpha
+        alphaLockStampAttachment.writeMask = [.red, .green, .blue]
+
+        do {
+            alphaLockStampPipelineState = try device.makeRenderPipelineState(descriptor: alphaLockStampDescriptor)
+        } catch {
+            fatalError("Failed to create CreativeShapeGeneratorRenderer alpha lock stamp pipeline: \(error)")
         }
 
         let fallbackDescriptor = MTLTextureDescriptor.texture2DDescriptor(
@@ -276,7 +320,7 @@ final class CreativeShapeGeneratorRenderer {
 
         if polygonVertices.isEmpty == false,
            let vertexBuffer = makePolygonVertexBuffer(vertices: polygonVertices) {
-            encoder.setRenderPipelineState(polygonPipelineState)
+            encoder.setRenderPipelineState(alphaLockTexture == nil ? polygonPipelineState : alphaLockPolygonPipelineState)
             encoder.setVertexBuffer(vertexBuffer, offset: 0, index: 0)
             encoder.setVertexBytes(&uniforms, length: MemoryLayout<CreativeShapeGeneratorUniforms>.stride, index: 1)
             let scissorRect = bounds(for: polygonVertices, canvasSize: canvasSize)
@@ -287,7 +331,7 @@ final class CreativeShapeGeneratorRenderer {
         }
 
         if stampVertexGroups.isEmpty == false {
-            encoder.setRenderPipelineState(stampPipelineState)
+            encoder.setRenderPipelineState(alphaLockTexture == nil ? stampPipelineState : alphaLockStampPipelineState)
             encoder.setVertexBytes(&uniforms, length: MemoryLayout<CreativeShapeGeneratorUniforms>.stride, index: 1)
             let sortedMaterialIDs = stampVertexGroups.keys.sorted()
             let stampBufferInfo = makeStampVertexBuffer(

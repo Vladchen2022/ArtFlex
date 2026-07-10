@@ -4,6 +4,40 @@ import Testing
 
 struct PersistenceSaveQueueTests {
     @Test
+    @MainActor
+    func projectSaveUsesSingleBatchTextureSnapshotForAllLayers() throws {
+        guard let metalContext = MetalDeviceContext() else {
+            Issue.record("Metal unavailable")
+            return
+        }
+
+        let bootstrap = try AppBootstrap(
+            workspaceStore: WorkspaceStore(),
+            metalContext: metalContext,
+            layerSurfaceStore: StageOneLayerSurfaceStore()
+        )
+        let viewModel = WorkspaceViewModel(bootstrap: bootstrap, installsZoomKeyboardMonitor: false)
+        viewModel.addLayer()
+        viewModel.addLayer()
+
+        let outputURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ArtFlexProjectSaveBatch-\(UUID().uuidString)")
+            .appendingPathExtension("artflex")
+        defer {
+            try? FileManager.default.removeItem(at: outputURL)
+            PerformanceAuditStore.shared.setRecordingEnabled(false)
+        }
+
+        PerformanceAuditStore.shared.reset()
+        try bootstrap.persistenceController.saveProject(to: outputURL)
+        let audit = PerformanceAuditStore.shared.snapshot()
+        let layerCount = viewModel.workspace.document.layers.count
+
+        #expect(audit.durations(for: "LayerTextureSerializer.snapshotBatch(\(layerCount))").count == 1)
+        #expect(audit.durations(for: "LayerTextureSerializer.snapshot").isEmpty)
+    }
+
+    @Test
     func serialSaveQueueLeavesLatestBrushLibraryOnDiskWhenOlderSaveIsSlow() throws {
         let tempRootURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("ArtFlexPersistenceSaveQueueTests-\(UUID().uuidString)", isDirectory: true)

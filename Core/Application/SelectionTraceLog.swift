@@ -5,6 +5,7 @@ private let selectionTraceQueue = DispatchQueue(label: "ArtFlex.SelectionTraceLo
 
 func resetSelectionTraceLog() {
 #if DEBUG
+    guard RuntimeDiagnostics.selectionTraceLoggingEnabled else { return }
     _ = selectionTraceQueue.sync {
         FileManager.default.createFile(atPath: selectionTraceLogPath, contents: Data(), attributes: nil)
     }
@@ -13,6 +14,7 @@ func resetSelectionTraceLog() {
 
 func appendSelectionTrace(_ message: String) {
 #if DEBUG
+    guard RuntimeDiagnostics.selectionTraceLoggingEnabled else { return }
     selectionTraceQueue.async {
         let line = "SelectionTrace \(message)\n"
         let data = Data(line.utf8)

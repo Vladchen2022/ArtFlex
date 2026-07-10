@@ -11,6 +11,7 @@ final class AppSharedMetalServices {
     let curveAdjustmentRenderer: CurveAdjustmentRenderer
     let creativeShapeGeneratorRenderer: CreativeShapeGeneratorRenderer
     let visibleDeltaRenderer: VisibleDeltaRenderer
+    let layerContentBoundsDetector: LayerContentBoundsDetector
     let textureSerializer: LayerTextureSerializer
     let pngExporter: PNGExporter
     let smudgeEngine: SmudgeEngine
@@ -30,6 +31,7 @@ final class AppSharedMetalServices {
         self.curveAdjustmentRenderer = try CurveAdjustmentRenderer(device: metalContext.device)
         self.creativeShapeGeneratorRenderer = CreativeShapeGeneratorRenderer(device: metalContext.device)
         self.visibleDeltaRenderer = try VisibleDeltaRenderer(device: metalContext.device)
+        self.layerContentBoundsDetector = try LayerContentBoundsDetector(device: metalContext.device)
         let textureSerializer = LayerTextureSerializer(metalContext: metalContext)
         self.textureSerializer = textureSerializer
         self.pngExporter = PNGExporter(serializer: textureSerializer)
@@ -61,6 +63,7 @@ struct AppBootstrap {
     let curveAdjustmentRenderer: CurveAdjustmentRenderer
     let creativeShapeGeneratorRenderer: CreativeShapeGeneratorRenderer
     let visibleDeltaRenderer: VisibleDeltaRenderer
+    let layerContentBoundsDetector: LayerContentBoundsDetector
     let smudgeEngine: SmudgeEngine
     let eyedropperSampler: EyedropperSampler
     let bucketFillEngine: BucketFillEngine
@@ -112,6 +115,7 @@ struct AppBootstrap {
         self.curveAdjustmentRenderer = resolvedSharedMetalServices.curveAdjustmentRenderer
         self.creativeShapeGeneratorRenderer = resolvedSharedMetalServices.creativeShapeGeneratorRenderer
         self.visibleDeltaRenderer = resolvedSharedMetalServices.visibleDeltaRenderer
+        self.layerContentBoundsDetector = resolvedSharedMetalServices.layerContentBoundsDetector
         let textureSerializer = resolvedSharedMetalServices.textureSerializer
         self.textureSerializer = textureSerializer
         let pngExporter = resolvedSharedMetalServices.pngExporter

@@ -197,7 +197,8 @@ struct CompoundBrushBuilderSheet: View {
                     title: "大小",
                     valueText: "\(Int(brush.size)) px",
                     value: Binding(get: { Double(brush.size) }, set: { _ in }),
-                    range: 1...512
+                    range: 1...512,
+                    liveValueText: { "\(Int($0)) px" }
                 ) {
                     viewModel.setBrushSize(Float($0))
                 }
@@ -206,7 +207,8 @@ struct CompoundBrushBuilderSheet: View {
                     title: "间距",
                     valueText: "\(Int(brush.spacingPercent))%",
                     value: Binding(get: { Double(brush.spacingPercent) }, set: { _ in }),
-                    range: 5...150
+                    range: 5...150,
+                    liveValueText: { "\(Int($0))%" }
                 ) {
                     viewModel.setBrushSpacingPercent(Float($0))
                 }
@@ -215,7 +217,8 @@ struct CompoundBrushBuilderSheet: View {
                     title: "角度",
                     valueText: "\(Int(brush.stampRotationDegrees))°",
                     value: Binding(get: { Double(brush.stampRotationDegrees) }, set: { _ in }),
-                    range: 0...360
+                    range: 0...360,
+                    liveValueText: { "\(Int($0))°" }
                 ) {
                     viewModel.setBrushStampRotationDegrees(Float($0))
                 }
@@ -224,7 +227,8 @@ struct CompoundBrushBuilderSheet: View {
                     title: "大小压感",
                     valueText: "\(Int(brush.pressureSizeAmount * 100))%",
                     value: Binding(get: { Double(brush.pressureSizeAmount) }, set: { _ in }),
-                    range: 0...1
+                    range: 0...1,
+                    liveValueText: { "\(Int($0 * 100))%" }
                 ) {
                     viewModel.setCompoundPrimaryPressureSizeAmount(Float($0))
                 }
@@ -233,7 +237,8 @@ struct CompoundBrushBuilderSheet: View {
                     title: "透明压感",
                     valueText: "\(Int(brush.pressureOpacityAmount * 100))%",
                     value: Binding(get: { Double(brush.pressureOpacityAmount) }, set: { _ in }),
-                    range: 0...1
+                    range: 0...1,
+                    liveValueText: { "\(Int($0 * 100))%" }
                 ) {
                     viewModel.setCompoundPrimaryPressureOpacityAmount(Float($0))
                 }
@@ -320,7 +325,12 @@ struct CompoundBrushBuilderSheet: View {
                         },
                         set: { _ in }
                     ),
-                    range: secondary.sizeMode == .relativeToPrimary ? 5...400 : 1...512
+                    range: secondary.sizeMode == .relativeToPrimary ? 5...400 : 1...512,
+                    liveValueText: { value in
+                        secondary.sizeMode == .relativeToPrimary
+                            ? "\(Int(value))%"
+                            : "\(Int(value)) px"
+                    }
                 ) {
                     if secondary.sizeMode == .relativeToPrimary {
                         viewModel.setCompoundSecondaryRelativeSizeRatio(Float($0 / 100))
@@ -333,7 +343,8 @@ struct CompoundBrushBuilderSheet: View {
                     title: "间距",
                     valueText: "\(Int(secondary.spacingPercent))%",
                     value: Binding(get: { Double(secondary.spacingPercent) }, set: { _ in }),
-                    range: 1...400
+                    range: 1...400,
+                    liveValueText: { "\(Int($0))%" }
                 ) {
                     viewModel.setCompoundSecondarySpacingPercent(Float($0))
                 }
@@ -342,7 +353,8 @@ struct CompoundBrushBuilderSheet: View {
                     title: "角度",
                     valueText: "\(Int(secondary.angleDegrees))°",
                     value: Binding(get: { Double(secondary.angleDegrees) }, set: { _ in }),
-                    range: 0...180
+                    range: 0...180,
+                    liveValueText: { "\(Int($0))°" }
                 ) {
                     viewModel.setCompoundSecondaryTipAngleDegrees(Float($0))
                 }
@@ -351,7 +363,8 @@ struct CompoundBrushBuilderSheet: View {
                     title: "随机旋转",
                     valueText: "\(Int(secondary.tileRandomRotation * 100))%",
                     value: Binding(get: { Double(secondary.tileRandomRotation) }, set: { _ in }),
-                    range: 0...1
+                    range: 0...1,
+                    liveValueText: { "\(Int($0 * 100))%" }
                 ) {
                     viewModel.setCompoundSecondaryTileRandomRotation(Float($0))
                 }
@@ -360,7 +373,8 @@ struct CompoundBrushBuilderSheet: View {
                     title: "大小压感",
                     valueText: "\(Int(secondary.pressureSizeAmount * 100))%",
                     value: Binding(get: { Double(secondary.pressureSizeAmount) }, set: { _ in }),
-                    range: 0...1
+                    range: 0...1,
+                    liveValueText: { "\(Int($0 * 100))%" }
                 ) {
                     viewModel.setCompoundSecondaryPressureSizeAmount(Float($0))
                 }
@@ -369,7 +383,8 @@ struct CompoundBrushBuilderSheet: View {
                     title: "透明压感",
                     valueText: "\(Int(secondary.pressureOpacityAmount * 100))%",
                     value: Binding(get: { Double(secondary.pressureOpacityAmount) }, set: { _ in }),
-                    range: 0...1
+                    range: 0...1,
+                    liveValueText: { "\(Int($0 * 100))%" }
                 ) {
                     viewModel.setCompoundSecondaryPressureOpacityAmount(Float($0))
                 }
@@ -394,7 +409,8 @@ struct CompoundBrushBuilderSheet: View {
                         title: "低压主占",
                         valueText: "\(Int(mix.primaryAtLowPressure * 100))%",
                         value: Binding(get: { Double(mix.primaryAtLowPressure) }, set: { _ in }),
-                        range: 0...1
+                        range: 0...1,
+                        liveValueText: { "\(Int($0 * 100))%" }
                     ) {
                         viewModel.setCompoundPrimaryMixAtLowPressure(Float($0))
                     }
@@ -403,7 +419,8 @@ struct CompoundBrushBuilderSheet: View {
                         title: "中压主占",
                         valueText: "\(Int(mix.primaryAtMidPressure * 100))%",
                         value: Binding(get: { Double(mix.primaryAtMidPressure) }, set: { _ in }),
-                        range: 0...1
+                        range: 0...1,
+                        liveValueText: { "\(Int($0 * 100))%" }
                     ) {
                         viewModel.setCompoundPrimaryMixAtMidPressure(Float($0))
                     }
@@ -412,7 +429,8 @@ struct CompoundBrushBuilderSheet: View {
                         title: "高压主占",
                         valueText: "\(Int(mix.primaryAtHighPressure * 100))%",
                         value: Binding(get: { Double(mix.primaryAtHighPressure) }, set: { _ in }),
-                        range: 0...1
+                        range: 0...1,
+                        liveValueText: { "\(Int($0 * 100))%" }
                     ) {
                         viewModel.setCompoundPrimaryMixAtHighPressure(Float($0))
                     }

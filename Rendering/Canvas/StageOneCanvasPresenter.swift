@@ -2,6 +2,11 @@ import Foundation
 import Metal
 import simd
 
+enum CanvasDisplaySamplingMode: Sendable, Equatable {
+    case linear
+    case nearest
+}
+
 enum StageOneCanvasPresenterInitializationError: LocalizedError {
     case shaderLibrary(Error)
     case missingFunction(String)
@@ -34,7 +39,9 @@ private struct CanvasPresenterUniforms {
 
 final class StageOneCanvasPresenter {
     private let pipelineState: MTLRenderPipelineState
-    private let samplerState: MTLSamplerState
+    private let checkerboardPipelineState: MTLRenderPipelineState
+    private let linearSamplerState: MTLSamplerState
+    private let nearestSamplerState: MTLSamplerState
     private let canvasVertexBuffer: MTLBuffer
 
     init(device: MTLDevice) throws {
@@ -76,6 +83,14 @@ final class StageOneCanvasPresenter {
             float4 layer = layerTexture.sample(layerSampler, in.texCoord);
             return float4(layer.rgb * uniforms.layerOpacity, layer.a * uniforms.layerOpacity);
         }
+
+        fragment float4 canvasCheckerboardFragment(VertexOut in [[stage_in]]) {
+            const float squareSize = 12.0;
+            uint2 square = uint2(floor(in.position.xy / squareSize));
+            bool alternate = ((square.x + square.y) & 1u) != 0u;
+            float value = alternate ? 0.72 : 0.84;
+            return float4(value, value, value, 1.0);
+        }
         """
 
         let library: MTLLibrary
@@ -108,15 +123,33 @@ final class StageOneCanvasPresenter {
             throw StageOneCanvasPresenterInitializationError.pipelineState(error)
         }
 
-        let samplerDescriptor = MTLSamplerDescriptor()
-        samplerDescriptor.minFilter = .linear
-        samplerDescriptor.magFilter = .linear
-        samplerDescriptor.sAddressMode = .clampToEdge
-        samplerDescriptor.tAddressMode = .clampToEdge
-        guard let samplerState = device.makeSamplerState(descriptor: samplerDescriptor) else {
+
+        let checkerboardDescriptor = MTLRenderPipelineDescriptor()
+        checkerboardDescriptor.vertexFunction = vertexFunction
+        checkerboardDescriptor.fragmentFunction = library.makeFunction(name: "canvasCheckerboardFragment")
+        checkerboardDescriptor.colorAttachments[0].pixelFormat = .bgra8Unorm_srgb
+        do {
+            checkerboardPipelineState = try device.makeRenderPipelineState(descriptor: checkerboardDescriptor)
+        } catch {
+            throw StageOneCanvasPresenterInitializationError.pipelineState(error)
+        }
+
+        let linearSamplerDescriptor = MTLSamplerDescriptor()
+        linearSamplerDescriptor.minFilter = .linear
+        linearSamplerDescriptor.magFilter = .linear
+        linearSamplerDescriptor.sAddressMode = .clampToEdge
+        linearSamplerDescriptor.tAddressMode = .clampToEdge
+        let nearestSamplerDescriptor = MTLSamplerDescriptor()
+        nearestSamplerDescriptor.minFilter = .nearest
+        nearestSamplerDescriptor.magFilter = .nearest
+        nearestSamplerDescriptor.sAddressMode = .clampToEdge
+        nearestSamplerDescriptor.tAddressMode = .clampToEdge
+        guard let linearSamplerState = device.makeSamplerState(descriptor: linearSamplerDescriptor),
+              let nearestSamplerState = device.makeSamplerState(descriptor: nearestSamplerDescriptor) else {
             throw StageOneCanvasPresenterInitializationError.samplerStateCreation
         }
-        self.samplerState = samplerState
+        self.linearSamplerState = linearSamplerState
+        self.nearestSamplerState = nearestSamplerState
 
         var vertices = [
             CanvasPresenterVertex(position: SIMD2(-1, -1), texCoord: SIMD2(0, 1)),
@@ -134,8 +167,25 @@ final class StageOneCanvasPresenter {
         self.canvasVertexBuffer = vertexBuffer
     }
 
+    func encodeBackground(
+        checkerboard: Bool,
+        into renderPassDescriptor: MTLRenderPassDescriptor,
+        commandBuffer: MTLCommandBuffer
+    ) {
+        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor) else {
+            return
+        }
+        if checkerboard {
+            encoder.setRenderPipelineState(checkerboardPipelineState)
+            encoder.setVertexBuffer(canvasVertexBuffer, offset: 0, index: 0)
+            encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+        }
+        encoder.endEncoding()
+    }
+
     func encode(
         layerTextures: [(texture: MTLTexture, opacity: Float)],
+        samplingMode: CanvasDisplaySamplingMode = .linear,
         into renderPassDescriptor: MTLRenderPassDescriptor,
         commandBuffer: MTLCommandBuffer
     ) {
@@ -144,7 +194,10 @@ final class StageOneCanvasPresenter {
         }
 
         encoder.setRenderPipelineState(pipelineState)
-        encoder.setFragmentSamplerState(samplerState, index: 0)
+        encoder.setFragmentSamplerState(
+            samplingMode == .nearest ? nearestSamplerState : linearSamplerState,
+            index: 0
+        )
         encoder.setVertexBuffer(canvasVertexBuffer, offset: 0, index: 0)
 
         for layer in layerTextures {
@@ -168,6 +221,7 @@ final class StageOneCanvasPresenter {
         bounds: CanvasRect,
         pivotBounds: CanvasRect? = nil,
         preview: FreeTransformPreview,
+        samplingMode: CanvasDisplaySamplingMode = .linear,
         into renderPassDescriptor: MTLRenderPassDescriptor,
         commandBuffer: MTLCommandBuffer
     ) {
@@ -198,7 +252,10 @@ final class StageOneCanvasPresenter {
             length: MemoryLayout<CanvasPresenterVertex>.stride * vertices.count,
             index: 0
         )
-        encoder.setFragmentSamplerState(samplerState, index: 0)
+        encoder.setFragmentSamplerState(
+            samplingMode == .nearest ? nearestSamplerState : linearSamplerState,
+            index: 0
+        )
 
         var uniforms = CanvasPresenterUniforms(layerOpacity: opacity)
         encoder.setFragmentTexture(texture, index: 0)

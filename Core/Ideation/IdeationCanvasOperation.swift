@@ -35,6 +35,7 @@ enum IdeationCanvasOperation: Sendable {
     case applyGradientSession
     case cancelGradientSession
     case fillAtPoint(CanvasPoint)
+    case applyCanvasCrop(CanvasRect)
     case handleCanvasToolClick(point: CanvasPoint, modifiers: CanvasModifierState, clickCount: Int)
     case beginSelection(kind: SelectionShapeKind, start: CanvasPoint, modifiers: CanvasModifierState)
     case updateSelection(point: CanvasPoint, modifiers: CanvasModifierState)

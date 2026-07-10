@@ -1,8 +1,15 @@
 import Foundation
 import Metal
+
+private enum LayerSurfaceContentState {
+    case knownTransparent
+    case unknown
+}
+
 final class StageOneLayerSurfaceStore {
     private var surfacesByLayerID: [LayerID: LayerSurfaceRecord] = [:]
     private var texturesBySurfaceID: [LayerSurfaceID: MTLTexture] = [:]
+    private var contentStateByLayerID: [LayerID: LayerSurfaceContentState] = [:]
 
     func surfaceRecords(for document: ArtDocument) -> [LayerSurfaceRecord] {
         document.layers.map { layer in
@@ -54,6 +61,7 @@ final class StageOneLayerSurfaceStore {
 
             clearTexture(texture, metal: metal)
             texturesBySurfaceID[record.surfaceID] = texture
+            contentStateByLayerID[record.layerID] = .knownTransparent
         }
 
         let validLayerIDs = Set(document.layers.map(\.id))
@@ -64,6 +72,7 @@ final class StageOneLayerSurfaceStore {
                 texturesBySurfaceID.removeValue(forKey: surfaceID)
             }
             surfacesByLayerID.removeValue(forKey: layerID)
+            contentStateByLayerID.removeValue(forKey: layerID)
         }
 
     }
@@ -77,6 +86,9 @@ final class StageOneLayerSurfaceStore {
         with texture: MTLTexture
     ) {
         texturesBySurfaceID[surfaceID] = texture
+        if let layerID = surfacesByLayerID.first(where: { $0.value.surfaceID == surfaceID })?.key {
+            markContentUnknown(for: layerID)
+        }
     }
 
     func surfaceID(for layerID: LayerID) -> LayerSurfaceID? {
@@ -99,6 +111,7 @@ final class StageOneLayerSurfaceStore {
             metal: metal,
             waitUntilCompleted: true
         )
+        contentStateByLayerID[destinationLayerID] = contentStateByLayerID[sourceLayerID] ?? .unknown
     }
 
     func copyTexture(
@@ -216,6 +229,25 @@ final class StageOneLayerSurfaceStore {
     func reset() {
         surfacesByLayerID.removeAll()
         texturesBySurfaceID.removeAll()
+        contentStateByLayerID.removeAll()
+    }
+
+    func isKnownTransparent(layerID: LayerID) -> Bool {
+        contentStateByLayerID[layerID] == .knownTransparent
+    }
+
+    func markKnownTransparent(for layerID: LayerID) {
+        contentStateByLayerID[layerID] = .knownTransparent
+    }
+
+    func markContentUnknown(for layerID: LayerID) {
+        contentStateByLayerID[layerID] = .unknown
+    }
+
+    func markContentUnknown<S: Sequence>(for layerIDs: S) where S.Element == LayerID {
+        for layerID in layerIDs {
+            markContentUnknown(for: layerID)
+        }
     }
 
     func makeTexture(

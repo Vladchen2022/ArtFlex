@@ -130,6 +130,71 @@ struct CanvasPresentationTests {
         #expect(abs(after.y - before.y) < 0.001)
     }
 
+    @Test
+    func viewportTransformRoundTripsCanvasPointsWithPanZoomAndRotation() {
+        let transform = CanvasViewportTransform(
+            canvasSize: .init(width: 1600, height: 900),
+            viewport: .init(
+                zoomScale: 2.4,
+                contentOffset: .init(x: 73, y: -41),
+                rotationDegrees: 27
+            ),
+            availableWidth: 1320,
+            availableHeight: 840
+        )
+        let point = CanvasPoint(x: 1180, y: 247)
+
+        let viewportPoint = transform.canvasToViewport(point)
+        let restored = transform.viewportToCanvas(viewportPoint)
+
+        #expect(abs(restored.x - point.x) < 0.000_001)
+        #expect(abs(restored.y - point.y) < 0.000_001)
+    }
+
+    @Test
+    func viewportCenteringOffsetPlacesRequestedCanvasPointAtViewportCenter() {
+        var viewport = CanvasViewport(
+            zoomScale: 1.8,
+            contentOffset: .init(x: 0, y: 0),
+            rotationDegrees: -18
+        )
+        let target = CanvasPoint(x: 820, y: 220)
+        let initial = CanvasViewportTransform(
+            canvasSize: .init(width: 1200, height: 800),
+            viewport: viewport,
+            availableWidth: 1000,
+            availableHeight: 700
+        )
+        viewport.contentOffset = initial.viewportOffsetCentering(on: target)
+        let centered = CanvasViewportTransform(
+            canvasSize: .init(width: 1200, height: 800),
+            viewport: viewport,
+            availableWidth: 1000,
+            availableHeight: 700
+        ).canvasToViewport(target)
+
+        #expect(abs(centered.x - 500) < 0.000_001)
+        #expect(abs(centered.y - 350) < 0.000_001)
+    }
+
+    @Test
+    func canvasCropStateCreatesMovesAndResizesPixelAlignedBounds() throws {
+        let canvasSize = CanvasSize(width: 100, height: 80)
+        var state = CanvasCropInteractionState()
+
+        state.begin(at: .init(x: 10.2, y: 8.7), canvasSize: canvasSize, handleRadius: 3)
+        state.end(at: .init(x: 70.4, y: 50.1), canvasSize: canvasSize)
+        #expect(state.pixelBounds(in: canvasSize) == .init(origin: .init(x: 10, y: 9), size: .init(x: 60, y: 41)))
+
+        state.begin(at: .init(x: 30, y: 30), canvasSize: canvasSize, handleRadius: 3)
+        state.end(at: .init(x: 40, y: 35), canvasSize: canvasSize)
+        #expect(state.pixelBounds(in: canvasSize) == .init(origin: .init(x: 20, y: 14), size: .init(x: 60, y: 41)))
+
+        state.begin(at: .init(x: 80, y: 55), canvasSize: canvasSize, handleRadius: 4)
+        state.end(at: .init(x: 92, y: 70), canvasSize: canvasSize)
+        #expect(state.pixelBounds(in: canvasSize) == .init(origin: .init(x: 20, y: 14), size: .init(x: 72, y: 56)))
+    }
+
     private func screenPoint(
         for canvasPoint: CanvasPoint,
         viewport: CanvasViewport,

@@ -97,6 +97,7 @@ struct BrushStrokeSamplingState {
     var nextSegmentIndexToCommit: Int = 0
     var hasEmittedLeadingStamp = false
     var isFlushing: Bool = false
+    var renderedPixelBounds: BrushPixelBounds?
 }
 
 struct OpacityCapSessionResources {
@@ -140,11 +141,6 @@ enum StageOneBrushRendererInitializationError: LocalizedError {
 
 final class StageOneBrushRenderer {
     private let brushStrokeLogger = Logger(subsystem: "ArtFlex", category: "BrushStroke")
-    #if DEBUG
-    private let isBrushStampDebugLoggingEnabled = true
-    #else
-    private let isBrushStampDebugLoggingEnabled = false
-    #endif
     private let device: MTLDevice
     private let brushPipelineState: MTLRenderPipelineState
     private let alphaLockBrushPipelineState: MTLRenderPipelineState
@@ -162,16 +158,17 @@ final class StageOneBrushRenderer {
     private var cachedSelectionMaskShape: SelectionShape?
     private var cachedSelectionMaskCanvasSize: CanvasSize?
     private var cachedSelectionMaskTexture: MTLTexture?
-    private var cachedPrimaryCustomTipData: Data?
+    private var cachedPrimaryCustomTipSourceData: Data?
     private var cachedPrimaryCustomTipTexture: MTLTexture?
-    private var cachedPrimaryEnvelopeCustomTipData: Data?
+    private var cachedPrimaryEnvelopeCustomTipSourceData: Data?
     private var cachedPrimaryEnvelopeCustomTipTexture: MTLTexture?
-    private var cachedCompoundSecondaryCustomTipData: Data?
+    private var cachedCompoundSecondaryCustomTipSourceData: Data?
     private var cachedCompoundSecondaryCustomTipTexture: MTLTexture?
     private var cachedOpacityCapOriginalTexture: MTLTexture?
     private var cachedOpacityCapAlphaTexture: MTLTexture?
     private var cachedUniformBuffer: MTLBuffer?
     private var cachedUniformBufferCapacity: Int = 0
+    private(set) var debugCustomTipResampleCount = 0
 
     init(device: MTLDevice) throws {
         self.device = device
@@ -837,8 +834,7 @@ final class StageOneBrushRenderer {
             }
 
             float4 sampled = gatheredColors.read(uint2(in.instanceID, 0));
-            float3 visibleRGB = sampled.rgb + ((1.0 - sampled.a) * float3(1.0));
-            return float4(visibleRGB * alpha, alpha);
+            return float4(sampled.rgb * alpha, sampled.a * alpha);
         }
 
         fragment float4 stageOneSmudgeFrozenTextureFragment(
@@ -916,8 +912,7 @@ final class StageOneBrushRenderer {
                 filter::linear
             );
             float4 sampled = sourceTexture.sample(sourceSampler, sampleUV);
-            float3 visibleRGB = sampled.rgb + ((1.0 - sampled.a) * float3(1.0));
-            return float4(visibleRGB * alpha, alpha);
+            return float4(sampled.rgb * alpha, sampled.a * alpha);
         }
 
         kernel void stageOneSmudgeGatherKernel(
@@ -1486,6 +1481,12 @@ final class StageOneBrushRenderer {
         guard !samples.isEmpty else {
             return 0
         }
+        recordRenderedPixelBounds(
+            for: samples,
+            stroke: stroke,
+            texture: texture,
+            samplingState: &samplingState
+        )
 
         if stroke.tool == .smudge {
             guard let smudgeGatheredColorsTexture = makeSmudgeGatheredColorsTexture(
@@ -1586,6 +1587,12 @@ final class StageOneBrushRenderer {
         guard !samples.isEmpty else {
             return 0
         }
+        recordRenderedPixelBounds(
+            for: samples,
+            stroke: stroke,
+            texture: texture,
+            samplingState: &samplingState
+        )
 
         let selectionShape = stroke.selectionShape?.clamped(
             to: CanvasSize(width: texture.width, height: texture.height)
@@ -1761,6 +1768,33 @@ final class StageOneBrushRenderer {
             width: endX - originX,
             height: endY - originY
         )
+    }
+
+    private func recordRenderedPixelBounds(
+        for samples: [StampSample],
+        stroke: StrokeDescriptor,
+        texture: MTLTexture,
+        samplingState: inout BrushStrokeSamplingState?
+    ) {
+        guard let dirtyRect = opacityCapDirtyRect(
+            for: samples,
+            stroke: stroke,
+            texture: texture
+        ) else {
+            return
+        }
+        let bounds = BrushPixelBounds(
+            originX: dirtyRect.x,
+            originY: dirtyRect.y,
+            width: dirtyRect.width,
+            height: dirtyRect.height
+        )
+        guard !bounds.isEmpty else { return }
+        var state = samplingState ?? BrushStrokeSamplingState()
+        state.renderedPixelBounds = state.renderedPixelBounds.map {
+            $0.union(bounds)
+        } ?? bounds
+        samplingState = state
     }
 
     private func makeUniforms(
@@ -2057,7 +2091,7 @@ final class StageOneBrushRenderer {
                     )
                 )
                 let loggedIndex = sampleIndex
-                if isBrushStampDebugLoggingEnabled, loggedIndex < 10 {
+                if RuntimeDiagnostics.brushHotPathLoggingEnabled, loggedIndex < 10 {
                     brushStrokeLogger.debug(
                         "[stamp] index=\(loggedIndex, privacy: .public) x=\(stamped.x, privacy: .public) y=\(stamped.y, privacy: .public) pressure=\(stamped.pressure, privacy: .public)"
                     )
@@ -2134,7 +2168,7 @@ final class StageOneBrushRenderer {
                     )
                 )
                 let loggedIndex = sampleIndex
-                if isBrushStampDebugLoggingEnabled, loggedIndex < 10 {
+                if RuntimeDiagnostics.brushHotPathLoggingEnabled, loggedIndex < 10 {
                     brushStrokeLogger.debug(
                         "[stamp] index=\(loggedIndex, privacy: .public) x=\(stamped.x, privacy: .public) y=\(stamped.y, privacy: .public) pressure=\(stamped.pressure, privacy: .public)"
                     )
@@ -2257,7 +2291,7 @@ final class StageOneBrushRenderer {
                 )
             )
             let loggedIndex = sampleIndex
-            if isBrushStampDebugLoggingEnabled, loggedIndex < 10 {
+            if RuntimeDiagnostics.brushHotPathLoggingEnabled, loggedIndex < 10 {
                 brushStrokeLogger.debug(
                     "[stamp] index=\(loggedIndex, privacy: .public) x=\(stamped.x, privacy: .public) y=\(stamped.y, privacy: .public) pressure=\(stamped.pressure, privacy: .public)"
                 )
@@ -2319,7 +2353,7 @@ final class StageOneBrushRenderer {
                 jitterDirectionDegrees: firstDir,
                 stroke: stroke
             ))
-            if isBrushStampDebugLoggingEnabled, state.nextSampleIndex < 10 {
+            if RuntimeDiagnostics.brushHotPathLoggingEnabled, state.nextSampleIndex < 10 {
                 brushStrokeLogger.debug(
                     "[stamp] index=\(state.nextSampleIndex, privacy: .public) x=\(pts[0].x, privacy: .public) y=\(pts[0].y, privacy: .public) pressure=\(pts[0].pressure, privacy: .public)"
                 )
@@ -2340,7 +2374,7 @@ final class StageOneBrushRenderer {
                     arcLengthPx: Float(state.nextSampleIndex) * Float(spacing),
                     strokeTangent: SIMD2<Float>(1, 0)
                 ))
-                if isBrushStampDebugLoggingEnabled, state.nextSampleIndex < 10 {
+                if RuntimeDiagnostics.brushHotPathLoggingEnabled, state.nextSampleIndex < 10 {
                     brushStrokeLogger.debug(
                         "[stamp] index=\(state.nextSampleIndex, privacy: .public) x=\(only.x, privacy: .public) y=\(only.y, privacy: .public) pressure=\(only.pressure, privacy: .public)"
                     )
@@ -2441,7 +2475,9 @@ final class StageOneBrushRenderer {
         trimPendingInputPoints(&state)
 
         if state.isFlushing {
-            state = BrushStrokeSamplingState()
+            state = BrushStrokeSamplingState(
+                renderedPixelBounds: state.renderedPixelBounds
+            )
         }
 
         samplingState = state
@@ -2896,7 +2932,7 @@ final class StageOneBrushRenderer {
         guard stroke.brush.tipShape == .customRound else {
             return nil
         }
-        return stroke.brush.customTipEnvelopeMaskData ?? stroke.brush.customTipMaskData
+        return stroke.brush.customTipEnvelopeMaskData
     }
 
     private func compoundSecondaryCustomTipMaskData(for stroke: StrokeDescriptor) -> Data? {
@@ -2907,16 +2943,16 @@ final class StageOneBrushRenderer {
     }
 
     private func customTipTexture(for data: Data?, role: CustomTipTextureRole) -> MTLTexture? {
-        guard let data = resampledCustomTipData(data) else {
+        guard let sourceData = data else {
             switch role {
             case .primary:
-                cachedPrimaryCustomTipData = nil
+                cachedPrimaryCustomTipSourceData = nil
                 cachedPrimaryCustomTipTexture = nil
             case .primaryEnvelope:
-                cachedPrimaryEnvelopeCustomTipData = nil
+                cachedPrimaryEnvelopeCustomTipSourceData = nil
                 cachedPrimaryEnvelopeCustomTipTexture = nil
             case .compoundSecondary:
-                cachedCompoundSecondaryCustomTipData = nil
+                cachedCompoundSecondaryCustomTipSourceData = nil
                 cachedCompoundSecondaryCustomTipTexture = nil
             }
             return nil
@@ -2924,17 +2960,32 @@ final class StageOneBrushRenderer {
 
         switch role {
         case .primary:
-            if cachedPrimaryCustomTipData == data, let cachedPrimaryCustomTipTexture {
+            if cachedPrimaryCustomTipSourceData == sourceData, let cachedPrimaryCustomTipTexture {
                 return cachedPrimaryCustomTipTexture
             }
         case .primaryEnvelope:
-            if cachedPrimaryEnvelopeCustomTipData == data, let cachedPrimaryEnvelopeCustomTipTexture {
+            if cachedPrimaryEnvelopeCustomTipSourceData == sourceData, let cachedPrimaryEnvelopeCustomTipTexture {
                 return cachedPrimaryEnvelopeCustomTipTexture
             }
         case .compoundSecondary:
-            if cachedCompoundSecondaryCustomTipData == data, let cachedCompoundSecondaryCustomTipTexture {
+            if cachedCompoundSecondaryCustomTipSourceData == sourceData, let cachedCompoundSecondaryCustomTipTexture {
                 return cachedCompoundSecondaryCustomTipTexture
             }
+        }
+
+        guard let data = resampledCustomTipData(sourceData) else {
+            switch role {
+            case .primary:
+                cachedPrimaryCustomTipSourceData = nil
+                cachedPrimaryCustomTipTexture = nil
+            case .primaryEnvelope:
+                cachedPrimaryEnvelopeCustomTipSourceData = nil
+                cachedPrimaryEnvelopeCustomTipTexture = nil
+            case .compoundSecondary:
+                cachedCompoundSecondaryCustomTipSourceData = nil
+                cachedCompoundSecondaryCustomTipTexture = nil
+            }
+            return nil
         }
 
         let descriptor = MTLTextureDescriptor.texture2DDescriptor(
@@ -2962,13 +3013,13 @@ final class StageOneBrushRenderer {
 
         switch role {
         case .primary:
-            cachedPrimaryCustomTipData = data
+            cachedPrimaryCustomTipSourceData = sourceData
             cachedPrimaryCustomTipTexture = texture
         case .primaryEnvelope:
-            cachedPrimaryEnvelopeCustomTipData = data
+            cachedPrimaryEnvelopeCustomTipSourceData = sourceData
             cachedPrimaryEnvelopeCustomTipTexture = texture
         case .compoundSecondary:
-            cachedCompoundSecondaryCustomTipData = data
+            cachedCompoundSecondaryCustomTipSourceData = sourceData
             cachedCompoundSecondaryCustomTipTexture = texture
         }
         return texture
@@ -2982,6 +3033,8 @@ final class StageOneBrushRenderer {
         if side == customTipMaskResolution {
             return data
         }
+
+        debugCustomTipResampleCount += 1
 
         let source = [UInt8](data)
         var destination = [UInt8](repeating: 0, count: customTipMaskResolution * customTipMaskResolution)

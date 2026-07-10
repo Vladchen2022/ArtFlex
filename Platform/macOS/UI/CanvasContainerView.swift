@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 import os
 
@@ -21,6 +22,14 @@ struct CanvasContainerView: View {
                 canvasSize: viewModel.workspace.document.canvasSize,
                 availableSize: geometry.size
             ) { presentation, documentPresentation, documentCenter in
+            let viewportTransform = CanvasViewportTransform(
+                canvasSize: viewModel.workspace.document.canvasSize,
+                viewport: viewModel.workspace.viewport,
+                availableWidth: geometry.size.width,
+                availableHeight: geometry.size.height
+            )
+            let samplingMode: CanvasDisplaySamplingMode =
+                presentation.actualDisplayScale >= 4 ? .nearest : .linear
             ZStack(alignment: .topLeading) {
                 CanvasWorkspaceBackdrop()
                     .clipped()
@@ -38,6 +47,9 @@ struct CanvasContainerView: View {
                         viewportRotationDegrees: viewModel.workspace.viewport.rotationDegrees,
                         strokeResetToken: viewModel.strokeResetToken,
                         brushSize: viewModel.workspace.toolSession.brush.size,
+                        viewportRenderScale: presentation.documentZoomScale,
+                        displaySamplingMode: samplingMode,
+                        drawsTransparencyCheckerboard: viewModel.showsTransparencyCheckerboard,
                         isPanModeActive: viewModel.isPanModeActive,
                         isTransformingSelection: viewModel.isTransformingSelection,
                         isFreeTransformDragging: viewModel.isFreeTransformDragging,
@@ -64,6 +76,11 @@ struct CanvasContainerView: View {
                         onFlushPendingBrushWork: { commandBuffer in
                             viewModel.flushPendingBrushWork(into: commandBuffer)
                         },
+                        canDrainPendingBrushCommitsInteractively: { hadLiveBrushWorkThisFrame in
+                            viewModel.canOpportunisticallyDrainBrushCommits(
+                                hadLiveBrushWorkThisFrame: hadLiveBrushWorkThisFrame
+                            )
+                        },
                         onDrainPendingBrushCommitsInteractively: { hadLiveBrushWorkThisFrame in
                             viewModel.opportunisticallyDrainBrushCommits(
                                 hadLiveBrushWorkThisFrame: hadLiveBrushWorkThisFrame
@@ -81,7 +98,7 @@ struct CanvasContainerView: View {
                         },
                         onBucketFill: { point in
                             onCanvasInteraction?()
-                            viewModel.fillAtPoint(point)
+                            viewModel.requestFillAtPoint(point)
                         },
                         onCanvasClick: { point, modifiers, clickCount in
                             onCanvasInteraction?()
@@ -145,6 +162,15 @@ struct CanvasContainerView: View {
                         },
                         onCanvasRotationChanged: { angleDegrees in
                             viewModel.setViewportRotation(angleDegrees)
+                        },
+                        onViewportPan: { deltaX, deltaY in
+                            viewModel.panViewport(deltaX: deltaX, deltaY: deltaY)
+                        },
+                        onViewportZoom: { multiplier, anchorPoint in
+                            viewModel.adjustViewportZoom(
+                                byScaleMultiplier: multiplier,
+                                anchoredAt: anchorPoint
+                            )
                         },
                         onPanModeChanged: { isActive in
                             viewModel.setPanModeActive(isActive)
@@ -301,7 +327,9 @@ struct CanvasContainerView: View {
                     StraightLineToolOverlay(
                         preview: preview,
                         presentation: documentPresentation,
-                        canvasSize: viewModel.workspace.document.canvasSize
+                        canvasSize: viewModel.workspace.document.canvasSize,
+                        brush: viewModel.workspace.toolSession.brush,
+                        color: viewModel.workspace.toolSession.selectedColor
                     )
                     .allowsHitTesting(false)
                 }
@@ -326,14 +354,32 @@ struct CanvasContainerView: View {
                     )
                     .allowsHitTesting(false)
                 }
+
+                if viewModel.workspace.toolSession.activeTool == .canvasCrop,
+                   let cropBounds = viewModel.canvasCropState.bounds {
+                    CanvasCropOverlay(
+                        bounds: cropBounds,
+                        presentation: documentPresentation,
+                        canvasSize: viewModel.workspace.document.canvasSize,
+                        viewportZoomScale: presentation.documentZoomScale
+                    )
+                    .allowsHitTesting(false)
+                }
                 }
                 .frame(
                     width: presentation.documentDisplaySize.x,
                     height: presentation.documentDisplaySize.y
                 )
-                .position(x: documentCenter.x, y: documentCenter.y)
                 .scaleEffect(presentation.documentZoomScale, anchor: .center)
                 .rotationEffect(.degrees(viewModel.workspace.viewport.rotationDegrees))
+                .position(x: documentCenter.x, y: documentCenter.y)
+
+                if viewModel.isPixelGridEnabled,
+                   presentation.actualDisplayScale >= 7.99 {
+                    CanvasPixelGridOverlay(transform: viewportTransform)
+                        .frame(width: geometry.size.width, height: geometry.size.height)
+                        .allowsHitTesting(false)
+                }
 
                 if viewModel.workspace.toolSession.activeTool == .canvasRotate || abs(viewModel.workspace.viewport.rotationDegrees) > 0.05 {
                     CanvasRotationHUD(
@@ -364,6 +410,33 @@ struct CanvasContainerView: View {
                         x: geometry.size.width / 2,
                         y: 28
                     )
+                }
+
+                if viewModel.workspace.toolSession.activeTool == .canvasCrop {
+                    CanvasCropHUD(
+                        bounds: viewModel.canvasCropState.pixelBounds(
+                            in: viewModel.workspace.document.canvasSize
+                        ),
+                        onApply: viewModel.applyCanvasCrop,
+                        onCancel: viewModel.cancelCanvasCrop
+                    )
+                    .position(x: geometry.size.width / 2, y: 28)
+                }
+
+                if viewModel.workspace.toolSession.activeTool == .canvasCrop,
+                   !viewModel.isPanModeActive {
+                    CanvasCropGestureOverlay(
+                        transform: viewportTransform,
+                        onBegan: { point in
+                            viewModel.beginCanvasCrop(
+                                at: point,
+                                handleRadius: 12 / max(viewportTransform.actualDisplayScale, 0.000_001)
+                            )
+                        },
+                        onChanged: viewModel.updateCanvasCrop,
+                        onEnded: viewModel.endCanvasCrop
+                    )
+                    .frame(width: geometry.size.width, height: geometry.size.height)
                 }
 
                 if viewModel.isPanModeActive && !viewModel.isCanvasViewportLocked {
@@ -584,7 +657,7 @@ private struct SelectionOverlayHost: View {
         let isFreeTransform = proxy.activeTool == .freeTransform
         let isApplying = proxy.isApplyingTransformCommit
 
-        if proxy.isHiddenForTransientAdjustment {
+        if proxy.isHiddenForTransientAdjustment || proxy.activeTool == .canvasCrop {
             EmptyView()
         } else if !isApplying, !(isFreeTransform && isTransforming),
            let committed = proxy.committedShape,
@@ -596,7 +669,8 @@ private struct SelectionOverlayHost: View {
                 canvasSize: canvasSize,
                 showsDimMask: false,
                 previewOffset: .init(x: 0, y: 0),
-                prefersVectorDisplay: true
+                prefersVectorDisplay: true,
+                smoothsLassoPath: false
             )
             SelectionOverlay(
                 selectionShape: inProgress,
@@ -604,7 +678,8 @@ private struct SelectionOverlayHost: View {
                 canvasSize: canvasSize,
                 showsDimMask: false,
                 previewOffset: .init(x: 0, y: 0),
-                prefersVectorDisplay: true
+                prefersVectorDisplay: true,
+                smoothsLassoPath: true
             )
         } else if !isApplying, !(isFreeTransform && isTransforming),
                   let shape = proxy.displayShape,
@@ -617,7 +692,8 @@ private struct SelectionOverlayHost: View {
                 previewOffset: isTransforming
                     ? proxy.transformPreviewOffset
                     : proxy.selectionMovePreviewOffset,
-                prefersVectorDisplay: shape.kind != .mask || !shape.components.isEmpty
+                prefersVectorDisplay: shape.kind != .mask || !shape.components.isEmpty,
+                smoothsLassoPath: proxy.inProgressShape?.kind == .lasso
             )
         }
     }
@@ -711,6 +787,227 @@ private struct CanvasRotationHUD: View {
         let rounded = Int(angleDegrees.rounded())
         if rounded == 0 { return "0°" }
         return "\(rounded)°"
+    }
+}
+
+private struct CanvasCropHUD: View {
+    let bounds: CanvasRect?
+    let onApply: () -> Void
+    let onCancel: () -> Void
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "crop")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(Color.white.opacity(0.82))
+
+            Text(sizeText)
+                .font(.system(size: 12, weight: .semibold, design: .rounded))
+                .foregroundStyle(Color.white)
+                .frame(minWidth: 72)
+
+            Button(action: onApply) {
+                Image(systemName: "checkmark")
+                    .font(.system(size: 11, weight: .bold))
+                    .frame(width: 24, height: 24)
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(Color.white)
+            .background(RoundedRectangle(cornerRadius: 6).fill(Color.white.opacity(0.12)))
+            .disabled(bounds == nil)
+            .opacity(bounds == nil ? 0.4 : 1)
+            .help("应用裁剪 (Enter)")
+
+            Button(action: onCancel) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 11, weight: .bold))
+                    .frame(width: 24, height: 24)
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(Color.white)
+            .background(RoundedRectangle(cornerRadius: 6).fill(Color.white.opacity(0.12)))
+            .help("取消裁剪 (Esc)")
+        }
+        .padding(.horizontal, 12)
+        .frame(height: 32)
+        .background(Capsule().fill(Color.black.opacity(0.62)))
+    }
+
+    private var sizeText: String {
+        guard let bounds else { return "拖出范围" }
+        return "\(Int(bounds.size.x)) × \(Int(bounds.size.y))"
+    }
+}
+
+private struct CanvasCropGestureOverlay: View {
+    let transform: CanvasViewportTransform
+    let onBegan: (CanvasPoint) -> Void
+    let onChanged: (CanvasPoint) -> Void
+    let onEnded: (CanvasPoint) -> Void
+
+    @State private var isDragging = false
+
+    var body: some View {
+        Rectangle()
+            .fill(Color.white.opacity(0.001))
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { value in
+                        if !isDragging {
+                            isDragging = true
+                            onBegan(canvasPoint(for: value.startLocation))
+                        }
+                        onChanged(canvasPoint(for: value.location))
+                    }
+                    .onEnded { value in
+                        onEnded(canvasPoint(for: value.location))
+                        isDragging = false
+                    }
+            )
+            .onHover { hovering in
+                if hovering {
+                    NSCursor.crosshair.set()
+                } else {
+                    NSCursor.arrow.set()
+                }
+            }
+    }
+
+    private func canvasPoint(for point: CGPoint) -> CanvasPoint {
+        transform.viewportToCanvas(.init(x: point.x, y: point.y), clamped: true)
+    }
+}
+
+private struct CanvasCropOverlay: View {
+    let bounds: CanvasRect
+    let presentation: CanvasPresentation
+    let canvasSize: CanvasSize
+    let viewportZoomScale: Double
+
+    var body: some View {
+        let scaleX = presentation.documentDisplaySize.x / Double(max(canvasSize.width, 1))
+        let scaleY = presentation.documentDisplaySize.y / Double(max(canvasSize.height, 1))
+        let rect = CGRect(
+            x: bounds.minX * scaleX,
+            y: bounds.minY * scaleY,
+            width: bounds.size.x * scaleX,
+            height: bounds.size.y * scaleY
+        )
+        let inverseZoom = 1 / max(viewportZoomScale, 0.01)
+        let handleSize = 8 * inverseZoom
+        let lineWidth = 1.2 * inverseZoom
+        let handlePoints = cropHandlePoints(in: rect)
+        let guidePath = Path { path in
+            path.addRect(rect)
+            path.move(to: CGPoint(x: rect.minX + rect.width / 3, y: rect.minY))
+            path.addLine(to: CGPoint(x: rect.minX + rect.width / 3, y: rect.maxY))
+            path.move(to: CGPoint(x: rect.minX + rect.width * 2 / 3, y: rect.minY))
+            path.addLine(to: CGPoint(x: rect.minX + rect.width * 2 / 3, y: rect.maxY))
+            path.move(to: CGPoint(x: rect.minX, y: rect.minY + rect.height / 3))
+            path.addLine(to: CGPoint(x: rect.maxX, y: rect.minY + rect.height / 3))
+            path.move(to: CGPoint(x: rect.minX, y: rect.minY + rect.height * 2 / 3))
+            path.addLine(to: CGPoint(x: rect.maxX, y: rect.minY + rect.height * 2 / 3))
+        }
+
+        ZStack(alignment: .topLeading) {
+            Path { path in
+                path.addRect(CGRect(
+                    x: 0,
+                    y: 0,
+                    width: presentation.documentDisplaySize.x,
+                    height: presentation.documentDisplaySize.y
+                ))
+                path.addRect(rect)
+            }
+            .fill(Color.black.opacity(0.48), style: FillStyle(eoFill: true))
+
+            guidePath
+                .stroke(Color.black.opacity(0.65), lineWidth: lineWidth * 2.4)
+
+            guidePath
+                .stroke(Color.white.opacity(0.92), lineWidth: lineWidth)
+
+            ForEach(Array(handlePoints.enumerated()), id: \.offset) { _, point in
+                Rectangle()
+                    .fill(Color.white)
+                    .frame(width: handleSize, height: handleSize)
+                    .overlay(Rectangle().stroke(Color.black.opacity(0.7), lineWidth: lineWidth))
+                    .position(point)
+            }
+        }
+    }
+
+    private func cropHandlePoints(in rect: CGRect) -> [CGPoint] {
+        [
+            .init(x: rect.minX, y: rect.minY),
+            .init(x: rect.midX, y: rect.minY),
+            .init(x: rect.maxX, y: rect.minY),
+            .init(x: rect.maxX, y: rect.midY),
+            .init(x: rect.maxX, y: rect.maxY),
+            .init(x: rect.midX, y: rect.maxY),
+            .init(x: rect.minX, y: rect.maxY),
+            .init(x: rect.minX, y: rect.midY)
+        ]
+    }
+}
+
+private struct CanvasPixelGridOverlay: View {
+    let transform: CanvasViewportTransform
+
+    var body: some View {
+        Canvas(opaque: false, colorMode: .nonLinear, rendersAsynchronously: true) { context, size in
+            let visibleCanvasBounds = visibleCanvasBounds(for: size)
+            var path = Path()
+
+            if visibleCanvasBounds.minX <= visibleCanvasBounds.maxX {
+                for x in visibleCanvasBounds.minX...visibleCanvasBounds.maxX {
+                    let start = transform.canvasToViewport(.init(x: Double(x), y: 0))
+                    let end = transform.canvasToViewport(
+                        .init(x: Double(x), y: Double(transform.canvasSize.height))
+                    )
+                    path.move(to: CGPoint(x: start.x, y: start.y))
+                    path.addLine(to: CGPoint(x: end.x, y: end.y))
+                }
+            }
+
+            if visibleCanvasBounds.minY <= visibleCanvasBounds.maxY {
+                for y in visibleCanvasBounds.minY...visibleCanvasBounds.maxY {
+                    let start = transform.canvasToViewport(.init(x: 0, y: Double(y)))
+                    let end = transform.canvasToViewport(
+                        .init(x: Double(transform.canvasSize.width), y: Double(y))
+                    )
+                    path.move(to: CGPoint(x: start.x, y: start.y))
+                    path.addLine(to: CGPoint(x: end.x, y: end.y))
+                }
+            }
+
+            context.stroke(
+                path,
+                with: .color(Color.black.opacity(0.24)),
+                lineWidth: 1
+            )
+        }
+    }
+
+    private func visibleCanvasBounds(for size: CGSize) -> (
+        minX: Int,
+        maxX: Int,
+        minY: Int,
+        maxY: Int
+    ) {
+        let viewportCorners = [
+            CanvasPoint(x: 0, y: 0),
+            CanvasPoint(x: size.width, y: 0),
+            CanvasPoint(x: size.width, y: size.height),
+            CanvasPoint(x: 0, y: size.height)
+        ]
+        let canvasCorners = viewportCorners.map { transform.viewportToCanvas($0) }
+        let minX = max(0, Int(floor(canvasCorners.map(\.x).min() ?? 0)) - 1)
+        let maxX = min(transform.canvasSize.width, Int(ceil(canvasCorners.map(\.x).max() ?? 0)) + 1)
+        let minY = max(0, Int(floor(canvasCorners.map(\.y).min() ?? 0)) - 1)
+        let maxY = min(transform.canvasSize.height, Int(ceil(canvasCorners.map(\.y).max() ?? 0)) + 1)
+        return (minX, maxX, minY, maxY)
     }
 }
 
@@ -856,6 +1153,8 @@ private struct StraightLineToolOverlay: View {
     let preview: StraightLinePreview
     let presentation: CanvasPresentation
     let canvasSize: CanvasSize
+    let brush: BrushSettings
+    let color: RGBAColor
 
     var body: some View {
         ZStack(alignment: .topLeading) {
@@ -863,8 +1162,25 @@ private struct StraightLineToolOverlay: View {
                 path.move(to: map(preview.pointA))
                 path.addLine(to: map(preview.pointB))
             }
-            .stroke(style: StrokeStyle(lineWidth: 2, dash: [8, 8]))
-            .foregroundStyle(Color.accentColor.opacity(0.9))
+            .stroke(
+                Color.accentColor.opacity(0.35),
+                style: StrokeStyle(
+                    lineWidth: previewLineWidth + 2,
+                    lineCap: previewLineCap
+                )
+            )
+
+            Path { path in
+                path.move(to: map(preview.pointA))
+                path.addLine(to: map(preview.pointB))
+            }
+            .stroke(
+                previewColor,
+                style: StrokeStyle(
+                    lineWidth: previewLineWidth,
+                    lineCap: previewLineCap
+                )
+            )
 
             pointMarker(preview.pointA, label: "A")
             pointMarker(preview.pointB, label: "B")
@@ -891,6 +1207,25 @@ private struct StraightLineToolOverlay: View {
         return CGPoint(
             x: presentation.documentOrigin.x + (point.x * scaleX),
             y: presentation.documentOrigin.y + (point.y * scaleY)
+        )
+    }
+
+    private var previewLineWidth: Double {
+        let scaleX = presentation.documentDisplaySize.x / Double(max(canvasSize.width, 1))
+        let scaleY = presentation.documentDisplaySize.y / Double(max(canvasSize.height, 1))
+        return max(Double(brush.size) * min(scaleX, scaleY), 1)
+    }
+
+    private var previewLineCap: CGLineCap {
+        brush.tipShape == .square ? .butt : .round
+    }
+
+    private var previewColor: Color {
+        Color(
+            red: Double(color.red),
+            green: Double(color.green),
+            blue: Double(color.blue),
+            opacity: Double(color.alpha * brush.opacity)
         )
     }
 }
@@ -1129,6 +1464,7 @@ private struct SelectionOverlay: View {
     let showsDimMask: Bool
     let previewOffset: CanvasPoint
     let prefersVectorDisplay: Bool
+    let smoothsLassoPath: Bool
 
     var body: some View {
         let displayOffsetX = previewOffset.x * (presentation.documentDisplaySize.x / Double(canvasSize.width))
@@ -1392,15 +1728,19 @@ private struct SelectionOverlay: View {
         let canvasHeight = max(bounds.size.y, 0.0001)
 
         let mappedPoints = points.map {
-            CGPoint(
+            CanvasPoint(
                 x: (($0.x - bounds.origin.x) / canvasWidth) * displayWidth,
                 y: (($0.y - bounds.origin.y) / canvasHeight) * displayHeight
             )
         }
+        if smoothsLassoPath,
+           let smoothedPath = smoothedClosedLassoPath(points: mappedPoints) {
+            return Path(smoothedPath)
+        }
         return Path { path in
             guard let firstPoint = mappedPoints.first else { return }
-            path.move(to: firstPoint)
-            path.addLines(Array(mappedPoints.dropFirst()))
+            path.move(to: CGPoint(x: firstPoint.x, y: firstPoint.y))
+            path.addLines(mappedPoints.dropFirst().map { CGPoint(x: $0.x, y: $0.y) })
             path.closeSubpath()
         }
     }
@@ -1533,23 +1873,29 @@ private struct SelectionOverlay: View {
     private func vectorDisplayShape(for shape: SelectionShape) -> SelectionShape? {
         guard shape.kind == .mask else { return nil }
         if shape.components.count > 1 {
-            let message = "[vectorDisplayShape] source=composite componentCount=\(shape.components.count) boundsOrigin=(\(shape.bounds.origin.x),\(shape.bounds.origin.y)) boundsSize=(\(shape.bounds.size.x),\(shape.bounds.size.y))"
-            selectionTraceLogger.debug("\(message, privacy: .public)")
-            emitSelectionTraceCanvas(message)
+            if RuntimeDiagnostics.selectionTraceLoggingEnabled {
+                let message = "[vectorDisplayShape] source=composite componentCount=\(shape.components.count) boundsOrigin=(\(shape.bounds.origin.x),\(shape.bounds.origin.y)) boundsSize=(\(shape.bounds.size.x),\(shape.bounds.size.y))"
+                selectionTraceLogger.debug("\(message, privacy: .public)")
+                emitSelectionTraceCanvas(message)
+            }
             return SelectionShape.composite(shape.components)
         }
         if shape.components.count == 1,
            let component = shape.components.first,
            component.operation == .add {
-            let message = "[vectorDisplayShape] source=component kind=\(component.shape.kind.rawValue) boundsOrigin=(\(component.shape.bounds.origin.x),\(component.shape.bounds.origin.y)) boundsSize=(\(component.shape.bounds.size.x),\(component.shape.bounds.size.y))"
-            selectionTraceLogger.debug("\(message, privacy: .public)")
-            emitSelectionTraceCanvas(message)
+            if RuntimeDiagnostics.selectionTraceLoggingEnabled {
+                let message = "[vectorDisplayShape] source=component kind=\(component.shape.kind.rawValue) boundsOrigin=(\(component.shape.bounds.origin.x),\(component.shape.bounds.origin.y)) boundsSize=(\(component.shape.bounds.size.x),\(component.shape.bounds.size.y))"
+                selectionTraceLogger.debug("\(message, privacy: .public)")
+                emitSelectionTraceCanvas(message)
+            }
             return component.shape
         }
         if shape.pathPoints.count >= 3 {
-            let message = "[vectorDisplayShape] source=maskPath pathCount=\(shape.pathPoints.count) boundsOrigin=(\(shape.bounds.origin.x),\(shape.bounds.origin.y)) boundsSize=(\(shape.bounds.size.x),\(shape.bounds.size.y))"
-            selectionTraceLogger.debug("\(message, privacy: .public)")
-            emitSelectionTraceCanvas(message)
+            if RuntimeDiagnostics.selectionTraceLoggingEnabled {
+                let message = "[vectorDisplayShape] source=maskPath pathCount=\(shape.pathPoints.count) boundsOrigin=(\(shape.bounds.origin.x),\(shape.bounds.origin.y)) boundsSize=(\(shape.bounds.size.x),\(shape.bounds.size.y))"
+                selectionTraceLogger.debug("\(message, privacy: .public)")
+                emitSelectionTraceCanvas(message)
+            }
             return SelectionShape(
                 kind: .lasso,
                 bounds: shape.bounds,
@@ -1616,9 +1962,11 @@ private func makeSelectionMaskImageSlice(
     let minY = max(Int(floor(croppedBounds.minY)), 0)
     let maxX = min(Int(ceil(croppedBounds.maxX)), width)
     let maxY = min(Int(ceil(croppedBounds.maxY)), height)
-    let message = "[makeSelectionMaskImageSlice] edgeOnly=\(edgeOnly) shapeKind=\(shape.kind.rawValue) shapeBoundsOrigin=(\(shape.bounds.origin.x),\(shape.bounds.origin.y)) shapeBoundsSize=(\(shape.bounds.size.x),\(shape.bounds.size.y)) cropped=(\(minX),\(minY))-(\(maxX),\(maxY))"
-    selectionTraceLogger.debug("\(message, privacy: .public)")
-    emitSelectionTraceCanvas(message)
+    if RuntimeDiagnostics.selectionTraceLoggingEnabled {
+        let message = "[makeSelectionMaskImageSlice] edgeOnly=\(edgeOnly) shapeKind=\(shape.kind.rawValue) shapeBoundsOrigin=(\(shape.bounds.origin.x),\(shape.bounds.origin.y)) shapeBoundsSize=(\(shape.bounds.size.x),\(shape.bounds.size.y)) cropped=(\(minX),\(minY))-(\(maxX),\(maxY))"
+        selectionTraceLogger.debug("\(message, privacy: .public)")
+        emitSelectionTraceCanvas(message)
+    }
     guard minX < maxX, minY < maxY else { return nil }
 
     let croppedWidth = maxX - minX

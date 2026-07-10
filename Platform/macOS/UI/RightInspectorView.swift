@@ -1,4 +1,5 @@
 import AppKit
+import ImageIO
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -89,7 +90,7 @@ private struct PatternThumbnailTile: View {
     let url: URL?
     let usesCheckerboard: Bool
 
-    @State private var image: NSImage?
+    @State private var image: CGImage?
 
     var body: some View {
         ZStack {
@@ -103,7 +104,7 @@ private struct PatternThumbnailTile: View {
             }
 
             if let image {
-                Image(nsImage: image)
+                Image(decorative: image, scale: 1)
                     .resizable()
                     .interpolation(.high)
                     .scaledToFill()
@@ -121,23 +122,63 @@ private struct PatternThumbnailTile: View {
         )
         .contentShape(RoundedRectangle(cornerRadius: 8))
         .task(id: url) {
-            image = url.flatMap(loadPatternThumbnailImage(from:))
+            guard let url else {
+                image = nil
+                return
+            }
+            let loadedImage = await Task.detached(priority: .utility) {
+                loadPatternThumbnailImage(from: url)
+            }.value
+            guard !Task.isCancelled else { return }
+            image = loadedImage
         }
     }
 }
 
-private func loadPatternThumbnailImage(from url: URL) -> NSImage? {
-    guard let image = NSImage(contentsOf: url) else { return nil }
-    guard
-        let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil),
-        let squareFilledImage = squareFilledPatternThumbnailImage(from: cgImage, targetDimension: 256)
-    else {
-        return image
+private struct LayerThumbnailTile: View {
+    let layerID: LayerID
+    let revision: UInt64
+    let load: () async -> CGImage?
+
+    @State private var image: CGImage?
+
+    var body: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 6)
+                .fill(Color.white.opacity(0.06))
+                .frame(width: 24, height: 24)
+
+            if let image {
+                Image(decorative: image, scale: 1)
+                    .resizable()
+                    .interpolation(.high)
+                    .scaledToFit()
+                    .frame(width: 20, height: 20)
+                    .clipShape(RoundedRectangle(cornerRadius: 4))
+            } else {
+                RoundedRectangle(cornerRadius: 4)
+                    .fill(Color.white.opacity(0.18))
+                    .frame(width: 14, height: 14)
+            }
+        }
+        .task(id: revision) {
+            try? await Task.sleep(for: .milliseconds(100))
+            guard !Task.isCancelled else { return }
+            guard let loadedImage = await load(), !Task.isCancelled else { return }
+            image = loadedImage
+        }
+        .accessibilityIdentifier("layer-thumbnail-\(layerID.rawValue.uuidString)")
     }
-    return NSImage(
-        cgImage: squareFilledImage,
-        size: NSSize(width: squareFilledImage.width, height: squareFilledImage.height)
-    )
+}
+
+private nonisolated func loadPatternThumbnailImage(from url: URL) -> CGImage? {
+    guard
+        let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+        let image = CGImageSourceCreateImageAtIndex(source, 0, nil)
+    else {
+        return nil
+    }
+    return squareFilledPatternThumbnailImage(from: image, targetDimension: 256) ?? image
 }
 
 private func cropVisibleContentIfPossible(_ image: CGImage) -> CGImage? {
@@ -285,7 +326,7 @@ struct RightInspectorView: View {
     @State private var showsCompoundBrushBuilder = false
     @State private var leftInspectorTab: LeftInspectorTab = .referenceImages
     @State private var libraryInspectorTab: LibraryInspectorTab = .brush
-    @State private var parameterInspectorTab: ParameterInspectorTab = .colorAdjustment
+    @State private var parameterInspectorTab: ParameterInspectorTab = .brush
     @State private var lastUsedAdjustmentTab: ParameterInspectorTab = .colorAdjustment
     @State private var parameterInspectorAutoRestoreTab: ParameterInspectorTab?
     @State private var topInspectorTab: TopInspectorTab = .navigator
@@ -348,7 +389,10 @@ struct RightInspectorView: View {
             syncNavigatorZoomPercentText()
             syncBrightnessAdjustmentEditorModeToTab()
         }
-        .onChange(of: viewModel.workspace.viewport.zoomScale) { _, _ in
+        .onChange(of: viewModel.navigatorZoomPercent) { _, _ in
+            syncNavigatorZoomPercentText()
+        }
+        .onChange(of: viewModel.canvasViewportMetricsRevision) { _, _ in
             syncNavigatorZoomPercentText()
         }
         .onChange(of: parameterInspectorTab) { _, _ in
@@ -503,6 +547,7 @@ struct RightInspectorView: View {
                     set: { _ in }
                 ),
                 range: 0...1,
+                liveValueText: { "\(Int($0 * 100))%" },
                 onCommit: { viewModel.setCreativeShapeGeneratorFeatherProbability(Float($0)) }
             )
 
@@ -514,6 +559,7 @@ struct RightInspectorView: View {
                     set: { _ in }
                 ),
                 range: 0...1,
+                liveValueText: { "\(Int($0 * 100))%" },
                 onCommit: { viewModel.setCreativeShapeGeneratorShapeCharacteristic(Float($0)) }
             )
 
@@ -525,6 +571,7 @@ struct RightInspectorView: View {
                     set: { _ in }
                 ),
                 range: 0...1,
+                liveValueText: { "\(Int($0 * 100))%" },
                 onCommit: { viewModel.setCreativeShapeGeneratorShapeSize(Float($0)) }
             )
 
@@ -536,6 +583,7 @@ struct RightInspectorView: View {
                     set: { _ in }
                 ),
                 range: 0...1,
+                liveValueText: { "\(Int($0 * 100))%" },
                 onCommit: { viewModel.setCreativeShapeGeneratorShapeJitter(Float($0)) }
             )
 
@@ -547,6 +595,7 @@ struct RightInspectorView: View {
                     set: { _ in }
                 ),
                 range: 0...1,
+                liveValueText: { "\(Int($0 * 100))%" },
                 onCommit: { viewModel.setCreativeShapeGeneratorColorJitter(Float($0)) }
             )
 
@@ -881,14 +930,26 @@ struct RightInspectorView: View {
                 }
 
                 compactToolButton(
-                    systemImage: "arrow.counterclockwise",
-                    tooltip: "恢复 100%",
+                    systemImage: "arrow.down.right.and.arrow.up.left",
+                    tooltip: "适合窗口 (Cmd+0)",
                     width: topInspectorControlButtonWidth,
                     height: topInspectorControlButtonHeight,
                     iconSize: topInspectorControlIconSize,
                     cornerRadius: topInspectorControlCornerRadius
                 ) {
-                    viewModel.setNavigatorZoomPercent(100)
+                    viewModel.fitCanvasToWindow()
+                    syncNavigatorZoomPercentText()
+                }
+
+                compactToolButton(
+                    systemImage: "viewfinder",
+                    tooltip: "实际像素 100% (Cmd+1)",
+                    width: topInspectorControlButtonWidth,
+                    height: topInspectorControlButtonHeight,
+                    iconSize: topInspectorControlIconSize,
+                    cornerRadius: topInspectorControlCornerRadius
+                ) {
+                    viewModel.setCanvasToActualPixels()
                     syncNavigatorZoomPercentText()
                 }
 
@@ -926,6 +987,28 @@ struct RightInspectorView: View {
                     RoundedRectangle(cornerRadius: topInspectorControlCornerRadius)
                         .stroke(Color.white.opacity(0.08), lineWidth: 1)
                 )
+
+                compactToolButton(
+                    systemImage: viewModel.showsTransparencyCheckerboard ? "checkerboard.rectangle" : "rectangle.fill",
+                    tooltip: "切换透明区域背景",
+                    width: topInspectorControlButtonWidth,
+                    height: topInspectorControlButtonHeight,
+                    iconSize: topInspectorControlIconSize,
+                    cornerRadius: topInspectorControlCornerRadius
+                ) {
+                    viewModel.showsTransparencyCheckerboard.toggle()
+                }
+
+                compactToolButton(
+                    systemImage: viewModel.isPixelGridEnabled ? "grid" : "grid.circle",
+                    tooltip: "切换高倍像素网格",
+                    width: topInspectorControlButtonWidth,
+                    height: topInspectorControlButtonHeight,
+                    iconSize: topInspectorControlIconSize,
+                    cornerRadius: topInspectorControlCornerRadius
+                ) {
+                    viewModel.isPixelGridEnabled.toggle()
+                }
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -992,48 +1075,87 @@ struct RightInspectorView: View {
     private var brushSection: some View {
         VStack(alignment: .leading, spacing: 8) {
             if viewModel.workspace.toolSession.activeTool == .textureFill {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("肌理填充")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(Color.white.opacity(0.92))
+                textureFillParameterControls
+            } else if usesFillParameterControls {
+                fillParameterControls
+            } else if usesFullBrushParameterControls {
+                fullBrushParameterControls
+                brushAdvancedActions
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
 
-                    Text(textureFillTipSourceSummary)
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(Color.white.opacity(0.62))
+    private var usesFullBrushParameterControls: Bool {
+        switch viewModel.workspace.toolSession.activeTool {
+        case .brush, .eraser, .smudge, .straightLine, .brightnessAdjust:
+            return true
+        default:
+            return false
+        }
+    }
 
-                    HStack(spacing: 8) {
-                        compactTextActionButton(
-                            title: "共享图库…",
-                            tooltip: "从共享笔尖图片资料库选择肌理填充素材",
-                            fillsAvailableWidth: true
-                        ) {
-                            prepareTipImageLibraryPresentation(for: .textureFill)
-                            tipImageLibrarySheetTarget = .textureFill
-                        }
+    private var usesFillParameterControls: Bool {
+        switch viewModel.workspace.toolSession.activeTool {
+        case .lassoFill, .linearGradient, .sectorGradient:
+            return true
+        default:
+            return false
+        }
+    }
 
-                        if viewModel.workspace.toolSession.textureFillTip.sourceSemantic == .importedImage {
-                            compactTextActionButton(
-                                title: "切回程序化",
-                                tooltip: "改回内置程序化纹理",
-                                fillsAvailableWidth: true
-                            ) {
-                                viewModel.resetTextureFillTipToProcedural()
-                            }
-                        }
-                    }
+    private var textureFillParameterControls: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("肌理填充")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(Color.white.opacity(0.92))
 
+            Text(textureFillTipSourceSummary)
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(Color.white.opacity(0.62))
+
+            HStack(spacing: 8) {
+                compactTextActionButton(
+                    title: "共享图库…",
+                    tooltip: "从共享笔尖图片资料库选择肌理填充素材",
+                    fillsAvailableWidth: true
+                ) {
+                    prepareTipImageLibraryPresentation(for: .textureFill)
+                    tipImageLibrarySheetTarget = .textureFill
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
-            } else {
-            // ⚡️ 优化：使用防抖滑块，拖动结束时才更新
+
+                if viewModel.workspace.toolSession.textureFillTip.sourceSemantic == .importedImage {
+                    compactTextActionButton(
+                        title: "切回程序化",
+                        tooltip: "改回内置程序化纹理",
+                        fillsAvailableWidth: true
+                    ) {
+                        viewModel.resetTextureFillTipToProcedural()
+                    }
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var fillParameterControls: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            brushJitterSlider
+            paintJitterSlider
+        }
+    }
+
+    private var fullBrushParameterControls: some View {
+        VStack(alignment: .leading, spacing: 8) {
             OptimizedCompactSlider(
                 title: "间距",
                 valueText: "\(Int(viewModel.workspace.toolSession.brush.spacingPercent))%",
                 value: Binding(
                     get: { Double(viewModel.workspace.toolSession.brush.spacingPercent) },
-                    set: { _ in }  // 通过 onCommit 处理
+                    set: { _ in }
                 ),
                 range: 5...150,
+                liveValueText: { "\(Int($0))%" },
                 onCommit: { viewModel.setBrushSpacingPercent(Float($0)) }
             )
 
@@ -1045,6 +1167,7 @@ struct RightInspectorView: View {
                     set: { _ in }
                 ),
                 range: 0...5,
+                liveValueText: { String(format: "%.1fx", $0) },
                 onCommit: { viewModel.setBrushScatterAmount(Float($0)) }
             )
 
@@ -1056,34 +1179,17 @@ struct RightInspectorView: View {
                     set: { _ in }
                 ),
                 range: 0...360,
+                liveValueText: { "\(Int($0))°" },
                 onCommit: { viewModel.setBrushStampRotationDegrees(Float($0)) }
             )
 
-            OptimizedCompactSlider(
-                title: "抖动",
-                valueText: "\(Int(viewModel.workspace.toolSession.brush.jitterAmount * 100))%",
-                value: Binding(
-                    get: { Double(viewModel.workspace.toolSession.brush.jitterAmount) },
-                    set: { _ in }
-                ),
-                range: 0...1,
-                onCommit: { viewModel.setBrushJitterAmount(Float($0)) }
-            )
+            brushJitterSlider
 
             Divider()
                 .overlay(Color.white.opacity(0.08))
                 .padding(.vertical, 2)
 
-            OptimizedCompactSlider(
-                title: "杂色",
-                valueText: "\(Int(viewModel.displayedPaintJitterAmount * 100))%",
-                value: Binding(
-                    get: { Double(viewModel.displayedPaintJitterAmount) },
-                    set: { _ in }
-                ),
-                range: 0...1,
-                onCommit: { viewModel.setPaintJitterAmount(Float($0)) }
-            )
+            paintJitterSlider
 
             OptimizedCompactSlider(
                 title: "大小压感",
@@ -1093,6 +1199,7 @@ struct RightInspectorView: View {
                     set: { _ in }
                 ),
                 range: 0...1,
+                liveValueText: { "\(Int($0 * 100))%" },
                 onCommit: { viewModel.setPressureSizeAmount(Float($0)) }
             )
 
@@ -1104,14 +1211,15 @@ struct RightInspectorView: View {
                     set: { _ in }
                 ),
                 range: 0...1,
+                liveValueText: { "\(Int($0 * 100))%" },
                 onCommit: { viewModel.setPressureOpacityAmount(Float($0)) }
             )
 
-            Divider()
-                .overlay(Color.white.opacity(0.08))
-                .padding(.vertical, 2)
-
             if viewModel.workspace.toolSession.brush.buildMode == .buildUp {
+                Divider()
+                    .overlay(Color.white.opacity(0.08))
+                    .padding(.vertical, 2)
+
                 OptimizedCompactSlider(
                     title: "透明修正",
                     valueText: "\(Int(viewModel.displayedBuildUpOpacityCompensationAmount * 100))%",
@@ -1120,62 +1228,91 @@ struct RightInspectorView: View {
                         set: { _ in }
                     ),
                     range: 0...1,
+                    liveValueText: { "\(Int($0 * 100))%" },
                     onCommit: { viewModel.setBuildUpOpacityCompensationAmount(Float($0)) }
                 )
             }
+        }
+    }
+
+    private var brushJitterSlider: some View {
+        OptimizedCompactSlider(
+            title: "抖动",
+            valueText: "\(Int(viewModel.workspace.toolSession.brush.jitterAmount * 100))%",
+            value: Binding(
+                get: { Double(viewModel.workspace.toolSession.brush.jitterAmount) },
+                set: { _ in }
+            ),
+            range: 0...1,
+            liveValueText: { "\(Int($0 * 100))%" },
+            onCommit: { viewModel.setBrushJitterAmount(Float($0)) }
+        )
+    }
+
+    private var paintJitterSlider: some View {
+        OptimizedCompactSlider(
+            title: "杂色",
+            valueText: "\(Int(viewModel.displayedPaintJitterAmount * 100))%",
+            value: Binding(
+                get: { Double(viewModel.displayedPaintJitterAmount) },
+                set: { _ in }
+            ),
+            range: 0...1,
+            liveValueText: { "\(Int($0 * 100))%" },
+            onCommit: { viewModel.setPaintJitterAmount(Float($0)) }
+        )
+    }
+
+    private var brushAdvancedActions: some View {
+        HStack(spacing: 8) {
+            compactIconButton(
+                systemImage: "square.3.layers.3d.top.filled",
+                tooltip: viewModel.workspace.toolSession.brush.buildMode == .opacityCap
+                    ? "关闭不透明度封顶"
+                    : "开启不透明度封顶",
+                isSelected: viewModel.workspace.toolSession.brush.buildMode == .opacityCap
+            ) {
+                viewModel.setBrushBuildMode(
+                    viewModel.workspace.toolSession.brush.buildMode == .opacityCap
+                        ? .buildUp
+                        : .opacityCap
+                )
             }
 
-            HStack(spacing: 8) {
-                compactIconButton(
-                    systemImage: "square.3.layers.3d.top.filled",
-                    tooltip: viewModel.workspace.toolSession.brush.buildMode == .opacityCap
-                        ? "关闭不透明度封顶"
-                        : "开启不透明度封顶",
-                    isSelected: viewModel.workspace.toolSession.brush.buildMode == .opacityCap
-                ) {
-                    viewModel.setBrushBuildMode(
-                        viewModel.workspace.toolSession.brush.buildMode == .opacityCap
-                            ? .buildUp
-                            : .opacityCap
-                    )
-                }
+            compactIconButton(
+                systemImage: "location.north.line.fill",
+                tooltip: viewModel.workspace.toolSession.brush.followsStrokeDirection ? "关闭跟随笔迹方向" : "开启跟随笔迹方向",
+                isSelected: viewModel.workspace.toolSession.brush.followsStrokeDirection
+            ) {
+                viewModel.setBrushFollowsStrokeDirection(!viewModel.workspace.toolSession.brush.followsStrokeDirection)
+            }
 
-                compactIconButton(
-                    systemImage: "location.north.line.fill",
-                    tooltip: viewModel.workspace.toolSession.brush.followsStrokeDirection ? "关闭跟随笔迹方向" : "开启跟随笔迹方向",
-                    isSelected: viewModel.workspace.toolSession.brush.followsStrokeDirection
-                ) {
-                    viewModel.setBrushFollowsStrokeDirection(!viewModel.workspace.toolSession.brush.followsStrokeDirection)
-                }
+            compactIconButton(systemImage: "waveform.path.ecg", tooltip: "大小压感曲线") {
+                showsPressureSizeCurveEditor.toggle()
+            }
+            .popover(isPresented: $showsPressureSizeCurveEditor, arrowEdge: .bottom) {
+                pressureSizeCurveEditor
+                    .padding(14)
+                    .frame(width: 296, height: 236, alignment: .topLeading)
+                    .background(Color(red: 0.965, green: 0.965, blue: 0.955))
+            }
 
-                compactIconButton(systemImage: "waveform.path.ecg", tooltip: "大小压感曲线") {
-                    showsPressureSizeCurveEditor.toggle()
-                }
-                .popover(isPresented: $showsPressureSizeCurveEditor, arrowEdge: .bottom) {
-                    pressureSizeCurveEditor
-                        .padding(14)
-                        .frame(width: 296, height: 236, alignment: .topLeading)
-                        .background(Color(red: 0.965, green: 0.965, blue: 0.955))
-                }
+            compactIconButton(systemImage: "drop", tooltip: "透明压感曲线") {
+                showsPressureCurveEditor.toggle()
+            }
+            .popover(isPresented: $showsPressureCurveEditor, arrowEdge: .bottom) {
+                pressureCurveEditor
+                    .padding(14)
+                    .frame(width: 296, height: 236, alignment: .topLeading)
+                    .background(Color(red: 0.965, green: 0.965, blue: 0.955))
+            }
 
-                compactIconButton(systemImage: "drop", tooltip: "透明压感曲线") {
-                    showsPressureCurveEditor.toggle()
-                }
-                .popover(isPresented: $showsPressureCurveEditor, arrowEdge: .bottom) {
-                    pressureCurveEditor
-                        .padding(14)
-                        .frame(width: 296, height: 236, alignment: .topLeading)
-                        .background(Color(red: 0.965, green: 0.965, blue: 0.955))
-                }
+            Spacer(minLength: 0)
 
-                Spacer(minLength: 0)
-
-                compactIconButton(systemImage: "square.and.arrow.down", tooltip: "存为笔刷") {
-                    viewModel.saveCurrentBrushPreset()
-                }
+            compactIconButton(systemImage: "square.and.arrow.down", tooltip: "存为笔刷") {
+                viewModel.saveCurrentBrushPreset()
             }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private var textureFillTipSourceSummary: String {
@@ -1897,7 +2034,7 @@ struct RightInspectorView: View {
     private var layersSection: some View {
         VStack(alignment: .leading, spacing: 10) {
             ScrollView {
-                VStack(alignment: .leading, spacing: 6) {
+                LazyVStack(alignment: .leading, spacing: 6) {
                     layerDropInsertionStrip(at: 0)
 
                     ForEach(Array(displayLayers.enumerated()), id: \.element.id) { index, layer in
@@ -2385,23 +2522,11 @@ struct RightInspectorView: View {
 
     @ViewBuilder
     private func layerThumbnailView(for layer: LayerRecord) -> some View {
-        ZStack {
-            RoundedRectangle(cornerRadius: 6)
-                .fill(Color.white.opacity(0.06))
-                .frame(width: 24, height: 24)
-
-            if let image = viewModel.layerThumbnail(for: layer.id, maxDimension: 36) {
-                Image(decorative: image, scale: 1)
-                    .resizable()
-                    .interpolation(.high)
-                    .scaledToFit()
-                    .frame(width: 20, height: 20)
-                    .clipShape(RoundedRectangle(cornerRadius: 4))
-            } else {
-                RoundedRectangle(cornerRadius: 4)
-                    .fill(Color.white.opacity(0.18))
-                    .frame(width: 14, height: 14)
-            }
+        LayerThumbnailTile(
+            layerID: layer.id,
+            revision: viewModel.layerThumbnailRevision
+        ) {
+            await viewModel.loadLayerThumbnail(for: layer.id, maxDimension: 36)
         }
     }
 
@@ -4340,6 +4465,9 @@ private struct NavigatorPreviewPanel: View {
                     viewportRotationDegrees: 0,
                     strokeResetToken: 0,
                     brushSize: 1,
+                    viewportRenderScale: 1,
+                    displaySamplingMode: .linear,
+                    drawsTransparencyCheckerboard: viewModel.showsTransparencyCheckerboard,
                     isPanModeActive: false,
                     isTransformingSelection: false,
                     isFreeTransformDragging: false,
@@ -4356,6 +4484,7 @@ private struct NavigatorPreviewPanel: View {
                     onStrokeInput: { _ in },
                     onStrokeEnded: {},
                     onFlushPendingBrushWork: { _ in nil },
+                    canDrainPendingBrushCommitsInteractively: { _ in false },
                     onDrainPendingBrushCommitsInteractively: { _ in },
                     resolveBrushDisplayTexture: { layerID in
                         viewModel.brushDisplayTexture(for: layerID)
@@ -4377,6 +4506,8 @@ private struct NavigatorPreviewPanel: View {
                     onTransformEnded: { _, _ in },
                     onTransformOffsetChanged: { _ in },
                     onCanvasRotationChanged: { _ in },
+                    onViewportPan: { _, _ in },
+                    onViewportZoom: { _, _ in },
                     onPanModeChanged: { _ in },
                     onToolShortcut: { _, _ in },
                     onKeyDown: { _ in false },
@@ -4415,6 +4546,27 @@ private struct NavigatorPreviewPanel: View {
                     )
                     .allowsHitTesting(false)
                 }
+
+                Color.clear
+                    .contentShape(Rectangle())
+                    .gesture(
+                        DragGesture(minimumDistance: 0)
+                            .onChanged { value in
+                                viewModel.centerViewport(
+                                    on: navigatorCanvasPoint(
+                                        for: value.location,
+                                        presentation: presentation
+                                    )
+                                )
+                            }
+                    )
+                    .onHover { hovering in
+                        if hovering {
+                            NSCursor.openHand.set()
+                        } else {
+                            NSCursor.arrow.set()
+                        }
+                    }
             }
         }
         .frame(height: 168)
@@ -4422,6 +4574,20 @@ private struct NavigatorPreviewPanel: View {
         .overlay(
             RoundedRectangle(cornerRadius: 10)
                 .stroke(Color.white.opacity(0.08), lineWidth: 1)
+        )
+    }
+
+    private func navigatorCanvasPoint(
+        for point: CGPoint,
+        presentation: CanvasPresentation
+    ) -> CanvasPoint {
+        let localX = (point.x - presentation.documentOrigin.x) /
+            max(presentation.documentDisplaySize.x, 0.000_001)
+        let localY = (point.y - presentation.documentOrigin.y) /
+            max(presentation.documentDisplaySize.y, 0.000_001)
+        return CanvasPoint(
+            x: min(max(localX, 0), 1) * Double(canvasSize.width),
+            y: min(max(localY, 0), 1) * Double(canvasSize.height)
         )
     }
 }
@@ -4478,7 +4644,9 @@ private struct ColorSVPickerView: NSViewRepresentable {
             Int(previousPanel.pickerSaturation.rounded()) != Int(panel.pickerSaturation.rounded()) ||
             Int(previousPanel.lightingHue.rounded()) != Int(panel.lightingHue.rounded()) ||
             Int(previousPanel.lightingStrength.rounded()) != Int(panel.lightingStrength.rounded())
-        if gradientChanged || !nsView.hasDrawnOnce {
+        let indicatorChanged = previousPanel.pickerX != panel.pickerX
+            || previousPanel.pickerY != panel.pickerY
+        if gradientChanged || (indicatorChanged && !nsView.isDragging) || !nsView.hasDrawnOnce {
             nsView.needsDisplay = true
         }
     }
@@ -4678,9 +4846,9 @@ final class LongPressDraggableCellNSView: NSView, NSDraggingSource {
 final class ColorSVPickerNSView: NSView {
     fileprivate weak var coordinator: ColorSVPickerView.Coordinator?
     fileprivate var hasDrawnOnce = false
+    fileprivate var isDragging = false
     private var localX: Float = 0
     private var localY: Float = 0
-    private var isDragging = false
 
     override var isFlipped: Bool { true }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }

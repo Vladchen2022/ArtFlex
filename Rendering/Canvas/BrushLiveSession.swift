@@ -26,6 +26,30 @@ enum BrushCommitDrainMode: Sendable, Equatable {
     case forced
 }
 
+struct BrushPixelBounds: Sendable, Equatable {
+    var originX: Int
+    var originY: Int
+    var width: Int
+    var height: Int
+
+    var isEmpty: Bool {
+        width <= 0 || height <= 0
+    }
+
+    func union(_ other: BrushPixelBounds) -> BrushPixelBounds {
+        let minX = min(originX, other.originX)
+        let minY = min(originY, other.originY)
+        let maxX = max(originX + width, other.originX + other.width)
+        let maxY = max(originY + height, other.originY + other.height)
+        return BrushPixelBounds(
+            originX: minX,
+            originY: minY,
+            width: maxX - minX,
+            height: maxY - minY
+        )
+    }
+}
+
 struct BrushCommitDrainResult: Sendable, Equatable {
     let drainedJobs: Int
     let skippedForInteractiveFrame: Bool
@@ -37,6 +61,7 @@ struct BrushCommitJob: Sendable, Equatable {
     let packets: [StrokeDescriptor]
     let needsTailFlush: Bool
     let commitRevision: UInt64
+    let renderedPixelBounds: BrushPixelBounds?
 }
 
 struct BrushLiveSession {

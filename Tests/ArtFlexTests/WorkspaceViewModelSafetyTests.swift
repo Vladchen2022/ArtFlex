@@ -193,6 +193,24 @@ struct WorkspaceViewModelSafetyTests {
 
     @Test
     @MainActor
+    func navigatorDistinguishesFitZoomFromActualPixels() throws {
+        let harness = try BrushEditingBoundaryHarness()
+        harness.viewModel.updateCanvasViewportSize(.init(width: 1200, height: 900))
+
+        harness.viewModel.fitCanvasToWindow()
+        let fitPercent = harness.viewModel.navigatorZoomPercent
+        #expect(fitPercent > 35)
+        #expect(fitPercent < 45)
+
+        harness.viewModel.setCanvasToActualPixels()
+        #expect(abs(harness.viewModel.navigatorZoomPercent - 100) < 0.001)
+
+        harness.viewModel.fitCanvasToWindow()
+        #expect(abs(harness.viewModel.navigatorZoomPercent - fitPercent) < 0.001)
+    }
+
+    @Test
+    @MainActor
     func toggleLayerTransparentPixelLockUpdatesActiveLayerState() throws {
         let harness = try BrushEditingBoundaryHarness()
         let activeLayerID = harness.viewModel.workspace.document.activeLayerID
@@ -200,6 +218,11 @@ struct WorkspaceViewModelSafetyTests {
         #expect(harness.viewModel.workspace.document.layers.first(where: { $0.id == activeLayerID })?.locksTransparentPixels == false)
         harness.viewModel.toggleLayerTransparentPixelLock(activeLayerID)
         #expect(harness.viewModel.workspace.document.layers.first(where: { $0.id == activeLayerID })?.locksTransparentPixels == true)
+        #expect(harness.viewModel.status?.message == "已锁定透明像素")
+
+        harness.viewModel.toggleLayerTransparentPixelLock(activeLayerID)
+        #expect(harness.viewModel.workspace.document.layers.first(where: { $0.id == activeLayerID })?.locksTransparentPixels == false)
+        #expect(harness.viewModel.status?.message == "已解除锁定透明像素")
     }
 
     @Test
@@ -291,6 +314,124 @@ struct WorkspaceViewModelSafetyTests {
 
     @Test
     @MainActor
+    func requestedBucketFillCompletesWithoutBlockingTheCallingInteraction() async throws {
+        let harness = try BrushEditingBoundaryHarness()
+        let activeLayerID = harness.viewModel.workspace.document.activeLayerID
+        harness.viewModel.setSelectedColor(.init(red: 0.82, green: 0.08, blue: 0.04, alpha: 1))
+
+        harness.viewModel.requestFillAtPoint(.init(x: 12, y: 12))
+
+        #expect(harness.viewModel.isBucketFillInProgress)
+        for _ in 0..<500 where harness.viewModel.isBucketFillInProgress {
+            await Task.yield()
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+
+        #expect(harness.viewModel.isBucketFillInProgress == false)
+        let pixel = try harness.color(atX: 12, y: 12, layerID: activeLayerID)
+        #expect(pixel.red > 0.75)
+        #expect(pixel.green < 0.15)
+        #expect(harness.viewModel.canUndo)
+    }
+
+    @Test
+    @MainActor
+    func layerOpacityDragPublishesOneContentChangeWithoutInvalidatingThumbnails() throws {
+        let harness = try BrushEditingBoundaryHarness()
+        let initialContentRevision = harness.viewModel.canvasContentRevision
+        let initialThumbnailRevision = harness.viewModel.layerThumbnailRevision
+
+        harness.viewModel.beginActiveLayerOpacityChange()
+        harness.viewModel.setActiveLayerOpacity(0.8)
+        harness.viewModel.setActiveLayerOpacity(0.6)
+        harness.viewModel.setActiveLayerOpacity(0.4)
+
+        #expect(harness.viewModel.canvasContentRevision == initialContentRevision)
+        #expect(harness.viewModel.layerThumbnailRevision == initialThumbnailRevision)
+
+        harness.viewModel.endActiveLayerOpacityChange()
+
+        #expect(harness.viewModel.canvasContentRevision == initialContentRevision + 1)
+        #expect(harness.viewModel.layerThumbnailRevision == initialThumbnailRevision)
+        let activeLayerID = harness.viewModel.workspace.document.activeLayerID
+        #expect(
+            harness.viewModel.workspace.document.layers.first(where: { $0.id == activeLayerID })?.opacity == 0.4
+        )
+    }
+
+    @Test
+    @MainActor
+    func unchangedLayerOpacityInteractionDoesNotCreateUndoHistory() throws {
+        let harness = try BrushEditingBoundaryHarness()
+        #expect(harness.viewModel.canUndo == false)
+
+        harness.viewModel.beginActiveLayerOpacityChange()
+        harness.viewModel.setActiveLayerOpacity(1)
+        harness.viewModel.endActiveLayerOpacityChange()
+
+        #expect(harness.viewModel.canUndo == false)
+    }
+
+    @Test
+    @MainActor
+    func creativeShapeGeneratorWithTransparentPixelLockPreservesSemitransparentAlpha() async throws {
+        let harness = try BrushEditingBoundaryHarness()
+        let activeLayerID = harness.viewModel.workspace.document.activeLayerID
+
+        try fillOpaqueRect(
+            in: harness,
+            layerID: activeLayerID,
+            originX: 72,
+            originY: 72,
+            width: 48,
+            height: 48,
+            color: .init(red: 0.08, green: 0.12, blue: 0.72, alpha: 0.36)
+        )
+        let basePixel = try harness.color(atX: 96, y: 96, layerID: activeLayerID)
+
+        harness.viewModel.setSelectedColor(.init(red: 0.88, green: 0.08, blue: 0.04, alpha: 1))
+        harness.viewModel.selectCreativeShapeGeneratorSource(.currentColor)
+        harness.viewModel.setCreativeShapeGeneratorFeatherProbability(0)
+        harness.viewModel.setCreativeShapeGeneratorShapeCharacteristic(0.42)
+        harness.viewModel.setCreativeShapeGeneratorShapeSize(0)
+        harness.viewModel.setCreativeShapeGeneratorShapeJitter(0)
+        harness.viewModel.setCreativeShapeGeneratorColorJitter(0)
+        harness.viewModel.toggleLayerTransparentPixelLock(activeLayerID)
+
+        makeLassoSelection(
+            in: harness.viewModel,
+            points: [
+                .init(x: 80, y: 80),
+                .init(x: 112, y: 80),
+                .init(x: 112, y: 112),
+                .init(x: 80, y: 112),
+                .init(x: 80, y: 80)
+            ]
+        )
+
+        var changedPixel: RGBAColor?
+        for _ in 0..<120 {
+            for y in 80...112 {
+                for x in 80...112 {
+                    let pixel = try harness.color(atX: x, y: y, layerID: activeLayerID)
+                    if pixel.red > basePixel.red + 0.04 {
+                        changedPixel = pixel
+                        break
+                    }
+                }
+                if changedPixel != nil { break }
+            }
+            if changedPixel != nil { break }
+            await Task.yield()
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+
+        let generatedPixel = try #require(changedPixel)
+        #expect(abs(generatedPixel.alpha - basePixel.alpha) < 0.03)
+    }
+
+    @Test
+    @MainActor
     func toggleWorkspaceChromeVisibilityUpdatesUIState() throws {
         let harness = try BrushEditingBoundaryHarness()
 
@@ -311,6 +452,63 @@ struct WorkspaceViewModelSafetyTests {
         #expect(harness.viewModel.workspace.toolSession.activeTool == .eraser)
         #expect(harness.viewModel.status?.message == "选择了橡皮")
         #expect(harness.viewModel.status?.shortcutLabel == "E")
+    }
+
+    @Test
+    @MainActor
+    func reselectingCurrentToolKeepsItsInProgressInteraction() throws {
+        let harness = try BrushEditingBoundaryHarness()
+        harness.viewModel.selectTool(.straightLine)
+        harness.viewModel.handleStraightLineClick(at: .init(x: 20, y: 30))
+
+        harness.viewModel.selectToolFromUI(.straightLine)
+
+        guard case .pickedA = harness.viewModel.straightLineState.phase else {
+            Issue.record("Reselecting the current tool unexpectedly cleared its draft")
+            return
+        }
+        #expect(harness.viewModel.straightLineState.pointA == .init(x: 20, y: 30))
+    }
+
+    @Test
+    @MainActor
+    func asyncLayerThumbnailReloadsAfterLayerContentInvalidation() async throws {
+        let harness = try BrushEditingBoundaryHarness()
+        let layerID = harness.viewModel.workspace.document.activeLayerID
+
+        let initialImage = try #require(
+            await harness.viewModel.loadLayerThumbnail(for: layerID, maxDimension: 36)
+        )
+        #expect(initialImage.width == 36)
+        #expect(initialImage.height == 36)
+
+        let initialRevision = harness.viewModel.layerThumbnailRevision
+        harness.viewModel.fillAtPoint(.init(x: 24, y: 24))
+        #expect(harness.viewModel.layerThumbnailRevision > initialRevision)
+
+        let updatedImage = try #require(
+            await harness.viewModel.loadLayerThumbnail(for: layerID, maxDimension: 36)
+        )
+        #expect(updatedImage.width == 36)
+        #expect(updatedImage.height == 36)
+    }
+
+    @Test
+    @MainActor
+    func layerAndToolMetadataChangesDoNotInvalidatePixelThumbnails() throws {
+        let harness = try BrushEditingBoundaryHarness()
+        let layerID = harness.viewModel.workspace.document.activeLayerID
+        let initialRevision = harness.viewModel.layerThumbnailRevision
+
+        harness.viewModel.selectTool(.eraser)
+        harness.viewModel.toggleLayerLock(layerID)
+        harness.viewModel.toggleLayerTransparentPixelLock(layerID)
+        harness.viewModel.setLayerVisibility(layerID, isVisible: false)
+        harness.viewModel.renameLayer(layerID, to: "Renamed")
+
+        #expect(harness.viewModel.layerThumbnailRevision == initialRevision)
+        #expect(harness.viewModel.workspace.toolSession.activeTool == .eraser)
+        #expect(harness.viewModel.workspace.document.layers.first(where: { $0.id == layerID })?.name == "Renamed")
     }
 
     @Test
@@ -1936,6 +2134,7 @@ struct WorkspaceViewModelSafetyTests {
                 rgbaPixels: Data(repeating: 255, count: CreativeShapeGeneratorImageSource.targetDimension * CreativeShapeGeneratorImageSource.targetDimension * 4)
             )
         }
+        harness.viewModel.selectTool(.eraser)
         harness.viewModel.selectTool(.brush)
 
         harness.viewModel.selectCreativeShapeGeneratorSource(.externalImage)
@@ -2467,6 +2666,7 @@ private func fillOpaqueRect(
         destinationX: originX,
         destinationY: originY
     )
+    harness.bootstrap.layerSurfaceStore.markContentUnknown(for: layerID)
 }
 
 @MainActor
@@ -2483,6 +2683,20 @@ private func makeRectangleSelection(
     viewModel.beginSelection(kind: .rectangle, at: start)
     viewModel.updateSelection(to: end)
     viewModel.commitSelection(at: end)
+}
+
+@MainActor
+private func makeLassoSelection(
+    in viewModel: WorkspaceViewModel,
+    points: [CanvasPoint]
+) {
+    guard let first = points.first, points.count > 1 else { return }
+    viewModel.selectTool(.lassoSelection)
+    viewModel.beginSelection(kind: .lasso, at: first)
+    for point in points.dropFirst().dropLast() {
+        viewModel.updateSelection(to: point)
+    }
+    viewModel.commitSelection(at: points.last ?? first)
 }
 
 @MainActor

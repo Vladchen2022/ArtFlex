@@ -53,7 +53,7 @@ struct CanvasViewport: Codable, Sendable, Equatable {
         availableWidth: Double,
         availableHeight: Double
     ) {
-        let clampedZoomScale = min(max(newZoomScale, 0.05), 32)
+        let clampedZoomScale = min(max(newZoomScale, 0.01), 256)
         guard clampedZoomScale.isFinite else { return }
 
         guard

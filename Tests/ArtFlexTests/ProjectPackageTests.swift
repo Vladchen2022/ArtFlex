@@ -4,6 +4,32 @@ import Testing
 
 struct ProjectPackageTests {
     @Test
+    func layerHistorySnapshotDecodesLegacyMissingOriginAsZero() throws {
+        let json = """
+        {
+          "layerID": {
+            "rawValue": "00000000-0000-0000-0000-000000000222"
+          },
+          "texture": {
+            "width": 1,
+            "height": 1,
+            "bytesPerRow": 4,
+            "pixelData": "AQIDBA=="
+          }
+        }
+        """
+
+        let snapshot = try JSONDecoder().decode(
+            LayerHistorySnapshot.self,
+            from: Data(json.utf8)
+        )
+
+        #expect(snapshot.originX == 0)
+        #expect(snapshot.originY == 0)
+        #expect(snapshot.texture.pixelData == Data([1, 2, 3, 4]))
+    }
+
+    @Test
     func packagePreservesWorkspaceStateAndLayerSnapshots() {
         var workspace = WorkspaceState.stageOneDefault
         let primaryMask = Data([11, 22, 140, 250])

@@ -56,6 +56,7 @@ enum StageOneBrushPreviewRasterizer {
             renderer: renderer
         )
     }()
+    private static let compoundPreviewRendererLock = NSLock()
 
     static func resetCache() {
         cache.removeAllObjects()
@@ -94,6 +95,9 @@ enum StageOneBrushPreviewRasterizer {
         width: Int? = nil,
         pressure: Float
     ) -> CGImage? {
+        compoundPreviewRendererLock.lock()
+        defer { compoundPreviewRendererLock.unlock() }
+
         let previewWidth = width ?? resolution
         let previewHeight = resolution
         guard previewWidth > 0, previewHeight > 0 else { return nil }
@@ -163,6 +167,9 @@ enum StageOneBrushPreviewRasterizer {
         samplingState: inout BrushStrokeSamplingState?,
         flushPendingSamples: Bool = false
     ) -> [UInt8]? {
+        compoundPreviewRendererLock.lock()
+        defer { compoundPreviewRendererLock.unlock() }
+
         guard resolution > 0 else { return nil }
         guard !points.isEmpty || flushPendingSamples else { return nil }
         guard

@@ -40,6 +40,11 @@ protocol StrokeEngine {
 
     var hasPendingBrushCommitJobs: Bool { get }
 
+    func canOpportunisticallyDrainPendingBrushCommitJobs(
+        hadLiveBrushWorkThisFrame: Bool,
+        retainedRecentBrushCommitJobs: Int
+    ) -> Bool
+
     @discardableResult
     func flushPendingStrokePackets(into commandBuffer: MTLCommandBuffer) -> BrushFlushMetrics?
 

@@ -75,6 +75,7 @@ struct HistoryEligibilityAuditTests {
         try flushPendingBrushWork(viewModel: viewModel, metalContext: metalContext)
         viewModel.opportunisticallyDrainBrushCommits(hadLiveBrushWorkThisFrame: false)
 
+        viewModel.setSelectedColor(.init(red: 0.9, green: 0.12, blue: 0.04, alpha: 1))
         viewModel.fillAtPoint(.init(x: 18, y: 18))
 
         viewModel.selectTool(.lassoSelection)

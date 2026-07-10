@@ -57,6 +57,24 @@ struct IdeationSessionTests {
 
     @Test
     @MainActor
+    func synchronizedCanvasCropResizesEveryBranch() throws {
+        let harness = try IdeationHarness()
+        harness.viewModel.startIdeationSession()
+
+        let session = try #require(harness.viewModel.ideationSession)
+        let sourceBranch = session.branches[0].viewModel
+        sourceBranch.selectTool(.canvasCrop)
+        sourceBranch.beginCanvasCrop(at: .init(x: 8, y: 12), handleRadius: 1)
+        sourceBranch.endCanvasCrop(at: .init(x: 48, y: 52))
+        sourceBranch.applyCanvasCrop()
+
+        for branch in session.branches {
+            #expect(branch.viewModel.workspace.document.canvasSize == .init(width: 40, height: 40))
+        }
+    }
+
+    @Test
+    @MainActor
     func applyingIdeationVariantToMainCanvasAppendsOnlyVisibleDeltaPixels() throws {
         let harness = try IdeationHarness()
         let baseLayerID = harness.viewModel.workspace.document.activeLayerID
@@ -254,6 +272,7 @@ private struct IdeationHarness {
         .ellipseSelection,
         .lassoSelection,
         .canvasRotate,
+        .canvasCrop,
         .freeTransform
     ]
 

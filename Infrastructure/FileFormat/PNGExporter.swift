@@ -3,7 +3,43 @@ import ImageIO
 import Metal
 import UniformTypeIdentifiers
 
+private final class PNGExportBufferPointers: @unchecked Sendable {
+    let lookup: UnsafePointer<UInt8>
+    let source: UnsafePointer<UInt8>
+    let destination: UnsafeMutablePointer<UInt8>
+
+    init(
+        lookup: UnsafePointer<UInt8>,
+        source: UnsafePointer<UInt8>,
+        destination: UnsafeMutablePointer<UInt8>
+    ) {
+        self.lookup = lookup
+        self.source = source
+        self.destination = destination
+    }
+}
+
 final class PNGExporter {
+    private static let flattenedOpaqueChannelLookup: [UInt8] = {
+        var lookup = [UInt8](repeating: 0, count: 256 * 256)
+        for alphaByte in 0...255 {
+            let alpha = Float(alphaByte) / 255
+            let inverseAlpha = 1 - alpha
+            for channelByte in 0...255 {
+                let sourceLinear = LinearPremultipliedColor.srgbChannelToLinear(
+                    Float(channelByte) / 255
+                )
+                let flattenedSRGB = LinearPremultipliedColor.linearChannelToSRGB(
+                    sourceLinear + inverseAlpha
+                )
+                lookup[(alphaByte << 8) | channelByte] = UInt8(
+                    clamping: Int((flattenedSRGB * 255).rounded())
+                )
+            }
+        }
+        return lookup
+    }()
+
     private let serializer: LayerTextureSerializer
 
     init(serializer: LayerTextureSerializer) {
@@ -60,39 +96,57 @@ final class PNGExporter {
         let bytesPerRow = width * bytesPerPixel
         var outputBytes = [UInt8](repeating: 0, count: bytesPerRow * height)
 
-        snapshot.pixelData.withUnsafeBytes { rawBuffer in
-            let sourceBytes = rawBuffer.bindMemory(to: UInt8.self)
-            guard sourceBytes.count >= bytesPerRow * height else { return }
+        Self.flattenedOpaqueChannelLookup.withUnsafeBytes { lookupBuffer in
+            snapshot.pixelData.withUnsafeBytes { sourceBuffer in
+                outputBytes.withUnsafeMutableBytes { destinationBuffer in
+                    guard snapshot.bytesPerRow >= bytesPerRow,
+                          sourceBuffer.count >= snapshot.bytesPerRow * height,
+                          let lookupBase = lookupBuffer.bindMemory(to: UInt8.self).baseAddress,
+                          let sourceBase = sourceBuffer.bindMemory(to: UInt8.self).baseAddress,
+                          let destinationBase = destinationBuffer.bindMemory(to: UInt8.self).baseAddress else {
+                        return
+                    }
 
-            for y in 0..<height {
-                for x in 0..<width {
-                    let sourceIndex = (y * bytesPerRow) + (x * bytesPerPixel)
-                    let destinationIndex = sourceIndex
-
-                    let blue = Float(sourceBytes[sourceIndex]) / 255
-                    let green = Float(sourceBytes[sourceIndex + 1]) / 255
-                    let red = Float(sourceBytes[sourceIndex + 2]) / 255
-                    let alpha = Float(sourceBytes[sourceIndex + 3]) / 255
-
-                    let composited = LinearPremultipliedColor(
-                        red: LinearPremultipliedColor.srgbChannelToLinear(red),
-                        green: LinearPremultipliedColor.srgbChannelToLinear(green),
-                        blue: LinearPremultipliedColor.srgbChannelToLinear(blue),
-                        alpha: alpha
+                    let pointers = PNGExportBufferPointers(
+                        lookup: UnsafePointer(lookupBase),
+                        source: UnsafePointer(sourceBase),
+                        destination: destinationBase
                     )
-                    .composited(over: .white)
-                    .srgbUnpremultipliedOverOpaqueBackground
-
-                    outputBytes[destinationIndex] = UInt8(clamping: Int((composited.red * 255).rounded()))
-                    outputBytes[destinationIndex + 1] = UInt8(clamping: Int((composited.green * 255).rounded()))
-                    outputBytes[destinationIndex + 2] = UInt8(clamping: Int((composited.blue * 255).rounded()))
-                    outputBytes[destinationIndex + 3] = 255
+                    let processRow: @Sendable (Int) -> Void = { y in
+                        var source = pointers.source.advanced(by: y * snapshot.bytesPerRow)
+                        var destination = pointers.destination.advanced(by: y * bytesPerRow)
+                        for _ in 0..<width {
+                            let alphaIndex = Int(source[3]) << 8
+                            destination[0] = pointers.lookup[alphaIndex | Int(source[2])]
+                            destination[1] = pointers.lookup[alphaIndex | Int(source[1])]
+                            destination[2] = pointers.lookup[alphaIndex | Int(source[0])]
+                            destination[3] = 255
+                            source = source.advanced(by: bytesPerPixel)
+                            destination = destination.advanced(by: bytesPerPixel)
+                        }
+                    }
+                    if width * height >= 512 * 512 {
+                        DispatchQueue.concurrentPerform(iterations: height, execute: processRow)
+                    } else {
+                        for y in 0..<height {
+                            processRow(y)
+                        }
+                    }
                 }
             }
         }
 
         return outputBytes
     }
+
+#if DEBUG
+    static func debugFlattenedOpaqueChannel(
+        srgbPremultipliedByte: UInt8,
+        alphaByte: UInt8
+    ) -> UInt8 {
+        flattenedOpaqueChannelLookup[(Int(alphaByte) << 8) | Int(srgbPremultipliedByte)]
+    }
+#endif
 
     private func writePNG(
         rgbaBytes: [UInt8],

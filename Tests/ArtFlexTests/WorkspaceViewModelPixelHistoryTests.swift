@@ -1,3 +1,4 @@
+import AppKit
 import Metal
 import Testing
 @testable import ArtFlex
@@ -788,6 +789,220 @@ struct WorkspaceViewModelPixelHistoryTests {
 
     @Test
     @MainActor
+    func fillAtPointOnLargeNonuniformLayerStoresOnlyDirtyRegion() throws {
+        let harness = try PixelHistoryHarness(canvasSize: .init(width: 1024, height: 1024))
+        let layerID = harness.viewModel.workspace.document.activeLayerID
+        try fillOpaqueRect(
+            in: harness,
+            layerID: layerID,
+            originX: 256,
+            originY: 256,
+            width: 32,
+            height: 32,
+            color: .init(red: 0.1, green: 0.2, blue: 0.9, alpha: 1)
+        )
+
+        harness.viewModel.setSelectedColor(.init(red: 0.9, green: 0.05, blue: 0.02, alpha: 1))
+        harness.viewModel.fillAtPoint(.init(x: 260, y: 260))
+
+        let filledPixel = try harness.color(atX: 260, y: 260, layerID: layerID)
+        #expect(filledPixel.red > 0.8)
+        #expect(try harness.alpha(atX: 64, y: 64, layerID: layerID) < 0.01)
+#if DEBUG
+        let entryBytes = harness.bootstrap.historyController.debugUndoEntryApproxByteCounts.last ?? 0
+        #expect(entryBytes <= 32 * 32 * 4)
+#endif
+
+        harness.viewModel.undo()
+        let restoredPixel = try harness.color(atX: 260, y: 260, layerID: layerID)
+        #expect(restoredPixel.blue > 0.8)
+        #expect(restoredPixel.red < 0.2)
+        #expect(try harness.alpha(atX: 64, y: 64, layerID: layerID) < 0.01)
+
+        harness.viewModel.redo()
+        let redonePixel = try harness.color(atX: 260, y: 260, layerID: layerID)
+        #expect(redonePixel.red > 0.8)
+        #expect(try harness.alpha(atX: 64, y: 64, layerID: layerID) < 0.01)
+    }
+
+    @Test
+    @MainActor
+    func scatteredBrushCommitStoresOnlyRenderedRegionAndKeepsUndoRedoExact() throws {
+        let harness = try PixelHistoryHarness(canvasSize: .init(width: 1024, height: 1024))
+        let layerID = harness.viewModel.workspace.document.activeLayerID
+        let before = try harness.snapshot(layerID: layerID)
+
+        harness.viewModel.selectLayer(layerID)
+        harness.viewModel.selectTool(.brush)
+        harness.viewModel.setBrushSize(72)
+        harness.viewModel.setBrushScatterAmount(1)
+        harness.viewModel.setBrushJitterAmount(1)
+        harness.viewModel.beginStrokeIfNeeded()
+        harness.viewModel.applyStroke(samples: [
+            .init(location: .init(x: 420, y: 430), pressure: 0.35),
+            .init(location: .init(x: 500, y: 500), pressure: 0.7),
+            .init(location: .init(x: 590, y: 570), pressure: 1)
+        ])
+        harness.viewModel.endStroke()
+        try flushPendingPixelHistoryBrushWork(
+            viewModel: harness.viewModel,
+            metalContext: harness.bootstrap.metalContext
+        )
+        _ = harness.viewModel.flushBrushEditingBoundary(reason: "test dirty brush history")
+        let after = try harness.snapshot(layerID: layerID)
+
+        #expect(after != before)
+#if DEBUG
+        let entryBytes = harness.bootstrap.historyController.debugUndoEntryApproxByteCounts.last ?? 0
+        #expect(entryBytes > 0)
+        #expect(entryBytes < (1024 * 1024 * 4) / 4)
+        let entryMode = try #require(harness.bootstrap.historyController.debugUndoEntryModes.last)
+        switch entryMode {
+        case .full:
+            Issue.record("Expected brush commit to use in-place dirty history")
+        case .inPlaceChangedLayers(_, let changedLayerIDs):
+            #expect(Set(changedLayerIDs) == [layerID])
+        }
+#endif
+
+        harness.viewModel.undo()
+        #expect(try harness.snapshot(layerID: layerID) == before)
+        harness.viewModel.redo()
+        #expect(try harness.snapshot(layerID: layerID) == after)
+    }
+
+    @Test
+    @MainActor
+    func smudgeCommitUsesSingleLayerRenderedRegionHistory() throws {
+        let harness = try PixelHistoryHarness(canvasSize: .init(width: 1024, height: 1024))
+        let layerID = harness.viewModel.workspace.document.activeLayerID
+        try harness.drawBrushStroke(on: layerID, points: [
+            .init(location: .init(x: 480, y: 500), pressure: 1),
+            .init(location: .init(x: 540, y: 500), pressure: 1)
+        ])
+        _ = harness.viewModel.flushBrushEditingBoundary(reason: "test smudge setup")
+        harness.bootstrap.historyController.resetHistory()
+
+        harness.viewModel.selectTool(.smudge)
+        harness.viewModel.setBrushSize(64)
+        harness.viewModel.beginStrokeIfNeeded()
+        harness.viewModel.applyStroke(samples: [
+            .init(location: .init(x: 490, y: 500), pressure: 1),
+            .init(location: .init(x: 560, y: 520), pressure: 1)
+        ])
+        harness.viewModel.endStroke()
+        try flushPendingPixelHistoryBrushWork(
+            viewModel: harness.viewModel,
+            metalContext: harness.bootstrap.metalContext
+        )
+        _ = harness.viewModel.flushBrushEditingBoundary(reason: "test smudge dirty history")
+
+#if DEBUG
+        let entryBytes = harness.bootstrap.historyController.debugUndoEntryApproxByteCounts.last ?? 0
+        #expect(entryBytes > 0)
+        #expect(entryBytes < 256 * 256 * 4)
+        let entryMode = try #require(harness.bootstrap.historyController.debugUndoEntryModes.last)
+        switch entryMode {
+        case .full:
+            Issue.record("Expected smudge commit to use in-place dirty history")
+        case .inPlaceChangedLayers(_, let changedLayerIDs):
+            #expect(Set(changedLayerIDs) == [layerID])
+        }
+#endif
+    }
+
+    @Test
+    @MainActor
+    func optionDeleteFillsSelectionWithForegroundColorFromAnyTool() throws {
+        let harness = try PixelHistoryHarness()
+        let layerID = harness.viewModel.workspace.document.activeLayerID
+
+        harness.makeRectangleSelection(minX: 8, minY: 8, maxX: 24, maxY: 24)
+        harness.viewModel.selectTool(.brush)
+        harness.viewModel.setSelectedColor(.init(red: 0.9, green: 0.05, blue: 0.02, alpha: 1))
+        let handled = harness.viewModel.handleKeyDown(
+            makeCanvasKeyEvent(
+                type: .keyDown,
+                characters: "\u{7f}",
+                charactersIgnoringModifiers: "\u{7f}",
+                modifiers: [.option],
+                keyCode: 51
+            )
+        )
+
+        #expect(handled)
+        let filledPixel = try harness.color(atX: 12, y: 12, layerID: layerID)
+        #expect(filledPixel.red > 0.8)
+        #expect(filledPixel.alpha > 0.9)
+        #expect(try harness.alpha(atX: 32, y: 32, layerID: layerID) < 0.01)
+
+        harness.viewModel.undo()
+        #expect(try harness.alpha(atX: 12, y: 12, layerID: layerID) < 0.01)
+    }
+
+    @Test
+    @MainActor
+    func optionForwardDeleteWithoutSelectionFillsOpaqueLayerPixelsPreservingAlpha() throws {
+        let harness = try PixelHistoryHarness()
+        let layerID = harness.viewModel.workspace.document.activeLayerID
+        try fillOpaqueRect(
+            in: harness,
+            layerID: layerID,
+            originX: 20,
+            originY: 20,
+            width: 16,
+            height: 16,
+            color: .init(red: 0.08, green: 0.12, blue: 0.72, alpha: 0.36)
+        )
+        let basePixel = try harness.color(atX: 24, y: 24, layerID: layerID)
+
+        harness.viewModel.selectTool(.brush)
+        harness.viewModel.setSelectedColor(.init(red: 0.92, green: 0.04, blue: 0.02, alpha: 1))
+        let handled = harness.viewModel.handleKeyDown(
+            makeCanvasKeyEvent(
+                type: .keyDown,
+                characters: "\u{7f}",
+                charactersIgnoringModifiers: "\u{7f}",
+                modifiers: [.option],
+                keyCode: 117
+            )
+        )
+
+        #expect(handled)
+        let filledPixel = try harness.color(atX: 24, y: 24, layerID: layerID)
+        #expect(filledPixel.red > basePixel.red + 0.04)
+        #expect(abs(filledPixel.alpha - basePixel.alpha) < 0.03)
+        #expect(try harness.alpha(atX: 8, y: 8, layerID: layerID) < 0.01)
+
+        harness.viewModel.undo()
+        let restoredPixel = try harness.color(atX: 24, y: 24, layerID: layerID)
+        #expect(restoredPixel.blue > basePixel.blue - 0.04)
+        #expect(abs(restoredPixel.alpha - basePixel.alpha) < 0.03)
+
+        harness.viewModel.redo()
+        let redonePixel = try harness.color(atX: 24, y: 24, layerID: layerID)
+        #expect(redonePixel.red > basePixel.red + 0.04)
+        #expect(abs(redonePixel.alpha - basePixel.alpha) < 0.03)
+    }
+
+    @Test
+    @MainActor
+    func selectionFillKeepsUntouchedEmptyLayerKnownTransparent() throws {
+        let harness = try PixelHistoryHarness()
+        let paintedLayerID = harness.viewModel.workspace.document.activeLayerID
+        let untouchedLayerID = harness.addLayer()
+        #expect(harness.bootstrap.layerSurfaceStore.isKnownTransparent(layerID: untouchedLayerID))
+
+        harness.viewModel.selectLayer(paintedLayerID)
+        harness.makeRectangleSelection(minX: 8, minY: 8, maxX: 24, maxY: 24)
+        harness.viewModel.fillSelectionContents()
+
+        #expect(!harness.bootstrap.layerSurfaceStore.isKnownTransparent(layerID: paintedLayerID))
+        #expect(harness.bootstrap.layerSurfaceStore.isKnownTransparent(layerID: untouchedLayerID))
+    }
+
+    @Test
+    @MainActor
     func fillAtPointMixedWithSelectionOperationsKeepsUndoRedoOrder() throws {
         let harness = try PixelHistoryHarness()
         let firstLayerID = harness.viewModel.workspace.document.activeLayerID
@@ -880,6 +1095,34 @@ struct WorkspaceViewModelPixelHistoryTests {
 
     @Test
     @MainActor
+    func selectionFillRespectsSubtractedCompositeRegion() throws {
+        let harness = try PixelHistoryHarness()
+        let layerID = harness.viewModel.workspace.document.activeLayerID
+
+        let outer = SelectionShape(
+            kind: .rectangle,
+            bounds: CanvasRect(origin: .init(x: 8, y: 8), size: .init(x: 24, y: 24)),
+            pathPoints: []
+        )
+        let inner = SelectionShape(
+            kind: .rectangle,
+            bounds: CanvasRect(origin: .init(x: 16, y: 16), size: .init(x: 8, y: 8)),
+            pathPoints: []
+        )
+        harness.viewModel.debugSetCommittedSelectionShapeForTests(
+            SelectionShape.composite([
+                SelectionShapeComponent(operation: .add, shape: outer),
+                SelectionShapeComponent(operation: .subtract, shape: inner)
+            ])
+        )
+        harness.viewModel.fillSelectionContents()
+
+        #expect(try harness.alpha(atX: 12, y: 12, layerID: layerID) > 0.01)
+        #expect(try harness.alpha(atX: 20, y: 20, layerID: layerID) < 0.01)
+    }
+
+    @Test
+    @MainActor
     func lassoFillAndEraseSupportUndoRedo() throws {
         let harness = try PixelHistoryHarness()
         let layerID = harness.viewModel.workspace.document.activeLayerID
@@ -942,9 +1185,11 @@ struct WorkspaceViewModelPixelHistoryTests {
         harness.beginTextureFill(at: .init(x: 8, y: 8))
         harness.updateTextureFill(to: .init(x: 32, y: 8))
         harness.updateTextureFill(to: .init(x: 32, y: 32))
+        #expect(harness.viewModel.selectionOverlayProxy.inProgressShape?.kind == .lasso)
         harness.endTextureFill(at: .init(x: 8, y: 32))
 
         #expect(try harness.alpha(atX: 12, y: 12, layerID: layerID) > 0.01)
+        #expect(harness.viewModel.selectionOverlayProxy.inProgressShape == nil)
 
         harness.viewModel.undo()
         let restoredPixel = try harness.color(atX: 12, y: 12, layerID: layerID)
@@ -1080,6 +1325,7 @@ struct WorkspaceViewModelPixelHistoryTests {
         harness.beginTextureFill(at: .init(x: 8, y: 8))
         harness.updateTextureFill(to: .init(x: 24, y: 8))
         harness.viewModel.selectTool(.brush)
+        #expect(harness.viewModel.selectionOverlayProxy.inProgressShape == nil)
 
         harness.beginTextureFill(at: .init(x: 40, y: 40))
         harness.updateTextureFill(to: .init(x: 56, y: 40))
@@ -1098,6 +1344,86 @@ struct WorkspaceViewModelPixelHistoryTests {
                 step: 2
             )
         )
+    }
+
+    @Test
+    @MainActor
+    func textureFillGestureResetsWhenActiveLayerIsLocked() throws {
+        let harness = try PixelHistoryHarness()
+        let layerID = harness.viewModel.workspace.document.activeLayerID
+
+        harness.beginTextureFill(at: .init(x: 8, y: 8))
+        harness.updateTextureFill(to: .init(x: 24, y: 8))
+        harness.viewModel.toggleLayerLock(layerID)
+        #expect(harness.viewModel.selectionOverlayProxy.inProgressShape == nil)
+
+        harness.viewModel.toggleLayerLock(layerID)
+        harness.beginTextureFill(at: .init(x: 40, y: 40))
+        harness.updateTextureFill(to: .init(x: 56, y: 40))
+        harness.updateTextureFill(to: .init(x: 56, y: 56))
+        harness.endTextureFill(at: .init(x: 40, y: 56))
+
+        #expect(try harness.alpha(atX: 12, y: 12, layerID: layerID) < 0.01)
+        #expect(
+            try regionHasVisiblePixels(
+                harness: harness,
+                layerID: layerID,
+                minX: 42,
+                maxX: 56,
+                minY: 42,
+                maxY: 56,
+                step: 2
+            )
+        )
+    }
+
+    @Test
+    @MainActor
+    func canvasCropCropsEveryLayerAndSupportsUndoRedo() throws {
+        let harness = try PixelHistoryHarness(canvasSize: .init(width: 64, height: 64))
+        let lowerLayerID = harness.viewModel.workspace.document.activeLayerID
+        let upperLayerID = harness.addLayer()
+        let red = RGBAColor(red: 0.9, green: 0.1, blue: 0.05, alpha: 1)
+        let blue = RGBAColor(red: 0.05, green: 0.2, blue: 0.9, alpha: 1)
+
+        try fillOpaqueRect(
+            in: harness,
+            layerID: lowerLayerID,
+            originX: 20,
+            originY: 12,
+            width: 4,
+            height: 4,
+            color: red
+        )
+        try fillOpaqueRect(
+            in: harness,
+            layerID: upperLayerID,
+            originX: 34,
+            originY: 26,
+            width: 4,
+            height: 4,
+            color: blue
+        )
+
+        harness.viewModel.selectTool(.canvasCrop)
+        harness.viewModel.beginCanvasCrop(at: .init(x: 16, y: 8), handleRadius: 2)
+        harness.viewModel.endCanvasCrop(at: .init(x: 48, y: 40))
+        harness.viewModel.applyCanvasCrop()
+
+        #expect(harness.viewModel.workspace.document.canvasSize == .init(width: 32, height: 32))
+        #expect(try harness.color(atX: 4, y: 4, layerID: lowerLayerID).red > 0.8)
+        #expect(try harness.color(atX: 18, y: 18, layerID: upperLayerID).blue > 0.8)
+        #expect(harness.viewModel.canUndo)
+
+        harness.viewModel.undo()
+        #expect(harness.viewModel.workspace.document.canvasSize == .init(width: 64, height: 64))
+        #expect(try harness.color(atX: 20, y: 12, layerID: lowerLayerID).red > 0.8)
+        #expect(try harness.color(atX: 34, y: 26, layerID: upperLayerID).blue > 0.8)
+
+        harness.viewModel.redo()
+        #expect(harness.viewModel.workspace.document.canvasSize == .init(width: 32, height: 32))
+        #expect(try harness.color(atX: 4, y: 4, layerID: lowerLayerID).red > 0.8)
+        #expect(try harness.color(atX: 18, y: 18, layerID: upperLayerID).blue > 0.8)
     }
 
     @Test
@@ -1503,14 +1829,32 @@ private struct PixelHistoryHarness {
         return viewModel.workspace.document.activeLayerID
     }
 
-    func makeLassoSelection(_ points: [CanvasPoint]) {
+    func makeLassoSelection(
+        _ points: [CanvasPoint],
+        modifiers: NSEvent.ModifierFlags = []
+    ) {
         guard let first = points.first, points.count > 1 else { return }
         viewModel.selectTool(.lassoSelection)
-        viewModel.beginSelection(kind: .lasso, at: first)
+        viewModel.beginSelection(kind: .lasso, at: first, modifiers: modifiers)
         for point in points.dropFirst().dropLast() {
-            viewModel.updateSelection(to: point)
+            viewModel.updateSelection(to: point, modifiers: modifiers)
         }
-        viewModel.commitSelection(at: points.last ?? first)
+        viewModel.commitSelection(at: points.last ?? first, modifiers: modifiers)
+    }
+
+    func makeRectangleSelection(
+        minX: Double,
+        minY: Double,
+        maxX: Double,
+        maxY: Double,
+        modifiers: NSEvent.ModifierFlags = []
+    ) {
+        let start = CanvasPoint(x: minX, y: minY)
+        let end = CanvasPoint(x: maxX, y: maxY)
+        viewModel.selectTool(.rectangleSelection)
+        viewModel.beginSelection(kind: .rectangle, at: start, modifiers: modifiers)
+        viewModel.updateSelection(to: end, modifiers: modifiers)
+        viewModel.commitSelection(at: end, modifiers: modifiers)
     }
 
     func beginTextureFill(at point: CanvasPoint) {
@@ -1594,6 +1938,28 @@ private enum PixelHistoryHarnessError: Error {
 }
 
 @MainActor
+private func makeCanvasKeyEvent(
+    type: NSEvent.EventType,
+    characters: String,
+    charactersIgnoringModifiers: String,
+    modifiers: NSEvent.ModifierFlags,
+    keyCode: UInt16
+) -> NSEvent {
+    NSEvent.keyEvent(
+        with: type,
+        location: .zero,
+        modifierFlags: modifiers,
+        timestamp: ProcessInfo.processInfo.systemUptime,
+        windowNumber: 0,
+        context: nil,
+        characters: characters,
+        charactersIgnoringModifiers: charactersIgnoringModifiers,
+        isARepeat: false,
+        keyCode: keyCode
+    )!
+}
+
+@MainActor
 private func fillOpaqueRect(
     in harness: PixelHistoryHarness,
     layerID: LayerID,
@@ -1635,6 +2001,7 @@ private func fillOpaqueRect(
         destinationX: originX,
         destinationY: originY
     )
+    harness.bootstrap.layerSurfaceStore.markContentUnknown(for: layerID)
 }
 
 @MainActor

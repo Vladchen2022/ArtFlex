@@ -8,10 +8,183 @@ private final class CompletionDurationBox: @unchecked Sendable {
     var value = 0.0
 }
 
+private let heavyPerformanceAuditEnvironmentKey = "ARTFLEX_RUN_HEAVY_PERF_TESTS"
+
+private var heavyPerformanceAuditEnabled: Bool {
+    let value = ProcessInfo.processInfo.environment[heavyPerformanceAuditEnvironmentKey]?.lowercased()
+    return value == "1" || value == "true" || value == "yes"
+}
+
+private let quickFillAtPointDirtyPilotCases: [(CanvasSize, Int)] = [
+    (.init(width: 1024, height: 1024), 4)
+]
+
+private let heavyDirtyPilotCases: [(CanvasSize, Int)] = [
+    (.init(width: 4096, height: 4096), 4),
+    (.init(width: 4096, height: 4096), 8),
+    (.init(width: 8192, height: 8192), 4),
+    (.init(width: 8192, height: 8192), 8)
+]
+
 struct PerformanceAuditFactTests {
     @Test
     @MainActor
+    func brushCommitRenderedRegionMeasurementOnly() throws {
+        guard let metalContext = MetalDeviceContext() else {
+            Issue.record("Metal unavailable")
+            return
+        }
+        let harness = try makePixelOperationHistoryMeasurementHarness(
+            canvasSize: .init(width: 4096, height: 4096),
+            layerCount: 4
+        )
+        let viewModel = harness.viewModel
+        viewModel.selectTool(.brush)
+        viewModel.setBrushSize(72)
+        viewModel.setBrushScatterAmount(1)
+        viewModel.setBrushJitterAmount(1)
+        harness.bootstrap.historyController.resetHistory()
+        PerformanceAuditStore.shared.reset()
+
+        viewModel.beginStrokeIfNeeded()
+        viewModel.applyStroke(samples: [
+            .init(location: .init(x: 1900, y: 1950), pressure: 0.4),
+            .init(location: .init(x: 2048, y: 2048), pressure: 0.7),
+            .init(location: .init(x: 2200, y: 2160), pressure: 1)
+        ])
+        viewModel.endStroke()
+        try flushPendingBrushWork(viewModel: viewModel, metalContext: metalContext)
+        _ = viewModel.flushBrushEditingBoundary(reason: "performance measurement")
+
+        let entryBytes = harness.bootstrap.historyController.debugUndoEntryApproxByteCounts.last ?? 0
+        let checkpointMs = PerformanceAuditStore.shared.snapshot()
+            .averageDuration("HistoryController.captureCheckpoint") ?? 0
+        print(
+            "[brush-rendered-region] canvas=4096x4096 layers=4 " +
+            "checkpoint=\(String(format: "%.3f", checkpointMs))ms entryBytes=\(entryBytes)"
+        )
+        #expect(entryBytes > 0)
+        #expect(entryBytes < 2 * 1024 * 1024)
+    }
+
+    @Test
+    @MainActor
+    func pngExportTransformMeasurementOnly() throws {
+        guard let metalContext = MetalDeviceContext() else {
+            Issue.record("Metal unavailable")
+            return
+        }
+        let bootstrap = try AppBootstrap(
+            metalContext: metalContext,
+            layerSurfaceStore: StageOneLayerSurfaceStore()
+        )
+        bootstrap.layerSurfaceStore.prepareTextures(
+            for: bootstrap.workspaceStore.state.document,
+            metal: metalContext
+        )
+        let metrics = try measureSerializerAndExportTimings(
+            bootstrap: bootstrap,
+            metalContext: metalContext
+        )
+        let transformMs = metrics["PNGExporter.transformBGRABytesForPNG"] ?? 0
+        print("[png-export-transform] canvas=2048x2048 transform=\(String(format: "%.3f", transformMs))ms")
+        #expect(transformMs > 0)
+    }
+
+    @Test
+    func layerContentBoundsMeasurementOnly() throws {
+        guard let metalContext = MetalDeviceContext() else {
+            Issue.record("Metal unavailable")
+            return
+        }
+        let surfaceStore = StageOneLayerSurfaceStore()
+        var document = ArtDocument.stageOneDefault()
+        document.canvasSize = .init(width: 4096, height: 4096)
+        surfaceStore.prepareTextures(for: document, metal: metalContext)
+        guard
+            let surfaceID = surfaceStore.surfaceID(for: document.activeLayerID),
+            let texture = surfaceStore.texture(for: surfaceID)
+        else {
+            Issue.record("Texture unavailable")
+            return
+        }
+        try LayerTextureSerializer(metalContext: metalContext).restore(
+            snapshot: LayerTextureSnapshot(
+                width: 64,
+                height: 48,
+                bytesPerRow: 64 * 4,
+                pixelData: Data(repeating: 255, count: 64 * 48 * 4)
+            ),
+            into: texture,
+            destinationX: 1900,
+            destinationY: 2000
+        )
+        let detector = try LayerContentBoundsDetector(device: metalContext.device)
+        var durations: [Double] = []
+        for _ in 0..<5 {
+            let startedAt = DispatchTime.now().uptimeNanoseconds
+            let result = try detector.detect(
+                texture: texture,
+                commandQueue: metalContext.commandQueue
+            )
+            durations.append(Double(DispatchTime.now().uptimeNanoseconds - startedAt) / 1_000_000)
+            #expect(
+                result == .bounds(
+                    CanvasRect(
+                        origin: .init(x: 1900, y: 2000),
+                        size: .init(x: 64, y: 48)
+                    )
+                )
+            )
+        }
+        let averageMs = durations.reduce(0, +) / Double(durations.count)
+        print("[layer-content-bounds] canvas=4096x4096 sparseAverage=\(String(format: "%.3f", averageMs))ms")
+
+        let renderPass = MTLRenderPassDescriptor()
+        renderPass.colorAttachments[0].texture = texture
+        renderPass.colorAttachments[0].loadAction = .clear
+        renderPass.colorAttachments[0].storeAction = .store
+        renderPass.colorAttachments[0].clearColor = MTLClearColorMake(1, 1, 1, 1)
+        guard
+            let commandBuffer = metalContext.commandQueue.makeCommandBuffer(),
+            let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPass)
+        else {
+            Issue.record("Unable to clear the texture")
+            return
+        }
+        encoder.endEncoding()
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+
+        durations.removeAll(keepingCapacity: true)
+        for _ in 0..<5 {
+            let startedAt = DispatchTime.now().uptimeNanoseconds
+            let result = try detector.detect(
+                texture: texture,
+                commandQueue: metalContext.commandQueue
+            )
+            durations.append(Double(DispatchTime.now().uptimeNanoseconds - startedAt) / 1_000_000)
+            #expect(
+                result == .bounds(
+                    CanvasRect(
+                        origin: .init(x: 0, y: 0),
+                        size: .init(x: 4096, y: 4096)
+                    )
+                )
+            )
+        }
+        let denseAverageMs = durations.reduce(0, +) / Double(durations.count)
+        print("[layer-content-bounds] canvas=4096x4096 denseAverage=\(String(format: "%.3f", denseAverageMs))ms")
+    }
+
+    @Test
+    @MainActor
     func performanceAuditMeasurementRun() throws {
+        guard heavyPerformanceAuditEnabled else {
+            print("[audit-skip] Set \(heavyPerformanceAuditEnvironmentKey)=1 to run the full performance audit.")
+            return
+        }
+
         guard let metalContext = MetalDeviceContext() else {
             Issue.record("Metal unavailable")
             return
@@ -143,7 +316,10 @@ struct PerformanceAuditFactTests {
             return
         }
 
-        let rows = try measureFillAtPointDirtyPilot(metalContext: metalContext)
+        let rows = try measureFillAtPointDirtyPilot(
+            metalContext: metalContext,
+            cases: quickFillAtPointDirtyPilotCases
+        )
         var outputLines: [String] = []
         for row in rows {
             let line =
@@ -169,6 +345,10 @@ struct PerformanceAuditFactTests {
     @Test
     @MainActor
     func fillAtPointDirtyPilot4096x4096_4Layers() throws {
+        guard heavyPerformanceAuditEnabled else {
+            print("[audit-skip] Set \(heavyPerformanceAuditEnvironmentKey)=1 to run fillAtPointDirtyPilot4096x4096_4Layers.")
+            return
+        }
         try measureAndWriteSingleFillAtPointDirtyPilotCase(
             canvasSize: .init(width: 4096, height: 4096),
             layerCount: 4,
@@ -179,6 +359,10 @@ struct PerformanceAuditFactTests {
     @Test
     @MainActor
     func fillAtPointDirtyPilot4096x4096_8Layers() throws {
+        guard heavyPerformanceAuditEnabled else {
+            print("[audit-skip] Set \(heavyPerformanceAuditEnvironmentKey)=1 to run fillAtPointDirtyPilot4096x4096_8Layers.")
+            return
+        }
         try measureAndWriteSingleFillAtPointDirtyPilotCase(
             canvasSize: .init(width: 4096, height: 4096),
             layerCount: 8,
@@ -189,6 +373,10 @@ struct PerformanceAuditFactTests {
     @Test
     @MainActor
     func fillAtPointDirtyPilot8192x8192_4Layers() throws {
+        guard heavyPerformanceAuditEnabled else {
+            print("[audit-skip] Set \(heavyPerformanceAuditEnvironmentKey)=1 to run fillAtPointDirtyPilot8192x8192_4Layers.")
+            return
+        }
         try measureAndWriteSingleFillAtPointDirtyPilotCase(
             canvasSize: .init(width: 8192, height: 8192),
             layerCount: 4,
@@ -199,6 +387,10 @@ struct PerformanceAuditFactTests {
     @Test
     @MainActor
     func fillAtPointDirtyPilot8192x8192_8Layers() throws {
+        guard heavyPerformanceAuditEnabled else {
+            print("[audit-skip] Set \(heavyPerformanceAuditEnvironmentKey)=1 to run fillAtPointDirtyPilot8192x8192_8Layers.")
+            return
+        }
         try measureAndWriteSingleFillAtPointDirtyPilotCase(
             canvasSize: .init(width: 8192, height: 8192),
             layerCount: 8,
@@ -209,6 +401,11 @@ struct PerformanceAuditFactTests {
     @Test
     @MainActor
     func selectionFillProfilingBreakdown() throws {
+        guard heavyPerformanceAuditEnabled else {
+            print("[audit-skip] Set \(heavyPerformanceAuditEnvironmentKey)=1 to run selectionFillProfilingBreakdown.")
+            return
+        }
+
         let selectionFill = try measureSelectionPixelOperationBreakdown(
             operation: .selectionFill,
             canvasSize: .init(width: 3000, height: 3000),
@@ -707,16 +904,11 @@ private func measureApplyPixelOperationDirtyPilot(
 
 @MainActor
 private func measureFillAtPointDirtyPilot(
-    metalContext: MetalDeviceContext
+    metalContext: MetalDeviceContext,
+    cases: [(CanvasSize, Int)] = heavyDirtyPilotCases
 ) throws -> [BrushDirtyHistoryPilotRow] {
-    let cases: [(CanvasSize, Int)] = [
-        (.init(width: 4096, height: 4096), 4),
-        (.init(width: 4096, height: 4096), 8),
-        (.init(width: 8192, height: 8192), 4),
-        (.init(width: 8192, height: 8192), 8)
-    ]
-
     return try cases.map { canvasSize, layerCount in
+        print("[fill-at-point-dirty-pilot] measuring canvas=\(canvasSize.width)x\(canvasSize.height) layers=\(layerCount)")
         let fullCapture = try measureFillAtPointCheckpoint(
             canvasSize: canvasSize,
             layerCount: layerCount,

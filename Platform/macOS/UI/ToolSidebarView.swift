@@ -36,34 +36,37 @@ struct ToolSidebarView: View {
         .group("smudge"),
         .group("color-adjust"),
         .group("canvas-rotate"),
+        .group("canvas-crop"),
         .group("free-transform")
     ]
 
     var body: some View {
         VStack(spacing: 0) {
-            ForEach(groupEntries) { entry in
-                switch entry.kind {
-                case .divider:
-                    Rectangle()
-                        .fill(Color.white.opacity(0.08))
-                        .frame(width: 104, height: 1)
-                        .padding(.vertical, 8)
-                case .group(let groupID):
-                    if let group = ToolSidebarGroup.orderedGroups.first(where: { $0.id == groupID }) {
-                        ToolSidebarGroupButton(
-                            group: group,
-                            shortcutSettings: hostViewModel.shortcutSettings,
-                            displayedTool: viewModel.displayedTool(for: group),
-                            isSelected: viewModel.isSelected(group: group),
-                            activateGroup: { viewModel.activateSidebarGroup(group) },
-                            activateTool: { tool in viewModel.selectToolFromUI(tool) }
-                        )
+            ScrollView(.vertical, showsIndicators: false) {
+                LazyVStack(spacing: 0) {
+                    ForEach(groupEntries) { entry in
+                        switch entry.kind {
+                        case .divider:
+                            Rectangle()
+                                .fill(Color.white.opacity(0.08))
+                                .frame(width: 104, height: 1)
+                                .padding(.vertical, 8)
+                        case .group(let groupID):
+                            if let group = ToolSidebarGroup.orderedGroups.first(where: { $0.id == groupID }) {
+                                ToolSidebarGroupButton(
+                                    group: group,
+                                    shortcutSettings: hostViewModel.shortcutSettings,
+                                    displayedTool: viewModel.displayedTool(for: group),
+                                    isSelected: viewModel.isSelected(group: group),
+                                    activateGroup: { viewModel.activateSidebarGroup(group) },
+                                    activateTool: { tool in viewModel.selectToolFromUI(tool) }
+                                )
+                            }
+                        }
                     }
                 }
+                .disabled(hostViewModel.snapshotCompareSession != nil)
             }
-            .disabled(hostViewModel.snapshotCompareSession != nil)
-
-            Spacer()
 
             VStack(spacing: sidebarUtilityButtonSpacing) {
                 snapshotButton
@@ -88,7 +91,7 @@ struct ToolSidebarView: View {
             }
             showsDrawingStatsPopover = false
             showsRecorderPopover = false
-            hostViewModel.handleSnapshotSavePrimaryAction()
+            hostViewModel.requestSnapshotSavePrimaryAction()
         } label: {
             HStack(spacing: sidebarButtonContentSpacing) {
                 Image(systemName: "camera.viewfinder")
@@ -202,7 +205,11 @@ struct ToolSidebarView: View {
             .frame(width: 204)
             .background(Color(red: 0.16, green: 0.16, blue: 0.17))
         }
-        .disabled(hostViewModel.ideationSession != nil || hostViewModel.snapshotCompareSession != nil)
+        .disabled(
+            hostViewModel.ideationSession != nil
+                || hostViewModel.snapshotCompareSession != nil
+                || hostViewModel.isSavingSnapshot
+        )
     }
 
     private var ideationButton: some View {
@@ -377,6 +384,9 @@ struct ToolSidebarView: View {
         if hostViewModel.ideationSession != nil {
             return "方案试探期间不可使用快照保存"
         }
+        if hostViewModel.isSavingSnapshot {
+            return "正在保存快照"
+        }
         if hostViewModel.savedSnapshotCount >= 6 {
             return "已达到 6 张快照上限，再点会直接进入快照对比"
         }
@@ -392,84 +402,67 @@ private struct ToolSidebarGroupButton: View {
     let activateGroup: () -> Void
     let activateTool: (ToolKind) -> Void
 
-    @State private var showsPopover = false
-
     var body: some View {
-        Button(action: activateGroup) {
-            HStack(spacing: sidebarButtonContentSpacing) {
-                Image(systemName: displayedTool.sidebarIconName)
-                    .font(.system(size: sidebarButtonIconFontSize, weight: .semibold))
-                    .frame(width: sidebarButtonLeadingIconWidth)
-                    .foregroundStyle(isSelected ? Color.white : Color.white.opacity(0.85))
+        HStack(spacing: 0) {
+            Button(action: activateGroup) {
+                HStack(spacing: sidebarButtonContentSpacing) {
+                    Image(systemName: displayedTool.sidebarIconName)
+                        .font(.system(size: sidebarButtonIconFontSize, weight: .semibold))
+                        .frame(width: sidebarButtonLeadingIconWidth)
+                        .foregroundStyle(isSelected ? Color.white : Color.white.opacity(0.85))
 
-                Text(displayedTool.displayName)
-                    .font(.system(size: sidebarButtonLabelFontSize, weight: .semibold))
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.95)
-                    .foregroundStyle(isSelected ? Color.white : Color.white.opacity(0.9))
+                    Text(displayedTool.displayName)
+                        .font(.system(size: sidebarButtonLabelFontSize, weight: .semibold))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.95)
+                        .foregroundStyle(isSelected ? Color.white : Color.white.opacity(0.9))
 
-                Spacer(minLength: sidebarButtonTrailingGap)
+                    Spacer(minLength: sidebarButtonTrailingGap)
+                }
+                .padding(.leading, sidebarButtonHorizontalPadding)
+                .padding(.trailing, group.isGrouped ? 4 : sidebarButtonHorizontalPadding)
+                .frame(
+                    width: group.isGrouped ? sidebarButtonWidth - 28 : sidebarButtonWidth,
+                    height: sidebarButtonHeight
+                )
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help(helpText)
 
-                if group.isGrouped {
+            if group.isGrouped {
+                Menu {
+                    ForEach(group.tools, id: \.self) { tool in
+                        Button {
+                            activateTool(tool)
+                        } label: {
+                            Label(tool.displayName, systemImage: tool.sidebarIconName)
+                        }
+                    }
+                } label: {
                     Image(systemName: "chevron.down")
                         .font(.system(size: 8, weight: .bold))
-                        .foregroundStyle(isSelected ? Color.white.opacity(0.88) : Color.white.opacity(0.5))
+                        .foregroundStyle(isSelected ? Color.white.opacity(0.9) : Color.white.opacity(0.58))
+                        .frame(width: 28, height: sidebarButtonHeight)
+                        .contentShape(Rectangle())
                 }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .help("切换\(group.defaultTool.displayName)组工具")
             }
-            .padding(.horizontal, sidebarButtonHorizontalPadding)
-            .frame(width: sidebarButtonWidth, height: sidebarButtonHeight)
-            .background(
-                RoundedRectangle(cornerRadius: sidebarButtonCornerRadius)
-                    .fill(isSelected ? Color.accentColor : Color.white.opacity(0.08))
-            )
         }
-        .buttonStyle(.plain)
-        .help(helpText)
-        .padding(.vertical, 4)
-        .simultaneousGesture(
-            LongPressGesture(minimumDuration: 0.35)
-                .onEnded { _ in
-                    guard group.isGrouped else { return }
-                    showsPopover = true
-                }
+        .frame(width: sidebarButtonWidth, height: sidebarButtonHeight)
+        .background(
+            RoundedRectangle(cornerRadius: sidebarButtonCornerRadius)
+                .fill(isSelected ? Color.accentColor : Color.white.opacity(0.08))
         )
-        .popover(isPresented: $showsPopover, arrowEdge: .trailing) {
-            VStack(alignment: .leading, spacing: 4) {
-                ForEach(group.tools, id: \.self) { tool in
-                    Button {
-                        activateTool(tool)
-                        showsPopover = false
-                    } label: {
-                        HStack(spacing: 8) {
-                            Text(tool.displayName)
-                                .font(.system(size: 13, weight: tool == displayedTool ? .bold : .medium))
-                                .foregroundStyle(Color.white)
-                            Spacer(minLength: 12)
-                            if let shortcut = shortcutSettings.shortcutKey(for: group) {
-                                Text(shortcut)
-                                    .font(.system(size: 11, weight: .bold, design: .rounded))
-                                    .foregroundStyle(Color.white.opacity(0.7))
-                            }
-                        }
-                        .padding(.horizontal, 10)
-                        .frame(width: 170, height: 30)
-                        .background(
-                            RoundedRectangle(cornerRadius: 7)
-                                .fill(tool == displayedTool ? Color.white.opacity(0.12) : Color.clear)
-                        )
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-            .padding(8)
-            .frame(width: 186)
-            .background(Color(red: 0.16, green: 0.16, blue: 0.17))
-        }
+        .padding(.vertical, 4)
     }
 
     private var helpText: String {
         if group.isGrouped, let shortcut = shortcutSettings.shortcutKey(for: group) {
-            return "\(displayedTool.displayName) (\(shortcut))，长按可切换组内工具，Shift+\(shortcut) 轮换"
+            return "\(displayedTool.displayName) (\(shortcut))，右侧箭头可切换组内工具，Shift+\(shortcut) 轮换"
         }
         if let shortcut = shortcutSettings.shortcutKey(for: group) {
             return "\(displayedTool.displayName) (\(shortcut))"

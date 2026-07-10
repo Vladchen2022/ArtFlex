@@ -4,6 +4,220 @@ import Testing
 
 struct MetalStrokeEngineQueueTests {
     @Test
+    func interactiveCommitDrainSchedulingRejectsFutileMainThreadWork() {
+        #expect(shouldScheduleInteractiveBrushCommitDrain(
+            queueDepth: 0,
+            protectedCommitCount: 0,
+            hadLiveBrushWorkThisFrame: false,
+            hasActiveStroke: false,
+            hasWarmIdleSession: false
+        ) == false)
+        #expect(shouldScheduleInteractiveBrushCommitDrain(
+            queueDepth: 1,
+            protectedCommitCount: 1,
+            hadLiveBrushWorkThisFrame: false,
+            hasActiveStroke: false,
+            hasWarmIdleSession: false
+        ) == false)
+        #expect(shouldScheduleInteractiveBrushCommitDrain(
+            queueDepth: 2,
+            protectedCommitCount: 0,
+            hadLiveBrushWorkThisFrame: true,
+            hasActiveStroke: false,
+            hasWarmIdleSession: false
+        ) == false)
+        #expect(shouldScheduleInteractiveBrushCommitDrain(
+            queueDepth: 2,
+            protectedCommitCount: 0,
+            hadLiveBrushWorkThisFrame: false,
+            hasActiveStroke: false,
+            hasWarmIdleSession: true
+        ) == false)
+        #expect(shouldScheduleInteractiveBrushCommitDrain(
+            queueDepth: 2,
+            protectedCommitCount: 1,
+            hadLiveBrushWorkThisFrame: false,
+            hasActiveStroke: false,
+            hasWarmIdleSession: false
+        ))
+    }
+
+    @Test
+    func commitJobBoundsContainScatteredBrushOutput() throws {
+        guard
+            let metalContext = MetalDeviceContext(),
+            let commandBuffer = metalContext.commandQueue.makeCommandBuffer()
+        else {
+            Issue.record("Metal unavailable")
+            return
+        }
+
+        let surfaceStore = StageOneLayerSurfaceStore()
+        var document = ArtDocument.stageOneDefault()
+        document.canvasSize = .init(width: 256, height: 256)
+        surfaceStore.prepareTextures(for: document, metal: metalContext)
+        let layerID = document.activeLayerID
+        let engine = try MetalStrokeEngine(
+            metalContext: metalContext,
+            layerSurfaceStore: surfaceStore
+        )
+        var brush = BrushSettings.stageOneDefault
+        brush.size = 48
+        brush.scatterAmount = 1
+        brush.jitterAmount = 1
+
+        engine.beginStrokeIfNeeded(
+            toolSession: ToolSessionState(activeTool: .brush, brush: brush, selectedColor: .black),
+            layerID: layerID
+        )
+        _ = engine.applyStroke(
+            StrokeDescriptor(
+                tool: .brush,
+                color: .black,
+                brush: brush,
+                points: [
+                    .init(x: 72, y: 80, pressure: 0.4),
+                    .init(x: 128, y: 118, pressure: 0.75),
+                    .init(x: 184, y: 168, pressure: 1)
+                ],
+                selectionShape: nil,
+                skipLeadingStamp: false
+            ),
+            to: layerID
+        )
+        engine.endStroke()
+        _ = engine.flushPendingStrokePackets(into: commandBuffer)
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+
+        var renderedBounds: BrushPixelBounds?
+        try engine.drainPendingBrushCommitJobs { job in
+            renderedBounds = job.renderedPixelBounds
+        }
+        let bounds = try #require(renderedBounds)
+        #expect(bounds.width < document.canvasSize.width)
+        #expect(bounds.height < document.canvasSize.height)
+
+        guard
+            let surfaceID = surfaceStore.surfaceID(for: layerID),
+            let texture = surfaceStore.texture(for: surfaceID)
+        else {
+            Issue.record("Texture unavailable")
+            return
+        }
+        let snapshot = try LayerTextureSerializer(metalContext: metalContext).snapshot(texture: texture)
+        snapshot.pixelData.withUnsafeBytes { rawBuffer in
+            let bytes = rawBuffer.bindMemory(to: UInt8.self)
+            for y in 0..<snapshot.height {
+                for x in 0..<snapshot.width where bytes[(y * snapshot.bytesPerRow) + (x * 4) + 3] > 0 {
+                    #expect(x >= bounds.originX)
+                    #expect(y >= bounds.originY)
+                    #expect(x < bounds.originX + bounds.width)
+                    #expect(y < bounds.originY + bounds.height)
+                }
+            }
+        }
+    }
+
+    @Test
+    func repeatedCustomTipPacketsReuseResampledTexture() throws {
+        guard
+            let metalContext = MetalDeviceContext(),
+            let firstCommandBuffer = metalContext.commandQueue.makeCommandBuffer(),
+            let secondCommandBuffer = metalContext.commandQueue.makeCommandBuffer()
+        else {
+            Issue.record("Metal unavailable")
+            return
+        }
+        let surfaceStore = StageOneLayerSurfaceStore()
+        guard let texture = surfaceStore.makeTexture(width: 128, height: 128, metal: metalContext) else {
+            Issue.record("Texture unavailable")
+            return
+        }
+        let renderer = try StageOneBrushRenderer(device: metalContext.device)
+        var brush = BrushSettings.stageOneDefault
+        brush.tipShape = .customRound
+        brush.customTipMaskData = Data(repeating: 255, count: 16 * 16)
+        let stroke = StrokeDescriptor(
+            tool: .brush,
+            color: .black,
+            brush: brush,
+            points: [
+                .init(x: 50, y: 64, pressure: 1),
+                .init(x: 78, y: 64, pressure: 1)
+            ],
+            selectionShape: nil,
+            skipLeadingStamp: false
+        )
+
+        var firstSamplingState: BrushStrokeSamplingState?
+        _ = renderer.encodeStroke(
+            stroke: stroke,
+            into: texture,
+            commandQueue: metalContext.commandQueue,
+            commandBuffer: firstCommandBuffer,
+            samplingState: &firstSamplingState
+        )
+        firstCommandBuffer.commit()
+        firstCommandBuffer.waitUntilCompleted()
+
+        var secondSamplingState: BrushStrokeSamplingState?
+        _ = renderer.encodeStroke(
+            stroke: stroke,
+            into: texture,
+            commandQueue: metalContext.commandQueue,
+            commandBuffer: secondCommandBuffer,
+            samplingState: &secondSamplingState
+        )
+        secondCommandBuffer.commit()
+        secondCommandBuffer.waitUntilCompleted()
+
+        #expect(renderer.debugCustomTipResampleCount == 1)
+    }
+
+    @Test
+    func layerContentBoundsDetectorFindsExactOpaqueRegion() throws {
+        guard let metalContext = MetalDeviceContext() else {
+            Issue.record("Metal unavailable")
+            return
+        }
+        let surfaceStore = StageOneLayerSurfaceStore()
+        var document = ArtDocument.stageOneDefault()
+        document.canvasSize = .init(width: 128, height: 128)
+        surfaceStore.prepareTextures(for: document, metal: metalContext)
+        guard
+            let surfaceID = surfaceStore.surfaceID(for: document.activeLayerID),
+            let texture = surfaceStore.texture(for: surfaceID)
+        else {
+            Issue.record("Texture unavailable")
+            return
+        }
+        let detector = try LayerContentBoundsDetector(device: metalContext.device)
+        #expect(
+            try detector.detect(texture: texture, commandQueue: metalContext.commandQueue) == .empty
+        )
+
+        try LayerTextureSerializer(metalContext: metalContext).restore(
+            snapshot: gradientSnapshot(width: 12, height: 9),
+            into: texture,
+            destinationX: 31,
+            destinationY: 47
+        )
+        let detected = try detector.detect(
+            texture: texture,
+            commandQueue: metalContext.commandQueue
+        )
+        #expect(
+            detected == .bounds(
+                CanvasRect(
+                    origin: .init(x: 31, y: 47),
+                    size: .init(x: 12, y: 9)
+                )
+            )
+        )
+    }
+
+    @Test
     func opacityCapStrokeOutsideCanvasSkipsInvalidScissorRect() throws {
         guard
             let metalContext = MetalDeviceContext(),
@@ -678,6 +892,66 @@ struct MetalStrokeEngineQueueTests {
         let maxDelta = maxByteDelta(gatheredSnapshot.pixelData, frozenSnapshot.pixelData)
 
         #expect(maxDelta <= 1)
+    }
+
+    @Test
+    func smudgingTransparentPixelsDoesNotPaintDisplayBackgroundColor() throws {
+        guard
+            let metalContext = MetalDeviceContext(),
+            let commandBuffer = metalContext.commandQueue.makeCommandBuffer()
+        else {
+            Issue.record("Metal unavailable")
+            return
+        }
+
+        let surfaceStore = StageOneLayerSurfaceStore()
+        let serializer = LayerTextureSerializer(metalContext: metalContext)
+        let renderer = try StageOneBrushRenderer(device: metalContext.device)
+        guard let texture = surfaceStore.makeTexture(width: 64, height: 64, metal: metalContext) else {
+            Issue.record("Texture unavailable")
+            return
+        }
+
+        try serializer.restore(
+            snapshot: LayerTextureSnapshot(
+                width: 64,
+                height: 64,
+                bytesPerRow: 64 * 4,
+                pixelData: Data(repeating: 0, count: 64 * 64 * 4)
+            ),
+            into: texture
+        )
+
+        var brush = BrushSettings.stageOneDefault
+        brush.size = 18
+        brush.opacity = 1
+        var samplingState: BrushStrokeSamplingState?
+        _ = renderer.encodeStroke(
+            stroke: StrokeDescriptor(
+                tool: .smudge,
+                color: .black,
+                brush: brush,
+                points: [
+                    .init(x: 18, y: 18, pressure: 1),
+                    .init(x: 30, y: 26, pressure: 1),
+                    .init(x: 42, y: 34, pressure: 1)
+                ],
+                selectionShape: nil,
+                skipLeadingStamp: false
+            ),
+            into: texture,
+            commandQueue: metalContext.commandQueue,
+            commandBuffer: commandBuffer,
+            samplingState: &samplingState
+        )
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+
+        let snapshot = try serializer.snapshot(texture: texture)
+        let alphaBytes = stride(from: 3, to: snapshot.pixelData.count, by: 4).map {
+            snapshot.pixelData[$0]
+        }
+        #expect(alphaBytes.allSatisfy { $0 == 0 })
     }
 }
 

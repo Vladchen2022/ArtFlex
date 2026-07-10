@@ -641,7 +641,11 @@ final class TimelapseRecorderController: ObservableObject {
                     guard
                         let frameSource = CGImageSourceCreateWithURL(url as CFURL, nil),
                         let frameImage = CGImageSourceCreateImageAtIndex(frameSource, 0, nil),
-                        let pixelBuffer = makePixelBuffer(from: frameImage)
+                        let pixelBuffer = makePixelBuffer(
+                            from: frameImage,
+                            width: firstImage.width,
+                            height: firstImage.height
+                        )
                     else {
                         return
                     }
@@ -702,7 +706,11 @@ final class TimelapseRecorderController: ObservableObject {
         .map { $0 + 1 } ?? 0
     }
 
-    nonisolated private static func makePixelBuffer(from image: CGImage) -> CVPixelBuffer? {
+    nonisolated private static func makePixelBuffer(
+        from image: CGImage,
+        width: Int,
+        height: Int
+    ) -> CVPixelBuffer? {
         var pixelBuffer: CVPixelBuffer?
         let attributes: [String: Any] = [
             kCVPixelBufferCGImageCompatibilityKey as String: true,
@@ -710,8 +718,8 @@ final class TimelapseRecorderController: ObservableObject {
         ]
         let status = CVPixelBufferCreate(
             kCFAllocatorDefault,
-            image.width,
-            image.height,
+            width,
+            height,
             kCVPixelFormatType_32ARGB,
             attributes as CFDictionary,
             &pixelBuffer
@@ -728,8 +736,8 @@ final class TimelapseRecorderController: ObservableObject {
             let baseAddress = CVPixelBufferGetBaseAddress(pixelBuffer),
             let context = CGContext(
                 data: baseAddress,
-                width: image.width,
-                height: image.height,
+                width: width,
+                height: height,
                 bitsPerComponent: 8,
                 bytesPerRow: CVPixelBufferGetBytesPerRow(pixelBuffer),
                 space: CGColorSpace(name: CGColorSpace.sRGB)!,
@@ -739,7 +747,24 @@ final class TimelapseRecorderController: ObservableObject {
             return nil
         }
 
-        context.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
+        context.setFillColor(CGColor(gray: 0, alpha: 1))
+        context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        context.interpolationQuality = .high
+        let scale = min(
+            CGFloat(width) / CGFloat(max(image.width, 1)),
+            CGFloat(height) / CGFloat(max(image.height, 1))
+        )
+        let drawWidth = CGFloat(image.width) * scale
+        let drawHeight = CGFloat(image.height) * scale
+        context.draw(
+            image,
+            in: CGRect(
+                x: (CGFloat(width) - drawWidth) / 2,
+                y: (CGFloat(height) - drawHeight) / 2,
+                width: drawWidth,
+                height: drawHeight
+            )
+        )
         return pixelBuffer
     }
 }

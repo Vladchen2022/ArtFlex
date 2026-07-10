@@ -5,6 +5,11 @@ struct CanvasPresentation: Sendable, Equatable {
     var documentOrigin: CanvasPoint
     var documentDisplaySize: CanvasPoint
     var documentZoomScale: Double
+    var fitScale: Double = 1
+
+    var actualDisplayScale: Double {
+        fitScale * documentZoomScale
+    }
 }
 
 enum CanvasPresentationBuilder {
@@ -40,7 +45,8 @@ enum CanvasPresentationBuilder {
                 x: displayWidth,
                 y: displayHeight
             ),
-            documentZoomScale: max(viewport.zoomScale, 0.01)
+            documentZoomScale: max(viewport.zoomScale, 0.01),
+            fitScale: baseScale
         )
     }
 }

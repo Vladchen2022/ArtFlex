@@ -79,4 +79,26 @@ struct ColorStandardTests {
         #expect(minimumRenderedSaturation <= baseHSV.s * 0.62)
         #expect(minimumRenderedSaturation >= baseHSV.s * 0.48)
     }
+
+    @Test
+    func pngFlattenLookupMatchesReferenceColorConversionForEveryBytePair() {
+        for alphaByte in UInt8.min...UInt8.max {
+            let alpha = Float(alphaByte) / 255
+            for channelByte in UInt8.min...UInt8.max {
+                let sourceLinear = LinearPremultipliedColor.srgbChannelToLinear(
+                    Float(channelByte) / 255
+                )
+                let expectedSRGB = LinearPremultipliedColor.linearChannelToSRGB(
+                    sourceLinear + (1 - alpha)
+                )
+                let expected = UInt8(clamping: Int((expectedSRGB * 255).rounded()))
+                #expect(
+                    PNGExporter.debugFlattenedOpaqueChannel(
+                        srgbPremultipliedByte: channelByte,
+                        alphaByte: alphaByte
+                    ) == expected
+                )
+            }
+        }
+    }
 }

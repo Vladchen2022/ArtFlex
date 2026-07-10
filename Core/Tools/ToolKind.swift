@@ -111,6 +111,7 @@ enum ToolKind: String, Codable, Sendable {
     case ellipseSelection
     case lassoSelection
     case canvasRotate
+    case canvasCrop
     case freeTransform
 }
 
@@ -149,6 +150,8 @@ extension ToolKind {
             return "slider.horizontal.3"
         case .canvasRotate:
             return "rotate.3d"
+        case .canvasCrop:
+            return "crop"
         case .freeTransform:
             return "arrow.up.left.and.arrow.down.right"
         }
@@ -188,6 +191,8 @@ extension ToolKind {
             return "色彩调整"
         case .canvasRotate:
             return "画布旋转"
+        case .canvasCrop:
+            return "画布裁剪"
         case .freeTransform:
             return "移动变形"
         }
@@ -221,6 +226,8 @@ extension ToolKind {
             return "O"
         case .canvasRotate:
             return "R"
+        case .canvasCrop:
+            return "X"
         case .freeTransform:
             return "V"
         }
@@ -257,6 +264,7 @@ struct ToolSidebarGroup: Identifiable, Equatable, Sendable {
         .init(id: "smudge", tools: [.smudge], shortcutKey: "T"),
         .init(id: "color-adjust", tools: [.brightnessAdjust], shortcutKey: "O"),
         .init(id: "canvas-rotate", tools: [.canvasRotate], shortcutKey: "R"),
+        .init(id: "canvas-crop", tools: [.canvasCrop], shortcutKey: "X"),
         .init(id: "free-transform", tools: [.freeTransform], shortcutKey: "V")
     ]
 

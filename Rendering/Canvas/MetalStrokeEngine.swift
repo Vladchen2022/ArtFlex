@@ -86,8 +86,10 @@ final class MetalStrokeEngine: StrokeEngine {
             .begin(layerID: layerID, enqueuedAt: now)
         )
         invalidateRecentBrushPreviewCache()
-        logger.debug("[brush-live] sessionWarmReused=\(reuseState == .warmReused, privacy: .public)")
-        logger.debug("[brush-live] commitQueueDepth=\(self.commitQueue.count, privacy: .public)")
+        if RuntimeDiagnostics.brushHotPathLoggingEnabled {
+            logger.debug("[brush-live] sessionWarmReused=\(reuseState == .warmReused, privacy: .public)")
+            logger.debug("[brush-live] commitQueueDepth=\(self.commitQueue.count, privacy: .public)")
+        }
     }
 
     @discardableResult
@@ -109,12 +111,16 @@ final class MetalStrokeEngine: StrokeEngine {
                     count += 1
                 }
             } ?? 0
-            logger.debug("[brush-feel] packetQueuedCount=\(queuedPackets, privacy: .public)")
-            logger.debug("[brush-feel] livePathMode=workingTexture")
+            if RuntimeDiagnostics.brushHotPathLoggingEnabled {
+                logger.debug("[brush-feel] packetQueuedCount=\(queuedPackets, privacy: .public)")
+                logger.debug("[brush-feel] livePathMode=workingTexture")
+            }
             return queuedPackets
         }
 
-        logger.debug("[brush-feel] livePathMode=immediate")
+        if RuntimeDiagnostics.brushHotPathLoggingEnabled {
+            logger.debug("[brush-feel] livePathMode=immediate")
+        }
 
         guard
             let surfaceID = layerSurfaceStore.surfaceID(for: layerID),
@@ -153,6 +159,38 @@ final class MetalStrokeEngine: StrokeEngine {
 
     var hasPendingBrushCommitJobs: Bool {
         !commitQueue.isEmpty
+    }
+
+    func canOpportunisticallyDrainPendingBrushCommitJobs(
+        hadLiveBrushWorkThisFrame: Bool,
+        retainedRecentBrushCommitJobs: Int
+    ) -> Bool {
+        let now = DispatchTime.now().uptimeNanoseconds
+        updateInteractiveState(now: now)
+        let queueSnapshot = commitQueue.snapshot()
+        guard !queueSnapshot.isEmpty else { return false }
+
+        let activeStroke = liveSession.map {
+            if case .activeStroke = $0.interactiveState { return true }
+            return false
+        } ?? false
+        let warmIdleHit = liveSession.map {
+            if case .warmIdle(let untilUptimeNs) = $0.interactiveState {
+                return now <= untilUptimeNs
+            }
+            return false
+        } ?? false
+        let protectedRecentBrushCommits = protectedRecentBrushCommitCount(
+            in: queueSnapshot,
+            retainedRecentBrushCommitJobs: retainedRecentBrushCommitJobs
+        )
+        return shouldScheduleInteractiveBrushCommitDrain(
+            queueDepth: queueSnapshot.count,
+            protectedCommitCount: protectedRecentBrushCommits,
+            hadLiveBrushWorkThisFrame: hadLiveBrushWorkThisFrame,
+            hasActiveStroke: activeStroke,
+            hasWarmIdleSession: warmIdleHit
+        )
     }
 
     var recentAdjustableBrushCommitLimit: Int {
@@ -346,7 +384,8 @@ final class MetalStrokeEngine: StrokeEngine {
                         layerID: layerID,
                         packets: session.currentStrokePackets,
                         needsTailFlush: true,
-                        commitRevision: nextCommitRevision
+                        commitRevision: nextCommitRevision,
+                        renderedPixelBounds: flushSamplingState?.renderedPixelBounds
                     )
                 )
                 if auditEnabled {
@@ -592,9 +631,11 @@ final class MetalStrokeEngine: StrokeEngine {
             maxCpuNs = cpuMs <= 0 ? 0 : UInt64(cpuMs * 1_000_000)
         }
 
-        logger.debug("[brush-live] warmIdleHit=\(warmIdleHit, privacy: .public)")
-        logger.debug("[brush-live] commitQueueDepth=\(self.commitQueue.count, privacy: .public)")
-        logger.debug("[brush-live] commitDrainSkippedForInteractiveFrame=\(shouldSkipForInteractiveFrame, privacy: .public)")
+        if RuntimeDiagnostics.brushHotPathLoggingEnabled {
+            logger.debug("[brush-live] warmIdleHit=\(warmIdleHit, privacy: .public)")
+            logger.debug("[brush-live] commitQueueDepth=\(self.commitQueue.count, privacy: .public)")
+            logger.debug("[brush-live] commitDrainSkippedForInteractiveFrame=\(shouldSkipForInteractiveFrame, privacy: .public)")
+        }
         PerformanceAuditStore.shared.recordInt(
             "MetalStrokeEngine.commitQueue.depth",
             value: commitQueue.count
@@ -631,7 +672,8 @@ final class MetalStrokeEngine: StrokeEngine {
             // committed pixels rather than the original pre-drain texture.
             try commit(
                 job: job,
-                selectedRecentCommitRevisions: selectedRecentCommitRevisions
+                selectedRecentCommitRevisions: selectedRecentCommitRevisions,
+                waitForCompletion: mode == .forced
             )
             if job.layerID == liveSession?.layerID {
                 lastCommittedRevisionForLiveLayer = job.commitRevision
@@ -653,7 +695,9 @@ final class MetalStrokeEngine: StrokeEngine {
             invalidateRecentBrushPreviewCache()
         }
 
-        logger.debug("[brush-live] commitQueueDepth=\(self.commitQueue.count, privacy: .public)")
+        if RuntimeDiagnostics.brushHotPathLoggingEnabled {
+            logger.debug("[brush-live] commitQueueDepth=\(self.commitQueue.count, privacy: .public)")
+        }
         return BrushCommitDrainResult(
             drainedJobs: drainedJobs,
             skippedForInteractiveFrame: false,
@@ -671,13 +715,22 @@ final class MetalStrokeEngine: StrokeEngine {
         liveSession = session
     }
 
-    private func commit(job: BrushCommitJob, selectedRecentCommitRevisions: Set<UInt64>) throws {
-        try commitBatch([job], selectedRecentCommitRevisions: selectedRecentCommitRevisions)
+    private func commit(
+        job: BrushCommitJob,
+        selectedRecentCommitRevisions: Set<UInt64>,
+        waitForCompletion: Bool
+    ) throws {
+        try commitBatch(
+            [job],
+            selectedRecentCommitRevisions: selectedRecentCommitRevisions,
+            waitForCompletion: waitForCompletion
+        )
     }
 
     private func commitBatch(
         _ jobs: [BrushCommitJob],
-        selectedRecentCommitRevisions: Set<UInt64>
+        selectedRecentCommitRevisions: Set<UInt64>,
+        waitForCompletion: Bool
     ) throws {
         let auditEnabled = PerformanceAuditStore.shared.isRecordingEnabled
         let startNs = auditEnabled ? DispatchTime.now().uptimeNanoseconds : 0
@@ -720,7 +773,9 @@ final class MetalStrokeEngine: StrokeEngine {
         }
 
         commandBuffer.commit()
-        commandBuffer.waitUntilCompleted()
+        if waitForCompletion {
+            commandBuffer.waitUntilCompleted()
+        }
     }
 
     private func recentBrushPreviewTextureIfNeeded(for layerID: LayerID) -> MTLTexture? {
@@ -1050,11 +1105,22 @@ final class MetalStrokeEngine: StrokeEngine {
             return nil
         }
 
-        layerSurfaceStore.copyTexture(
+        layerSurfaceStore.copyTextureAsync(
             from: sourceTexture,
             to: alphaLockTexture,
             metal: metalContext
         )
         return alphaLockTexture
     }
+}
+
+func shouldScheduleInteractiveBrushCommitDrain(
+    queueDepth: Int,
+    protectedCommitCount: Int,
+    hadLiveBrushWorkThisFrame: Bool,
+    hasActiveStroke: Bool,
+    hasWarmIdleSession: Bool
+) -> Bool {
+    guard queueDepth > max(protectedCommitCount, 0) else { return false }
+    return !hadLiveBrushWorkThisFrame && !hasActiveStroke && !hasWarmIdleSession
 }
