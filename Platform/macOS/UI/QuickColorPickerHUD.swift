@@ -31,6 +31,8 @@ struct QuickColorPickerHUD: View {
     let onSetRecentBrushSelectionEditing: (Bool) -> Void
     let onSetRecentBrushOpacityEditing: (Bool) -> Void
 
+    @State private var previewPanel: ColorPanelState?
+
     private var hudSize: CGSize {
         let baseHeight = (hudPadding * 2) + 18 + 8 + squareSize.height
         let selectionSliderHeight: CGFloat = state.recentBrushSelectionLimit > 0 ? 28 : 0
@@ -49,6 +51,7 @@ struct QuickColorPickerHUD: View {
     var body: some View {
         let anchor = viewportPoint(for: state.anchorPoint)
         let center = clampedCenter(near: anchor)
+        let displayedPanel = previewPanel ?? state.panel
 
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
@@ -68,14 +71,14 @@ struct QuickColorPickerHUD: View {
 
             HStack(alignment: .top, spacing: 10) {
                 QuickColorPickerSVSquare(
-                    panel: state.panel,
-                    onSetPoint: onSetPoint
+                    panel: displayedPanel,
+                    onSetPoint: updatePreviewPoint
                 )
                 .frame(width: squareSize.width, height: squareSize.height)
 
                 QuickColorPickerHueStrip(
-                    hue: state.panel.pickerHue,
-                    onSetHue: onSetHue
+                    hue: displayedPanel.pickerHue,
+                    onSetHue: updatePreviewHue
                 )
                 .frame(width: hueStripWidth, height: squareSize.height)
             }
@@ -178,6 +181,21 @@ struct QuickColorPickerHUD: View {
     private func signedPercentLabel(for value: Float) -> String {
         let percent = Int((value * 100).rounded())
         return percent > 0 ? "+\(percent)" : "\(percent)"
+    }
+
+    private func updatePreviewPoint(_ x: Float, _ y: Float) {
+        var panel = previewPanel ?? state.panel
+        panel.pickerX = min(max(x, 0), 1)
+        panel.pickerY = min(max(y, 0), 1)
+        previewPanel = panel
+        onSetPoint(panel.pickerX, panel.pickerY)
+    }
+
+    private func updatePreviewHue(_ hue: Float) {
+        var panel = previewPanel ?? state.panel
+        panel.pickerHue = ColorBlocksEngine.wrapHue(hue)
+        previewPanel = panel
+        onSetHue(panel.pickerHue)
     }
 }
 
@@ -309,16 +327,17 @@ private struct QuickColorPickerSVSquare: View {
     @State private var localX: Float = 0
     @State private var localY: Float = 0
     @State private var isDragging = false
+    @State private var displayImage: CGImage?
 
     var body: some View {
         let displayX = isDragging ? localX : panel.pickerX
         let displayY = isDragging ? localY : panel.pickerY
 
         GeometryReader { geometry in
+            let size = max(64, Int(min(geometry.size.width, geometry.size.height) * 2))
             ZStack(alignment: .topLeading) {
-                let size = max(64, Int(min(geometry.size.width, geometry.size.height) * 2))
-                if let image = sharedColorPickerSVImage(size: size, panel: panel) {
-                    Image(decorative: image, scale: 1)
+                if let displayImage {
+                    Image(decorative: displayImage, scale: 1)
                         .resizable()
                         .interpolation(.high)
                         .scaledToFill()
@@ -356,7 +375,44 @@ private struct QuickColorPickerSVSquare: View {
                         isDragging = false
                     }
             )
+            .task(id: QuickColorPickerSVImageKey(size: size, panel: panel)) {
+                await updateDisplayImage(size: size, panel: panel)
+            }
         }
+    }
+
+    @MainActor
+    private func updateDisplayImage(size: Int, panel: ColorPanelState) async {
+        let renderTask = Task.detached(priority: .userInitiated) {
+            makeColorPickerSVImage(size: size, panel: panel) {
+                Task.isCancelled
+            }
+        }
+        let image = await withTaskCancellationHandler {
+            await renderTask.value
+        } onCancel: {
+            renderTask.cancel()
+        }
+        guard !Task.isCancelled, let image else { return }
+        displayImage = image
+    }
+}
+
+private struct QuickColorPickerSVImageKey: Hashable, Sendable {
+    let size: Int
+    let hue: Int
+    let lightness: Int
+    let saturation: Int
+    let lightingHue: Int
+    let lightingStrength: Int
+
+    init(size: Int, panel: ColorPanelState) {
+        self.size = size
+        hue = Int(panel.pickerHue.rounded())
+        lightness = Int(panel.pickerLightness.rounded())
+        saturation = Int(panel.pickerSaturation.rounded())
+        lightingHue = Int(panel.lightingHue.rounded())
+        lightingStrength = Int(panel.lightingStrength.rounded())
     }
 }
 

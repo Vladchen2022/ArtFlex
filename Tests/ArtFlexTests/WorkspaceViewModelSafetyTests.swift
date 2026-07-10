@@ -1,10 +1,59 @@
 import AppKit
+import Combine
 import Foundation
 import Metal
 import Testing
 @testable import ArtFlex
 
 struct WorkspaceViewModelSafetyTests {
+    @Test
+    @MainActor
+    func quickColorPickerPreviewDoesNotPublishWholeWorkspaceAndStillCommits() throws {
+        let harness = try BrushEditingBoundaryHarness()
+        harness.viewModel.updateCanvasToolHover(to: .init(x: 120, y: 120))
+        let keyDownHandled = harness.viewModel.handleKeyDown(
+            makeCanvasKeyEvent(
+                type: .keyDown,
+                characters: "Z",
+                charactersIgnoringModifiers: "z",
+                modifiers: [.shift],
+                keyCode: 6
+            )
+        )
+        #expect(keyDownHandled)
+        let initialState = try #require(harness.viewModel.quickColorPickerState)
+
+        var workspacePublicationCount = 0
+        let observation = harness.viewModel.objectWillChange.sink {
+            workspacePublicationCount += 1
+        }
+        for index in 0..<240 {
+            let progress = Float(index) / 239
+            harness.viewModel.setQuickColorPickerHue(progress * 359)
+            harness.viewModel.setQuickColorPickerPoint(x: progress, y: 1 - progress)
+        }
+        #expect(workspacePublicationCount == 0)
+
+        var expectedPanel = initialState.panel
+        expectedPanel.pickerHue = 359
+        expectedPanel.pickerX = 1
+        expectedPanel.pickerY = 0
+        let expectedColor = ColorBlocksEngine.pickerColor(from: expectedPanel)
+        let keyUpHandled = harness.viewModel.handleKeyUp(
+            makeCanvasKeyEvent(
+                type: .keyUp,
+                characters: "Z",
+                charactersIgnoringModifiers: "z",
+                modifiers: [],
+                keyCode: 6
+            )
+        )
+        #expect(keyUpHandled)
+        #expect(harness.viewModel.quickColorPickerState == nil)
+        #expect(harness.viewModel.workspace.toolSession.selectedColor == expectedColor)
+        _ = observation
+    }
+
     @Test
     func recentBrushAdjustmentDefaultsToOneSelectionWhenRecentStrokesExist() {
         #expect(WorkspaceViewModel.resolvedRecentBrushAdjustmentSelectionCount(preferredCount: 0, limit: 0) == 0)

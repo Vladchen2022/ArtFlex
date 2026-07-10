@@ -69,33 +69,53 @@ final class ColorPickerDisplayImageCache {
 @MainActor
 func sharedColorPickerSVImage(size: Int, panel: ColorPanelState) -> CGImage? {
     ColorPickerDisplayImageCache.shared.svImage(size: size, panel: panel) {
-        let bytesPerPixel = 4
-        let bytesPerRow = size * bytesPerPixel
-        var rgba = [UInt8](repeating: 0, count: size * size * bytesPerPixel)
-
-        for y in 0..<size {
-            for x in 0..<size {
-                let pointX = Float(x) / Float(max(size - 1, 1))
-                let pointY = Float(y) / Float(max(size - 1, 1))
-                var state = panel
-                state.pickerX = pointX
-                state.pickerY = pointY
-                let color = ColorBlocksEngine.pickerColor(from: state)
-                let offset = ((y * size) + x) * bytesPerPixel
-                rgba[offset] = UInt8(clamping: Int((color.red * 255).rounded()))
-                rgba[offset + 1] = UInt8(clamping: Int((color.green * 255).rounded()))
-                rgba[offset + 2] = UInt8(clamping: Int((color.blue * 255).rounded()))
-                rgba[offset + 3] = 255
-            }
-        }
-
-        return makeSharedColorPickerImage(
-            rgba: rgba,
-            width: size,
-            height: size,
-            bytesPerRow: bytesPerRow
-        )
+        makeColorPickerSVImage(size: size, panel: panel)
     }
+}
+
+func makeColorPickerSVImage(
+    size: Int,
+    panel: ColorPanelState,
+    shouldCancel: @Sendable () -> Bool = { false }
+) -> CGImage? {
+    guard size > 0 else { return nil }
+
+    let bytesPerPixel = 4
+    let bytesPerRow = size * bytesPerPixel
+    let denominator = Float(max(size - 1, 1))
+    let currentLightness = ColorBlocksEngine.clamp(panel.pickerLightness, 0, 100)
+    let maximumValue: Float = currentLightness <= 50 ? currentLightness / 50 : 1
+    let minimumValue: Float = currentLightness > 50 ? (currentLightness - 50) / 50 : 0
+    let maximumSaturation = ColorBlocksEngine.clamp(panel.pickerSaturation, 0, 100) / 100
+    let appliesLighting = panel.lightingStrength > 0.0001
+    var rgba = [UInt8](repeating: 0, count: size * size * bytesPerPixel)
+
+    for y in 0..<size {
+        guard !shouldCancel() else { return nil }
+        let pointY = Float(y) / denominator
+        let value = (1 - pointY) * (maximumValue - minimumValue) + minimumValue
+        for x in 0..<size {
+            let saturation = (Float(x) / denominator) * maximumSaturation
+            var color = ColorBlocksEngine.hsvToRgb(
+                HSVColor(h: panel.pickerHue, s: saturation, v: value)
+            )
+            if appliesLighting {
+                color = ColorBlocksEngine.applyLighting(to: color, state: panel)
+            }
+            let offset = ((y * size) + x) * bytesPerPixel
+            rgba[offset] = UInt8(clamping: Int((color.red * 255).rounded()))
+            rgba[offset + 1] = UInt8(clamping: Int((color.green * 255).rounded()))
+            rgba[offset + 2] = UInt8(clamping: Int((color.blue * 255).rounded()))
+            rgba[offset + 3] = 255
+        }
+    }
+
+    return makeSharedColorPickerImage(
+        rgba: rgba,
+        width: size,
+        height: size,
+        bytesPerRow: bytesPerRow
+    )
 }
 
 @MainActor

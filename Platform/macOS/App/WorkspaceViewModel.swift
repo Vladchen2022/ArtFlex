@@ -231,6 +231,7 @@ final class WorkspaceViewModel: ObservableObject {
     private var latestCanvasViewportSize: CGSize = .zero
     private var lastCanvasHoverPoint: CanvasPoint?
     private var isQuickColorPickerShortcutActive = false
+    private var quickColorPickerDraftState: QuickColorPickerState?
     private var recentBrushAdjustmentSelectedCount = 0
     private var recentBrushAdjustmentOpacity: Float = 1
     private var recentBrushAdjustmentBrightness: Float = 0
@@ -2991,13 +2992,13 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func setQuickColorPickerHue(_ hue: Float) {
-        guard var state = quickColorPickerState else { return }
+        guard var state = quickColorPickerDraftState ?? quickColorPickerState else { return }
         state.panel.pickerHue = ColorBlocksEngine.wrapHue(hue)
         previewQuickColorPickerState(state)
     }
 
     func setQuickColorPickerPoint(x: Float, y: Float) {
-        guard var state = quickColorPickerState else { return }
+        guard var state = quickColorPickerDraftState ?? quickColorPickerState else { return }
         state.panel.pickerX = min(max(x, 0), 1)
         state.panel.pickerY = min(max(y, 0), 1)
         previewQuickColorPickerState(state)
@@ -13593,6 +13594,7 @@ final class WorkspaceViewModel: ObservableObject {
         if quickColorPickerState != nil {
             commitQuickColorPickerSelectionIfNeeded()
             quickColorPickerState = nil
+            quickColorPickerDraftState = nil
             isRecentBrushSelectionHighlightActive = false
             syncRecentBrushAdjustmentState(showsSelectionHighlight: false)
         }
@@ -13612,7 +13614,7 @@ final class WorkspaceViewModel: ObservableObject {
             limit: recentBrushSelectionLimit
         )
 
-        quickColorPickerState = QuickColorPickerState(
+        let state = QuickColorPickerState(
             anchorPoint: anchorPoint,
             panel: panel,
             recentBrushSelectionCount: recentBrushAdjustmentSelectedCount,
@@ -13621,18 +13623,20 @@ final class WorkspaceViewModel: ObservableObject {
             recentBrushBrightness: recentBrushAdjustmentBrightness,
             recentBrushSaturation: recentBrushAdjustmentSaturation
         )
+        quickColorPickerDraftState = state
+        quickColorPickerState = state
         isRecentBrushSelectionHighlightActive = false
         syncRecentBrushAdjustmentState(showsSelectionHighlight: false)
     }
 
     private func previewQuickColorPickerState(_ state: QuickColorPickerState) {
-        quickColorPickerState = state
+        quickColorPickerDraftState = state
         let color = ColorBlocksEngine.pickerColor(from: state.panel)
         colorPanelProxy.selectedColor = color
     }
 
     private func commitQuickColorPickerSelectionIfNeeded() {
-        guard let state = quickColorPickerState else { return }
+        guard let state = quickColorPickerDraftState ?? quickColorPickerState else { return }
         let color = ColorBlocksEngine.pickerColor(from: state.panel)
 
         rememberReferenceImagePreviousColor(before: color)
@@ -13722,7 +13726,7 @@ final class WorkspaceViewModel: ObservableObject {
         )
 
         let didUpdateQuickColorPickerState: Bool
-        if var state = quickColorPickerState {
+        if var state = quickColorPickerDraftState ?? quickColorPickerState {
             let updatedState = QuickColorPickerState(
                 anchorPoint: state.anchorPoint,
                 panel: state.panel,
@@ -13735,6 +13739,7 @@ final class WorkspaceViewModel: ObservableObject {
             didUpdateQuickColorPickerState = updatedState != state
             if updatedState != state {
                 state = updatedState
+                quickColorPickerDraftState = state
                 quickColorPickerState = state
             }
         } else {
@@ -13779,12 +13784,13 @@ final class WorkspaceViewModel: ObservableObject {
             saturation: 0,
             showsSelectionHighlight: false
         )
-        if var state = quickColorPickerState {
+        if var state = quickColorPickerDraftState ?? quickColorPickerState {
             state.recentBrushSelectionCount = 0
             state.recentBrushSelectionLimit = currentRecentBrushAdjustmentLimit()
             state.recentBrushOpacity = 1
             state.recentBrushBrightness = 0
             state.recentBrushSaturation = 0
+            quickColorPickerDraftState = state
             quickColorPickerState = state
         }
         recentBrushAdjustmentRedrawRevision &+= 1
