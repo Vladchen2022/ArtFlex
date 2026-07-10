@@ -352,7 +352,8 @@ final class MetalStrokeEngine: StrokeEngine {
                     points: [],
                     selectionShape: lastStroke.selectionShape,
                     alphaLockEnabled: lastStroke.alphaLockEnabled,
-                    skipLeadingStamp: true
+                    skipLeadingStamp: true,
+                    paintVariationSeed: lastStroke.paintVariationSeed
                 )
 
                 if requiresOpacityCap(lastStroke), let opacityCapSession = session.opacityCapSession {
@@ -965,7 +966,8 @@ final class MetalStrokeEngine: StrokeEngine {
                 points: [],
                 selectionShape: adjustedLastStroke.selectionShape,
                 alphaLockEnabled: adjustedLastStroke.alphaLockEnabled,
-                skipLeadingStamp: true
+                skipLeadingStamp: true,
+                paintVariationSeed: adjustedLastStroke.paintVariationSeed
             )
 
             if requiresOpacityCap(adjustedLastStroke), let opacityCapSession {

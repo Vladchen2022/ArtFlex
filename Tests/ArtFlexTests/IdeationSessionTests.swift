@@ -75,6 +75,53 @@ struct IdeationSessionTests {
 
     @Test
     @MainActor
+    func synchronizedBrushStrokeSharesPaintVariationSeedAcrossBranches() throws {
+        let harness = try IdeationHarness()
+        harness.viewModel.setPaintJitterAmount(1)
+        harness.viewModel.setSelectedColor(.init(red: 0.78, green: 0.16, blue: 0.08, alpha: 1))
+        harness.viewModel.startIdeationSession()
+
+        let session = try #require(harness.viewModel.ideationSession)
+        let sourceBranch = session.branches[0].viewModel
+        sourceBranch.beginStrokeIfNeeded()
+        sourceBranch.applyStroke(samples: [
+            .init(location: .init(x: 10, y: 18), pressure: 1),
+            .init(location: .init(x: 24, y: 22), pressure: 1),
+            .init(location: .init(x: 40, y: 30), pressure: 1),
+            .init(location: .init(x: 54, y: 38), pressure: 1)
+        ])
+        sourceBranch.endStroke()
+
+        let sourceSnapshot = try sourceBranch.makeVisibleCompositeSnapshot()
+        for branch in session.branches.dropFirst() {
+            let branchSnapshot = try branch.viewModel.makeVisibleCompositeSnapshot()
+            #expect(branchSnapshot.pixelData == sourceSnapshot.pixelData)
+        }
+    }
+
+    @Test
+    @MainActor
+    func synchronizedStraightLineSharesPaintVariationSeedAcrossBranches() throws {
+        let harness = try IdeationHarness()
+        harness.viewModel.selectTool(.straightLine)
+        harness.viewModel.setPaintJitterAmount(1)
+        harness.viewModel.setSelectedColor(.init(red: 0.78, green: 0.16, blue: 0.08, alpha: 1))
+        harness.viewModel.startIdeationSession()
+
+        let session = try #require(harness.viewModel.ideationSession)
+        let sourceBranch = session.branches[0].viewModel
+        sourceBranch.handleCanvasToolClick(at: .init(x: 8, y: 32))
+        sourceBranch.handleCanvasToolClick(at: .init(x: 56, y: 32))
+
+        let sourceSnapshot = try sourceBranch.makeVisibleCompositeSnapshot()
+        for branch in session.branches.dropFirst() {
+            let branchSnapshot = try branch.viewModel.makeVisibleCompositeSnapshot()
+            #expect(branchSnapshot.pixelData == sourceSnapshot.pixelData)
+        }
+    }
+
+    @Test
+    @MainActor
     func applyingIdeationVariantToMainCanvasAppendsOnlyVisibleDeltaPixels() throws {
         let harness = try IdeationHarness()
         let baseLayerID = harness.viewModel.workspace.document.activeLayerID

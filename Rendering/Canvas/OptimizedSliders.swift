@@ -157,6 +157,10 @@ struct OptimizedCompactSlider: View {
                 in: range,
                 onEditingChanged: handleEditingChanged
             )
+            .onChange(of: localValue) { _, newValue in
+                guard !isEditing, abs(newValue - value) > 0.000_001 else { return }
+                onCommit(newValue)
+            }
             
             Text(isEditing ? (liveValueText?(localValue) ?? valueText) : valueText)
                 .font(.system(size: 11, weight: .semibold).monospacedDigit())

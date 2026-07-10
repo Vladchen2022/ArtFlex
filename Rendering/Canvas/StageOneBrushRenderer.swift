@@ -16,6 +16,7 @@ private struct BrushUniforms {
     var paintJitterAmount: Float
     var paintContrastAmount: Float
     var stampSeed: Float
+    var paintVariationSeed: UInt32
     var jitterDirectionDegrees: Float
     var canvasSize: SIMD2<Float>
     var mode: UInt32
@@ -71,6 +72,7 @@ private struct CompositeUniforms {
     var paintJitterAmount: Float = 0
     var paintContrastAmount: Float = 0
     var jitterDirectionDegrees: Float = 0
+    var paintVariationSeed: UInt32 = 0
     var canvasWidth: Float = 0
     var canvasHeight: Float = 0
     var strokeCenterX: Float = 0
@@ -189,6 +191,7 @@ final class StageOneBrushRenderer {
             float paintJitterAmount;
             float paintContrastAmount;
             float stampSeed;
+            uint paintVariationSeed;
             float jitterDirectionDegrees;
             float2 canvasSize;
             uint mode;
@@ -256,6 +259,7 @@ final class StageOneBrushRenderer {
             float paintJitterAmount;
             float paintContrastAmount;
             float jitterDirectionDegrees;
+            uint paintVariationSeed;
             float canvasWidth;
             float canvasHeight;
             float strokeCenterX;
@@ -533,94 +537,209 @@ final class StageOneBrushRenderer {
             return c.z * mix(K.xxx, clamp(p - K.xxx, 0.0, 1.0), c.y);
         }
 
-        float hash11(float value) {
-            return fract(sin(value * 127.1) * 43758.5453123);
+        uint paintHash(uint value) {
+            value ^= value >> 16;
+            value *= 0x7FEB352Du;
+            value ^= value >> 15;
+            value *= 0x846CA68Bu;
+            value ^= value >> 16;
+            return value;
         }
 
-        float3 jitteredSrgbColor(
-            float3 srgbColor,
-            float2 localPoint,
-            BrushUniforms uniforms
-        ) {
-            if (uniforms.colorJitterAmount <= 0.001) {
-                return srgbColor;
-            }
+        float paintRandom(uint seed, int index, uint salt) {
+            uint laneBits = as_type<uint>(index);
+            uint value = seed ^ (laneBits * 0x9E3779B9u) ^ salt;
+            return float(paintHash(value) & 0x00FFFFFFu) / 16777215.0;
+        }
 
-            float amount = clamp(uniforms.colorJitterAmount, 0.0, 1.0);
-            float radiansValue = uniforms.jitterDirectionDegrees * 0.017453292519943295;
-            float cosine = cos(radiansValue);
-            float sine = sin(radiansValue);
-            float2 rotatedPoint = float2(
-                (localPoint.x * cosine) + (localPoint.y * sine),
-                (-localPoint.x * sine) + (localPoint.y * cosine)
+        float paintRandom2D(uint seed, int2 index, uint salt) {
+            uint xBits = as_type<uint>(index.x);
+            uint yBits = as_type<uint>(index.y);
+            uint value = seed ^ (xBits * 0x9E3779B9u) ^ (yBits * 0x85EBCA6Bu) ^ salt;
+            return float(paintHash(value) & 0x00FFFFFFu) / 16777215.0;
+        }
+
+        float paintTriangularRandom(uint seed, int index, uint salt) {
+            return paintRandom(seed, index, salt) +
+                paintRandom(seed, index, salt ^ 0xA511E9B3u) - 1.0;
+        }
+
+        float paintValueNoise(float coordinate, uint seed, uint salt) {
+            int cell = int(floor(coordinate));
+            float fractionValue = fract(coordinate);
+            float smoothValue = fractionValue * fractionValue * (3.0 - (2.0 * fractionValue));
+            return mix(
+                paintRandom(seed, cell, salt),
+                paintRandom(seed, cell + 1, salt),
+                smoothValue
             );
+        }
 
-            float rightBoost = pow(amount, 1.75);
-            float stripeCoordPrimary = clamp((rotatedPoint.x + 1.0) * 0.5, 0.0, 1.0);
+        float paintValueNoise2D(float2 coordinate, uint seed, uint salt) {
+            int2 cell = int2(floor(coordinate));
+            float2 fractionValue = fract(coordinate);
+            float2 smoothValue = fractionValue * fractionValue * (3.0 - (2.0 * fractionValue));
+            float lower = mix(
+                paintRandom2D(seed, cell, salt),
+                paintRandom2D(seed, cell + int2(1, 0), salt),
+                smoothValue.x
+            );
+            float upper = mix(
+                paintRandom2D(seed, cell + int2(0, 1), salt),
+                paintRandom2D(seed, cell + int2(1, 1), salt),
+                smoothValue.x
+            );
+            return mix(lower, upper, smoothValue.y);
+        }
 
-            // Build irregular stripe widths by combining macro and micro warps.
-            float macroBandCount = floor(6.0 + (amount * 6.0));
-            macroBandCount = max(macroBandCount, 2.0);
-            float macroBandIndex = floor(stripeCoordPrimary * macroBandCount);
-            float macroWarp = ((hash11(macroBandIndex + 151.0) * 2.0) - 1.0) * ((0.025 * amount) + (0.085 * rightBoost));
+        float3 paintLaneSrgbColor(
+            float3 baseSrgb,
+            int laneIndex,
+            float longitudinal,
+            float amount,
+            float contrastAmount,
+            uint variationSeed
+        ) {
+            float shapedAmount = pow(clamp(amount, 0.0, 1.0), 1.18);
+            int groupSize = 3 + int(floor(paintRandom(variationSeed, 0, 0x6E624EB7u) * 4.0));
+            int groupIndex = int(floor(float(laneIndex) / float(groupSize)));
 
-            float fineWarpSeed = floor(stripeCoordPrimary * 96.0);
-            float fineWarp = ((hash11(fineWarpSeed + 5.0) * 2.0) - 1.0) * ((0.015 * amount) + (0.04 * rightBoost));
+            float groupHue = paintTriangularRandom(variationSeed, groupIndex, 0x1B56C4E9u);
+            float groupSaturation = paintTriangularRandom(variationSeed, groupIndex, 0xB5297A4Du);
+            float groupValue = paintTriangularRandom(variationSeed, groupIndex, 0x68E31DA4u);
+            float laneHue = paintTriangularRandom(variationSeed, laneIndex, 0xA24BAED5u);
+            float laneSaturation = paintTriangularRandom(variationSeed, laneIndex, 0x9FB21C65u);
+            float laneValue = paintTriangularRandom(variationSeed, laneIndex, 0xC13FA9A9u);
+            float slowEvolution = (paintValueNoise(
+                longitudinal * 0.38 + float(laneIndex) * 0.173,
+                variationSeed,
+                0x91E10DA5u
+            ) * 2.0) - 1.0;
+            float fineEvolution = (paintValueNoise(
+                longitudinal * 1.15 + float(laneIndex) * 0.619,
+                variationSeed,
+                0x3C6EF372u
+            ) * 2.0) - 1.0;
 
-            float warpedCoord = clamp(stripeCoordPrimary + macroWarp + fineWarp, 0.0, 0.999);
-            float stripeCount = floor(30.0 + (amount * 10.0));
-            stripeCount = max(stripeCount, 2.0);
-            float stripeIndex = floor(warpedCoord * stripeCount);
-            float hueRandom = hash11(stripeIndex + 1.0);
-            float saturationRandom = hash11(stripeIndex + 31.0);
-            float valueRandom = hash11(stripeIndex + 61.0);
-            float accentRandom = hash11(stripeIndex + 91.0);
-            float stripeShapeRandom = hash11(stripeIndex + 121.0);
+            float accentChance = 0.012 + (0.065 * shapedAmount) + (0.08 * contrastAmount);
+            float accentLane = step(
+                1.0 - accentChance,
+                paintRandom(variationSeed, laneIndex, 0xD1B54A35u)
+            );
+            float accentPulse = smoothstep(
+                0.58,
+                0.92,
+                paintValueNoise(
+                    longitudinal * 0.72 + float(laneIndex) * 2.371,
+                    variationSeed,
+                    0xF1357AE5u
+                )
+            );
+            float accentWeight = accentLane * accentPulse;
+            float accentSign = paintRandom(variationSeed, laneIndex, 0x94D049BBu) >= 0.5 ? 1.0 : -1.0;
 
-            float layeringBandCount = floor(10.0 + (amount * 10.0));
-            layeringBandCount = max(layeringBandCount, 2.0);
-            float layeringBandIndex = floor(warpedCoord * layeringBandCount);
-            float bandSaturationRandom = hash11(layeringBandIndex + 211.0);
-            float bandValueRandom = hash11(layeringBandIndex + 241.0);
+            float hueRange = 0.115 * shapedAmount;
+            float hueOffset = (groupHue * hueRange * 0.76) +
+                (laneHue * hueRange * 0.28) +
+                (slowEvolution * hueRange * 0.24) +
+                (fineEvolution * hueRange * 0.08) +
+                (accentWeight * accentSign * hueRange * 1.35);
+            float saturationOffset = ((groupSaturation * 0.19) + (laneSaturation * 0.10)) * shapedAmount;
+            float valueOffset = (
+                (groupValue * 0.15) +
+                (laneValue * 0.09) +
+                (slowEvolution * 0.055) +
+                (fineEvolution * 0.025)
+            ) * shapedAmount;
 
-            float3 hsv = rgbToHsv(srgbColor);
-            float hueOffsetRange = 0.25 * amount;
-            float saturationOffsetRange = (0.85 * amount) + (0.55 * rightBoost);
-            float valueOffsetRange = (0.40 * amount) + (0.28 * rightBoost);
-
-            float hueOffset = ((hueRandom * 2.0) - 1.0) * hueOffsetRange;
-            float accentGate = step(0.82 - (0.18 * amount), accentRandom);
-            hueOffset += ((accentRandom * 2.0) - 1.0) * (0.03 * rightBoost) * accentGate;
-
-            float saturationBase = mix(saturationRandom, bandSaturationRandom, 0.55);
-            float valueBase = mix(valueRandom, bandValueRandom, 0.45);
-
-            float saturationOffset = ((saturationBase * 2.0) - 1.0) * saturationOffsetRange;
-            float valueOffset = ((valueBase * 2.0) - 1.0) * valueOffsetRange;
-
-            float vividBoost = accentGate * ((0.18 * amount) + (0.3 * rightBoost));
-            float darkLightSwing = ((stripeShapeRandom * 2.0) - 1.0) * ((0.05 * amount) + (0.12 * rightBoost));
-
+            float3 hsv = rgbToHsv(baseSrgb);
             hsv.x = fract(hsv.x + hueOffset + 1.0);
-            hsv.y = clamp(hsv.y + saturationOffset + (0.15 * rightBoost) + vividBoost, 0.0, 1.0);
-            hsv.z = clamp(hsv.z + valueOffset + darkLightSwing, 0.0, 1.0);
+            hsv.y = clamp(
+                hsv.y + saturationOffset + (0.055 * shapedAmount) + (accentWeight * 0.08 * shapedAmount),
+                0.0,
+                1.0
+            );
+            hsv.z = clamp(hsv.z + valueOffset, 0.0, 1.0);
             return hsvToRgb(hsv);
         }
 
-        // Paint-like stripe jitter with many fine bands for oil-paint "pulled thread" feel.
+        float3 paintBristleSrgbColor(
+            float3 baseSrgb,
+            float crossStrokeCoordinate,
+            float longitudinal,
+            float diameterPixels,
+            float jitterAmount,
+            float contrastAmount,
+            uint variationSeed
+        ) {
+            float amount = clamp(jitterAmount, 0.0, 1.0);
+            float clampedContrast = clamp(contrastAmount, 0.0, 1.0);
+            if (amount <= 0.001 && clampedContrast <= 0.001) {
+                return baseSrgb;
+            }
+
+            float seedPhase = paintRandom(variationSeed, 0, 0xDB4F0B91u) * 19.0;
+            float u = clamp(crossStrokeCoordinate, 0.0, 1.0);
+            float macroWarp = paintValueNoise2D(
+                float2((u * 5.0) + seedPhase, (longitudinal * 0.52) + seedPhase),
+                variationSeed,
+                0xBBE05633u
+            ) - 0.5;
+            float mediumWarp = paintValueNoise2D(
+                float2((u * 16.0) + seedPhase, (longitudinal * 1.45) - seedPhase),
+                variationSeed,
+                0xA0F2EC75u
+            ) - 0.5;
+            float fineWarp = paintValueNoise((u * 41.0) + seedPhase, variationSeed, 0x89E18285u) - 0.5;
+            float naturalness = 0.45 + (0.55 * amount);
+            float warpedU = clamp(
+                u +
+                    (macroWarp * 0.085 * naturalness) +
+                    (mediumWarp * 0.038 * naturalness) +
+                    (fineWarp * 0.012 * naturalness),
+                0.0,
+                0.999999
+            );
+
+            float meanLaneWidth = mix(4.2, 2.0, sqrt(amount));
+            float laneCount = clamp(max(diameterPixels, 1.0) / meanLaneWidth, 8.0, 72.0);
+            float lanePosition = warpedU * laneCount;
+            int laneIndex = int(floor(lanePosition));
+            float laneFraction = fract(lanePosition);
+
+            float3 currentColor = paintLaneSrgbColor(
+                baseSrgb,
+                laneIndex,
+                longitudinal,
+                amount,
+                clampedContrast,
+                variationSeed
+            );
+            float3 nextColor = paintLaneSrgbColor(
+                baseSrgb,
+                laneIndex + 1,
+                longitudinal,
+                amount,
+                clampedContrast,
+                variationSeed
+            );
+            float blendWidth = clamp(fwidth(lanePosition) * 0.72, 0.035, 0.24);
+            float nextWeight = smoothstep(1.0 - blendWidth, 1.0, laneFraction);
+            float3 mixedColor = mix(currentColor, nextColor, nextWeight);
+
+            float broadField = (macroWarp * 2.0) + (mediumWarp * 0.55);
+            float3 mixedHsv = rgbToHsv(mixedColor);
+            mixedHsv.x = fract(mixedHsv.x + (broadField * 0.022 * amount) + 1.0);
+            mixedHsv.y = clamp(mixedHsv.y + (broadField * 0.045 * amount), 0.0, 1.0);
+            mixedHsv.z = clamp(mixedHsv.z + (broadField * 0.065 * amount), 0.0, 1.0);
+            return hsvToRgb(mixedHsv);
+        }
+
         float3 paintJitteredSrgbColor(
             float3 srgbColor,
             float2 localPoint,
             BrushUniforms uniforms
         ) {
-            float contrastAmt = clamp(uniforms.paintContrastAmount, 0.0, 1.0);
-            if (uniforms.paintJitterAmount <= 0.001 && contrastAmt <= 0.001) {
-                return srgbColor;
-            }
-
-            float amount = clamp(uniforms.paintJitterAmount / 0.75, 0.0, 1.0);
-
-            // Project localPoint onto the jitter direction to get stripe coordinate
             float radiansValue = uniforms.jitterDirectionDegrees * 0.017453292519943295;
             float cosine = cos(radiansValue);
             float sine = sin(radiansValue);
@@ -628,36 +747,17 @@ final class StageOneBrushRenderer {
                 (localPoint.x * cosine) + (localPoint.y * sine),
                 (-localPoint.x * sine) + (localPoint.y * cosine)
             );
-
-            float stripeCoord = clamp((rotatedPoint.x + 1.0) * 0.5, 0.0, 1.0);
-
-            // 70 fine stripes for dense pulled-thread look
-            float stripeCount = 70.0;
-            float stripeIndex = floor(stripeCoord * stripeCount);
-
-            // Scatter adjacent stripes via golden ratio so neighbors never get similar colors
-            float scattered = fract(stripeIndex * 0.618033988749895) * stripeCount;
-            float hueRandom = hash11(scattered + 1001.0);
-            float satRandom = hash11(scattered + 1031.0);
-            float valRandom = hash11(scattered + 1061.0);
-            float contrastRandom = hash11(scattered + 1091.0);
-
-            float3 hsv = rgbToHsv(srgbColor);
-            float wheelHue = hueRandom;
-            if (contrastAmt > 0.001) {
-                float threshold = 1.0 - (contrastAmt * 0.25);
-                if (contrastRandom > threshold) {
-                    wheelHue = fract(hsv.x + 0.5 + (((hueRandom * 2.0) - 1.0) * 0.06) + 1.0);
-                }
-            }
-
-            float satSigned = ((satRandom * 2.0) - 1.0);
-            float valSigned = ((valRandom * 2.0) - 1.0);
-            float wheelS = clamp(mix(hsv.y, 0.82, amount) + (satSigned * 0.12 * amount), 0.0, 1.0);
-            float wheelV = clamp(hsv.z + (valSigned * 0.18 * amount), 0.0, 1.0);
-            float baseCoverage = mix(1.0, 0.20, amount);
-            float3 wheelSrgb = hsvToRgb(float3(wheelHue, wheelS, wheelV));
-            return mix(wheelSrgb, srgbColor, baseCoverage);
+            float diameterPixels = max(uniforms.radius * 2.0, 1.0);
+            float longitudinal = (uniforms.stampSeed / diameterPixels) + (rotatedPoint.y * 0.5);
+            return paintBristleSrgbColor(
+                srgbColor,
+                (rotatedPoint.x + 1.0) * 0.5,
+                longitudinal,
+                diameterPixels,
+                uniforms.paintJitterAmount,
+                uniforms.paintContrastAmount,
+                uniforms.paintVariationSeed
+            );
         }
 
         vertex CompositeVertexOut stageOneCompositeVertex(
@@ -1032,47 +1132,29 @@ final class StageOneBrushRenderer {
             float jitterAmt = uniforms.paintJitterAmount;
             float contrastAmt = uniforms.paintContrastAmount;
             if (jitterAmt > 0.001 || contrastAmt > 0.001) {
-                // Convert texCoord to pixel position relative to stroke center
-                float2 pixelPos = float2(
-                    in.texCoord.x * uniforms.canvasWidth - uniforms.strokeCenterX,
-                    in.texCoord.y * uniforms.canvasHeight - uniforms.strokeCenterY
+                float2 absolutePixel = float2(
+                    in.texCoord.x * uniforms.canvasWidth,
+                    in.texCoord.y * uniforms.canvasHeight
                 );
-                // Normalize by stroke radius to get -1..1 range
-                float invRadius = 1.0 / max(uniforms.strokeRadius, 1.0);
-                float2 localPoint = pixelPos * invRadius;
-
-                // Project onto jitter direction for stripe coordinate
+                float2 pixelPos = absolutePixel - float2(
+                    uniforms.strokeCenterX,
+                    uniforms.strokeCenterY
+                );
                 float radiansValue = uniforms.jitterDirectionDegrees * 0.017453292519943295;
                 float cosine = cos(radiansValue);
                 float sine = sin(radiansValue);
-                float rotX = (localPoint.x * cosine) + (localPoint.y * sine);
-                float stripeCoord = clamp((rotX + 1.0) * 0.5, 0.0, 1.0);
-
-                float stripeCount = 70.0;
-                float stripeIndex = floor(stripeCoord * stripeCount);
-                float scattered = fract(stripeIndex * 0.618033988749895) * stripeCount;
-                float hueRandom = hash11(scattered + 1001.0);
-                float satRandom = hash11(scattered + 1031.0);
-                float valRandom = hash11(scattered + 1061.0);
-
-                float3 hsv = rgbToHsv(brushSrgb);
-                float amount = clamp(jitterAmt / 0.75, 0.0, 1.0);
-                float contrastRandom = hash11(scattered + 1091.0);
-                float wheelHue = hueRandom;
-                if (contrastAmt > 0.001) {
-                    float threshold = 1.0 - (contrastAmt * 0.25);
-                    if (contrastRandom > threshold) {
-                        wheelHue = fract(hsv.x + 0.5 + (((hueRandom * 2.0) - 1.0) * 0.06) + 1.0);
-                    }
-                }
-
-                float satSigned = ((satRandom * 2.0) - 1.0);
-                float valSigned = ((valRandom * 2.0) - 1.0);
-                float wheelS = clamp(mix(hsv.y, 0.82, amount) + (satSigned * 0.12 * amount), 0.0, 1.0);
-                float wheelV = clamp(hsv.z + (valSigned * 0.18 * amount), 0.0, 1.0);
-                float baseCoverage = mix(1.0, 0.20, amount);
-                float3 wheelSrgb = hsvToRgb(float3(wheelHue, wheelS, wheelV));
-                brushSrgb = mix(wheelSrgb, brushSrgb, baseCoverage);
+                float crossPixels = (pixelPos.x * cosine) + (pixelPos.y * sine);
+                float longitudinalPixels = (-absolutePixel.x * sine) + (absolutePixel.y * cosine);
+                float diameterPixels = max(uniforms.strokeRadius * 2.0, 1.0);
+                brushSrgb = paintBristleSrgbColor(
+                    brushSrgb,
+                    0.5 + (crossPixels / diameterPixels),
+                    longitudinalPixels / diameterPixels,
+                    diameterPixels,
+                    jitterAmt,
+                    contrastAmt,
+                    uniforms.paintVariationSeed
+                );
             }
 
             float3 linearRGB = srgbToLinear(brushSrgb);
@@ -1663,28 +1745,27 @@ final class StageOneBrushRenderer {
             encoder.setFragmentSamplerState(compositeSamplerState, index: 0)
             encoder.setScissorRect(dirtyRect)
 
-            // Compute stroke center and average direction for paint jitter stripes
+            // Keep the material frame stable for straight segments while avoiding angle wraparound.
             let strokeCenterX: Float
             let strokeCenterY: Float
             let strokeRadius: Float
             let avgJitterDir: Float
             if !samples.isEmpty {
-                var sumX: Float = 0; var sumY: Float = 0; var sumDir: Float = 0
+                var sumX: Float = 0
+                var sumY: Float = 0
+                var sumTangentX: Float = 0
+                var sumTangentY: Float = 0
                 for s in samples {
-                    sumX += Float(s.point.x); sumY += Float(s.point.y)
-                    sumDir += s.jitterDirectionDegrees
+                    sumX += Float(s.point.x)
+                    sumY += Float(s.point.y)
+                    sumTangentX += s.strokeTangent.x
+                    sumTangentY += s.strokeTangent.y
                 }
                 let n = Float(samples.count)
                 strokeCenterX = sumX / n
                 strokeCenterY = sumY / n
-                avgJitterDir = sumDir / n + 90
-                var maxDist: Float = 0
-                for s in samples {
-                    let dx = Float(s.point.x) - strokeCenterX
-                    let dy = Float(s.point.y) - strokeCenterY
-                    maxDist = max(maxDist, sqrt(dx * dx + dy * dy))
-                }
-                strokeRadius = maxDist + Float(stroke.brush.size) * 0.5
+                avgJitterDir = atan2(sumTangentY, sumTangentX) * 180 / .pi + 90
+                strokeRadius = max(Float(stroke.brush.size) * 0.5, 0.5)
             } else {
                 strokeCenterX = 0; strokeCenterY = 0; strokeRadius = 1; avgJitterDir = 0
             }
@@ -1700,6 +1781,7 @@ final class StageOneBrushRenderer {
                 paintJitterAmount: stroke.brush.effectivePaintJitterAmount,
                 paintContrastAmount: stroke.brush.effectivePaintContrastAmount,
                 jitterDirectionDegrees: avgJitterDir,
+                paintVariationSeed: stroke.paintVariationSeed,
                 canvasWidth: Float(texture.width),
                 canvasHeight: Float(texture.height),
                 strokeCenterX: strokeCenterX,
@@ -1915,6 +1997,7 @@ final class StageOneBrushRenderer {
             paintJitterAmount: stroke.brush.effectivePaintJitterAmount,
             paintContrastAmount: stroke.brush.effectivePaintContrastAmount,
             stampSeed: sample.arcLengthPx,
+            paintVariationSeed: stroke.paintVariationSeed,
             jitterDirectionDegrees: sample.jitterDirectionDegrees + 90,
             canvasSize: SIMD2(Float(texture.width), Float(texture.height)),
             mode: modeOverride ?? (stroke.tool == .eraser ? 1 : 0),

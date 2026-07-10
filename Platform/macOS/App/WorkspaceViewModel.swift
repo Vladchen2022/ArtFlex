@@ -239,6 +239,7 @@ final class WorkspaceViewModel: ObservableObject {
     private var lastRecentBrushAdjustmentSyncState: RecentBrushAdjustmentSyncState?
     private var documentChangeRevision: UInt64 = 0
     private var strokePacketCount = 0
+    private var activePaintVariationSeed: UInt32 = 0
     var colorAdjustmentSession: ColorAdjustmentSession?
     var curveAdjustmentSession: CurveAdjustmentSession?
     var brightnessAdjustmentEditorMode: BrightnessAdjustmentEditorMode = .colorParameters
@@ -5433,7 +5434,7 @@ final class WorkspaceViewModel: ObservableObject {
         showStatus(.init(kind: .info, message: "已取消直线"))
     }
 
-    func handleStraightLineClick(at point: CanvasPoint) {
+    func handleStraightLineClick(at point: CanvasPoint, paintVariationSeed: UInt32? = nil) {
         guard workspace.toolSession.activeTool == .straightLine else { return }
 
         switch straightLineState.phase {
@@ -5447,7 +5448,11 @@ final class WorkspaceViewModel: ObservableObject {
                 showStatus(.init(kind: .info, message: "A 与 B 需要拉开一点距离"))
                 return
             }
-            let didApply = applyStraightLine(pointA: pointA, pointB: point)
+            let didApply = applyStraightLine(
+                pointA: pointA,
+                pointB: point,
+                paintVariationSeed: paintVariationSeed
+            )
             if didApply {
                 straightLineState = .init()
             } else {
@@ -5472,17 +5477,28 @@ final class WorkspaceViewModel: ObservableObject {
         showStatus(.init(kind: .info, message: "已取消扇形渐变"))
     }
 
-    func handleCanvasToolClick(at point: CanvasPoint, modifiers: NSEvent.ModifierFlags = [], clickCount: Int = 1) {
+    func handleCanvasToolClick(
+        at point: CanvasPoint,
+        modifiers: NSEvent.ModifierFlags = [],
+        clickCount: Int = 1,
+        paintVariationSeed seedOverride: UInt32? = nil
+    ) {
         ideationBranchActivityHandler?()
+        let paintVariationSeed = seedOverride ?? makePaintVariationSeed()
         switch workspace.toolSession.activeTool {
         case .straightLine:
-            handleStraightLineClick(at: point)
+            handleStraightLineClick(at: point, paintVariationSeed: paintVariationSeed)
         case .polygonSelection:
             handlePolygonSelectionClick(at: point, modifiers: modifiers, clickCount: clickCount)
         default:
             break
         }
-        relayIdeationOperation(.handleCanvasToolClick(point: point, modifiers: .init(flags: modifiers), clickCount: clickCount))
+        relayIdeationOperation(.handleCanvasToolClick(
+            point: point,
+            modifiers: .init(flags: modifiers),
+            clickCount: clickCount,
+            paintVariationSeed: paintVariationSeed
+        ))
     }
 
     private func beginSectorGradientDrag(at point: CanvasPoint, modifiers: NSEvent.ModifierFlags) {
@@ -8588,7 +8604,11 @@ final class WorkspaceViewModel: ObservableObject {
         )
     }
 
-    func applyStraightLine(pointA: CanvasPoint, pointB: CanvasPoint) -> Bool {
+    func applyStraightLine(
+        pointA: CanvasPoint,
+        pointB: CanvasPoint,
+        paintVariationSeed: UInt32? = nil
+    ) -> Bool {
         guard let layerID = bootstrap.interactionController.activeEditableLayerID() else {
             showStatus(.init(kind: .info, message: "当前图层已锁定"))
             return false
@@ -8606,7 +8626,8 @@ final class WorkspaceViewModel: ObservableObject {
                 StrokePoint(x: pointB.x, y: pointB.y, pressure: 1)
             ],
             selectionShape: workspace.selection.committedShape,
-            alphaLockEnabled: layerTransparentPixelLockEnabled(layerID)
+            alphaLockEnabled: layerTransparentPixelLockEnabled(layerID),
+            paintVariationSeed: paintVariationSeed ?? makePaintVariationSeed()
         )
 
         bootstrap.strokeEngine.beginStrokeIfNeeded(
@@ -9103,9 +9124,13 @@ final class WorkspaceViewModel: ObservableObject {
         let packetIndex = strokePacketCount
         let skipLeadingStamp = packetIndex > 0
         _ = resolvedToolSessionForCanvasStrokes()
+        if activePaintVariationSeed == 0 {
+            activePaintVariationSeed = makePaintVariationSeed()
+        }
         guard let strokePayload = bootstrap.interactionController.makeStrokeDescriptor(
             samples: samples,
-            skipLeadingStamp: skipLeadingStamp
+            skipLeadingStamp: skipLeadingStamp,
+            paintVariationSeed: activePaintVariationSeed
         ) else {
             if diagnosticsEnabled {
                 let applyDurationMs = Double(DispatchTime.now().uptimeNanoseconds - applyStartNs) / 1_000_000
@@ -9146,7 +9171,7 @@ final class WorkspaceViewModel: ObservableObject {
         relayIdeationOperation(.applyStroke(samples))
     }
 
-    func beginStrokeIfNeeded() {
+    func beginStrokeIfNeeded(paintVariationSeed seedOverride: UInt32? = nil) {
         let auditEnabled = PerformanceAuditStore.shared.isRecordingEnabled
         let startNs = auditEnabled ? DispatchTime.now().uptimeNanoseconds : 0
         defer {
@@ -9186,11 +9211,14 @@ final class WorkspaceViewModel: ObservableObject {
             checkpointHistoryIfPossible()
         }
 
+        let paintVariationSeed = seedOverride ?? makePaintVariationSeed()
+        activePaintVariationSeed = paintVariationSeed
+
         bootstrap.strokeEngine.beginStrokeIfNeeded(
             toolSession: resolvedToolSessionForCanvasStrokes(),
             layerID: layerID
         )
-        relayIdeationOperation(.beginStroke)
+        relayIdeationOperation(.beginStroke(paintVariationSeed: paintVariationSeed))
     }
 
     func endStroke() {
@@ -9206,9 +9234,24 @@ final class WorkspaceViewModel: ObservableObject {
         ideationBranchActivityHandler?()
         bootstrap.strokeEngine.endStroke()
         strokePacketCount = 0
+        activePaintVariationSeed = 0
         generatorStrokeSession = .init()
         noteCanvasContentChanged(changedLayerIDs: [workspace.document.activeLayerID])
         relayIdeationOperation(.endStroke)
+    }
+
+    private func makePaintVariationSeed() -> UInt32 {
+        UInt32.random(in: 1...UInt32.max)
+    }
+
+    private func derivedPaintVariationSeed(_ seed: UInt32, salt: UInt32) -> UInt32 {
+        var value = seed ^ (salt &* 0x9E37_79B9)
+        value ^= value >> 16
+        value &*= 0x7FEB_352D
+        value ^= value >> 15
+        value &*= 0x846C_A68B
+        value ^= value >> 16
+        return value == 0 ? (salt | 1) : value
     }
 
     @discardableResult
@@ -10499,8 +10542,8 @@ final class WorkspaceViewModel: ObservableObject {
         }
 
         switch operation {
-        case .beginStroke:
-            beginStrokeIfNeeded()
+        case .beginStroke(let paintVariationSeed):
+            beginStrokeIfNeeded(paintVariationSeed: paintVariationSeed)
         case .applyStroke(let samples):
             applyStroke(samples: samples)
         case .endStroke:
@@ -10522,8 +10565,13 @@ final class WorkspaceViewModel: ObservableObject {
         case .applyCanvasCrop(let bounds):
             canvasCropState.bounds = bounds
             applyCanvasCrop()
-        case .handleCanvasToolClick(let point, let modifiers, let clickCount):
-            handleCanvasToolClick(at: point, modifiers: modifiers.eventFlags, clickCount: clickCount)
+        case .handleCanvasToolClick(let point, let modifiers, let clickCount, let paintVariationSeed):
+            handleCanvasToolClick(
+                at: point,
+                modifiers: modifiers.eventFlags,
+                clickCount: clickCount,
+                paintVariationSeed: paintVariationSeed
+            )
         case .beginSelection(let kind, let start, let modifiers):
             beginSelection(kind: kind, at: start, modifiers: modifiers.eventFlags)
         case .updateSelection(let point, let modifiers):
@@ -13063,7 +13111,8 @@ final class WorkspaceViewModel: ObservableObject {
             brush: stroke.brush,
             points: smoothStrokePoints(transformedPoints),
             selectionShape: stroke.selectionShape,
-            alphaLockEnabled: stroke.alphaLockEnabled
+            alphaLockEnabled: stroke.alphaLockEnabled,
+            paintVariationSeed: stroke.paintVariationSeed
         )
     }
 
@@ -13120,7 +13169,8 @@ final class WorkspaceViewModel: ObservableObject {
             brush: stroke.brush,
             points: smoothStrokePoints(points),
             selectionShape: stroke.selectionShape,
-            alphaLockEnabled: stroke.alphaLockEnabled
+            alphaLockEnabled: stroke.alphaLockEnabled,
+            paintVariationSeed: derivedPaintVariationSeed(stroke.paintVariationSeed, salt: 0xB12A_4C4D)
         )
     }
 
@@ -13175,7 +13225,11 @@ final class WorkspaceViewModel: ObservableObject {
                 brush: stroke.brush,
                 points: smoothStrokePoints(points),
                 selectionShape: stroke.selectionShape,
-                alphaLockEnabled: stroke.alphaLockEnabled
+                alphaLockEnabled: stroke.alphaLockEnabled,
+                paintVariationSeed: derivedPaintVariationSeed(
+                    stroke.paintVariationSeed,
+                    salt: UInt32(index + 1) &* 0x45D9_F3B
+                )
             )
         }
 

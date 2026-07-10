@@ -4,6 +4,83 @@ import Testing
 
 struct MetalStrokeEngineQueueTests {
     @Test
+    func paintJitterSeedIsDeterministicVariedAndAlphaNeutral() throws {
+        guard let metalContext = MetalDeviceContext() else {
+            Issue.record("Metal unavailable")
+            return
+        }
+        let renderer = try StageOneBrushRenderer(device: metalContext.device)
+
+        let first = try renderPaintJitterSnapshot(
+            metalContext: metalContext,
+            renderer: renderer,
+            seed: 0x1234_5678,
+            amount: 1,
+            buildMode: .buildUp
+        )
+        let replay = try renderPaintJitterSnapshot(
+            metalContext: metalContext,
+            renderer: renderer,
+            seed: 0x1234_5678,
+            amount: 1,
+            buildMode: .buildUp
+        )
+        let variant = try renderPaintJitterSnapshot(
+            metalContext: metalContext,
+            renderer: renderer,
+            seed: 0x9ABC_DEF0,
+            amount: 1,
+            buildMode: .buildUp
+        )
+
+        #expect(first.pixelData == replay.pixelData)
+        #expect(first.pixelData != variant.pixelData)
+        #expect(alphaBytes(in: first) == alphaBytes(in: variant))
+
+        let zeroFirst = try renderPaintJitterSnapshot(
+            metalContext: metalContext,
+            renderer: renderer,
+            seed: 1,
+            amount: 0,
+            buildMode: .buildUp
+        )
+        let zeroVariant = try renderPaintJitterSnapshot(
+            metalContext: metalContext,
+            renderer: renderer,
+            seed: UInt32.max,
+            amount: 0,
+            buildMode: .buildUp
+        )
+        #expect(zeroFirst.pixelData == zeroVariant.pixelData)
+
+        let seventyFivePercent = try renderPaintJitterSnapshot(
+            metalContext: metalContext,
+            renderer: renderer,
+            seed: 0x1234_5678,
+            amount: 0.75,
+            buildMode: .buildUp
+        )
+        #expect(seventyFivePercent.pixelData != first.pixelData)
+
+        let opacityCapFirst = try renderPaintJitterSnapshot(
+            metalContext: metalContext,
+            renderer: renderer,
+            seed: 0x1234_5678,
+            amount: 1,
+            buildMode: .opacityCap
+        )
+        let opacityCapVariant = try renderPaintJitterSnapshot(
+            metalContext: metalContext,
+            renderer: renderer,
+            seed: 0x9ABC_DEF0,
+            amount: 1,
+            buildMode: .opacityCap
+        )
+        #expect(opacityCapFirst.pixelData != opacityCapVariant.pixelData)
+        #expect(alphaBytes(in: opacityCapFirst) == alphaBytes(in: opacityCapVariant))
+    }
+
+    @Test
     func interactiveCommitDrainSchedulingRejectsFutileMainThreadWork() {
         #expect(shouldScheduleInteractiveBrushCommitDrain(
             queueDepth: 0,
@@ -953,6 +1030,87 @@ struct MetalStrokeEngineQueueTests {
         }
         #expect(alphaBytes.allSatisfy { $0 == 0 })
     }
+}
+
+private func renderPaintJitterSnapshot(
+    metalContext: MetalDeviceContext,
+    renderer: StageOneBrushRenderer,
+    seed: UInt32,
+    amount: Float,
+    buildMode: BrushBuildMode
+) throws -> LayerTextureSnapshot {
+    let surfaceStore = StageOneLayerSurfaceStore()
+    let serializer = LayerTextureSerializer(metalContext: metalContext)
+    guard
+        let texture = surfaceStore.makeTexture(width: 192, height: 96, metal: metalContext),
+        let commandBuffer = metalContext.commandQueue.makeCommandBuffer()
+    else {
+        throw PaintJitterTestError.textureUnavailable
+    }
+    try serializer.restore(
+        snapshot: LayerTextureSnapshot(
+            width: 192,
+            height: 96,
+            bytesPerRow: 192 * 4,
+            pixelData: Data(repeating: 0, count: 192 * 96 * 4)
+        ),
+        into: texture
+    )
+
+    var brush = BrushSettings.stageOneDefault
+    brush.size = 64
+    brush.spacingPercent = 8
+    brush.opacity = 1
+    brush.paintJitterAmount = amount
+    brush.buildMode = buildMode
+    let stroke = StrokeDescriptor(
+        tool: .brush,
+        color: .init(red: 0.78, green: 0.16, blue: 0.08, alpha: 1),
+        brush: brush,
+        points: [
+            .init(x: 28, y: 48, pressure: 1),
+            .init(x: 72, y: 48, pressure: 1),
+            .init(x: 120, y: 48, pressure: 1),
+            .init(x: 164, y: 48, pressure: 1)
+        ],
+        selectionShape: nil,
+        paintVariationSeed: seed
+    )
+    var samplingState: BrushStrokeSamplingState?
+    if buildMode == .opacityCap {
+        guard let session = renderer.makeOpacityCapSession(
+            for: texture,
+            commandQueue: metalContext.commandQueue
+        ) else {
+            throw PaintJitterTestError.textureUnavailable
+        }
+        _ = renderer.encodeOpacityCapStroke(
+            stroke: stroke,
+            session: session,
+            into: texture,
+            commandBuffer: commandBuffer,
+            samplingState: &samplingState
+        )
+    } else {
+        _ = renderer.encodeStroke(
+            stroke: stroke,
+            into: texture,
+            commandQueue: metalContext.commandQueue,
+            commandBuffer: commandBuffer,
+            samplingState: &samplingState
+        )
+    }
+    commandBuffer.commit()
+    commandBuffer.waitUntilCompleted()
+    return try serializer.snapshot(texture: texture)
+}
+
+private func alphaBytes(in snapshot: LayerTextureSnapshot) -> [UInt8] {
+    stride(from: 3, to: snapshot.pixelData.count, by: 4).map { snapshot.pixelData[$0] }
+}
+
+private enum PaintJitterTestError: Error {
+    case textureUnavailable
 }
 
 private func enqueueBrushCommitJob(

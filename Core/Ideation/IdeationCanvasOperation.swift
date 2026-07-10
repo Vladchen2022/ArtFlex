@@ -25,7 +25,7 @@ struct CanvasModifierState: Sendable, Equatable {
 }
 
 enum IdeationCanvasOperation: Sendable {
-    case beginStroke
+    case beginStroke(paintVariationSeed: UInt32)
     case applyStroke([CanvasStrokeSample])
     case endStroke
     case beginGradientDrag(point: CanvasPoint, modifiers: CanvasModifierState)
@@ -36,7 +36,12 @@ enum IdeationCanvasOperation: Sendable {
     case cancelGradientSession
     case fillAtPoint(CanvasPoint)
     case applyCanvasCrop(CanvasRect)
-    case handleCanvasToolClick(point: CanvasPoint, modifiers: CanvasModifierState, clickCount: Int)
+    case handleCanvasToolClick(
+        point: CanvasPoint,
+        modifiers: CanvasModifierState,
+        clickCount: Int,
+        paintVariationSeed: UInt32
+    )
     case beginSelection(kind: SelectionShapeKind, start: CanvasPoint, modifiers: CanvasModifierState)
     case updateSelection(point: CanvasPoint, modifiers: CanvasModifierState)
     case commitSelection(end: CanvasPoint, modifiers: CanvasModifierState)

@@ -14,7 +14,8 @@ final class CanvasInteractionController {
 
     func makeStrokeDescriptor(
         samples: [CanvasStrokeSample],
-        skipLeadingStamp: Bool = false
+        skipLeadingStamp: Bool = false,
+        paintVariationSeed: UInt32 = 0
     ) -> (layerID: LayerID, stroke: StrokeDescriptor)? {
         guard
             !samples.isEmpty,
@@ -40,7 +41,8 @@ final class CanvasInteractionController {
             },
             selectionShape: workspaceStore.state.selection.committedShape,
             alphaLockEnabled: activeLayer.locksTransparentPixels,
-            skipLeadingStamp: skipLeadingStamp
+            skipLeadingStamp: skipLeadingStamp,
+            paintVariationSeed: paintVariationSeed
         )
 
         return (layerID: activeLayer.id, stroke: stroke)

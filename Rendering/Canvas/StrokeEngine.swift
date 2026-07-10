@@ -15,6 +15,7 @@ struct StrokeDescriptor: Sendable, Equatable {
     var selectionShape: SelectionShape?
     var alphaLockEnabled: Bool = false
     var skipLeadingStamp: Bool = false
+    var paintVariationSeed: UInt32 = 0
 }
 
 struct BrushFlushMetrics: Sendable, Equatable {
