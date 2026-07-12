@@ -332,9 +332,10 @@ struct RightInspectorView: View {
     @State private var topInspectorTab: TopInspectorTab = .navigator
     @State private var navigatorZoomPercentText = "100"
     var body: some View {
-        GeometryReader { proxy in
-            ScrollView(.vertical, showsIndicators: true) {
-                HStack(alignment: .top, spacing: 12) {
+        ZStack {
+            GeometryReader { proxy in
+                ScrollView(.vertical, showsIndicators: true) {
+                    HStack(alignment: .top, spacing: 12) {
                     VStack(spacing: 12) {
                         generatorReferencePanel()
 
@@ -377,10 +378,21 @@ struct RightInspectorView: View {
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
                 }
-                .padding(12)
-                .frame(maxWidth: .infinity, minHeight: proxy.size.height, alignment: .top)
+                    .padding(12)
+                    .frame(maxWidth: .infinity, minHeight: proxy.size.height, alignment: .top)
+                }
+                .frame(width: proxy.size.width, height: proxy.size.height, alignment: .top)
             }
-            .frame(width: proxy.size.width, height: proxy.size.height, alignment: .top)
+
+            if showsCompoundBrushBuilder {
+                CompoundBrushBuilderSheet(viewModel: viewModel) {
+                    withAnimation(.easeOut(duration: 0.16)) {
+                        showsCompoundBrushBuilder = false
+                    }
+                }
+                .transition(.move(edge: .trailing).combined(with: .opacity))
+                .zIndex(2)
+            }
         }
         .frame(width: 560)
         .frame(maxHeight: .infinity)
@@ -412,9 +424,6 @@ struct RightInspectorView: View {
             tipImageLibrarySheet(for: target) {
                 tipImageLibrarySheetTarget = nil
             }
-        }
-        .sheet(isPresented: $showsCompoundBrushBuilder) {
-            CompoundBrushBuilderSheet(viewModel: viewModel)
         }
     }
 
@@ -2246,10 +2255,23 @@ struct RightInspectorView: View {
                     tipPaintMode = tipPaintMode == .eraser ? .round : .eraser
                 }
 
+                Toggle(
+                    "",
+                    isOn: Binding(
+                        get: { viewModel.workspace.toolSession.brush.compoundBrush.enabled },
+                        set: { viewModel.setCompoundBrushEnabled($0) }
+                    )
+                )
+                .labelsHidden()
+                .toggleStyle(.switch)
+                .controlSize(.mini)
+                .frame(width: 34)
+                .help("启用或停用组合笔刷")
+
                 compactTextActionButton(
-                    title: "组合笔刷…",
-                    tooltip: "打开组合笔刷工作台",
-                    minWidth: 82,
+                    title: "编辑组合…",
+                    tooltip: "编辑组合笔刷",
+                    minWidth: 76,
                     isProminent: viewModel.workspace.toolSession.brush.compoundBrush.enabled,
                     fillsAvailableWidth: true,
                     height: topInspectorControlButtonHeight,
@@ -2257,12 +2279,7 @@ struct RightInspectorView: View {
                     fontSize: 11,
                     horizontalPadding: 6
                 ) {
-                    let isCompoundEnabled = viewModel.workspace.toolSession.brush.compoundBrush.enabled
-                    if isCompoundEnabled {
-                        viewModel.setCompoundBrushEnabled(false)
-                        showsCompoundBrushBuilder = false
-                    } else {
-                        viewModel.setCompoundBrushEnabled(true)
+                    withAnimation(.easeOut(duration: 0.16)) {
                         showsCompoundBrushBuilder = true
                     }
                 }

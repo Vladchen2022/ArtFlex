@@ -347,6 +347,24 @@ struct CompoundPressureMixSettings: Codable, Equatable, Sendable {
         primaryAtHighPressure: 1.00
     )
 
+    static let primaryOnly = CompoundPressureMixSettings(
+        primaryAtLowPressure: 1,
+        primaryAtMidPressure: 1,
+        primaryAtHighPressure: 1
+    )
+
+    static let secondaryOnly = CompoundPressureMixSettings(
+        primaryAtLowPressure: 0,
+        primaryAtMidPressure: 0,
+        primaryAtHighPressure: 0
+    )
+
+    static let balanced = CompoundPressureMixSettings(
+        primaryAtLowPressure: 0.5,
+        primaryAtMidPressure: 0.5,
+        primaryAtHighPressure: 0.5
+    )
+
     func resolvedPrimaryWeight(for pressure: Float) -> Float {
         let clampedPressure = min(max(pressure, 0), 1)
         if clampedPressure <= 0.5 {
@@ -367,12 +385,18 @@ enum CompoundBrushMode: String, Codable, Equatable, Sendable, CaseIterable {
     var displayName: String {
         switch self {
         case .textureBlend:
-            return "叠加"
+            return "纹理出现处"
         case .subtract:
-            return "减去"
+            return "纹理空白处"
         case .intersect:
-            return "相交"
+            return "旧版相交"
         }
+    }
+
+    static let editorCases: [CompoundBrushMode] = [.textureBlend, .subtract]
+
+    var editorEquivalent: CompoundBrushMode {
+        self == .intersect ? .textureBlend : self
     }
 }
 

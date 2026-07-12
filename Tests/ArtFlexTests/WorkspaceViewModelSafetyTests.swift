@@ -2048,6 +2048,47 @@ struct WorkspaceViewModelSafetyTests {
 
     @Test
     @MainActor
+    func compoundPressureMixEditingPreservesMonotonicOrderAndAppliesPresetsAtomically() throws {
+        let harness = try BrushEditingBoundaryHarness()
+
+        harness.viewModel.setCompoundPressureMix(.default)
+        harness.viewModel.setCompoundPrimaryMixAtLowPressure(0.8)
+        var mix = harness.viewModel.workspace.toolSession.brush.compoundBrush.pressureMix
+        #expect(mix.primaryAtLowPressure == 0.8)
+        #expect(mix.primaryAtMidPressure == 0.8)
+        #expect(mix.primaryAtHighPressure == 1)
+
+        harness.viewModel.setCompoundPrimaryMixAtMidPressure(0.4)
+        mix = harness.viewModel.workspace.toolSession.brush.compoundBrush.pressureMix
+        #expect(mix.primaryAtMidPressure == 0.8)
+
+        harness.viewModel.setCompoundPrimaryMixAtHighPressure(0.2)
+        mix = harness.viewModel.workspace.toolSession.brush.compoundBrush.pressureMix
+        #expect(mix.primaryAtHighPressure == 0.8)
+
+        harness.viewModel.setCompoundPressureMix(.balanced)
+        #expect(harness.viewModel.workspace.toolSession.brush.compoundBrush.pressureMix == .balanced)
+    }
+
+    @Test
+    @MainActor
+    func compoundBrushEditorSnapshotRestoreRestoresTheWholeBrush() throws {
+        let harness = try BrushEditingBoundaryHarness()
+        let baseline = harness.viewModel.workspace.toolSession.brush
+
+        harness.viewModel.setCompoundBrushEnabled(true)
+        harness.viewModel.setCompoundBrushMode(.subtract)
+        harness.viewModel.setCompoundSecondaryRelativeSizeRatio(3.2)
+        harness.viewModel.setCompoundPressureMix(.primaryOnly)
+        #expect(harness.viewModel.workspace.toolSession.brush != baseline)
+
+        harness.viewModel.restoreCompoundBrushEditingSnapshot(baseline)
+
+        #expect(harness.viewModel.workspace.toolSession.brush == baseline)
+    }
+
+    @Test
+    @MainActor
     func buildUpOpacityCompensationControlUpdatesBrushSetting() throws {
         let harness = try BrushEditingBoundaryHarness()
 

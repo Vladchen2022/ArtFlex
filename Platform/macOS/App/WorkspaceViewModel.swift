@@ -1065,6 +1065,13 @@ final class WorkspaceViewModel: ObservableObject {
         refresh()
     }
 
+    func restoreCompoundBrushEditingSnapshot(_ brush: BrushSettings) {
+        bootstrap.workspaceStore.updateToolSession { session in
+            session.brush = brush
+        }
+        refresh()
+    }
+
     func setCompoundSecondaryTipShape(_ tipShape: BrushTipShape) {
         bootstrap.workspaceStore.updateToolSession { session in
             session.brush.compoundBrush.secondary.tipShape = tipShape
@@ -1201,7 +1208,16 @@ final class WorkspaceViewModel: ObservableObject {
 
     func setCompoundPrimaryMixAtLowPressure(_ value: Float) {
         bootstrap.workspaceStore.updateToolSession { session in
-            session.brush.compoundBrush.pressureMix.primaryAtLowPressure = min(max(value, 0), 1)
+            let low = min(max(value, 0), 1)
+            session.brush.compoundBrush.pressureMix.primaryAtLowPressure = low
+            session.brush.compoundBrush.pressureMix.primaryAtMidPressure = max(
+                session.brush.compoundBrush.pressureMix.primaryAtMidPressure,
+                low
+            )
+            session.brush.compoundBrush.pressureMix.primaryAtHighPressure = max(
+                session.brush.compoundBrush.pressureMix.primaryAtHighPressure,
+                session.brush.compoundBrush.pressureMix.primaryAtMidPressure
+            )
         }
         refresh()
     }
@@ -1209,7 +1225,8 @@ final class WorkspaceViewModel: ObservableObject {
     func setCompoundPrimaryMixAtMidPressure(_ value: Float) {
         bootstrap.workspaceStore.updateToolSession { session in
             let low = session.brush.compoundBrush.pressureMix.primaryAtLowPressure
-            session.brush.compoundBrush.pressureMix.primaryAtMidPressure = min(max(value, low), 1)
+            let high = session.brush.compoundBrush.pressureMix.primaryAtHighPressure
+            session.brush.compoundBrush.pressureMix.primaryAtMidPressure = min(max(value, low), high)
         }
         refresh()
     }
@@ -1218,6 +1235,20 @@ final class WorkspaceViewModel: ObservableObject {
         bootstrap.workspaceStore.updateToolSession { session in
             let mid = session.brush.compoundBrush.pressureMix.primaryAtMidPressure
             session.brush.compoundBrush.pressureMix.primaryAtHighPressure = min(max(value, mid), 1)
+        }
+        refresh()
+    }
+
+    func setCompoundPressureMix(_ settings: CompoundPressureMixSettings) {
+        bootstrap.workspaceStore.updateToolSession { session in
+            let low = min(max(settings.primaryAtLowPressure, 0), 1)
+            let mid = min(max(settings.primaryAtMidPressure, low), 1)
+            let high = min(max(settings.primaryAtHighPressure, mid), 1)
+            session.brush.compoundBrush.pressureMix = CompoundPressureMixSettings(
+                primaryAtLowPressure: low,
+                primaryAtMidPressure: mid,
+                primaryAtHighPressure: high
+            )
         }
         refresh()
     }

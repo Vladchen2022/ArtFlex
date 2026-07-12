@@ -36,6 +36,14 @@ struct DocumentStateTests {
     }
 
     @Test
+    func compoundBrushEditorExposesOnlyDistinctRenderModes() {
+        #expect(CompoundBrushMode.editorCases == [.textureBlend, .subtract])
+        #expect(CompoundBrushMode.intersect.editorEquivalent == .textureBlend)
+        #expect(CompoundBrushMode.textureBlend.displayName == "纹理出现处")
+        #expect(CompoundBrushMode.subtract.displayName == "纹理空白处")
+    }
+
+    @Test
     func workspaceStartsWithEmptyBrushLibrary() {
         let workspace = WorkspaceState.stageOneDefault
 
