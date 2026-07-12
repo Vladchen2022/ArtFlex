@@ -764,55 +764,6 @@ final class WorkspaceViewModel: ObservableObject {
         refresh()
     }
 
-    func setBrushMedium(_ medium: BrushMedium) {
-        bootstrap.workspaceStore.updateToolSession { session in
-            session.brush.medium = medium
-        }
-        refresh()
-    }
-
-    func setOilPaintLoad(_ amount: Float) {
-        bootstrap.workspaceStore.updateToolSession { session in
-            session.brush.oilPaint.paintLoad = min(max(amount, 0), 1)
-        }
-        refresh()
-    }
-
-    func setOilColorSeparation(_ amount: Float) {
-        bootstrap.workspaceStore.updateToolSession { session in
-            session.brush.oilPaint.colorSeparation = min(max(amount, 0), 1)
-        }
-        refresh()
-    }
-
-    func setOilDryness(_ amount: Float) {
-        bootstrap.workspaceStore.updateToolSession { session in
-            session.brush.oilPaint.dryness = min(max(amount, 0), 1)
-        }
-        refresh()
-    }
-
-    func setOilBristleSpread(_ amount: Float) {
-        bootstrap.workspaceStore.updateToolSession { session in
-            session.brush.oilPaint.bristleSpread = min(max(amount, 0), 1)
-        }
-        refresh()
-    }
-
-    func setOilCompanionColor(slot: Int, color: RGBAColor?) {
-        bootstrap.workspaceStore.updateToolSession { session in
-            switch slot {
-            case 0:
-                session.brush.oilPaint.companionColorA = color?.withAlpha(1)
-            case 1:
-                session.brush.oilPaint.companionColorB = color?.withAlpha(1)
-            default:
-                return
-            }
-        }
-        refresh()
-    }
-
     func setBrushStampRotationDegrees(_ angleDegrees: Float) {
         bootstrap.workspaceStore.updateToolSession { session in
             var normalized = angleDegrees.truncatingRemainder(dividingBy: 360)

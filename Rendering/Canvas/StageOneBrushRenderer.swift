@@ -18,16 +18,6 @@ private struct BrushUniforms {
     var stampSeed: Float
     var paintVariationSeed: UInt32
     var jitterDirectionDegrees: Float
-    var oilEnabled: UInt32
-    var oilCompanionCount: UInt32
-    var oilPaintLoad: Float
-    var oilColorSeparation: Float
-    var oilDryness: Float
-    var oilBristleSpread: Float
-    var oilPressure: Float
-    var oilPadding: Float = 0
-    var oilCompanionColorA: SIMD4<Float>
-    var oilCompanionColorB: SIMD4<Float>
     var canvasSize: SIMD2<Float>
     var mode: UInt32
     var tipShape: UInt32
@@ -83,14 +73,6 @@ private struct CompositeUniforms {
     var paintContrastAmount: Float = 0
     var jitterDirectionDegrees: Float = 0
     var paintVariationSeed: UInt32 = 0
-    var oilEnabled: UInt32 = 0
-    var oilCompanionCount: UInt32 = 0
-    var oilPaintLoad: Float = 0
-    var oilColorSeparation: Float = 0
-    var oilDryness: Float = 0
-    var oilBristleSpread: Float = 0
-    var oilCompanionColorA: SIMD4<Float> = .zero
-    var oilCompanionColorB: SIMD4<Float> = .zero
     var canvasWidth: Float = 0
     var canvasHeight: Float = 0
     var strokeCenterX: Float = 0
@@ -211,16 +193,6 @@ final class StageOneBrushRenderer {
             float stampSeed;
             uint paintVariationSeed;
             float jitterDirectionDegrees;
-            uint oilEnabled;
-            uint oilCompanionCount;
-            float oilPaintLoad;
-            float oilColorSeparation;
-            float oilDryness;
-            float oilBristleSpread;
-            float oilPressure;
-            float oilPadding;
-            float4 oilCompanionColorA;
-            float4 oilCompanionColorB;
             float2 canvasSize;
             uint mode;
             uint tipShape;
@@ -288,14 +260,6 @@ final class StageOneBrushRenderer {
             float paintContrastAmount;
             float jitterDirectionDegrees;
             uint paintVariationSeed;
-            uint oilEnabled;
-            uint oilCompanionCount;
-            float oilPaintLoad;
-            float oilColorSeparation;
-            float oilDryness;
-            float oilBristleSpread;
-            float4 oilCompanionColorA;
-            float4 oilCompanionColorB;
             float canvasWidth;
             float canvasHeight;
             float strokeCenterX;
@@ -771,208 +735,6 @@ final class StageOneBrushRenderer {
             return hsvToRgb(mixedHsv);
         }
 
-        float3 oilLaneSrgbColor(
-            float3 baseSrgb,
-            int laneIndex,
-            float longitudinal,
-            float separation,
-            uint companionCount,
-            float3 companionA,
-            float3 companionB,
-            uint variationSeed
-        ) {
-            float amount = clamp(separation, 0.0, 1.0);
-            int groupSize = 2 + int(floor(paintRandom(variationSeed, 0, 0xC2B2AE35u) * 5.0));
-            int groupIndex = int(floor(float(laneIndex) / float(groupSize)));
-            float selector = paintRandom(variationSeed, groupIndex, 0x27D4EB2Fu);
-
-            if (companionCount == 0) {
-                float3 hsv = rgbToHsv(baseSrgb);
-                float warmCool = paintTriangularRandom(variationSeed, groupIndex, 0x165667B1u);
-                float valueBias = paintTriangularRandom(variationSeed, laneIndex, 0xD3A2646Cu);
-                float evolution = (paintValueNoise(
-                    longitudinal * 0.28 + float(groupIndex) * 0.41,
-                    variationSeed,
-                    0x9E3779B1u
-                ) * 2.0) - 1.0;
-                hsv.x = fract(hsv.x + ((warmCool * 0.016 + evolution * 0.004) * amount) + 1.0);
-                hsv.y = clamp(hsv.y + (warmCool * 0.055 * amount), 0.0, 1.0);
-                hsv.z = clamp(hsv.z + (valueBias * 0.07 * amount), 0.0, 1.0);
-                return hsvToRgb(hsv);
-            }
-
-            float3 paletteAverage = (baseSrgb + companionA) / 2.0;
-            if (companionCount > 1) {
-                paletteAverage = (baseSrgb + companionA + companionB) / 3.0;
-            }
-
-            float3 pigment = selector < (1.0 / float(companionCount + 1))
-                ? baseSrgb
-                : companionA;
-            if (companionCount > 1 && selector > (2.0 / 3.0)) {
-                pigment = companionB;
-            }
-
-            float purity = 0.18 + (0.82 * amount);
-            float3 laneColor = mix(paletteAverage, pigment, purity);
-            float slowBlend = paintValueNoise(
-                longitudinal * 0.22 + float(groupIndex) * 0.73,
-                variationSeed,
-                0x85EBCA77u
-            );
-            return clamp(mix(laneColor, baseSrgb, slowBlend * 0.12 * (1.0 - amount)), 0.0, 1.0);
-        }
-
-        float3 oilBristleSrgbColor(
-            float3 baseSrgb,
-            float crossStrokeCoordinate,
-            float longitudinal,
-            float diameterPixels,
-            float separation,
-            float bristleSpread,
-            uint companionCount,
-            float3 companionA,
-            float3 companionB,
-            uint variationSeed
-        ) {
-            float spread = clamp(bristleSpread, 0.0, 1.0);
-            float u = clamp(crossStrokeCoordinate, 0.0, 0.999999);
-            float seedPhase = paintRandom(variationSeed, 0, 0xA24BAED5u) * 13.0;
-            float warp = paintValueNoise2D(
-                float2((u * 8.0) + seedPhase, (longitudinal * 0.38) - seedPhase),
-                variationSeed,
-                0xB5297A4Du
-            ) - 0.5;
-            float warpedU = clamp(u + (warp * (0.025 + spread * 0.055)), 0.0, 0.999999);
-            float meanLaneWidth = mix(5.2, 2.1, spread);
-            float laneCount = clamp(max(diameterPixels, 1.0) / meanLaneWidth, 7.0, 64.0);
-            float lanePosition = warpedU * laneCount;
-            int laneIndex = int(floor(lanePosition));
-            float laneFraction = fract(lanePosition);
-
-            float3 current = oilLaneSrgbColor(
-                baseSrgb,
-                laneIndex,
-                longitudinal,
-                separation,
-                companionCount,
-                companionA,
-                companionB,
-                variationSeed
-            );
-            float3 next = oilLaneSrgbColor(
-                baseSrgb,
-                laneIndex + 1,
-                longitudinal,
-                separation,
-                companionCount,
-                companionA,
-                companionB,
-                variationSeed
-            );
-            float blendWidth = clamp(fwidth(lanePosition) * 0.58, 0.025, 0.18);
-            float nextWeight = smoothstep(1.0 - blendWidth, 1.0, laneFraction);
-            return mix(current, next, nextWeight);
-        }
-
-        float oilMediaAlphaFactor(
-            float2 localPoint,
-            float2 pixelPoint,
-            BrushUniforms uniforms
-        ) {
-            if (uniforms.oilEnabled == 0) {
-                return 1.0;
-            }
-
-            float radiansValue = uniforms.jitterDirectionDegrees * 0.017453292519943295;
-            float cosine = cos(radiansValue);
-            float sine = sin(radiansValue);
-            float2 rotatedPoint = float2(
-                (localPoint.x * cosine) + (localPoint.y * sine),
-                (-localPoint.x * sine) + (localPoint.y * cosine)
-            );
-            float diameterPixels = max(uniforms.radius * 2.0, 1.0);
-            float u = clamp((rotatedPoint.x + 1.0) * 0.5, 0.0, 0.999999);
-            float spread = clamp(uniforms.oilBristleSpread, 0.0, 1.0);
-            float laneCount = clamp(diameterPixels / mix(5.6, 2.2, spread), 7.0, 64.0);
-            float lanePosition = u * laneCount;
-            int laneIndex = int(floor(lanePosition));
-            float laneCenterDistance = abs(fract(lanePosition) - 0.5) * 2.0;
-            float longitudinal = (uniforms.stampSeed / diameterPixels) + (rotatedPoint.y * 0.5);
-
-            float laneEdge = 1.0 - smoothstep(mix(0.96, 0.70, spread), 1.0, laneCenterDistance);
-            float contactNoise = paintValueNoise(
-                longitudinal * 0.62 + float(laneIndex) * 0.371,
-                uniforms.paintVariationSeed,
-                0xC13FA9A9u
-            );
-            float laneStrength = paintRandom(
-                uniforms.paintVariationSeed,
-                laneIndex,
-                0x91E10DA5u
-            );
-            float brokenContact = smoothstep(
-                mix(0.12, 0.54, spread),
-                0.92,
-                (contactNoise * 0.72) + (laneStrength * 0.28)
-            );
-            float bristleContact = laneEdge * mix(1.0, brokenContact, 0.30 + (spread * 0.58));
-
-            float canvasGrain = paintValueNoise2D(
-                pixelPoint / 3.4,
-                0x6D2B79F5u,
-                0x1B56C4E9u
-            );
-            float effectiveDryness = clamp(
-                uniforms.oilDryness * (1.0 - (uniforms.oilPressure * 0.55)),
-                0.0,
-                1.0
-            );
-            float toothContact = smoothstep(
-                0.18 + (effectiveDryness * 0.42),
-                0.72 + (effectiveDryness * 0.18),
-                canvasGrain
-            );
-
-            float traveledDiameters = max(uniforms.stampSeed / diameterPixels, 0.0);
-            float load = clamp(uniforms.oilPaintLoad, 0.0, 1.0);
-            float loadLength = mix(2.5, 18.0, load);
-            float loadFloor = 0.24 + (0.58 * load);
-            float remainingLoad = loadFloor + ((1.0 - loadFloor) * exp(-traveledDiameters / loadLength));
-
-            float contact = mix(1.0, bristleContact, 0.18 + (spread * 0.72));
-            contact *= mix(1.0, toothContact, effectiveDryness * 0.86);
-            return clamp(contact * remainingLoad, 0.025, 1.0);
-        }
-
-        float3 oilJitteredSrgbColor(
-            float3 srgbColor,
-            float2 localPoint,
-            BrushUniforms uniforms
-        ) {
-            float radiansValue = uniforms.jitterDirectionDegrees * 0.017453292519943295;
-            float cosine = cos(radiansValue);
-            float sine = sin(radiansValue);
-            float2 rotatedPoint = float2(
-                (localPoint.x * cosine) + (localPoint.y * sine),
-                (-localPoint.x * sine) + (localPoint.y * cosine)
-            );
-            float diameterPixels = max(uniforms.radius * 2.0, 1.0);
-            float longitudinal = (uniforms.stampSeed / diameterPixels) + (rotatedPoint.y * 0.5);
-            return oilBristleSrgbColor(
-                srgbColor,
-                (rotatedPoint.x + 1.0) * 0.5,
-                longitudinal,
-                diameterPixels,
-                uniforms.oilColorSeparation,
-                uniforms.oilBristleSpread,
-                uniforms.oilCompanionCount,
-                uniforms.oilCompanionColorA.rgb,
-                uniforms.oilCompanionColorB.rgb,
-                uniforms.paintVariationSeed
-            );
-        }
-
         float3 paintJitteredSrgbColor(
             float3 srgbColor,
             float2 localPoint,
@@ -1048,7 +810,6 @@ final class StageOneBrushRenderer {
                 primaryEnvelopeTipMask,
                 compoundSecondaryTipMask
             );
-            alphaMask *= oilMediaAlphaFactor(in.localPoint, in.pixelPoint, uniforms);
             if (alphaMask <= 0.001) {
                 discard_fragment();
             }
@@ -1101,9 +862,7 @@ final class StageOneBrushRenderer {
 
             float4 inputColor = uniforms.color;
             float brushAlpha = inputColor.a * alpha;
-            float3 jitteredSrgb = uniforms.oilEnabled != 0
-                ? oilJitteredSrgbColor(inputColor.rgb, in.localPoint, uniforms)
-                : paintJitteredSrgbColor(inputColor.rgb, in.localPoint, uniforms);
+            float3 jitteredSrgb = paintJitteredSrgbColor(inputColor.rgb, in.localPoint, uniforms);
             float3 linearRGB = srgbToLinear(jitteredSrgb);
             float rgbAlphaScale = uniforms.preservesAlphaLockAlpha != 0 ? lockedDestinationAlpha : 1.0;
             return float4(linearRGB * brushAlpha * rgbAlphaScale, brushAlpha);
@@ -1128,7 +887,6 @@ final class StageOneBrushRenderer {
                 primaryEnvelopeTipMask,
                 compoundSecondaryTipMask
             );
-            alphaMask *= oilMediaAlphaFactor(in.localPoint, in.pixelPoint, uniforms);
             if (alphaMask <= 0.001) {
                 discard_fragment();
             }
@@ -1198,7 +956,6 @@ final class StageOneBrushRenderer {
                 primaryEnvelopeTipMask,
                 compoundSecondaryTipMask
             );
-            alphaMask *= oilMediaAlphaFactor(in.localPoint, in.pixelPoint, uniforms);
             if (alphaMask <= 0.001) {
                 discard_fragment();
             }
@@ -1300,7 +1057,6 @@ final class StageOneBrushRenderer {
                 primaryEnvelopeTipMask,
                 compoundSecondaryTipMask
             );
-            alphaMask *= oilMediaAlphaFactor(in.localPoint, in.pixelPoint, uniforms);
             if (alphaMask <= 0.001) {
                 discard_fragment();
             }
@@ -1372,9 +1128,10 @@ final class StageOneBrushRenderer {
 
             float3 brushSrgb = uniforms.brushColor.rgb;
 
+            // Apply paint jitter in composite pass using canvas-space stripes
             float jitterAmt = uniforms.paintJitterAmount;
             float contrastAmt = uniforms.paintContrastAmount;
-            if (uniforms.oilEnabled != 0 || jitterAmt > 0.001 || contrastAmt > 0.001) {
+            if (jitterAmt > 0.001 || contrastAmt > 0.001) {
                 float2 absolutePixel = float2(
                     in.texCoord.x * uniforms.canvasWidth,
                     in.texCoord.y * uniforms.canvasHeight
@@ -1389,30 +1146,15 @@ final class StageOneBrushRenderer {
                 float crossPixels = (pixelPos.x * cosine) + (pixelPos.y * sine);
                 float longitudinalPixels = (-absolutePixel.x * sine) + (absolutePixel.y * cosine);
                 float diameterPixels = max(uniforms.strokeRadius * 2.0, 1.0);
-                if (uniforms.oilEnabled != 0) {
-                    brushSrgb = oilBristleSrgbColor(
-                        brushSrgb,
-                        0.5 + (crossPixels / diameterPixels),
-                        longitudinalPixels / diameterPixels,
-                        diameterPixels,
-                        uniforms.oilColorSeparation,
-                        uniforms.oilBristleSpread,
-                        uniforms.oilCompanionCount,
-                        uniforms.oilCompanionColorA.rgb,
-                        uniforms.oilCompanionColorB.rgb,
-                        uniforms.paintVariationSeed
-                    );
-                } else {
-                    brushSrgb = paintBristleSrgbColor(
-                        brushSrgb,
-                        0.5 + (crossPixels / diameterPixels),
-                        longitudinalPixels / diameterPixels,
-                        diameterPixels,
-                        jitterAmt,
-                        contrastAmt,
-                        uniforms.paintVariationSeed
-                    );
-                }
+                brushSrgb = paintBristleSrgbColor(
+                    brushSrgb,
+                    0.5 + (crossPixels / diameterPixels),
+                    longitudinalPixels / diameterPixels,
+                    diameterPixels,
+                    jitterAmt,
+                    contrastAmt,
+                    uniforms.paintVariationSeed
+                );
             }
 
             float3 linearRGB = srgbToLinear(brushSrgb);
@@ -2027,13 +1769,6 @@ final class StageOneBrushRenderer {
             } else {
                 strokeCenterX = 0; strokeCenterY = 0; strokeRadius = 1; avgJitterDir = 0
             }
-            let oilEnabled = stroke.brush.medium == .oil && (stroke.tool == .brush || stroke.tool == .straightLine)
-            let oilCompanions = [
-                stroke.brush.oilPaint.companionColorA,
-                stroke.brush.oilPaint.companionColorB
-            ].compactMap { $0 }
-            let oilCompanionA = oilCompanions.first ?? stroke.color
-            let oilCompanionB = oilCompanions.dropFirst().first ?? oilCompanionA
 
             var uniforms = CompositeUniforms(
                 brushColor: SIMD4(
@@ -2047,24 +1782,6 @@ final class StageOneBrushRenderer {
                 paintContrastAmount: stroke.brush.effectivePaintContrastAmount,
                 jitterDirectionDegrees: avgJitterDir,
                 paintVariationSeed: stroke.paintVariationSeed,
-                oilEnabled: oilEnabled ? 1 : 0,
-                oilCompanionCount: UInt32(oilCompanions.count),
-                oilPaintLoad: min(max(stroke.brush.oilPaint.paintLoad, 0), 1),
-                oilColorSeparation: min(max(stroke.brush.oilPaint.colorSeparation, 0), 1),
-                oilDryness: min(max(stroke.brush.oilPaint.dryness, 0), 1),
-                oilBristleSpread: min(max(stroke.brush.oilPaint.bristleSpread, 0), 1),
-                oilCompanionColorA: SIMD4(
-                    oilCompanionA.red,
-                    oilCompanionA.green,
-                    oilCompanionA.blue,
-                    1
-                ),
-                oilCompanionColorB: SIMD4(
-                    oilCompanionB.red,
-                    oilCompanionB.green,
-                    oilCompanionB.blue,
-                    1
-                ),
                 canvasWidth: Float(texture.width),
                 canvasHeight: Float(texture.height),
                 strokeCenterX: strokeCenterX,
@@ -2265,13 +1982,6 @@ final class StageOneBrushRenderer {
         }
 
         let resolvedOpacity = min(max(includeBrushOpacity ? stroke.brush.opacity : 1, 0), 1)
-        let oilEnabled = stroke.brush.medium == .oil && (stroke.tool == .brush || stroke.tool == .straightLine)
-        let oilCompanions = [
-            stroke.brush.oilPaint.companionColorA,
-            stroke.brush.oilPaint.companionColorB
-        ].compactMap { $0 }
-        let oilCompanionA = oilCompanions.first ?? stroke.color
-        let oilCompanionB = oilCompanions.dropFirst().first ?? oilCompanionA
 
         return BrushUniforms(
             center: SIMD2(Float(point.x), Float(point.y)),
@@ -2289,25 +1999,6 @@ final class StageOneBrushRenderer {
             stampSeed: sample.arcLengthPx,
             paintVariationSeed: stroke.paintVariationSeed,
             jitterDirectionDegrees: sample.jitterDirectionDegrees + 90,
-            oilEnabled: oilEnabled ? 1 : 0,
-            oilCompanionCount: UInt32(oilCompanions.count),
-            oilPaintLoad: min(max(stroke.brush.oilPaint.paintLoad, 0), 1),
-            oilColorSeparation: min(max(stroke.brush.oilPaint.colorSeparation, 0), 1),
-            oilDryness: min(max(stroke.brush.oilPaint.dryness, 0), 1),
-            oilBristleSpread: min(max(stroke.brush.oilPaint.bristleSpread, 0), 1),
-            oilPressure: effectivePressure,
-            oilCompanionColorA: SIMD4(
-                oilCompanionA.red,
-                oilCompanionA.green,
-                oilCompanionA.blue,
-                1
-            ),
-            oilCompanionColorB: SIMD4(
-                oilCompanionB.red,
-                oilCompanionB.green,
-                oilCompanionB.blue,
-                1
-            ),
             canvasSize: SIMD2(Float(texture.width), Float(texture.height)),
             mode: modeOverride ?? (stroke.tool == .eraser ? 1 : 0),
             tipShape: stroke.brush.tipShape == .softRound
