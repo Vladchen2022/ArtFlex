@@ -5,7 +5,6 @@ import UniformTypeIdentifiers
 
 private let tipMaskResolution = 256
 private let topInspectorPanelHeight: CGFloat = 264
-private let collapsedReferenceInspectorHeight: CGFloat = 214
 private let topInspectorSectionSpacing: CGFloat = 10
 private let topInspectorControlSpacing: CGFloat = 6
 private let topInspectorControlButtonWidth: CGFloat = 24
@@ -331,7 +330,9 @@ struct RightInspectorView: View {
                 ScrollView(.vertical, showsIndicators: true) {
                     HStack(alignment: .top, spacing: 12) {
                     VStack(spacing: 12) {
-                        referenceImagePanel()
+                        InspectorPanel(title: "参考图") {
+                            referenceImageSection
+                        }
 
                         InspectorPanel(title: "颜色") {
                             ColorSectionView(
@@ -516,24 +517,6 @@ struct RightInspectorView: View {
         case .brush:
             break
         }
-    }
-
-    private func referenceImagePanel() -> some View {
-        let selectedReferenceAsset = viewModel.selectedReferenceImageSlot?.asset
-        let resolvedFixedHeight = selectedReferenceAsset == nil ? collapsedReferenceInspectorHeight : nil
-
-        return referenceImageSection
-            .frame(maxWidth: .infinity, alignment: .topLeading)
-            .padding(12)
-            .frame(maxWidth: .infinity, minHeight: resolvedFixedHeight, maxHeight: resolvedFixedHeight, alignment: .top)
-            .background(
-                RoundedRectangle(cornerRadius: 12)
-                    .fill(Color.white.opacity(0.06))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 12)
-                            .stroke(Color.white.opacity(0.06), lineWidth: 1)
-                    )
-            )
     }
 
     private var referenceImageSection: some View {
