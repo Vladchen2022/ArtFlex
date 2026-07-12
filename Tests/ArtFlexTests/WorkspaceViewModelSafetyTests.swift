@@ -440,11 +440,11 @@ struct WorkspaceViewModelSafetyTests {
 
         harness.viewModel.setSelectedColor(.init(red: 0.88, green: 0.08, blue: 0.04, alpha: 1))
         harness.viewModel.selectCreativeShapeGeneratorSource(.currentColor)
-        harness.viewModel.setCreativeShapeGeneratorFeatherProbability(0)
-        harness.viewModel.setCreativeShapeGeneratorShapeCharacteristic(0.42)
-        harness.viewModel.setCreativeShapeGeneratorShapeSize(0)
-        harness.viewModel.setCreativeShapeGeneratorShapeJitter(0)
-        harness.viewModel.setCreativeShapeGeneratorColorJitter(0)
+        harness.viewModel.setCreativeShapeGeneratorStructureMode(.cluster)
+        harness.viewModel.setCreativeShapeGeneratorComplexity(0)
+        harness.viewModel.setCreativeShapeGeneratorCoherence(1)
+        harness.viewModel.setCreativeShapeGeneratorFormElongation(0)
+        harness.viewModel.setCreativeShapeGeneratorEdgeTexture(0)
         harness.viewModel.toggleLayerTransparentPixelLock(activeLayerID)
 
         makeLassoSelection(
@@ -2222,14 +2222,21 @@ struct WorkspaceViewModelSafetyTests {
 
     @Test
     @MainActor
-    func togglingCreativeGeneratorTipImageModeUpdatesWorkspaceState() throws {
+    func creativeShapeGeneratorCompositionControlsUpdateWorkspaceState() throws {
         let harness = try BrushEditingBoundaryHarness()
 
-        #expect(harness.viewModel.workspace.creativeShapeGenerator.usesTipImageShapes == false)
-        harness.viewModel.setCreativeShapeGeneratorUsesTipImageShapes(true)
-        #expect(harness.viewModel.workspace.creativeShapeGenerator.usesTipImageShapes == true)
-        harness.viewModel.setCreativeShapeGeneratorUsesTipImageShapes(false)
-        #expect(harness.viewModel.workspace.creativeShapeGenerator.usesTipImageShapes == false)
+        harness.viewModel.setCreativeShapeGeneratorStructureMode(.fracture)
+        harness.viewModel.setCreativeShapeGeneratorComplexity(0.73)
+        harness.viewModel.setCreativeShapeGeneratorCoherence(0.64)
+        harness.viewModel.setCreativeShapeGeneratorFormElongation(0.86)
+        harness.viewModel.setCreativeShapeGeneratorEdgeTexture(0.52)
+
+        let generator = harness.viewModel.workspace.creativeShapeGenerator
+        #expect(generator.structureMode == .fracture)
+        #expect(generator.complexity == 0.73)
+        #expect(generator.coherence == 0.64)
+        #expect(generator.formElongation == 0.86)
+        #expect(generator.edgeTexture == 0.52)
     }
 
     @Test

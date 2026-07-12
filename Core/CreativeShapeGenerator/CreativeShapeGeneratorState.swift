@@ -19,6 +19,28 @@ enum CreativeShapeGeneratorColorSource: String, Codable, Sendable, Equatable, Ca
     }
 }
 
+enum CreativeShapeStructureMode: String, Codable, Sendable, Equatable, CaseIterable, Identifiable {
+    case cluster
+    case growth
+    case flow
+    case fracture
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .cluster:
+            return "聚合"
+        case .growth:
+            return "生长"
+        case .flow:
+            return "流动"
+        case .fracture:
+            return "断裂"
+        }
+    }
+}
+
 struct CreativeShapeGeneratorImageSource: Codable, Sendable, Equatable {
     var fileName: String
     var width: Int
@@ -36,53 +58,55 @@ struct CreativeShapeGeneratorImageSource: Codable, Sendable, Equatable {
 
 struct CreativeShapeGeneratorState: Codable, Sendable, Equatable {
     var selectedSource: CreativeShapeGeneratorColorSource?
-    var usesTipImageShapes: Bool
-    var featherProbability: Float
-    var shapeCharacteristic: Float
-    var shapeSize: Float
-    var shapeJitter: Float
-    var colorJitter: Float
+    var structureMode: CreativeShapeStructureMode
+    var complexity: Float
+    var coherence: Float
+    var formElongation: Float
+    var edgeTexture: Float
     var importedImage: CreativeShapeGeneratorImageSource?
 
     static let stageOneDefault = CreativeShapeGeneratorState(
         selectedSource: nil,
-        usesTipImageShapes: false,
-        featherProbability: 0.2,
-        shapeCharacteristic: 0.4,
-        shapeSize: 0.45,
-        shapeJitter: 0.35,
-        colorJitter: 0.18,
+        structureMode: .growth,
+        complexity: 0.48,
+        coherence: 0.72,
+        formElongation: 0.58,
+        edgeTexture: 0.38,
         importedImage: nil
     )
 
     enum CodingKeys: String, CodingKey {
         case selectedSource
-        case usesTipImageShapes
-        case featherProbability
+        case structureMode
+        case complexity
+        case coherence
+        case formElongation
+        case edgeTexture
+        case importedImage
+
+        // Legacy stage-one generator keys.
         case shapeCharacteristic
         case shapeSize
         case shapeJitter
         case colorJitter
-        case importedImage
+        case featherProbability
     }
 
     init(
         selectedSource: CreativeShapeGeneratorColorSource?,
-        usesTipImageShapes: Bool = false,
-        featherProbability: Float = 0.2,
-        shapeCharacteristic: Float,
-        shapeSize: Float,
-        shapeJitter: Float,
-        colorJitter: Float,
+        structureMode: CreativeShapeStructureMode = .growth,
+        complexity: Float = 0.48,
+        coherence: Float = 0.72,
+        formElongation: Float = 0.58,
+        edgeTexture: Float = 0.38,
         importedImage: CreativeShapeGeneratorImageSource?
     ) {
         self.selectedSource = selectedSource
-        self.usesTipImageShapes = usesTipImageShapes
-        self.featherProbability = featherProbability
-        self.shapeCharacteristic = shapeCharacteristic
-        self.shapeSize = shapeSize
-        self.shapeJitter = shapeJitter
-        self.colorJitter = colorJitter
+        self.structureMode = structureMode
+        self.complexity = complexity
+        self.coherence = coherence
+        self.formElongation = formElongation
+        self.edgeTexture = edgeTexture
         self.importedImage = importedImage
     }
 
@@ -90,13 +114,38 @@ struct CreativeShapeGeneratorState: Codable, Sendable, Equatable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         let defaults = Self.stageOneDefault
         selectedSource = try container.decodeIfPresent(CreativeShapeGeneratorColorSource.self, forKey: .selectedSource)
-        usesTipImageShapes = try container.decodeIfPresent(Bool.self, forKey: .usesTipImageShapes) ?? defaults.usesTipImageShapes
-        featherProbability = try container.decodeIfPresent(Float.self, forKey: .featherProbability) ?? defaults.featherProbability
-        shapeCharacteristic = try container.decodeIfPresent(Float.self, forKey: .shapeCharacteristic) ?? defaults.shapeCharacteristic
-        shapeSize = try container.decodeIfPresent(Float.self, forKey: .shapeSize) ?? defaults.shapeSize
-        shapeJitter = try container.decodeIfPresent(Float.self, forKey: .shapeJitter) ?? defaults.shapeJitter
-        colorJitter = try container.decodeIfPresent(Float.self, forKey: .colorJitter) ?? defaults.colorJitter
+        structureMode = try container.decodeIfPresent(CreativeShapeStructureMode.self, forKey: .structureMode) ?? defaults.structureMode
+        complexity = try container.decodeIfPresent(Float.self, forKey: .complexity)
+            ?? container.decodeIfPresent(Float.self, forKey: .shapeSize)
+            ?? defaults.complexity
+        if let storedCoherence = try container.decodeIfPresent(Float.self, forKey: .coherence) {
+            coherence = storedCoherence
+        } else if let legacyJitter = try container.decodeIfPresent(Float.self, forKey: .shapeJitter) {
+            coherence = 1 - legacyJitter
+        } else {
+            coherence = defaults.coherence
+        }
+        formElongation = try container.decodeIfPresent(Float.self, forKey: .formElongation)
+            ?? defaults.formElongation
+        if let storedTexture = try container.decodeIfPresent(Float.self, forKey: .edgeTexture) {
+            edgeTexture = storedTexture
+        } else {
+            let legacyCharacteristic = try container.decodeIfPresent(Float.self, forKey: .shapeCharacteristic)
+            let legacyFeather = try container.decodeIfPresent(Float.self, forKey: .featherProbability)
+            edgeTexture = ((legacyCharacteristic ?? defaults.edgeTexture) + (legacyFeather ?? defaults.edgeTexture)) * 0.5
+        }
         importedImage = try container.decodeIfPresent(CreativeShapeGeneratorImageSource.self, forKey: .importedImage)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encodeIfPresent(selectedSource, forKey: .selectedSource)
+        try container.encode(structureMode, forKey: .structureMode)
+        try container.encode(complexity, forKey: .complexity)
+        try container.encode(coherence, forKey: .coherence)
+        try container.encode(formElongation, forKey: .formElongation)
+        try container.encode(edgeTexture, forKey: .edgeTexture)
+        try container.encodeIfPresent(importedImage, forKey: .importedImage)
     }
 
     var isEnabled: Bool {

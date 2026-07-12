@@ -1751,11 +1751,11 @@ struct WorkspaceViewModelPixelHistoryTests {
         let layerID = harness.viewModel.workspace.document.activeLayerID
 
         harness.viewModel.selectCreativeShapeGeneratorSource(.currentColor)
-        harness.viewModel.setCreativeShapeGeneratorFeatherProbability(0)
-        harness.viewModel.setCreativeShapeGeneratorShapeCharacteristic(0.42)
-        harness.viewModel.setCreativeShapeGeneratorShapeSize(0)
-        harness.viewModel.setCreativeShapeGeneratorShapeJitter(0)
-        harness.viewModel.setCreativeShapeGeneratorColorJitter(0)
+        harness.viewModel.setCreativeShapeGeneratorStructureMode(.cluster)
+        harness.viewModel.setCreativeShapeGeneratorComplexity(0)
+        harness.viewModel.setCreativeShapeGeneratorCoherence(1)
+        harness.viewModel.setCreativeShapeGeneratorFormElongation(0)
+        harness.viewModel.setCreativeShapeGeneratorEdgeTexture(0)
 
         harness.makeLassoSelection([
             .init(x: 8, y: 8),
@@ -1797,6 +1797,51 @@ struct WorkspaceViewModelPixelHistoryTests {
                 maxY: 36
             ) == false
         )
+        #expect(harness.viewModel.workspace.selection.committedShape == nil)
+    }
+
+    @Test
+    @MainActor
+    func consecutiveCreativeShapeLassosStackWithoutCandidateConfirmation() async throws {
+        let harness = try PixelHistoryHarness()
+        let layerID = harness.viewModel.workspace.document.activeLayerID
+
+        harness.viewModel.selectCreativeShapeGeneratorSource(.currentColor)
+        harness.viewModel.setCreativeShapeGeneratorStructureMode(.flow)
+        harness.viewModel.setCreativeShapeGeneratorComplexity(0.2)
+        harness.viewModel.setCreativeShapeGeneratorCoherence(0.8)
+        harness.viewModel.setCreativeShapeGeneratorFormElongation(0.8)
+        harness.viewModel.setCreativeShapeGeneratorEdgeTexture(0.7)
+
+        harness.makeLassoSelection([
+            .init(x: 3, y: 5), .init(x: 29, y: 5), .init(x: 29, y: 31),
+            .init(x: 3, y: 31), .init(x: 3, y: 5)
+        ])
+        harness.makeLassoSelection([
+            .init(x: 35, y: 33), .init(x: 61, y: 33), .init(x: 61, y: 59),
+            .init(x: 35, y: 59), .init(x: 35, y: 33)
+        ])
+
+        try await waitForCondition {
+            let firstVisible = try regionHasVisiblePixels(
+                harness: harness,
+                layerID: layerID,
+                minX: 4,
+                maxX: 28,
+                minY: 6,
+                maxY: 30
+            )
+            let secondVisible = try regionHasVisiblePixels(
+                harness: harness,
+                layerID: layerID,
+                minX: 36,
+                maxX: 60,
+                minY: 34,
+                maxY: 58
+            )
+            return firstVisible && secondVisible
+        }
+
         #expect(harness.viewModel.workspace.selection.committedShape == nil)
     }
 }

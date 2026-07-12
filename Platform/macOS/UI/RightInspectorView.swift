@@ -526,7 +526,7 @@ struct RightInspectorView: View {
 
     private var generatorSection: some View {
         let generator = viewModel.workspace.creativeShapeGenerator
-        return VStack(alignment: .leading, spacing: 10) {
+        return VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
                 generatorSourceButton(
                     title: CreativeShapeGeneratorColorSource.currentColor.title,
@@ -545,88 +545,68 @@ struct RightInspectorView: View {
                 creativeShapeGeneratorExternalImageButton
             }
 
-            Divider()
-                .overlay(Color.white.opacity(0.08))
-
-            OptimizedCompactSlider(
-                title: "羽化概率",
-                valueText: "\(Int(generator.featherProbability * 100))%",
-                value: Binding(
-                    get: { Double(generator.featherProbability) },
-                    set: { _ in }
-                ),
-                range: 0...1,
-                liveValueText: { "\(Int($0 * 100))%" },
-                onCommit: { viewModel.setCreativeShapeGeneratorFeatherProbability(Float($0)) }
-            )
-
-            OptimizedCompactSlider(
-                title: "形状特征",
-                valueText: "\(Int(generator.shapeCharacteristic * 100))%",
-                value: Binding(
-                    get: { Double(generator.shapeCharacteristic) },
-                    set: { _ in }
-                ),
-                range: 0...1,
-                liveValueText: { "\(Int($0 * 100))%" },
-                onCommit: { viewModel.setCreativeShapeGeneratorShapeCharacteristic(Float($0)) }
-            )
-
-            OptimizedCompactSlider(
-                title: "形状大小",
-                valueText: "\(Int(generator.shapeSize * 100))%",
-                value: Binding(
-                    get: { Double(generator.shapeSize) },
-                    set: { _ in }
-                ),
-                range: 0...1,
-                liveValueText: { "\(Int($0 * 100))%" },
-                onCommit: { viewModel.setCreativeShapeGeneratorShapeSize(Float($0)) }
-            )
-
-            OptimizedCompactSlider(
-                title: "形状抖动",
-                valueText: "\(Int(generator.shapeJitter * 100))%",
-                value: Binding(
-                    get: { Double(generator.shapeJitter) },
-                    set: { _ in }
-                ),
-                range: 0...1,
-                liveValueText: { "\(Int($0 * 100))%" },
-                onCommit: { viewModel.setCreativeShapeGeneratorShapeJitter(Float($0)) }
-            )
-
-            OptimizedCompactSlider(
-                title: "色彩抖动",
-                valueText: "\(Int(generator.colorJitter * 100))%",
-                value: Binding(
-                    get: { Double(generator.colorJitter) },
-                    set: { _ in }
-                ),
-                range: 0...1,
-                liveValueText: { "\(Int($0 * 100))%" },
-                onCommit: { viewModel.setCreativeShapeGeneratorColorJitter(Float($0)) }
-            )
-
-            HStack(spacing: 8) {
-                Text("笔尖图形模式")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(Color.white.opacity(0.82))
-
-                Spacer(minLength: 8)
-
-                Toggle(
-                    "",
-                    isOn: Binding(
-                        get: { generator.usesTipImageShapes },
-                        set: { viewModel.setCreativeShapeGeneratorUsesTipImageShapes($0) }
-                    )
+            Picker(
+                "结构",
+                selection: Binding(
+                    get: { generator.structureMode },
+                    set: { viewModel.setCreativeShapeGeneratorStructureMode($0) }
                 )
-                .labelsHidden()
-                .toggleStyle(.switch)
-                .scaleEffect(0.82, anchor: .trailing)
+            ) {
+                ForEach(CreativeShapeStructureMode.allCases) { mode in
+                    Text(mode.title).tag(mode)
+                }
             }
-            .padding(.top, 2)
+            .labelsHidden()
+            .pickerStyle(.segmented)
+            .controlSize(.small)
+
+            OptimizedCompactSlider(
+                title: "复杂度",
+                valueText: "\(Int(generator.complexity * 100))%",
+                value: Binding(
+                    get: { Double(generator.complexity) },
+                    set: { _ in }
+                ),
+                range: 0...1,
+                liveValueText: { "\(Int($0 * 100))%" },
+                onCommit: { viewModel.setCreativeShapeGeneratorComplexity(Float($0)) }
+            )
+
+            OptimizedCompactSlider(
+                title: "连贯度",
+                valueText: "\(Int(generator.coherence * 100))%",
+                value: Binding(
+                    get: { Double(generator.coherence) },
+                    set: { _ in }
+                ),
+                range: 0...1,
+                liveValueText: { "\(Int($0 * 100))%" },
+                onCommit: { viewModel.setCreativeShapeGeneratorCoherence(Float($0)) }
+            )
+
+            OptimizedCompactSlider(
+                title: "形态延展",
+                valueText: "\(Int(generator.formElongation * 100))%",
+                value: Binding(
+                    get: { Double(generator.formElongation) },
+                    set: { _ in }
+                ),
+                range: 0...1,
+                liveValueText: { "\(Int($0 * 100))%" },
+                onCommit: { viewModel.setCreativeShapeGeneratorFormElongation(Float($0)) }
+            )
+
+            OptimizedCompactSlider(
+                title: "边缘变化",
+                valueText: "\(Int(generator.edgeTexture * 100))%",
+                value: Binding(
+                    get: { Double(generator.edgeTexture) },
+                    set: { _ in }
+                ),
+                range: 0...1,
+                liveValueText: { "\(Int($0 * 100))%" },
+                onCommit: { viewModel.setCreativeShapeGeneratorEdgeTexture(Float($0)) }
+            )
         }
         .frame(maxWidth: .infinity, alignment: .topLeading)
     }

@@ -27,6 +27,7 @@ struct CreativeShapeGeneratorPlan: Sendable, Equatable {
     var shapes: [CreativeShapeGeneratedShape]
     var tipMaterials: [CreativeShapeGeneratorTipMaterial]
     var seed: UInt64
+    var bounds: CanvasRect
 }
 
 struct CreativeShapeGeneratorColorContext: Sendable, Equatable {
@@ -36,62 +37,19 @@ struct CreativeShapeGeneratorColorContext: Sendable, Equatable {
     var paletteColors: [RGBAColor]
 }
 
-private struct CreativeShapeDeterministicSeedBuilder {
-    private(set) var state: UInt64 = 0xcbf29ce484222325
-    private static let prime: UInt64 = 0x100000001b3
-
-    mutating func mix(_ value: UInt64) {
-        state ^= value
-        state &*= Self.prime
-    }
-
-    mutating func mix(_ value: Int) {
-        mix(UInt64(bitPattern: Int64(value)))
-    }
-
-    mutating func mix(_ value: Float) {
-        mix(UInt64(value.bitPattern))
-    }
-
-    mutating func mix(_ value: Double) {
-        mix(value.bitPattern)
-    }
-
-    mutating func mix(_ value: String) {
-        for byte in value.utf8 {
-            mix(UInt64(byte))
-        }
-    }
-
-    mutating func mix(_ data: Data) {
-        let bytes = [UInt8](data)
-        guard bytes.isEmpty == false else {
-            mix(0)
-            return
-        }
-        let stride = max(bytes.count / 512, 1)
-        var index = 0
-        while index < bytes.count {
-            mix(UInt64(bytes[index]))
-            index += stride
-        }
-        mix(bytes.count)
-    }
-}
-
 private struct CreativeShapeGeneratorRandom {
     private var state: UInt64
 
     init(seed: UInt64) {
-        self.state = seed == 0 ? 0x9E3779B97F4A7C15 : seed
+        state = seed == 0 ? 0x9E37_79B9_7F4A_7C15 : seed
     }
 
     mutating func nextUInt64() -> UInt64 {
-        state &+= 0x9E3779B97F4A7C15
-        var z = state
-        z = (z ^ (z >> 30)) &* 0xBF58476D1CE4E5B9
-        z = (z ^ (z >> 27)) &* 0x94D049BB133111EB
-        return z ^ (z >> 31)
+        state &+= 0x9E37_79B9_7F4A_7C15
+        var value = state
+        value = (value ^ (value >> 30)) &* 0xBF58_476D_1CE4_E5B9
+        value = (value ^ (value >> 27)) &* 0x94D0_49BB_1331_11EB
+        return value ^ (value >> 31)
     }
 
     mutating func float(in range: ClosedRange<Float>) -> Float {
@@ -106,653 +64,883 @@ private struct CreativeShapeGeneratorRandom {
 
     mutating func int(in range: ClosedRange<Int>) -> Int {
         guard range.lowerBound < range.upperBound else { return range.lowerBound }
-        let delta = UInt64(range.upperBound - range.lowerBound + 1)
-        return range.lowerBound + Int(nextUInt64() % delta)
+        let width = UInt64(range.upperBound - range.lowerBound + 1)
+        return range.lowerBound + Int(nextUInt64() % width)
     }
 
     mutating func bool(probability: Float) -> Bool {
-        float(in: 0...1) <= probability
+        float(in: 0...1) < probability
     }
 }
 
-private struct CreativeShapeSamplingContext {
-    var candidatePoints: [CanvasPoint]
-    var jitterRadius: CanvasPoint
+private enum CreativeShapeRole {
+    case dominant
+    case secondary
+    case accent
+}
+
+private struct CreativeShapeCompositionAxis {
+    var center: CanvasPoint
+    var major: CanvasPoint
+    var minor: CanvasPoint
+    var angle: Double
+    var majorSpan: Double
+    var minorSpan: Double
+}
+
+private struct CreativeShapeColorRoles {
+    var dominant: RGBAColor
+    var secondary: RGBAColor
+    var accent: RGBAColor
 }
 
 enum CreativeShapeGeneratorEngine {
+    private static let attemptCount = 5
+    private static let attemptSeedStride: UInt64 = 0x9E37_79B9_7F4A_7C15
+
     static func makePlan(
         selectionShape: SelectionShape,
         state: CreativeShapeGeneratorState,
         colorContext: CreativeShapeGeneratorColorContext,
-        tipImageLibrary: TipImageLibraryState = .empty,
+        tipImageLibrary _: TipImageLibraryState = .empty,
         runtimeSeed: UInt64
     ) -> CreativeShapeGeneratorPlan? {
         guard state.isEnabled else { return nil }
-        let clampedShape = selectionShape
-        guard clampedShape.isEmpty == false else { return nil }
+        let selection = selectionShape
+        guard selection.isEmpty == false, selection.bounds.isEmpty == false else { return nil }
 
-        let seed = resolvedSeed(
-            selectionShape: clampedShape,
-            state: state,
-            colorContext: colorContext,
-            tipImageLibrary: tipImageLibrary,
-            runtimeSeed: runtimeSeed
-        )
-        var random = CreativeShapeGeneratorRandom(seed: seed)
-        let bounds = clampedShape.bounds
-        let shortestSide = max(Float(min(bounds.size.x, bounds.size.y)), 1)
-
-        let baseCount = resolvedBaseCount(shapeSize: state.shapeSize)
-        let countVariation = resolvedCountVariation(shapeJitter: state.shapeJitter, random: &random)
-        let resolvedCount = max(1, Int((Double(baseCount) * countVariation).rounded()))
-        let samplingContext = makeSamplingContext(
-            for: clampedShape,
-            targetPointBudget: max(256, min(2_304, resolvedCount * 48))
-        )
-        let tipMaterials = state.usesTipImageShapes
-            ? resolvedTipMaterials(
-                from: tipImageLibrary,
-                shapeCharacteristic: state.shapeCharacteristic,
+        var bestPlan: CreativeShapeGeneratorPlan?
+        var bestScore = -Double.infinity
+        for attempt in 0..<attemptCount {
+            let seed = runtimeSeed &+ (UInt64(attempt) &* attemptSeedStride)
+            var random = CreativeShapeGeneratorRandom(seed: seed)
+            guard let plan = buildPlan(
+                selection: selection,
+                state: state,
+                colorContext: colorContext,
+                seed: seed,
                 random: &random
-            )
-            : []
-        let usesTipMaterials = tipMaterials.isEmpty == false
-        let clusterAnchors = resolvedClusterAnchors(
-            count: resolvedCount,
-            samplingContext: samplingContext,
-            shapeJitter: state.shapeJitter,
-            random: &random
-        )
+            ) else {
+                continue
+            }
+            let score = compositionScore(plan: plan, state: state)
+            if score > bestScore {
+                bestScore = score
+                bestPlan = plan
+            }
+        }
+        return bestPlan
+    }
+
+    private static func buildPlan(
+        selection: SelectionShape,
+        state: CreativeShapeGeneratorState,
+        colorContext: CreativeShapeGeneratorColorContext,
+        seed: UInt64,
+        random: inout CreativeShapeGeneratorRandom
+    ) -> CreativeShapeGeneratorPlan? {
+        guard let axis = compositionAxis(for: selection) else { return nil }
+        let complexity = clamp(state.complexity, 0, 1)
+        let coherence = clamp(state.coherence, 0, 1)
+        let formElongation = clamp(state.formElongation, 0, 1)
+        let edgeTexture = clamp(state.edgeTexture, 0, 1)
+        let shapeCount = 5 + Int((complexity * 13).rounded())
+        let colorRoles = resolvedColorRoles(for: state, context: colorContext, random: &random)
+        let phase = random.double(in: 0...(Double.pi * 2))
 
         var shapes: [CreativeShapeGeneratedShape] = []
-        shapes.reserveCapacity(resolvedCount)
+        shapes.reserveCapacity(shapeCount)
 
-        for index in 0..<resolvedCount {
-            guard let center = resolvedCenterPoint(
+        for index in 0..<shapeCount {
+            let role = resolvedRole(index: index, count: shapeCount, mode: state.structureMode)
+            let skeleton = skeletonPoint(
                 index: index,
-                totalCount: resolvedCount,
-                selectionShape: clampedShape,
-                samplingContext: samplingContext,
-                clusterAnchors: clusterAnchors,
-                shapeJitter: state.shapeJitter,
-                random: &random
-            ) else { continue }
-
-            let diameter = resolvedDiameter(
-                shortestSide: shortestSide,
-                shapeSize: state.shapeSize,
-                shapeJitter: state.shapeJitter,
+                count: shapeCount,
+                role: role,
+                mode: state.structureMode,
+                axis: axis,
+                coherence: coherence,
+                phase: phase,
                 random: &random
             )
-
-            let geometry: CreativeShapeGeneratedGeometry
-            if usesTipMaterials,
-               let tipMaterial = resolvedTipMaterial(
-                forShapeAt: index,
-                from: tipMaterials,
-                shapeJitter: state.shapeJitter,
+            let center = resolvedInteriorCenter(
+                target: skeleton,
+                axis: axis,
+                selection: selection,
+                coherence: coherence,
                 random: &random
-               ) {
-                geometry = .tipStamp(
-                    CreativeShapeGeneratedTipStamp(
-                        materialID: tipMaterial.id,
-                        size: resolvedTipStampSize(
-                            diameter: diameter,
-                            shapeJitter: state.shapeJitter,
-                            random: &random
-                        ),
-                        rotationDegrees: resolvedTipStampRotation(
-                            shapeJitter: state.shapeJitter,
-                            random: &random
-                        )
-                    )
-                )
-            } else {
-                let feature = clamp(
-                    state.shapeCharacteristic + (random.float(in: -0.55...0.55) * state.shapeJitter),
-                    0,
-                    1
-                )
-                let boundaryPoints = organicShapePoints(
-                    center: center,
-                    diameter: diameter,
-                    organicity: feature,
-                    shapeJitter: state.shapeJitter,
-                    random: &random
-                )
-                guard boundaryPoints.count >= 3 else { continue }
-                geometry = .polygon(boundaryPoints)
-            }
+            )
+            let diameter = resolvedDiameter(
+                role: role,
+                mode: state.structureMode,
+                shortestSide: min(axis.majorSpan, axis.minorSpan),
+                complexity: complexity,
+                random: &random
+            )
+            let orientation = resolvedOrientation(
+                center: center,
+                mode: state.structureMode,
+                axis: axis,
+                coherence: coherence,
+                phase: phase,
+                random: &random
+            )
+            let aspect = resolvedAspect(
+                role: role,
+                mode: state.structureMode,
+                coherence: coherence,
+                formElongation: formElongation,
+                random: &random
+            )
+            let boundary = organicPolygon(
+                index: index,
+                role: role,
+                mode: state.structureMode,
+                center: center,
+                diameter: diameter,
+                aspect: aspect,
+                orientation: orientation,
+                complexity: complexity,
+                formElongation: formElongation,
+                edgeTexture: edgeTexture,
+                selection: selection,
+                random: &random
+            )
+            guard boundary.count >= 3 else { continue }
 
-            let selectionRelativePoint = normalizedPoint(center, in: bounds)
-            let color = resolvedColor(
-                for: state,
-                selectionRelativePoint: selectionRelativePoint,
-                shapeIndex: index,
-                totalShapeCount: resolvedCount,
-                colorContext: colorContext,
-                imageSource: state.importedImage,
+            let color = resolvedShapeColor(
+                role: role,
+                index: index,
+                roles: colorRoles,
+                opacity: colorContext.brushOpacity,
+                edgeTexture: edgeTexture,
+                random: &random
+            )
+            let featherAmount = resolvedFeatherAmount(
+                role: role,
+                edgeTexture: edgeTexture,
                 random: &random
             )
             shapes.append(
                 CreativeShapeGeneratedShape(
                     center: center,
-                    geometry: geometry,
+                    geometry: .polygon(boundary),
                     color: color,
-                    featherAmount: resolvedFeatherAmount(
-                        featherProbability: state.featherProbability,
-                        shapeJitter: state.shapeJitter,
-                        random: &random
-                    )
+                    featherAmount: featherAmount
                 )
             )
-            if index == 0 && state.shapeSize <= 0.001 {
-                break
-            }
         }
 
         guard shapes.isEmpty == false else { return nil }
         return CreativeShapeGeneratorPlan(
-            shapes: reordered(shapes: shapes, shapeJitter: state.shapeJitter, random: &random),
-            tipMaterials: tipMaterials,
-            seed: seed
+            shapes: orderedForRendering(shapes, mode: state.structureMode),
+            tipMaterials: [],
+            seed: seed,
+            bounds: selection.bounds
         )
     }
 
-    private static func resolvedTipMaterials(
-        from tipImageLibrary: TipImageLibraryState,
-        shapeCharacteristic: Float,
-        random: inout CreativeShapeGeneratorRandom
-    ) -> [CreativeShapeGeneratorTipMaterial] {
-        var available = tipImageLibrary.items.compactMap { item -> CreativeShapeGeneratorTipMaterial? in
-            guard let maskData = item.maskData, isRenderableTipMaskData(maskData) else { return nil }
-            return CreativeShapeGeneratorTipMaterial(id: item.id, maskData: maskData)
+    private static func resolvedRole(
+        index: Int,
+        count: Int,
+        mode: CreativeShapeStructureMode
+    ) -> CreativeShapeRole {
+        if index == 0 || (mode == .fracture && index == 1) {
+            return .dominant
         }
-        available.sort { $0.id < $1.id }
-        guard available.isEmpty == false else { return [] }
+        let accentStart = max(2, Int((Float(count) * 0.72).rounded(.down)))
+        return index >= accentStart ? .accent : .secondary
+    }
 
-        let maxMaterialCount = min(10, available.count)
-        let clampedCharacteristic = clamp(shapeCharacteristic, 0, 1)
-        let desiredMaterialCount = max(
-            1,
-            Int((1 + (clampedCharacteristic * Float(maxMaterialCount - 1))).rounded())
+    private static func compositionAxis(for selection: SelectionShape) -> CreativeShapeCompositionAxis? {
+        let bounds = selection.bounds
+        guard bounds.isEmpty == false else { return nil }
+        let boundsCenter = CanvasPoint(
+            x: bounds.origin.x + (bounds.size.x * 0.5),
+            y: bounds.origin.y + (bounds.size.y * 0.5)
         )
+        let center = interiorCentroid(for: selection) ?? firstInteriorGridPoint(in: selection) ?? boundsCenter
+        let points = selection.pathPoints.isEmpty ? boundsCorners(bounds) : selection.pathPoints
 
-        for index in 0..<available.count {
-            let swapIndex = random.int(in: index...(available.count - 1))
-            if swapIndex != index {
-                available.swapAt(index, swapIndex)
-            }
-        }
-        return Array(available.prefix(desiredMaterialCount))
-    }
-
-    private static func resolvedTipMaterial(
-        forShapeAt index: Int,
-        from materials: [CreativeShapeGeneratorTipMaterial],
-        shapeJitter: Float,
-        random: inout CreativeShapeGeneratorRandom
-    ) -> CreativeShapeGeneratorTipMaterial? {
-        guard materials.isEmpty == false else { return nil }
-        if materials.count == 1 {
-            return materials[0]
+        var covarianceXX = 0.0
+        var covarianceYY = 0.0
+        var covarianceXY = 0.0
+        for point in points {
+            let dx = point.x - center.x
+            let dy = point.y - center.y
+            covarianceXX += dx * dx
+            covarianceYY += dy * dy
+            covarianceXY += dx * dy
         }
 
-        let baseIndex = index % materials.count
-        let jitter = clamp(shapeJitter, 0, 1)
-        if jitter > 0.0001,
-           random.bool(probability: lerp(0.12, 0.46, jitter)) {
-            return materials[random.int(in: 0...(materials.count - 1))]
+        let angle: Double
+        if abs(covarianceXX - covarianceYY) + abs(covarianceXY) < 0.0001 {
+            angle = bounds.size.x >= bounds.size.y ? 0 : Double.pi * 0.5
+        } else {
+            angle = 0.5 * atan2(2 * covarianceXY, covarianceXX - covarianceYY)
         }
-
-        return materials[baseIndex]
+        let major = CanvasPoint(x: cos(angle), y: sin(angle))
+        let minor = CanvasPoint(x: -sin(angle), y: cos(angle))
+        return CreativeShapeCompositionAxis(
+            center: center,
+            major: major,
+            minor: minor,
+            angle: angle,
+            majorSpan: max(bounds.size.x, bounds.size.y),
+            minorSpan: max(min(bounds.size.x, bounds.size.y), 1)
+        )
     }
 
-    private static func isRenderableTipMaskData(_ data: Data) -> Bool {
-        guard data.isEmpty == false else { return false }
-        let side = Int(Double(data.count).squareRoot())
-        return side > 1 && side * side == data.count
-    }
-
-    private static func resolvedTipStampSize(
-        diameter: Float,
-        shapeJitter: Float,
+    private static func skeletonPoint(
+        index: Int,
+        count: Int,
+        role: CreativeShapeRole,
+        mode: CreativeShapeStructureMode,
+        axis: CreativeShapeCompositionAxis,
+        coherence: Float,
+        phase: Double,
         random: inout CreativeShapeGeneratorRandom
     ) -> CanvasPoint {
-        let jitter = clamp(shapeJitter, 0, 1)
-        let widthScale = lerp(1, random.float(in: 0.84...1.28), jitter)
-        let heightScale = lerp(1, random.float(in: 0.84...1.28), jitter)
-        return CanvasPoint(
-            x: Double(max(diameter * widthScale, 1)),
-            y: Double(max(diameter * heightScale, 1))
-        )
-    }
+        let progress = count > 1 ? Double(index) / Double(count - 1) : 0.5
+        let looseness = Double(1 - coherence)
+        var majorOffset = 0.0
+        var minorOffset = 0.0
 
-    private static func resolvedTipStampRotation(
-        shapeJitter: Float,
-        random: inout CreativeShapeGeneratorRandom
-    ) -> Float {
-        let range = lerp(36, 180, clamp(shapeJitter, 0, 1))
-        return random.float(in: -range...range)
-    }
-
-    private static func resolvedFeatherAmount(
-        featherProbability: Float,
-        shapeJitter: Float,
-        random: inout CreativeShapeGeneratorRandom
-    ) -> Float {
-        let probability = clamp(featherProbability, 0, 1)
-        guard probability > 0.0001, random.bool(probability: probability) else {
-            return 0
-        }
-
-        let baseSoftness = random.float(in: 0.16...0.30)
-        let contrastBoost = lerp(0.9, 1.22, shapeJitter)
-        return clamp(baseSoftness * contrastBoost, 0.08, 0.36)
-    }
-
-    private static func resolvedSeed(
-        selectionShape: SelectionShape,
-        state: CreativeShapeGeneratorState,
-        colorContext: CreativeShapeGeneratorColorContext,
-        tipImageLibrary: TipImageLibraryState,
-        runtimeSeed: UInt64
-    ) -> UInt64 {
-        if state.shapeJitter > 0.0001 {
-            return runtimeSeed
-        }
-
-        var builder = CreativeShapeDeterministicSeedBuilder()
-        builder.mix(selectionShape.kind.rawValue)
-        builder.mix(selectionShape.bounds.minX)
-        builder.mix(selectionShape.bounds.minY)
-        builder.mix(selectionShape.bounds.maxX)
-        builder.mix(selectionShape.bounds.maxY)
-        for point in sampled(points: selectionShape.pathPoints, limit: 24) {
-            builder.mix(point.x)
-            builder.mix(point.y)
-        }
-        builder.mix(state.selectedSource?.rawValue ?? "none")
-        builder.mix(state.featherProbability)
-        builder.mix(state.shapeCharacteristic)
-        builder.mix(state.shapeSize)
-        builder.mix(state.shapeJitter)
-        builder.mix(state.colorJitter)
-        builder.mix(colorContext.selectedColor.red)
-        builder.mix(colorContext.selectedColor.green)
-        builder.mix(colorContext.selectedColor.blue)
-        builder.mix(colorContext.selectedColor.alpha)
-        builder.mix(colorContext.brushOpacity)
-        builder.mix(colorContext.brushNoise)
-        for color in colorContext.paletteColors.prefix(25) {
-            builder.mix(color.red)
-            builder.mix(color.green)
-            builder.mix(color.blue)
-            builder.mix(color.alpha)
-        }
-        if let importedImage = state.importedImage {
-            builder.mix(importedImage.fileName)
-            builder.mix(importedImage.width)
-            builder.mix(importedImage.height)
-            builder.mix(importedImage.rgbaPixels)
-        }
-        if state.usesTipImageShapes {
-            let sortedTipIDs = tipImageLibrary.items
-                .compactMap { item -> BrushTipImageAssetID? in
-                    guard let maskData = item.maskData, isRenderableTipMaskData(maskData) else { return nil }
-                    return item.id
-                }
-                .sorted()
-            builder.mix(sortedTipIDs.count)
-            for id in sortedTipIDs.prefix(64) {
-                builder.mix(id.rawValue)
+        switch mode {
+        case .cluster:
+            if index > 0 {
+                let goldenAngle = Double(index) * 2.399_963_229_728_653
+                let radius = axis.minorSpan * (0.08 + (0.26 * sqrt(progress)))
+                majorOffset = cos(goldenAngle + phase) * radius
+                minorOffset = sin(goldenAngle + phase) * radius
             }
+        case .growth:
+            let growthProgress = index > 0 && count > 2
+                ? Double(index - 1) / Double(count - 2)
+                : 0
+            majorOffset = (index == 0 ? -0.12 : (-0.06 + (growthProgress * 0.40))) * axis.majorSpan
+            minorOffset = sin((progress * Double.pi * 2.4) + phase) * axis.minorSpan * (0.05 + (0.10 * looseness))
+            if role == .accent {
+                minorOffset += random.double(in: -0.12...0.12) * axis.minorSpan
+            }
+        case .flow:
+            majorOffset = (-0.30 + (progress * 0.60)) * axis.majorSpan
+            minorOffset = sin((progress * Double.pi * 2.0) + phase) * axis.minorSpan * (0.14 + (0.08 * looseness))
+        case .fracture:
+            let group = index % 3
+            let groupOffsets = [-0.22, 0.02, 0.23]
+            majorOffset = groupOffsets[group] * axis.majorSpan
+            let localAngle = random.double(in: 0...(Double.pi * 2))
+            let localRadius = axis.minorSpan * random.double(in: 0.03...(0.10 + (0.10 * looseness)))
+            majorOffset += cos(localAngle) * localRadius
+            minorOffset = sin(localAngle) * localRadius
         }
-        return builder.state
+
+        return offset(axis.center, major: axis.major, majorAmount: majorOffset, minor: axis.minor, minorAmount: minorOffset)
     }
 
-    private static func sampled(points: [CanvasPoint], limit: Int) -> [CanvasPoint] {
-        guard points.count > limit, limit > 0 else { return points }
-        let sampleStride = max(points.count / limit, 1)
-        return Swift.stride(from: 0, to: points.count, by: sampleStride).map { points[$0] }
-    }
-
-    private static func resolvedBaseCount(shapeSize: Float) -> Int {
-        let clamped = clamp(shapeSize, 0, 1)
-        let maxCount = 8 + Int((clamped * 24).rounded())
-        return max(1, Int((1 + (clamped * Float(maxCount - 1))).rounded()))
-    }
-
-    private static func resolvedCountVariation(
-        shapeJitter: Float,
+    private static func resolvedInteriorCenter(
+        target: CanvasPoint,
+        axis: CreativeShapeCompositionAxis,
+        selection: SelectionShape,
+        coherence: Float,
         random: inout CreativeShapeGeneratorRandom
-    ) -> Double {
-        let clamped = clamp(shapeJitter, 0, 1)
-        guard clamped > 0.0001 else { return 1 }
-        let contrast = Float(pow(Double(clamped), 1.15))
-        let sparseTarget = random.float(in: 0.35...0.82)
-        let denseTarget = random.float(in: 1.25...2.35)
-        let target = random.bool(probability: 0.46) ? sparseTarget : denseTarget
-        return Double(lerp(1, target, contrast))
+    ) -> CanvasPoint {
+        var resolvedTarget = constrainedPoint(target, from: axis.center, inside: selection)
+        let randomBlend = Double(1 - coherence) * 0.42
+        if randomBlend > 0.001, let randomPoint = randomInteriorPoint(in: selection, random: &random) {
+            resolvedTarget = CanvasPoint(
+                x: resolvedTarget.x + ((randomPoint.x - resolvedTarget.x) * randomBlend),
+                y: resolvedTarget.y + ((randomPoint.y - resolvedTarget.y) * randomBlend)
+            )
+            resolvedTarget = constrainedPoint(resolvedTarget, from: axis.center, inside: selection)
+        }
+        return resolvedTarget
     }
 
     private static func resolvedDiameter(
-        shortestSide: Float,
-        shapeSize: Float,
-        shapeJitter: Float,
+        role: CreativeShapeRole,
+        mode: CreativeShapeStructureMode,
+        shortestSide: Double,
+        complexity: Float,
         random: inout CreativeShapeGeneratorRandom
-    ) -> Float {
-        let clamped = clamp(shapeSize, 0, 1)
-        let minDiameter = shortestSide * lerp(0.70, 0.04, clamped)
-        let maxDiameter = shortestSide * lerp(0.90, 0.12, clamped)
-        var diameter = random.float(in: minDiameter...max(maxDiameter, minDiameter))
-        if shapeJitter > 0.0001 {
-            let contrast = Float(pow(Double(clamp(shapeJitter, 0, 1)), 1.1))
-            let shrinkScale = random.float(in: 0.28...0.82)
-            let growScale = random.float(in: 1.18...2.85)
-            let targetScale = random.bool(probability: 0.5) ? shrinkScale : growScale
-            diameter *= lerp(1, targetScale, contrast)
+    ) -> Double {
+        let complexityScale = Double(lerp(1.08, 0.80, complexity))
+        let range: ClosedRange<Double>
+        switch role {
+        case .dominant:
+            range = mode == .fracture ? 0.22...0.34 : 0.30...0.42
+        case .secondary:
+            range = 0.14...0.27
+        case .accent:
+            range = 0.05...0.12
         }
-        return max(diameter, shortestSide * 0.02)
+        return max(shortestSide * random.double(in: range) * complexityScale, 2)
     }
 
-    private static func resolvedClusterAnchors(
-        count: Int,
-        samplingContext: CreativeShapeSamplingContext,
-        shapeJitter: Float,
+    private static func resolvedOrientation(
+        center: CanvasPoint,
+        mode: CreativeShapeStructureMode,
+        axis: CreativeShapeCompositionAxis,
+        coherence: Float,
+        phase: Double,
+        random: inout CreativeShapeGeneratorRandom
+    ) -> Double {
+        let deviation = Double(1 - coherence) * Double.pi * 0.62
+        let base: Double
+        switch mode {
+        case .cluster:
+            base = atan2(center.y - axis.center.y, center.x - axis.center.x)
+        case .growth, .fracture:
+            base = axis.angle
+        case .flow:
+            let relative = ((center.x - axis.center.x) * axis.major.x) + ((center.y - axis.center.y) * axis.major.y)
+            let normalized = relative / max(axis.majorSpan, 1)
+            let slope = cos((normalized + 0.5) * Double.pi * 2 + phase) * 0.42
+            base = axis.angle + atan(slope)
+        }
+        return base + random.double(in: -deviation...deviation)
+    }
+
+    private static func resolvedAspect(
+        role: CreativeShapeRole,
+        mode: CreativeShapeStructureMode,
+        coherence: Float,
+        formElongation: Float,
+        random: inout CreativeShapeGeneratorRandom
+    ) -> Double {
+        let baseRange: ClosedRange<Double>
+        switch mode {
+        case .cluster:
+            baseRange = 1.10...2.15
+        case .growth:
+            baseRange = 1.30...3.40
+        case .flow:
+            baseRange = 1.55...4.20
+        case .fracture:
+            baseRange = 1.35...3.60
+        }
+        let roleScale: Double = role == .accent ? 0.82 : 1
+        let randomAspect = random.double(in: baseRange) * roleScale
+        let extensionAmount = Double(0.18 + (formElongation * 0.82))
+        return 1 + ((randomAspect - 1) * extensionAmount * Double(0.68 + (coherence * 0.32)))
+    }
+
+    private static func organicPolygon(
+        index: Int,
+        role: CreativeShapeRole,
+        mode: CreativeShapeStructureMode,
+        center: CanvasPoint,
+        diameter: Double,
+        aspect: Double,
+        orientation: Double,
+        complexity: Float,
+        formElongation: Float,
+        edgeTexture: Float,
+        selection: SelectionShape,
         random: inout CreativeShapeGeneratorRandom
     ) -> [CanvasPoint] {
-        guard count > 1, shapeJitter > 0.0001 else { return [] }
-        let clusterCount = min(4, max(1, Int((shapeJitter * 3.2).rounded())))
-        var anchors: [CanvasPoint] = []
-        anchors.reserveCapacity(clusterCount)
-        for _ in 0..<clusterCount {
-            if let point = randomPoint(
-                in: samplingContext,
-                validatingWith: nil,
-                random: &random
-            ) {
-                anchors.append(point)
-            }
+        let ribbonProbability: Float
+        switch mode {
+        case .cluster:
+            ribbonProbability = formElongation * 0.18
+        case .growth:
+            ribbonProbability = 0.12 + (formElongation * 0.58)
+        case .flow:
+            ribbonProbability = 0.24 + (formElongation * 0.68)
+        case .fracture:
+            ribbonProbability = 0.18 + (formElongation * 0.52)
         }
-        return anchors
-    }
-
-    private static func resolvedCenterPoint(
-        index: Int,
-        totalCount: Int,
-        selectionShape: SelectionShape,
-        samplingContext: CreativeShapeSamplingContext,
-        clusterAnchors: [CanvasPoint],
-        shapeJitter: Float,
-        random: inout CreativeShapeGeneratorRandom
-    ) -> CanvasPoint? {
-        guard
-            shapeJitter > 0.0001,
-            clusterAnchors.isEmpty == false,
-            totalCount > 1,
-            random.bool(probability: lerp(0.18, 0.86, shapeJitter))
-        else {
-            return randomPoint(
-                in: samplingContext,
-                validatingWith: selectionShape,
+        let shouldUseRibbon = role != .accent && (
+            (index == 0 && mode != .cluster && formElongation >= 0.35) ||
+            random.bool(probability: ribbonProbability)
+        )
+        if shouldUseRibbon {
+            return organicRibbonPolygon(
+                center: center,
+                diameter: diameter,
+                aspect: aspect,
+                orientation: orientation,
+                complexity: complexity,
+                edgeTexture: edgeTexture,
+                selection: selection,
                 random: &random
             )
         }
 
-        let anchor = clusterAnchors[min(index % clusterAnchors.count, clusterAnchors.count - 1)]
-        let bounds = selectionShape.bounds
-        let reach = min(bounds.size.x, bounds.size.y) * Double(lerp(0.06, 0.28, shapeJitter))
-        for _ in 0..<24 {
-            let angle = random.double(in: 0...(Double.pi * 2))
-            let distance = random.double(in: 0...(reach * random.double(in: 0.25...1.0)))
-            let point = CanvasPoint(
-                x: anchor.x + (cos(angle) * distance),
-                y: anchor.y + (sin(angle) * distance)
-            )
-            if selectionShape.contains(point) {
-                return point
-            }
-        }
-
-        return randomPoint(
-            in: samplingContext,
-            validatingWith: selectionShape,
+        return organicBlobPolygon(
+            center: center,
+            diameter: diameter,
+            aspect: aspect,
+            orientation: orientation,
+            complexity: complexity,
+            edgeTexture: edgeTexture,
+            selection: selection,
             random: &random
         )
     }
 
-    private static func randomPoint(
-        in samplingContext: CreativeShapeSamplingContext,
-        validatingWith selectionShape: SelectionShape?,
+    private static func organicBlobPolygon(
+        center: CanvasPoint,
+        diameter: Double,
+        aspect: Double,
+        orientation: Double,
+        complexity: Float,
+        edgeTexture: Float,
+        selection: SelectionShape,
         random: inout CreativeShapeGeneratorRandom
-    ) -> CanvasPoint? {
-        guard samplingContext.candidatePoints.isEmpty == false else { return nil }
+    ) -> [CanvasPoint] {
+        let controlPointCount = 10 + Int((complexity * 6).rounded()) + Int((edgeTexture * 5).rounded())
+        let majorRadius = diameter * 0.5 * aspect
+        let minorRadius = diameter * 0.5 * Double(lerp(0.96, 0.62, Float(min((aspect - 1) / 1.7, 1))))
+        let phaseA = random.double(in: 0...(Double.pi * 2))
+        let phaseB = random.double(in: 0...(Double.pi * 2))
+        let lobeAmplitude = Double(lerp(0.025, 0.17, edgeTexture))
+        let roughAmplitude = Double(lerp(0.008, 0.14, edgeTexture))
+        let cosine = cos(orientation)
+        let sine = sin(orientation)
 
-        let candidateIndex = random.int(in: 0...(samplingContext.candidatePoints.count - 1))
-        let candidate = samplingContext.candidatePoints[candidateIndex]
-        if let selectionShape {
-            for _ in 0..<12 {
-                let point = CanvasPoint(
-                    x: candidate.x + random.double(in: -samplingContext.jitterRadius.x...samplingContext.jitterRadius.x),
-                    y: candidate.y + random.double(in: -samplingContext.jitterRadius.y...samplingContext.jitterRadius.y)
-                )
-                if selectionShape.contains(point) {
-                    return point
-                }
-            }
+        var pinches: [(angle: Double, width: Double, depth: Double)] = []
+        for _ in 0..<(1 + Int((edgeTexture * 2).rounded())) {
+            pinches.append((
+                angle: random.double(in: 0...(Double.pi * 2)),
+                width: random.double(in: 0.28...0.72),
+                depth: random.double(in: 0.10...(0.16 + (Double(edgeTexture) * 0.34)))
+            ))
+        }
+        var protrusions: [(angle: Double, width: Double, height: Double)] = []
+        for _ in 0..<(1 + Int((edgeTexture * 1.5).rounded())) {
+            protrusions.append((
+                angle: random.double(in: 0...(Double.pi * 2)),
+                width: random.double(in: 0.24...0.62),
+                height: random.double(in: 0.08...(0.14 + (Double(edgeTexture) * 0.28)))
+            ))
         }
 
-        return candidate
+        var controls: [CanvasPoint] = []
+        controls.reserveCapacity(controlPointCount)
+        for index in 0..<controlPointCount {
+            let angle = (Double(index) / Double(controlPointCount)) * Double.pi * 2
+            let correlated =
+                sin((angle * 2) + phaseA) * lobeAmplitude +
+                sin((angle * 3) + phaseB) * lobeAmplitude * 0.55
+            let rough = random.double(in: -roughAmplitude...roughAmplitude)
+            var featureScale = 0.0
+            for pinch in pinches {
+                let influence = featureInfluence(angle: angle, center: pinch.angle, width: pinch.width)
+                featureScale -= influence * pinch.depth
+            }
+            for protrusion in protrusions {
+                let influence = featureInfluence(angle: angle, center: protrusion.angle, width: protrusion.width)
+                featureScale += influence * protrusion.height
+            }
+            let radiusScale = max(0.38, 1 + correlated + rough + featureScale)
+            let localX = cos(angle) * majorRadius * radiusScale
+            let localY = sin(angle) * minorRadius * radiusScale
+            let candidate = CanvasPoint(
+                x: center.x + (localX * cosine) - (localY * sine),
+                y: center.y + (localX * sine) + (localY * cosine)
+            )
+            controls.append(constrainedPoint(candidate, from: center, inside: selection))
+        }
+
+        let samplesPerSegment = edgeTexture > 0.76 ? 1 : (edgeTexture > 0.38 ? 2 : 3)
+        var smoothed: [CanvasPoint] = []
+        smoothed.reserveCapacity(controlPointCount * samplesPerSegment)
+        for index in 0..<controlPointCount {
+            let p0 = controls[(index - 1 + controlPointCount) % controlPointCount]
+            let p1 = controls[index]
+            let p2 = controls[(index + 1) % controlPointCount]
+            let p3 = controls[(index + 2) % controlPointCount]
+            for sample in 0..<samplesPerSegment {
+                let t = Double(sample) / Double(samplesPerSegment)
+                let point = catmullRom(p0: p0, p1: p1, p2: p2, p3: p3, t: t)
+                smoothed.append(constrainedPoint(point, from: center, inside: selection))
+            }
+        }
+        return smoothed
     }
 
-    private static func makeSamplingContext(
-        for selectionShape: SelectionShape,
-        targetPointBudget: Int
-    ) -> CreativeShapeSamplingContext {
-        let bounds = selectionShape.bounds
-        guard bounds.isEmpty == false else {
-            return CreativeShapeSamplingContext(
-                candidatePoints: [],
-                jitterRadius: CanvasPoint(x: 0, y: 0)
+    private static func organicRibbonPolygon(
+        center: CanvasPoint,
+        diameter: Double,
+        aspect: Double,
+        orientation: Double,
+        complexity: Float,
+        edgeTexture: Float,
+        selection: SelectionShape,
+        random: inout CreativeShapeGeneratorRandom
+    ) -> [CanvasPoint] {
+        let pointCount = 7 + Int((complexity * 3).rounded()) + Int((edgeTexture * 3).rounded())
+        let halfLength = diameter * 0.46 * aspect
+        let baseHalfWidth = diameter * Double(lerp(0.22, 0.34, 1 - edgeTexture))
+        let bend = diameter * random.double(in: 0.10...(0.18 + (Double(edgeTexture) * 0.30)))
+            * (random.bool(probability: 0.5) ? 1 : -1)
+        let wave = diameter * random.double(in: 0.02...(0.05 + (Double(edgeTexture) * 0.12)))
+        let wavePhase = random.double(in: 0...(Double.pi * 2))
+        let widthPhase = random.double(in: 0...(Double.pi * 2))
+        let cosine = cos(orientation)
+        let sine = sin(orientation)
+
+        var centerline: [CanvasPoint] = []
+        centerline.reserveCapacity(pointCount)
+        for index in 0..<pointCount {
+            let progress = Double(index) / Double(pointCount - 1)
+            let localX = (-halfLength) + (progress * halfLength * 2)
+            let localY = sin((progress - 0.5) * Double.pi) * bend
+                + sin((progress * Double.pi * 2) + wavePhase) * wave
+            let candidate = CanvasPoint(
+                x: center.x + (localX * cosine) - (localY * sine),
+                y: center.y + (localX * sine) + (localY * cosine)
+            )
+            centerline.append(constrainedPoint(candidate, from: center, inside: selection))
+        }
+
+        var left: [CanvasPoint] = []
+        var right: [CanvasPoint] = []
+        left.reserveCapacity(pointCount)
+        right.reserveCapacity(pointCount)
+        for index in centerline.indices {
+            let previous = centerline[max(index - 1, 0)]
+            let next = centerline[min(index + 1, centerline.count - 1)]
+            let tangentX = next.x - previous.x
+            let tangentY = next.y - previous.y
+            let tangentLength = max(hypot(tangentX, tangentY), 0.000_1)
+            let normalX = -tangentY / tangentLength
+            let normalY = tangentX / tangentLength
+            let progress = Double(index) / Double(pointCount - 1)
+            let taper = 0.18 + (0.82 * pow(sin(progress * Double.pi), 0.62))
+            let correlatedWidth = 1 + (sin((progress * Double.pi * 4) + widthPhase) * Double(edgeTexture) * 0.22)
+            let notch = random.double(in: -(Double(edgeTexture) * 0.18)...(Double(edgeTexture) * 0.13))
+            let halfWidth = max(baseHalfWidth * taper * correlatedWidth * (1 + notch), diameter * 0.035)
+            let centerPoint = centerline[index]
+            let leftCandidate = CanvasPoint(
+                x: centerPoint.x + (normalX * halfWidth),
+                y: centerPoint.y + (normalY * halfWidth)
+            )
+            let rightCandidate = CanvasPoint(
+                x: centerPoint.x - (normalX * halfWidth),
+                y: centerPoint.y - (normalY * halfWidth)
+            )
+            left.append(constrainedPoint(leftCandidate, from: centerPoint, inside: selection))
+            right.append(constrainedPoint(rightCandidate, from: centerPoint, inside: selection))
+        }
+
+        return left + right.reversed()
+    }
+
+    private static func featureInfluence(angle: Double, center: Double, width: Double) -> Double {
+        let rawDistance = abs(angle - center).truncatingRemainder(dividingBy: Double.pi * 2)
+        let distance = min(rawDistance, (Double.pi * 2) - rawDistance)
+        let normalized = max(0, 1 - (distance / max(width, 0.000_1)))
+        return normalized * normalized * (3 - (2 * normalized))
+    }
+
+    private static func resolvedColorRoles(
+        for state: CreativeShapeGeneratorState,
+        context: CreativeShapeGeneratorColorContext,
+        random: inout CreativeShapeGeneratorRandom
+    ) -> CreativeShapeColorRoles {
+        switch state.selectedSource {
+        case .paletteBlocks:
+            return paletteBlockRoles(colors: context.paletteColors, fallback: context.selectedColor, random: &random)
+        case .externalImage:
+            let colors = dominantImageColors(from: state.importedImage)
+            return paletteBlockRoles(colors: colors, fallback: context.selectedColor, random: &random)
+        case .currentColor, .none:
+            let base = context.selectedColor.withAlpha(1)
+            return CreativeShapeColorRoles(
+                dominant: base,
+                secondary: shiftedColor(base, hue: random.float(in: -22 ... -10), saturation: 0.05, value: -0.09),
+                accent: shiftedColor(base, hue: random.float(in: 138...178), saturation: -0.08, value: 0.06)
+            )
+        }
+    }
+
+    private static func paletteBlockRoles(
+        colors: [RGBAColor],
+        fallback: RGBAColor,
+        random: inout CreativeShapeGeneratorRandom
+    ) -> CreativeShapeColorRoles {
+        let palette = colors.filter { $0.alpha > 0.01 }
+        guard palette.isEmpty == false else {
+            let base = fallback.withAlpha(1)
+            return CreativeShapeColorRoles(
+                dominant: base,
+                secondary: shiftedColor(base, hue: -16, saturation: 0.04, value: -0.08),
+                accent: shiftedColor(base, hue: 155, saturation: -0.06, value: 0.05)
             )
         }
 
-        let normalizedBudget = max(144, min(targetPointBudget, 2_304))
-        let aspectRatio = max(bounds.size.x, 1) / max(bounds.size.y, 1)
-        let estimatedColumns = Int((sqrt(Double(normalizedBudget) * aspectRatio)).rounded(.up))
-        let estimatedRows = Int((Double(normalizedBudget) / Double(max(estimatedColumns, 1))).rounded(.up))
-        let sampleColumns = min(max(estimatedColumns, 12), 48)
-        let sampleRows = min(max(estimatedRows, 12), 48)
-        let stepX = max(bounds.size.x / Double(sampleColumns), 0.5)
-        let stepY = max(bounds.size.y / Double(sampleRows), 0.5)
-        var candidatePoints: [CanvasPoint] = []
-        candidatePoints.reserveCapacity(sampleColumns * sampleRows / 3)
+        let dominant = palette[random.int(in: 0...(palette.count - 1))].withAlpha(1)
+        let dominantHSV = ColorBlocksEngine.rgbToHsv(dominant)
+        let ranked = palette
+            .map { color -> (RGBAColor, Float) in
+                let hsv = ColorBlocksEngine.rgbToHsv(color)
+                return (color.withAlpha(1), hueDistance(dominantHSV.h, hsv.h))
+            }
+            .sorted { $0.1 < $1.1 }
+        let secondary = ranked.first(where: { $0.1 > 8 })?.0
+            ?? shiftedColor(dominant, hue: -18, saturation: 0.03, value: -0.10)
+        let accent = ranked.last(where: { $0.1 > 45 })?.0
+            ?? shiftedColor(dominant, hue: 160, saturation: -0.05, value: 0.08)
+        return CreativeShapeColorRoles(dominant: dominant, secondary: secondary, accent: accent)
+    }
 
-        for row in 0..<sampleRows {
-            for column in 0..<sampleColumns {
-                let point = CanvasPoint(
-                    x: bounds.minX + ((Double(column) + 0.5) * stepX),
-                    y: bounds.minY + ((Double(row) + 0.5) * stepY)
+    private static func resolvedShapeColor(
+        role: CreativeShapeRole,
+        index: Int,
+        roles: CreativeShapeColorRoles,
+        opacity: Float,
+        edgeTexture: Float,
+        random: inout CreativeShapeGeneratorRandom
+    ) -> RGBAColor {
+        let base: RGBAColor
+        switch role {
+        case .dominant:
+            base = roles.dominant
+        case .secondary:
+            base = index.isMultiple(of: 3) ? roles.dominant : roles.secondary
+        case .accent:
+            base = index.isMultiple(of: 2) ? roles.accent : roles.secondary
+        }
+        let hueRange = lerp(2, 9, edgeTexture)
+        let valueRange = lerp(0.015, 0.075, edgeTexture)
+        let varied = shiftedColor(
+            base,
+            hue: random.float(in: -hueRange...hueRange),
+            saturation: random.float(in: -0.035...0.035),
+            value: random.float(in: -valueRange...valueRange)
+        )
+        return varied.withAlpha(clamp(base.alpha * opacity, 0, 1))
+    }
+
+    private static func resolvedFeatherAmount(
+        role: CreativeShapeRole,
+        edgeTexture: Float,
+        random: inout CreativeShapeGeneratorRandom
+    ) -> Float {
+        let probability = lerp(0.06, 0.48, edgeTexture)
+        guard random.bool(probability: probability) else { return 0 }
+        let roleScale: Float = role == .dominant ? 0.78 : 1
+        return random.float(in: 0.06...lerp(0.10, 0.30, edgeTexture)) * roleScale
+    }
+
+    private static func dominantImageColors(from source: CreativeShapeGeneratorImageSource?) -> [RGBAColor] {
+        guard let source, source.isValid else { return [] }
+        let bytes = [UInt8](source.rgbaPixels)
+        let binCount = 5 * 5 * 5
+        var counts = [Int](repeating: 0, count: binCount)
+        var redSums = [Float](repeating: 0, count: binCount)
+        var greenSums = [Float](repeating: 0, count: binCount)
+        var blueSums = [Float](repeating: 0, count: binCount)
+
+        for index in stride(from: 0, to: bytes.count, by: 4) {
+            let alpha = Float(bytes[index + 3]) / 255
+            guard alpha > 0.05 else { continue }
+            let red = clamp((Float(bytes[index]) / 255) / alpha, 0, 1)
+            let green = clamp((Float(bytes[index + 1]) / 255) / alpha, 0, 1)
+            let blue = clamp((Float(bytes[index + 2]) / 255) / alpha, 0, 1)
+            let r = min(Int(red * 5), 4)
+            let g = min(Int(green * 5), 4)
+            let b = min(Int(blue * 5), 4)
+            let bin = (r * 25) + (g * 5) + b
+            counts[bin] += 1
+            redSums[bin] += red
+            greenSums[bin] += green
+            blueSums[bin] += blue
+        }
+
+        return counts.indices
+            .filter { counts[$0] > 0 }
+            .sorted { counts[$0] > counts[$1] }
+            .prefix(6)
+            .map { bin in
+                let count = Float(counts[bin])
+                return RGBAColor(
+                    red: redSums[bin] / count,
+                    green: greenSums[bin] / count,
+                    blue: blueSums[bin] / count,
+                    alpha: 1
                 )
-                if selectionShape.contains(point) {
-                    candidatePoints.append(point)
-                }
             }
-        }
+    }
 
-        if candidatePoints.isEmpty,
-           let centroid = interiorCentroid(for: selectionShape),
-           selectionShape.contains(centroid) {
-            candidatePoints.append(centroid)
-        }
+    private static func shiftedColor(
+        _ color: RGBAColor,
+        hue: Float,
+        saturation: Float,
+        value: Float
+    ) -> RGBAColor {
+        var hsv = ColorBlocksEngine.rgbToHsv(color)
+        hsv.h = ColorBlocksEngine.wrapHue(hsv.h + hue)
+        hsv.s = clamp(hsv.s + saturation, 0, 1)
+        hsv.v = clamp(hsv.v + value, 0, 1)
+        return ColorBlocksEngine.hsvToRgb(hsv, alpha: color.alpha)
+    }
 
-        if candidatePoints.isEmpty {
-            let fallback = CanvasPoint(
-                x: bounds.origin.x + (bounds.size.x * 0.5),
-                y: bounds.origin.y + (bounds.size.y * 0.5)
+    private static func hueDistance(_ lhs: Float, _ rhs: Float) -> Float {
+        let distance = abs(lhs - rhs).truncatingRemainder(dividingBy: 360)
+        return min(distance, 360 - distance)
+    }
+
+    private static func orderedForRendering(
+        _ shapes: [CreativeShapeGeneratedShape],
+        mode: CreativeShapeStructureMode
+    ) -> [CreativeShapeGeneratedShape] {
+        guard mode != .fracture else { return shapes }
+        return shapes.reversed()
+    }
+
+    private static func compositionScore(
+        plan: CreativeShapeGeneratorPlan,
+        state: CreativeShapeGeneratorState
+    ) -> Double {
+        let areas = plan.shapes.compactMap { shape -> Double? in
+            guard case .polygon(let points) = shape.geometry else { return nil }
+            return abs(polygonArea(points))
+        }
+        guard let largest = areas.max(), areas.isEmpty == false else { return -Double.infinity }
+        let total = areas.reduce(0, +)
+        let boundsArea = max(plan.bounds.size.x * plan.bounds.size.y, 1)
+        let coverage = min(total / boundsArea, 1.5)
+        let targetCoverage = 0.33 + (Double(state.complexity) * 0.18)
+        let dominance = largest / max(total, 1)
+        let targetDominance = state.structureMode == .fracture ? 0.28 : 0.40
+        let connectedness = centerConnectedness(shapes: plan.shapes, bounds: plan.bounds)
+        let targetConnectedness = 0.45 + (Double(state.coherence) * 0.45)
+        return
+            2.2 -
+            (abs(coverage - targetCoverage) * 2.1) -
+            (abs(dominance - targetDominance) * 1.5) -
+            (abs(connectedness - targetConnectedness) * 1.2)
+    }
+
+    private static func centerConnectedness(
+        shapes: [CreativeShapeGeneratedShape],
+        bounds: CanvasRect
+    ) -> Double {
+        guard shapes.count > 1 else { return 1 }
+        let scale = max(min(bounds.size.x, bounds.size.y), 1)
+        var score = 0.0
+        for index in 1..<shapes.count {
+            let point = shapes[index].center
+            let nearest = shapes[..<index].map { previous in
+                hypot(point.x - previous.center.x, point.y - previous.center.y) / scale
+            }.min() ?? 1
+            score += max(0, 1 - (nearest / 0.42))
+        }
+        return score / Double(shapes.count - 1)
+    }
+
+    private static func constrainedPoint(
+        _ target: CanvasPoint,
+        from origin: CanvasPoint,
+        inside selection: SelectionShape
+    ) -> CanvasPoint {
+        if selection.contains(target) { return target }
+        guard selection.contains(origin) else {
+            return firstInteriorGridPoint(in: selection) ?? target
+        }
+        var lower = 0.0
+        var upper = 1.0
+        for _ in 0..<18 {
+            let t = (lower + upper) * 0.5
+            let candidate = CanvasPoint(
+                x: origin.x + ((target.x - origin.x) * t),
+                y: origin.y + ((target.y - origin.y) * t)
             )
-            if selectionShape.contains(fallback) {
-                candidatePoints.append(fallback)
+            if selection.contains(candidate) {
+                lower = t
+            } else {
+                upper = t
             }
         }
-
-        return CreativeShapeSamplingContext(
-            candidatePoints: candidatePoints,
-            jitterRadius: CanvasPoint(x: stepX * 0.45, y: stepY * 0.45)
+        return CanvasPoint(
+            x: origin.x + ((target.x - origin.x) * lower * 0.985),
+            y: origin.y + ((target.y - origin.y) * lower * 0.985)
         )
     }
 
-    private static func interiorCentroid(for selectionShape: SelectionShape) -> CanvasPoint? {
-        switch selectionShape.kind {
-        case .rectangle, .ellipse:
-            return CanvasPoint(
-                x: selectionShape.bounds.origin.x + (selectionShape.bounds.size.x * 0.5),
-                y: selectionShape.bounds.origin.y + (selectionShape.bounds.size.y * 0.5)
+    private static func randomInteriorPoint(
+        in selection: SelectionShape,
+        random: inout CreativeShapeGeneratorRandom
+    ) -> CanvasPoint? {
+        let bounds = selection.bounds
+        for _ in 0..<48 {
+            let point = CanvasPoint(
+                x: random.double(in: bounds.minX...bounds.maxX),
+                y: random.double(in: bounds.minY...bounds.maxY)
             )
-        case .lasso:
-            return polygonCentroid(points: selectionShape.pathPoints)
-        case .mask, .composite:
-            return nil
+            if selection.contains(point) { return point }
         }
+        return firstInteriorGridPoint(in: selection)
     }
 
-    private static func polygonCentroid(points: [CanvasPoint]) -> CanvasPoint? {
-        guard points.count >= 3 else { return nil }
+    private static func firstInteriorGridPoint(in selection: SelectionShape) -> CanvasPoint? {
+        let bounds = selection.bounds
+        for row in 0..<12 {
+            for column in 0..<12 {
+                let point = CanvasPoint(
+                    x: bounds.minX + ((Double(column) + 0.5) / 12 * bounds.size.x),
+                    y: bounds.minY + ((Double(row) + 0.5) / 12 * bounds.size.y)
+                )
+                if selection.contains(point) { return point }
+            }
+        }
+        return nil
+    }
 
+    private static func interiorCentroid(for selection: SelectionShape) -> CanvasPoint? {
+        let points = selection.pathPoints
+        guard points.count >= 3 else {
+            let center = CanvasPoint(
+                x: selection.bounds.origin.x + (selection.bounds.size.x * 0.5),
+                y: selection.bounds.origin.y + (selection.bounds.size.y * 0.5)
+            )
+            return selection.contains(center) ? center : nil
+        }
         var signedArea = 0.0
-        var centroidX = 0.0
-        var centroidY = 0.0
-
-        for index in 0..<points.count {
+        var centerX = 0.0
+        var centerY = 0.0
+        for index in points.indices {
             let current = points[index]
             let next = points[(index + 1) % points.count]
             let cross = (current.x * next.y) - (next.x * current.y)
             signedArea += cross
-            centroidX += (current.x + next.x) * cross
-            centroidY += (current.y + next.y) * cross
+            centerX += (current.x + next.x) * cross
+            centerY += (current.y + next.y) * cross
         }
-
         signedArea *= 0.5
-        guard abs(signedArea) > 0.000001 else { return nil }
-        let factor = 1.0 / (6.0 * signedArea)
-        return CanvasPoint(
-            x: centroidX * factor,
-            y: centroidY * factor
+        guard abs(signedArea) > 0.000_001 else { return nil }
+        let factor = 1 / (6 * signedArea)
+        let centroid = CanvasPoint(x: centerX * factor, y: centerY * factor)
+        return selection.contains(centroid) ? centroid : nil
+    }
+
+    private static func boundsCorners(_ bounds: CanvasRect) -> [CanvasPoint] {
+        [
+            CanvasPoint(x: bounds.minX, y: bounds.minY),
+            CanvasPoint(x: bounds.maxX, y: bounds.minY),
+            CanvasPoint(x: bounds.maxX, y: bounds.maxY),
+            CanvasPoint(x: bounds.minX, y: bounds.maxY)
+        ]
+    }
+
+    private static func offset(
+        _ origin: CanvasPoint,
+        major: CanvasPoint,
+        majorAmount: Double,
+        minor: CanvasPoint,
+        minorAmount: Double
+    ) -> CanvasPoint {
+        CanvasPoint(
+            x: origin.x + (major.x * majorAmount) + (minor.x * minorAmount),
+            y: origin.y + (major.y * majorAmount) + (minor.y * minorAmount)
         )
     }
 
-    private static func normalizedPoint(_ point: CanvasPoint, in bounds: CanvasRect) -> CanvasPoint {
-        let width = max(bounds.size.x, 0.0001)
-        let height = max(bounds.size.y, 0.0001)
-        return CanvasPoint(
-            x: min(max((point.x - bounds.minX) / width, 0), 1),
-            y: min(max((point.y - bounds.minY) / height, 0), 1)
-        )
-    }
-
-    private static func organicShapePoints(
-        center: CanvasPoint,
-        diameter: Float,
-        organicity: Float,
-        shapeJitter: Float,
-        random: inout CreativeShapeGeneratorRandom
-    ) -> [CanvasPoint] {
-        func reducedExaggeration(_ value: Double, anchor: Double = 1.0, keepRatio: Double = 0.4) -> Double {
-            anchor + ((value - anchor) * keepRatio)
-        }
-
-        let clampedOrganicity = clamp(organicity, 0, 1)
-        let pointCountLower = 8 + Int((clampedOrganicity * 4).rounded())
-        let pointCountUpper = 12 + Int((clampedOrganicity * 6).rounded()) + Int((shapeJitter * 3).rounded())
-        let pointCount = random.int(in: pointCountLower...max(pointCountLower, pointCountUpper))
-        let baseRadius = Double(diameter) * 0.5
-        let step = (Double.pi * 2) / Double(pointCount)
-        let angularJitter = Double(lerp(0.14, 0.92, clampedOrganicity))
-        let jitterLimit = min(Double.pi / 4, step * angularJitter)
-        let innerRadiusScale = Double(lerp(0.88, 0.24, clampedOrganicity))
-        let outerRadiusScale = Double(lerp(1.10, 2.35, clampedOrganicity))
-        let lobeAmplitude = Double(lerp(0.04, 0.24, clampedOrganicity))
-        let lobeCount = max(2, 2 + Int((clampedOrganicity * 5).rounded()))
-        let phase = random.double(in: 0...(Double.pi * 2))
-        let orientation = random.double(in: 0...(Double.pi * 2))
-        let stretchBias = max(clampedOrganicity, shapeJitter * 0.8)
-        let majorScaleMin = reducedExaggeration(Double(lerp(1.0, 1.4, stretchBias)))
-        let majorScaleMax = reducedExaggeration(Double(lerp(1.2, 3.8, stretchBias)))
-        var majorScale = random.double(
-            in: min(majorScaleMin, majorScaleMax)...max(majorScaleMin, majorScaleMax)
-        )
-        let minorScaleMin = reducedExaggeration(Double(lerp(0.92, 0.74, stretchBias)))
-        let minorScaleMax = reducedExaggeration(Double(lerp(0.88, 0.18, stretchBias)))
-        var minorScale = random.double(
-            in: min(minorScaleMin, minorScaleMax)...max(minorScaleMin, minorScaleMax)
-        )
-        if random.bool(probability: lerp(0.07, 0.31, stretchBias)) {
-            majorScale *= random.double(
-                in: reducedExaggeration(1.08)...reducedExaggeration(1.85)
-            )
-            minorScale *= random.double(
-                in: reducedExaggeration(0.55)...reducedExaggeration(0.94)
-            )
-        }
-        let pinchProbability = lerp(0.05, 0.22, stretchBias)
-        let flutterAmplitude = Double(lerp(0.02, 0.18, shapeJitter))
-
-        var controlPoints: [CanvasPoint] = []
-        controlPoints.reserveCapacity(pointCount)
-
-        for index in 0..<pointCount {
-            let angle = (Double(index) * step) + random.double(in: -jitterLimit...jitterLimit)
-            let lobe = 1 + (sin((angle * Double(lobeCount)) + phase) * lobeAmplitude)
-            var radius = baseRadius * lobe * random.double(in: innerRadiusScale...outerRadiusScale)
-            radius *= 1 + (sin((angle * Double(max(lobeCount - 1, 1))) - phase * 0.35) * flutterAmplitude)
-            if random.bool(probability: pinchProbability) {
-                radius *= random.double(
-                    in: reducedExaggeration(0.24)...reducedExaggeration(0.74)
-                )
-            }
-            let localX = cos(angle) * radius * majorScale
-            let localY = sin(angle) * radius * minorScale
-            let rotatedX = (localX * cos(orientation)) - (localY * sin(orientation))
-            let rotatedY = (localX * sin(orientation)) + (localY * cos(orientation))
-            controlPoints.append(
-                CanvasPoint(
-                    x: center.x + rotatedX,
-                    y: center.y + rotatedY
-                )
-            )
-        }
-
-        let samplesPerSegment = max(8, 12 - Int((clampedOrganicity * 4).rounded()))
-        return sampledClosedCatmullRom(controlPoints: controlPoints, samplesPerSegment: samplesPerSegment)
-    }
-
-    private static func sampledClosedCatmullRom(
-        controlPoints: [CanvasPoint],
-        samplesPerSegment: Int
-    ) -> [CanvasPoint] {
-        guard controlPoints.count >= 3 else { return controlPoints }
-        let count = controlPoints.count
-        var sampled: [CanvasPoint] = []
-        sampled.reserveCapacity(count * samplesPerSegment)
-
-        for index in 0..<count {
-            let p0 = controlPoints[(index - 1 + count) % count]
-            let p1 = controlPoints[index]
-            let p2 = controlPoints[(index + 1) % count]
-            let p3 = controlPoints[(index + 2) % count]
-
-            for stepIndex in 0..<samplesPerSegment {
-                let t = Double(stepIndex) / Double(samplesPerSegment)
-                sampled.append(catmullRomPoint(p0: p0, p1: p1, p2: p2, p3: p3, t: t))
-            }
-        }
-
-        return sampled
-    }
-
-    private static func catmullRomPoint(
+    private static func catmullRom(
         p0: CanvasPoint,
         p1: CanvasPoint,
         p2: CanvasPoint,
@@ -761,7 +949,6 @@ enum CreativeShapeGeneratorEngine {
     ) -> CanvasPoint {
         let t2 = t * t
         let t3 = t2 * t
-
         let x = 0.5 * (
             (2 * p1.x) +
             (-p0.x + p2.x) * t +
@@ -777,147 +964,22 @@ enum CreativeShapeGeneratorEngine {
         return CanvasPoint(x: x, y: y)
     }
 
-    private static func resolvedColor(
-        for state: CreativeShapeGeneratorState,
-        selectionRelativePoint: CanvasPoint,
-        shapeIndex: Int,
-        totalShapeCount: Int,
-        colorContext: CreativeShapeGeneratorColorContext,
-        imageSource: CreativeShapeGeneratorImageSource?,
-        random: inout CreativeShapeGeneratorRandom
-    ) -> RGBAColor {
-        let baseColor: RGBAColor
-        switch state.selectedSource {
-        case .currentColor:
-            baseColor = colorContext.selectedColor
-        case .paletteBlocks:
-            let palette = colorContext.paletteColors.isEmpty ? [colorContext.selectedColor] : colorContext.paletteColors
-            baseColor = palette[random.int(in: 0...(palette.count - 1))]
-        case .externalImage:
-            baseColor = sampledImageColor(
-                at: selectionRelativePoint,
-                imageSource: imageSource,
-                fallback: colorContext.selectedColor,
-                random: &random
-            )
-        case .none:
-            baseColor = colorContext.selectedColor
+    private static func polygonArea(_ points: [CanvasPoint]) -> Double {
+        guard points.count >= 3 else { return 0 }
+        var area = 0.0
+        for index in points.indices {
+            let current = points[index]
+            let next = points[(index + 1) % points.count]
+            area += (current.x * next.y) - (next.x * current.y)
         }
-
-        let baseAlpha = clamp(baseColor.alpha * colorContext.brushOpacity, 0, 1)
-        var color = RGBAColor(red: baseColor.red, green: baseColor.green, blue: baseColor.blue, alpha: baseAlpha)
-
-        let panelJitter = clamp(state.colorJitter, 0, 1)
-        let brushNoise = state.selectedSource == .currentColor ? clamp(colorContext.brushNoise, 0, 1) : 0
-        if panelJitter > 0.0001 || brushNoise > 0.0001 {
-            let normalizedIndex = totalShapeCount > 1
-                ? (Float(shapeIndex) / Float(max(totalShapeCount - 1, 1))) * 2 - 1
-                : 0
-            color = jitteredColor(
-                color,
-                baseHueOffset: normalizedIndex * (0.34 * panelJitter),
-                baseSaturationOffset: normalizedIndex * (0.42 * panelJitter),
-                baseValueOffset: -normalizedIndex * (0.36 * panelJitter),
-                hueRange: (0.42 * panelJitter) + (0.14 * brushNoise),
-                saturationRange: (0.55 * panelJitter) + (0.20 * brushNoise),
-                valueRange: (0.45 * panelJitter) + (0.18 * brushNoise),
-                random: &random
-            )
-        }
-
-        return color
+        return area * 0.5
     }
 
-    private static func sampledImageColor(
-        at normalizedPoint: CanvasPoint,
-        imageSource: CreativeShapeGeneratorImageSource?,
-        fallback: RGBAColor,
-        random: inout CreativeShapeGeneratorRandom
-    ) -> RGBAColor {
-        guard let imageSource, imageSource.isValid else { return fallback }
-        let width = imageSource.width
-        let height = imageSource.height
-        let bytes = [UInt8](imageSource.rgbaPixels)
-        guard bytes.count == width * height * 4 else { return fallback }
-
-        let baseX = clamp(Float(normalizedPoint.x), 0, 1)
-        let baseY = clamp(Float(normalizedPoint.y), 0, 1)
-        let offsetX = random.float(in: -0.08...0.08)
-        let offsetY = random.float(in: -0.08...0.08)
-        let sampledX = clamp(baseX + offsetX, 0, 1)
-        let sampledY = clamp(baseY + offsetY, 0, 1)
-        let pixelX = min(max(Int((sampledX * Float(width - 1)).rounded()), 0), width - 1)
-        let pixelY = min(max(Int((sampledY * Float(height - 1)).rounded()), 0), height - 1)
-        let index = ((pixelY * width) + pixelX) * 4
-        guard index + 3 < bytes.count else { return fallback }
-
-        let alpha = Float(bytes[index + 3]) / 255
-        guard alpha > 0.001 else { return fallback }
-        let red = (Float(bytes[index]) / 255) / alpha
-        let green = (Float(bytes[index + 1]) / 255) / alpha
-        let blue = (Float(bytes[index + 2]) / 255) / alpha
-
-        return RGBAColor(
-            red: clamp(red, 0, 1),
-            green: clamp(green, 0, 1),
-            blue: clamp(blue, 0, 1),
-            alpha: 1
-        )
+    private static func lerp(_ lhs: Float, _ rhs: Float, _ amount: Float) -> Float {
+        lhs + ((rhs - lhs) * clamp(amount, 0, 1))
     }
 
-    private static func jitteredColor(
-        _ color: RGBAColor,
-        baseHueOffset: Float,
-        baseSaturationOffset: Float,
-        baseValueOffset: Float,
-        hueRange: Float,
-        saturationRange: Float,
-        valueRange: Float,
-        random: inout CreativeShapeGeneratorRandom
-    ) -> RGBAColor {
-        var hsv = ColorBlocksEngine.rgbToHsv(color)
-        hsv.h = ColorBlocksEngine.wrapHue(
-            hsv.h +
-            (baseHueOffset * 360) +
-            random.float(in: -(hueRange * 360)...(hueRange * 360))
-        )
-        hsv.s = clamp(
-            hsv.s +
-            baseSaturationOffset +
-            random.float(in: -saturationRange...saturationRange),
-            0,
-            1
-        )
-        hsv.v = clamp(
-            hsv.v +
-            baseValueOffset +
-            random.float(in: -valueRange...valueRange),
-            0,
-            1
-        )
-        return ColorBlocksEngine.hsvToRgb(hsv, alpha: color.alpha)
-    }
-
-    private static func reordered(
-        shapes: [CreativeShapeGeneratedShape],
-        shapeJitter: Float,
-        random: inout CreativeShapeGeneratorRandom
-    ) -> [CreativeShapeGeneratedShape] {
-        guard shapeJitter > 0.0001, shapes.count > 1 else { return shapes }
-        return shapes.enumerated()
-            .map { index, shape in
-                let shuffleWeight = Double(index) + random.double(in: -1...1) * Double(shapeJitter) * Double(shapes.count)
-                return (shape, shuffleWeight)
-            }
-            .sorted { $0.1 < $1.1 }
-            .map(\.0)
-    }
-
-    private static func lerp(_ a: Float, _ b: Float, _ t: Float) -> Float {
-        a + ((b - a) * clamp(t, 0, 1))
-    }
-
-    private static func clamp<T: Comparable>(_ value: T, _ minValue: T, _ maxValue: T) -> T {
-        min(max(value, minValue), maxValue)
+    private static func clamp<T: Comparable>(_ value: T, _ minimum: T, _ maximum: T) -> T {
+        min(max(value, minimum), maximum)
     }
 }
