@@ -80,6 +80,13 @@ private struct CreativeShapeFieldPrimitive {
     var endRadius: Double
 }
 
+private enum CreativeShapeTopologyGrammar {
+    case mass
+    case branching
+    case ribbon
+    case fragmented
+}
+
 enum CreativeShapeGeneratorEngine {
     static let maskResolution = 128
 
@@ -99,6 +106,13 @@ enum CreativeShapeGeneratorEngine {
         let openness = clamp(state.openness, 0, 1)
         let edgeCharacter = clamp(state.edgeCharacter, 0, 1)
         let surprise = clamp(state.surprise, 0, 1)
+        let grammar = resolvedGrammar(
+            tendency: tendency,
+            complexity: complexity,
+            openness: openness,
+            surprise: surprise,
+            random: &random
+        )
 
         let gestureLength = pathLength(sanitized)
         let rawBounds = CanvasRect.bounding(points: sanitized)
@@ -126,6 +140,7 @@ enum CreativeShapeGeneratorEngine {
             skeleton: skeleton,
             baseRadius: baseRadius,
             tendency: tendency,
+            grammar: grammar,
             surprise: surprise,
             random: &random
         )
@@ -135,6 +150,7 @@ enum CreativeShapeGeneratorEngine {
             baseRadius: baseRadius,
             tendency: tendency,
             complexity: complexity,
+            grammar: grammar,
             random: &random
         )
         appendBranches(
@@ -144,6 +160,7 @@ enum CreativeShapeGeneratorEngine {
             tendency: tendency,
             complexity: complexity,
             surprise: surprise,
+            grammar: grammar,
             random: &random
         )
         appendSatellites(
@@ -152,6 +169,7 @@ enum CreativeShapeGeneratorEngine {
             baseRadius: baseRadius,
             complexity: complexity,
             surprise: surprise,
+            grammar: grammar,
             random: &random
         )
         guard positive.isEmpty == false else { return nil }
@@ -163,6 +181,7 @@ enum CreativeShapeGeneratorEngine {
             complexity: complexity,
             edgeCharacter: edgeCharacter,
             surprise: surprise,
+            grammar: grammar,
             random: &random
         )
         let bounds = fieldBounds(
@@ -314,32 +333,110 @@ enum CreativeShapeGeneratorEngine {
         }
     }
 
+    private static func resolvedGrammar(
+        tendency: Float,
+        complexity: Float,
+        openness: Float,
+        surprise: Float,
+        random: inout CreativeShapeGeneratorRandom
+    ) -> CreativeShapeTopologyGrammar {
+        let weights: [(CreativeShapeTopologyGrammar, Float)] = [
+            (.mass, 0.22 + ((1 - tendency) * 1.15)),
+            (.branching, 0.20 + (complexity * 0.90) + (surprise * 0.28)),
+            (.ribbon, 0.18 + (tendency * 1.12)),
+            (.fragmented, 0.08 + (openness * 0.78) + (surprise * 0.42))
+        ]
+        let total = weights.reduce(Float(0)) { $0 + $1.1 }
+        var cursor = random.float(in: 0...total)
+        for (grammar, weight) in weights {
+            cursor -= weight
+            if cursor <= 0 { return grammar }
+        }
+        return .branching
+    }
+
     private static func makeMainPrimitives(
         skeleton: [CanvasPoint],
         baseRadius: Double,
         tendency: Float,
+        grammar: CreativeShapeTopologyGrammar,
         surprise: Float,
         random: inout CreativeShapeGeneratorRandom
     ) -> [CreativeShapeFieldPrimitive] {
         guard skeleton.count > 1 else { return [] }
+        let widthPhase = random.double(in: 0...(Double.pi * 2))
+        let widthFrequency = random.double(in: 1.15...2.85)
+        let widthAmplitude = random.double(in: 0.18...(0.34 + (Double(surprise) * 0.34)))
+        let startEndpointRadius = random.double(in: 0.04...(0.18 + (Double(1 - tendency) * 0.28)))
+        let endEndpointRadius = random.double(in: 0.04...(0.18 + (Double(1 - tendency) * 0.28)))
+        let grammarScale: Double = switch grammar {
+        case .mass: 0.46
+        case .branching: 0.68
+        case .ribbon: 0.88
+        case .fragmented: 0.62
+        }
+        var radii: [Double] = []
+        radii.reserveCapacity(skeleton.count)
+        for index in skeleton.indices {
+            let progress = Double(index) / Double(skeleton.count - 1)
+            let endpointBlend = (startEndpointRadius * (1 - progress)) + (endEndpointRadius * progress)
+            let envelope = endpointBlend + ((1 - endpointBlend) * pow(max(sin(progress * Double.pi), 0.01), 0.42))
+            let broadVariation = 1 + (sin((progress * Double.pi * widthFrequency) + widthPhase) * widthAmplitude)
+            let localVariation = 1 + random.double(in: -0.20...0.20) * Double(0.35 + (surprise * 0.65))
+            radii.append(max(baseRadius * envelope * broadVariation * localVariation * grammarScale, baseRadius * 0.035))
+        }
+
         var output: [CreativeShapeFieldPrimitive] = []
         output.reserveCapacity(skeleton.count - 1)
         for index in 0..<(skeleton.count - 1) {
-            let startProgress = Double(index) / Double(skeleton.count - 1)
-            let endProgress = Double(index + 1) / Double(skeleton.count - 1)
-            let taperPower = Double(lerp(0.20, 0.76, tendency))
-            let endpointRadius = Double(lerp(0.24, 0.07, tendency))
-            let startTaper = endpointRadius + ((1 - endpointRadius) * pow(max(sin(startProgress * Double.pi), 0.01), taperPower))
-            let endTaper = endpointRadius + ((1 - endpointRadius) * pow(max(sin(endProgress * Double.pi), 0.01), taperPower))
-            let variation = 1 + random.double(in: -0.16...0.16) * Double(surprise)
+            let keepsSegment: Bool = switch grammar {
+            case .fragmented:
+                random.bool(probability: 0.58)
+            case .mass:
+                random.bool(probability: 0.82)
+            case .branching, .ribbon:
+                true
+            }
+            guard keepsSegment else { continue }
+            var start = skeleton[index]
+            var end = skeleton[index + 1]
+            if grammar == .fragmented {
+                let direction = normalizedDirection(from: start, to: end)
+                let offset = baseRadius * random.double(in: -0.72...0.72) * Double(0.45 + (surprise * 0.55))
+                let angle = random.double(in: -0.42...0.42) * Double(0.35 + (surprise * 0.65))
+                let center = CanvasPoint(x: (start.x + end.x) * 0.5, y: (start.y + end.y) * 0.5)
+                let halfX = (end.x - start.x) * 0.5
+                let halfY = (end.y - start.y) * 0.5
+                let rotatedHalfX = (halfX * cos(angle)) - (halfY * sin(angle))
+                let rotatedHalfY = (halfX * sin(angle)) + (halfY * cos(angle))
+                let offsetX = -direction.y * offset
+                let offsetY = direction.x * offset
+                start = CanvasPoint(
+                    x: center.x - rotatedHalfX + offsetX,
+                    y: center.y - rotatedHalfY + offsetY
+                )
+                end = CanvasPoint(
+                    x: center.x + rotatedHalfX + offsetX,
+                    y: center.y + rotatedHalfY + offsetY
+                )
+            }
             output.append(
                 CreativeShapeFieldPrimitive(
-                    start: skeleton[index],
-                    end: skeleton[index + 1],
-                    startRadius: baseRadius * startTaper * variation,
-                    endRadius: baseRadius * endTaper * variation
+                    start: start,
+                    end: end,
+                    startRadius: radii[index],
+                    endRadius: radii[index + 1]
                 )
             )
+        }
+        if output.isEmpty {
+            let middle = max((skeleton.count - 1) / 2, 0)
+            output.append(.init(
+                start: skeleton[middle],
+                end: skeleton[min(middle + 1, skeleton.count - 1)],
+                startRadius: radii[middle],
+                endRadius: radii[min(middle + 1, radii.count - 1)]
+            ))
         }
         return output
     }
@@ -350,10 +447,20 @@ enum CreativeShapeGeneratorEngine {
         baseRadius: Double,
         tendency: Float,
         complexity: Float,
+        grammar: CreativeShapeTopologyGrammar,
         random: inout CreativeShapeGeneratorRandom
     ) {
         let massAmount = 1 - tendency
-        let count = 1 + Int((massAmount * (2 + (complexity * 3))).rounded())
+        let count: Int = switch grammar {
+        case .mass:
+            3 + Int((complexity * 4).rounded())
+        case .branching:
+            1 + Int((complexity * 2).rounded())
+        case .ribbon:
+            random.bool(probability: 0.45 + (massAmount * 0.35)) ? 1 : 0
+        case .fragmented:
+            2 + Int((complexity * 3).rounded())
+        }
         guard skeleton.isEmpty == false else { return }
         for _ in 0..<count {
             let index = random.int(in: 0...(skeleton.count - 1))
@@ -393,19 +500,36 @@ enum CreativeShapeGeneratorEngine {
         tendency: Float,
         complexity: Float,
         surprise: Float,
+        grammar: CreativeShapeTopologyGrammar,
         random: inout CreativeShapeGeneratorRandom
     ) {
         guard skeleton.count > 2 else { return }
-        let branchCount = Int((complexity * (2.5 + (surprise * 3))).rounded())
+        let branchCount: Int = switch grammar {
+        case .mass:
+            Int((complexity * (1.5 + surprise)).rounded())
+        case .branching:
+            2 + Int((complexity * (4 + (surprise * 3))).rounded())
+        case .ribbon:
+            Int((complexity * (0.8 + surprise)).rounded())
+        case .fragmented:
+            1 + Int((complexity * (2.5 + (surprise * 2))).rounded())
+        }
+        let focalIndex = random.int(in: 1...(skeleton.count - 2))
+        let clusterRadius = max(1, Int((Float(skeleton.count) * (0.08 + (surprise * 0.22))).rounded()))
         for _ in 0..<branchCount {
-            let index = random.int(in: 1...(skeleton.count - 2))
+            let index = clamp(
+                focalIndex + random.int(in: -clusterRadius...clusterRadius),
+                1,
+                skeleton.count - 2
+            )
             let origin = skeleton[index]
             let previous = skeleton[index - 1]
             let next = skeleton[index + 1]
             let baseAngle = atan2(next.y - previous.y, next.x - previous.x)
             let side: Double = random.bool(probability: 0.5) ? 1 : -1
-            let branchAngle = baseAngle + side * random.double(in: 0.58...(0.94 + (Double(surprise) * 1.05)))
-            let branchLength = baseRadius * random.double(in: 2.0...(3.6 + (Double(tendency) * 3.8)))
+            let branchAngle = baseAngle + side * random.double(in: 0.28...(1.10 + (Double(surprise) * 1.15)))
+            let grammarLengthScale: Double = grammar == .branching ? 1.25 : 0.82
+            let branchLength = baseRadius * random.double(in: 1.25...(3.1 + (Double(tendency) * 3.2))) * grammarLengthScale
             let bend = random.double(in: -0.38...0.38) * Double(surprise)
             let middle = CanvasPoint(
                 x: origin.x + (cos(branchAngle) * branchLength * 0.56),
@@ -415,7 +539,7 @@ enum CreativeShapeGeneratorEngine {
                 x: origin.x + (cos(branchAngle + bend) * branchLength),
                 y: origin.y + (sin(branchAngle + bend) * branchLength)
             )
-            let startRadius = baseRadius * random.double(in: 0.48...0.84)
+            let startRadius = baseRadius * random.double(in: 0.34...(grammar == .branching ? 0.92 : 0.68))
             primitives.append(.init(
                 start: origin,
                 end: middle,
@@ -426,8 +550,17 @@ enum CreativeShapeGeneratorEngine {
                 start: middle,
                 end: end,
                 startRadius: startRadius * 0.62,
-                endRadius: startRadius * random.double(in: 0.06...0.20)
+                endRadius: startRadius * random.double(in: 0.08...0.56)
             ))
+            if random.bool(probability: grammar == .branching ? 0.38 : 0.16) {
+                let terminalRadius = startRadius * random.double(in: 0.36...0.78)
+                primitives.append(.init(
+                    start: end,
+                    end: end,
+                    startRadius: terminalRadius,
+                    endRadius: terminalRadius
+                ))
+            }
         }
     }
 
@@ -437,10 +570,17 @@ enum CreativeShapeGeneratorEngine {
         baseRadius: Double,
         complexity: Float,
         surprise: Float,
+        grammar: CreativeShapeTopologyGrammar,
         random: inout CreativeShapeGeneratorRandom
     ) {
         guard skeleton.count > 1, complexity > 0.2 else { return }
-        let count = Int((complexity * (1.4 + (surprise * 2.6))).rounded())
+        let grammarScale: Float = switch grammar {
+        case .fragmented: 2.2
+        case .mass: 1.3
+        case .branching: 0.8
+        case .ribbon: 0.35
+        }
+        let count = Int((complexity * grammarScale * (1 + surprise)).rounded())
         for _ in 0..<count {
             let index = random.int(in: 0...(skeleton.count - 1))
             let anchor = skeleton[index]
@@ -475,14 +615,19 @@ enum CreativeShapeGeneratorEngine {
         complexity: Float,
         edgeCharacter: Float,
         surprise: Float,
+        grammar: CreativeShapeTopologyGrammar,
         random: inout CreativeShapeGeneratorRandom
     ) -> [CreativeShapeFieldPrimitive] {
         guard skeleton.count > 2, openness > 0.02 else { return [] }
         var output: [CreativeShapeFieldPrimitive] = []
 
-        let holeCount = Int((openness * (1.2 + (complexity * 4.8))).rounded())
+        let holeProbability = openness * (0.55 + (complexity * 0.45))
+        let holeCount = random.bool(probability: holeProbability)
+            ? 1 + random.int(in: 0...max(Int((openness * complexity * 3).rounded()), 0))
+            : 0
+        let holeFocalIndex = random.int(in: 1...(skeleton.count - 2))
         for _ in 0..<holeCount {
-            let index = random.int(in: 1...(skeleton.count - 2))
+            let index = clamp(holeFocalIndex + random.int(in: -2...2), 1, skeleton.count - 2)
             let center = skeleton[index]
             let tangent = normalizedDirection(from: skeleton[index - 1], to: skeleton[index + 1])
             let offset = baseRadius * random.double(in: -0.22...0.22) * Double(surprise)
@@ -491,24 +636,28 @@ enum CreativeShapeGeneratorEngine {
                 y: center.y + (tangent.x * offset)
             )
             let radius = baseRadius * random.double(in: 0.18...(0.28 + (Double(openness) * 0.34)))
+            let holeAngle = atan2(tangent.y, tangent.x) + random.double(in: -1.15...1.15)
             let halfLength = radius * random.double(in: 0.18...(0.55 + (Double(openness) * 0.75)))
             output.append(.init(
                 start: CanvasPoint(
-                    x: holeCenter.x - (tangent.x * halfLength),
-                    y: holeCenter.y - (tangent.y * halfLength)
+                    x: holeCenter.x - (cos(holeAngle) * halfLength),
+                    y: holeCenter.y - (sin(holeAngle) * halfLength)
                 ),
                 end: CanvasPoint(
-                    x: holeCenter.x + (tangent.x * halfLength),
-                    y: holeCenter.y + (tangent.y * halfLength)
+                    x: holeCenter.x + (cos(holeAngle) * halfLength),
+                    y: holeCenter.y + (sin(holeAngle) * halfLength)
                 ),
                 startRadius: radius * random.double(in: 0.55...0.88),
                 endRadius: radius
             ))
         }
 
-        let biteCount = Int(((openness * 2.4) + (edgeCharacter * 1.8)).rounded())
+        let biteCount = random.bool(probability: min((openness * 0.65) + (edgeCharacter * 0.35), 0.92))
+            ? 1 + random.int(in: 0...max(Int((complexity * 2).rounded()), 0))
+            : 0
+        let biteFocalIndex = random.int(in: 1...(skeleton.count - 2))
         for _ in 0..<biteCount {
-            let index = random.int(in: 1...(skeleton.count - 2))
+            let index = clamp(biteFocalIndex + random.int(in: -2...2), 1, skeleton.count - 2)
             let center = skeleton[index]
             let tangent = normalizedDirection(from: skeleton[index - 1], to: skeleton[index + 1])
             let side: Double = random.bool(probability: 0.5) ? 1 : -1
@@ -530,21 +679,16 @@ enum CreativeShapeGeneratorEngine {
             ))
         }
 
-        if openness > 0.48 {
-            let crackCount = 1 + Int(((openness - 0.48) * 3.8).rounded())
+        if openness > 0.48, random.bool(probability: (openness - 0.35) * 0.65) {
+            let crackCount = grammar == .fragmented ? 1 + random.int(in: 0...1) : 1
             for _ in 0..<crackCount {
                 let index = random.int(in: 1...(skeleton.count - 2))
                 let center = skeleton[index]
                 let tangent = normalizedDirection(from: skeleton[index - 1], to: skeleton[index + 1])
                 let halfLength = baseRadius * random.double(in: 0.65...(1.05 + (Double(openness) * 0.65)))
-                let start = CanvasPoint(
-                    x: center.x - (tangent.y * halfLength),
-                    y: center.y + (tangent.x * halfLength)
-                )
-                let end = CanvasPoint(
-                    x: center.x + (tangent.y * halfLength),
-                    y: center.y - (tangent.x * halfLength)
-                )
+                let crackAngle = atan2(tangent.y, tangent.x) + random.double(in: 0.35...2.75)
+                let start = CanvasPoint(x: center.x - (cos(crackAngle) * halfLength), y: center.y - (sin(crackAngle) * halfLength))
+                let end = CanvasPoint(x: center.x + (cos(crackAngle) * halfLength), y: center.y + (sin(crackAngle) * halfLength))
                 let radius = baseRadius * random.double(in: 0.055...(0.09 + (Double(edgeCharacter) * 0.09)))
                 output.append(.init(start: start, end: end, startRadius: radius, endRadius: radius * 0.65))
             }

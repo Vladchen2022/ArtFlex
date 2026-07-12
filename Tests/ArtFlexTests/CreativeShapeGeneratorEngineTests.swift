@@ -142,6 +142,36 @@ struct CreativeShapeGeneratorEngineTests {
     }
 
     @Test
+    func repeatedStraightGestureProducesDifferentTopologiesAcrossSeeds() throws {
+        var state = makeState()
+        state.formTendency = 0.55
+        state.complexity = 0.68
+        state.openness = 0.58
+        state.edgeCharacter = 0.52
+        state.surprise = 0.74
+        let gesture = [CanvasPoint(x: 20, y: 64), CanvasPoint(x: 220, y: 64)]
+
+        let plans = try (100...115).map { seed in
+            try #require(CreativeShapeGeneratorEngine.makePlan(
+                gesturePoints: gesture,
+                state: state,
+                colorContext: makeColorContext(),
+                runtimeSeed: UInt64(seed)
+            ))
+        }
+        let masks = Set(plans.map { $0.tipMaterials[0].maskData })
+        let visibleCounts = plans.map(visiblePixelCount(in:))
+        let holeCounts = plans.map(enclosedTransparentPixelCount(in:))
+        let shapesWithHoles = holeCounts.filter { $0 > 20 }.count
+
+        #expect(masks.count == plans.count)
+        #expect((visibleCounts.max() ?? 0) - (visibleCounts.min() ?? 0) > 500)
+        #expect(shapesWithHoles > 0)
+        #expect(shapesWithHoles < plans.count)
+        #expect(Set(holeCounts).count >= 4)
+    }
+
+    @Test
     func previousStructuredSettingsMigrateToGestureControls() throws {
         let payload = Data(
             """
