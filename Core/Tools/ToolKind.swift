@@ -1218,6 +1218,7 @@ struct ToolSessionState: Codable, Sendable, Equatable {
     var eraserBrush: BrushSettings
     var smudgeBrushUsesIndependentSettings: Bool
     var textureFillTip: TextureFillTipSettings
+    var eyedropper: EyedropperSettings
 
     private var isSynchronizingBrushSlots = false
 
@@ -1229,7 +1230,8 @@ struct ToolSessionState: Codable, Sendable, Equatable {
         smudgeBrush: BrushSettings? = nil,
         eraserBrush: BrushSettings? = nil,
         smudgeBrushUsesIndependentSettings: Bool = false,
-        textureFillTip: TextureFillTipSettings = .proceduralDefault
+        textureFillTip: TextureFillTipSettings = .proceduralDefault,
+        eyedropper: EyedropperSettings = .stageOneDefault
     ) {
         self.activeTool = activeTool
         self.brush = brush
@@ -1239,6 +1241,7 @@ struct ToolSessionState: Codable, Sendable, Equatable {
         self.eraserBrush = eraserBrush ?? brush
         self.smudgeBrushUsesIndependentSettings = smudgeBrushUsesIndependentSettings
         self.textureFillTip = textureFillTip
+        self.eyedropper = eyedropper
         synchronizeOnInitialization()
     }
 
@@ -1251,6 +1254,7 @@ struct ToolSessionState: Codable, Sendable, Equatable {
         case eraserBrush
         case smudgeBrushUsesIndependentSettings
         case textureFillTip
+        case eyedropper
     }
 
     init(from decoder: any Decoder) throws {
@@ -1271,7 +1275,9 @@ struct ToolSessionState: Codable, Sendable, Equatable {
             eraserBrush: decodedEraserBrush ?? brush,
             smudgeBrushUsesIndependentSettings: decodedSmudgeUsesIndependent ?? (activeTool == .smudge),
             textureFillTip: try container.decodeIfPresent(TextureFillTipSettings.self, forKey: .textureFillTip)
-                ?? .proceduralDefault
+                ?? .proceduralDefault,
+            eyedropper: try container.decodeIfPresent(EyedropperSettings.self, forKey: .eyedropper)
+                ?? .stageOneDefault
         )
     }
 
@@ -1285,6 +1291,7 @@ struct ToolSessionState: Codable, Sendable, Equatable {
         try container.encode(eraserBrush, forKey: .eraserBrush)
         try container.encode(smudgeBrushUsesIndependentSettings, forKey: .smudgeBrushUsesIndependentSettings)
         try container.encode(textureFillTip, forKey: .textureFillTip)
+        try container.encode(eyedropper, forKey: .eyedropper)
     }
 
     static let stageOneDefault: ToolSessionState = {
@@ -1298,7 +1305,8 @@ struct ToolSessionState: Codable, Sendable, Equatable {
             smudgeBrush: brush,
             eraserBrush: brush,
             smudgeBrushUsesIndependentSettings: false,
-            textureFillTip: .proceduralDefault
+            textureFillTip: .proceduralDefault,
+            eyedropper: .stageOneDefault
         )
     }()
 

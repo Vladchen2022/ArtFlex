@@ -505,6 +505,27 @@ struct WorkspaceViewModelSafetyTests {
 
     @Test
     @MainActor
+    func eyedropperCanReturnToPreviousToolAfterSuccessfulSample() throws {
+        let harness = try BrushEditingBoundaryHarness()
+        harness.viewModel.selectTool(.smudge)
+        harness.viewModel.selectTool(.eyedropper)
+
+        harness.viewModel.sampleColor(at: .init(x: 10, y: 10))
+        #expect(harness.viewModel.workspace.toolSession.activeTool == .eyedropper)
+
+        harness.viewModel.selectTool(.smudge)
+        harness.viewModel.selectTool(.eyedropper)
+        harness.viewModel.setEyedropperReturnsToPreviousTool(true)
+        harness.viewModel.sampleColor(at: .init(x: 10, y: 10))
+
+        #expect(harness.viewModel.workspace.toolSession.activeTool == .smudge)
+        #expect(harness.viewModel.workspace.toolSession.selectedColor.red > 0.99)
+        #expect(harness.viewModel.workspace.toolSession.selectedColor.green > 0.99)
+        #expect(harness.viewModel.workspace.toolSession.selectedColor.blue > 0.99)
+    }
+
+    @Test
+    @MainActor
     func reselectingCurrentToolKeepsItsInProgressInteraction() throws {
         let harness = try BrushEditingBoundaryHarness()
         harness.viewModel.selectTool(.straightLine)

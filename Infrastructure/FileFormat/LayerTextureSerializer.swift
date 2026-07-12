@@ -8,6 +8,14 @@ struct LayerTextureSnapshot: Codable, Sendable, Equatable {
     var pixelData: Data
 }
 
+struct LayerTextureRegionSnapshotRequest {
+    var texture: MTLTexture
+    var originX: Int
+    var originY: Int
+    var width: Int
+    var height: Int
+}
+
 private struct LayerSerializerStagingKey: Hashable {
     var width: Int
     var height: Int
@@ -427,6 +435,118 @@ final class LayerTextureSerializer {
             width: width,
             height: height
         )
+    }
+
+    func snapshotRegions(
+        _ requests: [LayerTextureRegionSnapshotRequest]
+    ) throws -> [LayerTextureSnapshot] {
+        guard !requests.isEmpty else { return [] }
+        for request in requests {
+            guard
+                request.originX >= 0,
+                request.originY >= 0,
+                request.width > 0,
+                request.height > 0,
+                request.originX + request.width <= request.texture.width,
+                request.originY + request.height <= request.texture.height
+            else {
+                throw CocoaError(.fileReadCorruptFile)
+            }
+        }
+
+        let auditEnabled = PerformanceAuditStore.shared.isRecordingEnabled
+        let startedAt = auditEnabled ? DispatchTime.now().uptimeNanoseconds : 0
+        defer {
+            if auditEnabled {
+                let ms = Double(DispatchTime.now().uptimeNanoseconds - startedAt) / 1_000_000
+                PerformanceAuditStore.shared.recordDuration(
+                    "LayerTextureSerializer.snapshotRegions(\(requests.count))",
+                    ms: ms
+                )
+            }
+        }
+
+        struct StagedRegion {
+            var index: Int
+            var texture: MTLTexture
+        }
+
+        var snapshots = Array<LayerTextureSnapshot?>(repeating: nil, count: requests.count)
+        var stagedRegions: [StagedRegion] = []
+        stagedRegions.reserveCapacity(requests.count)
+        defer {
+            for stagedRegion in stagedRegions {
+                stagingPool.checkin(stagedRegion.texture)
+            }
+        }
+
+        var commandBuffer: MTLCommandBuffer?
+        var blitEncoder: MTLBlitCommandEncoder?
+        for (index, request) in requests.enumerated() {
+            if request.texture.storageMode == .shared {
+                snapshots[index] = makeSnapshot(
+                    from: request.texture,
+                    originX: request.originX,
+                    originY: request.originY,
+                    width: request.width,
+                    height: request.height
+                )
+                continue
+            }
+
+            if blitEncoder == nil {
+                guard
+                    let createdCommandBuffer = metalContext.commandQueue.makeCommandBuffer(),
+                    let createdBlitEncoder = createdCommandBuffer.makeBlitCommandEncoder()
+                else {
+                    throw CocoaError(.fileReadUnknown)
+                }
+                commandBuffer = createdCommandBuffer
+                blitEncoder = createdBlitEncoder
+            }
+
+            guard let stagingTexture = stagingPool.checkout(
+                width: request.width,
+                height: request.height,
+                pixelFormat: request.texture.pixelFormat
+            ) else {
+                throw CocoaError(.fileReadUnknown)
+            }
+            stagedRegions.append(.init(index: index, texture: stagingTexture))
+            blitEncoder?.copy(
+                from: request.texture,
+                sourceSlice: 0,
+                sourceLevel: 0,
+                sourceOrigin: MTLOrigin(x: request.originX, y: request.originY, z: 0),
+                sourceSize: MTLSize(width: request.width, height: request.height, depth: 1),
+                to: stagingTexture,
+                destinationSlice: 0,
+                destinationLevel: 0,
+                destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
+            )
+        }
+
+        if let blitEncoder, let commandBuffer {
+            blitEncoder.endEncoding()
+            commandBuffer.commit()
+            commandBuffer.waitUntilCompleted()
+        }
+
+        for stagedRegion in stagedRegions {
+            let request = requests[stagedRegion.index]
+            snapshots[stagedRegion.index] = makeSnapshot(
+                from: stagedRegion.texture,
+                originX: 0,
+                originY: 0,
+                width: request.width,
+                height: request.height
+            )
+        }
+
+        return try snapshots.map { snapshot in
+            guard let snapshot else { throw CocoaError(.fileReadUnknown) }
+            return snapshot
+        }
     }
 
     func restore(

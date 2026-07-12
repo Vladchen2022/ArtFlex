@@ -1074,7 +1074,9 @@ struct RightInspectorView: View {
 
     private var brushSection: some View {
         VStack(alignment: .leading, spacing: 8) {
-            if viewModel.workspace.toolSession.activeTool == .textureFill {
+            if viewModel.workspace.toolSession.activeTool == .eyedropper {
+                eyedropperParameterControls
+            } else if viewModel.workspace.toolSession.activeTool == .textureFill {
                 textureFillParameterControls
             } else if usesFillParameterControls {
                 fillParameterControls
@@ -1082,6 +1084,105 @@ struct RightInspectorView: View {
                 fullBrushParameterControls
                 brushAdvancedActions
             }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var eyedropperParameterControls: some View {
+        let settings = viewModel.workspace.toolSession.eyedropper
+        return VStack(alignment: .leading, spacing: 9) {
+            Text("吸管")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(Color.white.opacity(0.92))
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("范围")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(Color.white.opacity(0.68))
+                Picker(
+                    "范围",
+                    selection: Binding(
+                        get: { settings.sampleSize },
+                        set: { viewModel.setEyedropperSampleSize($0) }
+                    )
+                ) {
+                    Text("单点").tag(EyedropperSampleSize.point)
+                    Text("3×3").tag(EyedropperSampleSize.threeByThree)
+                    Text("5×5").tag(EyedropperSampleSize.fiveByFive)
+                }
+                .labelsHidden()
+                .pickerStyle(.segmented)
+                .controlSize(.small)
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("算法")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(Color.white.opacity(settings.sampleSize == .point ? 0.36 : 0.68))
+                Picker(
+                    "算法",
+                    selection: Binding(
+                        get: { settings.statistic },
+                        set: { viewModel.setEyedropperSampleStatistic($0) }
+                    )
+                ) {
+                    Text("平均").tag(EyedropperSampleStatistic.average)
+                    Text("中值").tag(EyedropperSampleStatistic.median)
+                }
+                .labelsHidden()
+                .pickerStyle(.segmented)
+                .controlSize(.small)
+                .disabled(settings.sampleSize == .point)
+                .opacity(settings.sampleSize == .point ? 0.45 : 1)
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("来源")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(Color.white.opacity(0.68))
+                Picker(
+                    "来源",
+                    selection: Binding(
+                        get: { settings.source },
+                        set: { viewModel.setEyedropperSampleSource($0) }
+                    )
+                ) {
+                    Text("当前层").tag(EyedropperSampleSource.currentLayer)
+                    Text("可见层").tag(EyedropperSampleSource.allVisibleLayers)
+                    Text("显示色").tag(EyedropperSampleSource.displayedColor)
+                }
+                .labelsHidden()
+                .pickerStyle(.segmented)
+                .controlSize(.small)
+            }
+
+            Divider()
+                .overlay(Color.white.opacity(0.08))
+                .padding(.vertical, 1)
+
+            Toggle(
+                "保留透明度",
+                isOn: Binding(
+                    get: { settings.preservesTransparency },
+                    set: { viewModel.setEyedropperPreservesTransparency($0) }
+                )
+            )
+            .toggleStyle(.switch)
+            .controlSize(.mini)
+            .font(.system(size: 11, weight: .medium))
+            .foregroundStyle(Color.white.opacity(0.84))
+
+            Toggle(
+                "取色后返回上一个工具",
+                isOn: Binding(
+                    get: { settings.returnsToPreviousTool },
+                    set: { viewModel.setEyedropperReturnsToPreviousTool($0) }
+                )
+            )
+            .toggleStyle(.switch)
+            .controlSize(.mini)
+            .font(.system(size: 11, weight: .medium))
+            .foregroundStyle(Color.white.opacity(0.84))
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }

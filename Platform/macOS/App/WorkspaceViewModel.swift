@@ -232,6 +232,7 @@ final class WorkspaceViewModel: ObservableObject {
     private var lastCanvasHoverPoint: CanvasPoint?
     private var isQuickColorPickerShortcutActive = false
     private var quickColorPickerDraftState: QuickColorPickerState?
+    private var previousToolBeforeEyedropper: ToolKind?
     private var recentBrushAdjustmentSelectedCount = 0
     private var recentBrushAdjustmentOpacity: Float = 1
     private var recentBrushAdjustmentBrightness: Float = 0
@@ -466,6 +467,11 @@ final class WorkspaceViewModel: ObservableObject {
     private func performToolSelection(_ tool: ToolKind) {
         let tool = Self.normalizedAvailableTool(tool)
         let previousTool = workspace.toolSession.activeTool
+        if tool == .eyedropper, previousTool != .eyedropper {
+            previousToolBeforeEyedropper = previousTool
+        } else if previousTool == .eyedropper, tool != .eyedropper {
+            previousToolBeforeEyedropper = nil
+        }
         if workspace.toolSession.activeTool != tool {
             resolveTransformSession(reason: .toolChange)
         }
@@ -3094,10 +3100,15 @@ final class WorkspaceViewModel: ObservableObject {
     func sampleColor(at point: CanvasPoint) {
         ideationBranchActivityHandler?()
         do {
+            let eyedropperSettings = workspace.toolSession.eyedropper
             let sampledColor = try bootstrap.eyedropperSampler.sampleVisibleColor(
                 at: point,
                 document: workspace.document,
                 layerSurfaceStore: bootstrap.layerSurfaceStore,
+                settings: eyedropperSettings,
+                contentTextureForLayer: { [weak self] layerID in
+                    self?.bootstrap.strokeEngine.displayTexture(for: layerID)
+                },
                 displayTextureForLayer: { [weak self] layerID in
                     self?.brushDisplayTexture(for: layerID)
                 }
@@ -3117,9 +3128,53 @@ final class WorkspaceViewModel: ObservableObject {
             }
             refreshColorPanelOnly(includeSelectedColor: true)
             showStatus(.init(kind: .success, message: "已吸取颜色"))
+            if eyedropperSettings.returnsToPreviousTool,
+               workspace.toolSession.activeTool == .eyedropper {
+                selectTool(previousToolBeforeEyedropper ?? .brush)
+            }
         } catch {
             showStatus(.init(kind: .error, message: error.localizedDescription))
         }
+    }
+
+    func setEyedropperSampleSize(_ sampleSize: EyedropperSampleSize) {
+        guard workspace.toolSession.eyedropper.sampleSize != sampleSize else { return }
+        bootstrap.workspaceStore.updateToolSession { session in
+            session.eyedropper.sampleSize = sampleSize
+        }
+        refreshLightweight()
+    }
+
+    func setEyedropperSampleStatistic(_ statistic: EyedropperSampleStatistic) {
+        guard workspace.toolSession.eyedropper.statistic != statistic else { return }
+        bootstrap.workspaceStore.updateToolSession { session in
+            session.eyedropper.statistic = statistic
+        }
+        refreshLightweight()
+    }
+
+    func setEyedropperSampleSource(_ source: EyedropperSampleSource) {
+        guard workspace.toolSession.eyedropper.source != source else { return }
+        bootstrap.workspaceStore.updateToolSession { session in
+            session.eyedropper.source = source
+        }
+        refreshLightweight()
+    }
+
+    func setEyedropperPreservesTransparency(_ enabled: Bool) {
+        guard workspace.toolSession.eyedropper.preservesTransparency != enabled else { return }
+        bootstrap.workspaceStore.updateToolSession { session in
+            session.eyedropper.preservesTransparency = enabled
+        }
+        refreshLightweight()
+    }
+
+    func setEyedropperReturnsToPreviousTool(_ enabled: Bool) {
+        guard workspace.toolSession.eyedropper.returnsToPreviousTool != enabled else { return }
+        bootstrap.workspaceStore.updateToolSession { session in
+            session.eyedropper.returnsToPreviousTool = enabled
+        }
+        refreshLightweight()
     }
 
     func applyBrushPreset(_ presetID: String) {

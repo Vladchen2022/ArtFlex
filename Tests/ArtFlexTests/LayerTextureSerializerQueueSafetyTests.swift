@@ -275,10 +275,19 @@ struct LayerTextureSerializerQueueSafetyTests {
         try serializer.restore(snapshot: opaqueSnapshot(width: 8, height: 8, red: 255), into: committedTexture)
         try serializer.restore(snapshot: opaqueSnapshot(width: 8, height: 8, green: 255), into: displayedTexture)
 
+        let settings = EyedropperSettings(
+            sampleSize: .point,
+            statistic: .average,
+            source: .displayedColor,
+            preservesTransparency: false,
+            returnsToPreviousTool: false
+        )
+
         let color = try eyedropper.sampleVisibleColor(
             at: .init(x: 0, y: 0),
             document: document,
             layerSurfaceStore: layerSurfaceStore,
+            settings: settings,
             displayTextureForLayer: { layerID in
                 layerID == document.activeLayerID ? displayedTexture : nil
             }
