@@ -2120,7 +2120,13 @@ struct WorkspaceViewModelSafetyTests {
         let viewModel = harness.viewModel
         let minimumInterval = WorkspaceViewModel.navigatorPreviewMinimumRefreshIntervalNanoseconds
         #expect(minimumInterval == 250_000_000)
-        #expect(WorkspaceViewModel.navigatorPreviewRefreshDelayNanoseconds(now: 1_000, lastRefresh: nil) == 0)
+        #expect(WorkspaceViewModel.navigatorPreviewCoalescingDelayNanoseconds == 100_000_000)
+        #expect(
+            WorkspaceViewModel.navigatorPreviewRefreshDelayNanoseconds(
+                now: 1_000,
+                lastRefresh: nil
+            ) == 100_000_000
+        )
         #expect(
             WorkspaceViewModel.navigatorPreviewRefreshDelayNanoseconds(
                 now: 100_000_000,
@@ -2131,7 +2137,7 @@ struct WorkspaceViewModelSafetyTests {
             WorkspaceViewModel.navigatorPreviewRefreshDelayNanoseconds(
                 now: minimumInterval,
                 lastRefresh: 0
-            ) == 0
+            ) == 100_000_000
         )
 
         viewModel.setNavigatorPreviewVisible(true)

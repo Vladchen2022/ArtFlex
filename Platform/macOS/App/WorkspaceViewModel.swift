@@ -111,16 +111,20 @@ final class WorkspaceViewModel: ObservableObject {
     private static let luminosityReferenceAutoRefreshDelay: Duration = .seconds(2)
     private static let luminosityReferenceVisibleResumeDelay: Duration = .milliseconds(150)
     static let navigatorPreviewMinimumRefreshIntervalNanoseconds: UInt64 = 250_000_000
+    static let navigatorPreviewCoalescingDelayNanoseconds: UInt64 = 100_000_000
 
     static func navigatorPreviewRefreshDelayNanoseconds(
         now: UInt64,
         lastRefresh: UInt64?
     ) -> UInt64 {
-        guard let lastRefresh, now >= lastRefresh else { return 0 }
+        guard let lastRefresh, now >= lastRefresh else {
+            return navigatorPreviewCoalescingDelayNanoseconds
+        }
         let elapsed = now - lastRefresh
-        return elapsed >= navigatorPreviewMinimumRefreshIntervalNanoseconds
+        let rateLimitDelay = elapsed >= navigatorPreviewMinimumRefreshIntervalNanoseconds
             ? 0
             : navigatorPreviewMinimumRefreshIntervalNanoseconds - elapsed
+        return max(rateLimitDelay, navigatorPreviewCoalescingDelayNanoseconds)
     }
 
     private static func makeDefaultReferenceImageSlots() -> [ReferenceImageSlotState] {
@@ -306,6 +310,7 @@ final class WorkspaceViewModel: ObservableObject {
     private var navigatorPreviewRefreshTask: Task<Void, Never>?
     private var isNavigatorPreviewVisible = false
     private var navigatorPreviewHasPendingRefresh = false
+    private var navigatorPreviewRequestRevision: UInt64 = 0
     private var lastNavigatorPreviewRefreshUptimeNanoseconds: UInt64?
     private var patternImportPreviewTask: Task<Void, Never>?
     private var patternImportPreviewSourceFileURL: URL?
@@ -4091,7 +4096,7 @@ final class WorkspaceViewModel: ObservableObject {
 
         if isVisible {
             if navigatorPreviewHasPendingRefresh {
-                scheduleNavigatorPreviewRefresh()
+                schedulePendingNavigatorPreviewRefreshIfNeeded()
             } else {
                 syncNavigatorPreviewProxy()
             }
@@ -4117,6 +4122,12 @@ final class WorkspaceViewModel: ObservableObject {
         navigatorPreviewRefreshTask = nil
         performNavigatorPreviewRefresh()
     }
+
+#if DEBUG
+    var debugNavigatorPreviewHasPendingRefresh: Bool {
+        navigatorPreviewHasPendingRefresh
+    }
+#endif
 
     private func performNavigatorPreviewRefresh() {
         syncNavigatorPreviewProxy()
@@ -4193,7 +4204,12 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     private func scheduleNavigatorPreviewRefresh() {
+        navigatorPreviewRequestRevision &+= 1
         navigatorPreviewHasPendingRefresh = true
+        schedulePendingNavigatorPreviewRefreshIfNeeded()
+    }
+
+    private func schedulePendingNavigatorPreviewRefreshIfNeeded() {
         guard isNavigatorPreviewVisible else { return }
         guard navigatorPreviewRefreshTask == nil else { return }
 
@@ -4203,11 +4219,7 @@ final class WorkspaceViewModel: ObservableObject {
             lastRefresh: lastNavigatorPreviewRefreshUptimeNanoseconds
         )
 
-        if remainingNanoseconds == 0 {
-            performNavigatorPreviewRefresh()
-            return
-        }
-
+        let scheduledRequestRevision = navigatorPreviewRequestRevision
         navigatorPreviewRefreshTask = Task { @MainActor [weak self] in
             try? await Task.sleep(for: .nanoseconds(Int64(remainingNanoseconds)))
             guard !Task.isCancelled else { return }
@@ -4216,7 +4228,12 @@ final class WorkspaceViewModel: ObservableObject {
             guard self.isNavigatorPreviewVisible else { return }
             guard self.navigatorPreviewHasPendingRefresh else { return }
 
+            let needsTrailingRefresh = self.navigatorPreviewRequestRevision != scheduledRequestRevision
             self.performNavigatorPreviewRefresh()
+            if needsTrailingRefresh {
+                self.navigatorPreviewHasPendingRefresh = true
+                self.schedulePendingNavigatorPreviewRefreshIfNeeded()
+            }
         }
     }
 
@@ -9288,6 +9305,9 @@ final class WorkspaceViewModel: ObservableObject {
                 )
             }
             refresh()
+            if didUndo {
+                scheduleNavigatorPreviewRefresh()
+            }
             showStatus(
                 .init(
                     kind: .info,
@@ -9335,6 +9355,9 @@ final class WorkspaceViewModel: ObservableObject {
                 )
             }
             refresh()
+            if didRedo {
+                scheduleNavigatorPreviewRefresh()
+            }
             showStatus(
                 .init(
                     kind: .info,

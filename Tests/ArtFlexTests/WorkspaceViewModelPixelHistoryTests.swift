@@ -1744,6 +1744,42 @@ struct WorkspaceViewModelPixelHistoryTests {
         }
     }
 
+    @Test
+    @MainActor
+    func dirtyUndoRedoExplicitlyInvalidateNavigatorPreview() throws {
+        let harness = try PixelHistoryHarness()
+        let layerID = harness.addLayer()
+        harness.viewModel.selectLayer(layerID)
+
+        harness.makeLassoSelection([
+            .init(x: 8, y: 8),
+            .init(x: 24, y: 8),
+            .init(x: 24, y: 24),
+            .init(x: 8, y: 24),
+            .init(x: 8, y: 8)
+        ])
+        harness.viewModel.fillSelectionContents()
+
+        harness.viewModel.setNavigatorPreviewVisible(true)
+        harness.viewModel.refreshNavigatorPreviewNow()
+        let revisionBeforeUndo = harness.viewModel.navigatorPreviewProxy.redrawRevision
+
+        harness.viewModel.undo()
+        #expect(
+            harness.viewModel.navigatorPreviewProxy.redrawRevision > revisionBeforeUndo ||
+                harness.viewModel.debugNavigatorPreviewHasPendingRefresh
+        )
+
+        harness.viewModel.refreshNavigatorPreviewNow()
+        let revisionBeforeRedo = harness.viewModel.navigatorPreviewProxy.redrawRevision
+
+        harness.viewModel.redo()
+        #expect(
+            harness.viewModel.navigatorPreviewProxy.redrawRevision > revisionBeforeRedo ||
+                harness.viewModel.debugNavigatorPreviewHasPendingRefresh
+        )
+    }
+
 }
 
 @MainActor
