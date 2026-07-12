@@ -110,8 +110,18 @@ final class WorkspaceViewModel: ObservableObject {
     private static let maxReferenceImageSlotCount = 5
     private static let luminosityReferenceAutoRefreshDelay: Duration = .seconds(2)
     private static let luminosityReferenceVisibleResumeDelay: Duration = .milliseconds(150)
-    private static let navigatorPreviewAutoRefreshDelay: Duration = .milliseconds(1500)
-    private static let navigatorPreviewVisibleResumeDelay: Duration = .milliseconds(150)
+    static let navigatorPreviewMinimumRefreshIntervalNanoseconds: UInt64 = 250_000_000
+
+    static func navigatorPreviewRefreshDelayNanoseconds(
+        now: UInt64,
+        lastRefresh: UInt64?
+    ) -> UInt64 {
+        guard let lastRefresh, now >= lastRefresh else { return 0 }
+        let elapsed = now - lastRefresh
+        return elapsed >= navigatorPreviewMinimumRefreshIntervalNanoseconds
+            ? 0
+            : navigatorPreviewMinimumRefreshIntervalNanoseconds - elapsed
+    }
 
     private static func makeDefaultReferenceImageSlots() -> [ReferenceImageSlotState] {
         (0..<maxReferenceImageSlotCount).map { ReferenceImageSlotState(id: $0) }
@@ -296,6 +306,7 @@ final class WorkspaceViewModel: ObservableObject {
     private var navigatorPreviewRefreshTask: Task<Void, Never>?
     private var isNavigatorPreviewVisible = false
     private var navigatorPreviewHasPendingRefresh = false
+    private var lastNavigatorPreviewRefreshUptimeNanoseconds: UInt64?
     private var patternImportPreviewTask: Task<Void, Never>?
     private var patternImportPreviewSourceFileURL: URL?
     private var patternImportPreviewSourceAsset: PatternImportPreviewSourceAsset?
@@ -4079,9 +4090,10 @@ final class WorkspaceViewModel: ObservableObject {
         isNavigatorPreviewVisible = isVisible
 
         if isVisible {
-            syncNavigatorPreviewProxy()
             if navigatorPreviewHasPendingRefresh {
-                scheduleNavigatorPreviewRefresh(after: Self.navigatorPreviewVisibleResumeDelay)
+                scheduleNavigatorPreviewRefresh()
+            } else {
+                syncNavigatorPreviewProxy()
             }
         } else {
             navigatorPreviewRefreshTask?.cancel()
@@ -4103,9 +4115,14 @@ final class WorkspaceViewModel: ObservableObject {
     func refreshNavigatorPreviewNow() {
         navigatorPreviewRefreshTask?.cancel()
         navigatorPreviewRefreshTask = nil
-        navigatorPreviewHasPendingRefresh = false
+        performNavigatorPreviewRefresh()
+    }
+
+    private func performNavigatorPreviewRefresh() {
         syncNavigatorPreviewProxy()
         navigatorPreviewProxy.redrawRevision &+= 1
+        navigatorPreviewHasPendingRefresh = false
+        lastNavigatorPreviewRefreshUptimeNanoseconds = DispatchTime.now().uptimeNanoseconds
     }
 
     private var isLuminosityReferencePreviewVisible: Bool {
@@ -4175,22 +4192,42 @@ final class WorkspaceViewModel: ObservableObject {
         }
     }
 
-    private func scheduleNavigatorPreviewRefresh(after delay: Duration = WorkspaceViewModel.navigatorPreviewAutoRefreshDelay) {
+    private func scheduleNavigatorPreviewRefresh() {
         navigatorPreviewHasPendingRefresh = true
         guard isNavigatorPreviewVisible else { return }
+        guard navigatorPreviewRefreshTask == nil else { return }
 
-        navigatorPreviewRefreshTask?.cancel()
-        navigatorPreviewRefreshTask = Task { @MainActor [weak self] in
-            guard let self else { return }
-            try? await Task.sleep(for: delay)
-            guard !Task.isCancelled else { return }
-            guard self.isNavigatorPreviewVisible else { return }
+        let now = DispatchTime.now().uptimeNanoseconds
+        let remainingNanoseconds = Self.navigatorPreviewRefreshDelayNanoseconds(
+            now: now,
+            lastRefresh: lastNavigatorPreviewRefreshUptimeNanoseconds
+        )
 
-            self.syncNavigatorPreviewProxy()
-            self.navigatorPreviewProxy.redrawRevision &+= 1
-            self.navigatorPreviewHasPendingRefresh = false
-            self.navigatorPreviewRefreshTask = nil
+        if remainingNanoseconds == 0 {
+            performNavigatorPreviewRefresh()
+            return
         }
+
+        navigatorPreviewRefreshTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .nanoseconds(Int64(remainingNanoseconds)))
+            guard !Task.isCancelled else { return }
+            guard let self else { return }
+            self.navigatorPreviewRefreshTask = nil
+            guard self.isNavigatorPreviewVisible else { return }
+            guard self.navigatorPreviewHasPendingRefresh else { return }
+
+            self.performNavigatorPreviewRefresh()
+        }
+    }
+
+    private func scheduleNavigatorPreviewRefreshIfSourceChanged(
+        previousSceneSnapshot: CanvasSceneSnapshot,
+        currentSceneSnapshot: CanvasSceneSnapshot
+    ) {
+        let previousNavigatorSnapshot = makeNavigatorSceneSnapshot(from: previousSceneSnapshot)
+        let currentNavigatorSnapshot = makeNavigatorSceneSnapshot(from: currentSceneSnapshot)
+        guard previousNavigatorSnapshot != currentNavigatorSnapshot else { return }
+        scheduleNavigatorPreviewRefresh()
     }
 
     func zoomIn() {
@@ -8873,7 +8910,10 @@ final class WorkspaceViewModel: ObservableObject {
         syncCurveAdjustmentSessionToCurrentContextIfNeeded()
         let updatedSceneSnapshot = currentSceneSnapshot(for: state)
         sceneSnapshot = updatedSceneSnapshot
-        syncNavigatorPreviewProxy()
+        scheduleNavigatorPreviewRefreshIfSourceChanged(
+            previousSceneSnapshot: previousSceneSnapshot,
+            currentSceneSnapshot: updatedSceneSnapshot
+        )
         canUndo = bootstrap.historyController.canUndo
         canRedo = bootstrap.historyController.canRedo
         canMergeDown = state.document.activeMergeDownContext != nil
@@ -8901,7 +8941,10 @@ final class WorkspaceViewModel: ObservableObject {
         syncCurveAdjustmentSessionToCurrentContextIfNeeded()
         let updatedSceneSnapshot = currentSceneSnapshot(for: state)
         sceneSnapshot = updatedSceneSnapshot
-        syncNavigatorPreviewProxy()
+        scheduleNavigatorPreviewRefreshIfSourceChanged(
+            previousSceneSnapshot: previousSceneSnapshot,
+            currentSceneSnapshot: updatedSceneSnapshot
+        )
         canUndo = bootstrap.historyController.canUndo
         canRedo = bootstrap.historyController.canRedo
         canMergeDown = state.document.activeMergeDownContext != nil

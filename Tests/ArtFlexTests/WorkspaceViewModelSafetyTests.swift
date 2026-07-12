@@ -2115,6 +2115,44 @@ struct WorkspaceViewModelSafetyTests {
 
     @Test
     @MainActor
+    func navigatorAutoRefreshPolicyIsPromptRateLimitedAndVisibilityAware() throws {
+        let harness = try BrushEditingBoundaryHarness()
+        let viewModel = harness.viewModel
+        let minimumInterval = WorkspaceViewModel.navigatorPreviewMinimumRefreshIntervalNanoseconds
+        #expect(minimumInterval == 250_000_000)
+        #expect(WorkspaceViewModel.navigatorPreviewRefreshDelayNanoseconds(now: 1_000, lastRefresh: nil) == 0)
+        #expect(
+            WorkspaceViewModel.navigatorPreviewRefreshDelayNanoseconds(
+                now: 100_000_000,
+                lastRefresh: 0
+            ) == 150_000_000
+        )
+        #expect(
+            WorkspaceViewModel.navigatorPreviewRefreshDelayNanoseconds(
+                now: minimumInterval,
+                lastRefresh: 0
+            ) == 0
+        )
+
+        viewModel.setNavigatorPreviewVisible(true)
+        viewModel.refreshNavigatorPreviewNow()
+        let initialRevision = viewModel.navigatorPreviewProxy.redrawRevision
+
+        for _ in 0..<4 {
+            viewModel.endStroke()
+        }
+        #expect(viewModel.navigatorPreviewProxy.redrawRevision == initialRevision)
+
+        viewModel.setNavigatorPreviewVisible(false)
+        viewModel.endStroke()
+        #expect(viewModel.navigatorPreviewProxy.redrawRevision == initialRevision)
+
+        viewModel.refreshNavigatorPreviewNow()
+        #expect(viewModel.navigatorPreviewProxy.redrawRevision == initialRevision + 1)
+    }
+
+    @Test
+    @MainActor
     func canvasLuminosityReferenceDefersHiddenRefreshAndCatchesUpWhenVisible() async throws {
         let harness = try BrushEditingBoundaryHarness()
 
