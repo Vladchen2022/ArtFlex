@@ -51,7 +51,7 @@ struct PreparedAdjustmentLayerContext {
 }
 
 private struct CreativeShapeGeneratorRequest {
-    let selectionShape: SelectionShape
+    let gesturePoints: [CanvasPoint]
     let layerID: LayerID
     let state: CreativeShapeGeneratorState
     let colorContext: CreativeShapeGeneratorColorContext
@@ -2776,9 +2776,9 @@ final class WorkspaceViewModel: ObservableObject {
         refreshLightweight()
     }
 
-    func setCreativeShapeGeneratorStructureMode(_ mode: CreativeShapeStructureMode) {
+    func setCreativeShapeGeneratorFormTendency(_ value: Float) {
         bootstrap.workspaceStore.updateCreativeShapeGenerator { generator in
-            generator.structureMode = mode
+            generator.formTendency = min(max(value, 0), 1)
         }
         refreshLightweight()
     }
@@ -2790,23 +2790,23 @@ final class WorkspaceViewModel: ObservableObject {
         refreshLightweight()
     }
 
-    func setCreativeShapeGeneratorCoherence(_ value: Float) {
+    func setCreativeShapeGeneratorOpenness(_ value: Float) {
         bootstrap.workspaceStore.updateCreativeShapeGenerator { generator in
-            generator.coherence = min(max(value, 0), 1)
+            generator.openness = min(max(value, 0), 1)
         }
         refreshLightweight()
     }
 
-    func setCreativeShapeGeneratorFormElongation(_ value: Float) {
+    func setCreativeShapeGeneratorEdgeCharacter(_ value: Float) {
         bootstrap.workspaceStore.updateCreativeShapeGenerator { generator in
-            generator.formElongation = min(max(value, 0), 1)
+            generator.edgeCharacter = min(max(value, 0), 1)
         }
         refreshLightweight()
     }
 
-    func setCreativeShapeGeneratorEdgeTexture(_ value: Float) {
+    func setCreativeShapeGeneratorSurprise(_ value: Float) {
         bootstrap.workspaceStore.updateCreativeShapeGenerator { generator in
-            generator.edgeTexture = min(max(value, 0), 1)
+            generator.surprise = min(max(value, 0), 1)
         }
         refreshLightweight()
     }
@@ -5914,6 +5914,34 @@ final class WorkspaceViewModel: ObservableObject {
             selectionTraceLogger.debug("\(message, privacy: .public)")
             emitSelectionTraceViewModel(message)
         }
+        if currentKind == .lasso,
+           workspace.toolSession.activeTool == .lassoSelection,
+           workspace.creativeShapeGenerator.isEnabled {
+            var gesturePoints = activeLassoRawPoints
+            if gesturePoints.last != end {
+                gesturePoints.append(end)
+            }
+            activeLassoRawPoints = []
+            activeLassoBounds = nil
+            lassoSamplingDebugPoints = []
+            samePathPreviewDebugShape = nil
+            samePathCommittedDebugShape = nil
+            pendingCombineMode = nil
+            selectionEpoch += 1
+            cancelActiveRasterizationTask()
+            bootstrap.workspaceStore.updateSelection { selection in
+                selection.committedShape = nil
+                selection.inProgressShape = nil
+                selection.anchorPoint = nil
+                selection.activeKind = nil
+                selection.activeCombineMode = .replace
+            }
+            refreshLightweight()
+            recordDrawingActivityIfNeeded()
+            triggerCreativeShapeGeneratorIfNeeded(for: gesturePoints)
+            relayIdeationOperation(.commitSelection(end: end, modifiers: .init(flags: modifiers)))
+            return
+        }
         if Self.runSamePathCommitTest,
            currentKind == .lasso,
            workspace.selection.activeCombineMode == .replace,
@@ -6044,7 +6072,6 @@ final class WorkspaceViewModel: ObservableObject {
             refreshLightweight()
             recordDrawingActivityIfNeeded()
             showStatus(.init(kind: .success, message: "已更新选区"))
-            triggerCreativeShapeGeneratorIfNeeded(for: preferredShape)
 
             let polygonShapes = input.polygonShapes
             let capturedPreferredShape = preferredShape
@@ -6116,7 +6143,6 @@ final class WorkspaceViewModel: ObservableObject {
             refreshLightweight()
             recordDrawingActivityIfNeeded()
             showStatus(.init(kind: .success, message: "已更新选区"))
-            triggerCreativeShapeGeneratorIfNeeded(for: preferredShape)
 
             let polygonShapes = input.polygonShapes
             let capturedPreferredShape = preferredShape
@@ -11473,10 +11499,11 @@ final class WorkspaceViewModel: ObservableObject {
         }
     }
 
-    private func triggerCreativeShapeGeneratorIfNeeded(for selectionShape: SelectionShape) {
+    private func triggerCreativeShapeGeneratorIfNeeded(for gesturePoints: [CanvasPoint]) {
         guard workspace.toolSession.activeTool == .lassoSelection else { return }
         let generatorState = workspace.creativeShapeGenerator
         guard generatorState.isEnabled else { return }
+        guard gesturePoints.isEmpty == false else { return }
         guard let layerID = bootstrap.interactionController.activeEditableLayerID() else {
             showStatus(.init(kind: .info, message: "当前图层已锁定"))
             return
@@ -11489,7 +11516,7 @@ final class WorkspaceViewModel: ObservableObject {
             paletteColors: ColorBlocksEngine.renderPalette(for: workspace.colorPanel)
         )
         pendingCreativeShapeGeneratorRequests.append(CreativeShapeGeneratorRequest(
-            selectionShape: selectionShape,
+            gesturePoints: gesturePoints,
             layerID: layerID,
             state: generatorState,
             colorContext: colorContext,
@@ -11516,7 +11543,7 @@ final class WorkspaceViewModel: ObservableObject {
         Task.detached(priority: .userInitiated) { [weak self] in
             guard let self else { return }
             let plan = CreativeShapeGeneratorEngine.makePlan(
-                selectionShape: request.selectionShape,
+                gesturePoints: request.gesturePoints,
                 state: request.state,
                 colorContext: request.colorContext,
                 runtimeSeed: request.runtimeSeed
@@ -13969,6 +13996,7 @@ final class WorkspaceViewModel: ObservableObject {
         @Published var isApplyingTransformCommit: Bool = false
         @Published var isTransformingSelection: Bool = false
         @Published var activeTool: ToolKind = .brush
+        @Published var isCreativeGestureActive: Bool = false
         @Published var transformPreviewOffset: CanvasPoint = .init(x: 0, y: 0)
         @Published var selectionMovePreviewOffset: CanvasPoint = .init(x: 0, y: 0)
         @Published var hidesImplicitFreeTransformSelectionOverlay: Bool = false
@@ -14006,6 +14034,10 @@ final class WorkspaceViewModel: ObservableObject {
         selectionOverlayProxy.isApplyingTransformCommit = isApplyingTransformCommit
         selectionOverlayProxy.isTransformingSelection = isTransformingSelection
         selectionOverlayProxy.activeTool = state.toolSession.activeTool
+        selectionOverlayProxy.isCreativeGestureActive =
+            state.toolSession.activeTool == .lassoSelection &&
+            state.creativeShapeGenerator.isEnabled &&
+            sel.inProgressShape?.kind == .lasso
         selectionOverlayProxy.transformPreviewOffset = transformPreviewOffset
         selectionOverlayProxy.selectionMovePreviewOffset = selectionMovePreviewOffset
         selectionOverlayProxy.hidesImplicitFreeTransformSelectionOverlay = hidesImplicitFreeTransformSelectionOverlay

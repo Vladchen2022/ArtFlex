@@ -27,12 +27,14 @@ final class CreativeShapeGeneratorRenderer {
     private let alphaLockStampPipelineState: MTLRenderPipelineState
     private let fallbackAlphaLockTexture: MTLTexture
     private var stampTextureCache: [BrushTipImageAssetID: MTLTexture] = [:]
+    private var stampTextureCacheInsertionOrder: [BrushTipImageAssetID] = []
     private var reusablePolygonVertexBuffer: MTLBuffer?
     private var reusablePolygonVertexBufferLength = 0
     private var reusableStampVertexBuffer: MTLBuffer?
     private var reusableStampVertexBufferLength = 0
 
     private let stampMaskResolution = 128
+    private let maximumCachedStampTextureCount = 128
 
     init(device: MTLDevice) {
         self.device = device
@@ -554,6 +556,11 @@ final class CreativeShapeGeneratorRenderer {
         }
 
         stampTextureCache[materialID] = texture
+        stampTextureCacheInsertionOrder.append(materialID)
+        while stampTextureCacheInsertionOrder.count > maximumCachedStampTextureCount {
+            let expiredID = stampTextureCacheInsertionOrder.removeFirst()
+            stampTextureCache.removeValue(forKey: expiredID)
+        }
         return texture
     }
 

@@ -545,20 +545,17 @@ struct RightInspectorView: View {
                 creativeShapeGeneratorExternalImageButton
             }
 
-            Picker(
-                "结构",
-                selection: Binding(
-                    get: { generator.structureMode },
-                    set: { viewModel.setCreativeShapeGeneratorStructureMode($0) }
-                )
-            ) {
-                ForEach(CreativeShapeStructureMode.allCases) { mode in
-                    Text(mode.title).tag(mode)
-                }
-            }
-            .labelsHidden()
-            .pickerStyle(.segmented)
-            .controlSize(.small)
+            OptimizedCompactSlider(
+                title: "形态倾向",
+                valueText: creativeShapeFormTendencyText(generator.formTendency),
+                value: Binding(
+                    get: { Double(generator.formTendency) },
+                    set: { _ in }
+                ),
+                range: 0...1,
+                liveValueText: { creativeShapeFormTendencyText(Float($0)) },
+                onCommit: { viewModel.setCreativeShapeGeneratorFormTendency(Float($0)) }
+            )
 
             OptimizedCompactSlider(
                 title: "复杂度",
@@ -573,42 +570,53 @@ struct RightInspectorView: View {
             )
 
             OptimizedCompactSlider(
-                title: "连贯度",
-                valueText: "\(Int(generator.coherence * 100))%",
+                title: "开放程度",
+                valueText: "\(Int(generator.openness * 100))%",
                 value: Binding(
-                    get: { Double(generator.coherence) },
+                    get: { Double(generator.openness) },
                     set: { _ in }
                 ),
                 range: 0...1,
                 liveValueText: { "\(Int($0 * 100))%" },
-                onCommit: { viewModel.setCreativeShapeGeneratorCoherence(Float($0)) }
+                onCommit: { viewModel.setCreativeShapeGeneratorOpenness(Float($0)) }
             )
 
             OptimizedCompactSlider(
-                title: "形态延展",
-                valueText: "\(Int(generator.formElongation * 100))%",
+                title: "边缘性格",
+                valueText: "\(Int(generator.edgeCharacter * 100))%",
                 value: Binding(
-                    get: { Double(generator.formElongation) },
+                    get: { Double(generator.edgeCharacter) },
                     set: { _ in }
                 ),
                 range: 0...1,
                 liveValueText: { "\(Int($0 * 100))%" },
-                onCommit: { viewModel.setCreativeShapeGeneratorFormElongation(Float($0)) }
+                onCommit: { viewModel.setCreativeShapeGeneratorEdgeCharacter(Float($0)) }
             )
 
             OptimizedCompactSlider(
-                title: "边缘变化",
-                valueText: "\(Int(generator.edgeTexture * 100))%",
+                title: "意外程度",
+                valueText: "\(Int(generator.surprise * 100))%",
                 value: Binding(
-                    get: { Double(generator.edgeTexture) },
+                    get: { Double(generator.surprise) },
                     set: { _ in }
                 ),
                 range: 0...1,
                 liveValueText: { "\(Int($0 * 100))%" },
-                onCommit: { viewModel.setCreativeShapeGeneratorEdgeTexture(Float($0)) }
+                onCommit: { viewModel.setCreativeShapeGeneratorSurprise(Float($0)) }
             )
         }
         .frame(maxWidth: .infinity, alignment: .topLeading)
+    }
+
+    private func creativeShapeFormTendencyText(_ value: Float) -> String {
+        switch value {
+        case ..<0.34:
+            return "团块"
+        case 0.67...:
+            return "流动"
+        default:
+            return "混合"
+        }
     }
 
     private func generatorReferencePanel() -> some View {

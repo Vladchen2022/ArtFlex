@@ -19,28 +19,6 @@ enum CreativeShapeGeneratorColorSource: String, Codable, Sendable, Equatable, Ca
     }
 }
 
-enum CreativeShapeStructureMode: String, Codable, Sendable, Equatable, CaseIterable, Identifiable {
-    case cluster
-    case growth
-    case flow
-    case fracture
-
-    var id: String { rawValue }
-
-    var title: String {
-        switch self {
-        case .cluster:
-            return "聚合"
-        case .growth:
-            return "生长"
-        case .flow:
-            return "流动"
-        case .fracture:
-            return "断裂"
-        }
-    }
-}
-
 struct CreativeShapeGeneratorImageSource: Codable, Sendable, Equatable {
     var fileName: String
     var width: Int
@@ -58,55 +36,60 @@ struct CreativeShapeGeneratorImageSource: Codable, Sendable, Equatable {
 
 struct CreativeShapeGeneratorState: Codable, Sendable, Equatable {
     var selectedSource: CreativeShapeGeneratorColorSource?
-    var structureMode: CreativeShapeStructureMode
+    var formTendency: Float
     var complexity: Float
-    var coherence: Float
-    var formElongation: Float
-    var edgeTexture: Float
+    var openness: Float
+    var edgeCharacter: Float
+    var surprise: Float
     var importedImage: CreativeShapeGeneratorImageSource?
 
     static let stageOneDefault = CreativeShapeGeneratorState(
         selectedSource: nil,
-        structureMode: .growth,
+        formTendency: 0.58,
         complexity: 0.48,
-        coherence: 0.72,
-        formElongation: 0.58,
-        edgeTexture: 0.38,
+        openness: 0.34,
+        edgeCharacter: 0.38,
+        surprise: 0.32,
         importedImage: nil
     )
 
     enum CodingKeys: String, CodingKey {
         case selectedSource
-        case structureMode
+        case formTendency
         case complexity
+        case openness
+        case edgeCharacter
+        case surprise
+        case importedImage
+
+        // Previous structured generator keys.
+        case structureMode
         case coherence
         case formElongation
         case edgeTexture
-        case importedImage
 
-        // Legacy stage-one generator keys.
+        // Original stage-one generator keys.
         case shapeCharacteristic
         case shapeSize
         case shapeJitter
-        case colorJitter
         case featherProbability
     }
 
     init(
         selectedSource: CreativeShapeGeneratorColorSource?,
-        structureMode: CreativeShapeStructureMode = .growth,
+        formTendency: Float = 0.58,
         complexity: Float = 0.48,
-        coherence: Float = 0.72,
-        formElongation: Float = 0.58,
-        edgeTexture: Float = 0.38,
+        openness: Float = 0.34,
+        edgeCharacter: Float = 0.38,
+        surprise: Float = 0.32,
         importedImage: CreativeShapeGeneratorImageSource?
     ) {
         self.selectedSource = selectedSource
-        self.structureMode = structureMode
+        self.formTendency = formTendency
         self.complexity = complexity
-        self.coherence = coherence
-        self.formElongation = formElongation
-        self.edgeTexture = edgeTexture
+        self.openness = openness
+        self.edgeCharacter = edgeCharacter
+        self.surprise = surprise
         self.importedImage = importedImage
     }
 
@@ -114,25 +97,49 @@ struct CreativeShapeGeneratorState: Codable, Sendable, Equatable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         let defaults = Self.stageOneDefault
         selectedSource = try container.decodeIfPresent(CreativeShapeGeneratorColorSource.self, forKey: .selectedSource)
-        structureMode = try container.decodeIfPresent(CreativeShapeStructureMode.self, forKey: .structureMode) ?? defaults.structureMode
         complexity = try container.decodeIfPresent(Float.self, forKey: .complexity)
             ?? container.decodeIfPresent(Float.self, forKey: .shapeSize)
             ?? defaults.complexity
-        if let storedCoherence = try container.decodeIfPresent(Float.self, forKey: .coherence) {
-            coherence = storedCoherence
-        } else if let legacyJitter = try container.decodeIfPresent(Float.self, forKey: .shapeJitter) {
-            coherence = 1 - legacyJitter
+
+        let legacyMode = try container.decodeIfPresent(String.self, forKey: .structureMode)
+        if let storedTendency = try container.decodeIfPresent(Float.self, forKey: .formTendency) {
+            formTendency = storedTendency
+        } else if let storedElongation = try container.decodeIfPresent(Float.self, forKey: .formElongation) {
+            formTendency = storedElongation
         } else {
-            coherence = defaults.coherence
+            formTendency = switch legacyMode {
+            case "cluster": 0.18
+            case "flow": 0.86
+            case "fracture": 0.62
+            default: defaults.formTendency
+            }
         }
-        formElongation = try container.decodeIfPresent(Float.self, forKey: .formElongation)
-            ?? defaults.formElongation
-        if let storedTexture = try container.decodeIfPresent(Float.self, forKey: .edgeTexture) {
-            edgeTexture = storedTexture
+
+        if let storedOpenness = try container.decodeIfPresent(Float.self, forKey: .openness) {
+            openness = storedOpenness
+        } else {
+            openness = legacyMode == "fracture" ? 0.68 : defaults.openness
+        }
+
+        if let storedEdge = try container.decodeIfPresent(Float.self, forKey: .edgeCharacter) {
+            edgeCharacter = storedEdge
+        } else if let previousEdge = try container.decodeIfPresent(Float.self, forKey: .edgeTexture) {
+            edgeCharacter = previousEdge
         } else {
             let legacyCharacteristic = try container.decodeIfPresent(Float.self, forKey: .shapeCharacteristic)
             let legacyFeather = try container.decodeIfPresent(Float.self, forKey: .featherProbability)
-            edgeTexture = ((legacyCharacteristic ?? defaults.edgeTexture) + (legacyFeather ?? defaults.edgeTexture)) * 0.5
+            edgeCharacter = ((legacyCharacteristic ?? defaults.edgeCharacter) +
+                (legacyFeather ?? defaults.edgeCharacter)) * 0.5
+        }
+
+        if let storedSurprise = try container.decodeIfPresent(Float.self, forKey: .surprise) {
+            surprise = storedSurprise
+        } else if let previousCoherence = try container.decodeIfPresent(Float.self, forKey: .coherence) {
+            surprise = 1 - previousCoherence
+        } else if let legacyJitter = try container.decodeIfPresent(Float.self, forKey: .shapeJitter) {
+            surprise = legacyJitter
+        } else {
+            surprise = defaults.surprise
         }
         importedImage = try container.decodeIfPresent(CreativeShapeGeneratorImageSource.self, forKey: .importedImage)
     }
@@ -140,11 +147,11 @@ struct CreativeShapeGeneratorState: Codable, Sendable, Equatable {
     func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encodeIfPresent(selectedSource, forKey: .selectedSource)
-        try container.encode(structureMode, forKey: .structureMode)
+        try container.encode(formTendency, forKey: .formTendency)
         try container.encode(complexity, forKey: .complexity)
-        try container.encode(coherence, forKey: .coherence)
-        try container.encode(formElongation, forKey: .formElongation)
-        try container.encode(edgeTexture, forKey: .edgeTexture)
+        try container.encode(openness, forKey: .openness)
+        try container.encode(edgeCharacter, forKey: .edgeCharacter)
+        try container.encode(surprise, forKey: .surprise)
         try container.encodeIfPresent(importedImage, forKey: .importedImage)
     }
 

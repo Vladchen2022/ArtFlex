@@ -116,11 +116,11 @@ struct ProjectPackageTests {
         )
         workspace.creativeShapeGenerator = CreativeShapeGeneratorState(
             selectedSource: .externalImage,
-            structureMode: .flow,
+            formTendency: 0.67,
             complexity: 0.62,
-            coherence: 0.81,
-            formElongation: 0.67,
-            edgeTexture: 0.44,
+            openness: 0.41,
+            edgeCharacter: 0.44,
+            surprise: 0.19,
             importedImage: CreativeShapeGeneratorImageSource(
                 fileName: "reference.jpg",
                 width: 128,

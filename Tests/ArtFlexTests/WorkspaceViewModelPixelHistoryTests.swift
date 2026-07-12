@@ -1751,11 +1751,11 @@ struct WorkspaceViewModelPixelHistoryTests {
         let layerID = harness.viewModel.workspace.document.activeLayerID
 
         harness.viewModel.selectCreativeShapeGeneratorSource(.currentColor)
-        harness.viewModel.setCreativeShapeGeneratorStructureMode(.cluster)
+        harness.viewModel.setCreativeShapeGeneratorFormTendency(0)
         harness.viewModel.setCreativeShapeGeneratorComplexity(0)
-        harness.viewModel.setCreativeShapeGeneratorCoherence(1)
-        harness.viewModel.setCreativeShapeGeneratorFormElongation(0)
-        harness.viewModel.setCreativeShapeGeneratorEdgeTexture(0)
+        harness.viewModel.setCreativeShapeGeneratorOpenness(0)
+        harness.viewModel.setCreativeShapeGeneratorEdgeCharacter(0)
+        harness.viewModel.setCreativeShapeGeneratorSurprise(0)
 
         harness.makeLassoSelection([
             .init(x: 8, y: 8),
@@ -1807,11 +1807,11 @@ struct WorkspaceViewModelPixelHistoryTests {
         let layerID = harness.viewModel.workspace.document.activeLayerID
 
         harness.viewModel.selectCreativeShapeGeneratorSource(.currentColor)
-        harness.viewModel.setCreativeShapeGeneratorStructureMode(.flow)
+        harness.viewModel.setCreativeShapeGeneratorFormTendency(0.8)
         harness.viewModel.setCreativeShapeGeneratorComplexity(0.2)
-        harness.viewModel.setCreativeShapeGeneratorCoherence(0.8)
-        harness.viewModel.setCreativeShapeGeneratorFormElongation(0.8)
-        harness.viewModel.setCreativeShapeGeneratorEdgeTexture(0.7)
+        harness.viewModel.setCreativeShapeGeneratorOpenness(0.45)
+        harness.viewModel.setCreativeShapeGeneratorEdgeCharacter(0.7)
+        harness.viewModel.setCreativeShapeGeneratorSurprise(0.2)
 
         harness.makeLassoSelection([
             .init(x: 3, y: 5), .init(x: 29, y: 5), .init(x: 29, y: 31),
@@ -1843,6 +1843,39 @@ struct WorkspaceViewModelPixelHistoryTests {
         }
 
         #expect(harness.viewModel.workspace.selection.committedShape == nil)
+    }
+
+    @Test
+    @MainActor
+    func openCreativeShapeGestureGeneratesFromAPlainDrag() async throws {
+        let harness = try PixelHistoryHarness()
+        let layerID = harness.viewModel.workspace.document.activeLayerID
+
+        harness.viewModel.selectCreativeShapeGeneratorSource(.currentColor)
+        harness.viewModel.setCreativeShapeGeneratorFormTendency(0.7)
+        harness.viewModel.setCreativeShapeGeneratorComplexity(0.45)
+        harness.viewModel.setCreativeShapeGeneratorOpenness(0.35)
+        harness.viewModel.setCreativeShapeGeneratorEdgeCharacter(0.4)
+        harness.viewModel.setCreativeShapeGeneratorSurprise(0.35)
+
+        harness.makeLassoSelection([
+            .init(x: 8, y: 32),
+            .init(x: 56, y: 32)
+        ])
+
+        try await waitForCondition {
+            try regionHasVisiblePixels(
+                harness: harness,
+                layerID: layerID,
+                minX: 4,
+                maxX: 60,
+                minY: 12,
+                maxY: 52
+            )
+        }
+
+        #expect(harness.viewModel.workspace.selection.committedShape == nil)
+        #expect(harness.viewModel.workspace.selection.inProgressShape == nil)
     }
 }
 
