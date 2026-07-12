@@ -723,6 +723,38 @@ struct CompoundBrushSettings: Codable, Equatable, Sendable {
     }
 }
 
+enum BrushMedium: String, Codable, Equatable, Sendable, CaseIterable {
+    case standard
+    case oil
+
+    var displayName: String {
+        switch self {
+        case .standard:
+            return "普通"
+        case .oil:
+            return "油彩"
+        }
+    }
+}
+
+struct OilPaintSettings: Codable, Equatable, Sendable {
+    var paintLoad: Float
+    var colorSeparation: Float
+    var dryness: Float
+    var bristleSpread: Float
+    var companionColorA: RGBAColor?
+    var companionColorB: RGBAColor?
+
+    static let `default` = OilPaintSettings(
+        paintLoad: 0.72,
+        colorSeparation: 0.58,
+        dryness: 0.32,
+        bristleSpread: 0.38,
+        companionColorA: nil,
+        companionColorB: nil
+    )
+}
+
 struct BrushSettings: Codable, Sendable, Equatable {
     var size: Float
     var opacity: Float
@@ -758,6 +790,8 @@ struct BrushSettings: Codable, Sendable, Equatable {
     var opacityCurveHigh: Float
     var opacityPressureCurve: CurveChannelState?
     var compoundBrush: CompoundBrushSettings
+    var medium: BrushMedium
+    var oilPaint: OilPaintSettings
 
     static let stageOneDefault = BrushSettings(
         size: 24,
@@ -793,7 +827,9 @@ struct BrushSettings: Codable, Sendable, Equatable {
         opacityCurveMid: 0.4,
         opacityCurveHigh: 0.82,
         opacityPressureCurve: nil,
-        compoundBrush: .disabledDefault
+        compoundBrush: .disabledDefault,
+        medium: .standard,
+        oilPaint: .default
     )
 
     enum CodingKeys: String, CodingKey {
@@ -831,6 +867,8 @@ struct BrushSettings: Codable, Sendable, Equatable {
         case opacityCurveHigh
         case opacityPressureCurve
         case compoundBrush
+        case medium
+        case oilPaint
     }
 
     init(
@@ -867,7 +905,9 @@ struct BrushSettings: Codable, Sendable, Equatable {
         opacityCurveMid: Float,
         opacityCurveHigh: Float,
         opacityPressureCurve: CurveChannelState? = nil,
-        compoundBrush: CompoundBrushSettings = .disabledDefault
+        compoundBrush: CompoundBrushSettings = .disabledDefault,
+        medium: BrushMedium = .standard,
+        oilPaint: OilPaintSettings = .default
     ) {
         self.size = size
         self.opacity = opacity
@@ -903,6 +943,8 @@ struct BrushSettings: Codable, Sendable, Equatable {
         self.opacityCurveHigh = opacityCurveHigh
         self.opacityPressureCurve = opacityPressureCurve.map(Self.normalizedPressureCurveState(_:))
         self.compoundBrush = compoundBrush
+        self.medium = medium
+        self.oilPaint = oilPaint
     }
 
     init(from decoder: Decoder) throws {
@@ -946,6 +988,8 @@ struct BrushSettings: Codable, Sendable, Equatable {
         opacityPressureCurve = try container.decodeIfPresent(CurveChannelState.self, forKey: .opacityPressureCurve)
             .map(Self.normalizedPressureCurveState(_:))
         compoundBrush = try container.decodeIfPresent(CompoundBrushSettings.self, forKey: .compoundBrush) ?? defaults.compoundBrush
+        medium = try container.decodeIfPresent(BrushMedium.self, forKey: .medium) ?? defaults.medium
+        oilPaint = try container.decodeIfPresent(OilPaintSettings.self, forKey: .oilPaint) ?? defaults.oilPaint
     }
 
     func encode(to encoder: Encoder) throws {
@@ -958,6 +1002,8 @@ struct BrushSettings: Codable, Sendable, Equatable {
         try container.encode(scatterAmount, forKey: .scatterAmount)
         try container.encode(jitterAmount, forKey: .jitterAmount)
         try container.encode(colorJitterAmount, forKey: .colorJitterAmount)
+        try container.encode(paintJitterAmount, forKey: .paintJitterAmount)
+        try container.encode(paintContrastAmount, forKey: .paintContrastAmount)
         try container.encode(stampRotationDegrees, forKey: .stampRotationDegrees)
         try container.encode(followsStrokeDirection, forKey: .followsStrokeDirection)
         try container.encode(customTipSourceSemantic, forKey: .customTipSourceSemantic)
@@ -982,6 +1028,8 @@ struct BrushSettings: Codable, Sendable, Equatable {
         try container.encode(opacityCurveHigh, forKey: .opacityCurveHigh)
         try container.encodeIfPresent(opacityPressureCurve, forKey: .opacityPressureCurve)
         try container.encode(compoundBrush, forKey: .compoundBrush)
+        try container.encode(medium, forKey: .medium)
+        try container.encode(oilPaint, forKey: .oilPaint)
     }
 
     var resolvedSizePressureCurveState: CurveChannelState {

@@ -2048,6 +2048,36 @@ struct WorkspaceViewModelSafetyTests {
 
     @Test
     @MainActor
+    func oilPaintControlsStayIndependentFromStandardBrushSettings() throws {
+        let harness = try BrushEditingBoundaryHarness()
+        let companion = RGBAColor(red: 0.84, green: 0.26, blue: 0.12, alpha: 0.4)
+
+        harness.viewModel.setPaintJitterAmount(0.31)
+        harness.viewModel.setBrushMedium(.oil)
+        harness.viewModel.setOilPaintLoad(0.82)
+        harness.viewModel.setOilColorSeparation(0.63)
+        harness.viewModel.setOilDryness(0.44)
+        harness.viewModel.setOilBristleSpread(0.57)
+        harness.viewModel.setOilCompanionColor(slot: 0, color: companion)
+
+        var brush = harness.viewModel.workspace.toolSession.brush
+        #expect(brush.medium == .oil)
+        #expect(brush.paintJitterAmount == 0.31)
+        #expect(brush.oilPaint.paintLoad == 0.82)
+        #expect(brush.oilPaint.colorSeparation == 0.63)
+        #expect(brush.oilPaint.dryness == 0.44)
+        #expect(brush.oilPaint.bristleSpread == 0.57)
+        #expect(brush.oilPaint.companionColorA == companion.withAlpha(1))
+
+        harness.viewModel.setBrushMedium(.standard)
+        brush = harness.viewModel.workspace.toolSession.brush
+        #expect(brush.medium == .standard)
+        #expect(brush.paintJitterAmount == 0.31)
+        #expect(brush.oilPaint.companionColorA == companion.withAlpha(1))
+    }
+
+    @Test
+    @MainActor
     func compoundPressureMixEditingPreservesMonotonicOrderAndAppliesPresetsAtomically() throws {
         let harness = try BrushEditingBoundaryHarness()
 

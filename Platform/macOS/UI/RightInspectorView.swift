@@ -1257,6 +1257,14 @@ struct RightInspectorView: View {
 
     private var fullBrushParameterControls: some View {
         VStack(alignment: .leading, spacing: 8) {
+            if supportsBrushMediumControls {
+                brushMediumControls
+
+                Divider()
+                    .overlay(Color.white.opacity(0.08))
+                    .padding(.vertical, 2)
+            }
+
             OptimizedCompactSlider(
                 title: "间距",
                 valueText: "\(Int(viewModel.workspace.toolSession.brush.spacingPercent))%",
@@ -1299,7 +1307,9 @@ struct RightInspectorView: View {
                 .overlay(Color.white.opacity(0.08))
                 .padding(.vertical, 2)
 
-            paintJitterSlider
+            if viewModel.workspace.toolSession.brush.medium == .standard {
+                paintJitterSlider
+            }
 
             OptimizedCompactSlider(
                 title: "大小压感",
@@ -1343,6 +1353,142 @@ struct RightInspectorView: View {
                 )
             }
         }
+    }
+
+    private var supportsBrushMediumControls: Bool {
+        let tool = viewModel.workspace.toolSession.activeTool
+        return tool == .brush || tool == .straightLine
+    }
+
+    private var brushMediumControls: some View {
+        let brush = viewModel.workspace.toolSession.brush
+        let oil = brush.oilPaint
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 10) {
+                Text("介质")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(Color.white.opacity(0.72))
+
+                Picker(
+                    "介质",
+                    selection: Binding(
+                        get: { brush.medium },
+                        set: { viewModel.setBrushMedium($0) }
+                    )
+                ) {
+                    ForEach(BrushMedium.allCases, id: \.self) { medium in
+                        Text(medium.displayName).tag(medium)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.segmented)
+                .controlSize(.small)
+            }
+
+            if brush.medium == .oil {
+                HStack(spacing: 8) {
+                    Text("颜料")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(Color.white.opacity(0.72))
+
+                    oilPigmentSwatch(brushColor: viewModel.workspace.toolSession.selectedColor)
+                        .help("当前颜色")
+
+                    Image(systemName: "plus")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundStyle(Color.white.opacity(0.35))
+
+                    oilCompanionColorMenu(slot: 0, color: oil.companionColorA)
+                    oilCompanionColorMenu(slot: 1, color: oil.companionColorB)
+
+                    Spacer(minLength: 0)
+                }
+
+                OptimizedCompactSlider(
+                    title: "颜料装载",
+                    valueText: "\(Int(oil.paintLoad * 100))%",
+                    value: Binding(get: { Double(oil.paintLoad) }, set: { _ in }),
+                    range: 0...1,
+                    liveValueText: { "\(Int($0 * 100))%" },
+                    onCommit: { viewModel.setOilPaintLoad(Float($0)) }
+                )
+
+                OptimizedCompactSlider(
+                    title: "色彩分离",
+                    valueText: "\(Int(oil.colorSeparation * 100))%",
+                    value: Binding(get: { Double(oil.colorSeparation) }, set: { _ in }),
+                    range: 0...1,
+                    liveValueText: { "\(Int($0 * 100))%" },
+                    onCommit: { viewModel.setOilColorSeparation(Float($0)) }
+                )
+
+                OptimizedCompactSlider(
+                    title: "干燥程度",
+                    valueText: "\(Int(oil.dryness * 100))%",
+                    value: Binding(get: { Double(oil.dryness) }, set: { _ in }),
+                    range: 0...1,
+                    liveValueText: { "\(Int($0 * 100))%" },
+                    onCommit: { viewModel.setOilDryness(Float($0)) }
+                )
+
+                OptimizedCompactSlider(
+                    title: "鬃毛散开",
+                    valueText: "\(Int(oil.bristleSpread * 100))%",
+                    value: Binding(get: { Double(oil.bristleSpread) }, set: { _ in }),
+                    range: 0...1,
+                    liveValueText: { "\(Int($0 * 100))%" },
+                    onCommit: { viewModel.setOilBristleSpread(Float($0)) }
+                )
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func oilCompanionColorMenu(slot: Int, color: RGBAColor?) -> some View {
+        Menu {
+            Button("装入当前颜色") {
+                viewModel.setOilCompanionColor(
+                    slot: slot,
+                    color: viewModel.workspace.toolSession.selectedColor
+                )
+            }
+            Button("清空", role: .destructive) {
+                viewModel.setOilCompanionColor(slot: slot, color: nil)
+            }
+            .disabled(color == nil)
+        } label: {
+            oilPigmentSwatch(brushColor: color)
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help(color == nil ? "装入伴色" : "更换或清空伴色")
+    }
+
+    private func oilPigmentSwatch(brushColor: RGBAColor?) -> some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 5)
+                .fill(Color.white.opacity(0.05))
+            if let brushColor {
+                RoundedRectangle(cornerRadius: 4)
+                    .fill(Color(
+                        red: Double(brushColor.red),
+                        green: Double(brushColor.green),
+                        blue: Double(brushColor.blue),
+                        opacity: 1
+                    ))
+                    .padding(2)
+            } else {
+                Image(systemName: "plus")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(Color.white.opacity(0.55))
+            }
+        }
+        .frame(width: 26, height: 26)
+        .overlay(
+            RoundedRectangle(cornerRadius: 5)
+                .stroke(Color.white.opacity(0.12), lineWidth: 1)
+        )
     }
 
     private var brushJitterSlider: some View {

@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 @testable import ArtFlex
 
@@ -44,6 +45,38 @@ struct DocumentStateTests {
     }
 
     @Test
+    func brushMediumRoundTripsAndLegacyPayloadDefaultsToStandard() throws {
+        var oilBrush = BrushSettings.stageOneDefault
+        oilBrush.medium = .oil
+        oilBrush.paintJitterAmount = 0.37
+        oilBrush.paintContrastAmount = 0.22
+        oilBrush.oilPaint = OilPaintSettings(
+            paintLoad: 0.81,
+            colorSeparation: 0.67,
+            dryness: 0.43,
+            bristleSpread: 0.59,
+            companionColorA: .init(red: 0.9, green: 0.2, blue: 0.1, alpha: 1),
+            companionColorB: .init(red: 0.1, green: 0.3, blue: 0.8, alpha: 1)
+        )
+
+        let encoded = try JSONEncoder().encode(oilBrush)
+        let decoded = try JSONDecoder().decode(BrushSettings.self, from: encoded)
+        #expect(decoded == oilBrush)
+        #expect(decoded.paintJitterAmount == 0.37)
+        #expect(decoded.paintContrastAmount == 0.22)
+
+        var legacyObject = try #require(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        legacyObject.removeValue(forKey: "medium")
+        legacyObject.removeValue(forKey: "oilPaint")
+        let legacyData = try JSONSerialization.data(withJSONObject: legacyObject)
+        let legacy = try JSONDecoder().decode(BrushSettings.self, from: legacyData)
+        #expect(legacy.medium == .standard)
+        #expect(legacy.oilPaint == .default)
+        #expect(legacy.paintJitterAmount == 0.37)
+        #expect(legacy.paintContrastAmount == 0.22)
+    }
+
+    @Test
     func workspaceStartsWithEmptyBrushLibrary() {
         let workspace = WorkspaceState.stageOneDefault
 
@@ -60,6 +93,8 @@ struct DocumentStateTests {
         #expect(workspace.toolSession.brush.buildMode == .buildUp)
         #expect(workspace.toolSession.brush.jitterAmount == 0)
         #expect(workspace.toolSession.brush.colorJitterAmount == 0)
+        #expect(workspace.toolSession.brush.medium == .standard)
+        #expect(workspace.toolSession.brush.oilPaint == .default)
         #expect(workspace.toolSession.brush.pressureSensitivity == 1)
         #expect(workspace.toolSession.brush.sizeLowerBound == 0)
         #expect(workspace.toolSession.brush.pressureSizeAmount == 0)
