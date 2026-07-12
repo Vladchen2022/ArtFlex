@@ -9,7 +9,6 @@ struct IdeationEditingContext: Equatable {
     var patternLibrary: PatternLibraryState
     var tipImageLibrary: TipImageLibraryState
     var generator: GeneratorSettings
-    var creativeShapeGenerator: CreativeShapeGeneratorState
 }
 
 @MainActor
@@ -156,8 +155,7 @@ final class IdeationSessionState: ObservableObject {
                         brushLibrary: workspace.brushLibrary,
                         patternLibrary: workspace.patternLibrary,
                         tipImageLibrary: workspace.tipImageLibrary,
-                        generator: workspace.generator,
-                        creativeShapeGenerator: workspace.creativeShapeGenerator
+                        generator: workspace.generator
                     )
                 }
                 .removeDuplicates()

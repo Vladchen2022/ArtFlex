@@ -275,13 +275,12 @@ git diff --stat   # 仅在 dirty 时再看
 - `Infrastructure/FileFormat/PNGExporter.swift`
 - `Core/Application/PersistenceController.swift`
 
-### 5.4 颜色 / 参考图 / 生成器
+### 5.4 颜色 / 参考图
 
 - `Core/Color/ColorPanelState.swift`
 - `Core/Color/QuickColorPickerState.swift`
 - `Rendering/Canvas/LABLuminosityPostProcessor.swift`
 - `Platform/macOS/UI/ReferenceImagePanelSupport.swift`
-- `Core/CreativeShapeGenerator/*`
 
 ## 6. 常用验证
 

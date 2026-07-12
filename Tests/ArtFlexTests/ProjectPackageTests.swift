@@ -114,20 +114,6 @@ struct ProjectPackageTests {
             branch: 0.63,
             opacity: 0.45
         )
-        workspace.creativeShapeGenerator = CreativeShapeGeneratorState(
-            selectedSource: .externalImage,
-            formTendency: 0.67,
-            complexity: 0.62,
-            openness: 0.41,
-            edgeCharacter: 0.44,
-            surprise: 0.19,
-            importedImage: CreativeShapeGeneratorImageSource(
-                fileName: "reference.jpg",
-                width: 128,
-                height: 128,
-                rgbaPixels: Data(repeating: 127, count: 128 * 128 * 4)
-            )
-        )
         let snapshot = LayerTextureSnapshot(
             width: 8,
             height: 8,
@@ -170,9 +156,24 @@ struct ProjectPackageTests {
         #expect(package.workspaceState.toolSession.brush.compoundBrush.globalPaintJitterAmount == 0.57)
         #expect(package.workspaceState.toolSession.brush.compoundBrush.globalPaintContrastAmount == 0.26)
         #expect(package.workspaceState.tipImageLibrary == workspace.tipImageLibrary)
-        #expect(package.creativeShapeGenerator == workspace.creativeShapeGenerator)
-        #expect(package.workspaceState.creativeShapeGenerator == workspace.creativeShapeGenerator)
         #expect(package.layerSnapshots == layerSnapshots)
+    }
+
+    @Test
+    func packageIgnoresRemovedCreativeShapeGeneratorField() throws {
+        let package = ProjectPackage.fromWorkspace(.stageOneDefault, layerSnapshots: [])
+        let encoded = try JSONEncoder().encode(package)
+        var object = try #require(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        object["creativeShapeGenerator"] = [
+            "selectedSource": "currentColor",
+            "complexity": 0.7
+        ]
+
+        let legacyData = try JSONSerialization.data(withJSONObject: object)
+        let decoded = try JSONDecoder().decode(ProjectPackage.self, from: legacyData)
+
+        #expect(decoded.document == package.document)
+        #expect(decoded.workspaceState.document == package.workspaceState.document)
     }
 
     @Test

@@ -172,9 +172,6 @@
   `Core/Ideation/IdeationSessionState.swift`
 - timelapse：
   `Platform/macOS/Services/TimelapseRecorderController.swift`
-- creative generator：
-  `Core/CreativeShapeGenerator/*`
-  `Rendering/Canvas/CreativeShapeGeneratorRenderer.swift`
 
 ## 4. 当前最该警惕的热点文件
 

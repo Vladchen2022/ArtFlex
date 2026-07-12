@@ -278,11 +278,6 @@ private func squareFilledPatternThumbnailImage(
 }
 
 struct RightInspectorView: View {
-    private enum LeftInspectorTab: String {
-        case generator = "图形生成器"
-        case referenceImages = "参考图"
-    }
-
     private enum LibraryInspectorTab: String {
         case brush = "画笔库"
         case pattern = "图案库"
@@ -324,7 +319,6 @@ struct RightInspectorView: View {
     @State private var draggedTipImageLibraryAssetID: BrushTipImageAssetID?
     @State private var tipImageLibraryDropTargetID: BrushTipImageAssetID?
     @State private var showsCompoundBrushBuilder = false
-    @State private var leftInspectorTab: LeftInspectorTab = .referenceImages
     @State private var libraryInspectorTab: LibraryInspectorTab = .brush
     @State private var parameterInspectorTab: ParameterInspectorTab = .brush
     @State private var lastUsedAdjustmentTab: ParameterInspectorTab = .colorAdjustment
@@ -337,7 +331,7 @@ struct RightInspectorView: View {
                 ScrollView(.vertical, showsIndicators: true) {
                     HStack(alignment: .top, spacing: 12) {
                     VStack(spacing: 12) {
-                        generatorReferencePanel()
+                        referenceImagePanel()
 
                         InspectorPanel(title: "颜色") {
                             ColorSectionView(
@@ -524,145 +518,22 @@ struct RightInspectorView: View {
         }
     }
 
-    private var generatorSection: some View {
-        let generator = viewModel.workspace.creativeShapeGenerator
-        return VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 6) {
-                generatorSourceButton(
-                    title: CreativeShapeGeneratorColorSource.currentColor.title,
-                    isSelected: generator.selectedSource == .currentColor
-                ) {
-                    viewModel.selectCreativeShapeGeneratorSource(.currentColor)
-                }
-
-                generatorSourceButton(
-                    title: CreativeShapeGeneratorColorSource.paletteBlocks.title,
-                    isSelected: generator.selectedSource == .paletteBlocks
-                ) {
-                    viewModel.selectCreativeShapeGeneratorSource(.paletteBlocks)
-                }
-
-                creativeShapeGeneratorExternalImageButton
-            }
-
-            OptimizedCompactSlider(
-                title: "形态倾向",
-                valueText: creativeShapeFormTendencyText(generator.formTendency),
-                value: Binding(
-                    get: { Double(generator.formTendency) },
-                    set: { _ in }
-                ),
-                range: 0...1,
-                liveValueText: { creativeShapeFormTendencyText(Float($0)) },
-                onCommit: { viewModel.setCreativeShapeGeneratorFormTendency(Float($0)) }
-            )
-
-            OptimizedCompactSlider(
-                title: "复杂度",
-                valueText: "\(Int(generator.complexity * 100))%",
-                value: Binding(
-                    get: { Double(generator.complexity) },
-                    set: { _ in }
-                ),
-                range: 0...1,
-                liveValueText: { "\(Int($0 * 100))%" },
-                onCommit: { viewModel.setCreativeShapeGeneratorComplexity(Float($0)) }
-            )
-
-            OptimizedCompactSlider(
-                title: "开放程度",
-                valueText: "\(Int(generator.openness * 100))%",
-                value: Binding(
-                    get: { Double(generator.openness) },
-                    set: { _ in }
-                ),
-                range: 0...1,
-                liveValueText: { "\(Int($0 * 100))%" },
-                onCommit: { viewModel.setCreativeShapeGeneratorOpenness(Float($0)) }
-            )
-
-            OptimizedCompactSlider(
-                title: "边缘性格",
-                valueText: "\(Int(generator.edgeCharacter * 100))%",
-                value: Binding(
-                    get: { Double(generator.edgeCharacter) },
-                    set: { _ in }
-                ),
-                range: 0...1,
-                liveValueText: { "\(Int($0 * 100))%" },
-                onCommit: { viewModel.setCreativeShapeGeneratorEdgeCharacter(Float($0)) }
-            )
-
-            OptimizedCompactSlider(
-                title: "意外程度",
-                valueText: "\(Int(generator.surprise * 100))%",
-                value: Binding(
-                    get: { Double(generator.surprise) },
-                    set: { _ in }
-                ),
-                range: 0...1,
-                liveValueText: { "\(Int($0 * 100))%" },
-                onCommit: { viewModel.setCreativeShapeGeneratorSurprise(Float($0)) }
-            )
-        }
-        .frame(maxWidth: .infinity, alignment: .topLeading)
-    }
-
-    private func creativeShapeFormTendencyText(_ value: Float) -> String {
-        switch value {
-        case ..<0.34:
-            return "团块"
-        case 0.67...:
-            return "流动"
-        default:
-            return "混合"
-        }
-    }
-
-    private func generatorReferencePanel() -> some View {
+    private func referenceImagePanel() -> some View {
         let selectedReferenceAsset = viewModel.selectedReferenceImageSlot?.asset
-        let resolvedFixedHeight: CGFloat?
-        if leftInspectorTab == .generator {
-            resolvedFixedHeight = nil
-        } else if selectedReferenceAsset == nil {
-            resolvedFixedHeight = collapsedReferenceInspectorHeight
-        } else {
-            resolvedFixedHeight = nil
-        }
+        let resolvedFixedHeight = selectedReferenceAsset == nil ? collapsedReferenceInspectorHeight : nil
 
-        return VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 8) {
-                leftInspectorTabButton(.generator)
-                leftInspectorTabButton(.referenceImages)
-            }
-
-            Group {
-                if leftInspectorTab == .generator {
-                    generatorSection
-                        .frame(maxWidth: .infinity, alignment: .topLeading)
-                } else {
-                    referenceImageSection
-                        .frame(maxWidth: .infinity, alignment: .topLeading)
-                }
-            }
-        }
-        .padding(12)
-        .frame(maxWidth: .infinity, minHeight: resolvedFixedHeight, maxHeight: resolvedFixedHeight, alignment: .top)
-        .background(
-            RoundedRectangle(cornerRadius: 12)
-                .fill(Color.white.opacity(0.06))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 12)
-                        .stroke(Color.white.opacity(0.06), lineWidth: 1)
-                )
-        )
-    }
-
-    private func leftInspectorTabButton(_ tab: LeftInspectorTab) -> some View {
-        let isSelected = leftInspectorTab == tab
-        return inspectorTabButton(title: tab.rawValue, isSelected: isSelected) {
-            leftInspectorTab = tab
-        }
+        return referenceImageSection
+            .frame(maxWidth: .infinity, alignment: .topLeading)
+            .padding(12)
+            .frame(maxWidth: .infinity, minHeight: resolvedFixedHeight, maxHeight: resolvedFixedHeight, alignment: .top)
+            .background(
+                RoundedRectangle(cornerRadius: 12)
+                    .fill(Color.white.opacity(0.06))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 12)
+                            .stroke(Color.white.opacity(0.06), lineWidth: 1)
+                    )
+            )
     }
 
     private var referenceImageSection: some View {
@@ -1023,50 +894,6 @@ struct RightInspectorView: View {
         }
         viewModel.setNavigatorZoomPercent(parsed)
         syncNavigatorZoomPercentText()
-    }
-
-    private var creativeShapeGeneratorExternalImageButton: some View {
-        let generator = viewModel.workspace.creativeShapeGenerator
-        return generatorSourceButton(
-            title: viewModel.isCreativeShapeGeneratorImageLoading ? "分析中…" : CreativeShapeGeneratorColorSource.externalImage.title,
-            isSelected: generator.selectedSource == .externalImage,
-            isDisabled: viewModel.isCreativeShapeGeneratorImageLoading
-        ) {
-            viewModel.selectCreativeShapeGeneratorSource(.externalImage)
-        }
-    }
-
-    private func generatorSourceButton(
-        title: String,
-        isSelected: Bool,
-        isDisabled: Bool = false,
-        action: @escaping () -> Void
-    ) -> some View {
-        Button(action: action) {
-            Text(title)
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(Color.white.opacity(isDisabled ? 0.42 : 0.92))
-                .lineLimit(1)
-                .minimumScaleFactor(0.82)
-                .frame(maxWidth: .infinity, minHeight: 30)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 2)
-            .background(
-                RoundedRectangle(cornerRadius: 10)
-                    .fill(isSelected ? Color.accentColor.opacity(0.16) : Color.white.opacity(0.05))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 10)
-                    .stroke(
-                        isSelected ? Color.accentColor.opacity(0.9) : Color.white.opacity(0.08),
-                        lineWidth: 1
-                    )
-            )
-        }
-        .buttonStyle(.plain)
-        .disabled(isDisabled)
-        .opacity(isDisabled ? 0.7 : 1)
-        .frame(maxWidth: .infinity)
     }
 
     private var brushSection: some View {

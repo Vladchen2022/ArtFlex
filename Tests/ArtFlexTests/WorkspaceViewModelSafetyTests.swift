@@ -423,64 +423,6 @@ struct WorkspaceViewModelSafetyTests {
 
     @Test
     @MainActor
-    func creativeShapeGeneratorWithTransparentPixelLockPreservesSemitransparentAlpha() async throws {
-        let harness = try BrushEditingBoundaryHarness()
-        let activeLayerID = harness.viewModel.workspace.document.activeLayerID
-
-        try fillOpaqueRect(
-            in: harness,
-            layerID: activeLayerID,
-            originX: 72,
-            originY: 72,
-            width: 48,
-            height: 48,
-            color: .init(red: 0.08, green: 0.12, blue: 0.72, alpha: 0.36)
-        )
-        let basePixel = try harness.color(atX: 96, y: 96, layerID: activeLayerID)
-
-        harness.viewModel.setSelectedColor(.init(red: 0.88, green: 0.08, blue: 0.04, alpha: 1))
-        harness.viewModel.selectCreativeShapeGeneratorSource(.currentColor)
-        harness.viewModel.setCreativeShapeGeneratorFormTendency(0)
-        harness.viewModel.setCreativeShapeGeneratorComplexity(0)
-        harness.viewModel.setCreativeShapeGeneratorOpenness(0)
-        harness.viewModel.setCreativeShapeGeneratorEdgeCharacter(0)
-        harness.viewModel.setCreativeShapeGeneratorSurprise(0)
-        harness.viewModel.toggleLayerTransparentPixelLock(activeLayerID)
-
-        makeLassoSelection(
-            in: harness.viewModel,
-            points: [
-                .init(x: 80, y: 80),
-                .init(x: 112, y: 80),
-                .init(x: 112, y: 112),
-                .init(x: 80, y: 112),
-                .init(x: 80, y: 80)
-            ]
-        )
-
-        var changedPixel: RGBAColor?
-        for _ in 0..<120 {
-            for y in 80...112 {
-                for x in 80...112 {
-                    let pixel = try harness.color(atX: x, y: y, layerID: activeLayerID)
-                    if pixel.red > basePixel.red + 0.04 {
-                        changedPixel = pixel
-                        break
-                    }
-                }
-                if changedPixel != nil { break }
-            }
-            if changedPixel != nil { break }
-            await Task.yield()
-            try? await Task.sleep(for: .milliseconds(10))
-        }
-
-        let generatedPixel = try #require(changedPixel)
-        #expect(abs(generatedPixel.alpha - basePixel.alpha) < 0.03)
-    }
-
-    @Test
-    @MainActor
     func toggleWorkspaceChromeVisibilityUpdatesUIState() throws {
         let harness = try BrushEditingBoundaryHarness()
 
@@ -2125,30 +2067,6 @@ struct WorkspaceViewModelSafetyTests {
 
     @Test
     @MainActor
-    func selectingCreativeShapeGeneratorSourceSwitchesToLassoTool() throws {
-        let harness = try BrushEditingBoundaryHarness()
-
-        harness.viewModel.selectTool(.brush)
-        harness.viewModel.selectCreativeShapeGeneratorSource(.currentColor)
-
-        #expect(harness.viewModel.workspace.toolSession.activeTool == .lassoSelection)
-    }
-
-    @Test
-    @MainActor
-    func changingSelectedColorSwitchesCreativeGeneratorBackToCurrentColorSource() throws {
-        let harness = try BrushEditingBoundaryHarness()
-
-        harness.viewModel.selectCreativeShapeGeneratorSource(.paletteBlocks)
-        #expect(harness.viewModel.workspace.creativeShapeGenerator.selectedSource == .paletteBlocks)
-
-        harness.viewModel.setSelectedColor(.init(red: 0.2, green: 0.6, blue: 0.9, alpha: 1))
-
-        #expect(harness.viewModel.workspace.creativeShapeGenerator.selectedSource == .currentColor)
-    }
-
-    @Test
-    @MainActor
     func navigatorZoomPercentUpdatesViewportScale() throws {
         let harness = try BrushEditingBoundaryHarness()
 
@@ -2218,49 +2136,6 @@ struct WorkspaceViewModelSafetyTests {
 
         let refreshedPixels = try #require(harness.viewModel.referenceImageSlots[luminositySlotID].asset?.rgbaPixels)
         #expect(refreshedPixels != initialPixels)
-    }
-
-    @Test
-    @MainActor
-    func creativeShapeGeneratorCompositionControlsUpdateWorkspaceState() throws {
-        let harness = try BrushEditingBoundaryHarness()
-
-        harness.viewModel.setCreativeShapeGeneratorFormTendency(0.86)
-        harness.viewModel.setCreativeShapeGeneratorComplexity(0.73)
-        harness.viewModel.setCreativeShapeGeneratorOpenness(0.68)
-        harness.viewModel.setCreativeShapeGeneratorEdgeCharacter(0.52)
-        harness.viewModel.setCreativeShapeGeneratorSurprise(0.36)
-
-        let generator = harness.viewModel.workspace.creativeShapeGenerator
-        #expect(generator.formTendency == 0.86)
-        #expect(generator.complexity == 0.73)
-        #expect(generator.openness == 0.68)
-        #expect(generator.edgeCharacter == 0.52)
-        #expect(generator.surprise == 0.36)
-    }
-
-    @Test
-    @MainActor
-    func selectingExternalImageSourceTwiceClearsLoadedImage() throws {
-        let harness = try BrushEditingBoundaryHarness()
-
-        harness.bootstrap.workspaceStore.updateCreativeShapeGenerator { generator in
-            generator.importedImage = CreativeShapeGeneratorImageSource(
-                fileName: "test.png",
-                width: CreativeShapeGeneratorImageSource.targetDimension,
-                height: CreativeShapeGeneratorImageSource.targetDimension,
-                rgbaPixels: Data(repeating: 255, count: CreativeShapeGeneratorImageSource.targetDimension * CreativeShapeGeneratorImageSource.targetDimension * 4)
-            )
-        }
-        harness.viewModel.selectTool(.eraser)
-        harness.viewModel.selectTool(.brush)
-
-        harness.viewModel.selectCreativeShapeGeneratorSource(.externalImage)
-        #expect(harness.viewModel.workspace.creativeShapeGenerator.selectedSource == .externalImage)
-
-        harness.viewModel.selectCreativeShapeGeneratorSource(.externalImage)
-        #expect(harness.viewModel.workspace.creativeShapeGenerator.importedImage == nil)
-        #expect(harness.viewModel.workspace.creativeShapeGenerator.selectedSource == nil)
     }
 
     @Test

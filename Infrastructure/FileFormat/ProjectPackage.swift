@@ -8,7 +8,6 @@ struct ProjectPackage: Codable, Sendable, Equatable {
     var patternLibrary: PatternLibraryState
     var tipImageLibrary: TipImageLibraryState
     var generator: GeneratorSettings
-    var creativeShapeGenerator: CreativeShapeGeneratorState
     var viewport: CanvasViewport
     var selection: SelectionState
     var tipImageAssets: [BrushTipImageAsset]
@@ -22,7 +21,6 @@ struct ProjectPackage: Codable, Sendable, Equatable {
         case patternLibrary
         case tipImageLibrary
         case generator
-        case creativeShapeGenerator
         case viewport
         case selection
         case tipImageAssets
@@ -37,7 +35,6 @@ struct ProjectPackage: Codable, Sendable, Equatable {
         patternLibrary: PatternLibraryState = .init(),
         tipImageLibrary: TipImageLibraryState,
         generator: GeneratorSettings,
-        creativeShapeGenerator: CreativeShapeGeneratorState = .stageOneDefault,
         viewport: CanvasViewport,
         selection: SelectionState,
         tipImageAssets: [BrushTipImageAsset] = [],
@@ -50,7 +47,6 @@ struct ProjectPackage: Codable, Sendable, Equatable {
         self.patternLibrary = patternLibrary
         self.tipImageLibrary = tipImageLibrary
         self.generator = generator
-        self.creativeShapeGenerator = creativeShapeGenerator
         self.viewport = viewport
         self.selection = selection
         self.tipImageAssets = tipImageAssets
@@ -66,7 +62,6 @@ struct ProjectPackage: Codable, Sendable, Equatable {
         patternLibrary = try container.decodeIfPresent(PatternLibraryState.self, forKey: .patternLibrary) ?? .init()
         tipImageLibrary = try container.decodeIfPresent(TipImageLibraryState.self, forKey: .tipImageLibrary) ?? .empty
         generator = try container.decode(GeneratorSettings.self, forKey: .generator)
-        creativeShapeGenerator = try container.decodeIfPresent(CreativeShapeGeneratorState.self, forKey: .creativeShapeGenerator) ?? .stageOneDefault
         viewport = try container.decode(CanvasViewport.self, forKey: .viewport)
         selection = try container.decode(SelectionState.self, forKey: .selection)
         tipImageAssets = try container.decodeIfPresent([BrushTipImageAsset].self, forKey: .tipImageAssets) ?? []
@@ -82,7 +77,6 @@ struct ProjectPackage: Codable, Sendable, Equatable {
         try container.encode(patternLibrary, forKey: .patternLibrary)
         try container.encode(tipImageLibrary, forKey: .tipImageLibrary)
         try container.encode(generator, forKey: .generator)
-        try container.encode(creativeShapeGenerator, forKey: .creativeShapeGenerator)
         try container.encode(viewport, forKey: .viewport)
         try container.encode(selection, forKey: .selection)
         try container.encode(tipImageAssets, forKey: .tipImageAssets)
@@ -102,7 +96,6 @@ struct ProjectPackage: Codable, Sendable, Equatable {
             patternLibrary: normalized.workspace.patternLibrary,
             tipImageLibrary: normalized.workspace.tipImageLibrary,
             generator: normalized.workspace.generator,
-            creativeShapeGenerator: normalized.workspace.creativeShapeGenerator,
             viewport: normalized.workspace.viewport,
             selection: normalized.workspace.selection,
             tipImageAssets: normalized.assets,
@@ -120,7 +113,6 @@ struct ProjectPackage: Codable, Sendable, Equatable {
                 patternLibrary: patternLibrary,
                 tipImageLibrary: tipImageLibrary,
                 generator: generator,
-                creativeShapeGenerator: creativeShapeGenerator,
                 viewport: viewport,
                 selection: selection
             ),

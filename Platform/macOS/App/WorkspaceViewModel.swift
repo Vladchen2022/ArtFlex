@@ -1,5 +1,4 @@
 import AppKit
-import ImageIO
 import SwiftUI
 import os
 @preconcurrency import Metal
@@ -48,14 +47,6 @@ enum BrightnessAdjustmentEditorMode: Equatable {
 struct PreparedAdjustmentLayerContext {
     let layerID: LayerID
     let sourceTexture: MTLTexture
-}
-
-private struct CreativeShapeGeneratorRequest {
-    let gesturePoints: [CanvasPoint]
-    let layerID: LayerID
-    let state: CreativeShapeGeneratorState
-    let colorContext: CreativeShapeGeneratorColorContext
-    let runtimeSeed: UInt64
 }
 
 @MainActor
@@ -156,8 +147,6 @@ final class WorkspaceViewModel: ObservableObject {
     @Published private(set) var strokeResetToken = 0
     @Published private(set) var isGeneratorRegionSelectionArmed = false
     @Published private(set) var isGeneratorStrokeModeEnabled = false
-    @Published private(set) var isCreativeShapeGeneratorImageLoading = false
-    @Published private(set) var isCreativeShapeGeneratorGenerating = false
     @Published private(set) var straightLineState = StraightLineInteractionState()
     @Published private(set) var linearGradientState = LinearGradientInteractionState()
     @Published private(set) var sectorGradientState = SectorGradientInteractionState()
@@ -196,7 +185,6 @@ final class WorkspaceViewModel: ObservableObject {
     private var generatorStrokeSession = GeneratorStrokeSessionState()
     private var activeLassoRawPoints: [CanvasPoint] = []
     private var activeLassoBounds: CanvasRect?
-    private var pendingCreativeShapeGeneratorRequests: [CreativeShapeGeneratorRequest] = []
     private var textureFillGestureState: TextureFillGestureState?
     private var bucketFillRequestID: UInt64 = 0
     private var bucketFillTask: Task<Void, Never>?
@@ -2193,7 +2181,6 @@ final class WorkspaceViewModel: ObservableObject {
         bootstrap.workspaceStore.updateToolSession { session in
             session.selectedColor = color
         }
-        activateCreativeShapeGeneratorCurrentColorSourceIfNeeded()
         refreshLightweight()
     }
 
@@ -2643,7 +2630,6 @@ final class WorkspaceViewModel: ObservableObject {
         bootstrap.workspaceStore.updateToolSession { session in
             session.selectedColor = color
         }
-        activateCreativeShapeGeneratorCurrentColorSourceIfNeeded()
         refreshColorPanelOnly(includeSelectedColor: true)
     }
 
@@ -2743,194 +2729,6 @@ final class WorkspaceViewModel: ObservableObject {
         refreshLightweight()
         showStatus(.init(kind: .success, message: "已从图片提取色块"))
         return true
-    }
-
-    func selectCreativeShapeGeneratorSource(_ source: CreativeShapeGeneratorColorSource) {
-        // Toggle off if the same source is already selected
-        if workspace.creativeShapeGenerator.selectedSource == source {
-            if source == .externalImage {
-                clearCreativeShapeGeneratorImage()
-            } else {
-                bootstrap.workspaceStore.updateCreativeShapeGenerator { generator in
-                    generator.selectedSource = nil
-                }
-                refreshLightweight()
-            }
-            return
-        }
-
-        if source == .externalImage {
-            if isCreativeShapeGeneratorImageLoading {
-                return
-            }
-            if workspace.creativeShapeGenerator.importedImage == nil {
-                importCreativeShapeGeneratorImageFromDisk()
-                return
-            }
-        }
-
-        bootstrap.workspaceStore.updateCreativeShapeGenerator { generator in
-            generator.selectedSource = source
-        }
-        selectTool(.lassoSelection)
-        refreshLightweight()
-    }
-
-    func setCreativeShapeGeneratorFormTendency(_ value: Float) {
-        bootstrap.workspaceStore.updateCreativeShapeGenerator { generator in
-            generator.formTendency = min(max(value, 0), 1)
-        }
-        refreshLightweight()
-    }
-
-    func setCreativeShapeGeneratorComplexity(_ value: Float) {
-        bootstrap.workspaceStore.updateCreativeShapeGenerator { generator in
-            generator.complexity = min(max(value, 0), 1)
-        }
-        refreshLightweight()
-    }
-
-    func setCreativeShapeGeneratorOpenness(_ value: Float) {
-        bootstrap.workspaceStore.updateCreativeShapeGenerator { generator in
-            generator.openness = min(max(value, 0), 1)
-        }
-        refreshLightweight()
-    }
-
-    func setCreativeShapeGeneratorEdgeCharacter(_ value: Float) {
-        bootstrap.workspaceStore.updateCreativeShapeGenerator { generator in
-            generator.edgeCharacter = min(max(value, 0), 1)
-        }
-        refreshLightweight()
-    }
-
-    func setCreativeShapeGeneratorSurprise(_ value: Float) {
-        bootstrap.workspaceStore.updateCreativeShapeGenerator { generator in
-            generator.surprise = min(max(value, 0), 1)
-        }
-        refreshLightweight()
-    }
-
-    func importCreativeShapeGeneratorImageFromDisk() {
-        guard let url = bootstrap.filePanelService.presentImageOpenPanel() else {
-            showStatus(.init(kind: .info, message: "已取消选择图片"))
-            return
-        }
-
-        loadCreativeShapeGeneratorImage(from: url)
-    }
-
-    func clearCreativeShapeGeneratorImage() {
-        bootstrap.workspaceStore.updateCreativeShapeGenerator { generator in
-            generator.importedImage = nil
-            if generator.selectedSource == .externalImage {
-                generator.selectedSource = nil
-            }
-        }
-        isCreativeShapeGeneratorImageLoading = false
-        refreshLightweight()
-        showStatus(.init(kind: .info, message: "已清除外部图片"))
-    }
-
-    private func loadCreativeShapeGeneratorImage(from url: URL) {
-        isCreativeShapeGeneratorImageLoading = true
-        let fileName = url.lastPathComponent
-
-        Task.detached(priority: .userInitiated) { [weak self] in
-            let decoded = Self.decodeCreativeShapeGeneratorImageToRGBA(url: url, maxSize: 512)
-            await MainActor.run {
-                guard let self else { return }
-                self.isCreativeShapeGeneratorImageLoading = false
-
-                guard let decoded else {
-                    self.showStatus(.init(kind: .error, message: "无法读取图片"))
-                    return
-                }
-
-                self.bootstrap.workspaceStore.updateCreativeShapeGenerator { generator in
-                    generator.importedImage = decoded
-                    generator.selectedSource = .externalImage
-                }
-                self.selectTool(.lassoSelection)
-                self.refreshLightweight()
-                self.showStatus(.init(kind: .success, message: "已加载\(fileName)"))
-            }
-        }
-    }
-
-    nonisolated private static func decodeCreativeShapeGeneratorImageToRGBA(
-        url: URL,
-        maxSize: Int
-    ) -> CreativeShapeGeneratorImageSource? {
-        guard let imageSource = CGImageSourceCreateWithURL(url as CFURL, nil) else {
-            return nil
-        }
-
-        let thumbnailOptions: [CFString: Any] = [
-            kCGImageSourceCreateThumbnailFromImageAlways: true,
-            kCGImageSourceCreateThumbnailWithTransform: true,
-            kCGImageSourceShouldCache: false,
-            kCGImageSourceThumbnailMaxPixelSize: maxSize
-        ]
-
-        guard let cgImage = CGImageSourceCreateThumbnailAtIndex(
-            imageSource,
-            0,
-            thumbnailOptions as CFDictionary
-        ) ?? CGImageSourceCreateImageAtIndex(imageSource, 0, nil) else {
-            return nil
-        }
-
-        let target = CreativeShapeGeneratorImageSource.targetDimension
-        guard
-            let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
-            let context = CGContext(
-                data: nil,
-                width: target,
-                height: target,
-                bitsPerComponent: 8,
-                bytesPerRow: target * 4,
-                space: colorSpace,
-                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
-            )
-        else {
-            return nil
-        }
-
-        context.interpolationQuality = .high
-        context.clear(CGRect(x: 0, y: 0, width: target, height: target))
-        context.draw(cgImage, in: creativeShapeGeneratorAspectFillRect(for: cgImage, targetDimension: target))
-
-        guard let data = context.data else {
-            return nil
-        }
-
-        return CreativeShapeGeneratorImageSource(
-            fileName: url.lastPathComponent,
-            width: target,
-            height: target,
-            rgbaPixels: Data(bytes: data, count: target * target * 4)
-        )
-    }
-
-    nonisolated private static func creativeShapeGeneratorAspectFillRect(
-        for image: CGImage,
-        targetDimension: Int
-    ) -> CGRect {
-        let targetSize = CGSize(width: targetDimension, height: targetDimension)
-        let imageSize = CGSize(width: image.width, height: image.height)
-        guard imageSize.width > 0, imageSize.height > 0 else {
-            return CGRect(origin: .zero, size: targetSize)
-        }
-
-        let scale = max(targetSize.width / imageSize.width, targetSize.height / imageSize.height)
-        let drawSize = CGSize(width: imageSize.width * scale, height: imageSize.height * scale)
-        return CGRect(
-            x: (targetSize.width - drawSize.width) * 0.5,
-            y: (targetSize.height - drawSize.height) * 0.5,
-            width: drawSize.width,
-            height: drawSize.height
-        )
     }
 
     func setColorPanelLightness(_ value: Float) {
@@ -3127,7 +2925,6 @@ final class WorkspaceViewModel: ObservableObject {
         bootstrap.workspaceStore.updateToolSession { session in
             session.selectedColor = palette[index]
         }
-        activateCreativeShapeGeneratorCurrentColorSourceIfNeeded()
         refreshColorPanelOnly(includeSelectedColor: true)
     }
 
@@ -3151,7 +2948,6 @@ final class WorkspaceViewModel: ObservableObject {
             bootstrap.workspaceStore.updateToolSession { session in
                 session.selectedColor = sampledColor
             }
-            activateCreativeShapeGeneratorCurrentColorSourceIfNeeded()
             bootstrap.workspaceStore.updateColorPanel { panel in
                 ColorBlocksEngine.syncPicker(to: sampledColor, state: &panel)
                 if panel.mode == .picker {
@@ -5913,34 +5709,6 @@ final class WorkspaceViewModel: ObservableObject {
             let message = "[commitSelection:begin] kind=lasso end=(\(end.x),\(end.y)) rawPointCount=\(self.activeLassoRawPoints.count) firstRaw=(\(firstRaw.x),\(firstRaw.y)) lastRaw=(\(lastRaw.x),\(lastRaw.y)) rawBoundsOrigin=(\(rawBounds.origin.x),\(rawBounds.origin.y)) rawBoundsSize=(\(rawBounds.size.x),\(rawBounds.size.y))"
             selectionTraceLogger.debug("\(message, privacy: .public)")
             emitSelectionTraceViewModel(message)
-        }
-        if currentKind == .lasso,
-           workspace.toolSession.activeTool == .lassoSelection,
-           workspace.creativeShapeGenerator.isEnabled {
-            var gesturePoints = activeLassoRawPoints
-            if gesturePoints.last != end {
-                gesturePoints.append(end)
-            }
-            activeLassoRawPoints = []
-            activeLassoBounds = nil
-            lassoSamplingDebugPoints = []
-            samePathPreviewDebugShape = nil
-            samePathCommittedDebugShape = nil
-            pendingCombineMode = nil
-            selectionEpoch += 1
-            cancelActiveRasterizationTask()
-            bootstrap.workspaceStore.updateSelection { selection in
-                selection.committedShape = nil
-                selection.inProgressShape = nil
-                selection.anchorPoint = nil
-                selection.activeKind = nil
-                selection.activeCombineMode = .replace
-            }
-            refreshLightweight()
-            recordDrawingActivityIfNeeded()
-            triggerCreativeShapeGeneratorIfNeeded(for: gesturePoints)
-            relayIdeationOperation(.commitSelection(end: end, modifiers: .init(flags: modifiers)))
-            return
         }
         if Self.runSamePathCommitTest,
            currentKind == .lasso,
@@ -10086,7 +9854,6 @@ final class WorkspaceViewModel: ObservableObject {
             patternLibrary: workspace.patternLibrary,
             tipImageLibrary: workspace.tipImageLibrary,
             generator: workspace.generator,
-            creativeShapeGenerator: workspace.creativeShapeGenerator,
             viewport: .stageOneDefault,
             selection: .empty
         )
@@ -10720,8 +10487,7 @@ final class WorkspaceViewModel: ObservableObject {
             brushLibrary: workspace.brushLibrary,
             patternLibrary: workspace.patternLibrary,
             tipImageLibrary: workspace.tipImageLibrary,
-            generator: workspace.generator,
-            creativeShapeGenerator: workspace.creativeShapeGenerator
+            generator: workspace.generator
         )
     }
 
@@ -10732,7 +10498,6 @@ final class WorkspaceViewModel: ObservableObject {
         bootstrap.workspaceStore.updatePatternLibrary { $0 = context.patternLibrary }
         bootstrap.workspaceStore.updateTipImageLibrary { $0 = context.tipImageLibrary }
         bootstrap.workspaceStore.updateGenerator { $0 = context.generator }
-        bootstrap.workspaceStore.updateCreativeShapeGenerator { $0 = context.creativeShapeGenerator }
         refreshLightweight()
     }
 
@@ -11451,19 +11216,6 @@ final class WorkspaceViewModel: ObservableObject {
         return workspaceSnapshot
     }
 
-    private func creativeShapeGeneratorClearedSelectionWorkspaceSnapshot() -> WorkspaceState {
-        workspaceSnapshotClearingSelection()
-    }
-
-    private func activateCreativeShapeGeneratorCurrentColorSourceIfNeeded() {
-        guard workspace.creativeShapeGenerator.selectedSource != nil else { return }
-        guard workspace.creativeShapeGenerator.selectedSource != .currentColor else { return }
-        bootstrap.workspaceStore.updateCreativeShapeGenerator { generator in
-            generator.selectedSource = .currentColor
-        }
-        workspace.creativeShapeGenerator.selectedSource = .currentColor
-    }
-
     private func premultipliedPixel(from color: RGBAColor) -> EditablePixel {
         let premultiplied = color.premultiplied
         return EditablePixel(
@@ -11497,156 +11249,6 @@ final class WorkspaceViewModel: ObservableObject {
                 )
             )
         }
-    }
-
-    private func triggerCreativeShapeGeneratorIfNeeded(for gesturePoints: [CanvasPoint]) {
-        guard workspace.toolSession.activeTool == .lassoSelection else { return }
-        let generatorState = workspace.creativeShapeGenerator
-        guard generatorState.isEnabled else { return }
-        guard gesturePoints.isEmpty == false else { return }
-        guard let layerID = bootstrap.interactionController.activeEditableLayerID() else {
-            showStatus(.init(kind: .info, message: "当前图层已锁定"))
-            return
-        }
-
-        let colorContext = CreativeShapeGeneratorColorContext(
-            selectedColor: workspace.toolSession.selectedColor,
-            brushOpacity: workspace.toolSession.brush.opacity,
-            brushNoise: workspace.toolSession.brush.colorJitterAmount,
-            paletteColors: ColorBlocksEngine.renderPalette(for: workspace.colorPanel)
-        )
-        pendingCreativeShapeGeneratorRequests.append(CreativeShapeGeneratorRequest(
-            gesturePoints: gesturePoints,
-            layerID: layerID,
-            state: generatorState,
-            colorContext: colorContext,
-            runtimeSeed: UInt64(DispatchTime.now().uptimeNanoseconds)
-        ))
-
-        bootstrap.workspaceStore.updateSelection { selection in
-            selection.anchorPoint = nil
-            selection.activeKind = nil
-            selection.committedShape = nil
-            selection.inProgressShape = nil
-            selection.activeCombineMode = .replace
-        }
-        refreshLightweight()
-        processNextCreativeShapeGeneratorRequestIfNeeded()
-    }
-
-    private func processNextCreativeShapeGeneratorRequestIfNeeded() {
-        guard !isCreativeShapeGeneratorGenerating, !pendingCreativeShapeGeneratorRequests.isEmpty else { return }
-        let request = pendingCreativeShapeGeneratorRequests.removeFirst()
-        isCreativeShapeGeneratorGenerating = true
-        refreshLightweight()
-
-        Task.detached(priority: .userInitiated) { [weak self] in
-            guard let self else { return }
-            let plan = CreativeShapeGeneratorEngine.makePlan(
-                gesturePoints: request.gesturePoints,
-                state: request.state,
-                colorContext: request.colorContext,
-                runtimeSeed: request.runtimeSeed
-            )
-
-            await MainActor.run {
-                guard let plan else {
-                    self.finishCreativeShapeGeneratorRequest(message: "当前范围无法生成图形")
-                    return
-                }
-                let didStart = self.applyCreativeShapeGeneratorPlan(plan, to: request.layerID) {
-                    self.finishCreativeShapeGeneratorRequest()
-                }
-                if !didStart {
-                    self.finishCreativeShapeGeneratorRequest()
-                }
-            }
-        }
-    }
-
-    private func finishCreativeShapeGeneratorRequest(message: String? = nil) {
-        isCreativeShapeGeneratorGenerating = false
-        refreshLightweight()
-        if let message {
-            showStatus(.init(kind: .info, message: message))
-        }
-        processNextCreativeShapeGeneratorRequestIfNeeded()
-    }
-
-    @discardableResult
-    private func applyCreativeShapeGeneratorPlan(
-        _ plan: CreativeShapeGeneratorPlan,
-        to layerID: LayerID,
-        completion: (@MainActor @Sendable () -> Void)? = nil
-    ) -> Bool {
-        guard plan.shapes.isEmpty == false else { return false }
-        guard
-            let surfaceID = bootstrap.layerSurfaceStore.surfaceID(for: layerID),
-            let texture = bootstrap.layerSurfaceStore.texture(for: surfaceID)
-        else {
-            return false
-        }
-
-        let alphaLockTexture = makeAlphaLockTextureCopyIfNeeded(for: layerID, sourceTexture: texture)
-        guard alphaLockTexture != nil || !layerTransparentPixelLockEnabled(layerID) else {
-            showStatus(.init(kind: .error, message: "无法创建锁定透明像素遮罩"))
-            return false
-        }
-
-        _ = flushBrushEditingBoundary(reason: "creativeShapeGenerator.checkpoint")
-        do {
-            try bootstrap.historyController.captureCheckpoint(
-                workspaceOverride: creativeShapeGeneratorClearedSelectionWorkspaceSnapshot(),
-                captureMode: .inPlaceChangedLayers([layerID]),
-                auditContext: HistoryEligibilityAuditContext(
-                    operationKind: "creativeShapeGenerator",
-                    candidateChangedLayerIDs: [layerID],
-                    candidateChangedLayerIDsKnown: true,
-                    comparisonWorkspace: captureHistoryEligibilityComparisonWorkspace(),
-                    additionalOperationKinds: ["creativeShapeGeneratorRenderer"]
-                )
-            )
-            hasUnsavedChanges = true
-            canUndo = bootstrap.historyController.canUndo
-            canRedo = bootstrap.historyController.canRedo
-        } catch {
-            showStatus(.init(kind: .error, message: error.localizedDescription))
-            return false
-        }
-
-        guard let commandBuffer = bootstrap.metalContext.commandQueue.makeCommandBuffer() else {
-            showStatus(.init(kind: .error, message: "无法创建生成命令缓冲"))
-            return false
-        }
-
-        let renderPassDescriptor = MTLRenderPassDescriptor()
-        renderPassDescriptor.colorAttachments[0].texture = texture
-        renderPassDescriptor.colorAttachments[0].loadAction = .load
-        renderPassDescriptor.colorAttachments[0].storeAction = .store
-
-        bootstrap.creativeShapeGeneratorRenderer.encode(
-            into: renderPassDescriptor,
-            commandBuffer: commandBuffer,
-            canvasSize: CanvasSize(width: texture.width, height: texture.height),
-            plan: plan,
-            alphaLockTexture: alphaLockTexture
-        )
-
-        commandBuffer.addCompletedHandler { [weak self] _ in
-            Task { @MainActor in
-                guard let self else { return }
-                self.layerThumbnailCache.removeValue(forKey: layerID)
-                self.bootstrap.strokeEngine.resetBrushPipelineState()
-                self.clearRecentBrushAdjustmentState()
-                self.noteCanvasContentChanged(changedLayerIDs: [layerID])
-                self.refresh(invalidatedLayerIDs: [layerID])
-                self.recordDrawingActivityIfNeeded()
-                self.showStatus(.init(kind: .success, message: "已生成创意图形"))
-                completion?()
-            }
-        }
-        commandBuffer.commit()
-        return true
     }
 
     @discardableResult
@@ -13719,7 +13321,6 @@ final class WorkspaceViewModel: ObservableObject {
         bootstrap.workspaceStore.updateToolSession { session in
             session.selectedColor = color
         }
-        activateCreativeShapeGeneratorCurrentColorSourceIfNeeded()
         refreshColorPanelOnly(includeSelectedColor: true)
     }
 
@@ -13784,7 +13385,6 @@ final class WorkspaceViewModel: ObservableObject {
         bootstrap.workspaceStore.updateToolSession { session in
             session.selectedColor = color
         }
-        activateCreativeShapeGeneratorCurrentColorSourceIfNeeded()
         bootstrap.workspaceStore.updateColorPanel { panel in
             guard panel.mode == .picker else { return }
             panel.pickerHue = state.panel.pickerHue
@@ -13996,7 +13596,6 @@ final class WorkspaceViewModel: ObservableObject {
         @Published var isApplyingTransformCommit: Bool = false
         @Published var isTransformingSelection: Bool = false
         @Published var activeTool: ToolKind = .brush
-        @Published var isCreativeGestureActive: Bool = false
         @Published var transformPreviewOffset: CanvasPoint = .init(x: 0, y: 0)
         @Published var selectionMovePreviewOffset: CanvasPoint = .init(x: 0, y: 0)
         @Published var hidesImplicitFreeTransformSelectionOverlay: Bool = false
@@ -14034,10 +13633,6 @@ final class WorkspaceViewModel: ObservableObject {
         selectionOverlayProxy.isApplyingTransformCommit = isApplyingTransformCommit
         selectionOverlayProxy.isTransformingSelection = isTransformingSelection
         selectionOverlayProxy.activeTool = state.toolSession.activeTool
-        selectionOverlayProxy.isCreativeGestureActive =
-            state.toolSession.activeTool == .lassoSelection &&
-            state.creativeShapeGenerator.isEnabled &&
-            sel.inProgressShape?.kind == .lasso
         selectionOverlayProxy.transformPreviewOffset = transformPreviewOffset
         selectionOverlayProxy.selectionMovePreviewOffset = selectionMovePreviewOffset
         selectionOverlayProxy.hidesImplicitFreeTransformSelectionOverlay = hidesImplicitFreeTransformSelectionOverlay

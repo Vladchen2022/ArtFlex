@@ -670,8 +670,7 @@ private struct SelectionOverlayHost: View {
                 showsDimMask: false,
                 previewOffset: .init(x: 0, y: 0),
                 prefersVectorDisplay: true,
-                smoothsLassoPath: false,
-                closesLassoPath: true
+                smoothsLassoPath: false
             )
             SelectionOverlay(
                 selectionShape: inProgress,
@@ -680,8 +679,7 @@ private struct SelectionOverlayHost: View {
                 showsDimMask: false,
                 previewOffset: .init(x: 0, y: 0),
                 prefersVectorDisplay: true,
-                smoothsLassoPath: true,
-                closesLassoPath: !proxy.isCreativeGestureActive
+                smoothsLassoPath: true
             )
         } else if !isApplying, !(isFreeTransform && isTransforming),
                   let shape = proxy.displayShape,
@@ -695,8 +693,7 @@ private struct SelectionOverlayHost: View {
                     ? proxy.transformPreviewOffset
                     : proxy.selectionMovePreviewOffset,
                 prefersVectorDisplay: shape.kind != .mask || !shape.components.isEmpty,
-                smoothsLassoPath: proxy.inProgressShape?.kind == .lasso,
-                closesLassoPath: !proxy.isCreativeGestureActive
+                smoothsLassoPath: proxy.inProgressShape?.kind == .lasso
             )
         }
     }
@@ -1468,7 +1465,6 @@ private struct SelectionOverlay: View {
     let previewOffset: CanvasPoint
     let prefersVectorDisplay: Bool
     let smoothsLassoPath: Bool
-    let closesLassoPath: Bool
 
     var body: some View {
         let displayOffsetX = previewOffset.x * (presentation.documentDisplaySize.x / Double(canvasSize.width))
@@ -1737,7 +1733,7 @@ private struct SelectionOverlay: View {
                 y: (($0.y - bounds.origin.y) / canvasHeight) * displayHeight
             )
         }
-        if smoothsLassoPath, closesLassoPath,
+        if smoothsLassoPath,
            let smoothedPath = smoothedClosedLassoPath(points: mappedPoints) {
             return Path(smoothedPath)
         }
@@ -1745,9 +1741,7 @@ private struct SelectionOverlay: View {
             guard let firstPoint = mappedPoints.first else { return }
             path.move(to: CGPoint(x: firstPoint.x, y: firstPoint.y))
             path.addLines(mappedPoints.dropFirst().map { CGPoint(x: $0.x, y: $0.y) })
-            if closesLassoPath {
-                path.closeSubpath()
-            }
+            path.closeSubpath()
         }
     }
 
