@@ -13,6 +13,83 @@ private let topInspectorControlButtonHeight: CGFloat = 22
 private let topInspectorControlCornerRadius: CGFloat = 7
 private let topInspectorControlIconSize: CGFloat = 11.5
 
+private struct OilCompanionColorEditor: View {
+    let slotNumber: Int
+    let canClear: Bool
+    let onApply: (RGBAColor) -> Void
+    let onClear: () -> Void
+    let onDone: () -> Void
+
+    @State private var panel: ColorPanelState
+
+    init(
+        slotNumber: Int,
+        initialColor: RGBAColor,
+        canClear: Bool,
+        onApply: @escaping (RGBAColor) -> Void,
+        onClear: @escaping () -> Void,
+        onDone: @escaping () -> Void
+    ) {
+        self.slotNumber = slotNumber
+        self.canClear = canClear
+        self.onApply = onApply
+        self.onClear = onClear
+        self.onDone = onDone
+        var initialPanel = ColorPanelState.stageOneDefault
+        ColorBlocksEngine.syncPicker(to: initialColor, state: &initialPanel)
+        _panel = State(initialValue: initialPanel)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("颜料 \(slotNumber)")
+                .font(.system(size: 12, weight: .bold))
+
+            HStack(spacing: 6) {
+                ColorSVPickerView(
+                    panel: panel,
+                    onUpdatePoint: { x, y in
+                        panel.pickerX = x
+                        panel.pickerY = y
+                    },
+                    onDragEnded: { x, y in
+                        panel.pickerX = x
+                        panel.pickerY = y
+                    }
+                )
+                .frame(width: 154, height: 154)
+
+                ColorHueStripView(
+                    hue: panel.pickerHue,
+                    onUpdateHue: { panel.pickerHue = ColorBlocksEngine.wrapHue($0) },
+                    onDragEnded: { hue in
+                        panel.pickerHue = ColorBlocksEngine.wrapHue(hue)
+                    }
+                )
+                .frame(width: 14, height: 152)
+            }
+
+            HStack {
+                Button("清空", role: .destructive) {
+                    onClear()
+                    onDone()
+                }
+                .disabled(!canClear)
+
+                Spacer()
+
+                Button("完成") {
+                    onApply(ColorBlocksEngine.pickerColor(from: panel))
+                    onDone()
+                }
+                .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(14)
+        .frame(width: 210)
+    }
+}
+
 private enum TipImageLibrarySheetTarget: String, Identifiable {
     case primary
     case compoundSecondary
@@ -331,6 +408,7 @@ struct RightInspectorView: View {
     @State private var parameterInspectorAutoRestoreTab: ParameterInspectorTab?
     @State private var topInspectorTab: TopInspectorTab = .navigator
     @State private var navigatorZoomPercentText = "100"
+    @State private var editingOilCompanionSlot: Int?
     var body: some View {
         ZStack {
             GeometryReader { proxy in
@@ -1391,15 +1469,14 @@ struct RightInspectorView: View {
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(Color.white.opacity(0.72))
 
-                    oilPigmentSwatch(brushColor: viewModel.workspace.toolSession.selectedColor)
-                        .help("当前颜色")
+                    oilPigmentSwatch(
+                        brushColor: viewModel.workspace.toolSession.selectedColor,
+                        slotNumber: 1
+                    )
+                    .help("颜料 1：当前主色")
 
-                    Image(systemName: "plus")
-                        .font(.system(size: 9, weight: .bold))
-                        .foregroundStyle(Color.white.opacity(0.35))
-
-                    oilCompanionColorMenu(slot: 0, color: oil.companionColorA)
-                    oilCompanionColorMenu(slot: 1, color: oil.companionColorB)
+                    oilCompanionColorButton(slot: 0, color: oil.companionColorA)
+                    oilCompanionColorButton(slot: 1, color: oil.companionColorB)
 
                     Spacer(minLength: 0)
                 }
@@ -1444,28 +1521,39 @@ struct RightInspectorView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    private func oilCompanionColorMenu(slot: Int, color: RGBAColor?) -> some View {
-        Menu {
-            Button("装入当前颜色") {
-                viewModel.setOilCompanionColor(
-                    slot: slot,
-                    color: viewModel.workspace.toolSession.selectedColor
-                )
-            }
-            Button("清空", role: .destructive) {
-                viewModel.setOilCompanionColor(slot: slot, color: nil)
-            }
-            .disabled(color == nil)
+    private func oilCompanionColorButton(slot: Int, color: RGBAColor?) -> some View {
+        let slotNumber = slot + 2
+        return Button {
+            editingOilCompanionSlot = slot
         } label: {
-            oilPigmentSwatch(brushColor: color)
+            oilPigmentSwatch(brushColor: color, slotNumber: slotNumber)
         }
-        .menuStyle(.borderlessButton)
-        .menuIndicator(.hidden)
-        .fixedSize()
-        .help(color == nil ? "装入伴色" : "更换或清空伴色")
+        .buttonStyle(.plain)
+        .help(color == nil ? "设置颜料 \(slotNumber)" : "编辑颜料 \(slotNumber)")
+        .accessibilityLabel(color == nil ? "设置颜料 \(slotNumber)" : "编辑颜料 \(slotNumber)")
+        .popover(
+            isPresented: Binding(
+                get: { editingOilCompanionSlot == slot },
+                set: { isPresented in
+                    if !isPresented, editingOilCompanionSlot == slot {
+                        editingOilCompanionSlot = nil
+                    }
+                }
+            ),
+            arrowEdge: .bottom
+        ) {
+            OilCompanionColorEditor(
+                slotNumber: slotNumber,
+                initialColor: color ?? viewModel.workspace.toolSession.selectedColor,
+                canClear: color != nil,
+                onApply: { viewModel.setOilCompanionColor(slot: slot, color: $0) },
+                onClear: { viewModel.setOilCompanionColor(slot: slot, color: nil) },
+                onDone: { editingOilCompanionSlot = nil }
+            )
+        }
     }
 
-    private func oilPigmentSwatch(brushColor: RGBAColor?) -> some View {
+    private func oilPigmentSwatch(brushColor: RGBAColor?, slotNumber: Int) -> some View {
         ZStack {
             RoundedRectangle(cornerRadius: 5)
                 .fill(Color.white.opacity(0.05))
@@ -1483,6 +1571,16 @@ struct RightInspectorView: View {
                     .font(.system(size: 10, weight: .bold))
                     .foregroundStyle(Color.white.opacity(0.55))
             }
+
+            Text("\(slotNumber)")
+                .font(.system(size: 8, weight: .bold))
+                .foregroundStyle(Color.white)
+                .padding(.horizontal, 3)
+                .padding(.vertical, 1)
+                .background(Color.black.opacity(0.58))
+                .clipShape(RoundedRectangle(cornerRadius: 3))
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
+                .padding(2)
         }
         .frame(width: 26, height: 26)
         .overlay(
