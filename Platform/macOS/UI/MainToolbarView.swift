@@ -31,24 +31,24 @@ struct MainToolbarView: View {
 
             compactSlider(
                 title: "大小",
-                valueText: "\(Int(editingViewModel.workspace.toolSession.brush.size))",
                 value: Binding(
                     get: { Double(editingViewModel.workspace.toolSession.brush.size) },
                     set: { editingViewModel.setBrushSize(Float($0)) }
                 ),
                 range: 1...1000,
-                width: 110
+                width: 110,
+                valueText: { "\(Int($0.rounded()))" }
             )
 
             compactSlider(
                 title: "不透明度",
-                valueText: "\(Int(editingViewModel.workspace.toolSession.brush.opacity * 100))%",
                 value: Binding(
                     get: { Double(editingViewModel.workspace.toolSession.brush.opacity) },
                     set: { editingViewModel.setBrushOpacity(Float($0)) }
                 ),
                 range: 0...1,
-                width: 110
+                width: 110,
+                valueText: { "\(Int(($0 * 100).rounded()))%" }
             )
 
             toolbarToggleButton(
@@ -114,22 +114,18 @@ struct MainToolbarView: View {
 
     private func compactSlider(
         title: String,
-        valueText: String,
         value: Binding<Double>,
         range: ClosedRange<Double>,
-        width: CGFloat
+        width: CGFloat,
+        valueText: @escaping (Double) -> String
     ) -> some View {
-        HStack(spacing: 6) {
-            Text(title)
-                .font(.system(size: 11))
-                .foregroundStyle(Color.white.opacity(0.68))
-            Slider(value: value, in: range)
-                .frame(width: width)
-            Text(valueText)
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(Color.white.opacity(0.88))
-                .frame(width: 36, alignment: .leading)
-        }
+        ToolbarCommitSlider(
+            title: title,
+            value: value,
+            range: range,
+            sliderWidth: width,
+            valueText: valueText
+        )
     }
 
     private func toolbarToggleButton(
@@ -160,5 +156,70 @@ struct MainToolbarView: View {
         }
         .buttonStyle(.plain)
         .help(helpText ?? (isOn ? "已锁定画布：主画布不能缩放、旋转或移动" : "锁定画布：主画布不能缩放、旋转或移动"))
+    }
+}
+
+private struct ToolbarCommitSlider: View {
+    let title: String
+    @Binding var value: Double
+    let range: ClosedRange<Double>
+    let sliderWidth: CGFloat
+    let valueText: (Double) -> String
+
+    @State private var localValue: Double
+    @State private var isEditing = false
+
+    init(
+        title: String,
+        value: Binding<Double>,
+        range: ClosedRange<Double>,
+        sliderWidth: CGFloat,
+        valueText: @escaping (Double) -> String
+    ) {
+        self.title = title
+        self._value = value
+        self.range = range
+        self.sliderWidth = sliderWidth
+        self.valueText = valueText
+        self._localValue = State(initialValue: value.wrappedValue)
+    }
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Text(title)
+                .font(.system(size: 11))
+                .foregroundStyle(Color.white.opacity(0.68))
+
+            Slider(
+                value: $localValue,
+                in: range,
+                onEditingChanged: handleEditingChanged
+            )
+            .frame(width: sliderWidth)
+            .onChange(of: localValue) { _, newValue in
+                guard !isEditing, abs(newValue - value) > 0.000_001 else { return }
+                value = newValue
+            }
+
+            Text(valueText(localValue))
+                .font(.system(size: 11, weight: .semibold).monospacedDigit())
+                .foregroundStyle(Color.white.opacity(0.88))
+                .frame(width: 36, alignment: .leading)
+        }
+        .onChange(of: value) { _, newValue in
+            guard !isEditing else { return }
+            localValue = newValue
+        }
+    }
+
+    private func handleEditingChanged(_ editing: Bool) {
+        if editing {
+            isEditing = true
+            localValue = value
+        } else {
+            isEditing = false
+            guard abs(localValue - value) > 0.000_001 else { return }
+            value = localValue
+        }
     }
 }

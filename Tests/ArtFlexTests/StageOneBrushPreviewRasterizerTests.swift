@@ -5,6 +5,16 @@ import Testing
 
 struct StageOneBrushPreviewRasterizerTests {
     @Test
+    func brushLibraryStrokePreviewUsesSparseBoundedStampCount() {
+        #expect(StageOneBrushPreviewRasterizer.libraryStrokePreviewStampCount(spacingPercent: 0) == 7)
+        #expect(StageOneBrushPreviewRasterizer.libraryStrokePreviewStampCount(spacingPercent: 18) == 7)
+        #expect(StageOneBrushPreviewRasterizer.libraryStrokePreviewStampCount(spacingPercent: 50) == 6)
+        #expect(StageOneBrushPreviewRasterizer.libraryStrokePreviewStampCount(spacingPercent: 100) == 4)
+        #expect(StageOneBrushPreviewRasterizer.libraryStrokePreviewStampCount(spacingPercent: 150) == 3)
+        #expect(StageOneBrushPreviewRasterizer.libraryStrokePreviewStampCount(spacingPercent: 500) == 3)
+    }
+
+    @Test
     func incrementalStrokeSessionMatchesWholeStrokeRasterization() throws {
         let resolution = 256
         let points = [
@@ -326,6 +336,142 @@ struct StageOneBrushPreviewRasterizerTests {
         #expect(fingerprintA != fingerprintB)
     }
 
+    @Test
+    func textureFillMaterialFieldPreservesBrushTextureWithoutBecomingSolid() throws {
+        var brush = BrushSettings.stageOneDefault
+        brush.size = 28
+        brush.spacingPercent = 18
+        let resolution = 256
+
+        let alphaBytes = try #require(StageOneBrushPreviewRasterizer.materialFieldAlphaBytes(
+            for: brush,
+            resolution: resolution
+        ))
+
+        #expect(alphaBytes.count == resolution * resolution)
+        let visibleCount = alphaBytes.reduce(0) { $0 + ($1 > 24 ? 1 : 0) }
+        let openCount = alphaBytes.reduce(0) { $0 + ($1 < 8 ? 1 : 0) }
+        #expect(visibleCount > resolution * resolution / 8)
+        #expect(openCount > resolution * resolution / 8)
+
+        let cached = try #require(StageOneBrushPreviewRasterizer.materialFieldAlphaBytes(
+            for: brush,
+            resolution: resolution
+        ))
+        #expect(cached == alphaBytes)
+    }
+
+    @Test
+    func textureFillResultPreviewUsesFinalRendererAndReflectsCoverage() throws {
+        var brush = BrushSettings.stageOneDefault
+        brush.size = 28
+        brush.spacingPercent = 18
+
+        var lowCoverage = TextureFillTipSettings.proceduralDefault
+        lowCoverage.coverage = 0.2
+        var highCoverage = lowCoverage
+        highCoverage.coverage = 1
+
+        let lowImage = try #require(StageOneBrushPreviewRasterizer.textureFillPreviewImage(
+            for: brush,
+            tipSettings: lowCoverage,
+            color: .black,
+            width: 192,
+            height: 84
+        ))
+        let highImage = try #require(StageOneBrushPreviewRasterizer.textureFillPreviewImage(
+            for: brush,
+            tipSettings: highCoverage,
+            color: .black,
+            width: 192,
+            height: 84
+        ))
+
+        #expect(lowImage.width == 192)
+        #expect(lowImage.height == 84)
+        #expect(highImage.width == 192)
+        #expect(highImage.height == 84)
+        let lowAlphaSum = try alphaSum(in: lowImage)
+        let highAlphaSum = try alphaSum(in: highImage)
+        let fullyOpaqueAlphaSum = 192 * 84 * 255
+        #expect(highAlphaSum > lowAlphaSum)
+        #expect(highAlphaSum > (fullyOpaqueAlphaSum * 50 / 100))
+        #expect(highAlphaSum < (fullyOpaqueAlphaSum * 85 / 100))
+
+        var changedShape = lowCoverage
+        changedShape.materialScale = 2.2
+        changedShape.variation = 0.85
+        let changedShapeImage = try #require(StageOneBrushPreviewRasterizer.textureFillPreviewImage(
+            for: brush,
+            tipSettings: changedShape,
+            color: .black,
+            width: 192,
+            height: 84
+        ))
+        #expect(try pixelData(in: changedShapeImage) != pixelData(in: lowImage))
+
+        let cachedHighImage = try #require(StageOneBrushPreviewRasterizer.textureFillPreviewImage(
+            for: brush,
+            tipSettings: highCoverage,
+            color: .black,
+            width: 192,
+            height: 84
+        ))
+        #expect(try alphaSum(in: cachedHighImage) == alphaSum(in: highImage))
+    }
+
+    @Test
+    func textureFillResultPreviewAcceptsImportedMaterial() throws {
+        var settings = TextureFillTipSettings.proceduralDefault
+        settings.sourceSemantic = .importedImage
+        settings.customTipMaskData = makeVerticalMask(side: 32)
+
+        let image = try #require(StageOneBrushPreviewRasterizer.textureFillPreviewImage(
+            for: .stageOneDefault,
+            tipSettings: settings,
+            color: RGBAColor(red: 0.2, green: 0.4, blue: 0.8, alpha: 1),
+            width: 192,
+            height: 84
+        ))
+
+        let alpha = try alphaSum(in: image)
+        #expect(alpha > 0)
+        #expect(alpha < 192 * 84 * 255)
+
+        let proceduralImage = try #require(StageOneBrushPreviewRasterizer.textureFillPreviewImage(
+            for: .stageOneDefault,
+            tipSettings: .proceduralDefault,
+            color: RGBAColor(red: 0.2, green: 0.4, blue: 0.8, alpha: 1),
+            width: 192,
+            height: 84
+        ))
+        #expect(try pixelData(in: image) != pixelData(in: proceduralImage))
+    }
+
+    @Test
+    func textureFillArrangementModesProduceDistinctSpatialFields() throws {
+        var settings = TextureFillTipSettings.proceduralDefault
+        settings.sourceSemantic = .importedImage
+        settings.customTipMaskData = makeVerticalMask(side: 32)
+        settings.coverage = 0.58
+        settings.variation = 0.45
+
+        var renderedFields = Set<Data>()
+        for arrangement in TextureFillArrangement.allCases {
+            settings.arrangement = arrangement
+            let image = try #require(StageOneBrushPreviewRasterizer.textureFillPreviewImage(
+                for: .stageOneDefault,
+                tipSettings: settings,
+                color: .black,
+                width: 192,
+                height: 84
+            ))
+            renderedFields.insert(try pixelData(in: image))
+        }
+
+        #expect(renderedFields.count == TextureFillArrangement.allCases.count)
+    }
+
     private func makeVerticalMask(side: Int) -> Data {
         var bytes = [UInt8](repeating: 0, count: side * side)
         let xRange = max(0, side / 2 - 1)...min(side - 1, side / 2)
@@ -382,6 +528,16 @@ struct StageOneBrushPreviewRasterizerTests {
         return stride(from: 3, to: data.count, by: bytesPerPixel).reduce(0) { partialResult, index in
             partialResult + Int(data[index])
         }
+    }
+
+    private func pixelData(in image: CGImage) throws -> Data {
+        guard
+            let provider = image.dataProvider,
+            let providerData = provider.data
+        else {
+            throw PreviewSamplingError.missingData
+        }
+        return providerData as Data
     }
 
     private func alphaMax(in bytes: [UInt8]) -> UInt8 {

@@ -16,6 +16,23 @@ private struct SelectionFillUniforms {
     var paintContrastAmount: Float
     var distortionAmount: Float
     var usesAlphaLock: Float
+    var materialOptions: SIMD4<Float>
+    var materialSeed: SIMD4<Float>
+}
+
+private extension TextureFillArrangement {
+    var metalShaderValue: Float {
+        switch self {
+        case .directional:
+            return 0
+        case .interwoven:
+            return 1
+        case .radial:
+            return 2
+        case .scattered:
+            return 3
+        }
+    }
 }
 
 final class SelectionFillRenderer {
@@ -25,6 +42,8 @@ final class SelectionFillRenderer {
     private let fallbackAlphaLockTexture: MTLTexture
     private var reusableSelectionMaskTexture: MTLTexture?
     private var reusableSelectionMaskTextureSize: SIMD2<Int>?
+    private var reusableMaterialTexture: MTLTexture?
+    private var reusableMaterialTextureSize = 0
 
     init(device: MTLDevice) {
         self.device = device
@@ -46,6 +65,8 @@ final class SelectionFillRenderer {
             float paintContrastAmount;
             float distortionAmount;
             float usesAlphaLock;
+            float4 materialOptions;
+            float4 materialSeed;
         };
 
         struct VertexOut {
@@ -116,6 +137,105 @@ final class SelectionFillRenderer {
             return pos + float2(dx, dy);
         }
 
+        float2 rotateMaterialCoordinate(float2 point, float angle) {
+            float sine = sin(angle);
+            float cosine = cos(angle);
+            return float2(
+                (point.x * cosine) - (point.y * sine),
+                (point.x * sine) + (point.y * cosine)
+            );
+        }
+
+        float materialFieldAlpha(
+            float2 canvasPosition,
+            constant SelectionFillUniforms &uniforms,
+            texture2d<float> materialTexture,
+            thread float &stripeCoordinate
+        ) {
+            float scale = clamp(uniforms.materialOptions.y, 0.25, 3.0);
+            float coverage = max(uniforms.materialOptions.z, 0.1);
+            float amplifiedVariation = max(uniforms.materialOptions.w, 0.0);
+            float arrangementMode = uniforms.materialSeed.w;
+            float2 seed = uniforms.materialSeed.xy;
+            float2 centered = canvasPosition - uniforms.fillCenter;
+            float2 oriented = rotateMaterialCoordinate(centered, uniforms.materialSeed.z);
+            float2 selectionSize = max(
+                uniforms.selectionBoundsMax - uniforms.selectionBoundsMin,
+                float2(1.0)
+            );
+            float baseTileWorldSize = clamp(min(selectionSize.x, selectionSize.y) * 1.4, 64.0, 210.0);
+            float tileWorldSize = baseTileWorldSize * scale;
+            float2 materialCoordinate = oriented / tileWorldSize;
+
+            if (arrangementMode >= 1.5 && arrangementMode < 2.5) {
+                float radius = length(centered);
+                float angle = atan2(centered.y, centered.x);
+                float arcScale = max(radius / tileWorldSize, 0.35);
+                materialCoordinate = float2(
+                    (angle / 6.283185307179586) * arcScale,
+                    radius / tileWorldSize
+                );
+            } else if (arrangementMode >= 2.5) {
+                float cellWorldSize = max(tileWorldSize * 0.72, 24.0);
+                float2 seededCellPosition = (oriented / cellWorldSize) + (seed * 19.0);
+                float2 cell = floor(seededCellPosition);
+                float2 local = (fract(seededCellPosition) - 0.5) * cellWorldSize;
+                float2 cellRandom = hash22(cell + (seed * 97.0));
+                float cellAngle = ((cellRandom.x * 2.0) - 1.0) * 3.141592653589793;
+                materialCoordinate = rotateMaterialCoordinate(local, cellAngle) / tileWorldSize;
+                materialCoordinate += cellRandom * 5.0;
+            }
+
+            float2 noisePosition = (canvasPosition * (0.0045 / sqrt(scale))) + (seed * 113.0);
+            float2 warp = float2(
+                valueNoise(noisePosition + float2(17.0, 3.0)),
+                valueNoise(noisePosition + float2(5.0, 29.0))
+            ) - 0.5;
+            materialCoordinate += warp * (amplifiedVariation * 0.48);
+            materialCoordinate += seed * 7.0;
+
+            constexpr sampler materialSampler(
+                coord::normalized,
+                address::mirrored_repeat,
+                filter::linear
+            );
+            float first = materialTexture.sample(materialSampler, materialCoordinate).r;
+            if (arrangementMode >= 0.5 && arrangementMode < 1.5) {
+                float2 crossCoordinate = rotateMaterialCoordinate(oriented, 1.570796326794897) / tileWorldSize;
+                crossCoordinate += warp.yx * (amplifiedVariation * 0.36);
+                crossCoordinate += seed.yx * 5.0;
+                crossCoordinate += float2(0.5, 0.25);
+                float cross = materialTexture.sample(materialSampler, crossCoordinate).r;
+                first = max(first, cross * 0.92);
+            }
+            float2 secondaryCoordinate = rotateMaterialCoordinate(materialCoordinate, 0.71);
+            secondaryCoordinate = (secondaryCoordinate * 1.37) + (seed.yx * 3.0);
+            float second = materialTexture.sample(materialSampler, secondaryCoordinate).r;
+            float detail = mix(
+                first,
+                max(first, second * 0.82),
+                min(amplifiedVariation * 0.34, 1.0)
+            );
+
+            float broadNoise = valueNoise((oriented * 0.008) + (seed * 41.0));
+            float fineNoise = valueNoise((oriented * 0.021) + (seed.yx * 67.0));
+            float density = mix(broadNoise, fineNoise, 0.32);
+            float field = (detail * 0.70) + (density * 0.30);
+            float coverageTail = smoothstep(0.65, 4.0, coverage);
+            float threshold = mix(0.79, 0.25, min(coverage, 1.0));
+            float thresholdFeather = mix(0.11, 0.07, coverageTail);
+            float alpha = smoothstep(threshold - thresholdFeather, threshold + thresholdFeather, field);
+            float materialPresence = smoothstep(
+                0.02,
+                0.26,
+                detail + (density * min(amplifiedVariation * 0.22, 0.88)) + (coverageTail * 0.36)
+            );
+            stripeCoordinate = arrangementMode >= 0.5 && arrangementMode < 1.5
+                ? fract(((materialCoordinate.x + materialCoordinate.y) * 0.5) + (density * 0.18))
+                : fract(materialCoordinate.y + (density * 0.18));
+            return alpha * materialPresence;
+        }
+
         float3 radialPaintJitteredSrgbColor(
             float3 srgbColor,
             float angleNormalized,
@@ -159,7 +279,8 @@ final class SelectionFillRenderer {
             VertexOut in [[stage_in]],
             constant SelectionFillUniforms &uniforms [[buffer(1)]],
             texture2d<float> selectionMask [[texture(0)]],
-            texture2d<float> alphaLockTexture [[texture(1)]]
+            texture2d<float> alphaLockTexture [[texture(1)]],
+            texture2d<float> materialTexture [[texture(2)]]
         ) {
             float2 boundsSize = max(uniforms.selectionBoundsMax - uniforms.selectionBoundsMin, float2(1.0, 1.0));
             float2 localCoord = clamp((in.canvasPosition - uniforms.selectionBoundsMin) / boundsSize, 0.0, 1.0);
@@ -179,8 +300,25 @@ final class SelectionFillRenderer {
             }
 
             float2 distortedPos = noiseDistort(in.canvasPosition, uniforms.distortionAmount);
-            float angle = atan2(distortedPos.y - uniforms.fillCenter.y, distortedPos.x - uniforms.fillCenter.x);
+            float angle = atan2(
+                distortedPos.y - uniforms.fillCenter.y,
+                distortedPos.x - uniforms.fillCenter.x
+            );
             float angleNormalized = (angle / 6.283185307179586) + 0.5;
+            if (uniforms.materialOptions.x > 0.5) {
+                float stripeCoordinate = 0.0;
+                float textureAlpha = materialFieldAlpha(
+                    in.canvasPosition,
+                    uniforms,
+                    materialTexture,
+                    stripeCoordinate
+                );
+                maskAlpha *= textureAlpha;
+                if (maskAlpha <= 0.001) {
+                    return float4(0.0);
+                }
+                angleNormalized = stripeCoordinate;
+            }
             float3 jitteredColor = radialPaintJitteredSrgbColor(
                 uniforms.color.rgb,
                 angleNormalized,
@@ -195,6 +333,7 @@ final class SelectionFillRenderer {
             }
             return float4(premultiplied, alpha);
         }
+
         """
 
         let library: MTLLibrary
@@ -279,7 +418,14 @@ final class SelectionFillRenderer {
         paintJitterAmount: Float = 0,
         paintContrastAmount: Float = 0,
         distortionAmount: Float = 0,
-        alphaLockTexture: MTLTexture? = nil
+        alphaLockTexture: MTLTexture? = nil,
+        materialTextureData: Data? = nil,
+        materialScale: Float = 1,
+        materialCoverage: Float = 0.58,
+        materialVariation: Float = 0.45,
+        materialSeed: UInt64 = 0,
+        materialAngleRadians: Float = 0,
+        materialArrangement: TextureFillArrangement = .directional
     ) {
         let minX = max(selectionMaskOriginX, 0)
         let minY = max(selectionMaskOriginY, 0)
@@ -305,6 +451,13 @@ final class SelectionFillRenderer {
         ) else {
             return
         }
+        let materialTexture = materialTextureData.flatMap { makeMaterialTexture(maskData: $0) }
+        if materialTextureData != nil, materialTexture == nil {
+            return
+        }
+
+        let seedLow = Float(materialSeed & 0x00FF_FFFF) / Float(0x00FF_FFFF)
+        let seedHigh = Float((materialSeed >> 24) & 0x00FF_FFFF) / Float(0x00FF_FFFF)
 
         var uniforms = SelectionFillUniforms(
             canvasSize: SIMD2(Float(canvasSize.width), Float(canvasSize.height)),
@@ -315,7 +468,14 @@ final class SelectionFillRenderer {
             paintJitterAmount: paintJitterAmount,
             paintContrastAmount: paintContrastAmount,
             distortionAmount: distortionAmount,
-            usesAlphaLock: alphaLockTexture == nil ? 0 : 1
+            usesAlphaLock: alphaLockTexture == nil ? 0 : 1,
+            materialOptions: SIMD4(
+                materialTexture == nil ? 0 : 1,
+                min(max(materialScale, 0.25), 3),
+                TextureFillMaterialResponse.amplifiedCoverage(materialCoverage),
+                TextureFillMaterialResponse.amplifiedVariation(materialVariation)
+            ),
+            materialSeed: SIMD4(seedLow, seedHigh, materialAngleRadians, materialArrangement.metalShaderValue)
         )
 
         guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor) else {
@@ -334,6 +494,7 @@ final class SelectionFillRenderer {
         encoder.setFragmentBytes(&uniforms, length: MemoryLayout<SelectionFillUniforms>.stride, index: 1)
         encoder.setFragmentTexture(selectionMaskTexture, index: 0)
         encoder.setFragmentTexture(alphaLockTexture ?? fallbackAlphaLockTexture, index: 1)
+        encoder.setFragmentTexture(materialTexture ?? fallbackAlphaLockTexture, index: 2)
         encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: vertices.count)
         encoder.endEncoding()
     }
@@ -382,5 +543,37 @@ final class SelectionFillRenderer {
         }
 
         return texture
+    }
+
+    private func makeMaterialTexture(maskData: Data) -> MTLTexture? {
+        guard !maskData.isEmpty else { return nil }
+        let resolution = Int(sqrt(Double(maskData.count)))
+        guard resolution > 0, resolution * resolution == maskData.count else { return nil }
+
+        if reusableMaterialTextureSize != resolution || reusableMaterialTexture == nil {
+            let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+                pixelFormat: .r8Unorm,
+                width: resolution,
+                height: resolution,
+                mipmapped: false
+            )
+            descriptor.usage = .shaderRead
+            descriptor.storageMode = .shared
+            guard let texture = device.makeTexture(descriptor: descriptor) else { return nil }
+            reusableMaterialTexture = texture
+            reusableMaterialTextureSize = resolution
+        }
+        guard let reusableMaterialTexture else { return nil }
+
+        maskData.withUnsafeBytes { rawBuffer in
+            guard let baseAddress = rawBuffer.baseAddress else { return }
+            reusableMaterialTexture.replace(
+                region: MTLRegionMake2D(0, 0, resolution, resolution),
+                mipmapLevel: 0,
+                withBytes: baseAddress,
+                bytesPerRow: resolution
+            )
+        }
+        return reusableMaterialTexture
     }
 }

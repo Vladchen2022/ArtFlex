@@ -1,7 +1,7 @@
 import SwiftUI
 
 private let sidebarButtonLabelFontSize: CGFloat = 11
-private let sidebarButtonWidth: CGFloat = 122
+private let sidebarButtonWidth: CGFloat = 132
 private let sidebarButtonHeight: CGFloat = 34
 private let sidebarButtonCornerRadius: CGFloat = 9
 private let sidebarButtonHorizontalPadding: CGFloat = 10
@@ -78,7 +78,7 @@ struct ToolSidebarView: View {
         }
         .padding(.top, 10)
         .padding(.horizontal, 8)
-        .frame(width: 142)
+        .frame(width: 152)
         .frame(maxHeight: .infinity)
         .background(Color(red: 0.13, green: 0.13, blue: 0.14))
     }
@@ -411,10 +411,11 @@ private struct ToolSidebarGroupButton: View {
                         .frame(width: sidebarButtonLeadingIconWidth)
                         .foregroundStyle(isSelected ? Color.white : Color.white.opacity(0.85))
 
-                    Text(displayedTool.displayName)
+                    Text(displayLabel)
                         .font(.system(size: sidebarButtonLabelFontSize, weight: .semibold))
                         .lineLimit(1)
-                        .minimumScaleFactor(0.95)
+                        .minimumScaleFactor(group.isGrouped ? 0.82 : 0.95)
+                        .layoutPriority(1)
                         .foregroundStyle(isSelected ? Color.white : Color.white.opacity(0.9))
 
                     Spacer(minLength: sidebarButtonTrailingGap)
@@ -468,6 +469,13 @@ private struct ToolSidebarGroupButton: View {
             return "\(displayedTool.displayName) (\(shortcut))"
         }
         return displayedTool.displayName
+    }
+
+    private var displayLabel: String {
+        guard let shortcut = shortcutSettings.shortcutKey(for: group) else {
+            return displayedTool.displayName
+        }
+        return "\(displayedTool.displayName)(\(shortcut))"
     }
 }
 

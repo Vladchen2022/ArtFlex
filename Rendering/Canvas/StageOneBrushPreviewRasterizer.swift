@@ -175,6 +175,14 @@ enum StageOneBrushPreviewRasterizer {
         }
     }
 
+    private final class CachedDataBox: NSObject {
+        let data: Data
+
+        init(data: Data) {
+            self.data = data
+        }
+    }
+
     private struct TipDescriptor {
         let shape: BrushTipShape
         let sourceSemantic: TipSourceSemantic
@@ -198,11 +206,27 @@ enum StageOneBrushPreviewRasterizer {
         cache.countLimit = 512
         return cache
     }()
+    nonisolated(unsafe) private static let materialFieldCache: NSCache<NSString, CachedDataBox> = {
+        let cache = NSCache<NSString, CachedDataBox>()
+        cache.countLimit = 64
+        return cache
+    }()
+    nonisolated(unsafe) private static let textureFillPreviewCache: NSCache<NSString, CachedImageBox> = {
+        let cache = NSCache<NSString, CachedImageBox>()
+        cache.countLimit = 64
+        return cache
+    }()
 
     private struct CompoundPreviewRendererContext {
         let device: MTLDevice
         let commandQueue: MTLCommandQueue
         let renderer: StageOneBrushRenderer
+    }
+
+    private struct TextureFillPreviewRendererContext {
+        let device: MTLDevice
+        let commandQueue: MTLCommandQueue
+        let renderer: SelectionFillRenderer
     }
 
     nonisolated(unsafe) private static let compoundPreviewRendererContext: CompoundPreviewRendererContext? = {
@@ -220,9 +244,25 @@ enum StageOneBrushPreviewRasterizer {
         )
     }()
     private static let compoundPreviewRendererLock = NSLock()
+    nonisolated(unsafe) private static let textureFillPreviewRendererContext: TextureFillPreviewRendererContext? = {
+        guard
+            let device = MTLCreateSystemDefaultDevice(),
+            let commandQueue = device.makeCommandQueue()
+        else {
+            return nil
+        }
+        return TextureFillPreviewRendererContext(
+            device: device,
+            commandQueue: commandQueue,
+            renderer: SelectionFillRenderer(device: device)
+        )
+    }()
+    private static let textureFillPreviewRendererLock = NSLock()
 
     static func resetCache() {
         cache.removeAllObjects()
+        materialFieldCache.removeAllObjects()
+        textureFillPreviewCache.removeAllObjects()
     }
 
     static func stampImage(
@@ -487,6 +527,169 @@ enum StageOneBrushPreviewRasterizer {
         )
     }
 
+    static func materialFieldAlphaBytes(
+        for brush: BrushSettings,
+        resolution: Int
+    ) -> [UInt8]? {
+        guard resolution >= 64 else { return nil }
+        let cacheKey = makeMaterialFieldCacheKey(for: brush, resolution: resolution)
+        if let cached = materialFieldCache.object(forKey: cacheKey) {
+            return [UInt8](cached.data)
+        }
+
+        var materialBrush = brush
+        let secondaryBaseSize = brush.compoundBrush.enabled
+            ? brush.compoundBrush.secondary.resolvedBaseSize(for: brush.size)
+            : 0
+        let largestBaseSize = max(brush.size, secondaryBaseSize, 1)
+        let targetDiameter = Float(resolution) * 0.14
+        let sizeScale = targetDiameter / largestBaseSize
+
+        materialBrush.size = min(max(brush.size * sizeScale, 1), 512)
+        materialBrush.opacity = 1
+        materialBrush.pressureSizeAmount = 0
+        materialBrush.pressureOpacityAmount = 0
+        materialBrush.compoundBrush.globalPressureSizeAmount = 0
+        materialBrush.compoundBrush.globalPressureOpacityAmount = 0
+        materialBrush.compoundBrush.secondary.pressureSizeAmount = 0
+        materialBrush.compoundBrush.secondary.pressureOpacityAmount = 0
+        if materialBrush.compoundBrush.secondary.sizeMode == .absolutePixels {
+            materialBrush.compoundBrush.secondary.size = min(
+                max(brush.compoundBrush.secondary.size * sizeScale, 1),
+                512
+            )
+        }
+
+        let resolvedSecondarySize = materialBrush.compoundBrush.enabled
+            ? materialBrush.compoundBrush.secondary.resolvedBaseSize(for: materialBrush.size)
+            : 0
+        let halfTip = Double(max(materialBrush.size, resolvedSecondarySize) * 0.5)
+        let width = Double(resolution)
+        let rowFractions: [Double] = [0.13, 0.34, 0.57, 0.79]
+        var combined = [UInt8](repeating: 0, count: resolution * resolution)
+
+        for (rowIndex, rowFraction) in rowFractions.enumerated() {
+            let phase = Double(rowIndex) * 1.71
+            let amplitude = Double(resolution) * (0.025 + (Double(rowIndex % 2) * 0.012))
+            let points = (0...10).map { pointIndex -> StrokePoint in
+                let progress = Double(pointIndex) / 10
+                let x = (-halfTip) + ((width + (halfTip * 2)) * progress)
+                let wave = sin((progress * .pi * 2.4) + phase) * amplitude
+                let drift = (progress - 0.5) * Double(rowIndex - 1) * Double(resolution) * 0.018
+                return StrokePoint(
+                    x: x,
+                    y: (Double(resolution) * rowFraction) + wave + drift,
+                    pressure: 1
+                )
+            }
+            var samplingState: BrushStrokeSamplingState?
+            guard let rowAlpha = strokeAlphaBytes(
+                for: materialBrush,
+                resolution: resolution,
+                points: points,
+                samplingState: &samplingState,
+                flushPendingSamples: true
+            ) else {
+                return nil
+            }
+            for index in combined.indices {
+                combined[index] = max(combined[index], rowAlpha[index])
+            }
+        }
+
+        materialFieldCache.setObject(CachedDataBox(data: Data(combined)), forKey: cacheKey)
+        return combined
+    }
+
+    static func textureFillPreviewImage(
+        for brush: BrushSettings,
+        tipSettings: TextureFillTipSettings,
+        color: RGBAColor,
+        width: Int = 256,
+        height: Int = 112
+    ) -> CGImage? {
+        guard width > 0, height > 0 else { return nil }
+        let cacheKey = makeTextureFillPreviewCacheKey(
+            for: brush,
+            tipSettings: tipSettings,
+            color: color,
+            width: width,
+            height: height
+        )
+        if let cached = textureFillPreviewCache.object(forKey: cacheKey) {
+            return cached.image
+        }
+
+        let materialTextureData: Data
+        if tipSettings.sourceSemantic == .importedImage {
+            guard let importedMask = tipSettings.customTipMaskData, !importedMask.isEmpty else {
+                return nil
+            }
+            materialTextureData = importedMask
+        } else {
+            guard let materialAlphaBytes = materialFieldAlphaBytes(for: brush, resolution: 384) else {
+                return nil
+            }
+            materialTextureData = Data(materialAlphaBytes)
+        }
+
+        textureFillPreviewRendererLock.lock()
+        defer { textureFillPreviewRendererLock.unlock() }
+
+        if let cached = textureFillPreviewCache.object(forKey: cacheKey) {
+            return cached.image
+        }
+        guard
+            let context = textureFillPreviewRendererContext,
+            let texture = makePreviewTexture(device: context.device, width: width, height: height),
+            let commandBuffer = context.commandQueue.makeCommandBuffer()
+        else {
+            return nil
+        }
+
+        let renderPassDescriptor = MTLRenderPassDescriptor()
+        renderPassDescriptor.colorAttachments[0].texture = texture
+        renderPassDescriptor.colorAttachments[0].loadAction = .clear
+        renderPassDescriptor.colorAttachments[0].storeAction = .store
+        renderPassDescriptor.colorAttachments[0].clearColor = MTLClearColor(
+            red: 0,
+            green: 0,
+            blue: 0,
+            alpha: 0
+        )
+
+        context.renderer.encode(
+            into: renderPassDescriptor,
+            commandBuffer: commandBuffer,
+            canvasSize: CanvasSize(width: width, height: height),
+            selectionMaskOriginX: 0,
+            selectionMaskOriginY: 0,
+            selectionMaskWidth: width,
+            selectionMaskHeight: height,
+            selectionMaskAlphaBytes: Data(repeating: 255, count: width * height),
+            fillCenter: CanvasPoint(x: Double(width) * 0.5, y: Double(height) * 0.5),
+            color: color,
+            paintJitterAmount: brush.effectivePaintJitterAmount,
+            paintContrastAmount: brush.effectivePaintContrastAmount,
+            distortionAmount: 0,
+            materialTextureData: materialTextureData,
+            materialScale: tipSettings.materialScale,
+            materialCoverage: tipSettings.coverage,
+            materialVariation: tipSettings.variation,
+            materialSeed: 0,
+            materialAngleRadians: 0,
+            materialArrangement: tipSettings.arrangement
+        )
+
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+        guard commandBuffer.status == .completed, let image = makeCGImage(from: texture) else {
+            return nil
+        }
+        textureFillPreviewCache.setObject(CachedImageBox(image: image), forKey: cacheKey)
+        return image
+    }
+
     static func normalizedMaskPreviewImage(
         from maskData: Data?,
         resolution: Int = 128,
@@ -562,6 +765,12 @@ enum StageOneBrushPreviewRasterizer {
 
         cache.setObject(CachedImageBox(image: image), forKey: cacheKey)
         return image
+    }
+
+    static func libraryStrokePreviewStampCount(spacingPercent: Float) -> Int {
+        let spacing = max(0.18, min(Double(spacingPercent) / 100.0, 1.5))
+        let estimatedCount = Int(ceil(2.05 / spacing)) + 1
+        return min(7, max(3, estimatedCount))
     }
 
     static func stableRandom(x: Double, y: Double, index: Int, salt: UInt64) -> Double {
@@ -931,6 +1140,54 @@ enum StageOneBrushPreviewRasterizer {
         hasher.combine(mix.primaryAtHighPressure)
         hasher.combine(resolution)
         hasher.combine(pressure)
+        return NSString(string: String(hasher.finalize()))
+    }
+
+    private static func makeMaterialFieldCacheKey(
+        for brush: BrushSettings,
+        resolution: Int
+    ) -> NSString {
+        var hasher = Hasher()
+        brushHasher(brush, into: &hasher)
+        hasher.combine("texture-fill-material")
+        hasher.combine(resolution)
+        hasher.combine(brush.size)
+        hasher.combine(brush.spacingPercent)
+        hasher.combine(brush.scatterAmount)
+        hasher.combine(brush.jitterAmount)
+        hasher.combine(brush.stampRotationDegrees)
+        hasher.combine(brush.followsStrokeDirection)
+        hasher.combine(
+            makeCompoundStrokePreviewCacheKey(
+                for: brush,
+                resolution: resolution,
+                pressure: 1
+            ).description
+        )
+        return NSString(string: String(hasher.finalize()))
+    }
+
+    private static func makeTextureFillPreviewCacheKey(
+        for brush: BrushSettings,
+        tipSettings: TextureFillTipSettings,
+        color: RGBAColor,
+        width: Int,
+        height: Int
+    ) -> NSString {
+        var hasher = Hasher()
+        hasher.combine("texture-fill-result-preview")
+        hasher.combine(makeMaterialFieldCacheKey(for: brush, resolution: 384).description)
+        hasher.combine(tipSettings.sourceSemantic.rawValue)
+        hasher.combine(stableMaskDigest(tipSettings.customTipMaskData))
+        hasher.combine(tipSettings.arrangement.rawValue)
+        hasher.combine(tipSettings.materialScale)
+        hasher.combine(tipSettings.coverage)
+        hasher.combine(tipSettings.variation)
+        hasher.combine(brush.effectivePaintJitterAmount)
+        hasher.combine(brush.effectivePaintContrastAmount)
+        hasher.combine(color)
+        hasher.combine(width)
+        hasher.combine(height)
         return NSString(string: String(hasher.finalize()))
     }
 

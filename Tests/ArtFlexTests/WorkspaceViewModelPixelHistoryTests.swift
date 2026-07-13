@@ -1178,7 +1178,7 @@ struct WorkspaceViewModelPixelHistoryTests {
 
     @Test
     @MainActor
-    func textureFillSolidSupportsUndoRedo() throws {
+    func textureFillSupportsUndoRedo() throws {
         let harness = try PixelHistoryHarness()
         let layerID = harness.viewModel.workspace.document.activeLayerID
 
@@ -1188,7 +1188,8 @@ struct WorkspaceViewModelPixelHistoryTests {
         #expect(harness.viewModel.selectionOverlayProxy.inProgressShape?.kind == .lasso)
         harness.endTextureFill(at: .init(x: 8, y: 32))
 
-        #expect(try harness.alpha(atX: 12, y: 12, layerID: layerID) > 0.01)
+        let filledPixels = try harness.snapshot(layerID: layerID).pixelData
+        #expect(stride(from: 3, to: filledPixels.count, by: 4).contains { filledPixels[$0] > 0 })
         #expect(harness.viewModel.selectionOverlayProxy.inProgressShape == nil)
 
         harness.viewModel.undo()
@@ -1199,30 +1200,63 @@ struct WorkspaceViewModelPixelHistoryTests {
         #expect(restoredPixel.blue < 0.01)
 
         harness.viewModel.redo()
-        #expect(try harness.alpha(atX: 12, y: 12, layerID: layerID) > 0.01)
+        #expect(try harness.snapshot(layerID: layerID).pixelData == filledPixels)
     }
 
     @Test
     @MainActor
-    func textureFillSolidWritesPixelsDuringDrag() async throws {
+    func textureFillRespectsTransparentPixelLock() throws {
         let harness = try PixelHistoryHarness()
         let layerID = harness.viewModel.workspace.document.activeLayerID
+        try fillOpaqueRect(
+            in: harness,
+            layerID: layerID,
+            originX: 12,
+            originY: 12,
+            width: 40,
+            height: 40,
+            color: .init(red: 0.85, green: 0.1, blue: 0.1, alpha: 0.5)
+        )
+        let before = try harness.snapshot(layerID: layerID).pixelData
+
+        harness.viewModel.toggleLayerTransparentPixelLock(layerID)
+        harness.viewModel.setSelectedColor(.init(red: 0.05, green: 0.25, blue: 0.95, alpha: 1))
+        harness.beginTextureFill(at: .init(x: 4, y: 60))
+        harness.updateTextureFill(to: .init(x: 60, y: 60))
+        harness.updateTextureFill(to: .init(x: 60, y: 4))
+        harness.updateTextureFill(to: .init(x: 4, y: 4))
+        harness.endTextureFill(at: .init(x: 4, y: 60))
+
+        let after = try harness.snapshot(layerID: layerID).pixelData
+        let alphaOffsets = stride(from: 3, to: before.count, by: 4)
+        #expect(alphaOffsets.allSatisfy { before[$0] == after[$0] })
+        #expect(after != before)
+    }
+
+    @Test
+    @MainActor
+    func textureFillDragUpdatesOnlySelectionPreviewUntilCommit() throws {
+        let harness = try PixelHistoryHarness()
+        let layerID = harness.viewModel.workspace.document.activeLayerID
+        let before = try harness.snapshot(layerID: layerID).pixelData
 
         harness.beginTextureFill(at: .init(x: 8, y: 8))
         harness.updateTextureFill(to: .init(x: 32, y: 8))
         harness.updateTextureFill(to: .init(x: 32, y: 32))
 
-        try await waitForCondition {
-            try harness.alpha(atX: 20, y: 12, layerID: layerID) > 0.01
-        }
-        #expect(try harness.alpha(atX: 20, y: 12, layerID: layerID) > 0.01)
+        #expect(try harness.snapshot(layerID: layerID).pixelData == before)
+        #expect(harness.viewModel.selectionOverlayProxy.inProgressShape?.kind == .lasso)
+
+        harness.endTextureFill(at: .init(x: 8, y: 32))
+        #expect(try harness.snapshot(layerID: layerID).pixelData != before)
     }
 
     @Test
     @MainActor
-    func textureFillBatchedDragUpdatesWritePixelsDuringDrag() async throws {
+    func textureFillBatchedDragUpdatesOnlySelectionPreviewUntilCommit() throws {
         let harness = try PixelHistoryHarness()
         let layerID = harness.viewModel.workspace.document.activeLayerID
+        let before = try harness.snapshot(layerID: layerID).pixelData
 
         harness.beginTextureFill(at: .init(x: 8, y: 8))
         harness.viewModel.updateSelection(
@@ -1233,15 +1267,16 @@ struct WorkspaceViewModelPixelHistoryTests {
             modifiers: []
         )
 
-        try await waitForCondition {
-            try harness.alpha(atX: 20, y: 12, layerID: layerID) > 0.01
-        }
-        #expect(try harness.alpha(atX: 20, y: 12, layerID: layerID) > 0.01)
+        #expect(try harness.snapshot(layerID: layerID).pixelData == before)
+        #expect(harness.viewModel.selectionOverlayProxy.inProgressShape?.kind == .lasso)
+
+        harness.endTextureFill(at: .init(x: 8, y: 32))
+        #expect(try harness.snapshot(layerID: layerID).pixelData != before)
     }
 
     @Test
     @MainActor
-    func textureFillProducesGapsInsideRenderedSlice() async throws {
+    func textureFillFinalFieldContainsBrushGaps() throws {
         let harness = try PixelHistoryHarness()
         let layerID = harness.viewModel.workspace.document.activeLayerID
         let anchor = CanvasPoint(x: 8, y: 8)
@@ -1251,18 +1286,7 @@ struct WorkspaceViewModelPixelHistoryTests {
         harness.beginTextureFill(at: anchor)
         harness.updateTextureFill(to: previous)
         harness.updateTextureFill(to: current)
-
-        try await waitForCondition {
-            try regionHasVisiblePixels(
-                harness: harness,
-                layerID: layerID,
-                minX: 8,
-                maxX: 31,
-                minY: 8,
-                maxY: 31,
-                step: 2
-            )
-        }
+        harness.endTextureFill(at: current)
 
         var filledInteriorPixels = 0
         var emptyInteriorPixels = 0
@@ -1314,6 +1338,148 @@ struct WorkspaceViewModelPixelHistoryTests {
 
         #expect(filledInteriorPixels > 0)
         #expect(emptyInteriorPixels > 0)
+    }
+
+    @Test
+    @MainActor
+    func textureFillDistributesMaterialAcrossTheRegionInsteadOfTracingItsBoundary() throws {
+        let canvasSize = CanvasSize(width: 512, height: 512)
+        let harness = try PixelHistoryHarness(canvasSize: canvasSize)
+        let layerID = harness.viewModel.workspace.document.activeLayerID
+        harness.viewModel.updateCustomTipMask(makeTextureFillVerticalBandTipMask(resolution: 128))
+        harness.viewModel.setTextureFillCoverage(0.72)
+
+        let points = [
+            CanvasPoint(x: 70, y: 80),
+            CanvasPoint(x: 430, y: 70),
+            CanvasPoint(x: 450, y: 420),
+            CanvasPoint(x: 80, y: 440)
+        ]
+        harness.beginTextureFill(at: points[0])
+        for point in points.dropFirst() {
+            harness.updateTextureFill(to: point)
+        }
+        harness.endTextureFill(at: points[0])
+
+        let quadrants = [
+            (minX: 100, maxX: 230, minY: 100, maxY: 230),
+            (minX: 280, maxX: 410, minY: 100, maxY: 230),
+            (minX: 100, maxX: 230, minY: 280, maxY: 410),
+            (minX: 280, maxX: 410, minY: 280, maxY: 410)
+        ]
+        for quadrant in quadrants {
+            #expect(try regionHasVisiblePixels(
+                harness: harness,
+                layerID: layerID,
+                minX: quadrant.minX,
+                maxX: quadrant.maxX,
+                minY: quadrant.minY,
+                maxY: quadrant.maxY,
+                step: 4
+            ))
+        }
+    }
+
+    @Test
+    @MainActor
+    func textureFillPreservesPaintColorVariationInsideTheMaterialField() throws {
+        let harness = try PixelHistoryHarness(canvasSize: .init(width: 512, height: 512))
+        let layerID = harness.viewModel.workspace.document.activeLayerID
+        harness.viewModel.setSelectedColor(.init(red: 0.76, green: 0.22, blue: 0.12, alpha: 1))
+        harness.viewModel.setPaintJitterAmount(0.75)
+
+        let anchor = CanvasPoint(x: 90, y: 430)
+        let radius = 320.0
+        let angles = stride(from: -82.0, through: 8.0, by: 2.0).map {
+            $0 * .pi / 180
+        }
+        let edgePoints = angles.map { angle in
+            CanvasPoint(
+                x: anchor.x + cos(angle) * radius,
+                y: anchor.y + sin(angle) * radius
+            )
+        }
+        harness.beginTextureFill(at: anchor)
+        for point in edgePoints {
+            harness.updateTextureFill(to: point)
+        }
+        harness.endTextureFill(at: edgePoints.last ?? anchor)
+
+        var visibleColors: [RGBAColor] = []
+        for y in stride(from: 120, through: 410, by: 5) {
+            for x in stride(from: 120, through: 410, by: 5) {
+                let color = try harness.color(atX: x, y: y, layerID: layerID)
+                if color.alpha > 0.5 {
+                    visibleColors.append(color)
+                }
+            }
+        }
+
+        #expect(visibleColors.count > 40)
+        #expect(rgbChannelSpread(in: visibleColors) > 0.2)
+    }
+
+    @Test
+    @MainActor
+    func textureFillUsesAndFreezesCurrentDrawingBrushTip() throws {
+        let squareHarness = try PixelHistoryHarness()
+        squareHarness.viewModel.setBrushTipShape(.square)
+        let squareLayerID = squareHarness.viewModel.workspace.document.activeLayerID
+        squareHarness.beginTextureFill(at: .init(x: 8, y: 8))
+        squareHarness.updateTextureFill(to: .init(x: 56, y: 8))
+        squareHarness.updateTextureFill(to: .init(x: 56, y: 56))
+        squareHarness.endTextureFill(at: .init(x: 8, y: 56))
+        let squarePixels = try squareHarness.snapshot(layerID: squareLayerID).pixelData
+
+        let frozenHarness = try PixelHistoryHarness()
+        frozenHarness.viewModel.setBrushTipShape(.square)
+        let frozenLayerID = frozenHarness.viewModel.workspace.document.activeLayerID
+        frozenHarness.beginTextureFill(at: .init(x: 8, y: 8))
+        frozenHarness.viewModel.setBrushTipShape(.softRound)
+        frozenHarness.updateTextureFill(to: .init(x: 56, y: 8))
+        frozenHarness.updateTextureFill(to: .init(x: 56, y: 56))
+        frozenHarness.endTextureFill(at: .init(x: 8, y: 56))
+        let frozenPixels = try frozenHarness.snapshot(layerID: frozenLayerID).pixelData
+
+        let softHarness = try PixelHistoryHarness()
+        softHarness.viewModel.setBrushTipShape(.softRound)
+        let softLayerID = softHarness.viewModel.workspace.document.activeLayerID
+        softHarness.beginTextureFill(at: .init(x: 8, y: 8))
+        softHarness.updateTextureFill(to: .init(x: 56, y: 8))
+        softHarness.updateTextureFill(to: .init(x: 56, y: 56))
+        softHarness.endTextureFill(at: .init(x: 8, y: 56))
+        let softPixels = try softHarness.snapshot(layerID: softLayerID).pixelData
+
+        #expect(frozenPixels == squarePixels)
+        #expect(softPixels != squarePixels)
+        #expect(stride(from: 3, to: squarePixels.count, by: 4).contains { squarePixels[$0] > 0 })
+        #expect(stride(from: 3, to: softPixels.count, by: 4).contains { softPixels[$0] > 0 })
+    }
+
+    @Test
+    @MainActor
+    func textureFillArrangementChangesCommittedSpatialField() throws {
+        let directionalHarness = try PixelHistoryHarness()
+        directionalHarness.viewModel.setTextureFillArrangement(.directional)
+        let directionalLayerID = directionalHarness.viewModel.workspace.document.activeLayerID
+        directionalHarness.beginTextureFill(at: .init(x: 8, y: 8))
+        directionalHarness.updateTextureFill(to: .init(x: 56, y: 8))
+        directionalHarness.updateTextureFill(to: .init(x: 56, y: 56))
+        directionalHarness.endTextureFill(at: .init(x: 8, y: 56))
+        let directionalPixels = try directionalHarness.snapshot(layerID: directionalLayerID).pixelData
+
+        let radialHarness = try PixelHistoryHarness()
+        radialHarness.viewModel.setTextureFillArrangement(.radial)
+        let radialLayerID = radialHarness.viewModel.workspace.document.activeLayerID
+        radialHarness.beginTextureFill(at: .init(x: 8, y: 8))
+        radialHarness.updateTextureFill(to: .init(x: 56, y: 8))
+        radialHarness.updateTextureFill(to: .init(x: 56, y: 56))
+        radialHarness.endTextureFill(at: .init(x: 8, y: 56))
+        let radialPixels = try radialHarness.snapshot(layerID: radialLayerID).pixelData
+
+        #expect(directionalPixels != radialPixels)
+        #expect(stride(from: 3, to: directionalPixels.count, by: 4).contains { directionalPixels[$0] > 0 })
+        #expect(stride(from: 3, to: radialPixels.count, by: 4).contains { radialPixels[$0] > 0 })
     }
 
     @Test
@@ -1484,7 +1650,7 @@ struct WorkspaceViewModelPixelHistoryTests {
 
     @Test
     @MainActor
-    func textureFillImportedLiveFieldUsesRegionMappingInsteadOfRepeatingTiles() async throws {
+    func textureFillImportedMaterialProducesAVisibleNonSolidField() throws {
         let harness = try PixelHistoryHarness()
         let gradientMask = makeTextureFillGradientLibraryMask(resolution: 256)
         let assetID = BrushTipImageAssetID(maskData: gradientMask)
@@ -1497,27 +1663,29 @@ struct WorkspaceViewModelPixelHistoryTests {
             )
         }
         harness.viewModel.applyTextureFillTipImageLibraryItem(assetID)
+        harness.viewModel.setTextureFillCoverage(0.72)
 
         harness.beginTextureFill(at: .init(x: 8, y: 8))
         harness.updateTextureFill(to: .init(x: 56, y: 8))
         harness.updateTextureFill(to: .init(x: 56, y: 56))
-
-        try await waitForCondition {
-            try harness.alpha(atX: 12, y: 12, layerID: harness.viewModel.workspace.document.activeLayerID) > 0.01
-        }
+        harness.endTextureFill(at: .init(x: 8, y: 56))
 
         let layerID = harness.viewModel.workspace.document.activeLayerID
-        let left = try harness.alpha(atX: 12, y: 12, layerID: layerID)
-        let repeatedTileOffset = try harness.alpha(atX: 40, y: 12, layerID: layerID)
-        let middle = try harness.alpha(atX: 26, y: 12, layerID: layerID)
-
-        #expect(abs(left - repeatedTileOffset) > 0.05)
-        #expect(abs(left - middle) > 0.05 || abs(middle - repeatedTileOffset) > 0.05)
+        var visible = 0
+        var empty = 0
+        for y in 10...54 {
+            for x in 10...54 {
+                let alpha = try harness.alpha(atX: x, y: y, layerID: layerID)
+                if alpha > 0.01 { visible += 1 } else { empty += 1 }
+            }
+        }
+        #expect(visible > 0)
+        #expect(empty > 0)
     }
 
     @Test
     @MainActor
-    func textureFillImportedFinalCloselyMatchesLivePreviewAwayFromEdges() async throws {
+    func textureFillImportedDragDefersPixelsUntilCommit() throws {
         let harness = try PixelHistoryHarness()
         let gradientMask = makeTextureFillGradientLibraryMask(resolution: 256)
         let assetID = BrushTipImageAssetID(maskData: gradientMask)
@@ -1547,26 +1715,23 @@ struct WorkspaceViewModelPixelHistoryTests {
             (x: 44, y: 24)
         ]
 
-        try await waitForCondition {
-            try samplePoints.contains { point in
-                try harness.alpha(atX: point.x, y: point.y, layerID: layerID) > 0.01
-            }
-        }
-
         let previewSamples = try samplePoints.map { point in
             try harness.alpha(atX: point.x, y: point.y, layerID: layerID)
         }
-        #expect(previewSamples.contains { $0 > 0.01 })
+        #expect(previewSamples.allSatisfy { $0 < 0.01 })
+        #expect(harness.viewModel.selectionOverlayProxy.inProgressShape?.kind == .lasso)
 
         harness.endTextureFill(at: current)
 
-        let committedSamples = try samplePoints.map { point in
-            try harness.alpha(atX: point.x, y: point.y, layerID: layerID)
-        }
-
-        for (preview, committed) in zip(previewSamples, committedSamples) {
-            #expect(abs(preview - committed) < 0.15)
-        }
+        #expect(try regionHasVisiblePixels(
+            harness: harness,
+            layerID: layerID,
+            minX: 10,
+            maxX: 54,
+            minY: 10,
+            maxY: 54,
+            step: 2
+        ))
     }
 
     @Test
@@ -2035,6 +2200,51 @@ private func makeTextureFillGradientLibraryMask(resolution: Int) -> Data {
     }
 
     return Data(bytes)
+}
+
+private func makeTextureFillVerticalBandTipMask(resolution: Int) -> Data {
+    var bytes = [UInt8](repeating: 0, count: resolution * resolution)
+    let bandWidth = max(resolution / 20, 3)
+    let bandCenters = [18, 43, 69, 96, 116].map { $0 * resolution / 128 }
+    for centerX in bandCenters {
+        let minX = max(centerX - bandWidth / 2, 0)
+        let maxX = min(centerX + bandWidth / 2, resolution - 1)
+        for y in 0..<resolution {
+            for x in minX...maxX {
+                bytes[(y * resolution) + x] = 255
+            }
+        }
+    }
+    return Data(bytes)
+}
+
+private func binaryTransitions(in values: [Bool]) -> Int {
+    zip(values, values.dropFirst()).reduce(into: 0) { count, pair in
+        if pair.0 != pair.1 {
+            count += 1
+        }
+    }
+}
+
+private func rgbChannelSpread(in colors: [RGBAColor]) -> Float {
+    guard let first = colors.first else { return 0 }
+    var minimum = SIMD3(first.red, first.green, first.blue)
+    var maximum = minimum
+    for color in colors.dropFirst() {
+        let value = SIMD3(color.red, color.green, color.blue)
+        minimum = SIMD3(
+            min(minimum.x, value.x),
+            min(minimum.y, value.y),
+            min(minimum.z, value.z)
+        )
+        maximum = SIMD3(
+            max(maximum.x, value.x),
+            max(maximum.y, value.y),
+            max(maximum.z, value.z)
+        )
+    }
+    let spread = maximum - minimum
+    return max(spread.x, max(spread.y, spread.z))
 }
 
 @MainActor

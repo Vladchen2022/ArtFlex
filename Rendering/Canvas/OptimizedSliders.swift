@@ -107,10 +107,13 @@ struct OptimizedCompactSlider: View {
     @Binding var value: Double
     let range: ClosedRange<Double>
     let liveValueText: ((Double) -> String)?
+    let onPreview: ((Double) -> Void)?
     let onCommit: (Double) -> Void
     
     @State private var localValue: Double
     @State private var isEditing = false
+    @State private var lastPreviewTime: Date = .distantPast
+    private let previewThrottleInterval: TimeInterval = 0.08
     
     init(
         title: String,
@@ -124,6 +127,7 @@ struct OptimizedCompactSlider: View {
         self._value = value
         self.range = range
         self.liveValueText = nil
+        self.onPreview = nil
         self.onCommit = onCommit
         self._localValue = State(initialValue: value.wrappedValue)
     }
@@ -134,6 +138,7 @@ struct OptimizedCompactSlider: View {
         value: Binding<Double>,
         range: ClosedRange<Double>,
         liveValueText: @escaping (Double) -> String,
+        onPreview: ((Double) -> Void)? = nil,
         onCommit: @escaping (Double) -> Void
     ) {
         self.title = title
@@ -141,6 +146,7 @@ struct OptimizedCompactSlider: View {
         self._value = value
         self.range = range
         self.liveValueText = liveValueText
+        self.onPreview = onPreview
         self.onCommit = onCommit
         self._localValue = State(initialValue: value.wrappedValue)
     }
@@ -158,8 +164,15 @@ struct OptimizedCompactSlider: View {
                 onEditingChanged: handleEditingChanged
             )
             .onChange(of: localValue) { _, newValue in
-                guard !isEditing, abs(newValue - value) > 0.000_001 else { return }
-                onCommit(newValue)
+                if isEditing {
+                    guard let onPreview else { return }
+                    let now = Date()
+                    guard now.timeIntervalSince(lastPreviewTime) >= previewThrottleInterval else { return }
+                    lastPreviewTime = now
+                    onPreview(newValue)
+                } else if abs(newValue - value) > 0.000_001 {
+                    onCommit(newValue)
+                }
             }
             
             Text(isEditing ? (liveValueText?(localValue) ?? valueText) : valueText)
@@ -183,6 +196,7 @@ struct OptimizedCompactSlider: View {
             localValue = value
         } else {
             // 结束拖动时无条件提交
+            onPreview?(localValue)
             onCommit(localValue)
         }
     }

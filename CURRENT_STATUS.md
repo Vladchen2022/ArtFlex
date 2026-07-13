@@ -263,9 +263,9 @@ ArtFlex 当前已经是一个功能面明显超出最小 MVP 的 macOS Metal 绘
 
 - [Docs/reference/COLOR_ADJUSTMENT_STATUS.md](Docs/reference/COLOR_ADJUSTMENT_STATUS.md)
 
-### 2.10 当前肌理填充的真实状态
+### 2.10 当前纹理填充的真实状态
 
-当前仓库里的 `肌理填充 / textureFill` 已经不是占位工具。
+当前仓库里的 `纹理填充 / textureFill` 已经不是占位工具。
 
 当前这条线的真实状态应当理解为：
 

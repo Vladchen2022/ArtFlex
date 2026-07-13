@@ -190,7 +190,7 @@
 
 - [Docs/reference/COLOR_ADJUSTMENT_STATUS.md](Docs/reference/COLOR_ADJUSTMENT_STATUS.md)
 
-### 3.7 肌理填充当前以 `phase 4.3 + imported mapped live/final + final cover` 为 accepted 基线
+### 3.7 纹理填充当前以 `phase 4.3 + imported mapped live/final + final cover` 为 accepted 基线
 
 当前 `textureFill` 已经是一条正式活动线，不要再把它理解成“未开始的试验工具”。
 

@@ -26,7 +26,7 @@ private enum TipImageLibrarySheetTarget: String, Identifiable {
         case .compoundSecondary:
             return "组合笔刷次笔尖图片资料库"
         case .textureFill:
-            return "肌理填充素材库"
+            return "纹理填充素材库"
         }
     }
 }
@@ -167,6 +167,56 @@ private struct LayerThumbnailTile: View {
             image = loadedImage
         }
         .accessibilityIdentifier("layer-thumbnail-\(layerID.rawValue.uuidString)")
+    }
+}
+
+private struct TextureFillPreviewRequest: Equatable, Sendable {
+    let brush: BrushSettings
+    let tipSettings: TextureFillTipSettings
+    let color: RGBAColor
+}
+
+private struct TextureFillResultPreview: View {
+    let request: TextureFillPreviewRequest
+
+    @State private var image: CGImage?
+
+    var body: some View {
+        ZStack {
+            Color.white
+
+            if let image {
+                Image(decorative: image, scale: 1)
+                    .resizable()
+                    .interpolation(.high)
+                    .scaledToFill()
+            } else {
+                ProgressView()
+                    .controlSize(.small)
+                    .tint(Color.black.opacity(0.42))
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .frame(height: 84)
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .overlay {
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(Color.white.opacity(0.10), lineWidth: 1)
+        }
+        .task(id: request) {
+            let nextImage = await Task.detached(priority: .userInitiated) {
+                StageOneBrushPreviewRasterizer.textureFillPreviewImage(
+                    for: request.brush,
+                    tipSettings: request.tipSettings,
+                    color: request.color
+                )
+            }.value
+            guard !Task.isCancelled else { return }
+            image = nextImage
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("纹理填充结果预览")
+        .accessibilityValue("实际填充的随机分布和方向会随手势变化")
     }
 }
 
@@ -324,6 +374,9 @@ struct RightInspectorView: View {
     @State private var parameterInspectorAutoRestoreTab: ParameterInspectorTab?
     @State private var topInspectorTab: TopInspectorTab = .navigator
     @State private var navigatorZoomPercentText = "100"
+    @State private var textureFillPreviewMaterialScale: Float?
+    @State private var textureFillPreviewCoverage: Float?
+    @State private var textureFillPreviewVariation: Float?
     var body: some View {
         ZStack {
             GeometryReader { proxy in
@@ -407,6 +460,11 @@ struct RightInspectorView: View {
         }
         .onChange(of: viewModel.workspace.toolSession.activeTool) { oldTool, newTool in
             guard oldTool != newTool else { return }
+            if oldTool == .textureFill || newTool == .textureFill {
+                textureFillPreviewMaterialScale = nil
+                textureFillPreviewCoverage = nil
+                textureFillPreviewVariation = nil
+            }
             handleToolDrivenParameterInspectorTabChange(oldTool: oldTool, newTool: newTool)
             if newTool == .brush {
                 libraryInspectorTab = .brush
@@ -1013,8 +1071,18 @@ struct RightInspectorView: View {
     }
 
     private var textureFillParameterControls: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("肌理填充")
+        let settings = viewModel.workspace.toolSession.textureFillTip
+        var previewSettings = settings
+        previewSettings.materialScale = textureFillPreviewMaterialScale ?? settings.materialScale
+        previewSettings.coverage = textureFillPreviewCoverage ?? settings.coverage
+        previewSettings.variation = textureFillPreviewVariation ?? settings.variation
+        let previewRequest = TextureFillPreviewRequest(
+            brush: viewModel.textureFillPreviewBrush,
+            tipSettings: previewSettings,
+            color: viewModel.textureFillPreviewColor
+        )
+        return VStack(alignment: .leading, spacing: 7) {
+            Text("纹理填充")
                 .font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(Color.white.opacity(0.92))
 
@@ -1024,8 +1092,8 @@ struct RightInspectorView: View {
 
             HStack(spacing: 8) {
                 compactTextActionButton(
-                    title: "共享图库…",
-                    tooltip: "从共享笔尖图片资料库选择肌理填充素材",
+                    title: "选择纹理…",
+                    tooltip: "从共享笔尖图片中选择纹理素材",
                     fillsAvailableWidth: true
                 ) {
                     prepareTipImageLibraryPresentation(for: .textureFill)
@@ -1034,14 +1102,91 @@ struct RightInspectorView: View {
 
                 if viewModel.workspace.toolSession.textureFillTip.sourceSemantic == .importedImage {
                     compactTextActionButton(
-                        title: "切回程序化",
-                        tooltip: "改回内置程序化纹理",
+                        title: "使用当前画笔",
+                        tooltip: "使用当前画笔生成纹理素材",
                         fillsAvailableWidth: true
                     ) {
                         viewModel.resetTextureFillTipToProcedural()
                     }
                 }
             }
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("排列")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(Color.white.opacity(0.68))
+
+                Picker(
+                    "排列",
+                    selection: Binding(
+                        get: { settings.arrangement },
+                        set: { viewModel.setTextureFillArrangement($0) }
+                    )
+                ) {
+                    ForEach(TextureFillArrangement.allCases, id: \.self) { arrangement in
+                        Text(arrangement.displayName).tag(arrangement)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.segmented)
+                .controlSize(.small)
+                .help("流向跟随手势；交织叠加正交纹理；环形围绕落笔点；散布按随机块旋转")
+            }
+
+            TextureFillResultPreview(request: previewRequest)
+
+            Text("结果示意 · 每次填充的随机分布和方向会变化")
+                .font(.system(size: 9, weight: .medium))
+                .foregroundStyle(Color.white.opacity(0.48))
+                .lineLimit(1)
+
+            OptimizedCompactSlider(
+                title: "纹理尺寸",
+                valueText: "\(Int((settings.materialScale * 100).rounded()))%",
+                value: Binding(
+                    get: { Double(settings.materialScale * 100) },
+                    set: { _ in }
+                ),
+                range: 25...300,
+                liveValueText: { "\(Int($0.rounded()))%" },
+                onPreview: { textureFillPreviewMaterialScale = Float($0 / 100) },
+                onCommit: {
+                    viewModel.setTextureFillMaterialScale(Float($0 / 100))
+                    textureFillPreviewMaterialScale = nil
+                }
+            )
+
+            OptimizedCompactSlider(
+                title: "覆盖率",
+                valueText: "\(Int((settings.coverage * 100).rounded()))%",
+                value: Binding(
+                    get: { Double(settings.coverage * 100) },
+                    set: { _ in }
+                ),
+                range: 10...100,
+                liveValueText: { "\(Int($0.rounded()))%" },
+                onPreview: { textureFillPreviewCoverage = Float($0 / 100) },
+                onCommit: {
+                    viewModel.setTextureFillCoverage(Float($0 / 100))
+                    textureFillPreviewCoverage = nil
+                }
+            )
+
+            OptimizedCompactSlider(
+                title: "变化度",
+                valueText: "\(Int((settings.variation * 100).rounded()))%",
+                value: Binding(
+                    get: { Double(settings.variation * 100) },
+                    set: { _ in }
+                ),
+                range: 0...100,
+                liveValueText: { "\(Int($0.rounded()))%" },
+                onPreview: { textureFillPreviewVariation = Float($0 / 100) },
+                onCommit: {
+                    viewModel.setTextureFillVariation(Float($0 / 100))
+                    textureFillPreviewVariation = nil
+                }
+            )
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -1227,9 +1372,10 @@ struct RightInspectorView: View {
         let source = viewModel.workspace.toolSession.textureFillTip
         switch source.sourceSemantic {
         case .procedural:
-            return "当前使用程序化纹理 stamp"
+            let brush = viewModel.workspace.toolSession.drawingBrush
+            return "当前画笔纹理：\(brush.tipShape.displayName)"
         case .customMask:
-            return "当前使用自定义纹理 stamp"
+            return "当前使用自定义纹理"
         case .importedImage:
             if let sourceInfo = source.importedSourceInfo {
                 return "当前素材：\(sourceInfo.formattedSummary)"
@@ -2828,9 +2974,9 @@ struct RightInspectorView: View {
 
             if summary.currentTextureFillUsesImportedTip {
                 tipImageLibraryReferenceChip(
-                    title: "肌理填充",
+                    title: "纹理填充",
                     tint: Color(red: 0.82, green: 0.34, blue: 0.14),
-                    tooltip: "当前肌理填充正在使用这张图片"
+                    tooltip: "当前纹理填充正在使用这张图片"
                 )
             }
 
@@ -2846,7 +2992,7 @@ struct RightInspectorView: View {
                 tipImageLibraryReferenceChip(
                     title: "未引用",
                     tint: Color.secondary,
-                    tooltip: "当前没有主笔尖、次笔尖、肌理填充或已保存预设引用这张图片"
+                    tooltip: "当前没有主笔尖、次笔尖、纹理填充或已保存预设引用这张图片"
                 )
             }
         }
@@ -2904,7 +3050,7 @@ struct RightInspectorView: View {
             parts.append("当前组合笔刷次笔尖")
         }
         if summary.currentTextureFillUsesImportedTip {
-            parts.append("当前肌理填充素材")
+            parts.append("当前纹理填充素材")
         }
         if summary.presetPrimaryNames.isEmpty == false {
             parts.append("主笔尖预设：\(tipImageLibraryPresetNameSummary(summary.presetPrimaryNames))")
@@ -3470,10 +3616,11 @@ struct RightInspectorView: View {
             let dy = end.y - start.y
             let pathAngle = atan2(dy, dx)
 
-            let spacing = max(0.18, min(Double(brush.spacingPercent) / 100.0, 1.5))
             let scatter = Double(brush.scatterAmount)
             let jitter = Double(brush.jitterAmount)
-            let stampCount = max(4, Int(12.0 / spacing))
+            let stampCount = StageOneBrushPreviewRasterizer.libraryStrokePreviewStampCount(
+                spacingPercent: brush.spacingPercent
+            )
 
             let baseWidth = min(size.width, size.height) * 0.42
             let primaryStampResolution = previewRasterResolution(

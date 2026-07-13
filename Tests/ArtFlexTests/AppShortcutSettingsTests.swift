@@ -58,4 +58,24 @@ struct AppShortcutSettingsTests {
         #expect(restored.shortcutKey(for: brushGroup) == originalEraserShortcut)
         #expect(restored.shortcutKey(for: eraserGroup) == originalBrushShortcut)
     }
+
+    @Test
+    @MainActor
+    func textureFillShortcutDefaultsToFAndCanBeCustomized() {
+        let suiteName = "ArtFlexTests.AppShortcutSettings.TextureFill.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defaults.removePersistentDomain(forName: suiteName)
+
+        let store = AppShortcutSettingsStore(userDefaults: defaults)
+        let textureFillGroup = ToolSidebarGroup.orderedGroups.first { $0.id == "texture-fill" }!
+
+        #expect(store.configurableToolGroups.contains(textureFillGroup))
+        #expect(store.shortcutKey(for: textureFillGroup) == "F")
+
+        store.setShortcutKey("Q", for: textureFillGroup)
+
+        let restored = AppShortcutSettingsStore(userDefaults: defaults)
+        #expect(restored.shortcutKey(for: textureFillGroup) == "Q")
+        #expect(restored.toolGroup(forShortcutKey: "Q") == textureFillGroup)
+    }
 }

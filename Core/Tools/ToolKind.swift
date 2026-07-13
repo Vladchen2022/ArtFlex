@@ -174,7 +174,7 @@ extension ToolKind {
         case .lassoFill:
             return "套索填充"
         case .textureFill:
-            return "肌理填充"
+            return "纹理填充"
         case .rectangleSelection:
             return "矩形选区"
         case .ellipseSelection:
@@ -213,7 +213,7 @@ extension ToolKind {
         case .lassoFill:
             return "K"
         case .textureFill:
-            return nil
+            return "F"
         case .rectangleSelection, .ellipseSelection:
             return "M"
         case .straightLine:
@@ -258,7 +258,7 @@ struct ToolSidebarGroup: Identifiable, Equatable, Sendable {
         .init(id: "bucket", tools: [.bucket, .linearGradient, .sectorGradient], shortcutKey: "G"),
         .init(id: "selection-l", tools: [.lassoSelection, .polygonSelection], shortcutKey: "L"),
         .init(id: "lasso-fill", tools: [.lassoFill], shortcutKey: "K"),
-        .init(id: "texture-fill", tools: [.textureFill], shortcutKey: nil),
+        .init(id: "texture-fill", tools: [.textureFill], shortcutKey: "F"),
         .init(id: "selection-m", tools: [.rectangleSelection, .ellipseSelection], shortcutKey: "M"),
         .init(id: "straight-line", tools: [.straightLine], shortcutKey: "U"),
         .init(id: "smudge", tools: [.smudge], shortcutKey: "T"),
@@ -1209,18 +1209,92 @@ struct BrushSettings: Codable, Sendable, Equatable {
     }
 }
 
+enum TextureFillArrangement: String, Codable, Equatable, Sendable, CaseIterable {
+    case directional
+    case interwoven
+    case radial
+    case scattered
+
+    var displayName: String {
+        switch self {
+        case .directional:
+            return "流向"
+        case .interwoven:
+            return "交织"
+        case .radial:
+            return "环形"
+        case .scattered:
+            return "散布"
+        }
+    }
+
+}
+
 struct TextureFillTipSettings: Codable, Equatable, Sendable {
     var sourceSemantic: TipSourceSemantic
     var tipAssetID: BrushTipImageAssetID?
     var importedSourceInfo: ImportedTipSourceInfo?
     var customTipMaskData: Data?
+    var arrangement: TextureFillArrangement
+    var materialScale: Float
+    var coverage: Float
+    var variation: Float
 
     static let proceduralDefault = TextureFillTipSettings(
         sourceSemantic: .procedural,
         tipAssetID: nil,
         importedSourceInfo: nil,
-        customTipMaskData: nil
+        customTipMaskData: nil,
+        arrangement: .directional,
+        materialScale: 1,
+        coverage: 0.58,
+        variation: 0.45
     )
+
+    private enum CodingKeys: String, CodingKey {
+        case sourceSemantic
+        case tipAssetID
+        case importedSourceInfo
+        case customTipMaskData
+        case arrangement
+        case materialScale
+        case coverage
+        case variation
+    }
+
+    init(
+        sourceSemantic: TipSourceSemantic,
+        tipAssetID: BrushTipImageAssetID?,
+        importedSourceInfo: ImportedTipSourceInfo?,
+        customTipMaskData: Data?,
+        arrangement: TextureFillArrangement = .directional,
+        materialScale: Float = 1,
+        coverage: Float = 0.58,
+        variation: Float = 0.45
+    ) {
+        self.sourceSemantic = sourceSemantic
+        self.tipAssetID = tipAssetID
+        self.importedSourceInfo = importedSourceInfo
+        self.customTipMaskData = customTipMaskData
+        self.arrangement = arrangement
+        self.materialScale = min(max(materialScale, 0.25), 3)
+        self.coverage = min(max(coverage, 0.1), 1)
+        self.variation = min(max(variation, 0), 1)
+    }
+
+    init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            sourceSemantic: try container.decode(TipSourceSemantic.self, forKey: .sourceSemantic),
+            tipAssetID: try container.decodeIfPresent(BrushTipImageAssetID.self, forKey: .tipAssetID),
+            importedSourceInfo: try container.decodeIfPresent(ImportedTipSourceInfo.self, forKey: .importedSourceInfo),
+            customTipMaskData: try container.decodeIfPresent(Data.self, forKey: .customTipMaskData),
+            arrangement: try container.decodeIfPresent(TextureFillArrangement.self, forKey: .arrangement) ?? .directional,
+            materialScale: try container.decodeIfPresent(Float.self, forKey: .materialScale) ?? 1,
+            coverage: try container.decodeIfPresent(Float.self, forKey: .coverage) ?? 0.58,
+            variation: try container.decodeIfPresent(Float.self, forKey: .variation) ?? 0.45
+        )
+    }
 }
 
 struct ToolSessionState: Codable, Sendable, Equatable {

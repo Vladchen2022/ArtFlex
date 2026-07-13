@@ -31,7 +31,7 @@ ArtFlex 是旧版 `BrushCanvas` 的 Metal-first 重构版 macOS 绘图软件。
 2. 颜色 / 色标 / 黑白参考 / 画笔库工作流继续打磨
 3. HUD 拾色器、颜色面板拾色器和参考图 UI 等交互一致性继续打磨
 
-另外，`肌理填充 / textureFill` 当前也已经是一条活动中的正式开发线：
+另外，`纹理填充 / textureFill` 当前也已经是一条活动中的正式开发线：
 
 - 当前基线已推进到 `phase 4.3 + imported mapped live/final + final cover`
 - 程序化模式和最终定稿链已接通
