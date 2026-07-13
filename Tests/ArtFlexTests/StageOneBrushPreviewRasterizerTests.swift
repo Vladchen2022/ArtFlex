@@ -5,6 +5,58 @@ import Testing
 
 struct StageOneBrushPreviewRasterizerTests {
     @Test
+    func incrementalStrokeSessionMatchesWholeStrokeRasterization() throws {
+        let resolution = 256
+        let points = [
+            StrokePoint(x: 28, y: 36, pressure: 0.35),
+            StrokePoint(x: 58, y: 74, pressure: 0.48),
+            StrokePoint(x: 96, y: 112, pressure: 0.62),
+            StrokePoint(x: 142, y: 96, pressure: 0.76),
+            StrokePoint(x: 184, y: 142, pressure: 0.9),
+            StrokePoint(x: 224, y: 196, pressure: 1)
+        ]
+
+        for buildMode in [BrushBuildMode.buildUp, .opacityCap] {
+            var brush = BrushSettings.stageOneDefault
+            brush.size = 28
+            brush.spacingPercent = 9
+            brush.pressureSizeAmount = 0.7
+            brush.pressureOpacityAmount = 0.6
+            brush.buildMode = buildMode
+
+            var wholeSamplingState: BrushStrokeSamplingState?
+            let wholePoints = [points[0]] + points
+            let wholeAlpha = try #require(StageOneBrushPreviewRasterizer.strokeAlphaBytes(
+                for: brush,
+                resolution: resolution,
+                points: wholePoints,
+                samplingState: &wholeSamplingState,
+                flushPendingSamples: true
+            ))
+            let session = try #require(StageOneBrushPreviewRasterizer.makeStrokeAlphaSession(
+                for: brush,
+                resolution: resolution
+            ))
+
+            var incrementalAlpha = [UInt8](repeating: 0, count: resolution * resolution)
+            var largestUpdatePixelCount = 0
+            for index in points.indices {
+                let start = index == points.startIndex ? points[index] : points[index - 1]
+                if let update = session.append(points: [start, points[index]]) {
+                    apply(update, to: &incrementalAlpha, resolution: resolution)
+                    largestUpdatePixelCount = max(largestUpdatePixelCount, update.alphaBytes.count)
+                }
+            }
+            #expect(largestUpdatePixelCount < (resolution * resolution) / 2)
+            if let update = session.finish() {
+                apply(update, to: &incrementalAlpha, resolution: resolution)
+            }
+
+            #expect(incrementalAlpha == wholeAlpha)
+        }
+    }
+
+    @Test
     func importedStampImageCropsToVisibleContent() {
         var brush = BrushSettings.stageOneDefault
         brush.tipShape = .customRound
@@ -378,5 +430,22 @@ struct StageOneBrushPreviewRasterizerTests {
     private enum PreviewSamplingError: Error {
         case missingData
         case outOfBounds
+    }
+}
+
+private func apply(
+    _ update: StageOneBrushPreviewRasterizer.StrokeAlphaUpdate,
+    to destination: inout [UInt8],
+    resolution: Int
+) {
+    for localY in 0..<update.bounds.height {
+        for localX in 0..<update.bounds.width {
+            let sourceIndex = (localY * update.bounds.width) + localX
+            let destinationIndex =
+                ((update.bounds.originY + localY) * resolution)
+                + update.bounds.originX
+                + localX
+            destination[destinationIndex] = update.alphaBytes[sourceIndex]
+        }
     }
 }

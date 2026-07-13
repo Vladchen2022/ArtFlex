@@ -4,6 +4,169 @@ import Foundation
 import Metal
 
 enum StageOneBrushPreviewRasterizer {
+    struct StrokeAlphaUpdate {
+        let bounds: BrushPixelBounds
+        let alphaBytes: [UInt8]
+    }
+
+    final class StrokeAlphaSession {
+        private let texture: MTLTexture
+        private let brush: BrushSettings
+        private var samplingState: BrushStrokeSamplingState?
+        private var opacityCapSession: OpacityCapSessionResources?
+        private var packetCount = 0
+        private var isFinished = false
+        private var accumulatedPoints: [StrokePoint] = []
+
+        fileprivate init?(
+            brush: BrushSettings,
+            resolution: Int
+        ) {
+            guard
+                resolution > 0,
+                let context = StageOneBrushPreviewRasterizer.compoundPreviewRendererContext,
+                let texture = StageOneBrushPreviewRasterizer.makePreviewTexture(
+                    device: context.device,
+                    resolution: resolution
+                )
+            else {
+                return nil
+            }
+
+            self.texture = texture
+            self.brush = brush
+
+            StageOneBrushPreviewRasterizer.compoundPreviewRendererLock.lock()
+            defer { StageOneBrushPreviewRasterizer.compoundPreviewRendererLock.unlock() }
+            StageOneBrushPreviewRasterizer.clearPreviewTexture(
+                texture,
+                commandQueue: context.commandQueue
+            )
+            if brush.buildMode == .opacityCap {
+                opacityCapSession = context.renderer.makeOpacityCapSession(
+                    for: texture,
+                    commandQueue: context.commandQueue,
+                    reusesCachedTextures: false
+                )
+                guard opacityCapSession != nil else {
+                    return nil
+                }
+            }
+        }
+
+        func append(points: [StrokePoint]) -> StrokeAlphaUpdate? {
+            guard !isFinished, !points.isEmpty else { return nil }
+            appendAccumulatedPoints(points)
+            defer { packetCount += 1 }
+            return render(points: points)
+        }
+
+        func finish() -> StrokeAlphaUpdate? {
+            guard !isFinished else { return nil }
+            isFinished = true
+            var finalSamplingState: BrushStrokeSamplingState?
+            guard let alphaBytes = StageOneBrushPreviewRasterizer.strokeAlphaBytes(
+                for: brush,
+                tool: .brush,
+                resolution: texture.width,
+                points: accumulatedPoints,
+                samplingState: &finalSamplingState,
+                flushPendingSamples: true
+            ) else {
+                return nil
+            }
+            return StrokeAlphaUpdate(
+                bounds: BrushPixelBounds(
+                    originX: 0,
+                    originY: 0,
+                    width: texture.width,
+                    height: texture.height
+                ),
+                alphaBytes: alphaBytes
+            )
+        }
+
+        private func appendAccumulatedPoints(_ points: [StrokePoint]) {
+            guard
+                let tail = accumulatedPoints.last,
+                let head = points.first,
+                abs(tail.x - head.x) < 0.001,
+                abs(tail.y - head.y) < 0.001
+            else {
+                accumulatedPoints.append(contentsOf: points)
+                return
+            }
+            accumulatedPoints.append(contentsOf: points.dropFirst())
+        }
+
+        private func render(points: [StrokePoint]) -> StrokeAlphaUpdate? {
+            StageOneBrushPreviewRasterizer.compoundPreviewRendererLock.lock()
+            defer { StageOneBrushPreviewRasterizer.compoundPreviewRendererLock.unlock() }
+
+            guard
+                let context = StageOneBrushPreviewRasterizer.compoundPreviewRendererContext,
+                let commandBuffer = context.commandQueue.makeCommandBuffer()
+            else {
+                return nil
+            }
+
+            samplingState?.renderedPixelBounds = nil
+            let stroke = StrokeDescriptor(
+                tool: .brush,
+                color: .white,
+                brush: brush,
+                points: points,
+                selectionShape: nil,
+                skipLeadingStamp: packetCount > 0
+            )
+
+            encode(
+                stroke,
+                context: context,
+                commandBuffer: commandBuffer,
+                samplingState: &samplingState
+            )
+
+            guard let dirtyBounds = samplingState?.renderedPixelBounds, !dirtyBounds.isEmpty else {
+                commandBuffer.commit()
+                return nil
+            }
+
+            commandBuffer.commit()
+            commandBuffer.waitUntilCompleted()
+            return StageOneBrushPreviewRasterizer.makeAlphaUpdate(
+                from: texture,
+                bounds: dirtyBounds
+            )
+        }
+
+        private func encode(
+            _ stroke: StrokeDescriptor,
+            context: CompoundPreviewRendererContext,
+            commandBuffer: MTLCommandBuffer,
+            samplingState: inout BrushStrokeSamplingState?
+        ) {
+            if brush.buildMode == .opacityCap,
+               let opacityCapSession {
+                _ = context.renderer.encodeOpacityCapStroke(
+                    stroke: stroke,
+                    session: opacityCapSession,
+                    into: texture,
+                    commandBuffer: commandBuffer,
+                    samplingState: &samplingState
+                )
+            } else {
+                _ = context.renderer.encodeStroke(
+                    stroke: stroke,
+                    into: texture,
+                    commandQueue: context.commandQueue,
+                    commandBuffer: commandBuffer,
+                    samplingState: &samplingState
+                )
+            }
+        }
+    }
+
     private final class CachedImageBox: NSObject {
         let image: CGImage
 
@@ -275,6 +438,16 @@ enum StageOneBrushPreviewRasterizer {
 
         samplingState = workingSamplingState
         return makeAlphaBytes(from: texture)
+    }
+
+    static func makeStrokeAlphaSession(
+        for brush: BrushSettings,
+        resolution: Int
+    ) -> StrokeAlphaSession? {
+        StrokeAlphaSession(
+            brush: brush,
+            resolution: resolution
+        )
     }
 
     static func importedAssetImage(
@@ -930,6 +1103,42 @@ enum StageOneBrushPreviewRasterizer {
             alphaBytes[index] = bgraBytes[(index * 4) + 3]
         }
         return alphaBytes
+    }
+
+    private static func makeAlphaUpdate(
+        from texture: MTLTexture,
+        bounds: BrushPixelBounds
+    ) -> StrokeAlphaUpdate? {
+        let originX = min(max(bounds.originX, 0), texture.width)
+        let originY = min(max(bounds.originY, 0), texture.height)
+        let endX = min(max(bounds.originX + bounds.width, 0), texture.width)
+        let endY = min(max(bounds.originY + bounds.height, 0), texture.height)
+        guard originX < endX, originY < endY else { return nil }
+
+        let width = endX - originX
+        let height = endY - originY
+        let bytesPerRow = width * 4
+        var bgraBytes = [UInt8](repeating: 0, count: bytesPerRow * height)
+        texture.getBytes(
+            &bgraBytes,
+            bytesPerRow: bytesPerRow,
+            from: MTLRegionMake2D(originX, originY, width, height),
+            mipmapLevel: 0
+        )
+
+        var alphaBytes = [UInt8](repeating: 0, count: width * height)
+        for index in alphaBytes.indices {
+            alphaBytes[index] = bgraBytes[(index * 4) + 3]
+        }
+        return StrokeAlphaUpdate(
+            bounds: BrushPixelBounds(
+                originX: originX,
+                originY: originY,
+                width: width,
+                height: height
+            ),
+            alphaBytes: alphaBytes
+        )
     }
 
     private static func resampledMaskBytes(

@@ -1452,7 +1452,8 @@ final class StageOneBrushRenderer {
 
     func makeOpacityCapSession(
         for texture: MTLTexture,
-        commandQueue: MTLCommandQueue
+        commandQueue: MTLCommandQueue,
+        reusesCachedTextures: Bool = true
     ) -> OpacityCapSessionResources? {
         let auditEnabled = PerformanceAuditStore.shared.isRecordingEnabled
         let startNs = auditEnabled ? DispatchTime.now().uptimeNanoseconds : 0
@@ -1466,7 +1467,8 @@ final class StageOneBrushRenderer {
         let originalTexture: MTLTexture
         let alphaTexture: MTLTexture
 
-        if let cached = cachedOpacityCapOriginalTexture,
+        if reusesCachedTextures,
+           let cached = cachedOpacityCapOriginalTexture,
            cached.width == texture.width,
            cached.height == texture.height,
            cached.pixelFormat == texture.pixelFormat,
@@ -1502,8 +1504,10 @@ final class StageOneBrushRenderer {
             }
             originalTexture = newOriginal
             alphaTexture = newAlpha
-            cachedOpacityCapOriginalTexture = newOriginal
-            cachedOpacityCapAlphaTexture = newAlpha
+            if reusesCachedTextures {
+                cachedOpacityCapOriginalTexture = newOriginal
+                cachedOpacityCapAlphaTexture = newAlpha
+            }
         }
 
         clearTexture(alphaTexture, commandQueue: commandQueue)

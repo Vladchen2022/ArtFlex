@@ -5292,6 +5292,7 @@ private final class TipMaskEditorNSView: NSView {
     private var accumulatedDirtyRect: CGRect = .null
     private var strokeBaseMaskBytes: [UInt8]?
     private var activeStrokePoints: [StrokePoint] = []
+    private var activeStrokeRenderSession: StageOneBrushPreviewRasterizer.StrokeAlphaSession?
     private var shortcutContextArmed = false
     private var localKeyDownMonitor: Any?
 
@@ -5326,6 +5327,7 @@ private final class TipMaskEditorNSView: NSView {
             hasLocalChanges = false
             strokeBaseMaskBytes = nil
             activeStrokePoints = []
+            activeStrokeRenderSession = nil
             self.fitImportedPreview = fitImportedPreview
             let nextMask = normalizedMaskData(maskData)
             if nextMask != maskBytes {
@@ -5396,6 +5398,12 @@ private final class TipMaskEditorNSView: NSView {
         accumulatedDirtyRect = .null
         strokeBaseMaskBytes = maskBytes
         activeStrokePoints = []
+        let strokeBrush = strokeBrushSettings(for: paintMode)
+        // Paint and erase both need positive coverage; mask subtraction happens during the merge.
+        activeStrokeRenderSession = StageOneBrushPreviewRasterizer.makeStrokeAlphaSession(
+            for: strokeBrush,
+            resolution: tipMaskResolution
+        )
         paintSegment(from: point, to: point, pressure: max(pressure, 0.1))
     }
 
@@ -5411,6 +5419,10 @@ private final class TipMaskEditorNSView: NSView {
         hoverLocation = convert(event.locationInWindow, from: nil)
         lastPaintPoint = nil
         if hasLocalChanges {
+            if let update = activeStrokeRenderSession?.finish() {
+                mergeRenderedStrokeAlphaUpdate(update)
+                flushIncrementalDisplayIfNeeded()
+            }
             livePreviewImageDirty = true
             needsDisplay = true
             coordinator?.onUpdateMask(Data(maskBytes))
@@ -5418,6 +5430,7 @@ private final class TipMaskEditorNSView: NSView {
         }
         strokeBaseMaskBytes = nil
         activeStrokePoints = []
+        activeStrokeRenderSession = nil
         accumulatedDirtyRect = .null
         needsDisplay = true
     }
@@ -5554,10 +5567,18 @@ private final class TipMaskEditorNSView: NSView {
         }
         activeStrokePoints.append(endPoint)
 
+        if let activeStrokeRenderSession {
+            if let update = activeStrokeRenderSession.append(points: [startPoint, endPoint]) {
+                mergeRenderedStrokeAlphaUpdate(update)
+            }
+            flushIncrementalDisplayIfNeeded()
+            return
+        }
+
         var scratchSamplingState: BrushStrokeSamplingState?
         guard let alphaBytes = StageOneBrushPreviewRasterizer.strokeAlphaBytes(
             for: brush,
-            tool: paintMode == .eraser ? .eraser : .brush,
+            tool: .brush,
             resolution: tipMaskResolution,
             points: activeStrokePoints,
             samplingState: &scratchSamplingState,
@@ -5566,9 +5587,14 @@ private final class TipMaskEditorNSView: NSView {
             return
         }
 
-        maskBytes = strokeBaseMaskBytes ?? [UInt8](repeating: 0, count: tipMaskResolution * tipMaskResolution)
         mergeRenderedStrokeAlphaBytes(
             alphaBytes,
+            bounds: BrushPixelBounds(
+                originX: 0,
+                originY: 0,
+                width: tipMaskResolution,
+                height: tipMaskResolution
+            ),
             paintMode: paintMode,
             buildMode: brush.buildMode
         )
@@ -5588,42 +5614,54 @@ private final class TipMaskEditorNSView: NSView {
 
     private func mergeRenderedStrokeAlphaBytes(
         _ alphaBytes: [UInt8],
+        bounds: BrushPixelBounds,
         paintMode: TipPaintMode,
         buildMode: BrushBuildMode
     ) {
-        guard alphaBytes.count == maskBytes.count else { return }
+        guard
+            bounds.originX >= 0,
+            bounds.originY >= 0,
+            bounds.originX + bounds.width <= tipMaskResolution,
+            bounds.originY + bounds.height <= tipMaskResolution,
+            alphaBytes.count == bounds.width * bounds.height
+        else {
+            return
+        }
 
         var minX = tipMaskResolution
         var minY = tipMaskResolution
         var maxX = -1
         var maxY = -1
 
-        for index in alphaBytes.indices {
-            let alpha = alphaBytes[index]
-            guard alpha > 0 else { continue }
+        for localY in 0..<bounds.height {
+            for localX in 0..<bounds.width {
+                let localIndex = (localY * bounds.width) + localX
+                let alpha = alphaBytes[localIndex]
 
-            let existing = maskBytes[index]
-            let updated: UInt8
-            switch paintMode {
-            case .eraser:
-                updated = UInt8(max(0, Int(existing) - Int(alpha)))
-            case .round, .square:
-                if buildMode == .buildUp {
-                    updated = UInt8(min(255, Int(existing) + Int(alpha)))
-                } else {
-                    updated = max(existing, alpha)
+                let x = bounds.originX + localX
+                let y = bounds.originY + localY
+                let index = (y * tipMaskResolution) + x
+                let existing = strokeBaseMaskBytes?[index] ?? maskBytes[index]
+                let updated: UInt8
+                switch paintMode {
+                case .eraser:
+                    updated = UInt8(max(0, Int(existing) - Int(alpha)))
+                case .round, .square:
+                    if buildMode == .buildUp {
+                        updated = UInt8(min(255, Int(existing) + Int(alpha)))
+                    } else {
+                        updated = max(existing, alpha)
+                    }
                 }
+
+                guard updated != maskBytes[index] else { continue }
+                maskBytes[index] = updated
+
+                minX = min(minX, x)
+                minY = min(minY, y)
+                maxX = max(maxX, x)
+                maxY = max(maxY, y)
             }
-
-            guard updated != existing else { continue }
-            maskBytes[index] = updated
-
-            let x = index % tipMaskResolution
-            let y = index / tipMaskResolution
-            minX = min(minX, x)
-            minY = min(minY, y)
-            maxX = max(maxX, x)
-            maxY = max(maxY, y)
         }
 
         guard maxX >= minX, maxY >= minY else { return }
@@ -5639,6 +5677,17 @@ private final class TipMaskEditorNSView: NSView {
             height: CGFloat(maxY - minY + 1) * scaleY + 2
         )
         accumulatedDirtyRect = accumulatedDirtyRect.isNull ? dirtyViewRect : accumulatedDirtyRect.union(dirtyViewRect)
+    }
+
+    private func mergeRenderedStrokeAlphaUpdate(
+        _ update: StageOneBrushPreviewRasterizer.StrokeAlphaUpdate
+    ) {
+        mergeRenderedStrokeAlphaBytes(
+            update.alphaBytes,
+            bounds: update.bounds,
+            paintMode: paintMode,
+            buildMode: drawingBrush.buildMode
+        )
     }
 
     private func maskPoint(for viewPoint: CGPoint, in editableRect: CGRect) -> CGPoint {
