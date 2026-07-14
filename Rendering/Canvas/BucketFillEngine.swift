@@ -247,10 +247,15 @@ final class BucketFillEngine: @unchecked Sendable {
 
             for localX in leftX...rightX {
                 let index = (seed.y * snapshot.bytesPerRow) + (localX * bytesPerPixel)
-                bytes[index] = replacement.blue
-                bytes[index + 1] = replacement.green
-                bytes[index + 2] = replacement.red
-                bytes[index + 3] = replacement.alpha
+                let pixelID = (seed.y * processingWidth) + localX
+                let coverage = selectionMaskBytes?[pixelID] ?? 255
+                let coveredReplacement = coverage == 255
+                    ? replacement
+                    : blendedPixel(from: target, to: replacement, coverage: coverage)
+                bytes[index] = coveredReplacement.blue
+                bytes[index + 1] = coveredReplacement.green
+                bytes[index + 2] = coveredReplacement.red
+                bytes[index + 3] = coveredReplacement.alpha
             }
 
             dirtyMinX = min(dirtyMinX, leftX)
@@ -680,6 +685,31 @@ final class BucketFillEngine: @unchecked Sendable {
             green: UInt8(clamping: Int((color.green * alphaScale * 255).rounded())),
             red: UInt8(clamping: Int((color.red * alphaScale * 255).rounded())),
             alpha: alpha
+        )
+    }
+
+    private func blendedPixel(
+        from source: PixelBGRA,
+        to destination: PixelBGRA,
+        coverage: UInt8
+    ) -> PixelBGRA {
+        let amount = Int(coverage)
+        let inverse = 255 - amount
+        func blend(_ sourceValue: UInt8, _ destinationValue: UInt8) -> UInt8 {
+            UInt8(
+                clamping: (
+                    (Int(sourceValue) * inverse) +
+                    (Int(destinationValue) * amount) +
+                    127
+                ) / 255
+            )
+        }
+
+        return PixelBGRA(
+            blue: blend(source.blue, destination.blue),
+            green: blend(source.green, destination.green),
+            red: blend(source.red, destination.red),
+            alpha: blend(source.alpha, destination.alpha)
         )
     }
 

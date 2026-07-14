@@ -792,6 +792,40 @@ final class StageOneBrushRenderer {
             return out;
         }
 
+        float selectionAlphaForBrushPixel(
+            float2 pixelPoint,
+            BrushUniforms uniforms,
+            texture2d<float, access::read> selectionMask
+        ) {
+            if (uniforms.selectionMode == 0) {
+                return 1.0;
+            }
+
+            float2 minPoint = uniforms.selectionMin;
+            float2 maxPoint = uniforms.selectionMax;
+            bool insideBounds =
+                pixelPoint.x >= minPoint.x &&
+                pixelPoint.x <= maxPoint.x &&
+                pixelPoint.y >= minPoint.y &&
+                pixelPoint.y <= maxPoint.y;
+            if (!insideBounds) {
+                return 0.0;
+            }
+
+            if (uniforms.selectionMode == 2) {
+                float2 center = (minPoint + maxPoint) * 0.5;
+                float2 radius = max((maxPoint - minPoint) * 0.5, float2(0.0001));
+                float2 normalized = (pixelPoint - center) / radius;
+                return dot(normalized, normalized) <= 1.0 ? 1.0 : 0.0;
+            }
+            if (uniforms.selectionMode == 3) {
+                uint x = uint(clamp(pixelPoint.x, 0.0, uniforms.canvasSize.x - 1.0));
+                uint y = uint(clamp(pixelPoint.y, 0.0, uniforms.canvasSize.y - 1.0));
+                return selectionMask.read(uint2(x, y)).r;
+            }
+            return 1.0;
+        }
+
         fragment float4 stageOneBrushFragment(
             VertexOut in [[stage_in]],
             const device BrushUniforms *uniformsArray [[buffer(1)]],
@@ -814,34 +848,11 @@ final class StageOneBrushRenderer {
                 discard_fragment();
             }
 
-            if (uniforms.selectionMode != 0) {
-                float2 minPoint = uniforms.selectionMin;
-                float2 maxPoint = uniforms.selectionMax;
-                bool insideBounds =
-                    in.pixelPoint.x >= minPoint.x &&
-                    in.pixelPoint.x <= maxPoint.x &&
-                    in.pixelPoint.y >= minPoint.y &&
-                    in.pixelPoint.y <= maxPoint.y;
-
-                if (!insideBounds) {
-                    discard_fragment();
-                }
-
-                if (uniforms.selectionMode == 2) {
-                    float2 center = (minPoint + maxPoint) * 0.5;
-                    float2 radius = max((maxPoint - minPoint) * 0.5, float2(0.0001));
-                    float2 normalized = (in.pixelPoint - center) / radius;
-                    if (dot(normalized, normalized) > 1.0) {
-                        discard_fragment();
-                    }
-                } else if (uniforms.selectionMode == 3) {
-                    uint x = uint(clamp(in.pixelPoint.x, 0.0, uniforms.canvasSize.x - 1.0));
-                    uint y = uint(clamp(in.pixelPoint.y, 0.0, uniforms.canvasSize.y - 1.0));
-                    if (selectionMask.read(uint2(x, y)).r < 0.5) {
-                        discard_fragment();
-                    }
-                }
+            float selectionAlpha = selectionAlphaForBrushPixel(in.pixelPoint, uniforms, selectionMask);
+            if (selectionAlpha <= 0.001) {
+                discard_fragment();
             }
+            alphaMask *= selectionAlpha;
 
             float lockedDestinationAlpha = 1.0;
             if (uniforms.usesAlphaLock != 0) {
@@ -891,34 +902,11 @@ final class StageOneBrushRenderer {
                 discard_fragment();
             }
 
-            if (uniforms.selectionMode != 0) {
-                float2 minPoint = uniforms.selectionMin;
-                float2 maxPoint = uniforms.selectionMax;
-                bool insideBounds =
-                    in.pixelPoint.x >= minPoint.x &&
-                    in.pixelPoint.x <= maxPoint.x &&
-                    in.pixelPoint.y >= minPoint.y &&
-                    in.pixelPoint.y <= maxPoint.y;
-
-                if (!insideBounds) {
-                    discard_fragment();
-                }
-
-                if (uniforms.selectionMode == 2) {
-                    float2 center = (minPoint + maxPoint) * 0.5;
-                    float2 radius = max((maxPoint - minPoint) * 0.5, float2(0.0001));
-                    float2 normalized = (in.pixelPoint - center) / radius;
-                    if (dot(normalized, normalized) > 1.0) {
-                        discard_fragment();
-                    }
-                } else if (uniforms.selectionMode == 3) {
-                    uint x = uint(clamp(in.pixelPoint.x, 0.0, uniforms.canvasSize.x - 1.0));
-                    uint y = uint(clamp(in.pixelPoint.y, 0.0, uniforms.canvasSize.y - 1.0));
-                    if (selectionMask.read(uint2(x, y)).r < 0.5) {
-                        discard_fragment();
-                    }
-                }
+            float selectionAlpha = selectionAlphaForBrushPixel(in.pixelPoint, uniforms, selectionMask);
+            if (selectionAlpha <= 0.001) {
+                discard_fragment();
             }
+            alphaMask *= selectionAlpha;
 
             if (uniforms.usesAlphaLock != 0) {
                 uint x = uint(clamp(in.pixelPoint.x, 0.0, uniforms.canvasSize.x - 1.0));
@@ -960,34 +948,11 @@ final class StageOneBrushRenderer {
                 discard_fragment();
             }
 
-            if (uniforms.selectionMode != 0) {
-                float2 minPoint = uniforms.selectionMin;
-                float2 maxPoint = uniforms.selectionMax;
-                bool insideBounds =
-                    in.pixelPoint.x >= minPoint.x &&
-                    in.pixelPoint.x <= maxPoint.x &&
-                    in.pixelPoint.y >= minPoint.y &&
-                    in.pixelPoint.y <= maxPoint.y;
-
-                if (!insideBounds) {
-                    discard_fragment();
-                }
-
-                if (uniforms.selectionMode == 2) {
-                    float2 center = (minPoint + maxPoint) * 0.5;
-                    float2 radius = max((maxPoint - minPoint) * 0.5, float2(0.0001));
-                    float2 normalized = (in.pixelPoint - center) / radius;
-                    if (dot(normalized, normalized) > 1.0) {
-                        discard_fragment();
-                    }
-                } else if (uniforms.selectionMode == 3) {
-                    uint x = uint(clamp(in.pixelPoint.x, 0.0, uniforms.canvasSize.x - 1.0));
-                    uint y = uint(clamp(in.pixelPoint.y, 0.0, uniforms.canvasSize.y - 1.0));
-                    if (selectionMask.read(uint2(x, y)).r < 0.5) {
-                        discard_fragment();
-                    }
-                }
+            float selectionAlpha = selectionAlphaForBrushPixel(in.pixelPoint, uniforms, selectionMask);
+            if (selectionAlpha <= 0.001) {
+                discard_fragment();
             }
+            alphaMask *= selectionAlpha;
 
             if (uniforms.usesAlphaLock != 0) {
                 uint x = uint(clamp(in.pixelPoint.x, 0.0, uniforms.canvasSize.x - 1.0));
@@ -1061,34 +1026,11 @@ final class StageOneBrushRenderer {
                 discard_fragment();
             }
 
-            if (uniforms.selectionMode != 0) {
-                float2 minPoint = uniforms.selectionMin;
-                float2 maxPoint = uniforms.selectionMax;
-                bool insideBounds =
-                    in.pixelPoint.x >= minPoint.x &&
-                    in.pixelPoint.x <= maxPoint.x &&
-                    in.pixelPoint.y >= minPoint.y &&
-                    in.pixelPoint.y <= maxPoint.y;
-
-                if (!insideBounds) {
-                    discard_fragment();
-                }
-
-                if (uniforms.selectionMode == 2) {
-                    float2 center = (minPoint + maxPoint) * 0.5;
-                    float2 radius = max((maxPoint - minPoint) * 0.5, float2(0.0001));
-                    float2 normalized = (in.pixelPoint - center) / radius;
-                    if (dot(normalized, normalized) > 1.0) {
-                        discard_fragment();
-                    }
-                } else if (uniforms.selectionMode == 3) {
-                    uint x = uint(clamp(in.pixelPoint.x, 0.0, uniforms.canvasSize.x - 1.0));
-                    uint y = uint(clamp(in.pixelPoint.y, 0.0, uniforms.canvasSize.y - 1.0));
-                    if (selectionMask.read(uint2(x, y)).r < 0.5) {
-                        discard_fragment();
-                    }
-                }
+            float selectionAlpha = selectionAlphaForBrushPixel(in.pixelPoint, uniforms, selectionMask);
+            if (selectionAlpha <= 0.001) {
+                discard_fragment();
             }
+            alphaMask *= selectionAlpha;
 
             if (uniforms.usesAlphaLock != 0) {
                 uint x = uint(clamp(in.pixelPoint.x, 0.0, uniforms.canvasSize.x - 1.0));

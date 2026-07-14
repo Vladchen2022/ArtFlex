@@ -11,6 +11,8 @@ struct CanvasContainerView: View {
     @ObservedObject var viewModel: WorkspaceViewModel
     var onCanvasInteraction: (() -> Void)? = nil
     @State private var panStartOffset: CanvasPoint?
+    @State private var isFeatherSelectionDialogPresented = false
+    @State private var featherSelectionRadiusPixels = 16
     private static let showsSelectionDebugOverlay = false
 
     var body: some View {
@@ -55,6 +57,8 @@ struct CanvasContainerView: View {
                         isFreeTransformDragging: viewModel.isFreeTransformDragging,
                         activeFreeTransformInteractionMode: viewModel.activeFreeTransformInteractionMode,
                         transformPreview: viewModel.freeTransformPreview,
+                        freeTransformToolMode: viewModel.freeTransformToolMode,
+                        meshWarpGrid: viewModel.displayedMeshWarpGrid,
                         linearGradientPreview: viewModel.linearGradientState.preview,
                         sectorGradientPreview: viewModel.sectorGradientState.preview,
                         patternPlacementPhase: viewModel.patternPlacementPhase,
@@ -106,6 +110,26 @@ struct CanvasContainerView: View {
                         },
                         onCanvasHover: { point in
                             viewModel.updateCanvasToolHover(to: point)
+                        },
+                        onCanvasExited: {
+                            viewModel.handleCanvasPointerExit()
+                        },
+                        onStraightLineDragBegan: { point in
+                            onCanvasInteraction?()
+                            viewModel.beginStraightLineDrag(
+                                at: point,
+                                thicknessAdjustmentDeadZone: straightLineThicknessDeadZoneCanvasDistance(
+                                    actualDisplayScale: presentation.actualDisplayScale
+                                )
+                            )
+                        },
+                        onStraightLineDragChanged: { points in
+                            onCanvasInteraction?()
+                            viewModel.updateStraightLineDrag(along: points)
+                        },
+                        onStraightLineDragEnded: { point in
+                            onCanvasInteraction?()
+                            viewModel.endStraightLineDrag(at: point)
                         },
                         onSelectionBegan: { point, modifiers in
                             onCanvasInteraction?()
@@ -189,7 +213,13 @@ struct CanvasContainerView: View {
                         },
                         onGradientDragBegan: { point, modifiers in
                             onCanvasInteraction?()
-                            viewModel.beginGradientDrag(at: point, modifiers: modifiers)
+                            viewModel.beginGradientDrag(
+                                at: point,
+                                modifiers: modifiers,
+                                handleHitRadius: gradientHandleHitRadiusCanvasDistance(
+                                    actualDisplayScale: presentation.actualDisplayScale
+                                )
+                            )
                         },
                         onGradientDragChanged: { point, modifiers in
                             onCanvasInteraction?()
@@ -229,6 +259,9 @@ struct CanvasContainerView: View {
                             if viewModel.selectionOverlayProxy.displayShape != nil {
                                 viewModel.clearSelection()
                             }
+                        },
+                        onRequestSelectionFeather: {
+                            isFeatherSelectionDialogPresented = true
                         },
                         onApplyTransform: {
                             onCanvasInteraction?()
@@ -294,7 +327,8 @@ struct CanvasContainerView: View {
                     .allowsHitTesting(false)
                 }
 
-                if shouldShowFreeTransformHandles(
+                if viewModel.freeTransformToolMode == .standard,
+                   shouldShowFreeTransformHandles(
                     activeTool: viewModel.workspace.toolSession.activeTool,
                     isApplyingTransformCommit: viewModel.isApplyingTransformCommit,
                     isTransformingSelection: viewModel.isTransformingSelection,
@@ -305,6 +339,18 @@ struct CanvasContainerView: View {
                     FreeTransformHandlesOverlay(
                         bounds: shape.bounds,
                         preview: viewModel.freeTransformPreview,
+                        presentation: documentPresentation,
+                        canvasSize: viewModel.workspace.document.canvasSize
+                    )
+                    .allowsHitTesting(false)
+                } else if viewModel.workspace.toolSession.activeTool == .freeTransform,
+                          viewModel.isTransformingSelection,
+                          !viewModel.isApplyingTransformCommit,
+                          let grid = viewModel.displayedMeshWarpGrid {
+                    MeshWarpGridOverlay(
+                        grid: grid,
+                        activeInteractionMode: viewModel.activeFreeTransformInteractionMode,
+                        selectedControlPointIndices: viewModel.selectedMeshWarpControlPointIndices,
                         presentation: documentPresentation,
                         canvasSize: viewModel.workspace.document.canvasSize
                     )
@@ -399,6 +445,9 @@ struct CanvasContainerView: View {
                    viewModel.isTransformingSelection || viewModel.isApplyingTransformCommit {
                     FreeTransformHUD(
                         isApplying: viewModel.isApplyingTransformCommit,
+                        toolMode: viewModel.freeTransformToolMode,
+                        selectedMeshPointCount: viewModel.selectedMeshWarpControlPointIndices.count,
+                        onToolModeChanged: viewModel.setFreeTransformToolMode,
                         onApply: {
                             viewModel.applySelectionTransform()
                         },
@@ -410,6 +459,17 @@ struct CanvasContainerView: View {
                         x: geometry.size.width / 2,
                         y: 28
                     )
+                }
+
+                if viewModel.workspace.toolSession.activeTool == .linearGradient,
+                   viewModel.linearGradientState.isEditingSession || viewModel.isApplyingGradientCommit {
+                    GradientToolHUD(
+                        title: viewModel.isApplyingGradientCommit ? "应用中" : "直线渐变调整",
+                        isApplying: viewModel.isApplyingGradientCommit,
+                        onApply: viewModel.applyActiveGradientSession,
+                        onCancel: viewModel.cancelLinearGradientInteraction
+                    )
+                    .position(x: geometry.size.width / 2, y: 28)
                 }
 
                 if viewModel.workspace.toolSession.activeTool == .canvasCrop {
@@ -521,6 +581,20 @@ struct CanvasContainerView: View {
             } // CanvasViewportHost
         }
         .clipped()
+        .alert("羽化选区", isPresented: $isFeatherSelectionDialogPresented) {
+            TextField(
+                "半径（像素）",
+                value: $featherSelectionRadiusPixels,
+                format: .number
+            )
+            Button("取消", role: .cancel) {}
+            Button("应用") {
+                featherSelectionRadiusPixels = min(max(featherSelectionRadiusPixels, 1), 512)
+                viewModel.featherSelection(radiusPixels: featherSelectionRadiusPixels)
+            }
+        } message: {
+            Text("输入 1–512 px。羽化会柔化选区边缘，并可通过撤销恢复。")
+        }
     }
 }
 
@@ -1013,6 +1087,9 @@ private struct CanvasPixelGridOverlay: View {
 
 private struct FreeTransformHUD: View {
     let isApplying: Bool
+    let toolMode: FreeTransformToolMode
+    let selectedMeshPointCount: Int
+    let onToolModeChanged: (FreeTransformToolMode) -> Void
     let onApply: () -> Void
     let onCancel: () -> Void
 
@@ -1022,9 +1099,23 @@ private struct FreeTransformHUD: View {
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(Color.white.opacity(0.82))
 
-            Text(isApplying ? "应用中" : "变形中")
+            Text(isApplying ? "应用中" : (toolMode == .mesh ? "网格变形" : "自由变形"))
                 .font(.system(size: 12, weight: .semibold, design: .rounded))
                 .foregroundStyle(Color.white)
+
+            HStack(spacing: 2) {
+                transformModeButton(title: "自由", mode: .standard)
+                transformModeButton(title: "网格", mode: .mesh)
+            }
+            .padding(2)
+            .background(Color.black.opacity(0.28), in: RoundedRectangle(cornerRadius: 7))
+
+            if toolMode == .mesh, !isApplying {
+                Text(selectedMeshPointCount > 0 ? "已选 \(selectedMeshPointCount) 点" : "Shift 多选")
+                    .font(.system(size: 10.5, weight: .medium))
+                    .foregroundStyle(Color.white.opacity(0.72))
+                    .help("按住 Shift 点击可追加或移除网格锚点")
+            }
 
             Button(action: onApply) {
                 Text("应用")
@@ -1064,6 +1155,27 @@ private struct FreeTransformHUD: View {
             Capsule()
                 .fill(Color.black.opacity(0.55))
         )
+    }
+
+    private func transformModeButton(
+        title: String,
+        mode: FreeTransformToolMode
+    ) -> some View {
+        Button {
+            onToolModeChanged(mode)
+        } label: {
+            Text(title)
+                .font(.system(size: 10.5, weight: .semibold))
+                .foregroundStyle(Color.white.opacity(toolMode == mode ? 1 : 0.62))
+                .padding(.horizontal, 8)
+                .frame(height: 20)
+                .background(
+                    RoundedRectangle(cornerRadius: 5)
+                        .fill(toolMode == mode ? Color.accentColor.opacity(0.72) : Color.clear)
+                )
+        }
+        .buttonStyle(.plain)
+        .disabled(isApplying)
     }
 }
 
@@ -1184,7 +1296,33 @@ private struct StraightLineToolOverlay: View {
 
             pointMarker(preview.pointA, label: "A")
             pointMarker(preview.pointB, label: "B")
+
+            if let handlePoint = preview.thicknessHandlePoint {
+                Path { path in
+                    path.move(to: map(preview.pointB))
+                    path.addLine(to: map(handlePoint))
+                }
+                .stroke(
+                    Color.accentColor.opacity(0.9),
+                    style: StrokeStyle(lineWidth: 1.5, dash: [5, 4])
+                )
+
+                thicknessLabel(at: handlePoint)
+            } else if preview.isPending {
+                thicknessLabel(at: preview.pointB)
+            }
         }
+    }
+
+    private func thicknessLabel(at point: CanvasPoint) -> some View {
+        Text("\(Int(brush.size.rounded())) px")
+            .font(.system(size: 11, weight: .semibold, design: .rounded))
+            .foregroundStyle(Color.white)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 3)
+            .background(Color.accentColor.opacity(0.92), in: Capsule())
+            .position(map(point))
+            .offset(x: 18, y: 18)
     }
 
     private func pointMarker(_ point: CanvasPoint, label: String) -> some View {
@@ -1238,8 +1376,14 @@ private struct LinearGradientToolOverlay: View {
     var body: some View {
         ZStack(alignment: .topLeading) {
             dashedSegment(from: preview.pointA, to: preview.pointB)
-            pointMarker(preview.pointA, label: "A")
-            pointMarker(preview.pointB, label: "B")
+            pointMarker(preview.pointA, label: "起")
+            pointMarker(preview.pointB, label: "止")
+            if let geometry = preview.geometry {
+                midpointMarker(
+                    geometry.transitionMidpointPoint,
+                    percentage: geometry.transitionMidpoint
+                )
+            }
         }
     }
 
@@ -1262,6 +1406,28 @@ private struct LinearGradientToolOverlay: View {
                 .font(.system(size: 11, weight: .bold))
                 .foregroundStyle(Color.white)
                 .offset(x: 14, y: -12)
+        }
+        .position(mapped)
+    }
+
+    private func midpointMarker(_ point: CanvasPoint, percentage: Double) -> some View {
+        let mapped = map(point)
+        return ZStack {
+            RoundedRectangle(cornerRadius: 2)
+                .fill(Color.white)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 2)
+                        .stroke(Color.accentColor, lineWidth: 2)
+                )
+                .frame(width: 11, height: 11)
+                .rotationEffect(.degrees(45))
+            Text("\(Int((percentage * 100).rounded()))%")
+                .font(.system(size: 10, weight: .bold, design: .rounded))
+                .foregroundStyle(Color.white)
+                .padding(.horizontal, 5)
+                .padding(.vertical, 2)
+                .background(Color.black.opacity(0.7), in: Capsule())
+                .offset(y: 20)
         }
         .position(mapped)
     }
@@ -2081,11 +2247,14 @@ private struct FreeTransformHandlesOverlay: View {
     let presentation: CanvasPresentation
     let canvasSize: CanvasSize
     private let handleSize: CGFloat = 8
-    private let rotationHandleDistance: Double = 48
 
     var body: some View {
         let scaleX = presentation.documentDisplaySize.x / Double(canvasSize.width)
         let scaleY = presentation.documentDisplaySize.y / Double(canvasSize.height)
+        let handleMetrics = freeTransformHandleMetrics(
+            canvasExtent: Double(canvasSize.width),
+            displayExtent: presentation.documentDisplaySize.x
+        )
         let corners = freeTransformCornerPoints(bounds: bounds, preview: preview).map { point in
             CGPoint(
                 x: presentation.documentOrigin.x + (point.x * scaleX),
@@ -2095,7 +2264,7 @@ private struct FreeTransformHandlesOverlay: View {
         let handleMap = freeTransformHandlePoints(
             bounds: bounds,
             preview: preview,
-            rotationHandleDistance: rotationHandleDistance
+            rotationHandleDistance: handleMetrics.rotationHandleDistance
         ).mapValues { point in
             CGPoint(
                 x: presentation.documentOrigin.x + (point.x * scaleX),
@@ -2145,5 +2314,72 @@ private struct FreeTransformHandlesOverlay: View {
                 }
             }
         }
+    }
+}
+
+private struct MeshWarpGridOverlay: View {
+    let grid: MeshWarpGrid
+    let activeInteractionMode: FreeTransformInteractionMode?
+    let selectedControlPointIndices: Set<Int>
+    let presentation: CanvasPresentation
+    let canvasSize: CanvasSize
+
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            Path { path in
+                for row in 0..<grid.rows {
+                    guard let first = grid.point(row: row, column: 0) else { continue }
+                    path.move(to: map(first))
+                    for column in 1..<grid.columns {
+                        if let point = grid.point(row: row, column: column) {
+                            path.addLine(to: map(point))
+                        }
+                    }
+                }
+                for column in 0..<grid.columns {
+                    guard let first = grid.point(row: 0, column: column) else { continue }
+                    path.move(to: map(first))
+                    for row in 1..<grid.rows {
+                        if let point = grid.point(row: row, column: column) {
+                            path.addLine(to: map(point))
+                        }
+                    }
+                }
+            }
+            .stroke(
+                Color.accentColor.opacity(0.88),
+                style: StrokeStyle(lineWidth: 1.15, dash: [5, 3])
+            )
+
+            ForEach(Array(grid.controlPoints.enumerated()), id: \.offset) { index, point in
+                let isActive: Bool = {
+                    guard case .meshPoint(let activeIndex) = activeInteractionMode else {
+                        return false
+                    }
+                    return activeIndex == index
+                }()
+                let isSelected = selectedControlPointIndices.contains(index)
+                Circle()
+                    .fill(isSelected ? Color.accentColor : Color.white)
+                    .frame(
+                        width: isActive ? 12 : (isSelected ? 10 : 9),
+                        height: isActive ? 12 : (isSelected ? 10 : 9)
+                    )
+                    .overlay(
+                        Circle()
+                            .stroke(Color.black.opacity(0.72), lineWidth: 1.2)
+                    )
+                    .position(map(point))
+            }
+        }
+    }
+
+    private func map(_ point: CanvasPoint) -> CGPoint {
+        let scaleX = presentation.documentDisplaySize.x / Double(max(canvasSize.width, 1))
+        let scaleY = presentation.documentDisplaySize.y / Double(max(canvasSize.height, 1))
+        return CGPoint(
+            x: presentation.documentOrigin.x + (point.x * scaleX),
+            y: presentation.documentOrigin.y + (point.y * scaleY)
+        )
     }
 }

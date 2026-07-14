@@ -24,7 +24,9 @@ private struct SelectionPixelOperationUniforms {
 
 final class SelectionPixelOperationRenderer {
     private let device: MTLDevice
-    private let pipelineState: MTLRenderPipelineState
+    private let clearPipelineState: MTLRenderPipelineState
+    private let fillPipelineState: MTLRenderPipelineState
+    private let alphaLockedPipelineState: MTLRenderPipelineState
     private let fallbackAlphaLockTexture: MTLTexture
     private var reusableSelectionMaskTexture: MTLTexture?
     private var reusableSelectionMaskTextureSize: SIMD2<Int>?
@@ -82,7 +84,8 @@ final class SelectionPixelOperationRenderer {
             float2 localCoord = clamp((in.canvasPosition - uniforms.selectionBoundsMin) / boundsSize, 0.0, 1.0);
             constexpr sampler maskSampler(coord::normalized, address::clamp_to_edge, filter::nearest);
 
-            if (selectionMask.sample(maskSampler, localCoord).r <= 0.001) {
+            float maskAlpha = selectionMask.sample(maskSampler, localCoord).r;
+            if (maskAlpha <= 0.001) {
                 discard_fragment();
             }
 
@@ -96,19 +99,16 @@ final class SelectionPixelOperationRenderer {
             }
 
             if (uniforms.operationMode == 0) {
-                if (uniforms.usesAlphaLock != 0) {
-                    return float4(0.0, 0.0, 0.0, lockedDestinationAlpha);
-                }
-                return float4(0.0);
+                return float4(0.0, 0.0, 0.0, maskAlpha);
             }
             if (uniforms.usesAlphaLock != 0) {
                 float sourceAlpha = max(uniforms.fillColor.a, 0.0);
                 float3 visibleFillColor = sourceAlpha > 0.0001
                     ? clamp(uniforms.fillColor.rgb / sourceAlpha, 0.0, 1.0)
                     : float3(0.0);
-                return float4(visibleFillColor * lockedDestinationAlpha, lockedDestinationAlpha);
+                return float4(visibleFillColor * lockedDestinationAlpha, maskAlpha);
             }
-            return uniforms.fillColor;
+            return float4(uniforms.fillColor.rgb, maskAlpha);
         }
         """
 
@@ -119,16 +119,46 @@ final class SelectionPixelOperationRenderer {
             fatalError("Failed to compile SelectionPixelOperationRenderer shader: \(error)")
         }
 
-        let descriptor = MTLRenderPipelineDescriptor()
-        descriptor.vertexFunction = library.makeFunction(name: "selectionPixelOperationVertexShader")
-        descriptor.fragmentFunction = library.makeFunction(name: "selectionPixelOperationFragmentShader")
-        descriptor.colorAttachments[0].pixelFormat = .bgra8Unorm_srgb
-        descriptor.colorAttachments[0].isBlendingEnabled = false
+        func makePipeline(
+            configure attachment: (MTLRenderPipelineColorAttachmentDescriptor) -> Void
+        ) throws -> MTLRenderPipelineState {
+            let descriptor = MTLRenderPipelineDescriptor()
+            descriptor.vertexFunction = library.makeFunction(name: "selectionPixelOperationVertexShader")
+            descriptor.fragmentFunction = library.makeFunction(name: "selectionPixelOperationFragmentShader")
+            let colorAttachment = descriptor.colorAttachments[0]!
+            colorAttachment.pixelFormat = .bgra8Unorm_srgb
+            colorAttachment.isBlendingEnabled = true
+            attachment(colorAttachment)
+            return try device.makeRenderPipelineState(descriptor: descriptor)
+        }
 
         do {
-            pipelineState = try device.makeRenderPipelineState(descriptor: descriptor)
+            clearPipelineState = try makePipeline { attachment in
+                attachment.rgbBlendOperation = .add
+                attachment.alphaBlendOperation = .add
+                attachment.sourceRGBBlendFactor = .zero
+                attachment.destinationRGBBlendFactor = .oneMinusSourceAlpha
+                attachment.sourceAlphaBlendFactor = .zero
+                attachment.destinationAlphaBlendFactor = .oneMinusSourceAlpha
+            }
+            fillPipelineState = try makePipeline { attachment in
+                attachment.rgbBlendOperation = .add
+                attachment.alphaBlendOperation = .add
+                attachment.sourceRGBBlendFactor = .sourceAlpha
+                attachment.destinationRGBBlendFactor = .oneMinusSourceAlpha
+                attachment.sourceAlphaBlendFactor = .blendAlpha
+                attachment.destinationAlphaBlendFactor = .oneMinusSourceAlpha
+            }
+            alphaLockedPipelineState = try makePipeline { attachment in
+                attachment.rgbBlendOperation = .add
+                attachment.alphaBlendOperation = .add
+                attachment.sourceRGBBlendFactor = .sourceAlpha
+                attachment.destinationRGBBlendFactor = .oneMinusSourceAlpha
+                attachment.sourceAlphaBlendFactor = .zero
+                attachment.destinationAlphaBlendFactor = .one
+            }
         } catch {
-            fatalError("Failed to create SelectionPixelOperationRenderer pipeline: \(error)")
+            fatalError("Failed to create SelectionPixelOperationRenderer pipelines: \(error)")
         }
 
         let fallbackAlphaDescriptor = MTLTextureDescriptor.texture2DDescriptor(
@@ -208,7 +238,19 @@ final class SelectionPixelOperationRenderer {
             return
         }
 
+        let pipelineState: MTLRenderPipelineState
+        if alphaLockTexture != nil {
+            pipelineState = alphaLockedPipelineState
+        } else {
+            pipelineState = operationMode == .clear ? clearPipelineState : fillPipelineState
+        }
         encoder.setRenderPipelineState(pipelineState)
+        encoder.setBlendColor(
+            red: 0,
+            green: 0,
+            blue: 0,
+            alpha: premultipliedFillColor.alpha
+        )
         encoder.setScissorRect(MTLScissorRect(
             x: minX,
             y: minY,

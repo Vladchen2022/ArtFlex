@@ -75,6 +75,18 @@ struct ArtFlexApp: App {
                 }
                 .disabled(!commandTargetViewModel.canMergeVisible)
 
+                Button("盖印图层") {
+                    commandTargetViewModel.stampVisibleLayers()
+                }
+                .keyboardShortcut("e", modifiers: [.command, .option, .shift])
+                .disabled(commandTargetViewModel.isTransformingSelection)
+
+                Button("合并拷贝") {
+                    commandTargetViewModel.copyMergedPixels()
+                }
+                .keyboardShortcut("c", modifiers: [.command, .shift])
+                .disabled(commandTargetViewModel.isTransformingSelection)
+
                 Button("应用变形") {
                     commandTargetViewModel.applySelectionTransform()
                 }

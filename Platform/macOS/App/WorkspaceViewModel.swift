@@ -34,6 +34,11 @@ private struct RecentBrushAdjustmentSyncState: Equatable {
     let showsSelectionHighlight: Bool
 }
 
+private struct TimelapseDocumentContext: Equatable {
+    let documentName: String
+    let documentFileURL: URL?
+}
+
 private enum WholeLayerInteractionBoundsCacheEntry: Equatable {
     case ready(CanvasRect)
     case empty
@@ -168,9 +173,13 @@ final class WorkspaceViewModel: ObservableObject {
     @Published private(set) var toolGroupSurfaceTools = ToolSidebarGroup.defaultSurfaceTools
     @Published private(set) var transformPreviewOffset = CanvasPoint(x: 0, y: 0)
     @Published private(set) var freeTransformPreview = FreeTransformPreview.identity
+    @Published private(set) var freeTransformToolMode = FreeTransformToolMode.standard
+    @Published private(set) var freeTransformMeshWarpGrid: MeshWarpGrid?
+    @Published private(set) var selectedMeshWarpControlPointIndices: Set<Int> = []
     @Published private(set) var isApplyingGradientCommit = false
     @Published private(set) var isBucketFillInProgress = false
     @Published private(set) var isSavingSnapshot = false
+    @Published private(set) var isPreparingSnapshotCompare = false
     @Published private(set) var isLuminosityPreviewEnabled = false
     @Published private(set) var isFreeTransformDragging = false
     @Published private(set) var activeFreeTransformInteractionMode: FreeTransformInteractionMode?
@@ -195,6 +204,7 @@ final class WorkspaceViewModel: ObservableObject {
     private var isAdjustingLayerOpacity = false
     private var activeLayerOpacityChangeDidMutate = false
     private var transformState = TransformInteractionState()
+    private var activeMeshWarpDragControlPointIndices: Set<Int>?
     private var layerThumbnailCache: [LayerID: CGImage] = [:]
     private var generatorStrokeSession = GeneratorStrokeSessionState()
     private var activeLassoRawPoints: [CanvasPoint] = []
@@ -205,6 +215,8 @@ final class WorkspaceViewModel: ObservableObject {
     private var bucketFillTask: Task<Void, Never>?
     private var snapshotSaveRequestID: UInt64 = 0
     private var snapshotSaveTask: Task<Void, Never>?
+    private var snapshotComparePreparationRequestID: UInt64 = 0
+    private var snapshotComparePreparationTask: Task<Void, Never>?
     private var lassoRefreshCounter = 0  // 套索拖动时的刷新节流计数器
     private var freeTransformUsesImplicitSelection = false
     private var implicitFreeTransformSelectionShape: SelectionShape?
@@ -231,6 +243,7 @@ final class WorkspaceViewModel: ObservableObject {
     @Published private(set) var referenceImageLoadingSlotID: Int?
     @Published private(set) var isReferenceImageFloatingPanelPresented = false
     private var currentProjectURL: URL?
+    private var lastSyncedTimelapseDocumentContext: TimelapseDocumentContext?
     private var shouldResumeTimelapseAfterIdeation = false
     private var shouldResumeTimelapseAfterSnapshotCompare = false
     private var snapshotPreviewPreparationTasks: [UUID: Task<Void, Never>] = [:]
@@ -275,6 +288,7 @@ final class WorkspaceViewModel: ObservableObject {
     var debugCurveAdjustmentResolutionDecisionOverride: CurveAdjustmentResolutionDecision?
     var debugPixelOperationHistoryCaptureModeOverride: HistoryCaptureMode?
     var debugFillAtPointHistoryCaptureModeOverride: HistoryCaptureMode?
+    private(set) var debugTimelapseDocumentContextSyncCount = 0
 
     func debugSetCommittedSelectionShapeForTests(_ shape: SelectionShape?) {
         bootstrap.workspaceStore.updateSelection { selection in
@@ -414,6 +428,11 @@ final class WorkspaceViewModel: ObservableObject {
                 revealBrushLibraryPanel()
             }
             return
+        }
+        if currentTool == .straightLine, straightLineState.phase == .pending {
+            guard commitPendingStraightLine() else { return }
+        } else if currentTool == .straightLine, straightLineState.phase != .idle {
+            cancelStraightLineInteraction()
         }
         if currentTool != normalizedTool
             && !resolveColorAdjustmentSessionIfNeeded(reason: .toolChange) {
@@ -4669,7 +4688,58 @@ final class WorkspaceViewModel: ObservableObject {
         }
     }
 
+    func stampVisibleLayers() {
+        guard !isTransformingSelection else {
+            showStatus(.init(kind: .info, message: "请先应用或取消变形"))
+            return
+        }
+
+        _ = flushBrushEditingBoundary(reason: "stampVisibleLayers")
+        guard workspace.document.layers.contains(where: { $0.isVisible && $0.opacity > 0 }) else {
+            showStatus(.init(kind: .info, message: "当前没有可盖印的可见图层"))
+            return
+        }
+
+        do {
+            let stampedTexture = try makeVisibleCompositeTexture()
+            checkpointHistoryIfPossible(
+                operationKind: "layer.stampVisible",
+                topologyOperation: true,
+                additionalOperationKinds: ["layer.composite"]
+            )
+
+            var createdLayerID: LayerID?
+            bootstrap.workspaceStore.updateDocument { document in
+                createdLayerID = document.addLayer(named: "盖印图层").id
+            }
+
+            let state = bootstrap.workspaceStore.state
+            bootstrap.layerSurfaceStore.prepareTextures(
+                for: state.document,
+                metal: bootstrap.metalContext
+            )
+            guard
+                let createdLayerID,
+                let surfaceID = bootstrap.layerSurfaceStore.surfaceID(for: createdLayerID)
+            else {
+                throw CocoaError(.fileWriteUnknown)
+            }
+
+            bootstrap.layerSurfaceStore.swapTexture(for: surfaceID, with: stampedTexture)
+            refresh(invalidatedLayerIDs: [createdLayerID])
+            noteCanvasContentChanged(changedLayerIDs: [createdLayerID])
+            recordDrawingActivityIfNeeded()
+            showStatus(.init(kind: .success, message: "已盖印所有可见图层"))
+        } catch {
+            showStatus(.init(kind: .error, message: error.localizedDescription))
+        }
+    }
+
     func selectLayer(_ layerID: LayerID) {
+        if straightLineState.phase == .pending,
+           !commitPendingStraightLine() {
+            return
+        }
         _ = flushBrushEditingBoundary(reason: "selectLayer")
         if workspace.document.activeLayerID != layerID {
             guard resolveColorAdjustmentSessionIfNeeded(reason: .layerChange) else { return }
@@ -5186,6 +5256,10 @@ final class WorkspaceViewModel: ObservableObject {
 
     func enterGradientEditingViaShift() {
         guard !isApplyingGradientCommit else { return }
+        if workspace.toolSession.activeTool == .linearGradient,
+           linearGradientState.phase == .pendingPreview {
+            linearGradientState.phase = .editing
+        }
         relayIdeationOperation(.enterGradientEditing)
     }
 
@@ -5209,7 +5283,11 @@ final class WorkspaceViewModel: ObservableObject {
         }
     }
 
-    func beginGradientDrag(at point: CanvasPoint, modifiers: NSEvent.ModifierFlags = []) {
+    func beginGradientDrag(
+        at point: CanvasPoint,
+        modifiers: NSEvent.ModifierFlags = [],
+        handleHitRadius: Double? = nil
+    ) {
         ideationBranchActivityHandler?()
         if isApplyingGradientCommit {
             if let tool = activeGradientTool() {
@@ -5219,7 +5297,11 @@ final class WorkspaceViewModel: ObservableObject {
         }
         switch workspace.toolSession.activeTool {
         case .linearGradient:
-            beginLinearGradientDrag(at: point, modifiers: modifiers)
+            beginLinearGradientDrag(
+                at: point,
+                modifiers: modifiers,
+                handleHitRadius: handleHitRadius
+            )
         case .sectorGradient:
             beginSectorGradientDrag(at: point, modifiers: modifiers)
         default:
@@ -5319,7 +5401,49 @@ final class WorkspaceViewModel: ObservableObject {
         }
     }
 
-    private func beginLinearGradientDrag(at point: CanvasPoint, modifiers: NSEvent.ModifierFlags) {
+    private func beginLinearGradientDrag(
+        at point: CanvasPoint,
+        modifiers: NSEvent.ModifierFlags,
+        handleHitRadius: Double?
+    ) {
+        let resolvedHitRadius = max(handleHitRadius ?? 14, 1)
+        if linearGradientState.isEditingSession,
+           let geometry = linearGradientState.geometry {
+            if let handle = linearGradientHandleHitTest(
+                geometry,
+                point: point,
+                hitRadius: resolvedHitRadius
+            ) {
+                linearGradientState.phase = .draggingHandle(handle)
+                linearGradientState.dragStartPoint = point
+                linearGradientState.dragReferenceGeometry = geometry
+                return
+            }
+            if linearGradientPreviewContains(
+                geometry,
+                point: point,
+                hitRadius: resolvedHitRadius
+            ) {
+                linearGradientState.phase = .movingWholeGradient
+                linearGradientState.dragStartPoint = point
+                linearGradientState.dragReferenceGeometry = geometry
+                return
+            }
+        }
+
+        if shouldAutoApplyGradientBeforeNewDrag(hitExistingEditorTarget: false) {
+            deferredGradientAction = .gradientDrag(
+                DeferredGradientDrag(
+                    tool: .linearGradient,
+                    points: [point],
+                    modifiers: modifiers,
+                    didEnd: false
+                )
+            )
+            applyActiveGradientSession()
+            return
+        }
+
         linearGradientState = LinearGradientInteractionState(
             phase: .drawingLeg1,
             pointA: point,
@@ -5328,7 +5452,8 @@ final class WorkspaceViewModel: ObservableObject {
             dragStartPoint: point,
             dragReferenceGeometry: nil,
             leg1CandidatePoint: point,
-            hoverPoint: point
+            hoverPoint: point,
+            transitionMidpoint: 0.5
         )
     }
 
@@ -5351,15 +5476,27 @@ final class WorkspaceViewModel: ObservableObject {
             case .pointA:
                 state.pointA = point
                 state.pointB = reference.pointB
-                state.pointC = reference.pointC
+                state.pointC = defaultLinearGradientPointC(
+                    pointA: point,
+                    pointB: reference.pointB,
+                    canvasSize: workspace.document.canvasSize
+                )
             case .pointB:
                 state.pointA = reference.pointA
                 state.pointB = point
-                state.pointC = reference.pointC
-            case .pointC:
+                state.pointC = defaultLinearGradientPointC(
+                    pointA: reference.pointA,
+                    pointB: point,
+                    canvasSize: workspace.document.canvasSize
+                )
+            case .midpoint:
                 state.pointA = reference.pointA
                 state.pointB = reference.pointB
-                state.pointC = point
+                state.pointC = reference.pointC
+                state.transitionMidpoint = linearGradientTransitionMidpoint(
+                    for: point,
+                    geometry: reference
+                )
             }
         case .movingWholeGradient:
             guard
@@ -5377,75 +5514,184 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     private func endLinearGradientDrag(at point: CanvasPoint) {
-        let pointA = linearGradientState.pointA
-        let pointB = linearGradientState.pointB ?? point
-        guard let pointA else {
-            linearGradientState = .init()
-            return
-        }
-        guard distanceBetween(pointA, pointB) > 0.5 else {
-            linearGradientState = .init()
-            return
+        defer {
+            linearGradientState.dragStartPoint = nil
+            linearGradientState.dragReferenceGeometry = nil
+            linearGradientState.hoverPoint = point
         }
 
-        let pointC = defaultLinearGradientPointC(
-            pointA: pointA,
-            pointB: pointB,
-            canvasSize: workspace.document.canvasSize
-        )
-        linearGradientState.pointB = pointB
-        linearGradientState.pointC = pointC
-        linearGradientState.dragStartPoint = nil
-        linearGradientState.dragReferenceGeometry = nil
-        linearGradientState.hoverPoint = point
-        linearGradientState.phase = .drawingLeg1
-        applyLinearGradient(
-            geometry: LinearGradientGeometry(
+        switch linearGradientState.phase {
+        case .idle:
+            return
+        case .drawingLeg1, .drawingLeg2:
+            guard let pointA = linearGradientState.pointA else {
+                linearGradientState = .init()
+                return
+            }
+            let pointB = linearGradientState.pointB ?? point
+            guard distanceBetween(pointA, pointB) > 0.5 else {
+                linearGradientState = .init()
+                showStatus(.init(kind: .info, message: "渐变长度太短"))
+                return
+            }
+            linearGradientState.pointB = pointB
+            linearGradientState.pointC = defaultLinearGradientPointC(
                 pointA: pointA,
                 pointB: pointB,
-                pointC: pointC
+                canvasSize: workspace.document.canvasSize
             )
-        )
+            linearGradientState.phase = .editing
+            linearGradientState.leg1CandidatePoint = nil
+            showStatus(.init(
+                kind: .info,
+                message: "拖动起点、终点或中点调整渐变；Enter 应用，Esc 取消"
+            ))
+        case .draggingHandle, .movingWholeGradient:
+            linearGradientState.phase = .editing
+        case .editing, .pendingPreview:
+            break
+        }
     }
 
     func updateStraightLineHover(to point: CanvasPoint) {
         guard workspace.toolSession.activeTool == .straightLine else { return }
-        guard straightLineState.phase == .pickedA else { return }
-        straightLineState.hoverPoint = point
+        guard straightLineState.phase == .drawingLine else { return }
+        _ = updateStraightLineState(along: [point])
+    }
+
+    func beginStraightLineDrag(
+        at point: CanvasPoint,
+        paintVariationSeed seedOverride: UInt32? = nil,
+        initialBrushSize brushSizeOverride: Float? = nil,
+        thicknessAdjustmentDeadZone deadZoneOverride: Double? = nil
+    ) {
+        guard workspace.toolSession.activeTool == .straightLine else { return }
+        ideationBranchActivityHandler?()
+
+        if straightLineState.phase == .pending,
+           !commitPendingStraightLine() {
+            return
+        }
+
+        let paintVariationSeed = seedOverride ?? makePaintVariationSeed()
+        let brushSize = min(max(brushSizeOverride ?? workspace.toolSession.brush.size, 1), 1_000)
+        let thicknessAdjustmentDeadZone = max(
+            deadZoneOverride ?? straightLineDefaultThicknessDeadZoneScreenDistance,
+            1
+        )
+        if brushSizeOverride != nil {
+            setBrushSize(brushSize)
+        }
+        straightLineState.begin(
+            at: point,
+            brushSize: brushSize,
+            paintVariationSeed: paintVariationSeed,
+            thicknessAdjustmentDeadZone: thicknessAdjustmentDeadZone
+        )
+        relayIdeationOperation(.beginStraightLineDrag(
+            point: point,
+            brushSize: brushSize,
+            paintVariationSeed: paintVariationSeed,
+            thicknessAdjustmentDeadZone: thicknessAdjustmentDeadZone
+        ))
+        showStatus(.init(kind: .info, message: "拖动确定直线；末端垂直拖过约 50 px 可调整粗细"))
+    }
+
+    func updateStraightLineDrag(along points: [CanvasPoint]) {
+        guard workspace.toolSession.activeTool == .straightLine, !points.isEmpty else { return }
+        ideationBranchActivityHandler?()
+        if let adjustedBrushSize = updateStraightLineState(along: points) {
+            setBrushSize(adjustedBrushSize)
+        }
+        relayIdeationOperation(.updateStraightLineDrag(points))
+    }
+
+    func endStraightLineDrag(at point: CanvasPoint) {
+        guard workspace.toolSession.activeTool == .straightLine else { return }
+        ideationBranchActivityHandler?()
+        if let adjustedBrushSize = updateStraightLineState(along: [point]) {
+            setBrushSize(adjustedBrushSize)
+        }
+
+        var state = straightLineState
+        let didFinish = state.finishDrag(at: point)
+        straightLineState = state
+        relayIdeationOperation(.endStraightLineDrag(point))
+
+        if didFinish {
+            showStatus(.init(
+                kind: .info,
+                message: "直线待应用：离开画布自动确认，Enter 立即确认，Esc 取消"
+            ))
+        } else {
+            showStatus(.init(kind: .info, message: "直线长度太短"))
+        }
+    }
+
+    @discardableResult
+    func commitPendingStraightLine() -> Bool {
+        guard straightLineState.phase == .pending,
+              let pointA = straightLineState.pointA,
+              let pointB = straightLineState.pointB else {
+            return false
+        }
+
+        let pendingState = straightLineState
+        straightLineState = .init()
+        let didApply = applyStraightLine(
+            pointA: pointA,
+            pointB: pointB,
+            paintVariationSeed: pendingState.paintVariationSeed
+        )
+        if didApply {
+            relayIdeationOperation(.commitStraightLine)
+        } else {
+            straightLineState = pendingState
+        }
+        return didApply
     }
 
     func cancelStraightLineInteraction() {
         guard workspace.toolSession.activeTool == .straightLine else { return }
         guard straightLineState.phase != .idle else { return }
         straightLineState = .init()
+        relayIdeationOperation(.cancelStraightLine)
         showStatus(.init(kind: .info, message: "已取消直线"))
+    }
+
+    func handleCanvasPointerExit() {
+        guard workspace.toolSession.activeTool == .straightLine,
+              straightLineState.phase == .pending else {
+            return
+        }
+        _ = commitPendingStraightLine()
     }
 
     func handleStraightLineClick(at point: CanvasPoint, paintVariationSeed: UInt32? = nil) {
         guard workspace.toolSession.activeTool == .straightLine else { return }
 
         switch straightLineState.phase {
-        case .idle:
-            straightLineState.phase = .pickedA
-            straightLineState.pointA = point
-            straightLineState.hoverPoint = point
-            showStatus(.init(kind: .info, message: "已设置 A 点，请点击 B 点完成直线"))
-        case .pickedA:
-            guard let pointA = straightLineState.pointA, distanceBetween(pointA, point) > 0.05 else {
-                showStatus(.init(kind: .info, message: "A 与 B 需要拉开一点距离"))
-                return
-            }
-            let didApply = applyStraightLine(
-                pointA: pointA,
-                pointB: point,
-                paintVariationSeed: paintVariationSeed
-            )
-            if didApply {
-                straightLineState = .init()
-            } else {
-                straightLineState.hoverPoint = point
+        case .idle, .pending:
+            beginStraightLineDrag(at: point, paintVariationSeed: paintVariationSeed)
+        case .drawingLine, .adjustingThickness:
+            updateStraightLineDrag(along: [point])
+            endStraightLineDrag(at: point)
+            _ = commitPendingStraightLine()
+        }
+    }
+
+    @discardableResult
+    private func updateStraightLineState(along points: [CanvasPoint]) -> Float? {
+        guard !points.isEmpty else { return nil }
+        var state = straightLineState
+        var adjustedBrushSize: Float?
+        for point in points {
+            if let size = state.updateDrag(to: point) {
+                adjustedBrushSize = size
             }
         }
+        straightLineState = state
+        return adjustedBrushSize
     }
 
     func updateSectorGradientHover(to point: CanvasPoint) {
@@ -5475,6 +5721,7 @@ final class WorkspaceViewModel: ObservableObject {
         switch workspace.toolSession.activeTool {
         case .straightLine:
             handleStraightLineClick(at: point, paintVariationSeed: paintVariationSeed)
+            return
         case .polygonSelection:
             handlePolygonSelectionClick(at: point, modifiers: modifiers, clickCount: clickCount)
         default:
@@ -6303,7 +6550,10 @@ final class WorkspaceViewModel: ObservableObject {
             operationKind: "textureFill.drag",
             candidateChangedLayerIDs: [state.layerID],
             additionalOperationKinds: ["textureFillSliceRenderer"],
-            captureMode: .inPlaceChangedLayers([state.layerID])
+            captureMode: .inPlaceChangedLayers([state.layerID]),
+            workspaceOverride: workspaceSnapshotClearingSelection(
+                from: bootstrap.workspaceStore.state
+            )
         )
 
         _ = rebuildTextureFillFinalResult(from: state)
@@ -6850,8 +7100,86 @@ final class WorkspaceViewModel: ObservableObject {
         showStatus(.init(kind: .info, message: "已清除选区"))
     }
 
+    func featherSelection(radiusPixels: Int) {
+        guard !isTransformingSelection else {
+            showStatus(.init(kind: .info, message: "请先应用或取消变形"))
+            return
+        }
+        guard (1...512).contains(radiusPixels) else {
+            showStatus(.init(kind: .info, message: "羽化半径必须在 1–512 像素之间"))
+            return
+        }
+        guard let capturedSelection = bootstrap.workspaceStore.state.selection.committedShape else {
+            showStatus(.init(kind: .info, message: "没有可羽化的选区"))
+            return
+        }
+
+        _ = flushBrushEditingBoundary(reason: "featherSelection")
+        cancelActiveRasterizationTask()
+        selectionEpoch += 1
+        let capturedEpoch = selectionEpoch
+        let capturedCanvasSize = workspace.document.canvasSize
+        showStatus(.init(kind: .info, message: "正在羽化选区…"))
+
+        activeRasterizationTask = Task { [weak self] in
+            guard let self else { return }
+            let result = await Task.detached(priority: .userInitiated) {
+                Result {
+                    try self.featheredSelectionShape(
+                        capturedSelection,
+                        canvasSize: capturedCanvasSize,
+                        radiusPixels: radiusPixels
+                    )
+                }
+            }.value
+
+            guard !Task.isCancelled, self.selectionEpoch == capturedEpoch else { return }
+            guard self.bootstrap.workspaceStore.state.selection.committedShape == capturedSelection else { return }
+            self.activeRasterizationTask = nil
+
+            do {
+                let featheredSelection = try result.get()
+                self.checkpointSelectionChangeIfPossible(previousCommittedShape: capturedSelection)
+                self.bootstrap.workspaceStore.updateSelection { selection in
+                    selection.committedShape = featheredSelection
+                    selection.inProgressShape = nil
+                    selection.anchorPoint = nil
+                    selection.activeKind = nil
+                    selection.activeCombineMode = .replace
+                }
+                self.refreshLightweight()
+                self.showStatus(.init(kind: .success, message: "已羽化选区 \(radiusPixels) px"))
+            } catch {
+                self.showStatus(.init(kind: .error, message: error.localizedDescription))
+            }
+        }
+    }
+
     func beginSelectionTransform(at start: CanvasPoint) {
         beginSelectionTransform(at: start, mode: .move)
+    }
+
+    func setFreeTransformToolMode(_ mode: FreeTransformToolMode) {
+        guard workspace.toolSession.activeTool == .freeTransform else { return }
+        guard !isApplyingTransformCommit, freeTransformToolMode != mode else { return }
+
+        if mode == .standard,
+           freeTransformMeshWarpGrid?.isIdentity == false {
+            showStatus(.init(kind: .info, message: "请先应用或取消网格变形"))
+            return
+        }
+
+        freeTransformToolMode = mode
+        switch mode {
+        case .standard:
+            transformState.meshWarpGrid = nil
+            transformState.dragStartMeshWarpGrid = nil
+            setFreeTransformMeshWarpGrid(nil)
+        case .mesh:
+            ensureFreeTransformMeshWarpGridIfNeeded()
+        }
+        transformPreviewRevision &+= 1
+        relayIdeationOperation(.setFreeTransformToolMode(mode))
     }
 
     func beginSelectionTransform(at start: CanvasPoint, mode: FreeTransformInteractionMode) {
@@ -6867,6 +7195,27 @@ final class WorkspaceViewModel: ObservableObject {
         ensureWholeLayerInteractionBoundsAvailableIfNeeded(for: bootstrap.workspaceStore.state)
         activateImplicitFreeTransformSelectionIfNeeded()
         guard effectiveTransformOperationShape != nil else { return }
+        if freeTransformToolMode == .mesh {
+            ensureFreeTransformMeshWarpGridIfNeeded()
+            switch mode {
+            case .meshPoint(let index):
+                let wasSelected = selectedMeshWarpControlPointIndices.contains(index)
+                let togglesSelection = modifiers.contains(.shift)
+                selectedMeshWarpControlPointIndices = updatedMeshWarpControlPointSelection(
+                    current: selectedMeshWarpControlPointIndices,
+                    clickedIndex: index,
+                    togglesSelection: togglesSelection
+                )
+                activeMeshWarpDragControlPointIndices = togglesSelection && wasSelected
+                    ? []
+                    : selectedMeshWarpControlPointIndices
+            case .move:
+                selectedMeshWarpControlPointIndices = []
+                activeMeshWarpDragControlPointIndices = nil
+            case .scale, .rotate:
+                activeMeshWarpDragControlPointIndices = nil
+            }
+        }
 
         if transformState.isActive {
             // 已经激活（freeTransform 工具多次拖动）：只开始新的拖动，不重置 accumulated offset
@@ -6874,7 +7223,6 @@ final class WorkspaceViewModel: ObservableObject {
         } else {
             transformState.beginSession(at: start, mode: mode)
         }
-        _ = modifiers
         isFreeTransformDragging = true
         activeFreeTransformInteractionMode = mode
         freeTransformMoveLogCount = 0
@@ -6883,7 +7231,11 @@ final class WorkspaceViewModel: ObservableObject {
         }
         setFreeTransformPreview(transformState.preview)
         isTransformingSelection = transformState.isActive
-        relayIdeationOperation(.beginSelectionTransform(start: start, mode: mode))
+        relayIdeationOperation(.beginSelectionTransform(
+            start: start,
+            mode: mode,
+            modifiers: .init(flags: modifiers)
+        ))
     }
 
     func updateSelectionTransform(to point: CanvasPoint) {
@@ -6904,6 +7256,17 @@ final class WorkspaceViewModel: ObservableObject {
 
         switch transformState.interactionMode {
         case .move:
+            if freeTransformToolMode == .mesh,
+               let startGrid = transformState.dragStartMeshWarpGrid {
+                let delta = CanvasPoint(
+                    x: point.x - dragStartPoint.x,
+                    y: point.y - dragStartPoint.y
+                )
+                let nextGrid = startGrid.translated(by: delta)
+                transformState.meshWarpGrid = nextGrid
+                setFreeTransformMeshWarpGrid(nextGrid)
+                break
+            }
             let nextPreview = freeTransformTranslatedPreview(
                 dragStartPoint: dragStartPoint,
                 currentPoint: point,
@@ -6946,6 +7309,16 @@ final class WorkspaceViewModel: ObservableObject {
             transformState.preview = nextPreview
             transformState.accumulatedOffset = nextPreview.translation
             setFreeTransformPreview(nextPreview)
+        case .meshPoint(let index):
+            guard let startGrid = transformState.dragStartMeshWarpGrid else { return }
+            let delta = CanvasPoint(
+                x: point.x - dragStartPoint.x,
+                y: point.y - dragStartPoint.y
+            )
+            let draggedIndices = activeMeshWarpDragControlPointIndices ?? [index]
+            let nextGrid = startGrid.movingControlPoints(at: draggedIndices, by: delta)
+            transformState.meshWarpGrid = nextGrid
+            setFreeTransformMeshWarpGrid(nextGrid)
         }
         relayIdeationOperation(.updateSelectionTransform(point: point))
     }
@@ -6984,6 +7357,7 @@ final class WorkspaceViewModel: ObservableObject {
 
         if workspace.toolSession.activeTool == .freeTransform {
             transformState.endInteraction()
+            activeMeshWarpDragControlPointIndices = nil
             isFreeTransformDragging = false
             activeFreeTransformInteractionMode = nil
             transformLogger.debug("[transform] overlayHiddenDuringMove=false")
@@ -7023,6 +7397,9 @@ final class WorkspaceViewModel: ObservableObject {
 
         let isFreeTransform = workspace.toolSession.activeTool == .freeTransform
         let preview = isFreeTransform ? freeTransformPreview : transformState.preview
+        let meshWarpGrid = isFreeTransform && freeTransformToolMode == .mesh
+            ? freeTransformMeshWarpGrid
+            : nil
         let pixelDeltaX = Int(preview.translation.x.rounded())
         let pixelDeltaY = Int(preview.translation.y.rounded())
         let shouldClearSelection = clearSelectionAfterApply || freeTransformUsesImplicitSelection
@@ -7030,8 +7407,9 @@ final class WorkspaceViewModel: ObservableObject {
         let canvasSize = workspace.document.canvasSize
         let applyStart = DispatchTime.now().uptimeNanoseconds
 
-        guard !preview.isIdentity else {
+        guard !preview.isIdentity || meshWarpGrid?.isIdentity == false else {
             transformState.reset()
+            setFreeTransformMeshWarpGrid(nil)
             isFreeTransformDragging = false
             activeFreeTransformInteractionMode = nil
             freeTransformMoveLogCount = 0
@@ -7047,6 +7425,7 @@ final class WorkspaceViewModel: ObservableObject {
 
         guard let layerID = bootstrap.interactionController.activeEditableLayerID() else {
             transformState.reset()
+            setFreeTransformMeshWarpGrid(nil)
             isFreeTransformDragging = false
             activeFreeTransformInteractionMode = nil
             freeTransformMoveLogCount = 0
@@ -7065,6 +7444,7 @@ final class WorkspaceViewModel: ObservableObject {
             let texture = bootstrap.layerSurfaceStore.texture(for: surfaceID)
         else {
             transformState.reset()
+            setFreeTransformMeshWarpGrid(nil)
             isFreeTransformDragging = false
             activeFreeTransformInteractionMode = nil
             freeTransformMoveLogCount = 0
@@ -7083,6 +7463,7 @@ final class WorkspaceViewModel: ObservableObject {
         transformLogger.debug("[apply] historyCheckpointMs=\(historyCheckpointDurationMs, privacy: .public)")
         isApplyingTransformCommit = true
         let capturedPreview = preview
+        let capturedMeshWarpGrid = meshWarpGrid
         let buildStart = DispatchTime.now().uptimeNanoseconds
 
         transformPreviewSessionBuilder.makeSession(
@@ -7105,6 +7486,7 @@ final class WorkspaceViewModel: ObservableObject {
             guard let session else {
                 self.isApplyingTransformCommit = false
                 self.transformState.reset()
+                self.setFreeTransformMeshWarpGrid(nil)
                 self.isFreeTransformDragging = false
                 self.activeFreeTransformInteractionMode = nil
                 self.freeTransformMoveLogCount = 0
@@ -7124,6 +7506,7 @@ final class WorkspaceViewModel: ObservableObject {
             } catch {
                 self.isApplyingTransformCommit = false
                 self.transformState.reset()
+                self.setFreeTransformMeshWarpGrid(nil)
                 self.isFreeTransformDragging = false
                 self.activeFreeTransformInteractionMode = nil
                 self.freeTransformMoveLogCount = 0
@@ -7141,6 +7524,7 @@ final class WorkspaceViewModel: ObservableObject {
             compositor.composeTransformedTexture(
                 session: session,
                 preview: capturedPreview,
+                meshWarpGrid: capturedMeshWarpGrid,
                 canvasSize: canvasSize,
                 metal: self.bootstrap.metalContext
             ) { [weak self] targetTexture in
@@ -7154,6 +7538,7 @@ final class WorkspaceViewModel: ObservableObject {
                 guard let targetTexture else {
                     self.isApplyingTransformCommit = false
                     self.transformState.reset()
+                    self.setFreeTransformMeshWarpGrid(nil)
                     self.isFreeTransformDragging = false
                     self.activeFreeTransformInteractionMode = nil
                     self.freeTransformMoveLogCount = 0
@@ -7171,6 +7556,7 @@ final class WorkspaceViewModel: ObservableObject {
 
                 self.isApplyingTransformCommit = false
                 self.transformState.reset()
+                self.setFreeTransformMeshWarpGrid(nil)
                 self.isFreeTransformDragging = false
                 self.activeFreeTransformInteractionMode = nil
                 self.freeTransformMoveLogCount = 0
@@ -7203,7 +7589,7 @@ final class WorkspaceViewModel: ObservableObject {
                 self.transformLogger.debug("[apply] totalMs=\(totalDurationMs, privacy: .public)")
                 self.showStatus(.init(
                     kind: .success,
-                    message: (
+                    message: capturedMeshWarpGrid != nil ? "已应用网格变形" : (
                         abs(capturedPreview.scaleX - 1) < 0.0001 &&
                         abs(capturedPreview.scaleY - 1) < 0.0001 &&
                         abs(capturedPreview.rotationRadians) < 0.0001
@@ -7221,6 +7607,7 @@ final class WorkspaceViewModel: ObservableObject {
 
     private func cancelSelectionTransform(clearSelectionAfterCancel: Bool) {
         transformState.reset()
+        setFreeTransformMeshWarpGrid(nil)
         isFreeTransformDragging = false
         activeFreeTransformInteractionMode = nil
         freeTransformMoveLogCount = 0
@@ -7245,6 +7632,37 @@ final class WorkspaceViewModel: ObservableObject {
         freeTransformPreview = preview
         transformPreviewOffset = preview.translation
         transformPreviewRevision &+= 1
+    }
+
+    private func setFreeTransformMeshWarpGrid(_ grid: MeshWarpGrid?) {
+        freeTransformMeshWarpGrid = grid
+        if grid == nil {
+            selectedMeshWarpControlPointIndices = []
+            activeMeshWarpDragControlPointIndices = nil
+        }
+        transformPreviewRevision &+= 1
+    }
+
+    private func ensureFreeTransformMeshWarpGridIfNeeded() {
+        guard freeTransformToolMode == .mesh else { return }
+        guard freeTransformMeshWarpGrid == nil else { return }
+        guard let bounds = effectiveTransformInteractionShape?.bounds else { return }
+
+        var grid = MeshWarpGrid.regular(bounds: bounds)
+        if !freeTransformPreview.isIdentity {
+            grid = grid.applying(
+                freeTransformAffineTransform(
+                    bounds: bounds,
+                    preview: freeTransformPreview
+                )
+            )
+            transformState.preview = .identity
+            transformState.accumulatedOffset = .init(x: 0, y: 0)
+            setFreeTransformPreview(.identity)
+        }
+        transformState.meshWarpGrid = grid
+        transformState.dragStartMeshWarpGrid = grid
+        setFreeTransformMeshWarpGrid(grid)
     }
 
     private func rotatedPreview(
@@ -7303,6 +7721,9 @@ final class WorkspaceViewModel: ObservableObject {
             transformState.dragStartPoint = nil // 只激活，不开始拖动
             setFreeTransformPreview(.identity)
         }
+        if freeTransformToolMode == .mesh {
+            ensureFreeTransformMeshWarpGridIfNeeded()
+        }
         isTransformingSelection = transformState.isActive
     }
 
@@ -7329,6 +7750,15 @@ final class WorkspaceViewModel: ObservableObject {
             bounds: bounds,
             pathPoints: []
         )
+    }
+
+    var displayedMeshWarpGrid: MeshWarpGrid? {
+        guard freeTransformToolMode == .mesh else { return nil }
+        if let freeTransformMeshWarpGrid {
+            return freeTransformMeshWarpGrid
+        }
+        guard let bounds = effectiveTransformInteractionShape?.bounds else { return nil }
+        return MeshWarpGrid.regular(bounds: bounds)
     }
 
     var transformPreparationSelectionShape: SelectionShape? {
@@ -7560,6 +7990,43 @@ final class WorkspaceViewModel: ObservableObject {
 
             bootstrap.pixelClipboardController.store(payload)
             showStatus(.init(kind: .success, message: "已复制像素"))
+        } catch {
+            showStatus(.init(kind: .error, message: error.localizedDescription))
+        }
+    }
+
+    func copyMergedPixels() {
+        guard !isTransformingSelection else {
+            showStatus(.init(kind: .info, message: "请先应用或取消变形"))
+            return
+        }
+
+        _ = flushBrushEditingBoundary(reason: "copyMergedPixels")
+        guard workspace.document.layers.contains(where: { $0.isVisible && $0.opacity > 0 }) else {
+            showStatus(.init(kind: .info, message: "当前没有可合并拷贝的可见图层"))
+            return
+        }
+
+        do {
+            let compositeTexture = try makeVisibleCompositeTexture()
+            guard let payload = try makePixelClipboardPayload(
+                from: compositeTexture,
+                selectionShape: workspace.selection.committedShape,
+                canvasSize: workspace.document.canvasSize
+            ) else {
+                showStatus(.init(kind: .info, message: "选取范围内没有可复制的像素"))
+                return
+            }
+
+            bootstrap.pixelClipboardController.store(payload)
+            showStatus(
+                .init(
+                    kind: .success,
+                    message: workspace.selection.committedShape == nil
+                        ? "已合并拷贝所有可见图层"
+                        : "已合并拷贝选区内的可见图层"
+                )
+            )
         } catch {
             showStatus(.init(kind: .error, message: error.localizedDescription))
         }
@@ -8278,6 +8745,7 @@ final class WorkspaceViewModel: ObservableObject {
             pointA: pointA,
             pointB: pointB,
             pointC: pointC,
+            transitionMidpoint: Float(geometry.transitionMidpoint),
             color: gradientPreviewColor,
             paintJitterAmount: displayedPaintJitterAmount,
             paintContrastAmount: displayedPaintContrastAmount,
@@ -8470,6 +8938,12 @@ final class WorkspaceViewModel: ObservableObject {
             return true
         }
 
+        if (event.keyCode == 36 || event.keyCode == 76),
+           workspace.toolSession.activeTool == .straightLine,
+           straightLineState.phase == .pending {
+            return commitPendingStraightLine()
+        }
+
         if event.keyCode == 53,
            workspace.toolSession.activeTool == .straightLine,
            straightLineState.phase != .idle {
@@ -8554,6 +9028,18 @@ final class WorkspaceViewModel: ObservableObject {
             return importColorPanelPalette(fromPasteboard: .general)
         }
 
+        if normalizedModifiers == [.command, .option, .shift],
+           event.charactersIgnoringModifiers?.lowercased() == "e" {
+            stampVisibleLayers()
+            return true
+        }
+
+        if normalizedModifiers == [.command, .shift],
+           event.charactersIgnoringModifiers?.lowercased() == "c" {
+            copyMergedPixels()
+            return true
+        }
+
         if normalizedModifiers == [.command],
            let shortcut = event.charactersIgnoringModifiers?.lowercased() {
             switch shortcut {
@@ -8592,8 +9078,10 @@ final class WorkspaceViewModel: ObservableObject {
             return true
         }
 
-        if (event.keyCode == 51 || event.keyCode == 117),
-           normalizedModifiers == [.option] {
+        if isForegroundColorFillShortcut(
+            keyCode: event.keyCode,
+            modifiers: normalizedModifiers
+        ) {
             fillLegalPixelsWithForegroundColorShortcut()
             return true
         }
@@ -9034,6 +9522,11 @@ final class WorkspaceViewModel: ObservableObject {
             }
         }
         ideationBranchActivityHandler?()
+        if workspace.toolSession.activeTool == .straightLine,
+           straightLineState.phase != .idle {
+            cancelStraightLineInteraction()
+            return
+        }
         _ = drainPendingBrushCommitsIfNeeded(resetLiveSession: true)
         if ideationUndoHandler?() == true {
             return
@@ -9084,6 +9577,11 @@ final class WorkspaceViewModel: ObservableObject {
             }
         }
         ideationBranchActivityHandler?()
+        if workspace.toolSession.activeTool == .straightLine,
+           straightLineState.phase != .idle {
+            cancelStraightLineInteraction()
+            return
+        }
         _ = drainPendingBrushCommitsIfNeeded(resetLiveSession: true)
         if ideationRedoHandler?() == true {
             return
@@ -9172,7 +9670,6 @@ final class WorkspaceViewModel: ObservableObject {
             let snapshot = try makeVisibleCompositeSnapshot()
             let savedSnapshot = makeSavedCanvasSnapshot(from: snapshot, includesPreviewImage: false)
             savedSnapshots.append(savedSnapshot)
-            prepareSavedSnapshotPreviewIfNeeded(for: savedSnapshot.id)
             showStatus(.init(kind: .success, message: "已保存快照（\(savedSnapshots.count)/\(Self.maxSavedSnapshotCount)）"))
         } catch {
             showStatus(.init(kind: .error, message: error.localizedDescription))
@@ -9181,6 +9678,7 @@ final class WorkspaceViewModel: ObservableObject {
 
     func requestSnapshotSavePrimaryAction() {
         guard !isSavingSnapshot else { return }
+        guard !isPreparingSnapshotCompare else { return }
         guard snapshotCompareSession == nil else { return }
         guard ideationSession == nil else {
             showStatus(.init(kind: .info, message: "方案试探期间不可使用快照保存"))
@@ -9188,7 +9686,7 @@ final class WorkspaceViewModel: ObservableObject {
         }
 
         if savedSnapshots.count >= Self.maxSavedSnapshotCount {
-            openSnapshotCompare()
+            requestOpenSnapshotCompare()
             return
         }
 
@@ -9197,6 +9695,7 @@ final class WorkspaceViewModel: ObservableObject {
             let compositeTexture = try makeVisibleCompositeTexture(waitUntilCompleted: false)
             let serializerBox = WorkspaceUncheckedBox(bootstrap.textureSerializer)
             let textureBox = WorkspaceUncheckedBox(compositeTexture)
+            let documentID = workspace.document.metadata.drawingStatsID
 
             snapshotSaveRequestID &+= 1
             let requestID = snapshotSaveRequestID
@@ -9214,6 +9713,7 @@ final class WorkspaceViewModel: ObservableObject {
                 self.snapshotSaveTask = nil
                 self.isSavingSnapshot = false
                 guard !Task.isCancelled else { return }
+                guard self.workspace.document.metadata.drawingStatsID == documentID else { return }
 
                 do {
                     let savedSnapshot = self.makeSavedCanvasSnapshot(
@@ -9222,7 +9722,6 @@ final class WorkspaceViewModel: ObservableObject {
                     )
                     guard self.savedSnapshots.count < Self.maxSavedSnapshotCount else { return }
                     self.savedSnapshots.append(savedSnapshot)
-                    self.prepareSavedSnapshotPreviewIfNeeded(for: savedSnapshot.id)
                     self.showStatus(
                         .init(
                             kind: .success,
@@ -9234,6 +9733,78 @@ final class WorkspaceViewModel: ObservableObject {
                 }
             }
         } catch {
+            showStatus(.init(kind: .error, message: error.localizedDescription))
+        }
+    }
+
+    func requestOpenSnapshotCompare() {
+        guard !isPreparingSnapshotCompare else { return }
+        guard !isSavingSnapshot else {
+            showStatus(.init(kind: .info, message: "快照保存完成后再进入对比"))
+            return
+        }
+        guard snapshotCompareSession == nil else {
+            showStatus(.init(kind: .info, message: "快照对比已开启"))
+            return
+        }
+        guard ideationSession == nil else {
+            showStatus(.init(kind: .info, message: "方案试探期间不可进入快照对比"))
+            return
+        }
+        guard !savedSnapshots.isEmpty else {
+            showStatus(.init(kind: .info, message: "当前还没有已保存的快照"))
+            return
+        }
+
+        do {
+            _ = flushBrushEditingBoundary(reason: "requestOpenSnapshotCompare")
+            suspendTimelapseForSnapshotCompareIfNeeded()
+            let compositeTexture = try makeVisibleCompositeTexture(waitUntilCompleted: false)
+            let serializerBox = WorkspaceUncheckedBox(bootstrap.textureSerializer)
+            let textureBox = WorkspaceUncheckedBox(compositeTexture)
+            let documentID = workspace.document.metadata.drawingStatsID
+
+            snapshotComparePreparationRequestID &+= 1
+            let requestID = snapshotComparePreparationRequestID
+            isPreparingSnapshotCompare = true
+            showStatus(.init(kind: .info, message: "正在准备快照对比…"))
+
+            snapshotComparePreparationTask = Task { [weak self] in
+                let result = await Task.detached(priority: .userInitiated) {
+                    Result {
+                        try serializerBox.value.snapshot(texture: textureBox.value)
+                    }
+                }.value
+
+                guard let self, self.snapshotComparePreparationRequestID == requestID else { return }
+                self.snapshotComparePreparationTask = nil
+                self.isPreparingSnapshotCompare = false
+                guard !Task.isCancelled else {
+                    self.resumeTimelapseAfterSnapshotCompareIfNeeded()
+                    return
+                }
+                guard self.workspace.document.metadata.drawingStatsID == documentID else {
+                    self.resumeTimelapseAfterSnapshotCompareIfNeeded()
+                    return
+                }
+
+                do {
+                    let frozenSnapshot = self.makeSavedCanvasSnapshot(
+                        from: try result.get(),
+                        includesPreviewImage: false
+                    )
+                    self.snapshotCompareSession = SnapshotCompareSessionState(
+                        frozenCurrentSnapshot: frozenSnapshot
+                    )
+                    self.prepareFrozenSnapshotPreviewIfNeeded(for: frozenSnapshot)
+                    self.showStatus(.init(kind: .success, message: "已进入快照对比"))
+                } catch {
+                    self.resumeTimelapseAfterSnapshotCompareIfNeeded()
+                    self.showStatus(.init(kind: .error, message: error.localizedDescription))
+                }
+            }
+        } catch {
+            resumeTimelapseAfterSnapshotCompareIfNeeded()
             showStatus(.init(kind: .error, message: error.localizedDescription))
         }
     }
@@ -9265,9 +9836,6 @@ final class WorkspaceViewModel: ObservableObject {
                 )
             }
             snapshotCompareSession = SnapshotCompareSessionState(frozenCurrentSnapshot: frozenSnapshot)
-            for savedSnapshot in savedSnapshots {
-                prepareSavedSnapshotPreviewIfNeeded(for: savedSnapshot.id)
-            }
             prepareFrozenSnapshotPreviewIfNeeded(for: frozenSnapshot)
             showStatus(.init(kind: .success, message: "已进入快照对比"))
         } catch {
@@ -9285,8 +9853,16 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func clearSavedSnapshots() {
+        let wasSaving = isSavingSnapshot
+        cancelPendingSnapshotSave()
+        cancelPendingSnapshotComparePreparation(resumeTimelapseIfNeeded: true)
         guard !savedSnapshots.isEmpty else {
-            showStatus(.init(kind: .info, message: "当前没有可清空的快照"))
+            showStatus(
+                .init(
+                    kind: .info,
+                    message: wasSaving ? "已取消快照保存" : "当前没有可清空的快照"
+                )
+            )
             return
         }
 
@@ -9379,18 +9955,18 @@ final class WorkspaceViewModel: ObservableObject {
 
         Task { [weak self] in
             guard let self else { return }
-            do {
-                try await withThrowingTaskGroup(of: Void.self) { group in
+            let result = await Task.detached(priority: .utility) {
+                Result {
                     for entry in exportEntries {
                         let outputURL = directoryURL
                             .appendingPathComponent("\(defaultDirectoryName)-\(entry.index + 1).png")
-                        group.addTask(priority: .userInitiated) {
-                            try boxedExporter.value.export(snapshot: entry.snapshot, to: outputURL)
-                        }
+                        try boxedExporter.value.export(snapshot: entry.snapshot, to: outputURL)
                     }
-                    try await group.waitForAll()
                 }
+            }.value
 
+            do {
+                try result.get()
                 self.showStatus(.init(kind: .success, message: "已导出 \(exportEntries.count) 个快照"))
             } catch {
                 self.showStatus(.init(kind: .error, message: error.localizedDescription))
@@ -9399,6 +9975,10 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func startIdeationSession() {
+        guard !isSavingSnapshot, !isPreparingSnapshotCompare else {
+            showStatus(.init(kind: .info, message: "快照任务完成后再进入方案试探"))
+            return
+        }
         guard snapshotCompareSession == nil else {
             showStatus(.init(kind: .info, message: "快照对比期间不可进入方案试探"))
             return
@@ -9474,47 +10054,58 @@ final class WorkspaceViewModel: ObservableObject {
             return
         }
         let boxedExporter = WorkspaceUncheckedBox(bootstrap.pngExporter)
+        let boxedSerializer = WorkspaceUncheckedBox(bootstrap.textureSerializer)
 
         showStatus(.init(kind: .info, message: "正在导出 4 个草图..."))
 
-        Task { [weak self] in
-            guard let self else { return }
-            do {
-                var snapshots: [(index: Int, snapshot: LayerTextureSnapshot)] = []
-                snapshots.reserveCapacity(ideationSession.branches.count)
+        do {
+            var composites: [(index: Int, texture: MTLTexture)] = []
+            composites.reserveCapacity(ideationSession.branches.count)
+            for (index, branch) in ideationSession.branches.enumerated() {
+                _ = branch.viewModel.flushBrushEditingBoundary(
+                    reason: "exportIdeationVariantsToDisk.branch\(index)"
+                )
+                composites.append(
+                    (
+                        index: index,
+                        texture: try branch.viewModel.makeVisibleCompositeTexture(waitUntilCompleted: false)
+                    )
+                )
+            }
+            let boxedComposites = WorkspaceUncheckedBox(composites)
 
-                for (index, branch) in ideationSession.branches.enumerated() {
-                    let snapshot = try await MainActor.run {
-                        _ = branch.viewModel.flushBrushEditingBoundary(
-                            reason: "exportIdeationVariantsToDisk.branch\(index)"
-                        )
-                        return try branch.viewModel.makeVisibleCompositeSnapshot()
-                    }
-                    snapshots.append((index, snapshot))
-                    await Task.yield()
-                }
-
-                try await withThrowingTaskGroup(of: Void.self) { group in
-                    for entry in snapshots {
-                        let outputURL = directoryURL
-                            .appendingPathComponent("\(defaultDirectoryName)-\(entry.index + 1).png")
-                        group.addTask(priority: .userInitiated) {
-                            try boxedExporter.value.export(snapshot: entry.snapshot, to: outputURL)
+            Task { [weak self] in
+                guard let self else { return }
+                let result = await Task.detached(priority: .utility) {
+                    Result {
+                        for entry in boxedComposites.value {
+                            let snapshot = try boxedSerializer.value.snapshot(texture: entry.texture)
+                            let outputURL = directoryURL
+                                .appendingPathComponent("\(defaultDirectoryName)-\(entry.index + 1).png")
+                            try boxedExporter.value.export(snapshot: snapshot, to: outputURL)
                         }
                     }
-                    try await group.waitForAll()
-                }
+                }.value
 
-                self.showStatus(.init(kind: .success, message: "已导出 4 个草图"))
-            } catch {
-                self.showStatus(.init(kind: .error, message: error.localizedDescription))
+                do {
+                    try result.get()
+                    self.showStatus(.init(kind: .success, message: "已导出 4 个草图"))
+                } catch {
+                    self.showStatus(.init(kind: .error, message: error.localizedDescription))
+                }
             }
+        } catch {
+            showStatus(.init(kind: .error, message: error.localizedDescription))
         }
     }
 
     @discardableResult
     func saveProject() -> Bool {
-        _ = drainPendingBrushCommitsIfNeeded(resetLiveSession: false)
+        if straightLineState.phase == .pending,
+           !commitPendingStraightLine() {
+            return false
+        }
+        _ = flushBrushEditingBoundary(reason: "saveProject")
         pauseDrawingStatsTracking()
         let documentName = workspace.document.metadata.name
         let url: URL
@@ -10252,6 +10843,7 @@ final class WorkspaceViewModel: ObservableObject {
             applyStroke(samples: samples)
         case .endStroke:
             endStroke()
+            refreshLightweight(reason: "applyIdeationOperation.endStroke")
         case .beginGradientDrag(let point, let modifiers):
             beginGradientDrag(at: point, modifiers: modifiers.eventFlags)
         case .updateGradientDrag(let point, let modifiers):
@@ -10264,6 +10856,26 @@ final class WorkspaceViewModel: ObservableObject {
             applyActiveGradientSession()
         case .cancelGradientSession:
             cancelCanvasToolInteraction()
+        case .beginStraightLineDrag(
+            let point,
+            let brushSize,
+            let paintVariationSeed,
+            let thicknessAdjustmentDeadZone
+        ):
+            beginStraightLineDrag(
+                at: point,
+                paintVariationSeed: paintVariationSeed,
+                initialBrushSize: brushSize,
+                thicknessAdjustmentDeadZone: thicknessAdjustmentDeadZone
+            )
+        case .updateStraightLineDrag(let points):
+            updateStraightLineDrag(along: points)
+        case .endStraightLineDrag(let point):
+            endStraightLineDrag(at: point)
+        case .commitStraightLine:
+            _ = commitPendingStraightLine()
+        case .cancelStraightLine:
+            cancelStraightLineInteraction()
         case .fillAtPoint(let point):
             fillAtPoint(point)
         case .applyCanvasCrop(let bounds):
@@ -10286,8 +10898,10 @@ final class WorkspaceViewModel: ObservableObject {
             moveSelectionPreview(by: deltaX, deltaY: deltaY)
         case .commitSelectionMove:
             commitSelectionMove()
-        case .beginSelectionTransform(let start, let mode):
-            beginSelectionTransform(at: start, mode: mode)
+        case .setFreeTransformToolMode(let mode):
+            setFreeTransformToolMode(mode)
+        case .beginSelectionTransform(let start, let mode, let modifiers):
+            beginSelectionTransform(at: start, mode: mode, modifiers: modifiers.eventFlags)
         case .updateSelectionTransform(let point):
             updateSelectionTransform(to: point)
         case .commitSelectionTransform(let end):
@@ -10313,12 +10927,33 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func applyIdeationEditingContext(_ context: IdeationEditingContext) {
-        bootstrap.workspaceStore.updateToolSession { $0 = context.toolSession }
-        bootstrap.workspaceStore.updateColorPanel { $0 = context.colorPanel }
-        bootstrap.workspaceStore.updateBrushLibrary { $0 = context.brushLibrary }
-        bootstrap.workspaceStore.updatePatternLibrary { $0 = context.patternLibrary }
-        bootstrap.workspaceStore.updateTipImageLibrary { $0 = context.tipImageLibrary }
-        bootstrap.workspaceStore.updateGenerator { $0 = context.generator }
+        let current = workspace
+        var didChange = false
+        if current.toolSession != context.toolSession {
+            bootstrap.workspaceStore.updateToolSession { $0 = context.toolSession }
+            didChange = true
+        }
+        if current.colorPanel != context.colorPanel {
+            bootstrap.workspaceStore.updateColorPanel { $0 = context.colorPanel }
+            didChange = true
+        }
+        if current.brushLibrary != context.brushLibrary {
+            bootstrap.workspaceStore.updateBrushLibrary { $0 = context.brushLibrary }
+            didChange = true
+        }
+        if current.patternLibrary != context.patternLibrary {
+            bootstrap.workspaceStore.updatePatternLibrary { $0 = context.patternLibrary }
+            didChange = true
+        }
+        if current.tipImageLibrary != context.tipImageLibrary {
+            bootstrap.workspaceStore.updateTipImageLibrary { $0 = context.tipImageLibrary }
+            didChange = true
+        }
+        if current.generator != context.generator {
+            bootstrap.workspaceStore.updateGenerator { $0 = context.generator }
+            didChange = true
+        }
+        guard didChange else { return }
         refreshLightweight()
     }
 
@@ -10384,9 +11019,33 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     private func resetSnapshotToolState(resumeTimelapseIfNeeded: Bool) {
+        cancelPendingSnapshotSave()
+        cancelPendingSnapshotComparePreparation(resumeTimelapseIfNeeded: false)
         savedSnapshots.removeAll()
         cancelSnapshotPreviewPreparationTasks()
         snapshotCompareSession = nil
+        if resumeTimelapseIfNeeded {
+            resumeTimelapseAfterSnapshotCompareIfNeeded()
+        } else {
+            shouldResumeTimelapseAfterSnapshotCompare = false
+        }
+    }
+
+    private func cancelPendingSnapshotSave() {
+        snapshotSaveRequestID &+= 1
+        snapshotSaveTask?.cancel()
+        snapshotSaveTask = nil
+        isSavingSnapshot = false
+    }
+
+    private func cancelPendingSnapshotComparePreparation(resumeTimelapseIfNeeded: Bool) {
+        let wasPreparing = isPreparingSnapshotCompare
+        snapshotComparePreparationRequestID &+= 1
+        snapshotComparePreparationTask?.cancel()
+        snapshotComparePreparationTask = nil
+        isPreparingSnapshotCompare = false
+
+        guard wasPreparing else { return }
         if resumeTimelapseIfNeeded {
             resumeTimelapseAfterSnapshotCompareIfNeeded()
         } else {
@@ -10414,7 +11073,7 @@ final class WorkspaceViewModel: ObservableObject {
 
         let sourceSnapshot = snapshot.snapshot
         let previewDimension = Self.snapshotComparePreviewDimension
-        snapshotPreviewPreparationTasks[id] = Task.detached(priority: .userInitiated) { [sourceSnapshot] in
+        snapshotPreviewPreparationTasks[id] = Task.detached(priority: .utility) { [sourceSnapshot] in
             let image = WorkspaceViewModel.snapshotImage(
                 from: sourceSnapshot,
                 maxDimension: previewDimension
@@ -10422,6 +11081,10 @@ final class WorkspaceViewModel: ObservableObject {
 
             await MainActor.run { [weak self] in
                 guard let self else { return }
+                guard !Task.isCancelled else {
+                    self.snapshotPreviewPreparationTasks[id] = nil
+                    return
+                }
                 guard let updatedIndex = self.savedSnapshots.firstIndex(where: { $0.id == id }) else {
                     self.snapshotPreviewPreparationTasks[id] = nil
                     return
@@ -10445,7 +11108,7 @@ final class WorkspaceViewModel: ObservableObject {
         let sourceSnapshot = snapshot.snapshot
         let previewDimension = Self.snapshotComparePreviewDimension
 
-        frozenSnapshotPreviewPreparationTask = Task.detached(priority: .userInitiated) { [sourceSnapshot] in
+        frozenSnapshotPreviewPreparationTask = Task.detached(priority: .utility) { [sourceSnapshot] in
             let image = WorkspaceViewModel.snapshotImage(
                 from: sourceSnapshot,
                 maxDimension: previewDimension
@@ -10453,6 +11116,10 @@ final class WorkspaceViewModel: ObservableObject {
 
             await MainActor.run { [weak self] in
                 guard let self else { return }
+                guard !Task.isCancelled else {
+                    self.frozenSnapshotPreviewPreparationTask = nil
+                    return
+                }
                 guard let session = self.snapshotCompareSession else {
                     self.frozenSnapshotPreviewPreparationTask = nil
                     return
@@ -10500,10 +11167,15 @@ final class WorkspaceViewModel: ObservableObject {
         let bytesPerPixel = 4
         let targetBytesPerRow = targetWidth * bytesPerPixel
         var rgba = [UInt8](repeating: 0, count: targetHeight * targetBytesPerRow)
+        var wasCancelled = false
 
         snapshot.pixelData.withUnsafeBytes { rawBuffer in
             let sourceBytes = rawBuffer.bindMemory(to: UInt8.self)
             for targetY in 0..<targetHeight {
+                if Task.isCancelled {
+                    wasCancelled = true
+                    break
+                }
                 let sourceY = Swift.min((targetY * snapshot.height) / targetHeight, snapshot.height - 1)
                 for targetX in 0..<targetWidth {
                     let sourceX = Swift.min((targetX * snapshot.width) / targetWidth, snapshot.width - 1)
@@ -10516,6 +11188,8 @@ final class WorkspaceViewModel: ObservableObject {
                 }
             }
         }
+
+        guard !wasCancelled else { return nil }
 
         guard let provider = CGDataProvider(data: Data(rgba) as CFData) else {
             return nil
@@ -10646,6 +11320,8 @@ final class WorkspaceViewModel: ObservableObject {
             metal: bootstrap.metalContext
         )
 
+        var textureCopies: [(source: MTLTexture, destination: MTLTexture)] = []
+        var copiedLayerIDs: [LayerID] = []
         for layer in sourceWorkspace.document.layers {
             guard
                 let sourceSurfaceID = sourceLayerSurfaceStore.surfaceID(for: layer.id),
@@ -10656,15 +11332,29 @@ final class WorkspaceViewModel: ObservableObject {
                 continue
             }
 
-            bootstrap.layerSurfaceStore.copyTexture(
-                from: sourceTexture,
-                to: destinationTexture,
-                metal: bootstrap.metalContext
-            )
-            if sourceLayerSurfaceStore.isKnownTransparent(layerID: layer.id) {
-                bootstrap.layerSurfaceStore.markKnownTransparent(for: layer.id)
+            textureCopies.append((source: sourceTexture, destination: destinationTexture))
+            copiedLayerIDs.append(layer.id)
+        }
+
+        let didBatchCopy = bootstrap.layerSurfaceStore.copyTextures(
+            textureCopies,
+            metal: bootstrap.metalContext
+        )
+        if !didBatchCopy {
+            for copy in textureCopies {
+                bootstrap.layerSurfaceStore.copyTexture(
+                    from: copy.source,
+                    to: copy.destination,
+                    metal: bootstrap.metalContext
+                )
+            }
+        }
+
+        for layerID in copiedLayerIDs {
+            if sourceLayerSurfaceStore.isKnownTransparent(layerID: layerID) {
+                bootstrap.layerSurfaceStore.markKnownTransparent(for: layerID)
             } else {
-                bootstrap.layerSurfaceStore.markContentUnknown(for: layer.id)
+                bootstrap.layerSurfaceStore.markContentUnknown(for: layerID)
             }
         }
 
@@ -10675,12 +11365,14 @@ final class WorkspaceViewModel: ObservableObject {
     @discardableResult
     func flushBrushEditingBoundary(reason: String) -> Bool {
         _ = reason
+        let hadPendingStraightLine = straightLineState.phase == .pending
+        let didCommitStraightLine = hadPendingStraightLine && commitPendingStraightLine()
         let hadPendingWork = flushPendingBrushWorkAtEditingBoundaryIfNeeded()
         let hadPendingCommits = drainPendingBrushCommitsIfNeeded(resetLiveSession: true)
-        if hadPendingWork || hadPendingCommits {
+        if didCommitStraightLine || hadPendingWork || hadPendingCommits {
             invalidateWholeLayerInteractionBoundsCache()
         }
-        return hadPendingWork || hadPendingCommits
+        return didCommitStraightLine || hadPendingWork || hadPendingCommits
     }
 
     @discardableResult
@@ -10969,10 +11661,19 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     private func syncTimelapseDocumentContext() {
-        timelapseRecorder.syncCurrentDocument(
+        let context = TimelapseDocumentContext(
             documentName: workspace.document.metadata.name,
             documentFileURL: currentProjectURL
         )
+        guard context != lastSyncedTimelapseDocumentContext else { return }
+        timelapseRecorder.syncCurrentDocument(
+            documentName: context.documentName,
+            documentFileURL: context.documentFileURL
+        )
+        lastSyncedTimelapseDocumentContext = context
+#if DEBUG
+        debugTimelapseDocumentContextSyncCount += 1
+#endif
     }
 
     private func syncDrawingStatsDocumentContext() {
@@ -12115,6 +12816,95 @@ final class WorkspaceViewModel: ObservableObject {
                 width: width,
                 height: height
             )
+        )
+    }
+
+    nonisolated private func featheredSelectionShape(
+        _ shape: SelectionShape,
+        canvasSize: CanvasSize,
+        radiusPixels: Int
+    ) throws -> SelectionShape {
+        let clampedShape = shape.clamped(to: canvasSize)
+        guard !clampedShape.isEmpty else {
+            throw SelectionMaskFeatheringError.invalidDimensions
+        }
+
+        let minX = max(Int(clampedShape.bounds.minX.rounded(.down)) - radiusPixels, 0)
+        let minY = max(Int(clampedShape.bounds.minY.rounded(.down)) - radiusPixels, 0)
+        let maxX = min(Int(clampedShape.bounds.maxX.rounded(.up)) + radiusPixels, canvasSize.width)
+        let maxY = min(Int(clampedShape.bounds.maxY.rounded(.up)) + radiusPixels, canvasSize.height)
+        let width = maxX - minX
+        let height = maxY - minY
+        guard width > 0, height > 0 else {
+            throw SelectionMaskFeatheringError.invalidDimensions
+        }
+
+        let sourceRegion = selectionMaskRegion(
+            for: clampedShape,
+            canvasSize: canvasSize,
+            originX: minX,
+            originY: minY,
+            width: width,
+            height: height
+        )
+        let featheredRegionBytes = try VImageSelectionMaskFeatherer.feather(
+            alphaBytes: sourceRegion.alphaBytes,
+            width: width,
+            height: height,
+            radiusPixels: radiusPixels
+        )
+
+        var canvasMaskBytes = [UInt8](
+            repeating: 0,
+            count: canvasSize.width * canvasSize.height
+        )
+        canvasMaskBytes.withUnsafeMutableBufferPointer { destinationBuffer in
+            featheredRegionBytes.withUnsafeBytes { sourceRawBuffer in
+                guard
+                    let destinationBaseAddress = destinationBuffer.baseAddress,
+                    let sourceBaseAddress = sourceRawBuffer.baseAddress?.assumingMemoryBound(to: UInt8.self)
+                else {
+                    return
+                }
+
+                for row in 0..<height {
+                    let sourceOffset = row * width
+                    let destinationOffset = ((minY + row) * canvasSize.width) + minX
+                    UnsafeMutableRawPointer(destinationBaseAddress.advanced(by: destinationOffset))
+                        .copyMemory(
+                            from: UnsafeRawPointer(sourceBaseAddress.advanced(by: sourceOffset)),
+                            byteCount: width
+                        )
+                }
+            }
+        }
+
+        let result = SelectionShape.mask(
+            canvasWidth: canvasSize.width,
+            canvasHeight: canvasSize.height,
+            alphaBytes: canvasMaskBytes
+        )
+        guard !result.isEmpty else {
+            throw SelectionMaskFeatheringError.invalidDimensions
+        }
+
+        // The feathered mask controls pixel coverage, while the original vector
+        // geometry remains the stable 50% contour used by the marching-ants overlay.
+        // Existing mask selections may already carry display-only components.
+        let displayComponents: [SelectionShapeComponent]
+        if clampedShape.kind == .mask {
+            displayComponents = clampedShape.components
+        } else {
+            displayComponents = [
+                SelectionShapeComponent(operation: .add, shape: clampedShape)
+            ]
+        }
+        return SelectionShape(
+            kind: .mask,
+            bounds: result.bounds,
+            pathPoints: clampedShape.pathPoints,
+            maskData: result.maskData,
+            components: displayComponents
         )
     }
 
@@ -13533,24 +14323,216 @@ private enum DeferredGradientAction {
     case gradientDrag(DeferredGradientDrag)
 }
 
-enum StraightLinePhase: Sendable {
+let straightLineDefaultThicknessDeadZoneScreenDistance: Double = 50
+
+func straightLineThicknessDeadZoneCanvasDistance(
+    screenDistance: Double = straightLineDefaultThicknessDeadZoneScreenDistance,
+    actualDisplayScale: Double
+) -> Double {
+    max(screenDistance / max(actualDisplayScale, 0.000_001), 1)
+}
+
+enum StraightLinePhase: Sendable, Equatable {
     case idle
-    case pickedA
+    case drawingLine
+    case adjustingThickness
+    case pending
 }
 
 struct StraightLinePreview: Sendable {
     let pointA: CanvasPoint
     let pointB: CanvasPoint
+    let thicknessHandlePoint: CanvasPoint?
+    let isPending: Bool
 }
 
 struct StraightLineInteractionState: Sendable {
     var phase: StraightLinePhase = .idle
     var pointA: CanvasPoint?
-    var hoverPoint: CanvasPoint?
+    var pointB: CanvasPoint?
+    var lastDragPoint: CanvasPoint?
+    var baseBrushSize: Float = 1
+    var paintVariationSeed: UInt32?
+    var thicknessAdjustmentDeadZone = straightLineDefaultThicknessDeadZoneScreenDistance
+    var thicknessDragOrigin: CanvasPoint?
+    var thicknessPerpendicularUnit: CanvasPoint?
+    var thicknessHandlePoint: CanvasPoint?
+    var turnCandidateOrigin: CanvasPoint?
+    var turnCandidatePerpendicularUnit: CanvasPoint?
+
+    mutating func begin(
+        at point: CanvasPoint,
+        brushSize: Float,
+        paintVariationSeed: UInt32,
+        thicknessAdjustmentDeadZone: Double = straightLineDefaultThicknessDeadZoneScreenDistance
+    ) {
+        self = StraightLineInteractionState(
+            phase: .drawingLine,
+            pointA: point,
+            pointB: point,
+            lastDragPoint: point,
+            baseBrushSize: max(brushSize, 1),
+            paintVariationSeed: paintVariationSeed,
+            thicknessAdjustmentDeadZone: max(thicknessAdjustmentDeadZone, 1)
+        )
+    }
+
+    @discardableResult
+    mutating func updateDrag(to point: CanvasPoint) -> Float? {
+        switch phase {
+        case .idle, .pending:
+            return nil
+        case .adjustingThickness:
+            guard let origin = thicknessDragOrigin,
+                  let perpendicular = thicknessPerpendicularUnit else {
+                return nil
+            }
+            thicknessHandlePoint = point
+            lastDragPoint = point
+            return Self.adjustedBrushSize(
+                baseBrushSize: baseBrushSize,
+                origin: origin,
+                perpendicularUnit: perpendicular,
+                point: point,
+                deadZone: thicknessAdjustmentDeadZone
+            )
+        case .drawingLine:
+            guard let pointA, let lastDragPoint else { return nil }
+
+            if let candidateOrigin = turnCandidateOrigin,
+               let candidatePerpendicular = turnCandidatePerpendicularUnit {
+                return resolveTurnCandidate(
+                    at: point,
+                    origin: candidateOrigin,
+                    perpendicularUnit: candidatePerpendicular
+                )
+            }
+
+            let lineX = lastDragPoint.x - pointA.x
+            let lineY = lastDragPoint.y - pointA.y
+            let lineLength = hypot(lineX, lineY)
+            let movementX = point.x - lastDragPoint.x
+            let movementY = point.y - lastDragPoint.y
+            let movementLength = hypot(movementX, movementY)
+
+            if lineLength >= 24, movementLength >= 1 {
+                let direction = CanvasPoint(x: lineX / lineLength, y: lineY / lineLength)
+                let perpendicular = CanvasPoint(x: -direction.y, y: direction.x)
+                let parallelMovement = (movementX * direction.x) + (movementY * direction.y)
+                let perpendicularMovement = (movementX * perpendicular.x) + (movementY * perpendicular.y)
+
+                if abs(perpendicularMovement) > max(1, abs(parallelMovement) * 1.35) {
+                    turnCandidateOrigin = lastDragPoint
+                    turnCandidatePerpendicularUnit = perpendicular
+                    self.lastDragPoint = point
+                    return resolveTurnCandidate(
+                        at: point,
+                        origin: lastDragPoint,
+                        perpendicularUnit: perpendicular
+                    )
+                }
+            }
+
+            pointB = point
+            self.lastDragPoint = point
+            return nil
+        }
+    }
+
+    @discardableResult
+    mutating func finishDrag(at point: CanvasPoint) -> Bool {
+        switch phase {
+        case .idle, .pending:
+            return false
+        case .drawingLine:
+            pointB = turnCandidateOrigin ?? point
+            clearTurnCandidate()
+        case .adjustingThickness:
+            _ = updateDrag(to: point)
+        }
+
+        guard let pointA, let pointB, hypot(pointB.x - pointA.x, pointB.y - pointA.y) > 0.5 else {
+            self = .init()
+            return false
+        }
+        phase = .pending
+        lastDragPoint = nil
+        clearTurnCandidate()
+        return true
+    }
 
     var preview: StraightLinePreview? {
-        guard phase == .pickedA, let pointA, let hoverPoint else { return nil }
-        return StraightLinePreview(pointA: pointA, pointB: hoverPoint)
+        guard phase != .idle, let pointA, let pointB else { return nil }
+        return StraightLinePreview(
+            pointA: pointA,
+            pointB: pointB,
+            thicknessHandlePoint: thicknessHandlePoint,
+            isPending: phase == .pending
+        )
+    }
+
+    private mutating func resolveTurnCandidate(
+        at point: CanvasPoint,
+        origin: CanvasPoint,
+        perpendicularUnit: CanvasPoint
+    ) -> Float? {
+        let direction = CanvasPoint(
+            x: perpendicularUnit.y,
+            y: -perpendicularUnit.x
+        )
+        let offsetX = point.x - origin.x
+        let offsetY = point.y - origin.y
+        let parallelDistance = (offsetX * direction.x) + (offsetY * direction.y)
+        let perpendicularDistance = (offsetX * perpendicularUnit.x) + (offsetY * perpendicularUnit.y)
+        let activationDistance = thicknessAdjustmentDeadZone
+        pointB = origin
+
+        if abs(perpendicularDistance) >= activationDistance,
+           abs(perpendicularDistance) > abs(parallelDistance) * 1.15 {
+            phase = .adjustingThickness
+            pointB = origin
+            thicknessDragOrigin = origin
+            thicknessPerpendicularUnit = perpendicularUnit
+            thicknessHandlePoint = point
+            lastDragPoint = point
+            clearTurnCandidate()
+            return Self.adjustedBrushSize(
+                baseBrushSize: baseBrushSize,
+                origin: origin,
+                perpendicularUnit: perpendicularUnit,
+                point: point,
+                deadZone: activationDistance
+            )
+        }
+
+        let cancellationDistance = max(12, min(activationDistance * 0.2, 32))
+        if abs(parallelDistance) > abs(perpendicularDistance),
+           hypot(offsetX, offsetY) >= cancellationDistance {
+            pointB = point
+            clearTurnCandidate()
+        }
+        lastDragPoint = point
+        return nil
+    }
+
+    private mutating func clearTurnCandidate() {
+        turnCandidateOrigin = nil
+        turnCandidatePerpendicularUnit = nil
+    }
+
+    private static func adjustedBrushSize(
+        baseBrushSize: Float,
+        origin: CanvasPoint,
+        perpendicularUnit: CanvasPoint,
+        point: CanvasPoint,
+        deadZone: Double
+    ) -> Float {
+        let offsetX = point.x - origin.x
+        let offsetY = point.y - origin.y
+        let signedDistance = (offsetX * perpendicularUnit.x) + (offsetY * perpendicularUnit.y)
+        let effectiveDistance = max(abs(signedDistance) - deadZone, 0)
+        let signedEffectiveDistance = signedDistance < 0 ? -effectiveDistance : effectiveDistance
+        return min(max(baseBrushSize + Float(signedEffectiveDistance), 1), 1_000)
     }
 }
 

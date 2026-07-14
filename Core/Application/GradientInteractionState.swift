@@ -3,12 +3,13 @@ import Foundation
 private let gradientLegLatchMinDistance = 10.0
 private let gradientLeg2MinDistance = 10.0
 private let gradientLegLatchAngleThresholdDegrees = 32.0
-private let gradientHandleHitRadius = 14.0
+private let gradientDefaultHandleHitRadius = 14.0
+private let gradientTransitionMidpointRange = 0.05...0.95
 
 enum LinearGradientHandle: Sendable, Equatable {
     case pointA
     case pointB
-    case pointC
+    case midpoint
 }
 
 enum LinearGradientPhase: Sendable, Equatable {
@@ -30,6 +31,22 @@ struct LinearGradientGeometry: Sendable, Equatable {
     var pointA: CanvasPoint
     var pointB: CanvasPoint
     var pointC: CanvasPoint
+    var transitionMidpoint: Double
+
+    init(
+        pointA: CanvasPoint,
+        pointB: CanvasPoint,
+        pointC: CanvasPoint,
+        transitionMidpoint: Double = 0.5
+    ) {
+        self.pointA = pointA
+        self.pointB = pointB
+        self.pointC = pointC
+        self.transitionMidpoint = min(
+            max(transitionMidpoint, gradientTransitionMidpointRange.lowerBound),
+            gradientTransitionMidpointRange.upperBound
+        )
+    }
 
     var pointD: CanvasPoint {
         CanvasPoint(
@@ -52,6 +69,13 @@ struct LinearGradientGeometry: Sendable, Equatable {
             y: (pointD.y + pointC.y) * 0.5
         )
     }
+
+    var transitionMidpointPoint: CanvasPoint {
+        CanvasPoint(
+            x: pointA.x + ((pointB.x - pointA.x) * transitionMidpoint),
+            y: pointA.y + ((pointB.y - pointA.y) * transitionMidpoint)
+        )
+    }
 }
 
 struct LinearGradientPreview: Sendable, Equatable {
@@ -59,10 +83,30 @@ struct LinearGradientPreview: Sendable, Equatable {
     let pointB: CanvasPoint
     let pointC: CanvasPoint?
     let pointD: CanvasPoint
+    let transitionMidpoint: Double
+
+    init(
+        pointA: CanvasPoint,
+        pointB: CanvasPoint,
+        pointC: CanvasPoint?,
+        pointD: CanvasPoint,
+        transitionMidpoint: Double = 0.5
+    ) {
+        self.pointA = pointA
+        self.pointB = pointB
+        self.pointC = pointC
+        self.pointD = pointD
+        self.transitionMidpoint = transitionMidpoint
+    }
 
     var geometry: LinearGradientGeometry? {
         guard let pointC else { return nil }
-        return LinearGradientGeometry(pointA: pointA, pointB: pointB, pointC: pointC)
+        return LinearGradientGeometry(
+            pointA: pointA,
+            pointB: pointB,
+            pointC: pointC,
+            transitionMidpoint: transitionMidpoint
+        )
     }
 }
 
@@ -75,21 +119,33 @@ struct LinearGradientInteractionState: Sendable, Equatable {
     var dragReferenceGeometry: LinearGradientGeometry?
     var leg1CandidatePoint: CanvasPoint?
     var hoverPoint: CanvasPoint?
+    var transitionMidpoint: Double = 0.5
 
     var geometry: LinearGradientGeometry? {
         guard let pointA, let pointB, let pointC else { return nil }
-        return LinearGradientGeometry(pointA: pointA, pointB: pointB, pointC: pointC)
+        return LinearGradientGeometry(
+            pointA: pointA,
+            pointB: pointB,
+            pointC: pointC,
+            transitionMidpoint: transitionMidpoint
+        )
     }
 
     var preview: LinearGradientPreview? {
         guard let pointA, let pointB else { return nil }
         if let pointC {
-            let geometry = LinearGradientGeometry(pointA: pointA, pointB: pointB, pointC: pointC)
+            let geometry = LinearGradientGeometry(
+                pointA: pointA,
+                pointB: pointB,
+                pointC: pointC,
+                transitionMidpoint: transitionMidpoint
+            )
             return LinearGradientPreview(
                 pointA: geometry.pointA,
                 pointB: geometry.pointB,
                 pointC: geometry.pointC,
-                pointD: geometry.pointD
+                pointD: geometry.pointD,
+                transitionMidpoint: geometry.transitionMidpoint
             )
         }
 
@@ -97,7 +153,8 @@ struct LinearGradientInteractionState: Sendable, Equatable {
             pointA: pointA,
             pointB: pointB,
             pointC: nil,
-            pointD: pointA
+            pointD: pointA,
+            transitionMidpoint: transitionMidpoint
         )
     }
 
@@ -240,7 +297,8 @@ func resolvedLinearGradientPreviewGeometry(
     return LinearGradientGeometry(
         pointA: preview.pointA,
         pointB: preview.pointB,
-        pointC: pointC
+        pointC: pointC,
+        transitionMidpoint: preview.transitionMidpoint
     )
 }
 
@@ -258,16 +316,67 @@ func resolvedSectorGradientPreviewGeometry(
     return resolvedSectorGradientGeometry(center: preview.center, pathPoints: smoothedPathPoints)
 }
 
-func linearGradientPreviewContains(_ geometry: LinearGradientGeometry, point: CanvasPoint) -> Bool {
-    let polygon = [geometry.pointA, geometry.pointB, geometry.pointC, geometry.pointD]
-    return polygonContains(point: point, polygon: polygon)
+func gradientHandleHitRadiusCanvasDistance(
+    screenDistance: Double = gradientDefaultHandleHitRadius,
+    actualDisplayScale: Double
+) -> Double {
+    max(screenDistance, 1) / max(actualDisplayScale, 0.000_001)
 }
 
-func linearGradientHandleHitTest(_ geometry: LinearGradientGeometry, point: CanvasPoint) -> LinearGradientHandle? {
-    if distanceBetween(point, geometry.pointA) <= gradientHandleHitRadius { return .pointA }
-    if distanceBetween(point, geometry.pointB) <= gradientHandleHitRadius { return .pointB }
-    if distanceBetween(point, geometry.pointC) <= gradientHandleHitRadius { return .pointC }
+func linearGradientPreviewContains(
+    _ geometry: LinearGradientGeometry,
+    point: CanvasPoint,
+    hitRadius: Double = gradientDefaultHandleHitRadius
+) -> Bool {
+    distanceFromPointToLineSegment(point, start: geometry.pointA, end: geometry.pointB) <= hitRadius
+}
+
+func linearGradientHandleHitTest(
+    _ geometry: LinearGradientGeometry,
+    point: CanvasPoint,
+    hitRadius: Double = gradientDefaultHandleHitRadius
+) -> LinearGradientHandle? {
+    if distanceBetween(point, geometry.pointA) <= hitRadius { return .pointA }
+    if distanceBetween(point, geometry.pointB) <= hitRadius { return .pointB }
+    if distanceBetween(point, geometry.transitionMidpointPoint) <= hitRadius { return .midpoint }
     return nil
+}
+
+func linearGradientTransitionMidpoint(
+    for point: CanvasPoint,
+    geometry: LinearGradientGeometry
+) -> Double {
+    let axisX = geometry.pointB.x - geometry.pointA.x
+    let axisY = geometry.pointB.y - geometry.pointA.y
+    let axisLengthSquared = (axisX * axisX) + (axisY * axisY)
+    guard axisLengthSquared > 0.000_001 else { return geometry.transitionMidpoint }
+    let offsetX = point.x - geometry.pointA.x
+    let offsetY = point.y - geometry.pointA.y
+    let projection = ((offsetX * axisX) + (offsetY * axisY)) / axisLengthSquared
+    return min(
+        max(projection, gradientTransitionMidpointRange.lowerBound),
+        gradientTransitionMidpointRange.upperBound
+    )
+}
+
+private func distanceFromPointToLineSegment(
+    _ point: CanvasPoint,
+    start: CanvasPoint,
+    end: CanvasPoint
+) -> Double {
+    let axisX = end.x - start.x
+    let axisY = end.y - start.y
+    let axisLengthSquared = (axisX * axisX) + (axisY * axisY)
+    guard axisLengthSquared > 0.000_001 else { return distanceBetween(point, start) }
+    let projection = min(
+        max((((point.x - start.x) * axisX) + ((point.y - start.y) * axisY)) / axisLengthSquared, 0),
+        1
+    )
+    let closest = CanvasPoint(
+        x: start.x + (axisX * projection),
+        y: start.y + (axisY * projection)
+    )
+    return distanceBetween(point, closest)
 }
 
 func sectorGradientPreviewContains(_ geometry: SectorGradientGeometry, point: CanvasPoint) -> Bool {

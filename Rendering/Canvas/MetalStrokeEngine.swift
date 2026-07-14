@@ -105,12 +105,9 @@ final class MetalStrokeEngine: StrokeEngine {
             liveSession?.liveEvents.append(
                 .packet(stroke, layerID: layerID, enqueuedAt: now)
             )
+            liveSession?.pendingPacketCount += 1
             invalidateRecentBrushPreviewCache()
-            let queuedPackets = liveSession?.liveEvents.reduce(into: 0) { count, event in
-                if case .packet = event {
-                    count += 1
-                }
-            } ?? 0
+            let queuedPackets = liveSession?.pendingPacketCount ?? 0
             if RuntimeDiagnostics.brushHotPathLoggingEnabled {
                 logger.debug("[brush-feel] packetQueuedCount=\(queuedPackets, privacy: .public)")
                 logger.debug("[brush-feel] livePathMode=workingTexture")
@@ -266,7 +263,9 @@ final class MetalStrokeEngine: StrokeEngine {
         }
 
         let queuedEvents = session.liveEvents
+        let queuedPacketCount = session.pendingPacketCount
         session.liveEvents = []
+        session.pendingPacketCount = 0
 
         let flushStartNs = DispatchTime.now().uptimeNanoseconds
         let oldestEnqueueNs = queuedEvents.compactMap { event -> UInt64? in
@@ -413,11 +412,7 @@ final class MetalStrokeEngine: StrokeEngine {
         let enqueueToFlushMs = Double(flushStartNs - oldestEnqueueNs) / 1_000_000
         let flushEncodeMs = Double(encodeEndNs - flushStartNs) / 1_000_000
         let metrics = BrushFlushMetrics(
-            packetQueuedCount: queuedEvents.reduce(into: 0) { count, event in
-                if case .packet = event {
-                    count += 1
-                }
-            },
+            packetQueuedCount: queuedPacketCount,
             flushedPacketCount: flushedPacketCount,
             enqueueToFlushMs: enqueueToFlushMs,
             flushEncodeMs: flushEncodeMs,

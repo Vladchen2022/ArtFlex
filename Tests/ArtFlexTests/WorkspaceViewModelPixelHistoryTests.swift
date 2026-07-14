@@ -84,6 +84,99 @@ struct WorkspaceViewModelPixelHistoryTests {
 
     @Test
     @MainActor
+    func meshWarpMovesAnAnchorCommitsPixelsAndSupportsUndo() async throws {
+        let harness = try PixelHistoryHarness(canvasSize: .init(width: 64, height: 64))
+        let layerID = harness.addLayer()
+        try fillOpaqueRect(
+            in: harness,
+            layerID: layerID,
+            originX: 16,
+            originY: 16,
+            width: 32,
+            height: 32,
+            color: .init(red: 0.8, green: 0.2, blue: 0.1, alpha: 1)
+        )
+
+        harness.viewModel.selectTool(.freeTransform)
+        harness.viewModel.setFreeTransformToolMode(.mesh)
+        let grid = try #require(harness.viewModel.displayedMeshWarpGrid)
+        let topLeft = try #require(grid.point(row: 0, column: 0))
+        let movedTopLeft = CanvasPoint(x: topLeft.x - 8, y: topLeft.y - 8)
+
+        harness.viewModel.beginSelectionTransform(at: topLeft, mode: .meshPoint(0))
+        harness.viewModel.updateSelectionTransform(to: movedTopLeft)
+        harness.viewModel.commitSelectionTransform(at: movedTopLeft)
+        harness.viewModel.applySelectionTransform()
+        try await harness.waitForTransformCommitToFinish()
+
+        #expect(try harness.alpha(atX: 10, y: 10, layerID: layerID) > 0.1)
+        harness.viewModel.undo()
+        #expect(try harness.alpha(atX: 10, y: 10, layerID: layerID) < 0.01)
+        #expect(try harness.alpha(atX: 24, y: 24, layerID: layerID) > 0.95)
+    }
+
+    @Test
+    @MainActor
+    func meshWarpShiftSelectsAndDragsMultipleAnchors() throws {
+        let harness = try PixelHistoryHarness(canvasSize: .init(width: 64, height: 64))
+        let layerID = harness.addLayer()
+        try fillOpaqueRect(
+            in: harness,
+            layerID: layerID,
+            originX: 16,
+            originY: 16,
+            width: 32,
+            height: 32,
+            color: .init(red: 0.2, green: 0.5, blue: 0.9, alpha: 1)
+        )
+
+        harness.viewModel.selectTool(.freeTransform)
+        harness.viewModel.setFreeTransformToolMode(.mesh)
+        let initialGrid = try #require(harness.viewModel.displayedMeshWarpGrid)
+        let firstPoint = initialGrid.controlPoints[0]
+        let secondPoint = initialGrid.controlPoints[5]
+
+        harness.viewModel.beginSelectionTransform(at: firstPoint, mode: .meshPoint(0))
+        harness.viewModel.commitSelectionTransform(at: firstPoint)
+        harness.viewModel.beginSelectionTransform(
+            at: secondPoint,
+            mode: .meshPoint(5),
+            modifiers: [.shift]
+        )
+        harness.viewModel.commitSelectionTransform(at: secondPoint)
+        #expect(harness.viewModel.selectedMeshWarpControlPointIndices == Set([0, 5]))
+
+        let delta = CanvasPoint(x: 6, y: -3)
+        harness.viewModel.beginSelectionTransform(at: firstPoint, mode: .meshPoint(0))
+        harness.viewModel.updateSelectionTransform(
+            to: .init(x: firstPoint.x + delta.x, y: firstPoint.y + delta.y)
+        )
+        harness.viewModel.commitSelectionTransform(
+            at: .init(x: firstPoint.x + delta.x, y: firstPoint.y + delta.y)
+        )
+
+        let movedGrid = try #require(harness.viewModel.displayedMeshWarpGrid)
+        #expect(movedGrid.controlPoints[0] == .init(
+            x: initialGrid.controlPoints[0].x + delta.x,
+            y: initialGrid.controlPoints[0].y + delta.y
+        ))
+        #expect(movedGrid.controlPoints[5] == .init(
+            x: initialGrid.controlPoints[5].x + delta.x,
+            y: initialGrid.controlPoints[5].y + delta.y
+        ))
+        #expect(movedGrid.controlPoints[1] == initialGrid.controlPoints[1])
+
+        harness.viewModel.beginSelectionTransform(
+            at: movedGrid.controlPoints[5],
+            mode: .meshPoint(5),
+            modifiers: [.shift]
+        )
+        harness.viewModel.commitSelectionTransform(at: movedGrid.controlPoints[5])
+        #expect(harness.viewModel.selectedMeshWarpControlPointIndices == Set([0]))
+    }
+
+    @Test
+    @MainActor
     func linearGradientApplySupportsUndoRedoAndSelectionClipping() async throws {
         let harness = try PixelHistoryHarness()
         let layerID = harness.addLayer()
@@ -102,6 +195,8 @@ struct WorkspaceViewModelPixelHistoryTests {
         harness.viewModel.beginGradientDrag(at: .init(x: 12, y: 20))
         harness.viewModel.updateGradientDrag(to: .init(x: 24, y: 20))
         harness.viewModel.endGradientDrag(at: .init(x: 24, y: 20))
+        #expect(harness.viewModel.linearGradientState.phase == .editing)
+        harness.viewModel.applyActiveGradientSession()
         try await harness.waitForGradientCommitToFinish()
 
         #expect(harness.viewModel.isApplyingGradientCommit == false)
@@ -119,7 +214,7 @@ struct WorkspaceViewModelPixelHistoryTests {
 
     @Test
     @MainActor
-    func linearGradientAutoApplyCompletesAtDragEnd() async throws {
+    func linearGradientRetainsEditorUntilExplicitApply() async throws {
         let harness = try PixelHistoryHarness()
         let layerID = harness.addLayer()
 
@@ -128,6 +223,12 @@ struct WorkspaceViewModelPixelHistoryTests {
         harness.viewModel.beginGradientDrag(at: .init(x: 10, y: 16))
         harness.viewModel.updateGradientDrag(to: .init(x: 30, y: 16))
         harness.viewModel.endGradientDrag(at: .init(x: 30, y: 16))
+
+        #expect(harness.viewModel.isApplyingGradientCommit == false)
+        #expect(harness.viewModel.linearGradientState.phase == .editing)
+        #expect(try harness.alpha(atX: 10, y: 16, layerID: layerID) < 0.05)
+
+        harness.viewModel.applyActiveGradientSession()
         try await harness.waitForGradientCommitToFinish()
 
         #expect(harness.viewModel.isApplyingGradientCommit == false)
@@ -135,6 +236,27 @@ struct WorkspaceViewModelPixelHistoryTests {
         #expect(harness.viewModel.workspace.toolSession.activeTool == .linearGradient)
         #expect(try harness.alpha(atX: 10, y: 16, layerID: layerID) > 0.7)
         #expect(try harness.alpha(atX: 36, y: 16, layerID: layerID) < 0.05)
+    }
+
+    @Test
+    @MainActor
+    func linearGradientToolSwitchCommitsRetainedEditorBeforeSwitching() async throws {
+        let harness = try PixelHistoryHarness()
+        let layerID = harness.addLayer()
+
+        harness.viewModel.selectLayer(layerID)
+        harness.viewModel.selectTool(.linearGradient)
+        harness.viewModel.beginGradientDrag(at: .init(x: 10, y: 16))
+        harness.viewModel.updateGradientDrag(to: .init(x: 30, y: 16))
+        harness.viewModel.endGradientDrag(at: .init(x: 30, y: 16))
+        #expect(harness.viewModel.linearGradientState.phase == .editing)
+
+        harness.viewModel.selectTool(.brush)
+        try await harness.waitForGradientCommitToFinish()
+
+        #expect(harness.viewModel.workspace.toolSession.activeTool == .brush)
+        #expect(harness.viewModel.linearGradientState.phase == .idle)
+        #expect(try harness.alpha(atX: 10, y: 16, layerID: layerID) > 0.7)
     }
 
     @Test
@@ -149,11 +271,37 @@ struct WorkspaceViewModelPixelHistoryTests {
         harness.viewModel.beginGradientDrag(at: .init(x: 10, y: 16))
         harness.viewModel.updateGradientDrag(to: .init(x: 30, y: 16))
         harness.viewModel.endGradientDrag(at: .init(x: 30, y: 16))
+        harness.viewModel.applyActiveGradientSession()
         try await harness.waitForGradientCommitToFinish()
 
         let nearAlpha = try harness.alpha(atX: 10, y: 16, layerID: layerID)
         #expect(nearAlpha > 0.18)
         #expect(nearAlpha < 0.30)
+    }
+
+    @Test
+    @MainActor
+    func linearGradientMidpointHandleChangesTransitionBalance() async throws {
+        let harness = try PixelHistoryHarness()
+        let layerID = harness.addLayer()
+
+        harness.viewModel.selectLayer(layerID)
+        harness.viewModel.selectTool(.linearGradient)
+        harness.viewModel.beginGradientDrag(at: .init(x: 10, y: 16))
+        harness.viewModel.updateGradientDrag(to: .init(x: 50, y: 16))
+        harness.viewModel.endGradientDrag(at: .init(x: 50, y: 16))
+
+        harness.viewModel.beginGradientDrag(at: .init(x: 30, y: 16))
+        harness.viewModel.updateGradientDrag(to: .init(x: 20, y: 16))
+        harness.viewModel.endGradientDrag(at: .init(x: 20, y: 16))
+        #expect(abs(harness.viewModel.linearGradientState.transitionMidpoint - 0.25) < 0.0001)
+
+        harness.viewModel.applyActiveGradientSession()
+        try await harness.waitForGradientCommitToFinish()
+
+        let midpointAlpha = try harness.alpha(atX: 20, y: 16, layerID: layerID)
+        #expect(midpointAlpha > 0.40)
+        #expect(midpointAlpha < 0.60)
     }
 
     @Test
@@ -175,6 +323,7 @@ struct WorkspaceViewModelPixelHistoryTests {
         harness.viewModel.beginGradientDrag(at: .init(x: 10, y: 16))
         harness.viewModel.updateGradientDrag(to: .init(x: 30, y: 16))
         harness.viewModel.endGradientDrag(at: .init(x: 30, y: 16))
+        harness.viewModel.applyActiveGradientSession()
         try await harness.waitForGradientCommitToFinish()
 
         #expect(harness.bootstrap.strokeEngine.displayTexture(for: layerID) == nil)
@@ -913,31 +1062,156 @@ struct WorkspaceViewModelPixelHistoryTests {
 
     @Test
     @MainActor
-    func optionDeleteFillsSelectionWithForegroundColorFromAnyTool() throws {
-        let harness = try PixelHistoryHarness()
-        let layerID = harness.viewModel.workspace.document.activeLayerID
+    func optionBackspaceAndForwardDeleteFillSelectionWithForegroundColorFromAnyTool() throws {
+        for keyCode: UInt16 in [51, 117] {
+            let harness = try PixelHistoryHarness()
+            let layerID = harness.viewModel.workspace.document.activeLayerID
 
-        harness.makeRectangleSelection(minX: 8, minY: 8, maxX: 24, maxY: 24)
-        harness.viewModel.selectTool(.brush)
-        harness.viewModel.setSelectedColor(.init(red: 0.9, green: 0.05, blue: 0.02, alpha: 1))
-        let handled = harness.viewModel.handleKeyDown(
-            makeCanvasKeyEvent(
-                type: .keyDown,
-                characters: "\u{7f}",
-                charactersIgnoringModifiers: "\u{7f}",
-                modifiers: [.option],
-                keyCode: 51
+            harness.makeRectangleSelection(minX: 8, minY: 8, maxX: 24, maxY: 24)
+            harness.viewModel.selectTool(.brush)
+            harness.viewModel.setSelectedColor(.init(red: 0.9, green: 0.05, blue: 0.02, alpha: 1))
+            let handled = harness.viewModel.handleKeyDown(
+                makeCanvasKeyEvent(
+                    type: .keyDown,
+                    characters: "\u{7f}",
+                    charactersIgnoringModifiers: "\u{7f}",
+                    modifiers: [.option],
+                    keyCode: keyCode
+                )
             )
-        )
 
-        #expect(handled)
-        let filledPixel = try harness.color(atX: 12, y: 12, layerID: layerID)
-        #expect(filledPixel.red > 0.8)
-        #expect(filledPixel.alpha > 0.9)
-        #expect(try harness.alpha(atX: 32, y: 32, layerID: layerID) < 0.01)
+            #expect(handled)
+            let filledPixel = try harness.color(atX: 12, y: 12, layerID: layerID)
+            #expect(filledPixel.red > 0.8)
+            #expect(filledPixel.alpha > 0.9)
+            #expect(try harness.alpha(atX: 32, y: 32, layerID: layerID) < 0.01)
+
+            harness.viewModel.undo()
+            #expect(try harness.alpha(atX: 12, y: 12, layerID: layerID) < 0.01)
+        }
+    }
+
+    @Test
+    @MainActor
+    func featherSelectionSupportsUndoRedoAndCreatesASoftMask() async throws {
+        let harness = try PixelHistoryHarness()
+        harness.makeRectangleSelection(minX: 16, minY: 16, maxX: 48, maxY: 48)
+        let originalSelection = try #require(harness.viewModel.workspace.selection.committedShape)
+
+        harness.viewModel.featherSelection(radiusPixels: 8)
+        let featheredSelection = try await harness.waitForFeatheredSelection(sampleX: 11, sampleY: 32)
+        let featheredMask = try #require(featheredSelection.maskData)
+        let softAlpha = try #require(featheredMask.alphaByte(at: (32 * 64) + 11))
+
+        #expect(featheredSelection.kind == .mask)
+        #expect(featheredSelection.bounds.minX < 16)
+        #expect(featheredSelection.components.count == 1)
+        #expect(featheredSelection.components.first?.shape == originalSelection)
+        #expect(softAlpha > 0)
+        #expect(softAlpha < 255)
 
         harness.viewModel.undo()
-        #expect(try harness.alpha(atX: 12, y: 12, layerID: layerID) < 0.01)
+        #expect(harness.viewModel.workspace.selection.committedShape == originalSelection)
+
+        harness.viewModel.redo()
+        let redoneSelection = try #require(harness.viewModel.workspace.selection.committedShape)
+        let redoneMask = try #require(redoneSelection.maskData)
+        #expect(redoneMask.alphaByte(at: (32 * 64) + 11) == softAlpha)
+    }
+
+    @Test
+    @MainActor
+    func featheredSelectionSoftensColorFill() async throws {
+        let harness = try PixelHistoryHarness()
+        let layerID = harness.viewModel.workspace.document.activeLayerID
+        harness.makeRectangleSelection(minX: 16, minY: 16, maxX: 48, maxY: 48)
+        harness.viewModel.featherSelection(radiusPixels: 8)
+        _ = try await harness.waitForFeatheredSelection(sampleX: 11, sampleY: 32)
+
+        harness.viewModel.setSelectedColor(.init(red: 1, green: 0, blue: 0, alpha: 1))
+        harness.viewModel.fillSelectionContents()
+
+        let featherAlpha = try harness.alpha(atX: 11, y: 32, layerID: layerID)
+        #expect(featherAlpha > 0.01)
+        #expect(featherAlpha < 0.9)
+        #expect(try harness.alpha(atX: 32, y: 32, layerID: layerID) > 0.95)
+        #expect(try harness.alpha(atX: 4, y: 32, layerID: layerID) < 0.01)
+    }
+
+    @Test
+    @MainActor
+    func featheredSelectionSoftensPixelDeletion() async throws {
+        let harness = try PixelHistoryHarness()
+        let layerID = harness.viewModel.workspace.document.activeLayerID
+        try fillOpaqueRect(
+            in: harness,
+            layerID: layerID,
+            originX: 0,
+            originY: 0,
+            width: 64,
+            height: 64,
+            color: .init(red: 0.2, green: 0.4, blue: 0.8, alpha: 1)
+        )
+        harness.makeRectangleSelection(minX: 16, minY: 16, maxX: 48, maxY: 48)
+        harness.viewModel.featherSelection(radiusPixels: 8)
+        _ = try await harness.waitForFeatheredSelection(sampleX: 11, sampleY: 32)
+
+        harness.viewModel.deleteSelectionContents()
+
+        let featherAlpha = try harness.alpha(atX: 11, y: 32, layerID: layerID)
+        #expect(featherAlpha > 0.1)
+        #expect(featherAlpha < 0.99)
+        #expect(try harness.alpha(atX: 32, y: 32, layerID: layerID) < 0.01)
+        #expect(try harness.alpha(atX: 4, y: 32, layerID: layerID) > 0.99)
+    }
+
+    @Test
+    @MainActor
+    func featheredSelectionSoftensBrushPainting() async throws {
+        let harness = try PixelHistoryHarness()
+        let layerID = harness.viewModel.workspace.document.activeLayerID
+        harness.makeRectangleSelection(minX: 16, minY: 16, maxX: 48, maxY: 48)
+        harness.viewModel.featherSelection(radiusPixels: 8)
+        _ = try await harness.waitForFeatheredSelection(sampleX: 11, sampleY: 32)
+
+        harness.viewModel.setBrushBuildMode(.opacityCap)
+        harness.viewModel.setBrushTipShape(.hardRound)
+        harness.viewModel.setBrushSize(64)
+        harness.viewModel.setBrushOpacity(1)
+        try harness.drawBrushStroke(
+            on: layerID,
+            points: [
+                .init(location: .init(x: 30, y: 32), pressure: 1),
+                .init(location: .init(x: 32, y: 32), pressure: 1),
+                .init(location: .init(x: 34, y: 32), pressure: 1)
+            ]
+        )
+        _ = harness.viewModel.flushBrushEditingBoundary(reason: "test feathered brush output")
+
+        let featherAlpha = try harness.alpha(atX: 11, y: 32, layerID: layerID)
+        #expect(featherAlpha > 0.01)
+        #expect(featherAlpha < 0.9)
+        #expect(try harness.alpha(atX: 32, y: 32, layerID: layerID) > 0.95)
+        #expect(try harness.alpha(atX: 4, y: 32, layerID: layerID) < 0.01)
+    }
+
+    @Test
+    @MainActor
+    func featheredSelectionSoftensBucketFill() async throws {
+        let harness = try PixelHistoryHarness()
+        let layerID = harness.viewModel.workspace.document.activeLayerID
+        harness.makeRectangleSelection(minX: 16, minY: 16, maxX: 48, maxY: 48)
+        harness.viewModel.featherSelection(radiusPixels: 8)
+        _ = try await harness.waitForFeatheredSelection(sampleX: 11, sampleY: 32)
+
+        harness.viewModel.setSelectedColor(.init(red: 0, green: 0, blue: 1, alpha: 1))
+        harness.viewModel.fillAtPoint(.init(x: 32, y: 32))
+
+        let featherAlpha = try harness.alpha(atX: 11, y: 32, layerID: layerID)
+        #expect(featherAlpha > 0.01)
+        #expect(featherAlpha < 0.9)
+        #expect(try harness.alpha(atX: 32, y: 32, layerID: layerID) > 0.95)
+        #expect(try harness.alpha(atX: 4, y: 32, layerID: layerID) < 0.01)
     }
 
     @Test
@@ -1198,9 +1472,15 @@ struct WorkspaceViewModelPixelHistoryTests {
         #expect(restoredPixel.red < 0.01)
         #expect(restoredPixel.green < 0.01)
         #expect(restoredPixel.blue < 0.01)
+        #expect(harness.viewModel.workspace.selection.committedShape == nil)
+        #expect(harness.viewModel.workspace.selection.inProgressShape == nil)
+        #expect(harness.viewModel.selectionOverlayProxy.displayShape == nil)
 
         harness.viewModel.redo()
         #expect(try harness.snapshot(layerID: layerID).pixelData == filledPixels)
+        #expect(harness.viewModel.workspace.selection.committedShape == nil)
+        #expect(harness.viewModel.workspace.selection.inProgressShape == nil)
+        #expect(harness.viewModel.selectionOverlayProxy.displayShape == nil)
     }
 
     @Test
@@ -2061,6 +2341,40 @@ private struct PixelHistoryHarness {
 
         throw PixelHistoryHarnessError.gradientCommitTimeout
     }
+
+    func waitForTransformCommitToFinish(timeoutIterations: Int = 120) async throws {
+        for _ in 0..<timeoutIterations {
+            if !viewModel.isApplyingTransformCommit {
+                return
+            }
+            await Task.yield()
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+
+        throw PixelHistoryHarnessError.transformCommitTimeout
+    }
+
+    func waitForFeatheredSelection(
+        sampleX: Int,
+        sampleY: Int,
+        timeoutIterations: Int = 200
+    ) async throws -> SelectionShape {
+        for _ in 0..<timeoutIterations {
+            if
+                let selection = viewModel.workspace.selection.committedShape,
+                let maskData = selection.maskData,
+                let alpha = maskData.alphaByte(at: (sampleY * maskData.canvasWidth) + sampleX),
+                alpha > 0,
+                alpha < 255
+            {
+                return selection
+            }
+            await Task.yield()
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+
+        throw PixelHistoryHarnessError.selectionFeatherTimeout
+    }
 }
 
 @MainActor
@@ -2081,6 +2395,8 @@ private enum PixelHistoryHarnessError: Error {
     case textureUnavailable
     case commandBufferUnavailable
     case gradientCommitTimeout
+    case transformCommitTimeout
+    case selectionFeatherTimeout
 }
 
 @MainActor

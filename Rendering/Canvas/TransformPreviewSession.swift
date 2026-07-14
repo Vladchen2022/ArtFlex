@@ -49,6 +49,46 @@ struct TransformPreviewPlan: Sendable, Equatable {
     let needsMaskTexture: Bool
 }
 
+func meshWarpTextureCoordinateBounds(
+    sourceBounds: CanvasRect,
+    textureDomainBounds: CanvasRect
+) -> CanvasRect {
+    guard textureDomainBounds.size.x > 0, textureDomainBounds.size.y > 0 else {
+        return CanvasRect(
+            origin: .init(x: 0, y: 0),
+            size: .init(x: 1, y: 1)
+        )
+    }
+    return CanvasRect(
+        origin: .init(
+            x: (sourceBounds.minX - textureDomainBounds.minX) / textureDomainBounds.size.x,
+            y: (sourceBounds.minY - textureDomainBounds.minY) / textureDomainBounds.size.y
+        ),
+        size: .init(
+            x: sourceBounds.size.x / textureDomainBounds.size.x,
+            y: sourceBounds.size.y / textureDomainBounds.size.y
+        )
+    )
+}
+
+func meshWarpTextureCoordinateBounds(
+    session: TransformPreviewSession,
+    grid: MeshWarpGrid,
+    canvasSize: CanvasSize
+) -> CanvasRect {
+    let textureDomainBounds: CanvasRect
+    switch session.mode {
+    case .selection:
+        textureDomainBounds = session.operationBounds
+    case .wholeLayer:
+        textureDomainBounds = TransformPreviewSessionBuilder.fullCanvasBounds(canvasSize: canvasSize)
+    }
+    return meshWarpTextureCoordinateBounds(
+        sourceBounds: grid.sourceBounds,
+        textureDomainBounds: textureDomainBounds
+    )
+}
+
 final class TransformPreviewSessionBuilder {
     private let compositor: TransformGPUCompositor?
     private let initializationError: Error?

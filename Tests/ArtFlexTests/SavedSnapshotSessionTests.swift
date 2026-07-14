@@ -23,6 +23,58 @@ struct SavedSnapshotSessionTests {
 
     @Test
     @MainActor
+    func clearingSnapshotsCancelsPendingSaveWithoutLateWriteback() async throws {
+        let harness = try SavedSnapshotHarness()
+
+        harness.viewModel.requestSnapshotSavePrimaryAction()
+        #expect(harness.viewModel.isSavingSnapshot)
+
+        harness.viewModel.clearSavedSnapshots()
+        #expect(harness.viewModel.isSavingSnapshot == false)
+
+        try await Task.sleep(for: .milliseconds(150))
+        #expect(harness.viewModel.savedSnapshotCount == 0)
+    }
+
+    @Test
+    @MainActor
+    func savedSnapshotLargePreviewIsPreparedOnlyAfterSlotAssignment() async throws {
+        let harness = try SavedSnapshotHarness()
+
+        harness.viewModel.handleSnapshotSavePrimaryAction()
+        let snapshotID = try #require(harness.viewModel.savedSnapshots.first?.id)
+        #expect(harness.viewModel.savedSnapshots.first?.previewImage == nil)
+
+        harness.viewModel.openSnapshotCompare()
+        #expect(harness.viewModel.savedSnapshots.first?.previewImage == nil)
+        harness.viewModel.assignSavedSnapshot(snapshotID, to: .topLeading)
+
+        for _ in 0..<200 where harness.viewModel.savedSnapshots.first?.previewImage == nil {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(harness.viewModel.savedSnapshots.first?.previewImage != nil)
+    }
+
+    @Test
+    @MainActor
+    func requestedSnapshotComparePreparesCompositeOffMainActor() async throws {
+        let harness = try SavedSnapshotHarness()
+        harness.viewModel.handleSnapshotSavePrimaryAction()
+
+        harness.viewModel.requestOpenSnapshotCompare()
+        #expect(harness.viewModel.isPreparingSnapshotCompare)
+        #expect(harness.viewModel.snapshotCompareSession == nil)
+
+        for _ in 0..<200 where harness.viewModel.snapshotCompareSession == nil {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+
+        #expect(harness.viewModel.isPreparingSnapshotCompare == false)
+        #expect(harness.viewModel.snapshotCompareSession != nil)
+    }
+
+    @Test
+    @MainActor
     func savingSnapshotsCapsAtSixAndOpensCompareOnTheNextAction() throws {
         let harness = try SavedSnapshotHarness()
 

@@ -133,6 +133,53 @@ struct BrushInputDispatchTests {
     }
 
     @Test
+    func pendingBrushInputQueuePreservesSamplePacketBoundaries() {
+        var queue = PendingBrushInputQueue()
+        let first = CanvasStrokeSample(location: .init(x: 5, y: 7), pressure: 0.25)
+        let second = CanvasStrokeSample(location: .init(x: 9, y: 11), pressure: 0.75)
+
+        queue.enqueue(.begin, at: 1)
+        queue.enqueue(.samples([first]), at: 2)
+        queue.enqueue(.samples([second]), at: 3)
+        queue.enqueue(.end, at: 4)
+
+        let flushed = queue.flush()
+
+        #expect(flushed.count == 4)
+        #expect(flushed.map(\.kind) == [.begin, .samples([first]), .samples([second]), .end])
+        #expect(flushed.map(\.enqueuedAt) == [1, 2, 3, 4])
+        #expect(queue.isEmpty)
+    }
+
+    @Test
+    func highFrequencyBrushInputKeepsPacketsSmall() {
+        var queue = PendingBrushInputQueue()
+        queue.enqueue(.begin, at: 1)
+        for index in 0..<256 {
+            queue.enqueue(
+                .samples([
+                    CanvasStrokeSample(
+                        location: .init(x: Double(index), y: 32),
+                        pressure: Float(index % 100) / 100
+                    )
+                ]),
+                at: UInt64(index + 2)
+            )
+        }
+        queue.enqueue(.end, at: 258)
+
+        let flushed = queue.flush()
+        let sampleBatches = flushed.compactMap { batch -> [CanvasStrokeSample]? in
+            guard case .samples(let samples) = batch.kind else { return nil }
+            return samples
+        }
+
+        #expect(flushed.count == 258)
+        #expect(sampleBatches.count == 256)
+        #expect(sampleBatches.allSatisfy { $0.count == 1 })
+    }
+
+    @Test
     func brushLikeSampleMappingAllowsOverflowWhileBoundedToolsStillClamp() {
         let viewBounds = CGRect(x: 0, y: 0, width: 200, height: 100)
         let canvasSize = CanvasSize(width: 1000, height: 500)
@@ -186,5 +233,30 @@ struct BrushInputDispatchTests {
         #expect(synced.displayBrushSize == 40)
         #expect(synced.isAdjustingBrushSizePreview == false)
         #expect(synced.state == .synced)
+    }
+
+    @Test
+    func selectionFeatherContextMenuRequiresARightClickInsideTheSelection() {
+        let selection = SelectionShape(
+            kind: .rectangle,
+            bounds: CanvasRect(
+                origin: .init(x: 10, y: 12),
+                size: .init(x: 30, y: 24)
+            ),
+            pathPoints: []
+        )
+
+        #expect(shouldOfferSelectionFeatherContextMenu(
+            selectionShape: selection,
+            at: .init(x: 20, y: 20)
+        ))
+        #expect(!shouldOfferSelectionFeatherContextMenu(
+            selectionShape: selection,
+            at: .init(x: 4, y: 20)
+        ))
+        #expect(!shouldOfferSelectionFeatherContextMenu(
+            selectionShape: nil,
+            at: .init(x: 20, y: 20)
+        ))
     }
 }

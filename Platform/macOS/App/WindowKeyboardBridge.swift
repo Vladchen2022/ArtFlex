@@ -49,13 +49,13 @@ final class KeyboardBridgeView: NSView {
     var keyDownHandler: ((NSEvent) -> Bool)?
     var keyUpHandler: ((NSEvent) -> Bool)?
     var flagsChangedHandler: ((NSEvent) -> Bool)?
-    private var tabKeyMonitor: Any?
+    private var workspaceKeyDownMonitor: Any?
 
     override var acceptsFirstResponder: Bool { true }
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        installTabMonitorIfNeeded()
+        installWorkspaceKeyDownMonitorIfNeeded()
         activateIfNeeded()
     }
 
@@ -94,28 +94,31 @@ final class KeyboardBridgeView: NSView {
     }
 
     override func viewWillMove(toWindow newWindow: NSWindow?) {
-        if newWindow == nil, let tabKeyMonitor {
-            NSEvent.removeMonitor(tabKeyMonitor)
-            self.tabKeyMonitor = nil
+        if newWindow == nil, let workspaceKeyDownMonitor {
+            NSEvent.removeMonitor(workspaceKeyDownMonitor)
+            self.workspaceKeyDownMonitor = nil
         }
         super.viewWillMove(toWindow: newWindow)
     }
 
-    private func installTabMonitorIfNeeded() {
-        guard tabKeyMonitor == nil else { return }
-        tabKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+    private func installWorkspaceKeyDownMonitorIfNeeded() {
+        guard workspaceKeyDownMonitor == nil else { return }
+        workspaceKeyDownMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self, let window = self.window else { return event }
             guard NSApp.keyWindow === window else { return event }
-            guard event.keyCode == 48 else { return event }
 
             let normalizedModifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-            guard normalizedModifiers.isEmpty else { return event }
-            guard self.shouldAllowTabWorkspaceChromeToggle(for: window.firstResponder) else { return event }
-
-            if self.keyDownHandler?(event) == true {
-                return nil
+            if isForegroundColorFillShortcut(
+                keyCode: event.keyCode,
+                modifiers: normalizedModifiers
+            ) {
+                guard self.shouldAllowWorkspaceShortcut(for: window.firstResponder) else { return event }
+                return self.keyDownHandler?(event) == true ? nil : event
             }
-            return event
+
+            guard event.keyCode == 48, normalizedModifiers.isEmpty else { return event }
+            guard self.shouldAllowWorkspaceShortcut(for: window.firstResponder) else { return event }
+            return self.keyDownHandler?(event) == true ? nil : event
         }
     }
 
@@ -123,7 +126,7 @@ final class KeyboardBridgeView: NSView {
         false
     }
 
-    private func shouldAllowTabWorkspaceChromeToggle(for responder: Any?) -> Bool {
+    private func shouldAllowWorkspaceShortcut(for responder: Any?) -> Bool {
         guard let responder else { return true }
         if let textView = responder as? NSTextView, textView.isEditable {
             return false
@@ -160,4 +163,11 @@ final class KeyboardBridgeView: NSView {
         }
         return nil
     }
+}
+
+func isForegroundColorFillShortcut(
+    keyCode: UInt16,
+    modifiers: NSEvent.ModifierFlags
+) -> Bool {
+    (keyCode == 51 || keyCode == 117) && modifiers == [.option]
 }

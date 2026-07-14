@@ -80,6 +80,8 @@ struct MetalCanvasHost: NSViewRepresentable {
     let isFreeTransformDragging: Bool
     let activeFreeTransformInteractionMode: FreeTransformInteractionMode?
     let transformPreview: FreeTransformPreview
+    let freeTransformToolMode: FreeTransformToolMode
+    let meshWarpGrid: MeshWarpGrid?
     let linearGradientPreview: LinearGradientPreview?
     let sectorGradientPreview: SectorGradientPreview?
     let patternPlacementPhase: PatternPlacementPhase
@@ -99,6 +101,10 @@ struct MetalCanvasHost: NSViewRepresentable {
     let onBucketFill: (CanvasPoint) -> Void
     let onCanvasClick: (CanvasPoint, NSEvent.ModifierFlags, Int) -> Void
     let onCanvasHover: (CanvasPoint) -> Void
+    let onCanvasExited: () -> Void
+    let onStraightLineDragBegan: (CanvasPoint) -> Void
+    let onStraightLineDragChanged: ([CanvasPoint]) -> Void
+    let onStraightLineDragEnded: (CanvasPoint) -> Void
     let onSelectionBegan: (CanvasPoint, NSEvent.ModifierFlags) -> Void
     let onSelectionChanged: (CanvasPoint, NSEvent.ModifierFlags) -> Void
     let onSelectionChangedBatch: ([CanvasPoint], NSEvent.ModifierFlags) -> Void
@@ -128,6 +134,7 @@ struct MetalCanvasHost: NSViewRepresentable {
     let onCancelCanvasTool: () -> Void
     let onApplyGradientSession: () -> Void
     let onClearSelection: () -> Void
+    let onRequestSelectionFeather: () -> Void
     let onApplyTransform: () -> Void
     let onCancelTransform: () -> Void
     let isLuminosityPreviewEnabled: Bool
@@ -142,6 +149,8 @@ struct MetalCanvasHost: NSViewRepresentable {
             externalRedrawRevision: externalRedrawRevision,
             transformSelectionShape: transformSelectionShape,
             transformPreview: transformPreview,
+            freeTransformToolMode: freeTransformToolMode,
+            meshWarpGrid: meshWarpGrid,
             linearGradientPreview: linearGradientPreview,
             sectorGradientPreview: sectorGradientPreview,
             patternPlacementPhase: patternPlacementPhase,
@@ -166,6 +175,10 @@ struct MetalCanvasHost: NSViewRepresentable {
             onBucketFill: onBucketFill,
             onCanvasClick: onCanvasClick,
             onCanvasHover: onCanvasHover,
+            onCanvasExited: onCanvasExited,
+            onStraightLineDragBegan: onStraightLineDragBegan,
+            onStraightLineDragChanged: onStraightLineDragChanged,
+            onStraightLineDragEnded: onStraightLineDragEnded,
             onSelectionBegan: onSelectionBegan,
             onSelectionChanged: onSelectionChanged,
             onSelectionChangedBatch: onSelectionChangedBatch,
@@ -210,6 +223,8 @@ struct MetalCanvasHost: NSViewRepresentable {
         view.keyDownEventHandler = onKeyDown
         view.keyUpEventHandler = onKeyUp
         view.modifierFlagsChangedEventHandler = onModifierFlagsChanged
+        view.contextMenuSelectionShape = isTransformingSelection ? nil : sceneSnapshot.selectionShape
+        view.selectionFeatherRequestHandler = onRequestSelectionFeather
         view.wantsLayer = true
         view.viewportRenderScale = viewportRenderScale
         view.displaySamplingMode = displaySamplingMode
@@ -230,6 +245,8 @@ struct MetalCanvasHost: NSViewRepresentable {
         let previousExternalRedrawRevision = context.coordinator.previousExternalRedrawRevision
         let previousIsTransforming = context.coordinator.isTransformingSelection
         let previousTransformPreview = context.coordinator.transformPreview
+        let previousFreeTransformToolMode = context.coordinator.freeTransformToolMode
+        let previousMeshWarpGrid = context.coordinator.meshWarpGrid
         let previousDisplaySamplingMode = context.coordinator.displaySamplingMode
         let previousDrawsTransparencyCheckerboard = context.coordinator.drawsTransparencyCheckerboard
         context.coordinator.sceneSnapshot = sceneSnapshot
@@ -240,6 +257,8 @@ struct MetalCanvasHost: NSViewRepresentable {
         context.coordinator.isFreeTransformDragging = isFreeTransformDragging
         context.coordinator.activeFreeTransformInteractionMode = activeFreeTransformInteractionMode
         context.coordinator.transformPreview = transformPreview
+        context.coordinator.freeTransformToolMode = freeTransformToolMode
+        context.coordinator.meshWarpGrid = meshWarpGrid
         context.coordinator.linearGradientPreview = linearGradientPreview
         context.coordinator.sectorGradientPreview = sectorGradientPreview
         context.coordinator.patternPlacementPhase = patternPlacementPhase
@@ -252,6 +271,8 @@ struct MetalCanvasHost: NSViewRepresentable {
         let previousLuminosityPreview = context.coordinator.isLuminosityPreviewEnabled
         context.coordinator.isLuminosityPreviewEnabled = isLuminosityPreviewEnabled
         if let view = nsView as? StrokeCaptureMTKView {
+            view.contextMenuSelectionShape = isTransformingSelection ? nil : sceneSnapshot.selectionShape
+            view.selectionFeatherRequestHandler = onRequestSelectionFeather
             let previousCanvasSize = view.canvasSize
             let previousViewportRotation = view.viewportRotationDegrees
             let previousPanMode = view.isPanModeActive
@@ -279,6 +300,8 @@ struct MetalCanvasHost: NSViewRepresentable {
                 previousExternalRedrawRevision != externalRedrawRevision ||
                 previousIsTransforming != isTransformingSelection ||
                 previousTransformPreview != transformPreview ||
+                previousFreeTransformToolMode != freeTransformToolMode ||
+                previousMeshWarpGrid != meshWarpGrid ||
                 previousPatternPlacementPhase != patternPlacementPhase ||
                 previousLinearGradientPreview != linearGradientPreview ||
                 previousSectorGradientPreview != sectorGradientPreview ||
@@ -379,6 +402,10 @@ protocol StrokeCaptureDelegate: AnyObject {
     func strokeCaptureView(_ view: StrokeCaptureMTKView, didRequestBucketFillAt point: CanvasPoint)
     func strokeCaptureView(_ view: StrokeCaptureMTKView, didClickCanvasAt point: CanvasPoint, modifiers: NSEvent.ModifierFlags, clickCount: Int)
     func strokeCaptureView(_ view: StrokeCaptureMTKView, didHoverCanvasAt point: CanvasPoint)
+    func strokeCaptureViewDidExitCanvas(_ view: StrokeCaptureMTKView)
+    func strokeCaptureView(_ view: StrokeCaptureMTKView, didBeginStraightLineDragAt point: CanvasPoint)
+    func strokeCaptureView(_ view: StrokeCaptureMTKView, didChangeStraightLineDragAlong points: [CanvasPoint])
+    func strokeCaptureView(_ view: StrokeCaptureMTKView, didEndStraightLineDragAt point: CanvasPoint)
     func strokeCaptureView(_ view: StrokeCaptureMTKView, didBeginSelectionAt point: CanvasPoint, modifiers: NSEvent.ModifierFlags)
     func strokeCaptureView(_ view: StrokeCaptureMTKView, didChangeSelectionAt point: CanvasPoint, modifiers: NSEvent.ModifierFlags)
     func strokeCaptureView(_ view: StrokeCaptureMTKView, didChangeSelectionAlong points: [CanvasPoint], modifiers: NSEvent.ModifierFlags)
@@ -599,6 +626,41 @@ func shouldShowBrushTipIndicator(
     return hasHoverLocation
 }
 
+func shouldOfferSelectionFeatherContextMenu(
+    selectionShape: SelectionShape?,
+    at point: CanvasPoint
+) -> Bool {
+    selectionShape?.contains(point) == true
+}
+
+private let canvasRotationCenterDeadZonePoints = 24.0
+private let canvasRotationSensitivityReferenceRadiusPoints = 300.0
+private let canvasRotationMaximumSensitivity = 0.65
+
+func canvasRotationDragSensitivity(startDistanceFromCenter: Double) -> Double {
+    let effectiveRadius = max(startDistanceFromCenter - canvasRotationCenterDeadZonePoints, 0)
+    return min(
+        effectiveRadius / canvasRotationSensitivityReferenceRadiusPoints,
+        canvasRotationMaximumSensitivity
+    )
+}
+
+func canvasRotationDragDeltaDegrees(
+    startAngleDegrees: Double,
+    currentAngleDegrees: Double,
+    startDistanceFromCenter: Double
+) -> Double {
+    let startRadians = startAngleDegrees * .pi / 180
+    let currentRadians = currentAngleDegrees * .pi / 180
+    let shortestDeltaDegrees = normalizedAngleDelta(
+        from: startRadians,
+        to: currentRadians
+    ) * 180 / .pi
+    return shortestDeltaDegrees * canvasRotationDragSensitivity(
+        startDistanceFromCenter: startDistanceFromCenter
+    )
+}
+
 func freeTransformCanStartImmediately(
     signature: TransformPreviewPreparedSignature?,
     hasPreparedSession: Bool
@@ -665,6 +727,8 @@ final class StrokeCaptureMTKView: MTKView {
     var keyDownEventHandler: ((NSEvent) -> Bool)?
     var keyUpEventHandler: ((NSEvent) -> Bool)?
     var modifierFlagsChangedEventHandler: ((NSEvent.ModifierFlags) -> Bool)?
+    var contextMenuSelectionShape: SelectionShape?
+    var selectionFeatherRequestHandler: (() -> Void)?
     var canvasSize: CanvasSize = .stageOneDefault
     var activeTool: ToolKind = .brush {
         didSet {
@@ -757,7 +821,9 @@ final class StrokeCaptureMTKView: MTKView {
     private let brushStrokeLogger = Logger(subsystem: "ArtFlex", category: "BrushStroke")
     private let transformStrokeLogger = Logger(subsystem: "ArtFlex", category: "TransformStroke")
     private var canvasRotationBaseDegrees: Double?
-    private var canvasRotationStartAngleDegrees: Double?
+    private var canvasRotationPreviousAngleDegrees: Double?
+    private var canvasRotationStartDistanceFromCenter: Double?
+    private var canvasRotationAccumulatedDeltaDegrees = 0.0
     private static let eyedropperCursor: NSCursor = {
         let configuration = NSImage.SymbolConfiguration(pointSize: 18, weight: .regular)
         if let image = NSImage(
@@ -771,6 +837,33 @@ final class StrokeCaptureMTKView: MTKView {
 
     override var acceptsFirstResponder: Bool { true }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    override func menu(for event: NSEvent) -> NSMenu? {
+        guard !isPanModeActive else { return nil }
+        let point = sample(from: event).location
+        guard shouldOfferSelectionFeatherContextMenu(
+            selectionShape: contextMenuSelectionShape,
+            at: point
+        ) else {
+            return nil
+        }
+
+        let menu = NSMenu(title: "选区")
+        let featherItem = NSMenuItem(
+            title: "羽化选区…",
+            action: #selector(requestSelectionFeather(_:)),
+            keyEquivalent: ""
+        )
+        featherItem.target = self
+        menu.addItem(featherItem)
+        return menu
+    }
+
+    @objc private func requestSelectionFeather(_ sender: NSMenuItem) {
+        _ = sender
+        selectionFeatherRequestHandler?()
+    }
+
     private let debugDisableMouseCoalescingDuringStroke = true
     private let debugForceConstantPressure = false
     private let debugBypassStartupPressureSmoothing = false
@@ -990,7 +1083,9 @@ final class StrokeCaptureMTKView: MTKView {
         if activeTool == .canvasRotate {
             let location = convert(event.locationInWindow, from: nil)
             canvasRotationBaseDegrees = viewportRotationDegrees
-            canvasRotationStartAngleDegrees = canvasRotationAngleDegrees(for: location)
+            canvasRotationPreviousAngleDegrees = canvasRotationAngleDegrees(for: location)
+            canvasRotationStartDistanceFromCenter = canvasRotationDistanceFromCenter(for: location)
+            canvasRotationAccumulatedDeltaDegrees = 0
             setNeedsDisplay(bounds)
             return
         }
@@ -1008,6 +1103,10 @@ final class StrokeCaptureMTKView: MTKView {
         }
 
         if activeTool == .straightLine {
+            strokeDelegate?.strokeCaptureView(
+                self,
+                didBeginStraightLineDragAt: sample(from: event).location
+            )
             setNeedsDisplay(bounds)
             return
         }
@@ -1109,12 +1208,18 @@ final class StrokeCaptureMTKView: MTKView {
         if activeTool == .canvasRotate {
             let currentLocation = convert(event.locationInWindow, from: nil)
             if let baseDegrees = canvasRotationBaseDegrees,
-               let startAngleDegrees = canvasRotationStartAngleDegrees {
+               let previousAngleDegrees = canvasRotationPreviousAngleDegrees,
+               let startDistanceFromCenter = canvasRotationStartDistanceFromCenter {
                 let currentAngleDegrees = canvasRotationAngleDegrees(for: currentLocation)
-                let sensitivity = canvasRotationSensitivity(for: currentLocation)
+                canvasRotationAccumulatedDeltaDegrees += canvasRotationDragDeltaDegrees(
+                    startAngleDegrees: previousAngleDegrees,
+                    currentAngleDegrees: currentAngleDegrees,
+                    startDistanceFromCenter: startDistanceFromCenter
+                )
+                canvasRotationPreviousAngleDegrees = currentAngleDegrees
                 strokeDelegate?.strokeCaptureView(
                     self,
-                    didRotateCanvasTo: baseDegrees + ((currentAngleDegrees - startAngleDegrees) * sensitivity)
+                    didRotateCanvasTo: baseDegrees + canvasRotationAccumulatedDeltaDegrees
                 )
             }
             setNeedsDisplay(bounds)
@@ -1132,7 +1237,10 @@ final class StrokeCaptureMTKView: MTKView {
         }
 
         if activeTool == .straightLine {
-            strokeDelegate?.strokeCaptureView(self, didHoverCanvasAt: sample(from: event).location)
+            strokeDelegate?.strokeCaptureView(
+                self,
+                didChangeStraightLineDragAlong: [sample(from: event).location]
+            )
             setNeedsDisplay(bounds)
             return
         }
@@ -1305,7 +1413,9 @@ final class StrokeCaptureMTKView: MTKView {
 
         if activeTool == .canvasRotate {
             canvasRotationBaseDegrees = nil
-            canvasRotationStartAngleDegrees = nil
+            canvasRotationPreviousAngleDegrees = nil
+            canvasRotationStartDistanceFromCenter = nil
+            canvasRotationAccumulatedDeltaDegrees = 0
             lastSample = nil
             lastPressure = nil
             setNeedsDisplay(bounds)
@@ -1329,10 +1439,11 @@ final class StrokeCaptureMTKView: MTKView {
         if activeTool == .straightLine {
             strokeDelegate?.strokeCaptureView(
                 self,
-                didClickCanvasAt: sample(from: event).location,
-                modifiers: event.modifierFlags.intersection(.deviceIndependentFlagsMask),
-                clickCount: event.clickCount
+                didEndStraightLineDragAt: sample(from: event).location
             )
+            if !bounds.contains(convert(event.locationInWindow, from: nil)) {
+                strokeDelegate?.strokeCaptureViewDidExitCanvas(self)
+            }
             lastSample = nil
             lastPressure = nil
             setNeedsDisplay(bounds)
@@ -1567,6 +1678,7 @@ final class StrokeCaptureMTKView: MTKView {
         hoverLocation = nil
         updateCursorIndicator()
         NSCursor.arrow.set()
+        strokeDelegate?.strokeCaptureViewDidExitCanvas(self)
     }
 
     override func keyUp(with event: NSEvent) {
@@ -1794,9 +1906,9 @@ final class StrokeCaptureMTKView: MTKView {
         return atan2(location.y - center.y, location.x - center.x) * 180 / .pi
     }
 
-    private func canvasRotationSensitivity(for location: CGPoint) -> Double {
-        _ = location
-        return 1
+    private func canvasRotationDistanceFromCenter(for location: CGPoint) -> Double {
+        let center = CGPoint(x: bounds.midX, y: bounds.midY)
+        return hypot(location.x - center.x, location.y - center.y)
     }
 
     private func selectionSamples(from event: NSEvent) -> [CanvasStrokeSample] {
@@ -2223,6 +2335,10 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
     private let onBucketFill: (CanvasPoint) -> Void
     private let onCanvasClick: (CanvasPoint, NSEvent.ModifierFlags, Int) -> Void
     private let onCanvasHover: (CanvasPoint) -> Void
+    private let onCanvasExited: () -> Void
+    private let onStraightLineDragBegan: (CanvasPoint) -> Void
+    private let onStraightLineDragChanged: ([CanvasPoint]) -> Void
+    private let onStraightLineDragEnded: (CanvasPoint) -> Void
     private let onSelectionBegan: (CanvasPoint, NSEvent.ModifierFlags) -> Void
     private let onSelectionChanged: (CanvasPoint, NSEvent.ModifierFlags) -> Void
     private let onSelectionChangedBatch: ([CanvasPoint], NSEvent.ModifierFlags) -> Void
@@ -2289,6 +2405,8 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
     var previousGradientPaintContrastAmount: Float = 0
     var previousGradientDistortionAmount: Float = 0
     var transformPreview = FreeTransformPreview.identity
+    var freeTransformToolMode: FreeTransformToolMode
+    var meshWarpGrid: MeshWarpGrid?
     var isLuminosityPreviewEnabled = false
     private let labLuminosityPostProcessor: LABLuminosityPostProcessor?
     private let labLuminosityPostProcessorError: Error?
@@ -2310,6 +2428,8 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
         externalRedrawRevision: UInt64,
         transformSelectionShape: SelectionShape?,
         transformPreview: FreeTransformPreview,
+        freeTransformToolMode: FreeTransformToolMode,
+        meshWarpGrid: MeshWarpGrid?,
         linearGradientPreview: LinearGradientPreview?,
         sectorGradientPreview: SectorGradientPreview?,
         patternPlacementPhase: PatternPlacementPhase,
@@ -2334,6 +2454,10 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
         onBucketFill: @escaping (CanvasPoint) -> Void,
         onCanvasClick: @escaping (CanvasPoint, NSEvent.ModifierFlags, Int) -> Void,
         onCanvasHover: @escaping (CanvasPoint) -> Void,
+        onCanvasExited: @escaping () -> Void,
+        onStraightLineDragBegan: @escaping (CanvasPoint) -> Void,
+        onStraightLineDragChanged: @escaping ([CanvasPoint]) -> Void,
+        onStraightLineDragEnded: @escaping (CanvasPoint) -> Void,
         onSelectionBegan: @escaping (CanvasPoint, NSEvent.ModifierFlags) -> Void,
         onSelectionChanged: @escaping (CanvasPoint, NSEvent.ModifierFlags) -> Void,
         onSelectionChangedBatch: @escaping ([CanvasPoint], NSEvent.ModifierFlags) -> Void,
@@ -2389,6 +2513,8 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
         self.previousExternalRedrawRevision = externalRedrawRevision
         self.transformSelectionShape = transformSelectionShape
         self.transformPreview = transformPreview
+        self.freeTransformToolMode = freeTransformToolMode
+        self.meshWarpGrid = meshWarpGrid
         self.linearGradientPreview = linearGradientPreview
         self.sectorGradientPreview = sectorGradientPreview
         self.patternPlacementPhase = patternPlacementPhase
@@ -2419,6 +2545,10 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
         self.onBucketFill = onBucketFill
         self.onCanvasClick = onCanvasClick
         self.onCanvasHover = onCanvasHover
+        self.onCanvasExited = onCanvasExited
+        self.onStraightLineDragBegan = onStraightLineDragBegan
+        self.onStraightLineDragChanged = onStraightLineDragChanged
+        self.onStraightLineDragEnded = onStraightLineDragEnded
         self.onSelectionBegan = onSelectionBegan
         self.onSelectionChanged = onSelectionChanged
         self.onSelectionChangedBatch = onSelectionChangedBatch
@@ -2629,6 +2759,7 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
                         pointA: geometry.pointA,
                         pointB: geometry.pointB,
                         pointC: geometry.pointC,
+                        transitionMidpoint: Float(geometry.transitionMidpoint),
                         color: gradientPreviewColor,
                         paintJitterAmount: gradientPaintJitterAmount,
                         paintContrastAmount: gradientPaintContrastAmount,
@@ -2679,34 +2810,67 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
                 descriptor.colorAttachments[0].storeAction = .store
 
                 if let session = transformPreviewSession {
-                    canvasPresenter.encodePreview(
-                        texture: session.extractedTexture,
-                        opacity: activeLayerOpacity,
-                        canvasSize: canvasSize,
-                        bounds: session.operationBounds,
-                        pivotBounds: session.interactionBounds ?? session.operationBounds,
-                        preview: effectivePreview,
-                        samplingMode: displaySamplingMode,
-                        into: descriptor,
-                        commandBuffer: commandBuffer
-                    )
+                    if freeTransformToolMode == .mesh, let meshWarpGrid {
+                        canvasPresenter.encodeMeshPreview(
+                            texture: session.extractedTexture,
+                            opacity: activeLayerOpacity,
+                            canvasSize: canvasSize,
+                            grid: meshWarpGrid,
+                            textureCoordinateBounds: meshWarpTextureCoordinateBounds(
+                                session: session,
+                                grid: meshWarpGrid,
+                                canvasSize: canvasSize
+                            ),
+                            samplingMode: displaySamplingMode,
+                            into: descriptor,
+                            commandBuffer: commandBuffer
+                        )
+                    } else {
+                        canvasPresenter.encodePreview(
+                            texture: session.extractedTexture,
+                            opacity: activeLayerOpacity,
+                            canvasSize: canvasSize,
+                            bounds: session.operationBounds,
+                            pivotBounds: session.interactionBounds ?? session.operationBounds,
+                            preview: effectivePreview,
+                            samplingMode: displaySamplingMode,
+                            into: descriptor,
+                            commandBuffer: commandBuffer
+                        )
+                    }
                 } else if currentTransformPlan?.mode == .wholeLayer,
                           let texture = layerSurfaceStore.texture(for: surfaceID) {
                     let fullBounds = CanvasRect(
                         origin: .init(x: 0, y: 0),
                         size: .init(x: Double(canvasSize.width), y: Double(canvasSize.height))
                     )
-                    canvasPresenter.encodePreview(
-                        texture: texture,
-                        opacity: activeLayerOpacity,
-                        canvasSize: canvasSize,
-                        bounds: fullBounds,
-                        pivotBounds: currentTransformPlan?.interactionBounds ?? fullBounds,
-                        preview: effectivePreview,
-                        samplingMode: displaySamplingMode,
-                        into: descriptor,
-                        commandBuffer: commandBuffer
-                    )
+                    if freeTransformToolMode == .mesh, let meshWarpGrid {
+                        canvasPresenter.encodeMeshPreview(
+                            texture: texture,
+                            opacity: activeLayerOpacity,
+                            canvasSize: canvasSize,
+                            grid: meshWarpGrid,
+                            textureCoordinateBounds: meshWarpTextureCoordinateBounds(
+                                sourceBounds: meshWarpGrid.sourceBounds,
+                                textureDomainBounds: fullBounds
+                            ),
+                            samplingMode: displaySamplingMode,
+                            into: descriptor,
+                            commandBuffer: commandBuffer
+                        )
+                    } else {
+                        canvasPresenter.encodePreview(
+                            texture: texture,
+                            opacity: activeLayerOpacity,
+                            canvasSize: canvasSize,
+                            bounds: fullBounds,
+                            pivotBounds: currentTransformPlan?.interactionBounds ?? fullBounds,
+                            preview: effectivePreview,
+                            samplingMode: displaySamplingMode,
+                            into: descriptor,
+                            commandBuffer: commandBuffer
+                        )
+                    }
                 }
             }
 
@@ -2823,6 +2987,22 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
 
     func strokeCaptureView(_ view: StrokeCaptureMTKView, didHoverCanvasAt point: CanvasPoint) {
         onCanvasHover(point)
+    }
+
+    func strokeCaptureViewDidExitCanvas(_ view: StrokeCaptureMTKView) {
+        onCanvasExited()
+    }
+
+    func strokeCaptureView(_ view: StrokeCaptureMTKView, didBeginStraightLineDragAt point: CanvasPoint) {
+        onStraightLineDragBegan(point)
+    }
+
+    func strokeCaptureView(_ view: StrokeCaptureMTKView, didChangeStraightLineDragAlong points: [CanvasPoint]) {
+        onStraightLineDragChanged(points)
+    }
+
+    func strokeCaptureView(_ view: StrokeCaptureMTKView, didEndStraightLineDragAt point: CanvasPoint) {
+        onStraightLineDragEnded(point)
     }
 
     func strokeCaptureView(
@@ -2947,7 +3127,7 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
         mode: FreeTransformInteractionMode,
         modifiers: NSEvent.ModifierFlags
     ) {
-        if mode == .move {
+        if mode == .move, freeTransformToolMode == .standard {
             isLiveTransformDragging = true
             liveTransformMode = mode
             liveTransformDragStartPoint = point
@@ -3047,7 +3227,17 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
 @MainActor
 extension MetalCanvasCoordinator: TransformPreviewDelegate {
     func freeTransformInteractionMode(for point: CanvasPoint, in view: StrokeCaptureMTKView) -> FreeTransformInteractionMode {
-        let handleCanvasRadius = max(Double(14) * Double(view.canvasSize.width) / max(view.bounds.width, 1), 12)
+        let handleMetrics = freeTransformHandleMetrics(
+            canvasExtent: Double(view.canvasSize.width),
+            displayExtent: Double(view.bounds.width)
+        )
+        if freeTransformToolMode == .mesh {
+            return meshWarpInteractionMode(
+                point: point,
+                grid: meshWarpGrid,
+                handleRadius: handleMetrics.hitRadius
+            )
+        }
         let selectionBounds = sceneSnapshot?.selectionShape?.bounds
         if currentPreparedTransformSignature()?.mode == .wholeLayer {
             let canScaleRotate = selectionBounds != nil
@@ -3068,8 +3258,8 @@ extension MetalCanvasCoordinator: TransformPreviewDelegate {
             point: point,
             bounds: selectionBounds,
             preview: transformPreview,
-            handleRadius: handleCanvasRadius,
-            rotationHandleDistance: handleCanvasRadius * 3.4
+            handleRadius: handleMetrics.hitRadius,
+            rotationHandleDistance: handleMetrics.rotationHandleDistance
         )
     }
 

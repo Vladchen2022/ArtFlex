@@ -326,6 +326,7 @@ final class TransformGPUCompositor {
     func composeTransformedTexture(
         session: TransformPreviewSession,
         preview: FreeTransformPreview,
+        meshWarpGrid: MeshWarpGrid? = nil,
         canvasSize: CanvasSize,
         metal: MetalDeviceContext,
         completion: @escaping @MainActor (MTLTexture?) -> Void
@@ -365,16 +366,32 @@ final class TransformGPUCompositor {
             clearColor: .init(red: 0, green: 0, blue: 0, alpha: 0)
         )!
 
-        canvasPresenter.encodePreview(
-            texture: session.extractedTexture,
-            opacity: 1,
-            canvasSize: canvasSize,
-            bounds: session.operationBounds,
-            pivotBounds: session.interactionBounds ?? session.operationBounds,
-            preview: preview,
-            into: overlayPass,
-            commandBuffer: commandBuffer
-        )
+        if let meshWarpGrid {
+            canvasPresenter.encodeMeshPreview(
+                texture: session.extractedTexture,
+                opacity: 1,
+                canvasSize: canvasSize,
+                grid: meshWarpGrid,
+                textureCoordinateBounds: meshWarpTextureCoordinateBounds(
+                    session: session,
+                    grid: meshWarpGrid,
+                    canvasSize: canvasSize
+                ),
+                into: overlayPass,
+                commandBuffer: commandBuffer
+            )
+        } else {
+            canvasPresenter.encodePreview(
+                texture: session.extractedTexture,
+                opacity: 1,
+                canvasSize: canvasSize,
+                bounds: session.operationBounds,
+                pivotBounds: session.interactionBounds ?? session.operationBounds,
+                preview: preview,
+                into: overlayPass,
+                commandBuffer: commandBuffer
+            )
+        }
 
         let boxedTexture = TransformTextureBox(targetTexture)
         commandBuffer.addCompletedHandler { [boxedTexture] _ in

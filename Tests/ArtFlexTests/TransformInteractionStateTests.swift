@@ -232,6 +232,152 @@ struct TransformInteractionStateTests {
     }
 
     @Test
+    func rotationHandleDisplayAndHitTestingStayAlignedWhenCanvasIsFitToView() {
+        let metrics = freeTransformHandleMetrics(
+            canvasExtent: 2_000,
+            displayExtent: 500
+        )
+        #expect(metrics.hitRadius == 56)
+        #expect(metrics.rotationHandleDistance == 192)
+
+        let bounds = CanvasRect(
+            origin: .init(x: 500, y: 600),
+            size: .init(x: 800, y: 400)
+        )
+        let handleMap = freeTransformHandlePoints(
+            bounds: bounds,
+            preview: .identity,
+            rotationHandleDistance: metrics.rotationHandleDistance
+        )
+        let rotationPoint = handleMap[.rotation]!
+
+        let mode = freeTransformInteractionMode(
+            point: rotationPoint,
+            bounds: bounds,
+            preview: .identity,
+            handleRadius: metrics.hitRadius,
+            rotationHandleDistance: metrics.rotationHandleDistance
+        )
+
+        #expect(mode == .rotate)
+    }
+
+    @Test
+    func meshWarpGridCreatesFourByFourAnchorsAndDetectsMovedState() {
+        let bounds = CanvasRect(
+            origin: .init(x: 10, y: 20),
+            size: .init(x: 120, y: 90)
+        )
+        let grid = MeshWarpGrid.regular(bounds: bounds)
+
+        #expect(grid.columns == 4)
+        #expect(grid.rows == 4)
+        #expect(grid.controlPoints.count == 16)
+        #expect(grid.point(row: 0, column: 0) == .init(x: 10, y: 20))
+        #expect(grid.point(row: 3, column: 3) == .init(x: 130, y: 110))
+        #expect(grid.isIdentity)
+
+        let moved = grid.movingControlPoint(
+            at: 5,
+            by: .init(x: 14, y: -9)
+        )
+        #expect(moved.point(row: 1, column: 1) == .init(x: 64, y: 41))
+        #expect(!moved.isIdentity)
+    }
+
+    @Test
+    func meshWarpSelectionTogglesAndMovesEverySelectedAnchor() {
+        let grid = MeshWarpGrid.regular(
+            bounds: CanvasRect(
+                origin: .init(x: 10, y: 20),
+                size: .init(x: 90, y: 90)
+            )
+        )
+        var selection = updatedMeshWarpControlPointSelection(
+            current: [],
+            clickedIndex: 0,
+            togglesSelection: false
+        )
+        selection = updatedMeshWarpControlPointSelection(
+            current: selection,
+            clickedIndex: 5,
+            togglesSelection: true
+        )
+        #expect(selection == Set([0, 5]))
+
+        let moved = grid.movingControlPoints(
+            at: selection,
+            by: .init(x: 7, y: -4)
+        )
+        #expect(moved.controlPoints[0] == .init(x: 17, y: 16))
+        #expect(moved.controlPoints[5] == .init(x: 47, y: 46))
+        #expect(moved.controlPoints[1] == grid.controlPoints[1])
+
+        selection = updatedMeshWarpControlPointSelection(
+            current: selection,
+            clickedIndex: 5,
+            togglesSelection: true
+        )
+        #expect(selection == Set([0]))
+        #expect(
+            updatedMeshWarpControlPointSelection(
+                current: Set([0, 5]),
+                clickedIndex: 0,
+                togglesSelection: false
+            ) == Set([0, 5])
+        )
+    }
+
+    @Test
+    func meshWarpHitTestingPrioritizesAnchorsAndStateRequiresApply() {
+        let grid = MeshWarpGrid.regular(
+            bounds: CanvasRect(
+                origin: .init(x: 20, y: 30),
+                size: .init(x: 90, y: 90)
+            )
+        )
+        let anchor = grid.controlPoints[6]
+        #expect(
+            meshWarpInteractionMode(
+                point: .init(x: anchor.x + 2, y: anchor.y - 1),
+                grid: grid,
+                handleRadius: 8
+            ) == .meshPoint(6)
+        )
+
+        var state = TransformInteractionState()
+        state.isActive = true
+        state.meshWarpGrid = grid.movingControlPoint(
+            at: 6,
+            by: .init(x: 8, y: 3)
+        )
+        #expect(state.hasPendingTransform)
+        #expect(state.clearBehavior() == .apply)
+    }
+
+    @Test
+    func meshWarpTessellationKeepsTextureCornersAndMovedAnchor() {
+        var grid = MeshWarpGrid.regular(
+            bounds: CanvasRect(
+                origin: .init(x: 100, y: 200),
+                size: .init(x: 300, y: 150)
+            )
+        )
+        grid = grid.movingControlPoint(
+            at: 0,
+            by: .init(x: -25, y: 12)
+        )
+        let vertices = grid.tessellatedVertices(subdivisionsPerCell: 2)
+
+        #expect(vertices.count == 216)
+        #expect(vertices.contains {
+            $0.canvasPosition == .init(x: 75, y: 212) &&
+            $0.textureCoordinate == .init(x: 0, y: 0)
+        })
+        #expect(vertices.contains { $0.textureCoordinate == .init(x: 1, y: 1) })
+    }
+
+    @Test
     func missingInteractionBoundsFallsBackToMoveWithoutHandles() {
         let mode = freeTransformInteractionMode(
             point: .init(x: 10, y: 10),

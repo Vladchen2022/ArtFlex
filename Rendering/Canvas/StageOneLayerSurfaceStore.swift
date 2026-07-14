@@ -140,6 +140,46 @@ final class StageOneLayerSurfaceStore {
         )
     }
 
+    @discardableResult
+    func copyTextures(
+        _ copies: [(source: MTLTexture, destination: MTLTexture)],
+        metal: MetalDeviceContext
+    ) -> Bool {
+        guard !copies.isEmpty else { return true }
+        guard copies.allSatisfy({ copy in
+            copy.source.width == copy.destination.width
+                && copy.source.height == copy.destination.height
+                && copy.source.pixelFormat == copy.destination.pixelFormat
+        }) else {
+            return false
+        }
+        guard
+            let commandBuffer = metal.commandQueue.makeCommandBuffer(),
+            let blitEncoder = commandBuffer.makeBlitCommandEncoder()
+        else {
+            return false
+        }
+
+        for copy in copies {
+            blitEncoder.copy(
+                from: copy.source,
+                sourceSlice: 0,
+                sourceLevel: 0,
+                sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
+                sourceSize: MTLSize(width: copy.source.width, height: copy.source.height, depth: 1),
+                to: copy.destination,
+                destinationSlice: 0,
+                destinationLevel: 0,
+                destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
+            )
+        }
+
+        blitEncoder.endEncoding()
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+        return commandBuffer.status == .completed
+    }
+
     func copyTextureRegion(
         from sourceTexture: MTLTexture,
         to destinationTexture: MTLTexture,

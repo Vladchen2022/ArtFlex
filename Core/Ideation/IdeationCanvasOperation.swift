@@ -34,6 +34,16 @@ enum IdeationCanvasOperation: Sendable {
     case enterGradientEditing
     case applyGradientSession
     case cancelGradientSession
+    case beginStraightLineDrag(
+        point: CanvasPoint,
+        brushSize: Float,
+        paintVariationSeed: UInt32,
+        thicknessAdjustmentDeadZone: Double
+    )
+    case updateStraightLineDrag([CanvasPoint])
+    case endStraightLineDrag(CanvasPoint)
+    case commitStraightLine
+    case cancelStraightLine
     case fillAtPoint(CanvasPoint)
     case applyCanvasCrop(CanvasRect)
     case handleCanvasToolClick(
@@ -47,7 +57,12 @@ enum IdeationCanvasOperation: Sendable {
     case commitSelection(end: CanvasPoint, modifiers: CanvasModifierState)
     case moveSelectionPreview(deltaX: Double, deltaY: Double)
     case commitSelectionMove
-    case beginSelectionTransform(start: CanvasPoint, mode: FreeTransformInteractionMode)
+    case setFreeTransformToolMode(FreeTransformToolMode)
+    case beginSelectionTransform(
+        start: CanvasPoint,
+        mode: FreeTransformInteractionMode,
+        modifiers: CanvasModifierState
+    )
     case updateSelectionTransform(point: CanvasPoint)
     case commitSelectionTransform(end: CanvasPoint)
     case setTransformPreviewOffset(CanvasPoint)

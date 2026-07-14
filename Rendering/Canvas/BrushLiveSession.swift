@@ -71,6 +71,7 @@ struct BrushLiveSession {
     var committedRevision: UInt64
     var alphaLockTexture: MTLTexture?
     var liveEvents: [BrushLiveEvent] = []
+    var pendingPacketCount = 0
     var currentStrokePackets: [StrokeDescriptor] = []
     var brushSamplingState: BrushStrokeSamplingState?
     var opacityCapSession: OpacityCapSessionResources?

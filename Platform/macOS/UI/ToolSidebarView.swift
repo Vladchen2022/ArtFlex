@@ -158,7 +158,7 @@ struct ToolSidebarView: View {
             VStack(alignment: .leading, spacing: 8) {
                 Button {
                     showsSnapshotPopover = false
-                    hostViewModel.openSnapshotCompare()
+                    hostViewModel.requestOpenSnapshotCompare()
                 } label: {
                     HStack {
                         Text("快照对比")
@@ -209,6 +209,7 @@ struct ToolSidebarView: View {
             hostViewModel.ideationSession != nil
                 || hostViewModel.snapshotCompareSession != nil
                 || hostViewModel.isSavingSnapshot
+                || hostViewModel.isPreparingSnapshotCompare
         )
     }
 
@@ -266,11 +267,17 @@ struct ToolSidebarView: View {
             )
         }
         .buttonStyle(.plain)
-        .disabled(hostViewModel.snapshotCompareSession != nil)
+        .disabled(
+            hostViewModel.snapshotCompareSession != nil
+                || hostViewModel.isSavingSnapshot
+                || hostViewModel.isPreparingSnapshotCompare
+        )
         .help(
             hostViewModel.snapshotCompareSession != nil
                 ? "快照对比期间不可进入方案试探"
-                : (hostViewModel.ideationSession == nil ? "方案试探" : "退出方案试探")
+                : ((hostViewModel.isSavingSnapshot || hostViewModel.isPreparingSnapshotCompare)
+                    ? "快照任务完成后再进入方案试探"
+                    : (hostViewModel.ideationSession == nil ? "方案试探" : "退出方案试探"))
         )
     }
 
@@ -386,6 +393,9 @@ struct ToolSidebarView: View {
         }
         if hostViewModel.isSavingSnapshot {
             return "正在保存快照"
+        }
+        if hostViewModel.isPreparingSnapshotCompare {
+            return "正在准备快照对比"
         }
         if hostViewModel.savedSnapshotCount >= 6 {
             return "已达到 6 张快照上限，再点会直接进入快照对比"

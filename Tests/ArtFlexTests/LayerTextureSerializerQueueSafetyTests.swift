@@ -144,6 +144,40 @@ struct LayerTextureSerializerQueueSafetyTests {
     }
 
     @Test
+    func batchCopyTexturesPreservesEverySourcePixel() throws {
+        guard let metalContext = MetalDeviceContext() else {
+            Issue.record("Metal unavailable")
+            return
+        }
+
+        let layerSurfaceStore = StageOneLayerSurfaceStore()
+        let serializer = LayerTextureSerializer(metalContext: metalContext)
+        guard
+            let sourceA = layerSurfaceStore.makeTexture(width: 8, height: 8, metal: metalContext),
+            let sourceB = layerSurfaceStore.makeTexture(width: 8, height: 8, metal: metalContext),
+            let destinationA = layerSurfaceStore.makeTexture(width: 8, height: 8, metal: metalContext),
+            let destinationB = layerSurfaceStore.makeTexture(width: 8, height: 8, metal: metalContext)
+        else {
+            throw QueueSafetyHarnessError.textureUnavailable
+        }
+
+        try serializer.restore(snapshot: opaqueRedSnapshot(width: 8, height: 8, red: 91), into: sourceA)
+        try serializer.restore(snapshot: opaqueRedSnapshot(width: 8, height: 8, red: 217), into: sourceB)
+
+        let copied = layerSurfaceStore.copyTextures(
+            [
+                (source: sourceA, destination: destinationA),
+                (source: sourceB, destination: destinationB)
+            ],
+            metal: metalContext
+        )
+
+        #expect(copied)
+        #expect(try serializer.snapshot(texture: destinationA).pixelData == serializer.snapshot(texture: sourceA).pixelData)
+        #expect(try serializer.snapshot(texture: destinationB).pixelData == serializer.snapshot(texture: sourceB).pixelData)
+    }
+
+    @Test
     func prepareTexturesClearRemainsSynchronouslyVisibleToSerializer() throws {
         guard let metalContext = MetalDeviceContext() else {
             Issue.record("Metal unavailable")

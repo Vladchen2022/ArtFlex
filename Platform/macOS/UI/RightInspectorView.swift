@@ -333,8 +333,8 @@ struct RightInspectorView: View {
     }
 
     private enum ParameterInspectorTab: String {
-        case brush = "画笔参数"
-        case colorAdjustment = "色彩参数"
+        case brush = "工具参数"
+        case colorAdjustment = "调色"
         case curves = "曲线"
     }
 
@@ -4536,6 +4536,8 @@ private struct NavigatorPreviewPanel: View {
                     isFreeTransformDragging: false,
                     activeFreeTransformInteractionMode: nil,
                     transformPreview: .identity,
+                    freeTransformToolMode: .standard,
+                    meshWarpGrid: nil,
                     linearGradientPreview: nil,
                     sectorGradientPreview: nil,
                     patternPlacementPhase: .idle,
@@ -4557,6 +4559,10 @@ private struct NavigatorPreviewPanel: View {
                     onBucketFill: { _ in },
                     onCanvasClick: { _, _, _ in },
                     onCanvasHover: { _ in },
+                    onCanvasExited: {},
+                    onStraightLineDragBegan: { _ in },
+                    onStraightLineDragChanged: { _ in },
+                    onStraightLineDragEnded: { _ in },
                     onSelectionBegan: { _, _ in },
                     onSelectionChanged: { _, _ in },
                     onSelectionChangedBatch: { _, _ in },
@@ -4586,6 +4592,7 @@ private struct NavigatorPreviewPanel: View {
                     onCancelCanvasTool: {},
                     onApplyGradientSession: {},
                     onClearSelection: {},
+                    onRequestSelectionFeather: {},
                     onApplyTransform: {},
                     onCancelTransform: {},
                     isLuminosityPreviewEnabled: false,

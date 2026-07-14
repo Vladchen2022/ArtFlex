@@ -471,15 +471,41 @@ struct WorkspaceViewModelSafetyTests {
     func reselectingCurrentToolKeepsItsInProgressInteraction() throws {
         let harness = try BrushEditingBoundaryHarness()
         harness.viewModel.selectTool(.straightLine)
-        harness.viewModel.handleStraightLineClick(at: .init(x: 20, y: 30))
+        harness.viewModel.beginStraightLineDrag(at: .init(x: 20, y: 30))
 
         harness.viewModel.selectToolFromUI(.straightLine)
 
-        guard case .pickedA = harness.viewModel.straightLineState.phase else {
+        guard case .drawingLine = harness.viewModel.straightLineState.phase else {
             Issue.record("Reselecting the current tool unexpectedly cleared its draft")
             return
         }
         #expect(harness.viewModel.straightLineState.pointA == .init(x: 20, y: 30))
+    }
+
+    @Test
+    @MainActor
+    func straightLineDragStaysEditableUntilPointerExitAndKeepsAdjustedSize() throws {
+        let harness = try BrushEditingBoundaryHarness()
+        harness.viewModel.selectTool(.straightLine)
+        harness.viewModel.setBrushSize(12)
+
+        harness.viewModel.beginStraightLineDrag(at: .init(x: 10, y: 32))
+        harness.viewModel.updateStraightLineDrag(along: [.init(x: 56, y: 32)])
+        harness.viewModel.endStraightLineDrag(at: .init(x: 56, y: 32))
+
+        #expect(harness.viewModel.straightLineState.phase == .pending)
+        #expect(try harness.alpha(atX: 32, y: 32) < 0.01)
+
+        harness.viewModel.setBrushSize(40)
+        #expect(harness.viewModel.straightLineState.phase == .pending)
+        #expect(harness.viewModel.workspace.toolSession.brush.size == 40)
+        harness.viewModel.handleCanvasPointerExit()
+        #expect(harness.viewModel.straightLineState.phase == .idle)
+        _ = harness.viewModel.flushBrushEditingBoundary(reason: "straightLine.test")
+
+        #expect(try harness.alpha(atX: 32, y: 32) > 0.9)
+        harness.viewModel.beginStraightLineDrag(at: .init(x: 10, y: 64))
+        #expect(harness.viewModel.straightLineState.baseBrushSize == 40)
     }
 
     @Test
@@ -1948,6 +1974,171 @@ struct WorkspaceViewModelSafetyTests {
 
     @Test
     @MainActor
+    func stampVisibleLayersShortcutCreatesUndoableTopCompositeWithoutRemovingSources() throws {
+        let harness = try BrushEditingBoundaryHarness(canvasSize: .init(width: 32, height: 32))
+        let redLayerID = harness.viewModel.workspace.document.activeLayerID
+        try fillOpaqueRect(
+            in: harness,
+            layerID: redLayerID,
+            originX: 6,
+            originY: 6,
+            width: 12,
+            height: 12,
+            color: .init(red: 1, green: 0, blue: 0, alpha: 1)
+        )
+
+        harness.viewModel.addLayer()
+        let blueLayerID = harness.viewModel.workspace.document.activeLayerID
+        try fillOpaqueRect(
+            in: harness,
+            layerID: blueLayerID,
+            originX: 6,
+            originY: 6,
+            width: 12,
+            height: 12,
+            color: .init(red: 0, green: 0, blue: 1, alpha: 1)
+        )
+        harness.viewModel.setActiveLayerOpacity(0.5)
+
+        harness.viewModel.addLayer()
+        let hiddenGreenLayerID = harness.viewModel.workspace.document.activeLayerID
+        try fillOpaqueRect(
+            in: harness,
+            layerID: hiddenGreenLayerID,
+            originX: 6,
+            originY: 6,
+            width: 12,
+            height: 12,
+            color: .init(red: 0, green: 1, blue: 0, alpha: 1)
+        )
+        harness.viewModel.setLayerVisibility(hiddenGreenLayerID, isVisible: false)
+
+        let sourceLayerIDs = harness.viewModel.workspace.document.layers.map(\.id)
+        let handled = harness.viewModel.handleKeyDown(
+            makeCanvasKeyEvent(
+                type: .keyDown,
+                characters: "E",
+                charactersIgnoringModifiers: "e",
+                modifiers: [.command, .option, .shift],
+                keyCode: 14
+            )
+        )
+
+        #expect(handled)
+        let stampedDocument = harness.viewModel.workspace.document
+        #expect(stampedDocument.layers.count == sourceLayerIDs.count + 1)
+        #expect(Array(stampedDocument.layers.dropLast().map(\.id)) == sourceLayerIDs)
+        let stampedLayer = try #require(stampedDocument.layers.last)
+        #expect(stampedLayer.id == stampedDocument.activeLayerID)
+        #expect(stampedLayer.name == "盖印图层")
+        #expect(stampedLayer.isVisible)
+        #expect(stampedLayer.opacity == 1)
+
+        let stampedColor = try harness.color(atX: 10, y: 10, layerID: stampedLayer.id)
+        #expect(stampedColor.red > 0.45)
+        #expect(stampedColor.blue > 0.45)
+        #expect(stampedColor.green < 0.05)
+        #expect(stampedColor.alpha > 0.99)
+        #expect(stampedDocument.layers.first(where: { $0.id == hiddenGreenLayerID })?.isVisible == false)
+
+        harness.viewModel.undo()
+        #expect(harness.viewModel.workspace.document.layers.map(\.id) == sourceLayerIDs)
+        #expect(try harness.color(atX: 10, y: 10, layerID: redLayerID).red > 0.95)
+        #expect(try harness.color(atX: 10, y: 10, layerID: blueLayerID).blue > 0.95)
+    }
+
+    @Test
+    @MainActor
+    func mergedCopyShortcutPastesVisibleSelectionInPlaceAsNewLayer() throws {
+        let harness = try BrushEditingBoundaryHarness(canvasSize: .init(width: 32, height: 32))
+        let backgroundLayerID = try #require(harness.viewModel.workspace.document.layers.first?.id)
+        let redLayerID = harness.viewModel.workspace.document.activeLayerID
+        try fillOpaqueRect(
+            in: harness,
+            layerID: redLayerID,
+            originX: 6,
+            originY: 6,
+            width: 12,
+            height: 12,
+            color: .init(red: 1, green: 0, blue: 0, alpha: 1)
+        )
+
+        harness.viewModel.addLayer()
+        let blueLayerID = harness.viewModel.workspace.document.activeLayerID
+        try fillOpaqueRect(
+            in: harness,
+            layerID: blueLayerID,
+            originX: 6,
+            originY: 6,
+            width: 12,
+            height: 12,
+            color: .init(red: 0, green: 0, blue: 1, alpha: 1)
+        )
+        harness.viewModel.setActiveLayerOpacity(0.5)
+
+        harness.viewModel.addLayer()
+        let hiddenGreenLayerID = harness.viewModel.workspace.document.activeLayerID
+        try fillOpaqueRect(
+            in: harness,
+            layerID: hiddenGreenLayerID,
+            originX: 6,
+            originY: 6,
+            width: 12,
+            height: 12,
+            color: .init(red: 0, green: 1, blue: 0, alpha: 1)
+        )
+        harness.viewModel.setLayerVisibility(hiddenGreenLayerID, isVisible: false)
+        makeRectangleSelection(
+            in: harness.viewModel,
+            minX: 8,
+            minY: 8,
+            maxX: 16,
+            maxY: 16
+        )
+
+        let sourceLayerIDs = harness.viewModel.workspace.document.layers.map(\.id)
+        let copied = harness.viewModel.handleKeyDown(
+            makeCanvasKeyEvent(
+                type: .keyDown,
+                characters: "C",
+                charactersIgnoringModifiers: "c",
+                modifiers: [.command, .shift],
+                keyCode: 8
+            )
+        )
+        #expect(copied)
+        #expect(harness.viewModel.workspace.document.layers.map(\.id) == sourceLayerIDs)
+        #expect(harness.viewModel.status?.message == "已合并拷贝选区内的可见图层")
+
+        harness.viewModel.selectLayer(backgroundLayerID)
+        let pasted = harness.viewModel.handleKeyDown(
+            makeCanvasKeyEvent(
+                type: .keyDown,
+                characters: "v",
+                charactersIgnoringModifiers: "v",
+                modifiers: [.command],
+                keyCode: 9
+            )
+        )
+        #expect(pasted)
+
+        let pastedDocument = harness.viewModel.workspace.document
+        #expect(pastedDocument.layers.count == sourceLayerIDs.count + 1)
+        let pastedLayerID = pastedDocument.activeLayerID
+        #expect(sourceLayerIDs.contains(pastedLayerID) == false)
+        let pastedColor = try harness.color(atX: 10, y: 10, layerID: pastedLayerID)
+        #expect(pastedColor.red > 0.45)
+        #expect(pastedColor.blue > 0.45)
+        #expect(pastedColor.green < 0.05)
+        #expect(pastedColor.alpha > 0.99)
+        #expect(try harness.alpha(atX: 4, y: 4, layerID: pastedLayerID) < 0.01)
+        #expect(try harness.alpha(atX: 10, y: 10, layerID: redLayerID) > 0.99)
+        #expect(try harness.alpha(atX: 10, y: 10, layerID: blueLayerID) > 0.99)
+        #expect(harness.viewModel.status?.message == "已粘贴为新图层")
+    }
+
+    @Test
+    @MainActor
     func compoundGlobalPressureControlsStayDecoupledFromPrimaryInternalPressureControls() throws {
         let harness = try BrushEditingBoundaryHarness()
 
@@ -2495,12 +2686,18 @@ private struct BrushEditingBoundaryHarness {
     let bootstrap: AppBootstrap
     let viewModel: WorkspaceViewModel
 
-    init() throws {
+    init(canvasSize: CanvasSize? = nil) throws {
         guard let metalContext = MetalDeviceContext() else {
             throw BoundaryHarnessError.metalUnavailable
         }
+        let workspaceStore = WorkspaceStore()
+        if let canvasSize {
+            workspaceStore.updateDocument { document in
+                document.canvasSize = canvasSize
+            }
+        }
         let bootstrap = try AppBootstrap(
-            workspaceStore: WorkspaceStore(),
+            workspaceStore: workspaceStore,
             metalContext: metalContext,
             layerSurfaceStore: StageOneLayerSurfaceStore()
         )

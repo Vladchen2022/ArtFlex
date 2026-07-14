@@ -10,6 +10,7 @@ private struct LinearGradientUniforms {
     var canvasSize: SIMD2<Float>
     var pointA: SIMD2<Float>
     var pointB: SIMD2<Float>
+    var transitionMidpoint: Float
     var color: SIMD4<Float>
     var paintJitterAmount: Float
     var paintContrastAmount: Float
@@ -42,6 +43,7 @@ final class LinearGradientRenderer {
             float2 canvasSize;
             float2 pointA;
             float2 pointB;
+            float transitionMidpoint;
             float4 color;
             float paintJitterAmount;
             float paintContrastAmount;
@@ -168,6 +170,9 @@ final class LinearGradientRenderer {
             float axisLength = max(length(axis), 0.0001);
             float axisLengthSquared = max(dot(axis, axis), 0.0001);
             float t = clamp(dot(in.canvasPosition - uniforms.pointA, axis) / axisLengthSquared, 0.0, 1.0);
+            float midpoint = clamp(uniforms.transitionMidpoint, 0.05, 0.95);
+            float midpointExponent = log(0.5) / log(midpoint);
+            float remappedT = pow(t, midpointExponent);
             float maskAlpha = 1.0;
             if (uniforms.usesSelectionMask > 0.5) {
                 float2 canvasSize = max(uniforms.canvasSize, float2(1.0, 1.0));
@@ -183,7 +188,7 @@ final class LinearGradientRenderer {
                     return float4(0.0);
                 }
             }
-            float easedAlpha = 1.0 - smoothstep(0.0, 1.0, t);
+            float easedAlpha = 1.0 - smoothstep(0.0, 1.0, remappedT);
             float alpha = easedAlpha * uniforms.color.a * maskAlpha;
             float2 axisDirection = axis / axisLength;
             float2 perpendicularDirection = float2(-axisDirection.y, axisDirection.x);
@@ -297,6 +302,7 @@ final class LinearGradientRenderer {
         pointA: CanvasPoint,
         pointB: CanvasPoint,
         pointC: CanvasPoint,
+        transitionMidpoint: Float = 0.5,
         color: RGBAColor,
         paintJitterAmount: Float = 0,
         paintContrastAmount: Float = 0,
@@ -318,6 +324,7 @@ final class LinearGradientRenderer {
             canvasSize: SIMD2(Float(canvasSize.width), Float(canvasSize.height)),
             pointA: SIMD2(Float(pointA.x), Float(pointA.y)),
             pointB: SIMD2(Float(pointB.x), Float(pointB.y)),
+            transitionMidpoint: min(max(transitionMidpoint, 0.05), 0.95),
             color: SIMD4(color.red, color.green, color.blue, color.alpha),
             paintJitterAmount: paintJitterAmount,
             paintContrastAmount: paintContrastAmount,
@@ -345,6 +352,7 @@ final class LinearGradientRenderer {
         pointA: CanvasPoint,
         pointB: CanvasPoint,
         pointC: CanvasPoint,
+        transitionMidpoint: Float = 0.5,
         color: RGBAColor,
         paintJitterAmount: Float = 0,
         paintContrastAmount: Float = 0,
@@ -368,6 +376,7 @@ final class LinearGradientRenderer {
             pointA: pointA,
             pointB: pointB,
             pointC: pointC,
+            transitionMidpoint: transitionMidpoint,
             color: color,
             paintJitterAmount: paintJitterAmount,
             paintContrastAmount: paintContrastAmount,

@@ -46,6 +46,7 @@ final class IdeationSessionState: ObservableObject {
         didSet {
             guard mode != oldValue else { return }
             guard mode == .synchronized else { return }
+            lastSynchronizedEditingContext = nil
             propagateEditingContext(from: selectedBranchIndex)
         }
     }
@@ -69,6 +70,10 @@ final class IdeationSessionState: ObservableObject {
     private var isPropagatingOperation = false
     private var isPropagatingContext = false
     private var isPropagatingHistoryNavigation = false
+    private var lastSynchronizedEditingContext: IdeationEditingContext?
+#if DEBUG
+    private(set) var debugEditingContextPropagationCount = 0
+#endif
 
     init(
         hostViewModel: WorkspaceViewModel,
@@ -165,6 +170,8 @@ final class IdeationSessionState: ObservableObject {
                 }
             cancellables.append(cancellable)
         }
+
+        lastSynchronizedEditingContext = branches.first?.viewModel.makeIdeationEditingContext()
     }
 
     private func applyCanvasDisplayModeToBranches() {
@@ -188,8 +195,13 @@ final class IdeationSessionState: ObservableObject {
 
     private func propagateEditingContext(_ context: IdeationEditingContext, from index: Int) {
         guard mode == .synchronized, !isPropagatingContext else { return }
+        guard context != lastSynchronizedEditingContext else { return }
+        lastSynchronizedEditingContext = context
         isPropagatingContext = true
         defer { isPropagatingContext = false }
+#if DEBUG
+        debugEditingContextPropagationCount += 1
+#endif
 
         for otherIndex in branches.indices where otherIndex != index {
             branches[otherIndex].viewModel.applyIdeationEditingContext(context)

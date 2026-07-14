@@ -185,12 +185,15 @@ final class DrawingStatsController: ObservableObject {
     }
 
     func recordPaintingActivity(at now: Date = Date()) {
-        if activeSessionStartedAt == nil {
+        let didStartSession = activeSessionStartedAt == nil
+        if didStartSession {
             activeSessionStartedAt = now
         }
         lastPaintingActivityAt = now
         scheduleActiveTimerIfNeeded()
-        refreshSnapshot(now: now)
+        if didStartSession {
+            refreshSnapshot(now: now)
+        }
     }
 
     func pauseTracking(at now: Date = Date()) {

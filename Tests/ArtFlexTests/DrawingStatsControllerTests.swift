@@ -56,6 +56,29 @@ struct DrawingStatsControllerTests {
 
     @Test
     @MainActor
+    func repeatedPaintingActivityDefersSnapshotRefreshToTimerOrFlush() throws {
+        let tempDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: tempDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDirectory) }
+
+        let controller = DrawingStatsController(
+            persistenceController: DrawingStatsPersistenceController(baseDirectoryURL: tempDirectory),
+            gracePeriod: 60,
+            enablesLiveTimer: false
+        )
+        let start = Date(timeIntervalSince1970: 1_715_000_000)
+
+        controller.syncCurrentDocument(id: UUID(), name: "作品", accumulatedPaintingTime: 0, now: start)
+        controller.recordPaintingActivity(at: start)
+        controller.recordPaintingActivity(at: start.addingTimeInterval(10))
+
+        #expect(controller.snapshot.currentDocumentTime == 0)
+        controller.flushIfGraceExpired(at: start.addingTimeInterval(10))
+        #expect(abs(controller.snapshot.currentDocumentTime - 10) < 0.001)
+    }
+
+    @Test
+    @MainActor
     func firstHourMilestoneIsRecordedAndPersisted() throws {
         let tempDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: tempDirectory, withIntermediateDirectories: true)

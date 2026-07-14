@@ -119,4 +119,25 @@ struct TransformPreviewSessionTests {
 
         #expect(localBytes == [5, 6, 9, 10])
     }
+
+    @Test
+    func meshWarpTextureCoordinatesMapContentBoundsIntoTheSourceTexture() {
+        let coordinates = meshWarpTextureCoordinateBounds(
+            sourceBounds: CanvasRect(
+                origin: .init(x: 50, y: 25),
+                size: .init(x: 100, y: 50)
+            ),
+            textureDomainBounds: CanvasRect(
+                origin: .init(x: 0, y: 0),
+                size: .init(x: 200, y: 100)
+            )
+        )
+
+        #expect(
+            coordinates == CanvasRect(
+                origin: .init(x: 0.25, y: 0.25),
+                size: .init(x: 0.5, y: 0.5)
+            )
+        )
+    }
 }

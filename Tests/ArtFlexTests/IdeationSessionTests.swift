@@ -101,6 +101,69 @@ struct IdeationSessionTests {
 
     @Test
     @MainActor
+    func synchronizedStrokePacketsDoNotRebroadcastUnchangedEditingContext() async throws {
+        let harness = try IdeationHarness()
+        harness.viewModel.startIdeationSession()
+
+        let session = try #require(harness.viewModel.ideationSession)
+        let sourceBranch = session.branches[0].viewModel
+        let initialPropagationCount = session.debugEditingContextPropagationCount
+
+        sourceBranch.beginStrokeIfNeeded()
+        for index in 0..<12 {
+            sourceBranch.applyStroke(
+                samples: [
+                    .init(
+                        location: .init(x: Double(6 + (index * 4)), y: Double(12 + (index % 3))),
+                        pressure: 1
+                    )
+                ]
+            )
+        }
+        sourceBranch.endStroke()
+        await Task.yield()
+
+        #expect(session.debugEditingContextPropagationCount == initialPropagationCount)
+
+        let newColor = RGBAColor(red: 0.23, green: 0.61, blue: 0.87, alpha: 1)
+        sourceBranch.setSelectedColor(newColor)
+        await Task.yield()
+
+        #expect(session.debugEditingContextPropagationCount == initialPropagationCount + 1)
+        for branch in session.branches {
+            #expect(branch.viewModel.workspace.toolSession.selectedColor == newColor)
+        }
+    }
+
+    @Test
+    @MainActor
+    func mirroredStrokeEndPublishesSceneRevisionWithoutSecondaryClick() async throws {
+        let harness = try IdeationHarness()
+        harness.viewModel.startIdeationSession()
+
+        let session = try #require(harness.viewModel.ideationSession)
+        let sourceBranch = session.branches[0].viewModel
+        sourceBranch.beginStrokeIfNeeded()
+        sourceBranch.applyStroke(
+            samples: [
+                .init(location: .init(x: 10, y: 18), pressure: 1),
+                .init(location: .init(x: 42, y: 34), pressure: 1)
+            ]
+        )
+        sourceBranch.endStroke()
+        await Task.yield()
+
+        for branch in session.branches.dropFirst() {
+            #expect(branch.viewModel.canvasContentRevision > 0)
+            #expect(
+                branch.viewModel.sceneSnapshot.renderSnapshot.canvasContentRevision
+                    == branch.viewModel.canvasContentRevision
+            )
+        }
+    }
+
+    @Test
+    @MainActor
     func synchronizedStraightLineSharesPaintVariationSeedAcrossBranches() throws {
         let harness = try IdeationHarness()
         harness.viewModel.selectTool(.straightLine)

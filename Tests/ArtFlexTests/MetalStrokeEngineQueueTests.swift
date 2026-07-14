@@ -405,6 +405,101 @@ struct MetalStrokeEngineQueueTests {
     }
 
     @Test
+    func queuedBrushPacketCountTracksPendingPacketsWithoutRescanningEvents() throws {
+        guard
+            let metalContext = MetalDeviceContext(),
+            let commandBuffer = metalContext.commandQueue.makeCommandBuffer()
+        else {
+            Issue.record("Metal unavailable")
+            return
+        }
+
+        let surfaceStore = StageOneLayerSurfaceStore()
+        let document = ArtDocument.stageOneDefault()
+        surfaceStore.prepareTextures(for: document, metal: metalContext)
+        let layerID = document.activeLayerID
+        let engine = try MetalStrokeEngine(
+            metalContext: metalContext,
+            layerSurfaceStore: surfaceStore
+        )
+        let stroke = StrokeDescriptor(
+            tool: .brush,
+            color: .black,
+            brush: .stageOneDefault,
+            points: [.init(x: 10, y: 10, pressure: 1)],
+            selectionShape: nil,
+            skipLeadingStamp: false
+        )
+
+        engine.beginStrokeIfNeeded(toolSession: .stageOneDefault, layerID: layerID)
+        #expect(engine.applyStroke(stroke, to: layerID) == 1)
+        #expect(engine.applyStroke(stroke, to: layerID) == 2)
+        #expect(engine.applyStroke(stroke, to: layerID) == 3)
+
+        let metrics = engine.flushPendingStrokePackets(into: commandBuffer)
+        #expect(metrics?.packetQueuedCount == 3)
+        #expect(metrics?.flushedPacketCount == 3)
+    }
+
+    @Test
+    func highFrequencySinglePointPacketsRenderAContinuousStroke() throws {
+        guard
+            let metalContext = MetalDeviceContext(),
+            let commandBuffer = metalContext.commandQueue.makeCommandBuffer()
+        else {
+            Issue.record("Metal unavailable")
+            return
+        }
+
+        let surfaceStore = StageOneLayerSurfaceStore()
+        var document = ArtDocument.stageOneDefault()
+        document.canvasSize = .init(width: 256, height: 128)
+        surfaceStore.prepareTextures(for: document, metal: metalContext)
+        let layerID = document.activeLayerID
+        let engine = try MetalStrokeEngine(
+            metalContext: metalContext,
+            layerSurfaceStore: surfaceStore
+        )
+        var brush = BrushSettings.stageOneDefault
+        brush.size = 18
+        brush.spacingPercent = 10
+        brush.scatterAmount = 0
+        brush.jitterAmount = 0
+
+        engine.beginStrokeIfNeeded(
+            toolSession: ToolSessionState(activeTool: .brush, brush: brush, selectedColor: .black),
+            layerID: layerID
+        )
+        for (index, x) in stride(from: 16, through: 240, by: 2).enumerated() {
+            _ = engine.applyStroke(
+                StrokeDescriptor(
+                    tool: .brush,
+                    color: .black,
+                    brush: brush,
+                    points: [.init(x: Double(x), y: 64, pressure: 1)],
+                    selectionShape: nil,
+                    skipLeadingStamp: index > 0
+                ),
+                to: layerID
+            )
+        }
+        engine.endStroke()
+        _ = engine.flushPendingStrokePackets(into: commandBuffer)
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+
+        let displayTexture = try #require(engine.displayTexture(for: layerID))
+        let snapshot = try LayerTextureSerializer(metalContext: metalContext).snapshot(texture: displayTexture)
+        snapshot.pixelData.withUnsafeBytes { rawBuffer in
+            let bytes = rawBuffer.bindMemory(to: UInt8.self)
+            for x in 18...238 {
+                let alphaOffset = (64 * snapshot.bytesPerRow) + (x * 4) + 3
+                #expect(bytes[alphaOffset] > 0)
+            }
+        }
+    }
+
+    @Test
     func endStrokeFlushesPendingTailWithinFlushPass() throws {
         guard
             let metalContext = MetalDeviceContext(),

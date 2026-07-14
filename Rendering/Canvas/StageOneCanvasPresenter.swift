@@ -38,6 +38,7 @@ private struct CanvasPresenterUniforms {
 }
 
 final class StageOneCanvasPresenter {
+    private let device: MTLDevice
     private let pipelineState: MTLRenderPipelineState
     private let checkerboardPipelineState: MTLRenderPipelineState
     private let linearSamplerState: MTLSamplerState
@@ -45,6 +46,7 @@ final class StageOneCanvasPresenter {
     private let canvasVertexBuffer: MTLBuffer
 
     init(device: MTLDevice) throws {
+        self.device = device
         let source = """
         #include <metal_stdlib>
         using namespace metal;
@@ -265,6 +267,73 @@ final class StageOneCanvasPresenter {
             index: 0
         )
         encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+        encoder.endEncoding()
+    }
+
+    func encodeMeshPreview(
+        texture: MTLTexture,
+        opacity: Float,
+        canvasSize: CanvasSize,
+        grid: MeshWarpGrid,
+        textureCoordinateBounds: CanvasRect,
+        samplingMode: CanvasDisplaySamplingMode = .linear,
+        into renderPassDescriptor: MTLRenderPassDescriptor,
+        commandBuffer: MTLCommandBuffer
+    ) {
+        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor) else {
+            return
+        }
+
+        let meshVertices = grid.tessellatedVertices()
+        guard !meshVertices.isEmpty else {
+            encoder.endEncoding()
+            return
+        }
+        let vertices = meshVertices.map { vertex in
+            CanvasPresenterVertex(
+                position: ndcPoint(vertex.canvasPosition, canvasSize: canvasSize),
+                texCoord: SIMD2(
+                    Float(
+                        textureCoordinateBounds.minX +
+                        (vertex.textureCoordinate.x * textureCoordinateBounds.size.x)
+                    ),
+                    Float(
+                        textureCoordinateBounds.minY +
+                        (vertex.textureCoordinate.y * textureCoordinateBounds.size.y)
+                    )
+                )
+            )
+        }
+
+        let vertexBufferLength = MemoryLayout<CanvasPresenterVertex>.stride * vertices.count
+        let vertexBuffer = vertices.withUnsafeBytes { bytes -> MTLBuffer? in
+            guard let baseAddress = bytes.baseAddress else { return nil }
+            return device.makeBuffer(
+                bytes: baseAddress,
+                length: vertexBufferLength,
+                options: .storageModeShared
+            )
+        }
+        guard let vertexBuffer else {
+            encoder.endEncoding()
+            return
+        }
+
+        encoder.setRenderPipelineState(pipelineState)
+        encoder.setVertexBuffer(vertexBuffer, offset: 0, index: 0)
+        encoder.setFragmentSamplerState(
+            samplingMode == .nearest ? nearestSamplerState : linearSamplerState,
+            index: 0
+        )
+
+        var uniforms = CanvasPresenterUniforms(layerOpacity: opacity)
+        encoder.setFragmentTexture(texture, index: 0)
+        encoder.setFragmentBytes(
+            &uniforms,
+            length: MemoryLayout<CanvasPresenterUniforms>.stride,
+            index: 0
+        )
+        encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: vertices.count)
         encoder.endEncoding()
     }
 

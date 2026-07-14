@@ -37,6 +37,290 @@ enum FreeTransformInteractionMode: Sendable, Equatable {
     case move
     case scale(FreeTransformHandle)
     case rotate
+    case meshPoint(Int)
+}
+
+enum FreeTransformToolMode: String, CaseIterable, Sendable, Equatable {
+    case standard
+    case mesh
+}
+
+struct MeshWarpVertex: Sendable, Equatable {
+    var canvasPosition: CanvasPoint
+    var textureCoordinate: CanvasPoint
+}
+
+struct MeshWarpGrid: Sendable, Equatable {
+    let sourceBounds: CanvasRect
+    let columns: Int
+    let rows: Int
+    var controlPoints: [CanvasPoint]
+
+    static func regular(
+        bounds: CanvasRect,
+        columns: Int = 4,
+        rows: Int = 4
+    ) -> MeshWarpGrid {
+        let resolvedColumns = max(columns, 2)
+        let resolvedRows = max(rows, 2)
+        var points: [CanvasPoint] = []
+        points.reserveCapacity(resolvedColumns * resolvedRows)
+
+        for row in 0..<resolvedRows {
+            let v = Double(row) / Double(resolvedRows - 1)
+            for column in 0..<resolvedColumns {
+                let u = Double(column) / Double(resolvedColumns - 1)
+                points.append(
+                    CanvasPoint(
+                        x: bounds.minX + (bounds.size.x * u),
+                        y: bounds.minY + (bounds.size.y * v)
+                    )
+                )
+            }
+        }
+
+        return MeshWarpGrid(
+            sourceBounds: bounds,
+            columns: resolvedColumns,
+            rows: resolvedRows,
+            controlPoints: points
+        )
+    }
+
+    var isIdentity: Bool {
+        let identity = Self.regular(
+            bounds: sourceBounds,
+            columns: columns,
+            rows: rows
+        )
+        guard identity.controlPoints.count == controlPoints.count else { return false }
+        return zip(identity.controlPoints, controlPoints).allSatisfy { expected, actual in
+            abs(expected.x - actual.x) < 0.0001 &&
+            abs(expected.y - actual.y) < 0.0001
+        }
+    }
+
+    var destinationBounds: CanvasRect? {
+        guard let first = controlPoints.first else { return nil }
+        var minX = first.x
+        var maxX = first.x
+        var minY = first.y
+        var maxY = first.y
+        for point in controlPoints.dropFirst() {
+            minX = min(minX, point.x)
+            maxX = max(maxX, point.x)
+            minY = min(minY, point.y)
+            maxY = max(maxY, point.y)
+        }
+        return CanvasRect(
+            origin: .init(x: minX, y: minY),
+            size: .init(x: maxX - minX, y: maxY - minY)
+        )
+    }
+
+    func point(row: Int, column: Int) -> CanvasPoint? {
+        guard row >= 0, row < rows, column >= 0, column < columns else { return nil }
+        let index = (row * columns) + column
+        guard controlPoints.indices.contains(index) else { return nil }
+        return controlPoints[index]
+    }
+
+    func movingControlPoint(at index: Int, by delta: CanvasPoint) -> MeshWarpGrid {
+        guard controlPoints.indices.contains(index) else { return self }
+        var next = self
+        next.controlPoints[index] = CanvasPoint(
+            x: controlPoints[index].x + delta.x,
+            y: controlPoints[index].y + delta.y
+        )
+        return next
+    }
+
+    func movingControlPoints(at indices: Set<Int>, by delta: CanvasPoint) -> MeshWarpGrid {
+        let validIndices = indices.filter(controlPoints.indices.contains)
+        guard !validIndices.isEmpty else { return self }
+
+        var next = self
+        for index in validIndices {
+            next.controlPoints[index] = CanvasPoint(
+                x: controlPoints[index].x + delta.x,
+                y: controlPoints[index].y + delta.y
+            )
+        }
+        return next
+    }
+
+    func translated(by delta: CanvasPoint) -> MeshWarpGrid {
+        var next = self
+        next.controlPoints = controlPoints.map {
+            CanvasPoint(x: $0.x + delta.x, y: $0.y + delta.y)
+        }
+        return next
+    }
+
+    func applying(_ transform: CGAffineTransform) -> MeshWarpGrid {
+        var next = self
+        next.controlPoints = controlPoints.map { point in
+            let transformed = CGPoint(x: point.x, y: point.y).applying(transform)
+            return CanvasPoint(x: transformed.x, y: transformed.y)
+        }
+        return next
+    }
+
+    func nearestControlPoint(to point: CanvasPoint, radius: Double) -> Int? {
+        var bestIndex: Int?
+        var bestDistance = max(radius, 0)
+        for (index, controlPoint) in controlPoints.enumerated() {
+            let distance = hypot(controlPoint.x - point.x, controlPoint.y - point.y)
+            if distance <= bestDistance {
+                bestDistance = distance
+                bestIndex = index
+            }
+        }
+        return bestIndex
+    }
+
+    func tessellatedVertices(subdivisionsPerCell: Int = 8) -> [MeshWarpVertex] {
+        guard columns >= 2, rows >= 2 else { return [] }
+        guard controlPoints.count == columns * rows else { return [] }
+        let subdivisions = max(subdivisionsPerCell, 1)
+        var vertices: [MeshWarpVertex] = []
+        vertices.reserveCapacity((columns - 1) * (rows - 1) * subdivisions * subdivisions * 6)
+
+        for row in 0..<(rows - 1) {
+            for column in 0..<(columns - 1) {
+                guard
+                    let topLeft = point(row: row, column: column),
+                    let topRight = point(row: row, column: column + 1),
+                    let bottomLeft = point(row: row + 1, column: column),
+                    let bottomRight = point(row: row + 1, column: column + 1)
+                else {
+                    continue
+                }
+
+                for subdivisionRow in 0..<subdivisions {
+                    let v0 = Double(subdivisionRow) / Double(subdivisions)
+                    let v1 = Double(subdivisionRow + 1) / Double(subdivisions)
+                    for subdivisionColumn in 0..<subdivisions {
+                        let u0 = Double(subdivisionColumn) / Double(subdivisions)
+                        let u1 = Double(subdivisionColumn + 1) / Double(subdivisions)
+
+                        let a = meshWarpVertex(
+                            cellColumn: column,
+                            cellRow: row,
+                            localU: u0,
+                            localV: v0,
+                            topLeft: topLeft,
+                            topRight: topRight,
+                            bottomLeft: bottomLeft,
+                            bottomRight: bottomRight
+                        )
+                        let b = meshWarpVertex(
+                            cellColumn: column,
+                            cellRow: row,
+                            localU: u1,
+                            localV: v0,
+                            topLeft: topLeft,
+                            topRight: topRight,
+                            bottomLeft: bottomLeft,
+                            bottomRight: bottomRight
+                        )
+                        let c = meshWarpVertex(
+                            cellColumn: column,
+                            cellRow: row,
+                            localU: u0,
+                            localV: v1,
+                            topLeft: topLeft,
+                            topRight: topRight,
+                            bottomLeft: bottomLeft,
+                            bottomRight: bottomRight
+                        )
+                        let d = meshWarpVertex(
+                            cellColumn: column,
+                            cellRow: row,
+                            localU: u1,
+                            localV: v1,
+                            topLeft: topLeft,
+                            topRight: topRight,
+                            bottomLeft: bottomLeft,
+                            bottomRight: bottomRight
+                        )
+                        vertices.append(contentsOf: [a, c, b, b, c, d])
+                    }
+                }
+            }
+        }
+        return vertices
+    }
+
+    private func meshWarpVertex(
+        cellColumn: Int,
+        cellRow: Int,
+        localU: Double,
+        localV: Double,
+        topLeft: CanvasPoint,
+        topRight: CanvasPoint,
+        bottomLeft: CanvasPoint,
+        bottomRight: CanvasPoint
+    ) -> MeshWarpVertex {
+        let top = CanvasPoint(
+            x: topLeft.x + ((topRight.x - topLeft.x) * localU),
+            y: topLeft.y + ((topRight.y - topLeft.y) * localU)
+        )
+        let bottom = CanvasPoint(
+            x: bottomLeft.x + ((bottomRight.x - bottomLeft.x) * localU),
+            y: bottomLeft.y + ((bottomRight.y - bottomLeft.y) * localU)
+        )
+        let canvasPosition = CanvasPoint(
+            x: top.x + ((bottom.x - top.x) * localV),
+            y: top.y + ((bottom.y - top.y) * localV)
+        )
+        let textureCoordinate = CanvasPoint(
+            x: (Double(cellColumn) + localU) / Double(columns - 1),
+            y: (Double(cellRow) + localV) / Double(rows - 1)
+        )
+        return MeshWarpVertex(
+            canvasPosition: canvasPosition,
+            textureCoordinate: textureCoordinate
+        )
+    }
+}
+
+func updatedMeshWarpControlPointSelection(
+    current: Set<Int>,
+    clickedIndex: Int,
+    togglesSelection: Bool
+) -> Set<Int> {
+    guard clickedIndex >= 0 else { return current }
+
+    if togglesSelection {
+        var next = current
+        if next.contains(clickedIndex) {
+            next.remove(clickedIndex)
+        } else {
+            next.insert(clickedIndex)
+        }
+        return next
+    }
+
+    return current.contains(clickedIndex) ? current : [clickedIndex]
+}
+
+struct FreeTransformHandleMetrics: Sendable, Equatable {
+    var hitRadius: Double
+    var rotationHandleDistance: Double
+}
+
+func freeTransformHandleMetrics(
+    canvasExtent: Double,
+    displayExtent: Double,
+    hitRadiusDisplayPoints: Double = 14,
+    rotationHandleDistanceDisplayPoints: Double = 48
+) -> FreeTransformHandleMetrics {
+    let canvasUnitsPerDisplayPoint = canvasExtent / max(displayExtent, 0.0001)
+    return FreeTransformHandleMetrics(
+        hitRadius: max(hitRadiusDisplayPoints, 0) * canvasUnitsPerDisplayPoint,
+        rotationHandleDistance: max(rotationHandleDistanceDisplayPoints, 0) * canvasUnitsPerDisplayPoint
+    )
 }
 
 func freeTransformTranslatedPreview(
@@ -363,6 +647,18 @@ func freeTransformInteractionMode(
     return .move
 }
 
+func meshWarpInteractionMode(
+    point: CanvasPoint,
+    grid: MeshWarpGrid?,
+    handleRadius: Double
+) -> FreeTransformInteractionMode {
+    guard let grid else { return .move }
+    if let index = grid.nearestControlPoint(to: point, radius: handleRadius) {
+        return .meshPoint(index)
+    }
+    return .move
+}
+
 struct TransformInteractionState: Sendable, Equatable {
     var dragStartPoint: CanvasPoint?
     var accumulatedOffset: CanvasPoint = .init(x: 0, y: 0)
@@ -370,13 +666,15 @@ struct TransformInteractionState: Sendable, Equatable {
     var interactionMode: FreeTransformInteractionMode = .move
     var preview = FreeTransformPreview.identity
     var dragStartPreview = FreeTransformPreview.identity
+    var meshWarpGrid: MeshWarpGrid?
+    var dragStartMeshWarpGrid: MeshWarpGrid?
 
     var hasPendingOffset: Bool {
         accumulatedOffset.x.rounded() != 0 || accumulatedOffset.y.rounded() != 0
     }
 
     var hasPendingTransform: Bool {
-        !preview.isIdentity
+        !preview.isIdentity || meshWarpGrid?.isIdentity == false
     }
 
     mutating func beginSession(at point: CanvasPoint, mode: FreeTransformInteractionMode = .move) {
@@ -384,12 +682,14 @@ struct TransformInteractionState: Sendable, Equatable {
         dragStartPoint = point
         interactionMode = mode
         dragStartPreview = preview
+        dragStartMeshWarpGrid = meshWarpGrid
     }
 
     mutating func beginDrag(at point: CanvasPoint, mode: FreeTransformInteractionMode = .move) {
         dragStartPoint = point
         interactionMode = mode
         dragStartPreview = preview
+        dragStartMeshWarpGrid = meshWarpGrid
     }
 
     mutating func finishDrag(at point: CanvasPoint) -> CanvasPoint {
@@ -416,6 +716,7 @@ struct TransformInteractionState: Sendable, Equatable {
     mutating func endInteraction() {
         dragStartPoint = nil
         dragStartPreview = preview
+        dragStartMeshWarpGrid = meshWarpGrid
     }
 
     func clearBehavior() -> TransformClearBehavior {
@@ -442,6 +743,8 @@ struct TransformInteractionState: Sendable, Equatable {
         interactionMode = .move
         preview = .identity
         dragStartPreview = .identity
+        meshWarpGrid = nil
+        dragStartMeshWarpGrid = nil
         isActive = false
     }
 }
