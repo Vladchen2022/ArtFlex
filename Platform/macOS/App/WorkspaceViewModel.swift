@@ -176,6 +176,7 @@ final class WorkspaceViewModel: ObservableObject {
     @Published private(set) var freeTransformToolMode = FreeTransformToolMode.standard
     @Published private(set) var freeTransformMeshWarpGrid: MeshWarpGrid?
     @Published private(set) var selectedMeshWarpControlPointIndices: Set<Int> = []
+    @Published private(set) var selectedPerspectiveAnchorID: UUID?
     @Published private(set) var isApplyingGradientCommit = false
     @Published private(set) var isBucketFillInProgress = false
     @Published private(set) var isSavingSnapshot = false
@@ -205,6 +206,10 @@ final class WorkspaceViewModel: ObservableObject {
     private var activeLayerOpacityChangeDidMutate = false
     private var transformState = TransformInteractionState()
     private var activeMeshWarpDragControlPointIndices: Set<Int>?
+    private var perspectiveGuideInteractionTarget: PerspectiveGuideInteractionTarget?
+    private var perspectiveGuideInteractionLastPoint: CanvasPoint?
+    private var perspectiveGuideInteractionHasCheckpoint = false
+    private var isAdjustingPerspectiveGuideStyle = false
     private var layerThumbnailCache: [LayerID: CGImage] = [:]
     private var generatorStrokeSession = GeneratorStrokeSessionState()
     private var activeLassoRawPoints: [CanvasPoint] = []
@@ -240,7 +245,7 @@ final class WorkspaceViewModel: ObservableObject {
     @Published private(set) var selectedReferenceImageSlotID: Int?
     @Published private(set) var referenceImagePreviewColor: RGBAColor?
     @Published private(set) var referenceImagePreviousPickedColor: RGBAColor?
-    @Published private(set) var referenceImageLoadingSlotID: Int?
+    @Published private(set) var referenceImageLoadingSlotIDs: Set<Int> = []
     @Published private(set) var isReferenceImageFloatingPanelPresented = false
     private var currentProjectURL: URL?
     private var lastSyncedTimelapseDocumentContext: TimelapseDocumentContext?
@@ -530,6 +535,11 @@ final class WorkspaceViewModel: ObservableObject {
         bootstrap.workspaceStore.updateToolSession { session in
             session.activeTool = tool
         }
+        if previousTool == .perspective, tool != .perspective {
+            lockPerspectiveGuideForPainting()
+        } else if tool == .perspective {
+            activatePerspectiveGuideForEditing()
+        }
         syncBrightnessAdjustmentHotkeyState(for: tool)
         if let group = ToolSidebarGroup.group(containing: tool) {
             toolGroupSurfaceTools[group.id] = tool
@@ -679,6 +689,22 @@ final class WorkspaceViewModel: ObservableObject {
         toolGroupSurfaceTools[group.id] ?? group.defaultTool
     }
 
+    func sidebarDisplayedTool(for group: ToolSidebarGroup) -> ToolKind {
+        group.id == "lasso-fill" ? .lassoFill : displayedTool(for: group)
+    }
+
+    var lassoFillMode: LassoFillMode {
+        workspace.toolSession.activeTool == .textureFill ? .texture : .color
+    }
+
+    func setLassoFillMode(_ mode: LassoFillMode) {
+        guard workspace.toolSession.activeTool == .lassoFill
+                || workspace.toolSession.activeTool == .textureFill else { return }
+        let tool: ToolKind = mode == .texture ? .textureFill : .lassoFill
+        guard workspace.toolSession.activeTool != tool else { return }
+        selectToolFromUI(tool)
+    }
+
     func isSelected(group: ToolSidebarGroup) -> Bool {
         group.contains(workspace.toolSession.activeTool)
     }
@@ -688,7 +714,7 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func cycleSidebarGroup(_ group: ToolSidebarGroup) {
-        guard group.tools.count > 1 else {
+        guard group.isGrouped else {
             activateSidebarGroup(group)
             return
         }
@@ -701,12 +727,299 @@ final class WorkspaceViewModel: ObservableObject {
         guard let group = shortcutSettings.toolGroup(forShortcutKey: key) else { return false }
         let shortcutTitle = shortcutSettings.shortcutDisplayTitle(for: group)
 
-        if normalized.contains(.shift), group.tools.count > 1 {
+        if normalized.contains(.shift), group.isGrouped {
             selectToolFromUI(nextSidebarGroupTool(group), shortcutLabel: "Shift+\(shortcutTitle)")
         } else {
             selectToolFromUI(displayedTool(for: group), shortcutLabel: shortcutTitle)
         }
         return true
+    }
+
+    var perspectiveGuide: PerspectiveGuideState? {
+        workspace.document.perspectiveGuide
+    }
+
+    private func activatePerspectiveGuideForEditing() {
+        selectedPerspectiveAnchorID = nil
+        perspectiveGuideInteractionTarget = nil
+        perspectiveGuideInteractionLastPoint = nil
+        perspectiveGuideInteractionHasCheckpoint = false
+
+        if bootstrap.workspaceStore.state.document.perspectiveGuide == nil {
+            createPerspectiveGuide()
+            return
+        }
+
+        var didChange = false
+        bootstrap.workspaceStore.updateDocument { document in
+            guard var guide = document.perspectiveGuide else { return }
+            if !guide.isVisible {
+                guide.isVisible = true
+                didChange = true
+            }
+            if guide.isLocked {
+                guide.isLocked = false
+                didChange = true
+            }
+            document.perspectiveGuide = guide
+        }
+        if didChange {
+            notePerspectiveGuideChanged()
+        }
+    }
+
+    func createPerspectiveGuide() {
+        guard perspectiveGuide == nil else { return }
+        guard capturePerspectiveGuideCheckpoint(operationKind: "perspective.create") else { return }
+        let canvasSize = bootstrap.workspaceStore.state.document.canvasSize
+        bootstrap.workspaceStore.updateDocument { document in
+            document.perspectiveGuide = .initial(canvasSize: canvasSize)
+        }
+        selectedPerspectiveAnchorID = nil
+        notePerspectiveGuideChanged()
+    }
+
+    private func lockPerspectiveGuideForPainting() {
+        selectedPerspectiveAnchorID = nil
+        perspectiveGuideInteractionTarget = nil
+        perspectiveGuideInteractionLastPoint = nil
+        perspectiveGuideInteractionHasCheckpoint = false
+        isAdjustingPerspectiveGuideStyle = false
+
+        var didChange = false
+        bootstrap.workspaceStore.updateDocument { document in
+            guard var guide = document.perspectiveGuide, !guide.isLocked else { return }
+            guide.isLocked = true
+            document.perspectiveGuide = guide
+            didChange = true
+        }
+        if didChange {
+            notePerspectiveGuideChanged()
+        }
+    }
+
+    func setPerspectiveGuideMode(_ mode: PerspectiveGuideMode) {
+        guard var guide = perspectiveGuide, guide.mode != mode else { return }
+        guard capturePerspectiveGuideCheckpoint(operationKind: "perspective.mode") else { return }
+        guide.setMode(mode, canvasSize: workspace.document.canvasSize)
+        replacePerspectiveGuide(guide)
+    }
+
+    func setPerspectiveVerticalDirection(_ direction: PerspectiveVerticalDirection) {
+        guard var guide = perspectiveGuide, guide.verticalDirection != direction else { return }
+        guard capturePerspectiveGuideCheckpoint(operationKind: "perspective.verticalDirection") else { return }
+        guide.setVerticalDirection(direction, canvasSize: workspace.document.canvasSize)
+        replacePerspectiveGuide(guide)
+    }
+
+    func setPerspectiveGuideVisibility(_ isVisible: Bool) {
+        guard var guide = perspectiveGuide, guide.isVisible != isVisible else { return }
+        guard capturePerspectiveGuideCheckpoint(operationKind: "perspective.visibility") else { return }
+        guide.isVisible = isVisible
+        replacePerspectiveGuide(guide)
+    }
+
+    func setPerspectiveGuideLocked(_ isLocked: Bool) {
+        guard var guide = perspectiveGuide, guide.isLocked != isLocked else { return }
+        guard capturePerspectiveGuideCheckpoint(operationKind: "perspective.lock") else { return }
+        guide.isLocked = isLocked
+        replacePerspectiveGuide(guide)
+        if isLocked {
+            perspectiveGuideInteractionTarget = nil
+            perspectiveGuideInteractionLastPoint = nil
+            perspectiveGuideInteractionHasCheckpoint = false
+        }
+    }
+
+    func setPerspectiveGuideStyleEditing(_ isEditing: Bool) {
+        if isEditing {
+            guard !isAdjustingPerspectiveGuideStyle else { return }
+            isAdjustingPerspectiveGuideStyle = capturePerspectiveGuideCheckpoint(
+                operationKind: "perspective.style"
+            )
+        } else {
+            isAdjustingPerspectiveGuideStyle = false
+        }
+    }
+
+    func setPerspectiveGuideOpacity(_ opacity: Float) {
+        guard var guide = perspectiveGuide else { return }
+        let resolved = min(max(opacity, 0.05), 1)
+        guard abs(guide.opacity - resolved) > 0.0001 else { return }
+        guide.opacity = resolved
+        replacePerspectiveGuide(guide)
+    }
+
+    func setPerspectiveGuideLineWidth(_ lineWidth: Float) {
+        guard var guide = perspectiveGuide else { return }
+        let resolved = min(max(lineWidth, 0.5), 4)
+        guard abs(guide.lineWidth - resolved) > 0.0001 else { return }
+        guide.lineWidth = resolved
+        replacePerspectiveGuide(guide)
+    }
+
+    func setPerspectiveGuideColor(_ color: RGBAColor) {
+        guard var guide = perspectiveGuide, guide.color != color else { return }
+        guard capturePerspectiveGuideCheckpoint(operationKind: "perspective.color") else { return }
+        guide.color = color.withAlpha(1)
+        guide.normalizeStyle()
+        replacePerspectiveGuide(guide)
+    }
+
+    func resetPerspectiveGuide() {
+        guard perspectiveGuide != nil else { return }
+        guard capturePerspectiveGuideCheckpoint(operationKind: "perspective.reset") else { return }
+        replacePerspectiveGuide(.initial(canvasSize: workspace.document.canvasSize))
+        selectedPerspectiveAnchorID = nil
+    }
+
+    func clearPerspectiveGuide() {
+        guard perspectiveGuide != nil else { return }
+        guard capturePerspectiveGuideCheckpoint(operationKind: "perspective.clear") else { return }
+        selectedPerspectiveAnchorID = nil
+        perspectiveGuideInteractionTarget = nil
+        perspectiveGuideInteractionLastPoint = nil
+        perspectiveGuideInteractionHasCheckpoint = false
+        isAdjustingPerspectiveGuideStyle = false
+        bootstrap.workspaceStore.updateDocument { document in
+            document.perspectiveGuide = nil
+        }
+        notePerspectiveGuideChanged()
+    }
+
+    func deleteSelectedPerspectiveGuideAnchor() {
+        guard let selectedPerspectiveAnchorID,
+              var guide = perspectiveGuide,
+              guide.anchors.contains(where: { $0.id == selectedPerspectiveAnchorID }) else { return }
+        guard capturePerspectiveGuideCheckpoint(operationKind: "perspective.deleteAnchor") else { return }
+        guide.anchors.removeAll { $0.id == selectedPerspectiveAnchorID }
+        self.selectedPerspectiveAnchorID = nil
+        replacePerspectiveGuide(guide)
+    }
+
+    func setSelectedPerspectiveAnchorConnection(
+        _ isEnabled: Bool,
+        role: PerspectiveVanishingPointRole
+    ) {
+        guard let selectedPerspectiveAnchorID,
+              var guide = perspectiveGuide,
+              let index = guide.anchors.firstIndex(where: { $0.id == selectedPerspectiveAnchorID }),
+              guide.anchors[index].connects(to: role) != isEnabled else { return }
+        guard capturePerspectiveGuideCheckpoint(operationKind: "perspective.anchorConnection") else { return }
+        guide.anchors[index].setConnection(isEnabled, to: role)
+        replacePerspectiveGuide(guide)
+    }
+
+    func beginPerspectiveGuideInteraction(at point: CanvasPoint, hitRadius: Double) {
+        guard workspace.toolSession.activeTool == .perspective,
+              var guide = perspectiveGuide,
+              guide.isVisible,
+              !guide.isLocked else { return }
+
+        perspectiveGuideInteractionHasCheckpoint = false
+        perspectiveGuideInteractionLastPoint = point
+
+        if let target = perspectiveGuideHitTarget(
+            state: guide,
+            point: point,
+            hitRadius: hitRadius,
+            canvasSize: workspace.document.canvasSize
+        ) {
+            perspectiveGuideInteractionTarget = target
+            if case .anchor(let anchorID) = target {
+                selectedPerspectiveAnchorID = anchorID
+            } else {
+                selectedPerspectiveAnchorID = nil
+            }
+            return
+        }
+
+        guard point.x >= 0,
+              point.y >= 0,
+              point.x <= Double(workspace.document.canvasSize.width),
+              point.y <= Double(workspace.document.canvasSize.height),
+              capturePerspectiveGuideCheckpoint(operationKind: "perspective.addAnchor") else {
+            perspectiveGuideInteractionTarget = nil
+            perspectiveGuideInteractionLastPoint = nil
+            return
+        }
+
+        let anchor = guide.makeAnchor(at: point)
+        guide.anchors.append(anchor)
+        perspectiveGuideInteractionTarget = .anchor(anchor.id)
+        selectedPerspectiveAnchorID = anchor.id
+        perspectiveGuideInteractionHasCheckpoint = true
+        replacePerspectiveGuide(guide)
+    }
+
+    func updatePerspectiveGuideInteraction(to point: CanvasPoint) {
+        guard let target = perspectiveGuideInteractionTarget,
+              let lastPoint = perspectiveGuideInteractionLastPoint,
+              var guide = perspectiveGuide else { return }
+        let delta = CanvasPoint(x: point.x - lastPoint.x, y: point.y - lastPoint.y)
+        guard abs(delta.x) > 0.0001 || abs(delta.y) > 0.0001 else { return }
+
+        if !perspectiveGuideInteractionHasCheckpoint {
+            guard capturePerspectiveGuideCheckpoint(operationKind: "perspective.moveControl") else { return }
+            perspectiveGuideInteractionHasCheckpoint = true
+        }
+
+        switch target {
+        case .vanishingPoint(let role):
+            let current = guide.vanishingPoint(for: role)
+            guide.setVanishingPoint(
+                CanvasPoint(x: current.x + delta.x, y: current.y + delta.y),
+                for: role
+            )
+        case .horizon:
+            guide.leftVanishingPoint = CanvasPoint(
+                x: guide.leftVanishingPoint.x + delta.x,
+                y: guide.leftVanishingPoint.y + delta.y
+            )
+            if guide.mode != .onePoint {
+                guide.rightVanishingPoint = CanvasPoint(
+                    x: guide.rightVanishingPoint.x + delta.x,
+                    y: guide.rightVanishingPoint.y + delta.y
+                )
+            }
+        case .anchor(let anchorID):
+            guard let index = guide.anchors.firstIndex(where: { $0.id == anchorID }) else { return }
+            let current = guide.anchors[index].position
+            guide.anchors[index].position = CanvasPoint(
+                x: current.x + delta.x,
+                y: current.y + delta.y
+            )
+        }
+
+        perspectiveGuideInteractionLastPoint = point
+        replacePerspectiveGuide(guide)
+    }
+
+    func endPerspectiveGuideInteraction() {
+        perspectiveGuideInteractionTarget = nil
+        perspectiveGuideInteractionLastPoint = nil
+        perspectiveGuideInteractionHasCheckpoint = false
+    }
+
+    private func capturePerspectiveGuideCheckpoint(operationKind: String) -> Bool {
+        checkpointHistoryIfPossible(
+            operationKind: operationKind,
+            captureMode: .workspaceOnly
+        )
+    }
+
+    private func replacePerspectiveGuide(_ guide: PerspectiveGuideState) {
+        var normalized = guide
+        normalized.normalizeStyle()
+        bootstrap.workspaceStore.updateDocument { document in
+            document.perspectiveGuide = normalized
+        }
+        notePerspectiveGuideChanged()
+    }
+
+    private func notePerspectiveGuideChanged() {
+        hasUnsavedChanges = true
+        refreshPerspectiveGuideOnly()
     }
 
     func setBrushSize(_ size: Float) {
@@ -2283,6 +2596,7 @@ final class WorkspaceViewModel: ObservableObject {
 
     func activateReferenceImageSlot(_ slotID: Int) {
         guard referenceImageSlots.indices.contains(slotID) else { return }
+        guard referenceImageLoadingSlotIDs.contains(slotID) == false else { return }
 
         if referenceImageSlots[slotID].asset != nil {
             selectReferenceImageSlot(slotID)
@@ -2399,10 +2713,61 @@ final class WorkspaceViewModel: ObservableObject {
         loadReferenceImage(from: url, into: slotID)
     }
 
+    @discardableResult
+    func importDroppedReferenceImages(from urls: [URL]) -> Int {
+        guard urls.isEmpty == false else { return 0 }
+
+        var reservedSlotIDs = referenceImageLoadingSlotIDs
+        if let luminosityReferenceSlotID {
+            reservedSlotIDs.insert(luminosityReferenceSlotID)
+        }
+        let destinationSlotIDs = referenceImageDropDestinationSlotIDs(
+            slots: referenceImageSlots,
+            reservedSlotIDs: reservedSlotIDs,
+            maximumCount: urls.count
+        )
+
+        guard destinationSlotIDs.isEmpty == false else {
+            showStatus(.init(kind: .info, message: "5 个参考图位置已满"))
+            return 0
+        }
+
+        for (url, slotID) in zip(urls, destinationSlotIDs) {
+            loadReferenceImage(from: url, into: slotID)
+        }
+        return destinationSlotIDs.count
+    }
+
+    @discardableResult
+    func importDroppedReferenceImage(
+        from image: NSImage,
+        fileName: String = "拖入的参考图"
+    ) -> Bool {
+        var reservedSlotIDs = referenceImageLoadingSlotIDs
+        if let luminosityReferenceSlotID {
+            reservedSlotIDs.insert(luminosityReferenceSlotID)
+        }
+        guard let slotID = referenceImageDropDestinationSlotIDs(
+            slots: referenceImageSlots,
+            reservedSlotIDs: reservedSlotIDs,
+            maximumCount: 1
+        ).first else {
+            showStatus(.init(kind: .info, message: "5 个参考图位置已满"))
+            return false
+        }
+        guard let imageData = image.tiffRepresentation else {
+            showStatus(.init(kind: .error, message: "无法读取参考图"))
+            return false
+        }
+
+        loadReferenceImage(from: imageData, fileName: fileName, into: slotID)
+        return true
+    }
+
     private func loadReferenceImage(from url: URL, into slotID: Int) {
         referenceImageUpgradeTasks[slotID]?.cancel()
         referenceImageUpgradeTasks[slotID] = nil
-        referenceImageLoadingSlotID = slotID
+        referenceImageLoadingSlotIDs.insert(slotID)
         let fileName = url.lastPathComponent
 
         Task.detached(priority: .userInitiated) { [weak self] in
@@ -2410,7 +2775,38 @@ final class WorkspaceViewModel: ObservableObject {
 
             await MainActor.run {
                 guard let self else { return }
-                self.referenceImageLoadingSlotID = nil
+                self.referenceImageLoadingSlotIDs.remove(slotID)
+
+                guard let asset else {
+                    self.showStatus(.init(kind: .error, message: "无法读取参考图"))
+                    return
+                }
+
+                self.replaceReferenceImageSlotAsset(asset, at: slotID, selectAfterUpdate: true)
+                self.showStatus(.init(kind: .success, message: "已载入\(fileName)"))
+            }
+        }
+    }
+
+    private func loadReferenceImage(
+        from imageData: Data,
+        fileName: String,
+        into slotID: Int
+    ) {
+        referenceImageUpgradeTasks[slotID]?.cancel()
+        referenceImageUpgradeTasks[slotID] = nil
+        referenceImageLoadingSlotIDs.insert(slotID)
+
+        Task.detached(priority: .userInitiated) { [weak self] in
+            let asset = ReferenceImageAsset.decode(
+                from: imageData,
+                fileName: fileName,
+                maxDimension: 768
+            )
+
+            await MainActor.run {
+                guard let self else { return }
+                self.referenceImageLoadingSlotIDs.remove(slotID)
 
                 guard let asset else {
                     self.showStatus(.init(kind: .error, message: "无法读取参考图"))
@@ -4428,6 +4824,20 @@ final class WorkspaceViewModel: ObservableObject {
             return
         }
 
+        let overlapMinX = max(sourceX, 0)
+        let overlapMinY = max(sourceY, 0)
+        let overlapMaxX = min(sourceX + targetSize.width, currentSize.width)
+        let overlapMaxY = min(sourceY + targetSize.height, currentSize.height)
+        let copyWidth = max(overlapMaxX - overlapMinX, 0)
+        let copyHeight = max(overlapMaxY - overlapMinY, 0)
+        let sourceOrigin = MTLOrigin(x: overlapMinX, y: overlapMinY, z: 0)
+        let destinationOrigin = MTLOrigin(
+            x: overlapMinX - sourceX,
+            y: overlapMinY - sourceY,
+            z: 0
+        )
+        let copySize = MTLSize(width: copyWidth, height: copyHeight, depth: 1)
+
         _ = flushBrushEditingBoundary(reason: "canvasCrop")
         let layerIDs = workspace.document.layers.map(\.id)
         var cropCopies: [(source: MTLTexture, target: MTLTexture)] = []
@@ -4464,25 +4874,46 @@ final class WorkspaceViewModel: ObservableObject {
             return
         }
 
-        guard let blitEncoder = commandBuffer.makeBlitCommandEncoder() else {
-            showStatus(.init(kind: .error, message: "无法创建画布裁剪任务"))
-            return
-        }
 
         for copy in cropCopies {
-            blitEncoder.copy(
-                from: copy.source,
-                sourceSlice: 0,
-                sourceLevel: 0,
-                sourceOrigin: MTLOrigin(x: sourceX, y: sourceY, z: 0),
-                sourceSize: MTLSize(width: targetSize.width, height: targetSize.height, depth: 1),
-                to: copy.target,
-                destinationSlice: 0,
-                destinationLevel: 0,
-                destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
+            let clearDescriptor = MTLRenderPassDescriptor()
+            clearDescriptor.colorAttachments[0].texture = copy.target
+            clearDescriptor.colorAttachments[0].loadAction = .clear
+            clearDescriptor.colorAttachments[0].storeAction = .store
+            clearDescriptor.colorAttachments[0].clearColor = MTLClearColor(
+                red: 0,
+                green: 0,
+                blue: 0,
+                alpha: 0
             )
+            guard let clearEncoder = commandBuffer.makeRenderCommandEncoder(descriptor: clearDescriptor) else {
+                showStatus(.init(kind: .error, message: "无法清空扩展后的画布区域"))
+                return
+            }
+            clearEncoder.endEncoding()
         }
-        blitEncoder.endEncoding()
+
+        if copyWidth > 0, copyHeight > 0 {
+            guard let blitEncoder = commandBuffer.makeBlitCommandEncoder() else {
+                showStatus(.init(kind: .error, message: "无法创建画布裁剪任务"))
+                return
+            }
+
+            for copy in cropCopies {
+                blitEncoder.copy(
+                    from: copy.source,
+                    sourceSlice: 0,
+                    sourceLevel: 0,
+                    sourceOrigin: sourceOrigin,
+                    sourceSize: copySize,
+                    to: copy.target,
+                    destinationSlice: 0,
+                    destinationLevel: 0,
+                    destinationOrigin: destinationOrigin
+                )
+            }
+            blitEncoder.endEncoding()
+        }
         commandBuffer.commit()
         commandBuffer.waitUntilCompleted()
         guard commandBuffer.status == .completed else {
@@ -4491,6 +4922,10 @@ final class WorkspaceViewModel: ObservableObject {
         }
 
         bootstrap.workspaceStore.updateDocument { document in
+            document.perspectiveGuide = document.perspectiveGuide?.cropped(
+                originX: sourceX,
+                originY: sourceY
+            )
             document.canvasSize = targetSize
         }
         bootstrap.workspaceStore.updateSelection { selection in
@@ -4517,7 +4952,7 @@ final class WorkspaceViewModel: ObservableObject {
         refresh()
         noteCanvasContentChanged(changedLayerIDs: Set(layerIDs))
         relayIdeationOperation(.applyCanvasCrop(cropBounds))
-        showStatus(.init(kind: .success, message: "已裁剪画布为 \(targetSize.width) × \(targetSize.height)"))
+        showStatus(.init(kind: .success, message: "已调整画布为 \(targetSize.width) × \(targetSize.height)"))
     }
 
     func addLayer() {
@@ -4535,6 +4970,15 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func removeActiveLayer() {
+        guard !isApplyingTransformCommit else {
+            showStatus(.init(kind: .info, message: "正在应用变形，请稍候再删除图层"))
+            return
+        }
+
+        if isTransformingSelection {
+            cancelSelectionTransform(clearSelectionAfterCancel: true)
+        }
+
         checkpointHistoryIfPossible()
         let initialCount = workspace.document.layers.count
         bootstrap.workspaceStore.updateDocument { document in
@@ -5396,6 +5840,9 @@ final class WorkspaceViewModel: ObservableObject {
             cancelSectorGradientInteraction()
         case .polygonSelection:
             cancelPolygonSelectionInteraction()
+        case .perspective:
+            selectedPerspectiveAnchorID = nil
+            endPerspectiveGuideInteraction()
         default:
             break
         }
@@ -7552,6 +7999,26 @@ final class WorkspaceViewModel: ObservableObject {
                     return
                 }
 
+                guard
+                    self.bootstrap.workspaceStore.state.document.layers.contains(where: { $0.id == layerID }),
+                    self.bootstrap.layerSurfaceStore.surfaceID(for: layerID) == surfaceID
+                else {
+                    self.isApplyingTransformCommit = false
+                    self.transformState.reset()
+                    self.setFreeTransformMeshWarpGrid(nil)
+                    self.isFreeTransformDragging = false
+                    self.activeFreeTransformInteractionMode = nil
+                    self.freeTransformMoveLogCount = 0
+                    self.transformLogger.debug("[transform] overlayHiddenDuringMove=false")
+                    self.setFreeTransformPreview(.identity)
+                    self.isTransformingSelection = false
+                    self.freeTransformUsesImplicitSelection = false
+                    self.implicitFreeTransformSelectionShape = nil
+                    self.refresh()
+                    self.showStatus(.init(kind: .info, message: "目标图层已变化，已取消本次变形"))
+                    return
+                }
+
                 self.bootstrap.layerSurfaceStore.swapTexture(for: surfaceID, with: targetTexture)
 
                 self.isApplyingTransformCommit = false
@@ -8107,19 +8574,86 @@ final class WorkspaceViewModel: ObservableObject {
             return
         }
 
+        _ = insertPixelPayloadAsNewLayer(
+            payload,
+            named: "粘贴图层",
+            historyOperationKind: "pixel.paste",
+            successMessage: "已粘贴为新图层",
+            outsideCanvasMessage: "粘贴内容超出当前画布",
+            additionalHistoryOperationKinds: ["pixelClipboard"]
+        )
+    }
+
+    @discardableResult
+    func importDroppedCanvasImage(
+        from url: URL,
+        centeredAt center: CanvasPoint
+    ) -> Bool {
+        guard let image = NSImage(contentsOf: url) else {
+            showStatus(.init(kind: .error, message: "无法读取拖入的图片"))
+            return false
+        }
+        let fileName = url.deletingPathExtension().lastPathComponent
+        return importDroppedCanvasImage(
+            from: image,
+            centeredAt: center,
+            layerName: fileName.isEmpty ? "导入图像" : fileName
+        )
+    }
+
+    @discardableResult
+    func importDroppedCanvasImage(
+        from image: NSImage,
+        centeredAt center: CanvasPoint,
+        layerName: String = "导入图像"
+    ) -> Bool {
+        guard !isTransformingSelection else {
+            showStatus(.init(kind: .info, message: "请先应用或取消变形"))
+            return false
+        }
+
+        _ = flushBrushEditingBoundary(reason: "importDroppedCanvasImage")
+
+        guard let payload = bootstrap.pixelClipboardController.canvasImportPayload(
+            from: image,
+            fittingWithin: workspace.document.canvasSize,
+            centeredAt: center
+        ) else {
+            showStatus(.init(kind: .error, message: "无法读取拖入的图片"))
+            return false
+        }
+
+        return insertPixelPayloadAsNewLayer(
+            payload,
+            named: layerName,
+            historyOperationKind: "pixel.importDroppedImage",
+            successMessage: "已将图片导入为新图层",
+            outsideCanvasMessage: "拖入位置在画布外"
+        )
+    }
+
+    @discardableResult
+    private func insertPixelPayloadAsNewLayer(
+        _ payload: PixelClipboardPayload,
+        named layerName: String,
+        historyOperationKind: String,
+        successMessage: String,
+        outsideCanvasMessage: String,
+        additionalHistoryOperationKinds: [String] = []
+    ) -> Bool {
         guard let placement = clippedPlacement(
             for: payload,
             destinationCanvasSize: workspace.document.canvasSize
         ) else {
-            showStatus(.init(kind: .info, message: "粘贴内容超出当前画布"))
-            return
+            showStatus(.init(kind: .info, message: outsideCanvasMessage))
+            return false
         }
 
         do {
             checkpointHistoryIfPossible(
-                operationKind: "pixel.paste",
+                operationKind: historyOperationKind,
                 topologyOperation: true,
-                additionalOperationKinds: ["pixelClipboard"]
+                additionalOperationKinds: additionalHistoryOperationKinds
             )
 
             let insertionIndex = min(
@@ -8129,7 +8663,7 @@ final class WorkspaceViewModel: ObservableObject {
 
             var createdLayerID: LayerID?
             bootstrap.workspaceStore.updateDocument { document in
-                createdLayerID = document.addLayer(named: "粘贴图层").id
+                createdLayerID = document.addLayer(named: layerName).id
                 if let createdLayerID {
                     _ = document.moveLayer(createdLayerID, toIndex: insertionIndex)
                 }
@@ -8159,9 +8693,11 @@ final class WorkspaceViewModel: ObservableObject {
             refresh(invalidatedLayerIDs: [createdLayerID])
             noteCanvasContentChanged(changedLayerIDs: [createdLayerID])
             recordDrawingActivityIfNeeded()
-            showStatus(.init(kind: .success, message: "已粘贴为新图层"))
+            showStatus(.init(kind: .success, message: successMessage))
+            return true
         } catch {
             showStatus(.init(kind: .error, message: error.localizedDescription))
+            return false
         }
     }
 
@@ -8495,6 +9031,14 @@ final class WorkspaceViewModel: ObservableObject {
             historyOperationKind: "selection.erase",
             successMessage: "已删除选区内容"
         )
+    }
+
+    func deleteSelectionOrActiveLayer() {
+        if workspace.selection.committedShape != nil {
+            deleteSelectionContents()
+        } else {
+            removeActiveLayer()
+        }
     }
 
     func fillSelectionContents() {
@@ -8896,6 +9440,20 @@ final class WorkspaceViewModel: ObservableObject {
     func handleKeyDown(_ event: NSEvent) -> Bool {
         let normalizedModifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
 
+        if workspace.toolSession.activeTool == .perspective,
+           normalizedModifiers.isEmpty {
+            if event.keyCode == 51 || event.keyCode == 117 {
+                guard selectedPerspectiveAnchorID != nil else { return false }
+                deleteSelectedPerspectiveGuideAnchor()
+                return true
+            }
+            if event.keyCode == 53 {
+                selectedPerspectiveAnchorID = nil
+                endPerspectiveGuideInteraction()
+                return true
+            }
+        }
+
         if workspace.toolSession.activeTool == .canvasCrop {
             if event.keyCode == 36 || event.keyCode == 76 {
                 applyCanvasCrop()
@@ -9088,8 +9646,7 @@ final class WorkspaceViewModel: ObservableObject {
 
         if (event.keyCode == 51 || event.keyCode == 117),
            normalizedModifiers.isEmpty {
-            guard workspace.selection.displayRect != nil else { return false }
-            deleteSelectionContents()
+            deleteSelectionOrActiveLayer()
             return true
         }
 
@@ -9224,6 +9781,19 @@ final class WorkspaceViewModel: ObservableObject {
     private func refreshToolSessionOnly() {
         let state = bootstrap.workspaceStore.state
         workspace = state
+    }
+
+    /// 透视辅助线属于文档级 UI 状态，不应触发 Metal 场景重建或缩略图刷新。
+    private func refreshPerspectiveGuideOnly() {
+        workspace = bootstrap.workspaceStore.state
+        if let selectedPerspectiveAnchorID,
+           workspace.document.perspectiveGuide?.anchors.contains(where: {
+               $0.id == selectedPerspectiveAnchorID
+           }) != true {
+            self.selectedPerspectiveAnchorID = nil
+        }
+        canUndo = bootstrap.historyController.canUndo
+        canRedo = bootstrap.historyController.canRedo
     }
 
     private func notePrimaryBrushTipDefinitionChanged() {
@@ -9546,14 +10116,19 @@ final class WorkspaceViewModel: ObservableObject {
             return
         }
         do {
+            let restoresWorkspaceOnly = bootstrap.historyController.nextUndoRestoresWorkspaceOnly
             let didUndo = try bootstrap.historyController.undo()
-            if didUndo {
+            if didUndo, !restoresWorkspaceOnly {
                 bootstrap.layerSurfaceStore.markContentUnknown(
                     for: bootstrap.workspaceStore.state.document.layers.map(\.id)
                 )
             }
-            refresh()
-            if didUndo {
+            if restoresWorkspaceOnly {
+                refreshPerspectiveGuideOnly()
+            } else {
+                refresh()
+            }
+            if didUndo, !restoresWorkspaceOnly {
                 scheduleNavigatorPreviewRefresh()
             }
             showStatus(
@@ -9601,14 +10176,19 @@ final class WorkspaceViewModel: ObservableObject {
             return
         }
         do {
+            let restoresWorkspaceOnly = bootstrap.historyController.nextRedoRestoresWorkspaceOnly
             let didRedo = try bootstrap.historyController.redo()
-            if didRedo {
+            if didRedo, !restoresWorkspaceOnly {
                 bootstrap.layerSurfaceStore.markContentUnknown(
                     for: bootstrap.workspaceStore.state.document.layers.map(\.id)
                 )
             }
-            refresh()
-            if didRedo {
+            if restoresWorkspaceOnly {
+                refreshPerspectiveGuideOnly()
+            } else {
+                refresh()
+            }
+            if didRedo, !restoresWorkspaceOnly {
                 scheduleNavigatorPreviewRefresh()
             }
             showStatus(
@@ -10352,10 +10932,12 @@ final class WorkspaceViewModel: ObservableObject {
     ) -> CanvasSceneSnapshot {
         let surfaces = bootstrap.layerSurfaceStore.surfaceRecords(for: workspace.document)
         let activeSurface = surfaces.first { $0.layerID == workspace.document.activeLayerID }
+        var renderDocument = workspace.document
+        renderDocument.perspectiveGuide = nil
 
         return CanvasSceneSnapshot(
             renderSnapshot: CanvasRenderSnapshot(
-                document: workspace.document,
+                document: renderDocument,
                 viewport: workspace.viewport,
                 canvasContentRevision: canvasContentRevision,
                 viewportRevision: viewportRevision
@@ -12323,7 +12905,7 @@ final class WorkspaceViewModel: ObservableObject {
         let displayComponents: [SelectionShapeComponent]
         if mode == .replace, let preferredDisplayShape = input.preferredDisplayShape {
             displayComponents = [
-                SelectionShapeComponent(operation: .add, shape: preferredDisplayShape.clamped(to: canvasSize))
+                SelectionShapeComponent(operation: .add, shape: preferredDisplayShape)
             ]
         } else {
             let baseDisplayComponents: [SelectionShapeComponent]
@@ -12332,7 +12914,7 @@ final class WorkspaceViewModel: ObservableObject {
                     baseDisplayComponents = baseShape.components
                 } else {
                     baseDisplayComponents = [
-                        SelectionShapeComponent(operation: .add, shape: baseShape.clamped(to: canvasSize))
+                        SelectionShapeComponent(operation: .add, shape: baseShape)
                     ]
                 }
             } else {
@@ -12344,7 +12926,7 @@ final class WorkspaceViewModel: ObservableObject {
                 incomingDisplayComponents = [
                     SelectionShapeComponent(
                         operation: mode == .subtract ? .subtract : .add,
-                        shape: preferredDisplayShape.clamped(to: canvasSize)
+                        shape: preferredDisplayShape
                     )
                 ]
             } else {

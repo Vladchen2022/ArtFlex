@@ -32,7 +32,7 @@ struct CanvasCropInteractionState: Sendable, Equatable {
         canvasSize: CanvasSize,
         handleRadius: Double
     ) {
-        let point = pixelAligned(clamp(rawPoint, to: canvasSize))
+        let point = pixelAligned(rawPoint)
         dragStartPoint = point
         dragStartBounds = bounds
 
@@ -53,21 +53,19 @@ struct CanvasCropInteractionState: Sendable, Equatable {
 
     mutating func update(to rawPoint: CanvasPoint, canvasSize: CanvasSize) {
         guard let dragMode, let dragStartPoint else { return }
-        let point = pixelAligned(clamp(rawPoint, to: canvasSize))
+        let point = pixelAligned(rawPoint)
 
         switch dragMode {
         case .create:
-            bounds = CanvasRect.fromPoints(dragStartPoint, point).clamped(to: canvasSize)
+            bounds = CanvasRect.fromPoints(dragStartPoint, point)
         case .move:
             guard let startBounds = dragStartBounds else { return }
             let deltaX = point.x - dragStartPoint.x
             let deltaY = point.y - dragStartPoint.y
-            let maxOriginX = max(Double(canvasSize.width) - startBounds.size.x, 0)
-            let maxOriginY = max(Double(canvasSize.height) - startBounds.size.y, 0)
             bounds = CanvasRect(
                 origin: CanvasPoint(
-                    x: min(max(startBounds.minX + deltaX, 0), maxOriginX),
-                    y: min(max(startBounds.minY + deltaY, 0), maxOriginY)
+                    x: startBounds.minX + deltaX,
+                    y: startBounds.minY + deltaY
                 ),
                 size: startBounds.size
             )
@@ -76,8 +74,7 @@ struct CanvasCropInteractionState: Sendable, Equatable {
             bounds = resizedBounds(
                 startBounds,
                 handle: handle,
-                point: point,
-                canvasSize: canvasSize
+                point: point
             )
         }
     }
@@ -88,7 +85,10 @@ struct CanvasCropInteractionState: Sendable, Equatable {
         dragStartPoint = nil
         dragStartBounds = nil
         if let bounds, bounds.size.x < 1 || bounds.size.y < 1 {
-            self.bounds = nil
+            self.bounds = CanvasRect(
+                origin: .init(x: 0, y: 0),
+                size: .init(x: Double(canvasSize.width), y: Double(canvasSize.height))
+            )
         }
     }
 
@@ -96,7 +96,7 @@ struct CanvasCropInteractionState: Sendable, Equatable {
         self = .init()
     }
 
-    func pixelBounds(in canvasSize: CanvasSize) -> CanvasRect? {
+    func pixelBounds(in _: CanvasSize) -> CanvasRect? {
         guard let bounds else { return nil }
         let resolved = CanvasRect(
             origin: CanvasPoint(x: bounds.minX.rounded(), y: bounds.minY.rounded()),
@@ -104,7 +104,7 @@ struct CanvasCropInteractionState: Sendable, Equatable {
                 x: (bounds.maxX - bounds.minX).rounded(),
                 y: (bounds.maxY - bounds.minY).rounded()
             )
-        ).clamped(to: canvasSize)
+        )
         guard resolved.size.x >= 1, resolved.size.y >= 1 else { return nil }
         return resolved
     }
@@ -112,8 +112,7 @@ struct CanvasCropInteractionState: Sendable, Equatable {
     private func resizedBounds(
         _ start: CanvasRect,
         handle: CanvasCropHandle,
-        point: CanvasPoint,
-        canvasSize: CanvasSize
+        point: CanvasPoint
     ) -> CanvasRect {
         var minX = start.minX
         var minY = start.minY
@@ -145,12 +144,8 @@ struct CanvasCropInteractionState: Sendable, Equatable {
 
         if minX > maxX { swap(&minX, &maxX) }
         if minY > maxY { swap(&minY, &maxY) }
-        minX = min(max(minX, 0), Double(canvasSize.width))
-        minY = min(max(minY, 0), Double(canvasSize.height))
-        maxX = min(max(maxX, minX + 1), Double(canvasSize.width))
-        maxY = min(max(maxY, minY + 1), Double(canvasSize.height))
-        if maxX - minX < 1 { minX = max(maxX - 1, 0) }
-        if maxY - minY < 1 { minY = max(maxY - 1, 0) }
+        if maxX - minX < 1 { maxX = minX + 1 }
+        if maxY - minY < 1 { maxY = minY + 1 }
         return CanvasRect(
             origin: CanvasPoint(x: minX, y: minY),
             size: CanvasPoint(x: maxX - minX, y: maxY - minY)
@@ -179,13 +174,6 @@ struct CanvasCropInteractionState: Sendable, Equatable {
             let dy = point.y - handlePoint.y
             return (dx * dx) + (dy * dy) <= radius * radius
         }?.0
-    }
-
-    private func clamp(_ point: CanvasPoint, to canvasSize: CanvasSize) -> CanvasPoint {
-        CanvasPoint(
-            x: min(max(point.x, 0), Double(canvasSize.width)),
-            y: min(max(point.y, 0), Double(canvasSize.height))
-        )
     }
 
     private func pixelAligned(_ point: CanvasPoint) -> CanvasPoint {

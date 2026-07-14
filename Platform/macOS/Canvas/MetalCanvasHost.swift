@@ -588,7 +588,7 @@ func preferredBrushCursorMode(
     }
     if activeTool == .brush || activeTool == .eraser || activeTool == .smudge || activeTool == .brightnessAdjust ||
         activeTool == .canvasCrop || activeTool == .canvasRotate || activeTool == .straightLine ||
-        activeTool == .linearGradient || activeTool == .sectorGradient || activeTool == .polygonSelection ||
+        activeTool == .linearGradient || activeTool == .sectorGradient || activeTool == .polygonSelection || activeTool == .perspective ||
         activeTool == .rectangleSelection || activeTool == .ellipseSelection || activeTool == .lassoSelection {
         return .crosshair
     }
@@ -1560,7 +1560,7 @@ final class StrokeCaptureMTKView: MTKView {
                 strokeDelegate?.strokeCaptureViewDidRequestCanvasToolCancel(self)
                 return
             }
-            if activeTool == .straightLine || activeTool == .linearGradient || activeTool == .sectorGradient || activeTool == .polygonSelection {
+            if activeTool == .straightLine || activeTool == .linearGradient || activeTool == .sectorGradient || activeTool == .polygonSelection || activeTool == .perspective {
                 strokeDelegate?.strokeCaptureViewDidRequestCanvasToolCancel(self)
                 return
             }
@@ -2192,7 +2192,7 @@ final class StrokeCaptureMTKView: MTKView {
         switch activeTool {
         case .brush, .eraser, .smudge, .straightLine, .linearGradient, .sectorGradient, .brightnessAdjust:
             return true
-        case .eyedropper, .bucket, .polygonSelection, .lassoFill, .textureFill, .rectangleSelection, .ellipseSelection, .lassoSelection, .canvasRotate, .canvasCrop, .freeTransform:
+        case .eyedropper, .bucket, .polygonSelection, .lassoFill, .textureFill, .rectangleSelection, .ellipseSelection, .lassoSelection, .canvasRotate, .canvasCrop, .freeTransform, .perspective:
             return false
         }
     }

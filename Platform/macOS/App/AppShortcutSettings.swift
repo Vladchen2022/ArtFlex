@@ -91,7 +91,13 @@ final class AppShortcutSettingsStore: ObservableObject {
         }
         if let data = userDefaults.data(forKey: StorageKeys.toolGroupShortcuts),
            let decoded = try? JSONDecoder().decode([String: String].self, from: data) {
-            toolGroupShortcuts = Self.normalizedToolGroupShortcuts(from: decoded)
+            let migrated = Self.migratedToolGroupShortcuts(from: decoded)
+            let normalized = Self.normalizedToolGroupShortcuts(from: migrated)
+            toolGroupShortcuts = normalized
+            if normalized != decoded,
+               let normalizedData = try? JSONEncoder().encode(normalized) {
+                userDefaults.set(normalizedData, forKey: StorageKeys.toolGroupShortcuts)
+            }
         } else {
             toolGroupShortcuts = Self.defaultToolGroupShortcuts
         }
@@ -145,6 +151,24 @@ final class AppShortcutSettingsStore: ObservableObject {
                 return (group.id, shortcutKey.uppercased())
             }
         )
+    }
+
+    private static func migratedToolGroupShortcuts(from raw: [String: String]) -> [String: String] {
+        let cropGroupID = "canvas-crop"
+        let oldDefault = "X"
+        let newDefault = "C"
+        guard raw[cropGroupID]?.uppercased() == oldDefault else {
+            return raw
+        }
+
+        var migrated = raw
+        if let conflictingGroupID = migrated.first(where: {
+            $0.key != cropGroupID && $0.value.uppercased() == newDefault
+        })?.key {
+            migrated[conflictingGroupID] = oldDefault
+        }
+        migrated[cropGroupID] = newDefault
+        return migrated
     }
 
     private static func normalizedToolGroupShortcuts(from raw: [String: String]) -> [String: String] {

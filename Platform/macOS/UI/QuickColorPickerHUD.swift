@@ -295,7 +295,7 @@ private struct QuickColorPickerBrushSlotDot: View {
                 .fill(dotFillColor)
                 .overlay {
                     Circle()
-                        .stroke(dotStrokeColor, lineWidth: isSelected ? 1.4 : 1)
+                        .strokeBorder(dotStrokeColor, lineWidth: 1.2)
                 }
                 .frame(width: dotSize, height: dotSize)
         }
@@ -314,9 +314,9 @@ private struct QuickColorPickerBrushSlotDot: View {
 
     private var dotStrokeColor: Color {
         guard preset != nil else {
-            return Color.white.opacity(0.08)
+            return Color.black.opacity(0.18)
         }
-        return isSelected ? Color.accentColor.opacity(0.96) : Color.white.opacity(0.18)
+        return Color.black.opacity(isSelected ? 0.84 : 0.72)
     }
 }
 

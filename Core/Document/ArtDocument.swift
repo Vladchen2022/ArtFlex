@@ -77,19 +77,22 @@ struct ArtDocument: Codable, Sendable, Equatable {
     var colorStandard: ArtColorStandard
     var layers: [LayerRecord]
     var activeLayerID: LayerID
+    var perspectiveGuide: PerspectiveGuideState?
 
     init(
         metadata: DocumentMetadata,
         canvasSize: CanvasSize,
         colorStandard: ArtColorStandard = .stageOneDefault,
         layers: [LayerRecord],
-        activeLayerID: LayerID
+        activeLayerID: LayerID,
+        perspectiveGuide: PerspectiveGuideState? = nil
     ) {
         self.metadata = metadata
         self.canvasSize = canvasSize
         self.colorStandard = colorStandard
         self.layers = layers
         self.activeLayerID = activeLayerID
+        self.perspectiveGuide = perspectiveGuide
     }
 
     static func stageOneDefault(name: String = "未命名") -> ArtDocument {

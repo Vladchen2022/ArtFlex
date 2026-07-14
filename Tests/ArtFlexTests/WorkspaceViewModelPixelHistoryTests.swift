@@ -6,6 +6,72 @@ import Testing
 struct WorkspaceViewModelPixelHistoryTests {
     @Test
     @MainActor
+    func deletingLayerWithPendingTransformCancelsPreviewWithoutMovingBackground() throws {
+        let harness = try PixelHistoryHarness(canvasSize: .init(width: 64, height: 64))
+        let backgroundLayerID = try #require(harness.viewModel.workspace.document.layers.first?.id)
+        let drawingLayerID = harness.viewModel.workspace.document.activeLayerID
+        let backgroundBefore = try harness.snapshot(layerID: backgroundLayerID)
+
+        harness.makeRectangleSelection(minX: -12, minY: 8, maxX: 24, maxY: 32)
+        harness.viewModel.fillSelectionContents()
+        #expect(try harness.alpha(atX: 12, y: 16, layerID: drawingLayerID) > 0.95)
+
+        harness.viewModel.selectTool(.freeTransform)
+        let start = CanvasPoint(x: 12, y: 16)
+        let end = CanvasPoint(x: 24, y: 16)
+        harness.viewModel.beginSelectionTransform(at: start, mode: .move)
+        harness.viewModel.updateSelectionTransform(to: end)
+        harness.viewModel.commitSelectionTransform(at: end)
+
+        #expect(harness.viewModel.isTransformingSelection)
+        #expect(!harness.viewModel.freeTransformPreview.isIdentity)
+
+        harness.viewModel.removeActiveLayer()
+
+        #expect(harness.viewModel.workspace.document.layers.count == 1)
+        #expect(harness.viewModel.workspace.document.activeLayerID == backgroundLayerID)
+        #expect(!harness.viewModel.isTransformingSelection)
+        #expect(harness.viewModel.freeTransformPreview.isIdentity)
+        #expect(harness.viewModel.workspace.selection.committedShape == nil)
+        #expect(harness.bootstrap.layerSurfaceStore.surfaceID(for: drawingLayerID) == nil)
+        #expect(try harness.snapshot(layerID: backgroundLayerID) == backgroundBefore)
+    }
+
+    @Test
+    @MainActor
+    func deletingLayerIsBlockedWhileTransformCommitIsApplying() async throws {
+        let harness = try PixelHistoryHarness(canvasSize: .init(width: 64, height: 64))
+        let drawingLayerID = harness.viewModel.workspace.document.activeLayerID
+        try fillOpaqueRect(
+            in: harness,
+            layerID: drawingLayerID,
+            originX: 12,
+            originY: 12,
+            width: 24,
+            height: 24,
+            color: .init(red: 0, green: 0, blue: 0, alpha: 1)
+        )
+
+        harness.makeRectangleSelection(minX: 8, minY: 8, maxX: 40, maxY: 40)
+        harness.viewModel.selectTool(.freeTransform)
+        let start = CanvasPoint(x: 20, y: 20)
+        let end = CanvasPoint(x: 28, y: 20)
+        harness.viewModel.beginSelectionTransform(at: start, mode: .move)
+        harness.viewModel.updateSelectionTransform(to: end)
+        harness.viewModel.commitSelectionTransform(at: end)
+        harness.viewModel.applySelectionTransform()
+        #expect(harness.viewModel.isApplyingTransformCommit)
+
+        let layerCountBeforeDelete = harness.viewModel.workspace.document.layers.count
+        harness.viewModel.removeActiveLayer()
+
+        #expect(harness.viewModel.workspace.document.layers.count == layerCountBeforeDelete)
+        #expect(harness.viewModel.workspace.document.activeLayerID == drawingLayerID)
+        try await harness.waitForTransformCommitToFinish()
+    }
+
+    @Test
+    @MainActor
     func applyingWholeLayerFreeTransformReprimesIdleStateWithoutReselectingTool() async throws {
         let harness = try PixelHistoryHarness()
         let layerID = harness.addLayer()
@@ -1011,6 +1077,8 @@ struct WorkspaceViewModelPixelHistoryTests {
             Issue.record("Expected brush commit to use in-place dirty history")
         case .inPlaceChangedLayers(_, let changedLayerIDs):
             #expect(Set(changedLayerIDs) == [layerID])
+        case .workspaceOnly:
+            Issue.record("Expected brush commit to use pixel history")
         }
 #endif
 
@@ -1056,6 +1124,8 @@ struct WorkspaceViewModelPixelHistoryTests {
             Issue.record("Expected smudge commit to use in-place dirty history")
         case .inPlaceChangedLayers(_, let changedLayerIDs):
             #expect(Set(changedLayerIDs) == [layerID])
+        case .workspaceOnly:
+            Issue.record("Expected smudge commit to use pixel history")
         }
 #endif
     }
@@ -1089,6 +1159,69 @@ struct WorkspaceViewModelPixelHistoryTests {
             harness.viewModel.undo()
             #expect(try harness.alpha(atX: 12, y: 12, layerID: layerID) < 0.01)
         }
+    }
+
+    @Test
+    @MainActor
+    func deleteKeyClearsSelectedPixelsWithoutDeletingLayer() throws {
+        let harness = try PixelHistoryHarness()
+        let layerID = harness.viewModel.workspace.document.activeLayerID
+        try fillOpaqueRect(
+            in: harness,
+            layerID: layerID,
+            originX: 0,
+            originY: 0,
+            width: 64,
+            height: 64,
+            color: .init(red: 0.2, green: 0.5, blue: 0.8, alpha: 1)
+        )
+        harness.makeRectangleSelection(minX: 8, minY: 8, maxX: 24, maxY: 24)
+        let initialLayerCount = harness.viewModel.workspace.document.layers.count
+
+        let handled = harness.viewModel.handleKeyDown(
+            makeCanvasKeyEvent(
+                type: .keyDown,
+                characters: "\u{7f}",
+                charactersIgnoringModifiers: "\u{7f}",
+                modifiers: [],
+                keyCode: 51
+            )
+        )
+
+        #expect(handled)
+        #expect(harness.viewModel.workspace.document.layers.count == initialLayerCount)
+        #expect(try harness.alpha(atX: 12, y: 12, layerID: layerID) < 0.01)
+        #expect(try harness.alpha(atX: 32, y: 32, layerID: layerID) > 0.99)
+
+        harness.viewModel.undo()
+        #expect(try harness.alpha(atX: 12, y: 12, layerID: layerID) > 0.99)
+    }
+
+    @Test
+    @MainActor
+    func deleteKeyWithoutSelectionDeletesActiveLayerAndSupportsUndo() throws {
+        let harness = try PixelHistoryHarness()
+        let deletedLayerID = harness.viewModel.workspace.document.activeLayerID
+        let initialLayerIDs = harness.viewModel.workspace.document.layers.map(\.id)
+
+        let handled = harness.viewModel.handleKeyDown(
+            makeCanvasKeyEvent(
+                type: .keyDown,
+                characters: "\u{7f}",
+                charactersIgnoringModifiers: "\u{7f}",
+                modifiers: [],
+                keyCode: 51
+            )
+        )
+
+        #expect(handled)
+        #expect(harness.viewModel.workspace.document.layers.count == initialLayerIDs.count - 1)
+        #expect(harness.viewModel.workspace.document.layers.contains(where: { $0.id == deletedLayerID }) == false)
+        #expect(harness.viewModel.status?.message == "已删除当前图层")
+
+        harness.viewModel.undo()
+        #expect(harness.viewModel.workspace.document.layers.map(\.id) == initialLayerIDs)
+        #expect(harness.viewModel.workspace.document.activeLayerID == deletedLayerID)
     }
 
     @Test
@@ -1874,6 +2007,44 @@ struct WorkspaceViewModelPixelHistoryTests {
 
     @Test
     @MainActor
+    func canvasCropCanExpandEveryEdgeWithTransparentPaddingAndUndoRedo() throws {
+        let harness = try PixelHistoryHarness(canvasSize: .init(width: 32, height: 32))
+        let layerID = harness.viewModel.workspace.document.activeLayerID
+        try fillOpaqueRect(
+            in: harness,
+            layerID: layerID,
+            originX: 4,
+            originY: 6,
+            width: 4,
+            height: 4,
+            color: .init(red: 0.85, green: 0.15, blue: 0.05, alpha: 1)
+        )
+
+        harness.viewModel.selectTool(.canvasCrop)
+        harness.viewModel.beginCanvasCrop(at: .init(x: 16, y: 16), handleRadius: 2)
+        harness.viewModel.endCanvasCrop(at: .init(x: 16, y: 16))
+        harness.viewModel.beginCanvasCrop(at: .init(x: 0, y: 0), handleRadius: 2)
+        harness.viewModel.endCanvasCrop(at: .init(x: -8, y: -4))
+        harness.viewModel.beginCanvasCrop(at: .init(x: 32, y: 32), handleRadius: 2)
+        harness.viewModel.endCanvasCrop(at: .init(x: 40, y: 40))
+        harness.viewModel.applyCanvasCrop()
+
+        #expect(harness.viewModel.workspace.document.canvasSize == .init(width: 48, height: 44))
+        #expect(try harness.alpha(atX: 0, y: 0, layerID: layerID) < 0.01)
+        #expect(try harness.color(atX: 12, y: 10, layerID: layerID).red > 0.8)
+        #expect(try harness.alpha(atX: 47, y: 43, layerID: layerID) < 0.01)
+
+        harness.viewModel.undo()
+        #expect(harness.viewModel.workspace.document.canvasSize == .init(width: 32, height: 32))
+        #expect(try harness.color(atX: 4, y: 6, layerID: layerID).red > 0.8)
+
+        harness.viewModel.redo()
+        #expect(harness.viewModel.workspace.document.canvasSize == .init(width: 48, height: 44))
+        #expect(try harness.color(atX: 12, y: 10, layerID: layerID).red > 0.8)
+    }
+
+    @Test
+    @MainActor
     func textureFillGestureCancelsCleanly() throws {
         let harness = try PixelHistoryHarness()
         let layerID = harness.viewModel.workspace.document.activeLayerID
@@ -2186,6 +2357,8 @@ struct WorkspaceViewModelPixelHistoryTests {
             Issue.record("Expected symmetric dirty current-entry capture for applyPixelOperation in redo stack")
         case .inPlaceChangedLayers(_, let changedLayerIDs):
             #expect(Set(changedLayerIDs) == [layerID])
+        case .workspaceOnly:
+            Issue.record("Expected pixel operation to use pixel history")
         }
     }
 

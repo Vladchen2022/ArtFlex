@@ -89,6 +89,38 @@ final class ReferenceImageAsset: @unchecked Sendable {
             return nil
         }
 
+        return decode(
+            from: imageSource,
+            fileName: url.lastPathComponent,
+            sourceURL: url,
+            maxDimension: maxDimension
+        )
+    }
+
+    static func decode(
+        from imageData: Data,
+        fileName: String,
+        maxDimension: Int = 4096
+    ) -> ReferenceImageAsset? {
+        guard let imageSource = CGImageSourceCreateWithData(imageData as CFData, nil) else {
+            return nil
+        }
+
+        return decode(
+            from: imageSource,
+            fileName: fileName,
+            sourceURL: nil,
+            maxDimension: maxDimension
+        )
+    }
+
+    private static func decode(
+        from imageSource: CGImageSource,
+        fileName: String,
+        sourceURL: URL?,
+        maxDimension: Int
+    ) -> ReferenceImageAsset? {
+
         let thumbnailOptions: [CFString: Any] = [
             kCGImageSourceCreateThumbnailFromImageAlways: true,
             kCGImageSourceCreateThumbnailWithTransform: true,
@@ -138,12 +170,12 @@ final class ReferenceImageAsset: @unchecked Sendable {
         }
 
         return ReferenceImageAsset(
-            fileName: url.lastPathComponent,
+            fileName: fileName,
             width: width,
             height: height,
             rgbaPixels: rgbaPixels,
             cgImage: previewImage,
-            sourceURL: url,
+            sourceURL: sourceURL,
             decodedMaxDimension: maxDimension
         )
     }
@@ -183,6 +215,21 @@ struct ReferenceImageSlotState: Identifiable {
     var isLoaded: Bool {
         asset != nil
     }
+}
+
+func referenceImageDropDestinationSlotIDs(
+    slots: [ReferenceImageSlotState],
+    reservedSlotIDs: Set<Int>,
+    maximumCount: Int
+) -> [Int] {
+    guard maximumCount > 0 else { return [] }
+
+    return Array(
+        slots.lazy
+            .filter { $0.asset == nil && reservedSlotIDs.contains($0.id) == false }
+            .prefix(maximumCount)
+            .map(\.id)
+    )
 }
 
 struct ReferenceImageViewer: NSViewRepresentable {

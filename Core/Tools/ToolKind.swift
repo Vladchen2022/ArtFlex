@@ -113,9 +113,34 @@ enum ToolKind: String, Codable, Sendable {
     case canvasRotate
     case canvasCrop
     case freeTransform
+    case perspective
+}
+
+enum LassoFillMode: String, CaseIterable, Sendable, Equatable {
+    case color
+    case texture
+
+    var displayName: String {
+        switch self {
+        case .color:
+            return "颜色填充"
+        case .texture:
+            return "纹理填充"
+        }
+    }
 }
 
 extension ToolKind {
+    var supportsOutsideCanvasSelectionStart: Bool {
+        switch self {
+        case .polygonSelection, .lassoFill, .textureFill,
+             .rectangleSelection, .ellipseSelection, .lassoSelection:
+            return true
+        default:
+            return false
+        }
+    }
+
     var sidebarIconName: String {
         switch self {
         case .brush:
@@ -154,6 +179,8 @@ extension ToolKind {
             return "crop"
         case .freeTransform:
             return "arrow.up.left.and.arrow.down.right"
+        case .perspective:
+            return "triangle"
         }
     }
 
@@ -195,6 +222,8 @@ extension ToolKind {
             return "画布裁剪"
         case .freeTransform:
             return "移动变形"
+        case .perspective:
+            return "透视"
         }
     }
 
@@ -210,10 +239,8 @@ extension ToolKind {
             return "G"
         case .lassoSelection, .polygonSelection:
             return "L"
-        case .lassoFill:
+        case .lassoFill, .textureFill:
             return "K"
-        case .textureFill:
-            return "F"
         case .rectangleSelection, .ellipseSelection:
             return "M"
         case .straightLine:
@@ -227,9 +254,11 @@ extension ToolKind {
         case .canvasRotate:
             return "R"
         case .canvasCrop:
-            return "X"
+            return "C"
         case .freeTransform:
             return "V"
+        case .perspective:
+            return "P"
         }
     }
 }
@@ -244,7 +273,7 @@ struct ToolSidebarGroup: Identifiable, Equatable, Sendable {
     }
 
     var isGrouped: Bool {
-        tools.count > 1
+        tools.count > 1 && id != "lasso-fill"
     }
 
     func contains(_ tool: ToolKind) -> Bool {
@@ -257,15 +286,15 @@ struct ToolSidebarGroup: Identifiable, Equatable, Sendable {
         .init(id: "eyedropper", tools: [.eyedropper], shortcutKey: nil),
         .init(id: "bucket", tools: [.bucket, .linearGradient, .sectorGradient], shortcutKey: "G"),
         .init(id: "selection-l", tools: [.lassoSelection, .polygonSelection], shortcutKey: "L"),
-        .init(id: "lasso-fill", tools: [.lassoFill], shortcutKey: "K"),
-        .init(id: "texture-fill", tools: [.textureFill], shortcutKey: "F"),
+        .init(id: "lasso-fill", tools: [.lassoFill, .textureFill], shortcutKey: "K"),
         .init(id: "selection-m", tools: [.rectangleSelection, .ellipseSelection], shortcutKey: "M"),
         .init(id: "straight-line", tools: [.straightLine], shortcutKey: "U"),
         .init(id: "smudge", tools: [.smudge], shortcutKey: "T"),
         .init(id: "color-adjust", tools: [.brightnessAdjust], shortcutKey: "O"),
         .init(id: "canvas-rotate", tools: [.canvasRotate], shortcutKey: "R"),
-        .init(id: "canvas-crop", tools: [.canvasCrop], shortcutKey: "X"),
-        .init(id: "free-transform", tools: [.freeTransform], shortcutKey: "V")
+        .init(id: "canvas-crop", tools: [.canvasCrop], shortcutKey: "C"),
+        .init(id: "free-transform", tools: [.freeTransform], shortcutKey: "V"),
+        .init(id: "perspective", tools: [.perspective], shortcutKey: "P")
     ]
 
     static func group(containing tool: ToolKind) -> ToolSidebarGroup? {

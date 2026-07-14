@@ -1940,6 +1940,43 @@ struct WorkspaceViewModelSafetyTests {
 
     @Test
     @MainActor
+    func droppedCanvasImageImportsAsCenteredUndoableNewLayer() throws {
+        let harness = try BrushEditingBoundaryHarness(canvasSize: .init(width: 64, height: 64))
+        let sourceAsset = makeReferenceImageAsset(
+            fileName: "drop.png",
+            color: .init(red: 0.9, green: 0.2, blue: 0.1, alpha: 1)
+        )
+        let droppedImage = NSImage(
+            cgImage: sourceAsset.cgImage,
+            size: NSSize(width: sourceAsset.width, height: sourceAsset.height)
+        )
+        let initialLayerIDs = harness.viewModel.workspace.document.layers.map(\.id)
+
+        #expect(harness.viewModel.importDroppedCanvasImage(
+            from: droppedImage,
+            centeredAt: .init(x: 20, y: 22),
+            layerName: "drop"
+        ))
+
+        let importedLayerID = harness.viewModel.workspace.document.activeLayerID
+        #expect(harness.viewModel.workspace.document.layers.count == initialLayerIDs.count + 1)
+        #expect(harness.viewModel.workspace.document.layers.last?.id == importedLayerID)
+        #expect(harness.viewModel.workspace.document.layers.last?.name == "drop")
+        #expect(try harness.alpha(atX: 19, y: 21, layerID: importedLayerID) > 0.95)
+        #expect(try harness.alpha(atX: 18, y: 21, layerID: importedLayerID) < 0.01)
+        #expect(harness.viewModel.status?.message == "已将图片导入为新图层")
+
+        harness.viewModel.undo()
+        #expect(harness.viewModel.workspace.document.layers.map(\.id) == initialLayerIDs)
+
+        harness.viewModel.redo()
+        #expect(harness.viewModel.workspace.document.layers.count == initialLayerIDs.count + 1)
+        let restoredLayerID = harness.viewModel.workspace.document.activeLayerID
+        #expect(try harness.alpha(atX: 19, y: 21, layerID: restoredLayerID) > 0.95)
+    }
+
+    @Test
+    @MainActor
     func cutPixelsWithSelectionClearsSourceAndCanPasteBackInPlace() throws {
         let harness = try BrushEditingBoundaryHarness()
         let sourceLayerID = harness.viewModel.workspace.document.activeLayerID
@@ -2139,6 +2176,97 @@ struct WorkspaceViewModelSafetyTests {
 
     @Test
     @MainActor
+    func perspectiveToolAddsMovesUndoesAndLocksGuidesWithoutPixelHistory() throws {
+        let harness = try BrushEditingBoundaryHarness(canvasSize: .init(width: 32, height: 32))
+        harness.viewModel.selectTool(.perspective)
+
+        #expect(harness.viewModel.workspace.toolSession.activeTool == .perspective)
+        #expect(harness.viewModel.perspectiveGuide?.mode == .threePoint)
+        let sceneBeforeGuideEditing = harness.viewModel.sceneSnapshot
+
+        harness.viewModel.beginPerspectiveGuideInteraction(
+            at: .init(x: 16, y: 22),
+            hitRadius: 1
+        )
+        harness.viewModel.endPerspectiveGuideInteraction()
+        let anchor = try #require(harness.viewModel.perspectiveGuide?.anchors.first)
+        #expect(anchor.position == CanvasPoint(x: 16, y: 22))
+
+        harness.viewModel.beginPerspectiveGuideInteraction(at: anchor.position, hitRadius: 2)
+        harness.viewModel.updatePerspectiveGuideInteraction(to: .init(x: 20, y: 25))
+        harness.viewModel.endPerspectiveGuideInteraction()
+        #expect(harness.viewModel.perspectiveGuide?.anchors.first?.position == CanvasPoint(x: 20, y: 25))
+        #expect(harness.viewModel.sceneSnapshot == sceneBeforeGuideEditing)
+
+#if DEBUG
+        #expect(harness.bootstrap.historyController.debugUndoEntryApproxByteCounts.last == 0)
+#endif
+
+        harness.viewModel.undo()
+        #expect(harness.viewModel.perspectiveGuide?.anchors.first?.position == CanvasPoint(x: 16, y: 22))
+        harness.viewModel.redo()
+        #expect(harness.viewModel.perspectiveGuide?.anchors.first?.position == CanvasPoint(x: 20, y: 25))
+
+        harness.viewModel.selectTool(.brush)
+        #expect(harness.viewModel.perspectiveGuide?.isVisible == true)
+        #expect(harness.viewModel.perspectiveGuide?.isLocked == true)
+    }
+
+    @Test
+    @MainActor
+    func clearingPerspectiveGuideRemovesEveryControlAndSupportsUndoRedoAndRecreation() throws {
+        let harness = try BrushEditingBoundaryHarness(canvasSize: .init(width: 32, height: 32))
+        harness.viewModel.selectTool(.perspective)
+        harness.viewModel.beginPerspectiveGuideInteraction(
+            at: .init(x: 16, y: 22),
+            hitRadius: 1
+        )
+        harness.viewModel.endPerspectiveGuideInteraction()
+        let guideBeforeClear = try #require(harness.viewModel.perspectiveGuide)
+        #expect(guideBeforeClear.anchors.count == 1)
+
+        harness.viewModel.clearPerspectiveGuide()
+        #expect(harness.viewModel.perspectiveGuide == nil)
+        #expect(harness.viewModel.selectedPerspectiveAnchorID == nil)
+
+        harness.viewModel.undo()
+        #expect(harness.viewModel.perspectiveGuide == guideBeforeClear)
+        harness.viewModel.redo()
+        #expect(harness.viewModel.perspectiveGuide == nil)
+
+        harness.viewModel.createPerspectiveGuide()
+        #expect(harness.viewModel.perspectiveGuide?.mode == .threePoint)
+        #expect(harness.viewModel.perspectiveGuide?.anchors.isEmpty == true)
+    }
+
+    @Test
+    @MainActor
+    func lassoFillModeSwitchKeepsOneSidebarSurfaceAndRemembersTextureMode() throws {
+        let harness = try BrushEditingBoundaryHarness(canvasSize: .init(width: 32, height: 32))
+        let group = try #require(
+            ToolSidebarGroup.orderedGroups.first { $0.id == "lasso-fill" }
+        )
+
+        harness.viewModel.selectTool(.lassoFill)
+        #expect(harness.viewModel.lassoFillMode == .color)
+        #expect(harness.viewModel.sidebarDisplayedTool(for: group) == .lassoFill)
+
+        harness.viewModel.setLassoFillMode(.texture)
+        #expect(harness.viewModel.workspace.toolSession.activeTool == .textureFill)
+        #expect(harness.viewModel.lassoFillMode == .texture)
+        #expect(harness.viewModel.isSelected(group: group))
+        #expect(harness.viewModel.sidebarDisplayedTool(for: group) == .lassoFill)
+
+        harness.viewModel.selectTool(.brush)
+        harness.viewModel.activateSidebarGroup(group)
+        #expect(harness.viewModel.workspace.toolSession.activeTool == .textureFill)
+
+        harness.viewModel.setLassoFillMode(.color)
+        #expect(harness.viewModel.workspace.toolSession.activeTool == .lassoFill)
+    }
+
+    @Test
+    @MainActor
     func compoundGlobalPressureControlsStayDecoupledFromPrimaryInternalPressureControls() throws {
         let harness = try BrushEditingBoundaryHarness()
 
@@ -2254,6 +2382,46 @@ struct WorkspaceViewModelSafetyTests {
         harness.viewModel.commitSelection(at: .init(x: 24, y: 24))
 
         #expect(harness.viewModel.drawingStatsController.snapshot.isActiveSessionRunning == true)
+    }
+
+    @Test
+    @MainActor
+    func ellipseSelectionStartedOutsideCanvasCommitsAsCanvasClippedMask() async throws {
+        let harness = try BrushEditingBoundaryHarness(canvasSize: .init(width: 96, height: 72))
+        let viewModel = harness.viewModel
+        viewModel.selectTool(.ellipseSelection)
+
+        let action = viewModel.handleSelectionMouseDown(
+            at: .init(x: -30, y: -18),
+            modifiers: []
+        )
+        guard case .beginDrawing = action else {
+            Issue.record("Expected an outside-canvas press to begin drawing a selection.")
+            return
+        }
+
+        viewModel.updateSelection(to: .init(x: 62, y: 54))
+        viewModel.commitSelection(at: .init(x: 62, y: 54))
+
+        for _ in 0..<200 where viewModel.workspace.selection.committedShape?.kind != .mask {
+            await Task.yield()
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+
+        let committed = try #require(viewModel.workspace.selection.committedShape)
+        #expect(committed.kind == .mask)
+        #expect(committed.bounds.origin.x >= 0)
+        #expect(committed.bounds.origin.y >= 0)
+        #expect(committed.bounds.maxX <= 96)
+        #expect(committed.bounds.maxY <= 72)
+        let displayComponent = try #require(committed.components.first)
+        #expect(committed.components.count == 1)
+        #expect(displayComponent.operation == .add)
+        #expect(displayComponent.shape.kind == .ellipse)
+        #expect(displayComponent.shape.bounds.origin.x == -30)
+        #expect(displayComponent.shape.bounds.origin.y == -18)
+        #expect(displayComponent.shape.bounds.maxX == 62)
+        #expect(displayComponent.shape.bounds.maxY == 54)
     }
 
     @Test
@@ -2391,6 +2559,60 @@ struct WorkspaceViewModelSafetyTests {
         #expect(harness.viewModel.referenceImageSlots[2].asset == nil)
         #expect(harness.viewModel.referenceImageSlots[4].asset != nil)
         #expect(harness.viewModel.selectedReferenceImageSlotID == 4)
+    }
+
+    @Test
+    @MainActor
+    func referenceImageDropUsesFirstAvailableSlotsAndSkipsReservedSlots() {
+        var slots = (0..<5).map { ReferenceImageSlotState(id: $0) }
+        slots[1].asset = makeReferenceImageAsset(fileName: "two.png")
+
+        let destinationIDs = referenceImageDropDestinationSlotIDs(
+            slots: slots,
+            reservedSlotIDs: [2],
+            maximumCount: 5
+        )
+
+        #expect(destinationIDs == [0, 3, 4])
+        #expect(referenceImageDropDestinationSlotIDs(
+            slots: slots,
+            reservedSlotIDs: [0, 2, 3, 4],
+            maximumCount: 1
+        ).isEmpty)
+        #expect(referenceImageDropDestinationSlotIDs(
+            slots: slots,
+            reservedSlotIDs: [],
+            maximumCount: 0
+        ).isEmpty)
+    }
+
+    @Test
+    @MainActor
+    func droppedReferenceImageObjectLoadsIntoTheFirstEmptySlot() async throws {
+        let harness = try BrushEditingBoundaryHarness()
+        let sourceAsset = makeReferenceImageAsset(fileName: "source.png")
+        let droppedImage = NSImage(
+            cgImage: sourceAsset.cgImage,
+            size: NSSize(width: sourceAsset.width, height: sourceAsset.height)
+        )
+
+        #expect(harness.viewModel.importDroppedReferenceImage(
+            from: droppedImage,
+            fileName: "dropped.png"
+        ))
+        #expect(harness.viewModel.referenceImageLoadingSlotIDs == [0])
+
+        for _ in 0..<200 {
+            if harness.viewModel.referenceImageSlots[0].asset != nil {
+                break
+            }
+            await Task.yield()
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+
+        #expect(harness.viewModel.referenceImageSlots[0].asset?.fileName == "dropped.png")
+        #expect(harness.viewModel.referenceImageLoadingSlotIDs.isEmpty)
+        #expect(harness.viewModel.selectedReferenceImageSlotID == 0)
     }
 
     @Test

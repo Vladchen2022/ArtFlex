@@ -3,13 +3,23 @@ import Testing
 
 struct TextureFillPhase0Tests {
     @Test
-    func textureFillToolIsRegisteredAsStandaloneSidebarGroup() {
-        let group = ToolSidebarGroup.orderedGroups.first { $0.id == "texture-fill" }
+    func inspectorColumnsStayEqualAtTheFixedSidebarWidth() {
+        #expect(rightInspectorColumnWidth(totalWidth: 560) == 262)
+        #expect(topInspectorPanelContentWidth(panelWidth: 262) == 238)
+        #expect(rightInspectorColumnWidth(totalWidth: 20) == 0)
+        #expect(topInspectorPanelContentWidth(panelWidth: 20) == 0)
+    }
+
+    @Test
+    func textureFillIsAnInternalModeOfTheLassoFillSidebarTool() {
+        let group = ToolSidebarGroup.orderedGroups.first { $0.id == "lasso-fill" }
 
         #expect(group != nil)
-        #expect(group?.tools == [.textureFill])
-        #expect(group?.shortcutKey == "F")
-        #expect(ToolKind.textureFill.shortcutKey == "F")
+        #expect(group?.tools == [.lassoFill, .textureFill])
+        #expect(group?.isGrouped == false)
+        #expect(group?.shortcutKey == "K")
+        #expect(ToolKind.textureFill.shortcutKey == "K")
         #expect(ToolKind.textureFill.displayName == "纹理填充")
+        #expect(ToolSidebarGroup.orderedGroups.contains { $0.id == "texture-fill" } == false)
     }
 }

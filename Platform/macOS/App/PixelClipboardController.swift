@@ -46,6 +46,23 @@ final class PixelClipboardController {
         return externalImagePayload(from: pasteboard)
     }
 
+    func canvasImportPayload(
+        from image: NSImage,
+        fittingWithin canvasSize: CanvasSize,
+        centeredAt center: CanvasPoint
+    ) -> PixelClipboardPayload? {
+        guard let snapshot = makeSnapshot(from: image, fittingWithin: canvasSize) else {
+            return nil
+        }
+
+        return PixelClipboardPayload(
+            snapshot: snapshot,
+            originX: Int(center.x.rounded()) - (snapshot.width / 2),
+            originY: Int(center.y.rounded()) - (snapshot.height / 2),
+            sourceCanvasSize: canvasSize
+        )
+    }
+
     private func externalImagePayload(
         from pasteboard: NSPasteboard
     ) -> PixelClipboardPayload? {
@@ -105,13 +122,26 @@ private func makeImage(from snapshot: LayerTextureSnapshot) -> NSImage? {
     return NSImage(cgImage: cgImage, size: NSSize(width: snapshot.width, height: snapshot.height))
 }
 
-private func makeSnapshot(from image: NSImage) -> LayerTextureSnapshot? {
+private func makeSnapshot(
+    from image: NSImage,
+    fittingWithin maximumSize: CanvasSize? = nil
+) -> LayerTextureSnapshot? {
     guard let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
         return nil
     }
 
-    let width = cgImage.width
-    let height = cgImage.height
+    let scale: Double
+    if let maximumSize {
+        scale = min(
+            1,
+            Double(maximumSize.width) / Double(max(cgImage.width, 1)),
+            Double(maximumSize.height) / Double(max(cgImage.height, 1))
+        )
+    } else {
+        scale = 1
+    }
+    let width = max(Int((Double(cgImage.width) * scale).rounded()), 1)
+    let height = max(Int((Double(cgImage.height) * scale).rounded()), 1)
     let bytesPerRow = width * 4
     var rgbaBytes = [UInt8](repeating: 0, count: bytesPerRow * height)
 
@@ -131,6 +161,7 @@ private func makeSnapshot(from image: NSImage) -> LayerTextureSnapshot? {
             return false
         }
 
+        context.interpolationQuality = .high
         context.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
         return true
     }

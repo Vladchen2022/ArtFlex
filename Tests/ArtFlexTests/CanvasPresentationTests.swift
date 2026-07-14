@@ -152,6 +152,47 @@ struct CanvasPresentationTests {
     }
 
     @Test
+    func viewportTransformDetectsCanvasInteriorForRotatedOutsideSelectionStarts() {
+        let transform = CanvasViewportTransform(
+            canvasSize: .init(width: 640, height: 480),
+            viewport: .init(
+                zoomScale: 1.7,
+                contentOffset: .init(x: 42, y: -31),
+                rotationDegrees: 33
+            ),
+            availableWidth: 1100,
+            availableHeight: 760
+        )
+
+        let insideViewportPoint = transform.canvasToViewport(.init(x: 320, y: 240))
+        let edgeViewportPoint = transform.canvasToViewport(.init(x: 0, y: 480))
+        let outsideViewportPoint = transform.canvasToViewport(.init(x: -12, y: 240))
+
+        #expect(transform.containsViewportPoint(insideViewportPoint))
+        #expect(transform.containsViewportPoint(edgeViewportPoint))
+        #expect(!transform.containsViewportPoint(outsideViewportPoint))
+    }
+
+    @Test
+    func everySelectionCreationToolSupportsAnOutsideCanvasStart() {
+        let selectionTools: [ToolKind] = [
+            .rectangleSelection,
+            .ellipseSelection,
+            .lassoSelection,
+            .polygonSelection,
+            .lassoFill,
+            .textureFill
+        ]
+
+        let everySelectionToolSupportsOutsideStart = selectionTools.allSatisfy {
+            $0.supportsOutsideCanvasSelectionStart
+        }
+        #expect(everySelectionToolSupportsOutsideStart)
+        #expect(!ToolKind.brush.supportsOutsideCanvasSelectionStart)
+        #expect(!ToolKind.freeTransform.supportsOutsideCanvasSelectionStart)
+    }
+
+    @Test
     func viewportCenteringOffsetPlacesRequestedCanvasPointAtViewportCenter() {
         var viewport = CanvasViewport(
             zoomScale: 1.8,
@@ -193,6 +234,33 @@ struct CanvasPresentationTests {
         state.begin(at: .init(x: 80, y: 55), canvasSize: canvasSize, handleRadius: 4)
         state.end(at: .init(x: 92, y: 70), canvasSize: canvasSize)
         #expect(state.pixelBounds(in: canvasSize) == .init(origin: .init(x: 20, y: 14), size: .init(x: 72, y: 56)))
+    }
+
+    @Test
+    func canvasCropSingleClickSelectsWholeCanvasAndHandlesCanExpandBeyondIt() throws {
+        let canvasSize = CanvasSize(width: 100, height: 80)
+        var state = CanvasCropInteractionState()
+
+        state.begin(at: .init(x: 42.2, y: 31.8), canvasSize: canvasSize, handleRadius: 3)
+        state.end(at: .init(x: 42.2, y: 31.8), canvasSize: canvasSize)
+        #expect(state.pixelBounds(in: canvasSize) == .init(
+            origin: .init(x: 0, y: 0),
+            size: .init(x: 100, y: 80)
+        ))
+
+        state.begin(at: .init(x: 0, y: 0), canvasSize: canvasSize, handleRadius: 3)
+        state.end(at: .init(x: -20, y: -10), canvasSize: canvasSize)
+        #expect(state.pixelBounds(in: canvasSize) == .init(
+            origin: .init(x: -20, y: -10),
+            size: .init(x: 120, y: 90)
+        ))
+
+        state.begin(at: .init(x: 100, y: 80), canvasSize: canvasSize, handleRadius: 3)
+        state.end(at: .init(x: 130, y: 110), canvasSize: canvasSize)
+        #expect(state.pixelBounds(in: canvasSize) == .init(
+            origin: .init(x: -20, y: -10),
+            size: .init(x: 150, y: 120)
+        ))
     }
 
     private func screenPoint(

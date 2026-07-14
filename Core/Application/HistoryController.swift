@@ -50,6 +50,7 @@ struct WorkspaceHistoryEntry: Sendable, Equatable {
     enum Mode: Sendable, Equatable {
         case full
         case inPlaceChangedLayers(topologySignature: TopologySignature, changedLayerIDs: [LayerID])
+        case workspaceOnly(topologySignature: TopologySignature)
     }
 
     struct TopologySignature: Sendable, Equatable {
@@ -67,6 +68,7 @@ struct WorkspaceHistoryEntry: Sendable, Equatable {
 enum HistoryCaptureMode {
     case full
     case inPlaceChangedLayers([LayerID])
+    case workspaceOnly
 }
 
 private enum HistoryControllerError: LocalizedError {
@@ -129,6 +131,18 @@ final class HistoryController {
 
     var canUndo: Bool { !undoStack.isEmpty }
     var canRedo: Bool { !redoStack.isEmpty }
+
+    var nextUndoRestoresWorkspaceOnly: Bool {
+        guard let entry = undoStack.last else { return false }
+        if case .workspaceOnly = entry.mode { return true }
+        return false
+    }
+
+    var nextRedoRestoresWorkspaceOnly: Bool {
+        guard let entry = redoStack.last else { return false }
+        if case .workspaceOnly = entry.mode { return true }
+        return false
+    }
 
     var latestUndoWorkspaceForAudit: WorkspaceState? {
         undoStack.last?.workspace
@@ -238,9 +252,12 @@ final class HistoryController {
         providedLayerSnapshots: [LayerHistorySnapshot]? = nil
     ) throws -> WorkspaceHistoryEntry {
         let workspace = workspaceOverride ?? workspaceStore.state
-        layerSurfaceStore.prepareTextures(for: workspace.document, metal: metalContext)
-
         let resolvedCapture = resolveCaptureMode(captureMode, workspace: workspace)
+        if case .workspaceOnly = resolvedCapture {
+            // 文档级 UI 状态（例如透视辅助线）不需要触碰 Metal 图层。
+        } else {
+            layerSurfaceStore.prepareTextures(for: workspace.document, metal: metalContext)
+        }
         let snapshotLayerIDs: Set<LayerID>
         let mode: WorkspaceHistoryEntry.Mode
 
@@ -254,12 +271,15 @@ final class HistoryController {
                 topologySignature: topologySignature(for: workspace),
                 changedLayerIDs: changedLayerIDs
             )
+        case .workspaceOnly:
+            snapshotLayerIDs = []
+            mode = .workspaceOnly(topologySignature: topologySignature(for: workspace))
         }
         let requiresFullCanvasSnapshots: Bool
         switch resolvedCapture {
         case .full:
             requiresFullCanvasSnapshots = true
-        case .inPlaceChangedLayers:
+        case .inPlaceChangedLayers, .workspaceOnly:
             requiresFullCanvasSnapshots = false
         }
 
@@ -402,6 +422,11 @@ final class HistoryController {
                 expectedTopologySignature: topologySignature,
                 changedLayerIDs: changedLayerIDs
             )
+        case .workspaceOnly(let topologySignature):
+            try restoreWorkspaceOnly(
+                workspace: mergedWorkspace,
+                expectedTopologySignature: topologySignature
+            )
         }
     }
 
@@ -416,8 +441,24 @@ final class HistoryController {
                 expectedTopologySignature: topologySignature,
                 changedLayerIDs: changedLayerIDs
             )
+        case .workspaceOnly(let topologySignature):
+            try restoreWorkspaceOnly(
+                workspace: entry.workspace,
+                expectedTopologySignature: topologySignature
+            )
         }
         resetHistory()
+    }
+
+    private func restoreWorkspaceOnly(
+        workspace: WorkspaceState,
+        expectedTopologySignature: WorkspaceHistoryEntry.TopologySignature
+    ) throws {
+        guard topologySignature(for: workspaceStore.state) == expectedTopologySignature,
+              topologySignature(for: workspace) == expectedTopologySignature else {
+            throw HistoryControllerError.dirtyRestoreTopologyMismatch
+        }
+        workspaceStore.replaceState(workspace)
     }
 
     private func restoreWithFullReset(
@@ -473,6 +514,11 @@ final class HistoryController {
                 return .full
             }
             return .inPlaceChangedLayers(changedLayerIDs)
+        case .workspaceOnly(let expectedTopologySignature):
+            guard topologySignature(for: workspaceStore.state) == expectedTopologySignature else {
+                return .full
+            }
+            return .workspaceOnly
         }
     }
 
@@ -679,6 +725,8 @@ final class HistoryController {
                 return .full
             }
             return .inPlaceChangedLayers(uniqueLayerIDs)
+        case .workspaceOnly:
+            return .workspaceOnly
         }
     }
 

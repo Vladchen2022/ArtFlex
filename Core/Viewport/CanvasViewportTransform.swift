@@ -87,4 +87,16 @@ struct CanvasViewportTransform: Sendable, Equatable {
             y: min(max(point.y, 0), Double(canvasSize.height))
         )
     }
+
+    func containsCanvasPoint(_ point: CanvasPoint) -> Bool {
+        let tolerance = 0.000_001
+        return point.x >= -tolerance
+            && point.y >= -tolerance
+            && point.x <= Double(canvasSize.width) + tolerance
+            && point.y <= Double(canvasSize.height) + tolerance
+    }
+
+    func containsViewportPoint(_ point: CanvasPoint) -> Bool {
+        containsCanvasPoint(viewportToCanvas(point, clamped: false))
+    }
 }

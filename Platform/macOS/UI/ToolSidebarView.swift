@@ -29,7 +29,6 @@ struct ToolSidebarView: View {
         .group("bucket"),
         .group("selection-l"),
         .group("lasso-fill"),
-        .group("texture-fill"),
         .group("selection-m"),
         .group("straight-line"),
         .group("gradient-j"),
@@ -37,7 +36,8 @@ struct ToolSidebarView: View {
         .group("color-adjust"),
         .group("canvas-rotate"),
         .group("canvas-crop"),
-        .group("free-transform")
+        .group("free-transform"),
+        .group("perspective")
     ]
 
     var body: some View {
@@ -56,7 +56,7 @@ struct ToolSidebarView: View {
                                 ToolSidebarGroupButton(
                                     group: group,
                                     shortcutSettings: hostViewModel.shortcutSettings,
-                                    displayedTool: viewModel.displayedTool(for: group),
+                                    displayedTool: viewModel.sidebarDisplayedTool(for: group),
                                     isSelected: viewModel.isSelected(group: group),
                                     activateGroup: { viewModel.activateSidebarGroup(group) },
                                     activateTool: { tool in viewModel.selectToolFromUI(tool) }

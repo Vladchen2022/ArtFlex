@@ -11,6 +11,20 @@ private let topInspectorControlButtonWidth: CGFloat = 24
 private let topInspectorControlButtonHeight: CGFloat = 22
 private let topInspectorControlCornerRadius: CGFloat = 7
 private let topInspectorControlIconSize: CGFloat = 11.5
+private let topInspectorPanelPadding: CGFloat = 12
+private let rightInspectorHorizontalPadding: CGFloat = 12
+private let rightInspectorColumnSpacing: CGFloat = 12
+
+func rightInspectorColumnWidth(totalWidth: CGFloat) -> CGFloat {
+    max(
+        0,
+        (totalWidth - (rightInspectorHorizontalPadding * 2) - rightInspectorColumnSpacing) / 2
+    )
+}
+
+func topInspectorPanelContentWidth(panelWidth: CGFloat) -> CGFloat {
+    max(0, panelWidth - (topInspectorPanelPadding * 2))
+}
 
 private enum TipImageLibrarySheetTarget: String, Identifiable {
     case primary
@@ -358,6 +372,7 @@ struct RightInspectorView: View {
     @State private var layerDropInsertionIndex: Int?
     @FocusState private var focusedLayerNameFieldID: LayerID?
     @State private var isTipImageDropTarget = false
+    @State private var isReferenceImageDropTarget = false
     @State private var isColorPaletteDropTarget = false
     @State private var highlightsPrimaryTipEditor = false
     @State private var primaryTipEditorHighlightGeneration = 0
@@ -380,8 +395,9 @@ struct RightInspectorView: View {
     var body: some View {
         ZStack {
             GeometryReader { proxy in
+                let columnWidth = rightInspectorColumnWidth(totalWidth: proxy.size.width)
                 ScrollView(.vertical, showsIndicators: true) {
-                    HStack(alignment: .top, spacing: 12) {
+                    HStack(alignment: .top, spacing: rightInspectorColumnSpacing) {
                     VStack(spacing: 12) {
                         InspectorPanel(title: "参考图") {
                             referenceImageSection
@@ -399,10 +415,11 @@ struct RightInspectorView: View {
                         }
                         .frame(maxHeight: .infinity, alignment: .top)
                     }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                    .frame(width: columnWidth)
+                    .frame(maxHeight: .infinity, alignment: .top)
 
                     VStack(spacing: 12) {
-                        tipNavigatorPanel
+                        tipNavigatorPanel(width: columnWidth)
                         .overlay {
                             RoundedRectangle(cornerRadius: 12)
                                 .stroke(
@@ -424,9 +441,10 @@ struct RightInspectorView: View {
                         }
                         .frame(maxHeight: .infinity, alignment: .top)
                     }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                    .frame(width: columnWidth)
+                    .frame(maxHeight: .infinity, alignment: .top)
                 }
-                    .padding(12)
+                    .padding(rightInspectorHorizontalPadding)
                     .frame(maxWidth: .infinity, minHeight: proxy.size.height, alignment: .top)
                 }
                 .frame(width: proxy.size.width, height: proxy.size.height, alignment: .top)
@@ -656,6 +674,38 @@ struct RightInspectorView: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .topLeading)
+        .contentShape(Rectangle())
+        .overlay {
+            ZStack {
+                RoundedRectangle(cornerRadius: 12)
+                    .fill(isReferenceImageDropTarget ? Color.accentColor.opacity(0.08) : Color.clear)
+
+                RoundedRectangle(cornerRadius: 12)
+                    .stroke(
+                        isReferenceImageDropTarget ? Color.accentColor.opacity(0.95) : Color.clear,
+                        lineWidth: 2
+                    )
+
+                if isReferenceImageDropTarget {
+                    Label("松开以载入参考图", systemImage: "photo.badge.plus")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundStyle(Color.white.opacity(0.96))
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .background(
+                            Capsule()
+                                .fill(Color.black.opacity(0.72))
+                        )
+                }
+            }
+            .allowsHitTesting(false)
+        }
+        .onDrop(
+            of: [UTType.fileURL.identifier, UTType.image.identifier],
+            isTargeted: $isReferenceImageDropTarget
+        ) { providers in
+            importReferenceImagesFromDrop(providers: providers)
+        }
         .onAppear {
             viewModel.setReferenceImageInspectorVisible(true)
         }
@@ -705,7 +755,7 @@ struct RightInspectorView: View {
             .clipShape(RoundedRectangle(cornerRadius: 12))
 
             if selectedAsset == nil {
-                Text(viewModel.referenceImageLoadingSlotID != nil ? "载入中…" : "点击 1 - 5 载入参考图")
+                Text(viewModel.referenceImageLoadingSlotIDs.isEmpty ? "点击 1 - 5 或拖入图片" : "载入中…")
                     .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(Color.white.opacity(0.52))
             }
@@ -728,7 +778,7 @@ struct RightInspectorView: View {
 
     private func referenceImageSlotButton(_ slot: ReferenceImageSlotState) -> some View {
         let isSelected = viewModel.selectedReferenceImageSlotID == slot.id
-        let isLoading = viewModel.referenceImageLoadingSlotID == slot.id
+        let isLoading = viewModel.referenceImageLoadingSlotIDs.contains(slot.id)
         let isLoaded = slot.asset != nil
 
         return Button {
@@ -763,8 +813,22 @@ struct RightInspectorView: View {
                         lineWidth: 1
                     )
             )
+            .overlay(alignment: .topTrailing) {
+                if isLoaded {
+                    Circle()
+                        .fill(Color.accentColor)
+                        .frame(width: 7, height: 7)
+                        .overlay {
+                            Circle()
+                                .stroke(Color.black.opacity(0.58), lineWidth: 1)
+                        }
+                        .padding(4)
+                }
+            }
         }
         .buttonStyle(.plain)
+        .accessibilityLabel("参考图 \(slot.labelText)")
+        .accessibilityValue(isLoading ? "载入中" : (isLoaded ? "已载入" : "空"))
         .contextMenu {
             if isLoaded {
                 Button("清除") {
@@ -774,8 +838,50 @@ struct RightInspectorView: View {
         }
     }
 
-    private var tipNavigatorPanel: some View {
-        VStack(alignment: .leading, spacing: 10) {
+    private func importReferenceImagesFromDrop(providers: [NSItemProvider]) -> Bool {
+        var acceptedProvider = false
+
+        for provider in providers where provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) {
+            acceptedProvider = true
+            provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { item, _ in
+                let url: URL?
+                switch item {
+                case let data as Data:
+                    url = URL(dataRepresentation: data, relativeTo: nil)
+                case let nsData as NSData:
+                    url = URL(dataRepresentation: nsData as Data, relativeTo: nil)
+                case let fileURL as URL:
+                    url = fileURL
+                default:
+                    url = nil
+                }
+
+                guard let url else { return }
+                DispatchQueue.main.async {
+                    _ = viewModel.importDroppedReferenceImages(from: [url])
+                }
+            }
+        }
+
+        for provider in providers
+        where provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) == false
+            && provider.canLoadObject(ofClass: NSImage.self) {
+            acceptedProvider = true
+            provider.loadObject(ofClass: NSImage.self) { object, _ in
+                guard let image = object as? NSImage else { return }
+                DispatchQueue.main.async {
+                    _ = viewModel.importDroppedReferenceImage(from: image)
+                }
+            }
+        }
+
+        return acceptedProvider
+    }
+
+    private func tipNavigatorPanel(width: CGFloat) -> some View {
+        let contentWidth = topInspectorPanelContentWidth(panelWidth: width)
+
+        return VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 8) {
                 topInspectorTabButton(.tipShape)
                 topInspectorTabButton(.navigator)
@@ -789,8 +895,14 @@ struct RightInspectorView: View {
                 }
             }
         }
-        .padding(12)
-        .frame(maxWidth: .infinity)
+        .frame(
+            width: contentWidth,
+            height: topInspectorPanelHeight - (topInspectorPanelPadding * 2),
+            alignment: .topLeading
+        )
+        .padding(topInspectorPanelPadding)
+        .frame(width: width, height: topInspectorPanelHeight, alignment: .topLeading)
+        .clipped()
         .background(
             RoundedRectangle(cornerRadius: 12)
                 .fill(Color.white.opacity(0.06))
@@ -826,7 +938,7 @@ struct RightInspectorView: View {
                 viewModel.setNavigatorPreviewVisible(false)
             }
 
-            HStack(spacing: topInspectorControlSpacing) {
+            HStack(spacing: 4) {
                 compactToolButton(
                     systemImage: "arrow.clockwise",
                     tooltip: "刷新导航器",
@@ -869,7 +981,7 @@ struct RightInspectorView: View {
                     ),
                     in: 5...3200
                 )
-                .frame(maxWidth: .infinity)
+                .frame(minWidth: 32, maxWidth: .infinity)
 
                 HStack(spacing: 4) {
                     TextField("", text: $navigatorZoomPercentText)
@@ -877,7 +989,7 @@ struct RightInspectorView: View {
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(Color.white.opacity(0.92))
                         .multilineTextAlignment(.trailing)
-                        .frame(width: 36)
+                        .frame(width: 28)
                         .onSubmit {
                             commitNavigatorZoomPercentText()
                         }
@@ -886,7 +998,7 @@ struct RightInspectorView: View {
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(Color.white.opacity(0.66))
                 }
-                .padding(.horizontal, 7)
+                .padding(.horizontal, 4)
                 .frame(height: topInspectorControlButtonHeight)
                 .background(
                     RoundedRectangle(cornerRadius: topInspectorControlCornerRadius)
@@ -941,8 +1053,10 @@ struct RightInspectorView: View {
         VStack(alignment: .leading, spacing: 8) {
             if viewModel.workspace.toolSession.activeTool == .eyedropper {
                 eyedropperParameterControls
-            } else if viewModel.workspace.toolSession.activeTool == .textureFill {
-                textureFillParameterControls
+            } else if viewModel.workspace.toolSession.activeTool == .perspective {
+                perspectiveParameterControls
+            } else if isLassoFillToolActive {
+                lassoFillParameterControls
             } else if usesFillParameterControls {
                 fillParameterControls
             } else if usesFullBrushParameterControls {
@@ -1052,6 +1166,234 @@ struct RightInspectorView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
+    @ViewBuilder
+    private var perspectiveParameterControls: some View {
+        if let guide = viewModel.perspectiveGuide {
+            VStack(alignment: .leading, spacing: 9) {
+                HStack {
+                    Text("透视辅助")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(Color.white.opacity(0.92))
+                    Spacer()
+                    Text("\(guide.anchors.count) 条锚点")
+                        .font(.system(size: 10, weight: .medium).monospacedDigit())
+                        .foregroundStyle(Color.white.opacity(0.5))
+                }
+
+                Picker(
+                    "透视类型",
+                    selection: Binding(
+                        get: { guide.mode },
+                        set: { viewModel.setPerspectiveGuideMode($0) }
+                    )
+                ) {
+                    ForEach(PerspectiveGuideMode.allCases, id: \.self) { mode in
+                        Text(mode.displayName).tag(mode)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.segmented)
+                .controlSize(.small)
+
+                if guide.mode == .threePoint {
+                    Picker(
+                        "第三消失点",
+                        selection: Binding(
+                            get: { guide.verticalDirection },
+                            set: { viewModel.setPerspectiveVerticalDirection($0) }
+                        )
+                    ) {
+                        ForEach(PerspectiveVerticalDirection.allCases, id: \.self) { direction in
+                            Text(direction.displayName).tag(direction)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .controlSize(.small)
+                }
+
+                HStack(spacing: 12) {
+                    Toggle(
+                        "显示",
+                        isOn: Binding(
+                            get: { guide.isVisible },
+                            set: { viewModel.setPerspectiveGuideVisibility($0) }
+                        )
+                    )
+                    Toggle(
+                        "锁定",
+                        isOn: Binding(
+                            get: { guide.isLocked },
+                            set: { viewModel.setPerspectiveGuideLocked($0) }
+                        )
+                    )
+                }
+                .toggleStyle(.switch)
+                .controlSize(.mini)
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(Color.white.opacity(0.82))
+
+                compactParameterSlider(
+                    title: "透明度",
+                    valueText: "\(Int((guide.opacity * 100).rounded()))%",
+                    value: Binding(
+                        get: { Double(guide.opacity) },
+                        set: { viewModel.setPerspectiveGuideOpacity(Float($0)) }
+                    ),
+                    range: 0.05...1,
+                    onEditingChanged: viewModel.setPerspectiveGuideStyleEditing
+                )
+
+                compactParameterSlider(
+                    title: "线宽",
+                    valueText: String(format: "%.1f", guide.lineWidth),
+                    value: Binding(
+                        get: { Double(guide.lineWidth) },
+                        set: { viewModel.setPerspectiveGuideLineWidth(Float($0)) }
+                    ),
+                    range: 0.5...4,
+                    onEditingChanged: viewModel.setPerspectiveGuideStyleEditing
+                )
+
+                HStack(spacing: 8) {
+                    Text("颜色")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(Color.white.opacity(0.58))
+                        .frame(width: 44, alignment: .leading)
+
+                    ForEach(Array(perspectiveGuideColorPresets.enumerated()), id: \.offset) { _, color in
+                        let isSelected = guide.color == color
+                        Button {
+                            viewModel.setPerspectiveGuideColor(color)
+                        } label: {
+                            Circle()
+                                .fill(swiftUIColor(color))
+                                .frame(width: 18, height: 18)
+                                .overlay(
+                                    Circle().stroke(
+                                        isSelected ? Color.accentColor : Color.white.opacity(0.3),
+                                        lineWidth: isSelected ? 2 : 1
+                                    )
+                                )
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+
+                if let selectedAnchor = guide.anchors.first(where: {
+                    $0.id == viewModel.selectedPerspectiveAnchorID
+                }) {
+                    Divider().overlay(Color.white.opacity(0.08))
+
+                    Text("所选锚点连接")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(Color.white.opacity(0.62))
+
+                    HStack(spacing: 10) {
+                        perspectiveConnectionToggle(
+                            title: guide.mode == .onePoint ? "主" : "左",
+                            isOn: selectedAnchor.connectsLeft,
+                            role: .left
+                        )
+                        if guide.mode != .onePoint {
+                            perspectiveConnectionToggle(
+                                title: "右",
+                                isOn: selectedAnchor.connectsRight,
+                                role: .right
+                            )
+                        }
+                        if guide.mode == .threePoint {
+                            perspectiveConnectionToggle(
+                                title: "纵向",
+                                isOn: selectedAnchor.connectsVertical,
+                                role: .vertical
+                            )
+                        }
+                    }
+
+                    Button("删除所选锚点", role: .destructive) {
+                        viewModel.deleteSelectedPerspectiveGuideAnchor()
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                }
+
+                Divider().overlay(Color.white.opacity(0.08))
+
+                HStack(spacing: 8) {
+                    Button("重置") {
+                        viewModel.resetPerspectiveGuide()
+                    }
+                    Button("完全清除", role: .destructive) {
+                        viewModel.clearPerspectiveGuide()
+                    }
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+
+                Text(guide.isLocked
+                    ? "辅助线已锁定；切换到画笔后可穿透绘画。"
+                    : "拖动消失点或地平线；点击画布添加辅助锚点。")
+                    .font(.system(size: 9, weight: .medium))
+                    .foregroundStyle(Color.white.opacity(0.48))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        } else {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("透视辅助已清除")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(Color.white.opacity(0.9))
+
+                Text("视平线、消失点和辅助锚点均已从当前文档移除。")
+                    .font(.system(size: 9, weight: .medium))
+                    .foregroundStyle(Color.white.opacity(0.48))
+                    .fixedSize(horizontal: false, vertical: true)
+
+                Button("重新创建透视辅助") {
+                    viewModel.createPerspectiveGuide()
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private var perspectiveGuideColorPresets: [RGBAColor] {
+        [
+            RGBAColor(red: 0.12, green: 0.68, blue: 1, alpha: 1),
+            RGBAColor(red: 1, green: 0.24, blue: 0.22, alpha: 1),
+            RGBAColor(red: 1, green: 0.78, blue: 0.12, alpha: 1),
+            RGBAColor.white,
+            RGBAColor.black
+        ]
+    }
+
+    private func swiftUIColor(_ color: RGBAColor) -> Color {
+        Color(
+            red: Double(color.red),
+            green: Double(color.green),
+            blue: Double(color.blue),
+            opacity: Double(color.alpha)
+        )
+    }
+
+    private func perspectiveConnectionToggle(
+        title: String,
+        isOn: Bool,
+        role: PerspectiveVanishingPointRole
+    ) -> some View {
+        Toggle(
+            title,
+            isOn: Binding(
+                get: { isOn },
+                set: { viewModel.setSelectedPerspectiveAnchorConnection($0, role: role) }
+            )
+        )
+        .toggleStyle(.button)
+        .controlSize(.small)
+    }
+
     private var usesFullBrushParameterControls: Bool {
         switch viewModel.workspace.toolSession.activeTool {
         case .brush, .eraser, .smudge, .straightLine, .brightnessAdjust:
@@ -1063,11 +1405,48 @@ struct RightInspectorView: View {
 
     private var usesFillParameterControls: Bool {
         switch viewModel.workspace.toolSession.activeTool {
-        case .lassoFill, .linearGradient, .sectorGradient:
+        case .linearGradient, .sectorGradient:
             return true
         default:
             return false
         }
+    }
+
+    private var isLassoFillToolActive: Bool {
+        viewModel.workspace.toolSession.activeTool == .lassoFill
+            || viewModel.workspace.toolSession.activeTool == .textureFill
+    }
+
+    private var lassoFillParameterControls: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("填充内容")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(Color.white.opacity(0.68))
+
+                Picker(
+                    "填充内容",
+                    selection: Binding(
+                        get: { viewModel.lassoFillMode },
+                        set: { viewModel.setLassoFillMode($0) }
+                    )
+                ) {
+                    ForEach(LassoFillMode.allCases, id: \.self) { mode in
+                        Text(mode.displayName).tag(mode)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.segmented)
+                .controlSize(.small)
+            }
+
+            if viewModel.lassoFillMode == .texture {
+                textureFillParameterControls
+            } else {
+                fillParameterControls
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private var textureFillParameterControls: some View {

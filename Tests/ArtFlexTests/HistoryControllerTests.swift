@@ -64,6 +64,30 @@ struct HistoryControllerTests {
 
     @Test
     @MainActor
+    func workspaceOnlyHistoryRestoresDocumentStateWithoutTextureSnapshots() throws {
+        let harness = try BrushHistoryHarness(canvasSize: .init(width: 16, height: 16))
+
+        try harness.history.captureCheckpoint(captureMode: .workspaceOnly)
+        harness.workspaceStore.updateDocument { document in
+            document.perspectiveGuide = .initial(canvasSize: document.canvasSize)
+        }
+
+        #expect(harness.history.debugUndoEntryApproxByteCounts.last == 0)
+        let undoMode = try #require(harness.history.debugUndoEntryModes.last)
+        if case .workspaceOnly = undoMode {
+            // Expected: this entry contains document state but no layer texture snapshots.
+        } else {
+            Issue.record("Expected workspace-only history entry")
+        }
+
+        #expect(try harness.history.undo())
+        #expect(harness.workspaceStore.state.document.perspectiveGuide == nil)
+        #expect(try harness.history.redo())
+        #expect(harness.workspaceStore.state.document.perspectiveGuide?.mode == .threePoint)
+    }
+
+    @Test
+    @MainActor
     func undoDoesNotDropTipImageLibraryState() throws {
         let harness = try BrushHistoryHarness(canvasSize: .init(width: 16, height: 16))
         let tipImageLibrary = TipImageLibraryState(
@@ -485,6 +509,8 @@ struct HistoryControllerTests {
             break
         case .inPlaceChangedLayers:
             Issue.record("Single-layer document should not produce dirty history entries")
+        case .workspaceOnly:
+            Issue.record("Brush stroke should not produce workspace-only history entries")
         }
     }
 
@@ -550,6 +576,8 @@ struct HistoryControllerTests {
             Issue.record("Expected symmetric dirty current-entry capture in redo stack")
         case .inPlaceChangedLayers(_, let changedLayerIDs):
             #expect(Set(changedLayerIDs) == [secondLayerID])
+        case .workspaceOnly:
+            Issue.record("Brush stroke should not produce workspace-only history entries")
         }
     }
 
@@ -856,6 +884,8 @@ struct HistoryControllerTests {
             Issue.record("Expected symmetric dirty current-entry capture for eraser in redo stack")
         case .inPlaceChangedLayers(_, let changedLayerIDs):
             #expect(Set(changedLayerIDs) == [layerID])
+        case .workspaceOnly:
+            Issue.record("Eraser stroke should not produce workspace-only history entries")
         }
     }
 }

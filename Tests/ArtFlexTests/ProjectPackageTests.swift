@@ -177,6 +177,37 @@ struct ProjectPackageTests {
     }
 
     @Test
+    func packageRoundTripsPerspectiveGuideState() throws {
+        var workspace = WorkspaceState.stageOneDefault
+        var guide = PerspectiveGuideState.initial(canvasSize: workspace.document.canvasSize)
+        guide.mode = .twoPoint
+        guide.opacity = 0.38
+        guide.anchors = [guide.makeAnchor(at: .init(x: 640, y: 720))]
+        workspace.document.perspectiveGuide = guide
+
+        let package = ProjectPackage.fromWorkspace(workspace, layerSnapshots: [])
+        let encoded = try JSONEncoder().encode(package)
+        let decoded = try JSONDecoder().decode(ProjectPackage.self, from: encoded)
+
+        #expect(decoded.workspaceState.document.perspectiveGuide == guide)
+    }
+
+    @Test
+    func legacyPackageWithoutPerspectiveGuideDecodesWithNoGuide() throws {
+        let package = ProjectPackage.fromWorkspace(.stageOneDefault, layerSnapshots: [])
+        let encoded = try JSONEncoder().encode(package)
+        var object = try #require(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        var document = try #require(object["document"] as? [String: Any])
+        document.removeValue(forKey: "perspectiveGuide")
+        object["document"] = document
+
+        let legacyData = try JSONSerialization.data(withJSONObject: object)
+        let decoded = try JSONDecoder().decode(ProjectPackage.self, from: legacyData)
+
+        #expect(decoded.workspaceState.document.perspectiveGuide == nil)
+    }
+
+    @Test
     func packagePreservesDormantImportedTipAssetsAcrossWorkspaceRoundTrip() {
         var workspace = WorkspaceState.stageOneDefault
         let primaryMask = Data([255, 96, 48, 0, 12])

@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 import os
 
 private let selectionTraceLogger = Logger(subsystem: "ArtFlex", category: "SelectionTrace")
@@ -13,6 +14,7 @@ struct CanvasContainerView: View {
     @State private var panStartOffset: CanvasPoint?
     @State private var isFeatherSelectionDialogPresented = false
     @State private var featherSelectionRadiusPixels = 16
+    @State private var isCanvasImageDropTarget = false
     private static let showsSelectionDebugOverlay = false
 
     var body: some View {
@@ -427,6 +429,51 @@ struct CanvasContainerView: View {
                         .allowsHitTesting(false)
                 }
 
+                if let guide = viewModel.perspectiveGuide, guide.isVisible {
+                    PerspectiveGuideOverlay(
+                        guide: guide,
+                        selectedAnchorID: viewModel.selectedPerspectiveAnchorID,
+                        isEditing: viewModel.workspace.toolSession.activeTool == .perspective,
+                        transform: viewportTransform
+                    )
+                    .frame(width: geometry.size.width, height: geometry.size.height)
+                    .allowsHitTesting(false)
+                }
+
+                if viewModel.workspace.toolSession.activeTool == .perspective,
+                   let guide = viewModel.perspectiveGuide,
+                   guide.isVisible,
+                   !viewModel.isPanModeActive {
+                    PerspectiveGuideGestureOverlay(
+                        transform: viewportTransform,
+                        onBegan: { point in
+                            onCanvasInteraction?()
+                            viewModel.beginPerspectiveGuideInteraction(
+                                at: point,
+                                hitRadius: 14 / max(viewportTransform.actualDisplayScale, 0.000_001)
+                            )
+                        },
+                        onChanged: viewModel.updatePerspectiveGuideInteraction,
+                        onEnded: viewModel.endPerspectiveGuideInteraction
+                    )
+                    .frame(width: geometry.size.width, height: geometry.size.height)
+                }
+
+                if viewModel.workspace.toolSession.activeTool == .perspective,
+                   let guide = viewModel.perspectiveGuide {
+                    PerspectiveGuideHUD(
+                        guide: guide,
+                        onToggleLock: {
+                            viewModel.setPerspectiveGuideLocked(!guide.isLocked)
+                        },
+                        onClear: viewModel.clearPerspectiveGuide
+                    )
+                    .position(
+                        x: geometry.size.width / 2,
+                        y: abs(viewModel.workspace.viewport.rotationDegrees) > 0.05 ? 68 : 28
+                    )
+                }
+
                 if viewModel.workspace.toolSession.activeTool == .canvasRotate || abs(viewModel.workspace.viewport.rotationDegrees) > 0.05 {
                     CanvasRotationHUD(
                         angleDegrees: viewModel.workspace.viewport.rotationDegrees,
@@ -495,6 +542,44 @@ struct CanvasContainerView: View {
                         },
                         onChanged: viewModel.updateCanvasCrop,
                         onEnded: viewModel.endCanvasCrop
+                    )
+                    .frame(width: geometry.size.width, height: geometry.size.height)
+                }
+
+                if viewModel.workspace.toolSession.activeTool.supportsOutsideCanvasSelectionStart,
+                   !viewModel.isPanModeActive {
+                    OutsideCanvasSelectionEventBridge(
+                        transform: viewportTransform,
+                        activeTool: viewModel.workspace.toolSession.activeTool,
+                        onSelectionMouseDown: { point, modifiers in
+                            onCanvasInteraction?()
+                            return viewModel.handleSelectionMouseDown(at: point, modifiers: modifiers)
+                        },
+                        onSelectionChangedBatch: { points, modifiers in
+                            onCanvasInteraction?()
+                            viewModel.updateSelection(to: points, modifiers: modifiers)
+                        },
+                        onSelectionEnded: { point, modifiers in
+                            onCanvasInteraction?()
+                            viewModel.commitSelection(at: point, modifiers: modifiers)
+                        },
+                        onMoveSelectionPreview: { deltaX, deltaY in
+                            onCanvasInteraction?()
+                            viewModel.moveSelectionPreview(by: deltaX, deltaY: deltaY)
+                        },
+                        onCommitSelectionMove: {
+                            onCanvasInteraction?()
+                            viewModel.commitSelectionMove()
+                        },
+                        onPolygonClick: { point, modifiers, clickCount in
+                            onCanvasInteraction?()
+                            viewModel.handleCanvasToolClick(
+                                at: point,
+                                modifiers: modifiers,
+                                clickCount: clickCount
+                            )
+                        },
+                        onPolygonHover: viewModel.updateCanvasToolHover
                     )
                     .frame(width: geometry.size.width, height: geometry.size.height)
                 }
@@ -572,6 +657,28 @@ struct CanvasContainerView: View {
             }
             .clipped()
             .contentShape(Rectangle())
+            .overlay {
+                if isCanvasImageDropTarget {
+                    RoundedRectangle(cornerRadius: 12)
+                        .stroke(Color.accentColor.opacity(0.95), lineWidth: 3)
+                        .padding(8)
+                        .overlay {
+                            Label("松开以导入为新图层", systemImage: "photo.badge.plus")
+                                .font(.system(size: 12, weight: .bold))
+                                .foregroundStyle(Color.white.opacity(0.98))
+                                .padding(.horizontal, 14)
+                                .padding(.vertical, 9)
+                                .background(Capsule().fill(Color.black.opacity(0.72)))
+                        }
+                        .allowsHitTesting(false)
+                }
+            }
+            .onDrop(
+                of: [UTType.fileURL.identifier, UTType.image.identifier],
+                isTargeted: $isCanvasImageDropTarget
+            ) { providers in
+                importCanvasImagesFromDrop(providers: providers)
+            }
             .onAppear {
                 viewModel.updateCanvasViewportSize(geometry.size)
             }
@@ -595,6 +702,51 @@ struct CanvasContainerView: View {
         } message: {
             Text("输入 1–512 px。羽化会柔化选区边缘，并可通过撤销恢复。")
         }
+    }
+
+    private func importCanvasImagesFromDrop(providers: [NSItemProvider]) -> Bool {
+        let canvasSize = viewModel.workspace.document.canvasSize
+        let canvasCenter = CanvasPoint(
+            x: Double(canvasSize.width) / 2,
+            y: Double(canvasSize.height) / 2
+        )
+        var acceptedProvider = false
+
+        for provider in providers where provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) {
+            acceptedProvider = true
+            provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { item, _ in
+                let url: URL?
+                switch item {
+                case let data as Data:
+                    url = URL(dataRepresentation: data, relativeTo: nil)
+                case let nsData as NSData:
+                    url = URL(dataRepresentation: nsData as Data, relativeTo: nil)
+                case let fileURL as URL:
+                    url = fileURL
+                default:
+                    url = nil
+                }
+
+                guard let url else { return }
+                DispatchQueue.main.async {
+                    _ = viewModel.importDroppedCanvasImage(from: url, centeredAt: canvasCenter)
+                }
+            }
+        }
+
+        for provider in providers
+        where provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) == false
+            && provider.canLoadObject(ofClass: NSImage.self) {
+            acceptedProvider = true
+            provider.loadObject(ofClass: NSImage.self) { object, _ in
+                guard let image = object as? NSImage else { return }
+                DispatchQueue.main.async {
+                    _ = viewModel.importDroppedCanvasImage(from: image, centeredAt: canvasCenter)
+                }
+            }
+        }
+
+        return acceptedProvider
     }
 }
 
@@ -949,7 +1101,487 @@ private struct CanvasCropGestureOverlay: View {
     }
 
     private func canvasPoint(for point: CGPoint) -> CanvasPoint {
-        transform.viewportToCanvas(.init(x: point.x, y: point.y), clamped: true)
+        transform.viewportToCanvas(.init(x: point.x, y: point.y))
+    }
+}
+
+private struct OutsideCanvasSelectionEventBridge: NSViewRepresentable {
+    let transform: CanvasViewportTransform
+    let activeTool: ToolKind
+    let onSelectionMouseDown: (CanvasPoint, NSEvent.ModifierFlags) -> SelectionMouseDownAction
+    let onSelectionChangedBatch: ([CanvasPoint], NSEvent.ModifierFlags) -> Void
+    let onSelectionEnded: (CanvasPoint, NSEvent.ModifierFlags) -> Void
+    let onMoveSelectionPreview: (Double, Double) -> Void
+    let onCommitSelectionMove: () -> Void
+    let onPolygonClick: (CanvasPoint, NSEvent.ModifierFlags, Int) -> Void
+    let onPolygonHover: (CanvasPoint) -> Void
+
+    func makeNSView(context: Context) -> OutsideCanvasSelectionEventView {
+        let view = OutsideCanvasSelectionEventView()
+        update(view)
+        return view
+    }
+
+    func updateNSView(_ nsView: OutsideCanvasSelectionEventView, context: Context) {
+        update(nsView)
+    }
+
+    private func update(_ view: OutsideCanvasSelectionEventView) {
+        view.transform = transform
+        view.activeTool = activeTool
+        view.onSelectionMouseDown = onSelectionMouseDown
+        view.onSelectionChangedBatch = onSelectionChangedBatch
+        view.onSelectionEnded = onSelectionEnded
+        view.onMoveSelectionPreview = onMoveSelectionPreview
+        view.onCommitSelectionMove = onCommitSelectionMove
+        view.onPolygonClick = onPolygonClick
+        view.onPolygonHover = onPolygonHover
+    }
+}
+
+private final class OutsideCanvasSelectionEventView: NSView {
+    var transform = CanvasViewportTransform(
+        canvasSize: .init(width: 1, height: 1),
+        viewport: .stageOneDefault,
+        availableWidth: 1,
+        availableHeight: 1
+    )
+    var activeTool: ToolKind = .rectangleSelection
+    var onSelectionMouseDown: ((CanvasPoint, NSEvent.ModifierFlags) -> SelectionMouseDownAction)?
+    var onSelectionChangedBatch: (([CanvasPoint], NSEvent.ModifierFlags) -> Void)?
+    var onSelectionEnded: ((CanvasPoint, NSEvent.ModifierFlags) -> Void)?
+    var onMoveSelectionPreview: ((Double, Double) -> Void)?
+    var onCommitSelectionMove: (() -> Void)?
+    var onPolygonClick: ((CanvasPoint, NSEvent.ModifierFlags, Int) -> Void)?
+    var onPolygonHover: ((CanvasPoint) -> Void)?
+
+    private var localEventMonitor: Any?
+    private var isCapturingOutsideStart = false
+    private var interactionMode: SelectionMouseDownAction = .idle
+    private var selectionMoveLastPoint: CanvasPoint?
+    private var initialClickCount = 1
+
+    override var isFlipped: Bool { true }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        nil
+    }
+
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        if newWindow == nil {
+            removeLocalEventMonitor()
+            resetCapture()
+        }
+        super.viewWillMove(toWindow: newWindow)
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window != nil {
+            installLocalEventMonitorIfNeeded()
+        }
+    }
+
+    private func installLocalEventMonitorIfNeeded() {
+        guard localEventMonitor == nil else { return }
+        localEventMonitor = NSEvent.addLocalMonitorForEvents(
+            matching: [.leftMouseDown, .leftMouseDragged, .leftMouseUp, .mouseMoved]
+        ) { [weak self] event in
+            self?.handleLocalEvent(event) ?? event
+        }
+    }
+
+    private func removeLocalEventMonitor() {
+        guard let localEventMonitor else { return }
+        NSEvent.removeMonitor(localEventMonitor)
+        self.localEventMonitor = nil
+    }
+
+    private func handleLocalEvent(_ event: NSEvent) -> NSEvent? {
+        guard activeTool.supportsOutsideCanvasSelectionStart else { return event }
+        guard event.window === window || isCapturingOutsideStart else { return event }
+
+        switch event.type {
+        case .leftMouseDown:
+            guard !isCapturingOutsideStart else { return nil }
+            guard let point = outsideCanvasPoint(for: event) else { return event }
+            let modifiers = normalizedModifiers(for: event)
+            isCapturingOutsideStart = true
+            initialClickCount = event.clickCount
+            interactionMode = onSelectionMouseDown?(point, modifiers) ?? .beginDrawing
+            selectionMoveLastPoint = interactionMode == .beginMoving ? point : nil
+            return nil
+
+        case .leftMouseDragged:
+            guard isCapturingOutsideStart else { return event }
+            let modifiers = normalizedModifiers(for: event)
+            switch interactionMode {
+            case .beginDrawing:
+                guard activeTool != .polygonSelection else { return nil }
+                let points = selectionCanvasPoints(from: event)
+                if !points.isEmpty {
+                    onSelectionChangedBatch?(points, modifiers)
+                }
+            case .beginMoving:
+                let point = canvasPoint(for: event)
+                if let lastPoint = selectionMoveLastPoint {
+                    onMoveSelectionPreview?(point.x - lastPoint.x, point.y - lastPoint.y)
+                }
+                selectionMoveLastPoint = point
+            case .idle:
+                break
+            }
+            return nil
+
+        case .leftMouseUp:
+            guard isCapturingOutsideStart else { return event }
+            let point = canvasPoint(for: event)
+            let modifiers = normalizedModifiers(for: event)
+            let completedMode = interactionMode
+            let clickCount = max(initialClickCount, event.clickCount)
+            resetCapture()
+
+            if activeTool == .polygonSelection {
+                switch completedMode {
+                case .beginMoving:
+                    onCommitSelectionMove?()
+                case .beginDrawing, .idle:
+                    onPolygonClick?(point, modifiers, clickCount)
+                }
+            } else {
+                switch completedMode {
+                case .beginDrawing:
+                    onSelectionEnded?(point, modifiers)
+                case .beginMoving:
+                    onCommitSelectionMove?()
+                case .idle:
+                    break
+                }
+            }
+            return nil
+
+        case .mouseMoved:
+            guard let point = outsideCanvasPoint(for: event) else { return event }
+            NSCursor.crosshair.set()
+            if activeTool == .polygonSelection {
+                onPolygonHover?(point)
+            }
+            return event
+
+        default:
+            return event
+        }
+    }
+
+    private func outsideCanvasPoint(for event: NSEvent) -> CanvasPoint? {
+        let localPoint = convert(event.locationInWindow, from: nil)
+        guard bounds.contains(localPoint) else { return nil }
+        let point = transform.viewportToCanvas(
+            .init(x: localPoint.x, y: localPoint.y),
+            clamped: false
+        )
+        return transform.containsCanvasPoint(point) ? nil : point
+    }
+
+    private func canvasPoint(for event: NSEvent) -> CanvasPoint {
+        let localPoint = convert(event.locationInWindow, from: nil)
+        return transform.viewportToCanvas(
+            .init(x: localPoint.x, y: localPoint.y),
+            clamped: false
+        )
+    }
+
+    private func selectionCanvasPoints(from event: NSEvent) -> [CanvasPoint] {
+        guard activeTool == .lassoSelection || activeTool == .lassoFill || activeTool == .textureFill else {
+            return [canvasPoint(for: event)]
+        }
+
+        var events = [event]
+        while let queuedEvent = window?.nextEvent(
+            matching: .leftMouseDragged,
+            until: .distantPast,
+            inMode: .eventTracking,
+            dequeue: true
+        ) {
+            events.append(queuedEvent)
+        }
+        if events.count == 1 {
+            while let queuedEvent = window?.nextEvent(
+                matching: .leftMouseDragged,
+                until: .distantPast,
+                inMode: .default,
+                dequeue: true
+            ) {
+                events.append(queuedEvent)
+            }
+        }
+        return events.map(canvasPoint(for:))
+    }
+
+    private func normalizedModifiers(for event: NSEvent) -> NSEvent.ModifierFlags {
+        event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+    }
+
+    private func resetCapture() {
+        isCapturingOutsideStart = false
+        interactionMode = .idle
+        selectionMoveLastPoint = nil
+        initialClickCount = 1
+    }
+}
+
+private struct PerspectiveGuideGestureOverlay: View {
+    let transform: CanvasViewportTransform
+    let onBegan: (CanvasPoint) -> Void
+    let onChanged: (CanvasPoint) -> Void
+    let onEnded: () -> Void
+
+    @State private var isDragging = false
+
+    var body: some View {
+        Rectangle()
+            .fill(Color.white.opacity(0.001))
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { value in
+                        let point = canvasPoint(for: value.location)
+                        if !isDragging {
+                            isDragging = true
+                            onBegan(canvasPoint(for: value.startLocation))
+                        }
+                        onChanged(point)
+                    }
+                    .onEnded { _ in
+                        onEnded()
+                        isDragging = false
+                    }
+            )
+            .onHover { hovering in
+                if hovering {
+                    NSCursor.crosshair.set()
+                } else {
+                    NSCursor.arrow.set()
+                }
+            }
+    }
+
+    private func canvasPoint(for point: CGPoint) -> CanvasPoint {
+        transform.viewportToCanvas(CanvasPoint(x: point.x, y: point.y), clamped: false)
+    }
+}
+
+private struct PerspectiveGuideOverlay: View {
+    let guide: PerspectiveGuideState
+    let selectedAnchorID: UUID?
+    let isEditing: Bool
+    let transform: CanvasViewportTransform
+
+    var body: some View {
+        Canvas { context, _ in
+            let lineColor = Color(
+                red: Double(guide.color.red),
+                green: Double(guide.color.green),
+                blue: Double(guide.color.blue),
+                opacity: Double(guide.opacity)
+            )
+            let documentPath = Path { path in
+                let corners = [
+                    CanvasPoint(x: 0, y: 0),
+                    CanvasPoint(x: Double(transform.canvasSize.width), y: 0),
+                    CanvasPoint(
+                        x: Double(transform.canvasSize.width),
+                        y: Double(transform.canvasSize.height)
+                    ),
+                    CanvasPoint(x: 0, y: Double(transform.canvasSize.height))
+                ].map(transform.canvasToViewport)
+                guard let first = corners.first else { return }
+                path.move(to: CGPoint(x: first.x, y: first.y))
+                for corner in corners.dropFirst() {
+                    path.addLine(to: CGPoint(x: corner.x, y: corner.y))
+                }
+                path.closeSubpath()
+            }
+
+            var clippedContext = context
+            clippedContext.clip(to: documentPath)
+
+            if guide.mode == .onePoint {
+                drawPerspectiveLine(
+                    from: CanvasPoint(x: 0, y: guide.leftVanishingPoint.y),
+                    through: CanvasPoint(
+                        x: Double(transform.canvasSize.width),
+                        y: guide.leftVanishingPoint.y
+                    ),
+                    in: clippedContext,
+                    color: lineColor.opacity(0.8),
+                    lineWidth: CGFloat(guide.lineWidth) * 1.25,
+                    dash: [8, 5]
+                )
+            } else {
+                drawPerspectiveLine(
+                    from: guide.leftVanishingPoint,
+                    through: guide.rightVanishingPoint,
+                    in: clippedContext,
+                    color: lineColor.opacity(0.8),
+                    lineWidth: CGFloat(guide.lineWidth) * 1.25,
+                    dash: [8, 5]
+                )
+            }
+
+            for anchor in guide.anchors {
+                for role in guide.activeVanishingPointRoles where anchor.connects(to: role) {
+                    drawPerspectiveLine(
+                        from: guide.vanishingPoint(for: role),
+                        through: anchor.position,
+                        in: clippedContext,
+                        color: lineColor,
+                        lineWidth: CGFloat(guide.lineWidth),
+                        dash: []
+                    )
+                }
+            }
+
+            guard isEditing else { return }
+            for role in guide.activeVanishingPointRoles {
+                drawVanishingPointHandle(role, in: context, color: lineColor)
+            }
+            for anchor in guide.anchors {
+                drawAnchorHandle(anchor, in: context, color: lineColor)
+            }
+        }
+    }
+
+    private func drawPerspectiveLine(
+        from first: CanvasPoint,
+        through second: CanvasPoint,
+        in context: GraphicsContext,
+        color: Color,
+        lineWidth: CGFloat,
+        dash: [CGFloat]
+    ) {
+        let axisX = second.x - first.x
+        let axisY = second.y - first.y
+        let length = hypot(axisX, axisY)
+        guard length > 0.000_001 else { return }
+        let directionX = axisX / length
+        let directionY = axisY / length
+        let coordinateExtent = [
+            Double(max(transform.canvasSize.width, transform.canvasSize.height)),
+            abs(first.x),
+            abs(first.y),
+            abs(second.x),
+            abs(second.y)
+        ].max() ?? 1
+        let extensionDistance = max(coordinateExtent * 4, 1_000)
+        let start = transform.canvasToViewport(
+            CanvasPoint(
+                x: first.x - (directionX * extensionDistance),
+                y: first.y - (directionY * extensionDistance)
+            )
+        )
+        let end = transform.canvasToViewport(
+            CanvasPoint(
+                x: first.x + (directionX * extensionDistance),
+                y: first.y + (directionY * extensionDistance)
+            )
+        )
+        var path = Path()
+        path.move(to: CGPoint(x: start.x, y: start.y))
+        path.addLine(to: CGPoint(x: end.x, y: end.y))
+        let drawingContext = context
+        drawingContext.stroke(
+            path,
+            with: .color(color),
+            style: StrokeStyle(
+                lineWidth: lineWidth,
+                lineCap: .round,
+                lineJoin: .round,
+                dash: dash
+            )
+        )
+    }
+
+    private func drawVanishingPointHandle(
+        _ role: PerspectiveVanishingPointRole,
+        in context: GraphicsContext,
+        color: Color
+    ) {
+        let drawingContext = context
+        let point = transform.canvasToViewport(guide.vanishingPoint(for: role))
+        let rect = CGRect(x: point.x - 9, y: point.y - 9, width: 18, height: 18)
+        drawingContext.fill(Path(ellipseIn: rect), with: .color(Color.black.opacity(0.72)))
+        drawingContext.stroke(Path(ellipseIn: rect), with: .color(color.opacity(0.95)), lineWidth: 2)
+        let label: String
+        switch (guide.mode, role) {
+        case (.onePoint, .left):
+            label = "1"
+        case (_, .left):
+            label = "左"
+        case (_, .right):
+            label = "右"
+        case (_, .vertical):
+            label = guide.verticalDirection == .above ? "上" : "下"
+        }
+        drawingContext.draw(
+            Text(label).font(.system(size: 8, weight: .bold)).foregroundStyle(Color.white),
+            at: CGPoint(x: point.x, y: point.y)
+        )
+    }
+
+    private func drawAnchorHandle(
+        _ anchor: PerspectiveGuideAnchor,
+        in context: GraphicsContext,
+        color: Color
+    ) {
+        let drawingContext = context
+        let point = transform.canvasToViewport(anchor.position)
+        let isSelected = anchor.id == selectedAnchorID
+        let radius = isSelected ? 6.0 : 4.5
+        let rect = CGRect(
+            x: point.x - radius,
+            y: point.y - radius,
+            width: radius * 2,
+            height: radius * 2
+        )
+        drawingContext.fill(
+            Path(ellipseIn: rect),
+            with: .color(isSelected ? color.opacity(0.95) : Color.black.opacity(0.65))
+        )
+        drawingContext.stroke(
+            Path(ellipseIn: rect),
+            with: .color(isSelected ? Color.white : color.opacity(0.9)),
+            lineWidth: isSelected ? 2 : 1.4
+        )
+    }
+}
+
+private struct PerspectiveGuideHUD: View {
+    let guide: PerspectiveGuideState
+    let onToggleLock: () -> Void
+    let onClear: () -> Void
+
+    var body: some View {
+        HStack(spacing: 9) {
+            Image(systemName: "triangle")
+                .font(.system(size: 11, weight: .semibold))
+            Text("\(guide.mode.displayName)透视 · \(guide.anchors.count) 个锚点")
+                .font(.system(size: 11, weight: .semibold))
+            Button(guide.isLocked ? "解锁编辑" : "锁定") {
+                onToggleLock()
+            }
+            .buttonStyle(.borderless)
+            .font(.system(size: 10, weight: .semibold))
+            Button("清除") {
+                onClear()
+            }
+            .buttonStyle(.borderless)
+            .font(.system(size: 10, weight: .semibold))
+        }
+        .foregroundStyle(Color.white)
+        .padding(.horizontal, 12)
+        .frame(height: 32)
+        .background(Capsule().fill(Color.black.opacity(0.62)))
     }
 }
 

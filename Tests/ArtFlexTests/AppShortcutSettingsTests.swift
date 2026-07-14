@@ -61,21 +61,56 @@ struct AppShortcutSettingsTests {
 
     @Test
     @MainActor
-    func textureFillShortcutDefaultsToFAndCanBeCustomized() {
+    func textureFillUsesTheMergedLassoFillShortcutGroup() {
         let suiteName = "ArtFlexTests.AppShortcutSettings.TextureFill.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
         defaults.removePersistentDomain(forName: suiteName)
 
         let store = AppShortcutSettingsStore(userDefaults: defaults)
-        let textureFillGroup = ToolSidebarGroup.orderedGroups.first { $0.id == "texture-fill" }!
+        let lassoFillGroup = ToolSidebarGroup.orderedGroups.first { $0.id == "lasso-fill" }!
 
-        #expect(store.configurableToolGroups.contains(textureFillGroup))
-        #expect(store.shortcutKey(for: textureFillGroup) == "F")
+        #expect(store.configurableToolGroups.contains(lassoFillGroup))
+        #expect(lassoFillGroup.tools == [.lassoFill, .textureFill])
+        #expect(store.shortcutKey(for: lassoFillGroup) == "K")
+        #expect(store.toolGroup(forShortcutKey: "F") == nil)
+    }
 
-        store.setShortcutKey("Q", for: textureFillGroup)
+    @Test
+    @MainActor
+    func perspectiveToolIsRegisteredWithDefaultPShortcut() {
+        let store = AppShortcutSettingsStore(
+            userDefaults: UserDefaults(suiteName: "ArtFlexTests.Perspective.\(UUID().uuidString)")!
+        )
+        let group = ToolSidebarGroup.orderedGroups.first { $0.id == "perspective" }
 
-        let restored = AppShortcutSettingsStore(userDefaults: defaults)
-        #expect(restored.shortcutKey(for: textureFillGroup) == "Q")
-        #expect(restored.toolGroup(forShortcutKey: "Q") == textureFillGroup)
+        #expect(group?.tools == [.perspective])
+        #expect(group.flatMap { store.shortcutKey(for: $0) } == "P")
+        #expect(ToolKind.perspective.displayName == "透视")
+    }
+
+    @Test
+    @MainActor
+    func canvasCropUsesCAndMigratesThePreviousXDefault() throws {
+        let suiteName = "ArtFlexTests.CanvasCropShortcut.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defaults.removePersistentDomain(forName: suiteName)
+        let rawShortcuts = [
+            "brush": "C",
+            "canvas-crop": "X"
+        ]
+        defaults.set(
+            try JSONEncoder().encode(rawShortcuts),
+            forKey: "ArtFlex.Settings.Shortcuts.ToolGroups"
+        )
+
+        let store = AppShortcutSettingsStore(userDefaults: defaults)
+        let brushGroup = ToolSidebarGroup.orderedGroups.first { $0.id == "brush" }!
+        let cropGroup = ToolSidebarGroup.orderedGroups.first { $0.id == "canvas-crop" }!
+
+        #expect(ToolKind.canvasCrop.shortcutKey == "C")
+        #expect(cropGroup.shortcutKey == "C")
+        #expect(store.shortcutKey(for: cropGroup) == "C")
+        #expect(store.shortcutKey(for: brushGroup) == "X")
+        #expect(store.toolGroup(forShortcutKey: "C") == cropGroup)
     }
 }
