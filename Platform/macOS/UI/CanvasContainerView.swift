@@ -19,7 +19,7 @@ struct CanvasContainerView: View {
 
     var body: some View {
         GeometryReader { geometry in
-            // CanvasViewportHost 只订阅 viewport（zoom/pan/rotation），
+            // CanvasViewportHost 只订阅 viewport（zoom/pan/rotation/flip），
             // 缩放时 overlay 层完全不参与 SwiftUI layout diff
             CanvasViewportHost(
                 viewport: viewModel.workspace.viewport,
@@ -418,7 +418,13 @@ struct CanvasContainerView: View {
                     width: presentation.documentDisplaySize.x,
                     height: presentation.documentDisplaySize.y
                 )
-                .scaleEffect(presentation.documentZoomScale, anchor: .center)
+                .scaleEffect(
+                    x: viewModel.workspace.viewport.isHorizontallyFlipped
+                        ? -presentation.documentZoomScale
+                        : presentation.documentZoomScale,
+                    y: presentation.documentZoomScale,
+                    anchor: .center
+                )
                 .rotationEffect(.degrees(viewModel.workspace.viewport.rotationDegrees))
                 .position(x: documentCenter.x, y: documentCenter.y)
 
@@ -619,6 +625,7 @@ struct CanvasContainerView: View {
                         presentation: presentation,
                         canvasSize: viewModel.workspace.document.canvasSize,
                         viewportRotationDegrees: viewModel.workspace.viewport.rotationDegrees,
+                        isCanvasHorizontallyFlipped: viewModel.workspace.viewport.isHorizontallyFlipped,
                         viewportSize: geometry.size,
                         brushSlots: quickPickerBrushSlots,
                         selectedBrushPresetID: viewModel.workspace.brushLibrary.selectedPresetID,
@@ -842,7 +849,7 @@ private func resolvedQuickColorPickerState(
     return resolved
 }
 
-// viewport 状态隔离容器：只有 zoom/pan/rotation 变化时这个 View 才重新 layout
+// viewport 状态隔离容器：只有 zoom/pan/rotation/flip 变化时这个 View 才重新 layout
 // 缩放时父级 CanvasContainerView 不会因此触发所有 overlay 的重绘
 private struct CanvasViewportHost<Content: View>: View {
     let viewport: CanvasViewport

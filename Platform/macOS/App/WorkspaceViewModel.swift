@@ -1549,6 +1549,7 @@ final class WorkspaceViewModel: ObservableObject {
             session.brush.compoundBrush.secondary.opacityCurveLow = min(max(low, 0), 0.85)
             session.brush.compoundBrush.secondary.opacityCurveMid = min(max(mid, session.brush.compoundBrush.secondary.opacityCurveLow), 0.95)
             session.brush.compoundBrush.secondary.opacityCurveHigh = min(max(high, session.brush.compoundBrush.secondary.opacityCurveMid), 1)
+            session.brush.compoundBrush.secondary.opacityPressureCurve = nil
         }
         refresh()
     }
@@ -4475,6 +4476,17 @@ final class WorkspaceViewModel: ObservableObject {
 
     func toggleLuminosityPreview() {
         isLuminosityPreviewEnabled.toggle()
+    }
+
+    func toggleCanvasHorizontalFlip() {
+        bootstrap.workspaceStore.updateViewport { viewport in
+            viewport.isHorizontallyFlipped.toggle()
+        }
+        refreshLightweight()
+        showStatus(.init(
+            kind: .info,
+            message: workspace.viewport.isHorizontallyFlipped ? "已水平翻转画布" : "已恢复画布方向"
+        ))
     }
 
     func updateCanvasViewportSize(_ size: CGSize) {
@@ -11057,7 +11069,7 @@ final class WorkspaceViewModel: ObservableObject {
                     slotIndex: normalized.slotIndex
                 )
             } else {
-                normalized.isBuiltIn = false
+                normalized.isBuiltIn = normalized.id == BrushPreset.pressureGrainCrayonPresetID
             }
             seen.insert(normalized.id)
             presets.append(normalized)
@@ -11203,6 +11215,7 @@ final class WorkspaceViewModel: ObservableObject {
         }
         let normalizedLibrary = Self.normalizeImportedBrushLibrary(restored.library)
             .removingRetiredBrushDemoPresets()
+            .installingOrUpdatingPressureGrainCrayonPresetIfPossible()
         let normalizedTipImageLibrary = Self.normalizeImportedTipImageLibrary(restored.tipImageLibrary)
         bootstrap.workspaceStore.updateBrushLibrary { library in
             library = normalizedLibrary

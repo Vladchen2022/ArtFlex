@@ -340,7 +340,7 @@ extension WorkspaceViewModel {
             skipLeadingStamp: skipLeadingStamp
         )
 
-        if stroke.brush.buildMode == .opacityCap {
+        if stroke.brush.requiresStrokeMaskSession {
             if paintedState.opacityCapSession == nil {
                 paintedState.opacityCapSession = colorAdjustmentStrokeEngine.makeOpacityCapSessionForImmediateStroke(
                     texture: paintedState.maskTexture
@@ -415,7 +415,7 @@ extension WorkspaceViewModel {
             skipLeadingStamp: true
         )
 
-        if flushStroke.brush.buildMode == .opacityCap,
+        if flushStroke.brush.requiresStrokeMaskSession,
            let opacityCapSession = paintedState.opacityCapSession {
             _ = colorAdjustmentStrokeEngine.renderImmediateOpacityCapStroke(
                 flushStroke,

@@ -121,4 +121,127 @@ struct BrushStrokeSamplingTests {
         #expect(samplingState?.pendingInputPoints.isEmpty == true)
         #expect(samplingState?.isFlushing == false)
     }
+
+    @Test
+    func sparseSinglePointPacketsRemainContinuouslySpacedAfterFlush() throws {
+        let device = MTLCreateSystemDefaultDevice()
+        #expect(device != nil)
+        guard let device else { return }
+
+        let renderer = try StageOneBrushRenderer(device: device)
+        var samplingState: BrushStrokeSamplingState?
+        var brush = BrushSettings.stageOneDefault
+        brush.size = 40
+        brush.spacingPercent = 5
+
+        var samples: [StampSample] = []
+        for (index, x) in stride(from: 20.0, through: 340.0, by: 32.0).enumerated() {
+            let packet = StrokeDescriptor(
+                tool: .brush,
+                color: .black,
+                brush: brush,
+                points: [StrokePoint(x: x, y: 64, pressure: 1)],
+                selectionShape: nil,
+                skipLeadingStamp: index > 0
+            )
+            samples.append(contentsOf: renderer.debugInterpolatedStrokeSamples(
+                for: packet,
+                samplingState: &samplingState
+            ))
+        }
+
+        samplingState?.isFlushing = true
+        let flush = StrokeDescriptor(
+            tool: .brush,
+            color: .black,
+            brush: brush,
+            points: [],
+            selectionShape: nil,
+            skipLeadingStamp: true
+        )
+        samples.append(contentsOf: renderer.debugInterpolatedStrokeSamples(
+            for: flush,
+            samplingState: &samplingState
+        ))
+
+        let orderedX = samples.map(\.point.x).sorted()
+        #expect(orderedX.count > 100)
+        #expect(orderedX.first.map { abs($0 - 20) < 0.01 } == true)
+        let maximumGap = zip(orderedX, orderedX.dropFirst())
+            .map { $1 - $0 }
+            .max() ?? .infinity
+        #expect(maximumGap <= 2.1)
+        #expect(orderedX.last.map { $0 >= 338 } == true)
+    }
+
+    @Test
+    func compoundSecondaryUsesItsOwnSparseStampCadence() throws {
+        let device = MTLCreateSystemDefaultDevice()
+        #expect(device != nil)
+        guard let device else { return }
+
+        let renderer = try StageOneBrushRenderer(device: device)
+        var brush = BrushSettings.stageOneDefault
+        brush.size = 29
+        brush.spacingPercent = 6
+        brush.compoundBrush.enabled = true
+        brush.compoundBrush.mode = .overlay
+        brush.compoundBrush.secondary.sizeMode = .relativeToPrimary
+        brush.compoundBrush.secondary.relativeSizeRatio = 1.5454545
+        brush.compoundBrush.secondary.spacingPercent = 65
+
+        let stroke = StrokeDescriptor(
+            tool: .brush,
+            color: .black,
+            brush: brush,
+            points: [
+                StrokePoint(x: 0, y: 20, pressure: 1),
+                StrokePoint(x: 120, y: 20, pressure: 1)
+            ],
+            selectionShape: nil
+        )
+
+        var primaryState: BrushStrokeSamplingState?
+        var secondaryState: BrushStrokeSamplingState?
+        var primarySamples = renderer.debugInterpolatedStrokeSamples(
+            for: stroke,
+            samplingState: &primaryState
+        )
+        var secondarySamples = renderer.debugInterpolatedCompoundSecondarySamples(
+            for: stroke,
+            samplingState: &secondaryState
+        )
+
+        primaryState?.isFlushing = true
+        secondaryState?.isFlushing = true
+        let flush = StrokeDescriptor(
+            tool: .brush,
+            color: .black,
+            brush: brush,
+            points: [],
+            selectionShape: nil,
+            skipLeadingStamp: true
+        )
+        primarySamples += renderer.debugInterpolatedStrokeSamples(
+            for: flush,
+            samplingState: &primaryState
+        )
+        secondarySamples += renderer.debugInterpolatedCompoundSecondarySamples(
+            for: flush,
+            samplingState: &secondaryState
+        )
+
+        let primaryGaps = zip(primarySamples, primarySamples.dropFirst()).map {
+            $1.point.x - $0.point.x
+        }
+        let secondaryGaps = zip(secondarySamples, secondarySamples.dropFirst()).map {
+            $1.point.x - $0.point.x
+        }
+        let primaryFullGap = primaryGaps.dropFirst().first
+        let secondaryFullGap = secondaryGaps.dropFirst().first
+
+        #expect(primarySamples.count > secondarySamples.count * 10)
+        #expect(primaryFullGap.map { abs($0 - 1.74) < 0.05 } == true)
+        #expect(secondaryFullGap.map { abs($0 - 29.132) < 0.1 } == true)
+    }
 }

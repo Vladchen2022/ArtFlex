@@ -42,7 +42,7 @@ enum StageOneBrushPreviewRasterizer {
                 texture,
                 commandQueue: context.commandQueue
             )
-            if brush.buildMode == .opacityCap {
+            if brush.requiresStrokeMaskSession {
                 opacityCapSession = context.renderer.makeOpacityCapSession(
                     for: texture,
                     commandQueue: context.commandQueue,
@@ -146,7 +146,7 @@ enum StageOneBrushPreviewRasterizer {
             commandBuffer: MTLCommandBuffer,
             samplingState: inout BrushStrokeSamplingState?
         ) {
-            if brush.buildMode == .opacityCap,
+            if brush.requiresStrokeMaskSession,
                let opacityCapSession {
                 _ = context.renderer.encodeOpacityCapStroke(
                     stroke: stroke,
@@ -325,7 +325,7 @@ enum StageOneBrushPreviewRasterizer {
         let stroke = makeCompoundPreviewStroke(for: brush, width: previewWidth, height: previewHeight, pressure: pressure)
         var samplingState: BrushStrokeSamplingState?
 
-        if stroke.brush.buildMode == .opacityCap {
+        if stroke.brush.requiresStrokeMaskSession {
             guard let session = context.renderer.makeOpacityCapSession(for: texture, commandQueue: context.commandQueue),
                   let commandBuffer = context.commandQueue.makeCommandBuffer()
             else {
@@ -394,7 +394,7 @@ enum StageOneBrushPreviewRasterizer {
             selectionShape: nil
         )
 
-        if tool == .brush && brush.buildMode == .opacityCap {
+        if tool == .brush && brush.requiresStrokeMaskSession {
             guard let session = context.renderer.makeOpacityCapSession(for: texture, commandQueue: context.commandQueue),
                   let commandBuffer = context.commandQueue.makeCommandBuffer()
             else {

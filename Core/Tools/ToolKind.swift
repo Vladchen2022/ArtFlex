@@ -409,6 +409,7 @@ struct CompoundPressureMixSettings: Codable, Equatable, Sendable {
 enum CompoundBrushMode: String, Codable, Equatable, Sendable, CaseIterable {
     case textureBlend
     case subtract
+    case overlay
     case intersect
 
     var displayName: String {
@@ -417,12 +418,14 @@ enum CompoundBrushMode: String, Codable, Equatable, Sendable, CaseIterable {
             return "纹理出现处"
         case .subtract:
             return "纹理空白处"
+        case .overlay:
+            return "叠加遮罩"
         case .intersect:
             return "旧版相交"
         }
     }
 
-    static let editorCases: [CompoundBrushMode] = [.textureBlend, .subtract]
+    static let editorCases: [CompoundBrushMode] = [.textureBlend, .subtract, .overlay]
 
     var editorEquivalent: CompoundBrushMode {
         self == .intersect ? .textureBlend : self
@@ -466,6 +469,7 @@ struct CompoundSecondaryTipSettings: Codable, Equatable, Sendable {
         case opacityCurveLow
         case opacityCurveMid
         case opacityCurveHigh
+        case opacityPressureCurve
         case tileRandomRotation
     }
 
@@ -495,6 +499,7 @@ struct CompoundSecondaryTipSettings: Codable, Equatable, Sendable {
     var opacityCurveLow: Float
     var opacityCurveMid: Float
     var opacityCurveHigh: Float
+    var opacityPressureCurve: CurveChannelState?
 
     /// 0 = no random rotation, 1 = full 360° random rotation per tile
     var tileRandomRotation: Float
@@ -521,6 +526,7 @@ struct CompoundSecondaryTipSettings: Codable, Equatable, Sendable {
         opacityCurveLow: 0.20,
         opacityCurveMid: 0.60,
         opacityCurveHigh: 1.00,
+        opacityPressureCurve: nil,
         tileRandomRotation: 1.0
     )
 
@@ -543,7 +549,13 @@ struct CompoundSecondaryTipSettings: Codable, Equatable, Sendable {
         for pressure: Float,
         pressureSensitivity: Float
     ) -> Float {
-        let curved = BrushSettings.resolvedOpacityCurvePressure(
+        let remappedPressure = BrushSettings.remappedOpacityPressure(
+            pressure: pressure,
+            pressureSensitivity: pressureSensitivity
+        )
+        let curved = opacityPressureCurve.map {
+            CurveLUTBuilder.sampleChannelValue(from: $0, at: remappedPressure)
+        } ?? BrushSettings.resolvedOpacityCurvePressure(
             pressure: pressure,
             pressureSensitivity: pressureSensitivity,
             low: opacityCurveLow,
@@ -589,6 +601,7 @@ struct CompoundSecondaryTipSettings: Codable, Equatable, Sendable {
         opacityCurveLow: Float,
         opacityCurveMid: Float,
         opacityCurveHigh: Float,
+        opacityPressureCurve: CurveChannelState? = nil,
         tileRandomRotation: Float = 1.0
     ) {
         self.tipShape = tipShape
@@ -612,6 +625,7 @@ struct CompoundSecondaryTipSettings: Codable, Equatable, Sendable {
         self.opacityCurveLow = opacityCurveLow
         self.opacityCurveMid = opacityCurveMid
         self.opacityCurveHigh = opacityCurveHigh
+        self.opacityPressureCurve = opacityPressureCurve
         self.tileRandomRotation = tileRandomRotation
     }
 
@@ -640,6 +654,7 @@ struct CompoundSecondaryTipSettings: Codable, Equatable, Sendable {
         opacityCurveLow = try container.decodeIfPresent(Float.self, forKey: .opacityCurveLow) ?? defaults.opacityCurveLow
         opacityCurveMid = try container.decodeIfPresent(Float.self, forKey: .opacityCurveMid) ?? defaults.opacityCurveMid
         opacityCurveHigh = try container.decodeIfPresent(Float.self, forKey: .opacityCurveHigh) ?? defaults.opacityCurveHigh
+        opacityPressureCurve = try container.decodeIfPresent(CurveChannelState.self, forKey: .opacityPressureCurve)
         tileRandomRotation = try container.decodeIfPresent(Float.self, forKey: .tileRandomRotation) ?? defaults.tileRandomRotation
     }
 
@@ -666,6 +681,7 @@ struct CompoundSecondaryTipSettings: Codable, Equatable, Sendable {
         try container.encode(opacityCurveLow, forKey: .opacityCurveLow)
         try container.encode(opacityCurveMid, forKey: .opacityCurveMid)
         try container.encode(opacityCurveHigh, forKey: .opacityCurveHigh)
+        try container.encodeIfPresent(opacityPressureCurve, forKey: .opacityPressureCurve)
         try container.encode(tileRandomRotation, forKey: .tileRandomRotation)
     }
 }
@@ -1235,6 +1251,20 @@ struct BrushSettings: Codable, Sendable, Equatable {
         let automatic = min(max(automaticCompensationAmount, 0), 1)
         let brush = min(max(brushCompensationAmount, 0), 1)
         return automatic * brush
+    }
+}
+
+extension BrushSettings {
+    /// Rendering modes that need a stroke-scoped mask session instead of the
+    /// ordinary per-stamp color pipeline. Overlay compound brushes must keep A
+    /// and B in independent accumulation textures so their own stamp cadences
+    /// survive until the final pixel blend.
+    var requiresStrokeMaskSession: Bool {
+        buildMode == .opacityCap || (
+            buildMode == .buildUp &&
+            compoundBrush.enabled &&
+            compoundBrush.mode == .overlay
+        )
     }
 }
 

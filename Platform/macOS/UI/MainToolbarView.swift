@@ -68,6 +68,17 @@ struct MainToolbarView: View {
                 editingViewModel.toggleLuminosityPreview()
             }
 
+            toolbarToggleButton(
+                title: "水平翻转",
+                systemImage: "arrow.left.and.right",
+                isOn: editingViewModel.workspace.viewport.isHorizontallyFlipped,
+                helpText: editingViewModel.workspace.viewport.isHorizontallyFlipped
+                    ? "恢复画布正常方向"
+                    : "左右翻转画布，仅改变观察方向"
+            ) {
+                editingViewModel.toggleCanvasHorizontalFlip()
+            }
+
             Spacer(minLength: 0)
 
             Text(hostViewModel.workspace.document.metadata.name)

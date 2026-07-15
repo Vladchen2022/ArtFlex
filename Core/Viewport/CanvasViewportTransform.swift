@@ -48,9 +48,10 @@ struct CanvasViewportTransform: Sendable, Equatable {
     func canvasToViewport(_ point: CanvasPoint) -> CanvasPoint {
         let localX = (point.x - (Double(canvasSize.width) / 2)) * actualDisplayScale
         let localY = (point.y - (Double(canvasSize.height) / 2)) * actualDisplayScale
+        let mirroredX = viewport.isHorizontallyFlipped ? -localX : localX
         let radians = viewport.rotationDegrees * .pi / 180
-        let rotatedX = (localX * cos(radians)) - (localY * sin(radians))
-        let rotatedY = (localX * sin(radians)) + (localY * cos(radians))
+        let rotatedX = (mirroredX * cos(radians)) - (localY * sin(radians))
+        let rotatedY = (mirroredX * sin(radians)) + (localY * cos(radians))
         let center = documentCenter
         return CanvasPoint(x: center.x + rotatedX, y: center.y + rotatedY)
     }
@@ -63,8 +64,9 @@ struct CanvasViewportTransform: Sendable, Equatable {
         let unrotatedX = (translatedX * cos(radians)) - (translatedY * sin(radians))
         let unrotatedY = (translatedX * sin(radians)) + (translatedY * cos(radians))
         let scale = max(actualDisplayScale, 0.000_001)
+        let resolvedX = viewport.isHorizontallyFlipped ? -unrotatedX : unrotatedX
         let resolved = CanvasPoint(
-            x: (unrotatedX / scale) + (Double(canvasSize.width) / 2),
+            x: (resolvedX / scale) + (Double(canvasSize.width) / 2),
             y: (unrotatedY / scale) + (Double(canvasSize.height) / 2)
         )
         guard clamped else { return resolved }
@@ -74,10 +76,11 @@ struct CanvasViewportTransform: Sendable, Equatable {
     func viewportOffsetCentering(on canvasPoint: CanvasPoint) -> CanvasPoint {
         let localX = (canvasPoint.x - (Double(canvasSize.width) / 2)) * actualDisplayScale
         let localY = (canvasPoint.y - (Double(canvasSize.height) / 2)) * actualDisplayScale
+        let mirroredX = viewport.isHorizontallyFlipped ? -localX : localX
         let radians = viewport.rotationDegrees * .pi / 180
         return CanvasPoint(
-            x: -((localX * cos(radians)) - (localY * sin(radians))),
-            y: -((localX * sin(radians)) + (localY * cos(radians)))
+            x: -((mirroredX * cos(radians)) - (localY * sin(radians))),
+            y: -((mirroredX * sin(radians)) + (localY * cos(radians)))
         )
     }
 

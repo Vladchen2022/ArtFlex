@@ -323,6 +323,110 @@ struct StageOneBrushPreviewRasterizerTests {
     }
 
     @Test
+    func pressureGrainCrayonMovesFromSparseTextureToDenseHeavyStroke() throws {
+        var sourceBrush = BrushSettings.stageOneDefault
+        sourceBrush.tipShape = .customRound
+        sourceBrush.customTipSourceSemantic = .importedImage
+        sourceBrush.customTipAssetID = BrushPreset.pressureGrainCrayonSourceTipAssetID
+        sourceBrush.customTipMaskData = makeFiberedMask(side: 256)
+        sourceBrush.customTipEnvelopeMaskData = Data(repeating: 255, count: 256 * 256)
+        sourceBrush.compoundBrush.enabled = true
+        sourceBrush.compoundBrush.secondary.tipShape = .customRound
+        sourceBrush.compoundBrush.secondary.sourceSemantic = .customMask
+        sourceBrush.compoundBrush.secondary.customTipMaskData = makeGrainMask(side: 256)
+
+        let sourcePreset = BrushPreset(
+            id: "source-fourth-brush",
+            name: "第四支笔",
+            brush: sourceBrush,
+            isBuiltIn: false,
+            slotIndex: 3
+        )
+        let crayon = try #require(
+            BrushPreset.pressureGrainCrayon(derivedFrom: sourcePreset, slotIndex: 4)
+        )
+        #expect(crayon.brush.buildMode == .buildUp)
+
+        let crayonBrush = crayon.brush
+
+        func renderedAlpha(brush: BrushSettings, pressure: Float) throws -> [UInt8] {
+            var samplingState: BrushStrokeSamplingState?
+            return try #require(StageOneBrushPreviewRasterizer.strokeAlphaBytes(
+                for: brush,
+                resolution: 256,
+                points: [
+                    StrokePoint(x: 52, y: 128, pressure: pressure),
+                    StrokePoint(x: 204, y: 128, pressure: pressure)
+                ],
+                samplingState: &samplingState,
+                flushPendingSamples: true
+            ))
+        }
+
+        let light = try renderedAlpha(brush: crayonBrush, pressure: 0.28)
+        let medium = try renderedAlpha(brush: crayonBrush, pressure: 0.58)
+        let heavy = try renderedAlpha(brush: crayonBrush, pressure: 1)
+        let pressureSeries: [Float] = [
+            0.15, 0.25, 0.35, 0.45, 0.55, 0.58, 0.60, 0.62, 0.65,
+            0.68, 0.70, 0.72, 0.75, 0.80, 0.85, 0.90, 0.95, 1
+        ]
+        let pressureSeriesInteriorAverages = try pressureSeries.map { pressure in
+            alphaAverageRatio(
+                in: try renderedAlpha(brush: crayonBrush, pressure: pressure),
+                resolution: 256,
+                xRange: 72...184,
+                yRange: 121...135
+            )
+        }
+        let lightAverage = alphaAverage(in: light)
+        let mediumAverage = alphaAverage(in: medium)
+        let heavyAverage = alphaAverage(in: heavy)
+        let lightCoverage = alphaCoverageCount(in: light, threshold: 24)
+        let mediumInteriorVariation = alphaStandardDeviationRatio(
+            in: medium,
+            resolution: 256,
+            xRange: 72...184,
+            yRange: 121...135
+        )
+        let heavyNearBlackCoverage = alphaCoverageRatio(
+            in: heavy,
+            resolution: 256,
+            xRange: 72...184,
+            yRange: 121...135,
+            threshold: 224
+        )
+        let heavyDenseCoverage = alphaCoverageRatio(
+            in: heavy,
+            resolution: 256,
+            xRange: 72...184,
+            yRange: 121...135,
+            threshold: 128
+        )
+
+        #expect(lightAverage > 0)
+        #expect(mediumAverage > lightAverage * 1.8)
+        #expect(heavyAverage > mediumAverage * 1.5)
+        #expect(lightCoverage > 0)
+        #expect(alphaMax(in: heavy) >= 248)
+        #expect((pressureSeriesInteriorAverages.first ?? 0) > 0.03)
+        #expect((pressureSeriesInteriorAverages.last ?? 0) > 0.88)
+        for index in 1..<pressureSeriesInteriorAverages.count {
+            let previous = pressureSeriesInteriorAverages[index - 1]
+            let current = pressureSeriesInteriorAverages[index]
+            #expect(current > previous)
+            #expect(current - previous < 0.18)
+        }
+        // Medium pressure must retain visible A-tip texture instead of becoming
+        // a uniform translucent sheet.
+        #expect(mediumInteriorVariation > 0.1)
+        // The Photoshop reference resolves the primary body to an essentially
+        // solid mark at maximum pressure.
+        #expect(heavyDenseCoverage > 0.95)
+        #expect(heavyNearBlackCoverage > 0.95)
+
+    }
+
+    @Test
     func maskFingerprintUsesStableContentIdentity() {
         let maskA = makeVerticalMask(side: 16)
         let maskB = makeSoftCenteredMask(side: 16, alpha: 128)
@@ -498,6 +602,22 @@ struct StageOneBrushPreviewRasterizerTests {
         return Data(bytes)
     }
 
+    private func makeGrainMask(side: Int) -> Data {
+        Data((0..<(side * side)).map { index in
+            let x = index % side
+            let y = index / side
+            let hash = (x &* 73) ^ (y &* 151) ^ ((x + y) &* 37)
+            return hash.isMultiple(of: 5) ? UInt8(255) : UInt8(0)
+        })
+    }
+
+    private func makeFiberedMask(side: Int) -> Data {
+        Data((0..<(side * side)).map { index in
+            let y = index / side
+            return (y / 6).isMultiple(of: 2) ? UInt8(255) : UInt8(0)
+        })
+    }
+
     private func alpha(atX x: Int, y: Int, in image: CGImage) throws -> UInt8 {
         guard
             let provider = image.dataProvider,
@@ -558,6 +678,70 @@ struct StageOneBrushPreviewRasterizerTests {
             partialResult += Int(value)
         }
         return Double(total) / Double(bytes.count)
+    }
+
+    private func alphaCoverageRatio(
+        in bytes: [UInt8],
+        resolution: Int,
+        xRange: ClosedRange<Int>,
+        yRange: ClosedRange<Int>,
+        threshold: UInt8
+    ) -> Double {
+        var covered = 0
+        var sampled = 0
+        for y in yRange where y >= 0 && y < resolution {
+            for x in xRange where x >= 0 && x < resolution {
+                let index = (y * resolution) + x
+                guard index < bytes.count else { continue }
+                sampled += 1
+                if bytes[index] >= threshold {
+                    covered += 1
+                }
+            }
+        }
+        return sampled > 0 ? Double(covered) / Double(sampled) : 0
+    }
+
+    private func alphaAverageRatio(
+        in bytes: [UInt8],
+        resolution: Int,
+        xRange: ClosedRange<Int>,
+        yRange: ClosedRange<Int>
+    ) -> Double {
+        var total = 0
+        var sampled = 0
+        for y in yRange where y >= 0 && y < resolution {
+            for x in xRange where x >= 0 && x < resolution {
+                let index = (y * resolution) + x
+                guard index < bytes.count else { continue }
+                sampled += 1
+                total += Int(bytes[index])
+            }
+        }
+        return sampled > 0 ? Double(total) / Double(sampled * 255) : 0
+    }
+
+    private func alphaStandardDeviationRatio(
+        in bytes: [UInt8],
+        resolution: Int,
+        xRange: ClosedRange<Int>,
+        yRange: ClosedRange<Int>
+    ) -> Double {
+        var values: [Double] = []
+        for y in yRange where y >= 0 && y < resolution {
+            for x in xRange where x >= 0 && x < resolution {
+                let index = (y * resolution) + x
+                guard index < bytes.count else { continue }
+                values.append(Double(bytes[index]) / 255)
+            }
+        }
+        guard !values.isEmpty else { return 0 }
+        let average = values.reduce(0, +) / Double(values.count)
+        let variance = values.reduce(0) { partialResult, value in
+            let delta = value - average
+            return partialResult + (delta * delta)
+        } / Double(values.count)
+        return sqrt(variance)
     }
 
     private func rgba(atX x: Int, y: Int, in image: CGImage) throws -> (red: UInt8, green: UInt8, blue: UInt8, alpha: UInt8) {

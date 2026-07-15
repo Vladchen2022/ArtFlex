@@ -290,14 +290,14 @@ final class MetalStrokeEngine: StrokeEngine {
 
             case .packet(let stroke, let layerID, _):
                 guard session.layerID == layerID else { continue }
-                if requiresOpacityCap(stroke), session.opacityCapSession == nil {
+                if requiresStrokeMaskSession(stroke), session.opacityCapSession == nil {
                     session.opacityCapSession = brushRenderer.makeOpacityCapSession(
                         for: session.workingTexture,
                         commandQueue: metalContext.commandQueue
                     )
                 }
 
-                if requiresOpacityCap(stroke), let opacityCapSession = session.opacityCapSession {
+                if requiresStrokeMaskSession(stroke), let opacityCapSession = session.opacityCapSession {
                     _ = brushRenderer.encodeOpacityCapStroke(
                         stroke: stroke,
                         session: opacityCapSession,
@@ -355,7 +355,7 @@ final class MetalStrokeEngine: StrokeEngine {
                     paintVariationSeed: lastStroke.paintVariationSeed
                 )
 
-                if requiresOpacityCap(lastStroke), let opacityCapSession = session.opacityCapSession {
+                if requiresStrokeMaskSession(lastStroke), let opacityCapSession = session.opacityCapSession {
                     _ = brushRenderer.encodeOpacityCapStroke(
                         stroke: flushStroke,
                         session: opacityCapSession,
@@ -914,14 +914,14 @@ final class MetalStrokeEngine: StrokeEngine {
                 colorTint: colorTint,
                 colorTintAmount: colorTintAmount
             )
-            if requiresOpacityCap(adjustedPacket), opacityCapSession == nil {
+            if requiresStrokeMaskSession(adjustedPacket), opacityCapSession == nil {
                 opacityCapSession = brushRenderer.makeOpacityCapSession(
                     for: texture,
                     commandQueue: metalContext.commandQueue
                 )
             }
 
-            if requiresOpacityCap(adjustedPacket), let opacityCapSession {
+            if requiresStrokeMaskSession(adjustedPacket), let opacityCapSession {
                 _ = brushRenderer.encodeOpacityCapStroke(
                     stroke: adjustedPacket,
                     session: opacityCapSession,
@@ -965,7 +965,7 @@ final class MetalStrokeEngine: StrokeEngine {
                 paintVariationSeed: adjustedLastStroke.paintVariationSeed
             )
 
-            if requiresOpacityCap(adjustedLastStroke), let opacityCapSession {
+            if requiresStrokeMaskSession(adjustedLastStroke), let opacityCapSession {
                 _ = brushRenderer.encodeOpacityCapStroke(
                     stroke: flushStroke,
                     session: opacityCapSession,
@@ -1086,8 +1086,8 @@ final class MetalStrokeEngine: StrokeEngine {
         tool == .brush || tool == .eraser || tool == .smudge
     }
 
-    private func requiresOpacityCap(_ stroke: StrokeDescriptor) -> Bool {
-        (stroke.tool == .brush || stroke.tool == .eraser) && stroke.brush.buildMode == .opacityCap
+    private func requiresStrokeMaskSession(_ stroke: StrokeDescriptor) -> Bool {
+        (stroke.tool == .brush || stroke.tool == .eraser) && stroke.brush.requiresStrokeMaskSession
     }
 
     private func makeAlphaLockTextureCopy(from sourceTexture: MTLTexture) -> MTLTexture? {

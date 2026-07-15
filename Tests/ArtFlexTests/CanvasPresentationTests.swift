@@ -20,6 +20,22 @@ struct CanvasPresentationTests {
         #expect(viewport.zoomScale == 1.5)
         #expect(viewport.contentOffset == CanvasPoint(x: 12, y: -8))
         #expect(viewport.rotationDegrees == 0)
+        #expect(!viewport.isHorizontallyFlipped)
+    }
+
+    @Test
+    func viewportRoundTripsHorizontalFlipState() throws {
+        let viewport = CanvasViewport(
+            zoomScale: 1.8,
+            contentOffset: .init(x: 21, y: -13),
+            rotationDegrees: 17,
+            isHorizontallyFlipped: true
+        )
+
+        let data = try JSONEncoder().encode(viewport)
+        let restored = try JSONDecoder().decode(CanvasViewport.self, from: data)
+
+        #expect(restored == viewport)
     }
 
     @Test
@@ -131,6 +147,45 @@ struct CanvasPresentationTests {
     }
 
     @Test
+    func anchoredZoomKeepsHoveredCanvasPointStationaryWhenFlippedAndRotated() {
+        var viewport = CanvasViewport(
+            zoomScale: 1.15,
+            contentOffset: CanvasPoint(x: -34, y: 26),
+            rotationDegrees: 32,
+            isHorizontallyFlipped: true
+        )
+        let canvasSize = CanvasSize(width: 960, height: 960)
+        let anchorPoint = CanvasPoint(x: 710, y: 260)
+
+        let before = screenPoint(
+            for: anchorPoint,
+            viewport: viewport,
+            canvasSize: canvasSize,
+            availableWidth: 1400,
+            availableHeight: 900
+        )
+
+        viewport.setZoomScale(
+            1.95,
+            anchoredAt: anchorPoint,
+            canvasSize: canvasSize,
+            availableWidth: 1400,
+            availableHeight: 900
+        )
+
+        let after = screenPoint(
+            for: anchorPoint,
+            viewport: viewport,
+            canvasSize: canvasSize,
+            availableWidth: 1400,
+            availableHeight: 900
+        )
+
+        #expect(abs(after.x - before.x) < 0.001)
+        #expect(abs(after.y - before.y) < 0.001)
+    }
+
+    @Test
     func viewportTransformRoundTripsCanvasPointsWithPanZoomAndRotation() {
         let transform = CanvasViewportTransform(
             canvasSize: .init(width: 1600, height: 900),
@@ -149,6 +204,60 @@ struct CanvasPresentationTests {
 
         #expect(abs(restored.x - point.x) < 0.000_001)
         #expect(abs(restored.y - point.y) < 0.000_001)
+    }
+
+    @Test
+    func viewportTransformRoundTripsCanvasPointsWhenFlippedAndRotated() {
+        let transform = CanvasViewportTransform(
+            canvasSize: .init(width: 1600, height: 900),
+            viewport: .init(
+                zoomScale: 2.4,
+                contentOffset: .init(x: 73, y: -41),
+                rotationDegrees: 27,
+                isHorizontallyFlipped: true
+            ),
+            availableWidth: 1320,
+            availableHeight: 840
+        )
+        let point = CanvasPoint(x: 1180, y: 247)
+
+        let viewportPoint = transform.canvasToViewport(point)
+        let restored = transform.viewportToCanvas(viewportPoint)
+
+        #expect(abs(restored.x - point.x) < 0.000_001)
+        #expect(abs(restored.y - point.y) < 0.000_001)
+    }
+
+    @Test
+    func horizontalFlipMirrorsCanvasPointsBeforeRotation() {
+        let canvasSize = CanvasSize(width: 1000, height: 800)
+        let normal = CanvasViewportTransform(
+            canvasSize: canvasSize,
+            viewport: .init(
+                zoomScale: 1.7,
+                contentOffset: .init(x: 18, y: -24),
+                rotationDegrees: 31
+            ),
+            availableWidth: 1200,
+            availableHeight: 900
+        )
+        let flipped = CanvasViewportTransform(
+            canvasSize: canvasSize,
+            viewport: .init(
+                zoomScale: 1.7,
+                contentOffset: .init(x: 18, y: -24),
+                rotationDegrees: 31,
+                isHorizontallyFlipped: true
+            ),
+            availableWidth: 1200,
+            availableHeight: 900
+        )
+
+        let normalMirroredPoint = normal.canvasToViewport(.init(x: 750, y: 230))
+        let flippedPoint = flipped.canvasToViewport(.init(x: 250, y: 230))
+
+        #expect(abs(flippedPoint.x - normalMirroredPoint.x) < 0.000_001)
+        #expect(abs(flippedPoint.y - normalMirroredPoint.y) < 0.000_001)
     }
 
     @Test
@@ -287,7 +396,7 @@ struct CanvasPresentationTests {
             y: (canvasPoint.y / Double(canvasSize.height)) * displayHeight - (displayHeight / 2)
         )
         let zoomedPoint = CanvasPoint(
-            x: localPoint.x * viewport.zoomScale,
+            x: localPoint.x * viewport.zoomScale * (viewport.isHorizontallyFlipped ? -1 : 1),
             y: localPoint.y * viewport.zoomScale
         )
         let rotationRadians = viewport.rotationDegrees * .pi / 180

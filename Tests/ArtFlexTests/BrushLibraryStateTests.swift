@@ -360,6 +360,103 @@ struct BrushLibraryStateTests {
     }
 
     @Test
+    @MainActor
+    func workspaceViewModelRelaunchKeepsInstalledPressureGrainCrayonBuiltIn() async throws {
+        let tempRootURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ArtFlexPressureGrainCrayonTests-\(UUID().uuidString)", isDirectory: true)
+        let redirectedFileManager = RedirectedApplicationSupportFileManager(
+            applicationSupportRootURL: tempRootURL
+        )
+        let persistenceController = BrushLibraryPersistenceController(
+            fileManager: redirectedFileManager
+        )
+
+        defer {
+            try? FileManager.default.removeItem(at: tempRootURL)
+        }
+
+        var sourceBrush = BrushSettings.stageOneDefault
+        sourceBrush.tipShape = .customRound
+        sourceBrush.customTipSourceSemantic = .importedImage
+        sourceBrush.customTipAssetID = BrushPreset.pressureGrainCrayonSourceTipAssetID
+        sourceBrush.customTipEnvelopeMaskData = Data(repeating: 255, count: 256 * 256)
+        sourceBrush.compoundBrush.enabled = true
+        sourceBrush.compoundBrush.secondary.tipShape = .customRound
+        sourceBrush.compoundBrush.secondary.customTipMaskData = Data(repeating: 127, count: 256 * 256)
+
+        let sourcePreset = BrushPreset(
+            id: "source-fourth-brush",
+            name: "第四支笔",
+            brush: sourceBrush,
+            isBuiltIn: false,
+            slotIndex: 3
+        )
+        try persistenceController.saveResources(
+            library: BrushLibraryState(
+                presets: [sourcePreset],
+                selectedPresetID: sourcePreset.id
+            ),
+            tipImageLibrary: .empty
+        )
+
+        guard let metalContext = MetalDeviceContext() else {
+            Issue.record("Metal is required to validate pressure crayon startup migration.")
+            return
+        }
+
+        let firstBootstrap = try AppBootstrap(
+            workspaceStore: WorkspaceStore(),
+            metalContext: metalContext,
+            layerSurfaceStore: StageOneLayerSurfaceStore(),
+            brushLibraryPersistenceController: persistenceController
+        )
+        let firstViewModel = WorkspaceViewModel(
+            bootstrap: firstBootstrap,
+            installsZoomKeyboardMonitor: false,
+            preparesInitialTextures: false
+        )
+        #expect(
+            firstViewModel.workspace.brushLibrary
+                .preset(id: BrushPreset.pressureGrainCrayonPresetID)?.isBuiltIn == true
+        )
+
+        var persistedCrayon = persistenceController.loadResources()?.library
+            .preset(id: BrushPreset.pressureGrainCrayonPresetID)
+        for _ in 0..<20 where persistedCrayon?.isBuiltIn != true {
+            try await Task.sleep(for: .milliseconds(50))
+            persistedCrayon = persistenceController.loadResources()?.library
+                .preset(id: BrushPreset.pressureGrainCrayonPresetID)
+        }
+        #expect(persistedCrayon?.isBuiltIn == true)
+
+        let secondBootstrap = try AppBootstrap(
+            workspaceStore: WorkspaceStore(),
+            metalContext: metalContext,
+            layerSurfaceStore: StageOneLayerSurfaceStore(),
+            brushLibraryPersistenceController: persistenceController
+        )
+        let secondViewModel = WorkspaceViewModel(
+            bootstrap: secondBootstrap,
+            installsZoomKeyboardMonitor: false,
+            preparesInitialTextures: false
+        )
+        let relaunchedCrayon = secondViewModel.workspace.brushLibrary
+            .preset(id: BrushPreset.pressureGrainCrayonPresetID)
+
+        #expect(relaunchedCrayon?.isBuiltIn == true)
+        #expect(relaunchedCrayon?.brush.buildMode == .buildUp)
+        #expect(
+            secondViewModel.workspace.brushLibrary.selectedPresetID
+                == BrushPreset.pressureGrainCrayonPresetID
+        )
+        #expect(secondViewModel.workspace.toolSession.brush.buildMode == .buildUp)
+        #expect(
+            secondViewModel.workspace.brushLibrary.presets
+                .filter { $0.id == BrushPreset.pressureGrainCrayonPresetID }.count == 1
+        )
+    }
+
+    @Test
     func launchDefaultPresetPrefersFirstVisibleShortcutSlotOverArrayOrder() {
         let firstPreset = BrushPreset(
             id: "slot-zero",
@@ -381,6 +478,151 @@ struct BrushLibraryStateTests {
         )
 
         #expect(library.launchDefaultPreset()?.id == firstPreset.id)
+    }
+
+    @Test
+    func pressureGrainCrayonInstallsOnceFromKnownFourthBrushTip() throws {
+        var sourceBrush = BrushSettings.stageOneDefault
+        sourceBrush.tipShape = .customRound
+        sourceBrush.customTipSourceSemantic = .importedImage
+        sourceBrush.customTipAssetID = BrushPreset.pressureGrainCrayonSourceTipAssetID
+        sourceBrush.customTipEnvelopeMaskData = Data(repeating: 255, count: 256 * 256)
+        sourceBrush.compoundBrush.enabled = true
+        sourceBrush.compoundBrush.secondary.tipShape = .customRound
+        sourceBrush.compoundBrush.secondary.customTipMaskData = Data(
+            (0..<(256 * 256)).map { index in
+                index.isMultiple(of: 5) ? UInt8(255) : UInt8(0)
+            }
+        )
+
+        let sourcePreset = BrushPreset(
+            id: "source-fourth-brush",
+            name: "第四支笔",
+            brush: sourceBrush,
+            isBuiltIn: false,
+            slotIndex: 3
+        )
+        let library = BrushLibraryState(
+            presets: [sourcePreset],
+            selectedPresetID: sourcePreset.id
+        )
+
+        let installed = library.installingOrUpdatingPressureGrainCrayonPresetIfPossible()
+        let crayon = try #require(installed.preset(id: BrushPreset.pressureGrainCrayonPresetID))
+
+        #expect(installed.presets.count == 2)
+        #expect(crayon.name == "颗粒蜡笔")
+        #expect(crayon.isBuiltIn)
+        #expect(crayon.slotIndex == 0)
+        #expect(crayon.brush.size == 29)
+        #expect(crayon.brush.spacingPercent == 5)
+        #expect(crayon.brush.pressureSizeAmount == 0)
+        #expect(crayon.brush.pressureOpacityAmount == 0)
+        #expect(crayon.brush.buildMode == .buildUp)
+        #expect(crayon.brush.buildUpOpacityCompensationAmount == 1)
+        #expect(crayon.brush.compoundBrush.enabled)
+        #expect(crayon.brush.compoundBrush.mode == .overlay)
+        #expect(crayon.brush.compoundBrush.pressureMix == .balanced)
+        #expect(crayon.brush.compoundBrush.globalPressureSizeAmount == 0)
+        #expect(crayon.brush.compoundBrush.globalPressureOpacityAmount == 1)
+        #expect(abs(crayon.brush.customTipSoftness - (44.0 / 49.0)) < 0.0001)
+        #expect(
+            abs(crayon.brush.compoundBrush.secondary.relativeSizeRatio - (214.0 / 150.0)) < 0.0001
+        )
+        #expect(crayon.brush.compoundBrush.secondary.spacingPercent == 75)
+        #expect(abs(crayon.brush.compoundBrush.secondary.softness - (44.0 / 49.0)) < 0.0001)
+        #expect(crayon.brush.compoundBrush.secondary.followsStrokeDirection == false)
+        #expect(crayon.brush.compoundBrush.secondary.pressureSizeAmount == 0)
+        #expect(crayon.brush.compoundBrush.secondary.pressureOpacityAmount == 0)
+        #expect(crayon.brush.compoundBrush.secondary.tileRandomRotation == 0)
+        #expect(
+            crayon.brush.compoundBrush.secondary.opacityPressureCurve?.points == [
+                .init(x: 0, y: 0),
+                .init(x: 1, y: 1)
+            ]
+        )
+        #expect(
+            abs(crayon.brush.compoundBrush.secondary.resolvedOpacityFactor(for: 0) - 1) < 0.0001
+        )
+        #expect(
+            abs(crayon.brush.compoundBrush.secondary.resolvedOpacityFactor(for: 0.5) - 1) < 0.0001
+        )
+        #expect(
+            crayon.brush.resolvedOpacityPressureCurveState.points == [
+                .init(x: 0, y: 0),
+                .init(x: 1, y: 1)
+            ]
+        )
+
+        let installedAgain = installed.installingOrUpdatingPressureGrainCrayonPresetIfPossible()
+        #expect(installedAgain == installed)
+    }
+
+    @Test
+    func pressureGrainCrayonMigrationReplacesBadVersionInOriginalSlot() throws {
+        var sourceBrush = BrushSettings.stageOneDefault
+        sourceBrush.tipShape = .customRound
+        sourceBrush.customTipSourceSemantic = .importedImage
+        sourceBrush.customTipAssetID = BrushPreset.pressureGrainCrayonSourceTipAssetID
+        sourceBrush.customTipEnvelopeMaskData = Data(repeating: 255, count: 256 * 256)
+        sourceBrush.compoundBrush.secondary.tipShape = .customRound
+        sourceBrush.compoundBrush.secondary.customTipMaskData = Data(repeating: 127, count: 256 * 256)
+
+        var badBrush = sourceBrush
+        badBrush.spacingPercent = 6
+        badBrush.buildMode = .opacityCap
+        badBrush.buildUpOpacityCompensationAmount = 0
+        badBrush.compoundBrush.globalPressureOpacityAmount = 0
+        badBrush.compoundBrush.secondary.tileRandomRotation = 1
+        let library = BrushLibraryState(
+            presets: [
+                BrushPreset(
+                    id: "source-fourth-brush",
+                    name: "第四支笔",
+                    brush: sourceBrush,
+                    isBuiltIn: false,
+                    slotIndex: 3
+                ),
+                BrushPreset(
+                    id: BrushPreset.pressureGrainCrayonPresetID,
+                    name: "旧蜡笔",
+                    brush: badBrush,
+                    isBuiltIn: true,
+                    slotIndex: 9
+                )
+            ],
+            selectedPresetID: BrushPreset.pressureGrainCrayonPresetID
+        )
+
+        let migrated = library.installingOrUpdatingPressureGrainCrayonPresetIfPossible()
+        let crayon = try #require(migrated.preset(id: BrushPreset.pressureGrainCrayonPresetID))
+
+        #expect(migrated.presets.filter { $0.id == BrushPreset.pressureGrainCrayonPresetID }.count == 1)
+        #expect(crayon.slotIndex == 9)
+        #expect(crayon.name == "颗粒蜡笔")
+        #expect(crayon.brush.spacingPercent == 5)
+        #expect(crayon.brush.buildMode == .buildUp)
+        #expect(crayon.brush.buildUpOpacityCompensationAmount == 1)
+        #expect(crayon.brush.compoundBrush.mode == .overlay)
+        #expect(crayon.brush.compoundBrush.globalPressureOpacityAmount == 1)
+        #expect(crayon.brush.compoundBrush.secondary.tileRandomRotation == 0)
+    }
+
+    @Test
+    func pressureGrainCrayonDoesNotInstallFromUnrelatedFourthBrush() {
+        let sourcePreset = BrushPreset(
+            id: "unrelated-fourth-brush",
+            name: "第四支笔",
+            brush: .stageOneDefault,
+            isBuiltIn: false,
+            slotIndex: 3
+        )
+        let library = BrushLibraryState(
+            presets: [sourcePreset],
+            selectedPresetID: sourcePreset.id
+        )
+
+        #expect(library.installingOrUpdatingPressureGrainCrayonPresetIfPossible() == library)
     }
 }
 

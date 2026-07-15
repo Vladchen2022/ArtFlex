@@ -9,21 +9,25 @@ struct CanvasViewport: Codable, Sendable, Equatable {
     var zoomScale: Double
     var contentOffset: CanvasPoint
     var rotationDegrees: Double
+    var isHorizontallyFlipped: Bool
 
     init(
         zoomScale: Double,
         contentOffset: CanvasPoint,
-        rotationDegrees: Double = 0
+        rotationDegrees: Double = 0,
+        isHorizontallyFlipped: Bool = false
     ) {
         self.zoomScale = zoomScale
         self.contentOffset = contentOffset
         self.rotationDegrees = rotationDegrees
+        self.isHorizontallyFlipped = isHorizontallyFlipped
     }
 
     private enum CodingKeys: String, CodingKey {
         case zoomScale
         case contentOffset
         case rotationDegrees
+        case isHorizontallyFlipped
     }
 
     init(from decoder: Decoder) throws {
@@ -31,6 +35,10 @@ struct CanvasViewport: Codable, Sendable, Equatable {
         zoomScale = try container.decode(Double.self, forKey: .zoomScale)
         contentOffset = try container.decode(CanvasPoint.self, forKey: .contentOffset)
         rotationDegrees = try container.decodeIfPresent(Double.self, forKey: .rotationDegrees) ?? 0
+        isHorizontallyFlipped = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .isHorizontallyFlipped
+        ) ?? false
     }
 
     func encode(to encoder: Encoder) throws {
@@ -38,12 +46,14 @@ struct CanvasViewport: Codable, Sendable, Equatable {
         try container.encode(zoomScale, forKey: .zoomScale)
         try container.encode(contentOffset, forKey: .contentOffset)
         try container.encode(rotationDegrees, forKey: .rotationDegrees)
+        try container.encode(isHorizontallyFlipped, forKey: .isHorizontallyFlipped)
     }
 
     static let stageOneDefault = CanvasViewport(
         zoomScale: 1,
         contentOffset: CanvasPoint(x: 0, y: 0),
-        rotationDegrees: 0
+        rotationDegrees: 0,
+        isHorizontallyFlipped: false
     )
 
     mutating func setZoomScale(
@@ -91,10 +101,11 @@ struct CanvasViewport: Codable, Sendable, Equatable {
             x: (clampedAnchor.x / Double(canvasSize.width)) * displayWidth - (displayWidth / 2),
             y: (clampedAnchor.y / Double(canvasSize.height)) * displayHeight - (displayHeight / 2)
         )
+        let mirroredAnchorX = isHorizontallyFlipped ? -localAnchor.x : localAnchor.x
         let rotationRadians = rotationDegrees * .pi / 180
         let rotatedAnchor = CanvasPoint(
-            x: (localAnchor.x * cos(rotationRadians)) - (localAnchor.y * sin(rotationRadians)),
-            y: (localAnchor.x * sin(rotationRadians)) + (localAnchor.y * cos(rotationRadians))
+            x: (mirroredAnchorX * cos(rotationRadians)) - (localAnchor.y * sin(rotationRadians)),
+            y: (mirroredAnchorX * sin(rotationRadians)) + (localAnchor.y * cos(rotationRadians))
         )
         let zoomDelta = previousZoomScale - clampedZoomScale
 

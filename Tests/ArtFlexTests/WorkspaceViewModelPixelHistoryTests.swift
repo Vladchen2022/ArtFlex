@@ -6,6 +6,34 @@ import Testing
 struct WorkspaceViewModelPixelHistoryTests {
     @Test
     @MainActor
+    func horizontalCanvasFlipChangesOnlyViewportAndLeavesLayerPixelsUntouched() throws {
+        let harness = try PixelHistoryHarness(canvasSize: .init(width: 64, height: 64))
+        let activeLayerID = harness.viewModel.workspace.document.activeLayerID
+        try fillOpaqueRect(
+            in: harness,
+            layerID: activeLayerID,
+            originX: 8,
+            originY: 12,
+            width: 20,
+            height: 16,
+            color: .init(red: 0.2, green: 0.45, blue: 0.8, alpha: 1)
+        )
+        let before = try harness.snapshot(layerID: activeLayerID)
+
+        harness.viewModel.toggleCanvasHorizontalFlip()
+
+        #expect(harness.viewModel.workspace.viewport.isHorizontallyFlipped)
+        #expect(try harness.snapshot(layerID: activeLayerID) == before)
+        #expect(!harness.viewModel.canUndo)
+
+        harness.viewModel.toggleCanvasHorizontalFlip()
+
+        #expect(!harness.viewModel.workspace.viewport.isHorizontallyFlipped)
+        #expect(try harness.snapshot(layerID: activeLayerID) == before)
+    }
+
+    @Test
+    @MainActor
     func deletingLayerWithPendingTransformCancelsPreviewWithoutMovingBackground() throws {
         let harness = try PixelHistoryHarness(canvasSize: .init(width: 64, height: 64))
         let backgroundLayerID = try #require(harness.viewModel.workspace.document.layers.first?.id)

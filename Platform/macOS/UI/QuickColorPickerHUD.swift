@@ -18,6 +18,7 @@ struct QuickColorPickerHUD: View {
     let presentation: CanvasPresentation
     let canvasSize: CanvasSize
     let viewportRotationDegrees: Double
+    let isCanvasHorizontallyFlipped: Bool
     let viewportSize: CGSize
     let brushSlots: [BrushPreset?]
     let selectedBrushPresetID: String?
@@ -147,9 +148,10 @@ struct QuickColorPickerHUD: View {
         let centerY = presentation.documentDisplaySize.y / 2
         let translatedX = (localX - centerX) * presentation.documentZoomScale
         let translatedY = (localY - centerY) * presentation.documentZoomScale
+        let mirroredX = isCanvasHorizontallyFlipped ? -translatedX : translatedX
         let radians = viewportRotationDegrees * .pi / 180
-        let rotatedX = (translatedX * cos(radians)) - (translatedY * sin(radians))
-        let rotatedY = (translatedX * sin(radians)) + (translatedY * cos(radians))
+        let rotatedX = (mirroredX * cos(radians)) - (translatedY * sin(radians))
+        let rotatedY = (mirroredX * sin(radians)) + (translatedY * cos(radians))
 
         return CGPoint(
             x: presentation.documentOrigin.x + centerX + rotatedX,

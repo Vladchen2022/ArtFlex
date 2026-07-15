@@ -500,6 +500,71 @@ struct MetalStrokeEngineQueueTests {
     }
 
     @Test
+    func opacityCapThreePointStrokeStaysContinuousAcrossFrameCommandBuffers() throws {
+        guard let metalContext = MetalDeviceContext() else {
+            Issue.record("Metal unavailable")
+            return
+        }
+
+        let surfaceStore = StageOneLayerSurfaceStore()
+        var document = ArtDocument.stageOneDefault()
+        document.canvasSize = .init(width: 512, height: 128)
+        surfaceStore.prepareTextures(for: document, metal: metalContext)
+        let layerID = document.activeLayerID
+        let engine = try MetalStrokeEngine(
+            metalContext: metalContext,
+            layerSurfaceStore: surfaceStore
+        )
+        var brush = BrushSettings.stageOneDefault
+        brush.buildMode = .opacityCap
+        brush.size = 26
+        brush.spacingPercent = 10
+        brush.pressureSizeAmount = 0
+        brush.pressureOpacityAmount = 0
+
+        engine.beginStrokeIfNeeded(
+            toolSession: ToolSessionState(activeTool: .brush, brush: brush, selectedColor: .black),
+            layerID: layerID
+        )
+
+        let points = [32.0, 256.0, 480.0]
+        for (index, x) in points.enumerated() {
+            _ = engine.applyStroke(
+                StrokeDescriptor(
+                    tool: .brush,
+                    color: .black,
+                    brush: brush,
+                    points: [.init(x: x, y: 64, pressure: 1)],
+                    selectionShape: nil,
+                    skipLeadingStamp: index > 0
+                ),
+                to: layerID
+            )
+            if index == points.indices.last {
+                engine.endStroke()
+            }
+            let commandBuffer = try #require(metalContext.commandQueue.makeCommandBuffer())
+            _ = engine.flushPendingStrokePackets(into: commandBuffer)
+            commandBuffer.commit()
+            commandBuffer.waitUntilCompleted()
+        }
+
+        let displayTexture = try #require(engine.displayTexture(for: layerID))
+        let snapshot = try LayerTextureSerializer(metalContext: metalContext).snapshot(texture: displayTexture)
+        snapshot.pixelData.withUnsafeBytes { rawBuffer in
+            let bytes = rawBuffer.bindMemory(to: UInt8.self)
+            let missingPixels = (36...476).filter { x in
+                let alphaOffset = (64 * snapshot.bytesPerRow) + (x * 4) + 3
+                return bytes[alphaOffset] == 0
+            }
+            #expect(
+                missingPixels.isEmpty,
+                "Missing opacity-cap centerline pixels: \(missingPixels)"
+            )
+        }
+    }
+
+    @Test
     func endStrokeFlushesPendingTailWithinFlushPass() throws {
         guard
             let metalContext = MetalDeviceContext(),

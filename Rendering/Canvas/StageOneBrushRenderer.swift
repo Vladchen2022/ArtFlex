@@ -68,7 +68,8 @@ private struct SmudgeFragmentUniforms {
 private struct CompositeUniforms {
     var brushColor: SIMD4<Float>
     var mode: UInt32 = 0
-    var paddingValues: SIMD3<UInt32> = .zero
+    var usesCompoundMask: UInt32 = 0
+    var paddingValues: SIMD2<UInt32> = .zero
     var paintJitterAmount: Float = 0
     var paintContrastAmount: Float = 0
     var jitterDirectionDegrees: Float = 0
@@ -102,9 +103,36 @@ struct BrushStrokeSamplingState {
     var renderedPixelBounds: BrushPixelBounds?
 }
 
-struct OpacityCapSessionResources {
+final class OpacityCapSessionResources {
     let originalTexture: MTLTexture
     let alphaTexture: MTLTexture
+    let reusesCachedTextures: Bool
+    var compoundSecondaryTexture: MTLTexture?
+    var compoundSecondarySamplingState: BrushStrokeSamplingState?
+
+    init(
+        originalTexture: MTLTexture,
+        alphaTexture: MTLTexture,
+        reusesCachedTextures: Bool
+    ) {
+        self.originalTexture = originalTexture
+        self.alphaTexture = alphaTexture
+        self.reusesCachedTextures = reusesCachedTextures
+    }
+}
+
+private final class UniformBufferRecycleLease: @unchecked Sendable {
+    private weak var renderer: StageOneBrushRenderer?
+    private let buffer: MTLBuffer
+
+    init(renderer: StageOneBrushRenderer, buffer: MTLBuffer) {
+        self.renderer = renderer
+        self.buffer = buffer
+    }
+
+    func recycle() {
+        renderer?.recycleUniformBuffer(buffer)
+    }
 }
 
 private let customTipMaskResolution = 256
@@ -151,6 +179,10 @@ final class StageOneBrushRenderer {
     private let smudgeFrozenTexturePipelineState: MTLRenderPipelineState
     private let smudgeGatherPipelineState: MTLComputePipelineState
     private let opacityCapMaskPipelineState: MTLRenderPipelineState
+    private let compoundPrimaryMaskPipelineState: MTLRenderPipelineState
+    private let compoundSecondaryMaskPipelineState: MTLRenderPipelineState
+    private let compoundPrimaryBuildUpMaskPipelineState: MTLRenderPipelineState
+    private let compoundSecondaryBuildUpMaskPipelineState: MTLRenderPipelineState
     private let opacityCapCompositePipelineState: MTLRenderPipelineState
     private let vertexBuffer: MTLBuffer
     private let compositeSamplerState: MTLSamplerState
@@ -168,8 +200,10 @@ final class StageOneBrushRenderer {
     private var cachedCompoundSecondaryCustomTipTexture: MTLTexture?
     private var cachedOpacityCapOriginalTexture: MTLTexture?
     private var cachedOpacityCapAlphaTexture: MTLTexture?
-    private var cachedUniformBuffer: MTLBuffer?
-    private var cachedUniformBufferCapacity: Int = 0
+    private var cachedCompoundSecondaryTexture: MTLTexture?
+    private let reusableUniformBufferLock = NSLock()
+    private var reusableUniformBuffers: [MTLBuffer] = []
+    private var reusableUniformBufferBytes = 0
     private(set) var debugCustomTipResampleCount = 0
 
     init(device: MTLDevice) throws {
@@ -255,7 +289,8 @@ final class StageOneBrushRenderer {
         struct CompositeUniforms {
             float4 brushColor;
             uint mode;
-            uint3 paddingValues;
+            uint usesCompoundMask;
+            uint2 paddingValues;
             float paintJitterAmount;
             float paintContrastAmount;
             float jitterDirectionDegrees;
@@ -474,12 +509,28 @@ final class StageOneBrushRenderer {
                     break;
             }
 
-            // Pressure mix controls how much of the primary body survives versus the
-            // secondary texture appearance. Overall opacity pressure is applied once
-            // at the end so the main "透明压感" slider still fades the whole brush,
-            // including compound-secondary-dominant presets.
-            float primaryBody = uniforms.compoundPrimaryOpacityFactor * mixWeight;
-            float interior = primaryBody + (1.0 - primaryBody) * compoundAppearance;
+            float interior;
+            if (uniforms.compoundMode == 3) { // overlay
+                // Photoshop-style dual brush: combine A and B with the configured
+                // pressure-mix curve, then apply final opacity pressure once through
+                // compoundGlobalOpacityFactor below.
+                // `mixWeight` is the existing A/B pressure-mix curve. Raising the
+                // A envelope floor with it closes the longitudinal channels only
+                // as pressure becomes heavy, while light pressure remains B-led.
+                float primaryAlpha = max(
+                    clamp(primaryTexture, 0.0, 1.0),
+                    primaryEnvelope * mixWeight * 0.92
+                );
+                float overlaid = primaryAlpha <= 0.5
+                    ? 2.0 * secondaryField * primaryAlpha
+                    : 1.0 - (2.0 * (1.0 - secondaryField) * (1.0 - primaryAlpha));
+                interior = mix(secondaryField, clamp(overlaid, 0.0, 1.0), mixWeight);
+            } else {
+                // Pressure mix controls how much of the primary body survives versus
+                // the secondary texture appearance.
+                float primaryBody = uniforms.compoundPrimaryOpacityFactor * mixWeight;
+                interior = primaryBody + (1.0 - primaryBody) * compoundAppearance;
+            }
 
             // ALWAYS clip by primaryEnvelope — stroke boundary stays sharp at all pressures.
             // Max-blend (opacityCap) across overlapping stamps ensures interior texture is
@@ -1044,15 +1095,167 @@ final class StageOneBrushRenderer {
             return float4(flowAlpha, flowAlpha, flowAlpha, flowAlpha);
         }
 
+        fragment float4 stageOneCompoundPrimaryMaskFragment(
+            VertexOut in [[stage_in]],
+            const device BrushUniforms *uniformsArray [[buffer(1)]],
+            texture2d<float, access::read> selectionMask [[texture(0)]],
+            texture2d<float, access::read> alphaLockTexture [[texture(1)]],
+            texture2d<float, access::sample> customTipMask [[texture(2)]],
+            texture2d<float, access::sample> primaryEnvelopeTipMask [[texture(5)]]
+        ) {
+            BrushUniforms uniforms = uniformsArray[in.instanceID];
+            // Preserve the real A-tip material. Replacing it with a solid envelope
+            // turns opacity pressure into a uniform translucent sheet before the
+            // overlay operation, which is visibly unlike Photoshop/Krita.
+            float texturedPrimary = primaryTextureAlpha(
+                in.localPoint,
+                uniforms,
+                customTipMask
+            );
+            float primaryEnvelope = primaryEnvelopeAlpha(
+                in.localPoint,
+                uniforms,
+                primaryEnvelopeTipMask
+            );
+            float effectivePrimaryPressure = clamp(
+                uniforms.compoundPrimaryOpacityFactor * uniforms.compoundGlobalOpacityFactor,
+                0.0,
+                1.0
+            );
+            // Let the real A texture appear from light pressure onward, while a
+            // restrained envelope floor closes its larger channels progressively.
+            // Both terms are continuous over the full pressure range: a narrow
+            // high-pressure switch makes the stroke jump from sparse to dead black.
+            float texturedPressure = 0.98 * pow(effectivePrimaryPressure, 0.75);
+            float densityPressure = 0.92 * (
+                1.0 - pow(1.0 - effectivePrimaryPressure, 1.5)
+            );
+            float primaryAlpha = max(
+                texturedPrimary * texturedPressure,
+                primaryEnvelope * densityPressure
+            );
+            if (primaryAlpha <= 0.001) {
+                discard_fragment();
+            }
+
+            float selectionAlpha = selectionAlphaForBrushPixel(in.pixelPoint, uniforms, selectionMask);
+            if (selectionAlpha <= 0.001) {
+                discard_fragment();
+            }
+            primaryAlpha *= selectionAlpha;
+
+            if (uniforms.usesAlphaLock != 0) {
+                uint x = uint(clamp(in.pixelPoint.x, 0.0, uniforms.canvasSize.x - 1.0));
+                uint y = uint(clamp(in.pixelPoint.y, 0.0, uniforms.canvasSize.y - 1.0));
+                if (alphaLockTexture.read(uint2(x, y)).a <= 0.001) {
+                    discard_fragment();
+                }
+            }
+
+            float flowAlpha = uniforms.opacity * primaryAlpha;
+            return float4(flowAlpha, flowAlpha, flowAlpha, flowAlpha);
+        }
+
+        fragment float4 stageOneCompoundSecondaryMaskFragment(
+            VertexOut in [[stage_in]],
+            const device BrushUniforms *uniformsArray [[buffer(1)]],
+            texture2d<float, access::sample> compoundSecondaryTipMask [[texture(6)]]
+        ) {
+            BrushUniforms uniforms = uniformsArray[in.instanceID];
+            float secondaryAlpha = compoundSecondaryTipAlpha(
+                in.localPoint,
+                uniforms,
+                compoundSecondaryTipMask
+            ) * uniforms.compoundSecondaryOpacityFactor;
+            if (secondaryAlpha <= 0.001) {
+                discard_fragment();
+            }
+            float flowAlpha = uniforms.opacity * secondaryAlpha;
+            return float4(flowAlpha, flowAlpha, flowAlpha, flowAlpha);
+        }
+
+        fragment float4 stageOneCompoundPrimaryBuildUpMaskFragment(
+            VertexOut in [[stage_in]],
+            const device BrushUniforms *uniformsArray [[buffer(1)]],
+            texture2d<float, access::read> selectionMask [[texture(0)]],
+            texture2d<float, access::read> alphaLockTexture [[texture(1)]],
+            texture2d<float, access::sample> primaryEnvelopeTipMask [[texture(5)]]
+        ) {
+            BrushUniforms uniforms = uniformsArray[in.instanceID];
+            // A is the dense body stream. Its saved envelope is the actual
+            // footprint that can close under repeated 5% stamps; the raw A
+            // grayscale texture contains fixed channels that cannot become solid
+            // regardless of pressure. B remains the material/grain stream.
+            float primaryAlpha = primaryEnvelopeAlpha(
+                in.localPoint,
+                uniforms,
+                primaryEnvelopeTipMask
+            );
+            float pressureAlpha = uniforms.compoundPrimaryOpacityFactor
+                * uniforms.compoundGlobalOpacityFactor;
+            float targetAlpha = uniforms.opacity * primaryAlpha * pressureAlpha;
+            float flowAlpha = buildUpVisibleAlpha(targetAlpha, uniforms);
+            if (flowAlpha <= 0.001) {
+                discard_fragment();
+            }
+
+            float selectionAlpha = selectionAlphaForBrushPixel(in.pixelPoint, uniforms, selectionMask);
+            if (selectionAlpha <= 0.001) {
+                discard_fragment();
+            }
+            flowAlpha *= selectionAlpha;
+
+            if (uniforms.usesAlphaLock != 0) {
+                uint x = uint(clamp(in.pixelPoint.x, 0.0, uniforms.canvasSize.x - 1.0));
+                uint y = uint(clamp(in.pixelPoint.y, 0.0, uniforms.canvasSize.y - 1.0));
+                if (alphaLockTexture.read(uint2(x, y)).a <= 0.001) {
+                    discard_fragment();
+                }
+            }
+
+            return float4(flowAlpha, flowAlpha, flowAlpha, flowAlpha);
+        }
+
+        fragment float4 stageOneCompoundSecondaryBuildUpMaskFragment(
+            VertexOut in [[stage_in]],
+            const device BrushUniforms *uniformsArray [[buffer(1)]],
+            texture2d<float, access::sample> compoundSecondaryTipMask [[texture(6)]]
+        ) {
+            BrushUniforms uniforms = uniformsArray[in.instanceID];
+            float secondaryAlpha = compoundSecondaryTipAlpha(
+                in.localPoint,
+                uniforms,
+                compoundSecondaryTipMask
+            );
+            // B is the Dual Brush material mask, not a second coat of pressure-
+            // controlled paint. Applying global transfer to both A and B squares
+            // low pressure after Overlay and makes the light stroke disappear.
+            // B may still have its own explicitly configured opacity response.
+            float pressureAlpha = uniforms.compoundSecondaryOpacityFactor;
+            float targetAlpha = uniforms.opacity * secondaryAlpha * pressureAlpha;
+            float flowAlpha = buildUpVisibleAlpha(targetAlpha, uniforms);
+            if (flowAlpha <= 0.001) {
+                discard_fragment();
+            }
+            return float4(flowAlpha, flowAlpha, flowAlpha, flowAlpha);
+        }
+
         fragment float4 stageOneOpacityCapCompositeFragment(
             CompositeVertexOut in [[stage_in]],
             texture2d<float, access::sample> originalTexture [[texture(0)]],
             texture2d<float, access::sample> alphaTexture [[texture(1)]],
+            texture2d<float, access::sample> compoundSecondaryTexture [[texture(2)]],
             sampler textureSampler [[sampler(0)]],
             constant CompositeUniforms &uniforms [[buffer(0)]]
         ) {
             float4 original = originalTexture.sample(textureSampler, in.texCoord);
             float accumulatedAlpha = alphaTexture.sample(textureSampler, in.texCoord).r;
+            if (uniforms.usesCompoundMask != 0) {
+                float secondaryAlpha = compoundSecondaryTexture.sample(textureSampler, in.texCoord).r;
+                accumulatedAlpha = accumulatedAlpha <= 0.5
+                    ? 2.0 * secondaryAlpha * accumulatedAlpha
+                    : 1.0 - (2.0 * (1.0 - secondaryAlpha) * (1.0 - accumulatedAlpha));
+            }
             float cappedAlpha = clamp(accumulatedAlpha * uniforms.brushColor.a, 0.0, 1.0);
 
             if (uniforms.mode == 1) {
@@ -1261,6 +1464,106 @@ final class StageOneBrushRenderer {
             throw StageOneBrushRendererInitializationError.pipelineState("opacityCapMask", error)
         }
 
+        let compoundPrimaryMaskDescriptor = MTLRenderPipelineDescriptor()
+        compoundPrimaryMaskDescriptor.vertexFunction = vertexFunction
+        guard let compoundPrimaryMaskFunction = library.makeFunction(name: "stageOneCompoundPrimaryMaskFragment") else {
+            throw StageOneBrushRendererInitializationError.missingFunction("stageOneCompoundPrimaryMaskFragment")
+        }
+        compoundPrimaryMaskDescriptor.fragmentFunction = compoundPrimaryMaskFunction
+        compoundPrimaryMaskDescriptor.colorAttachments[0].pixelFormat = .r8Unorm
+        let compoundPrimaryMaskAttachment = compoundPrimaryMaskDescriptor.colorAttachments[0]!
+        compoundPrimaryMaskAttachment.isBlendingEnabled = true
+        compoundPrimaryMaskAttachment.rgbBlendOperation = .max
+        compoundPrimaryMaskAttachment.alphaBlendOperation = .max
+        compoundPrimaryMaskAttachment.sourceRGBBlendFactor = .one
+        compoundPrimaryMaskAttachment.sourceAlphaBlendFactor = .one
+        compoundPrimaryMaskAttachment.destinationRGBBlendFactor = .one
+        compoundPrimaryMaskAttachment.destinationAlphaBlendFactor = .one
+        do {
+            self.compoundPrimaryMaskPipelineState = try device.makeRenderPipelineState(
+                descriptor: compoundPrimaryMaskDescriptor
+            )
+        } catch {
+            throw StageOneBrushRendererInitializationError.pipelineState("compoundPrimaryMask", error)
+        }
+
+        let compoundSecondaryMaskDescriptor = MTLRenderPipelineDescriptor()
+        compoundSecondaryMaskDescriptor.vertexFunction = vertexFunction
+        guard let compoundSecondaryMaskFunction = library.makeFunction(name: "stageOneCompoundSecondaryMaskFragment") else {
+            throw StageOneBrushRendererInitializationError.missingFunction("stageOneCompoundSecondaryMaskFragment")
+        }
+        compoundSecondaryMaskDescriptor.fragmentFunction = compoundSecondaryMaskFunction
+        compoundSecondaryMaskDescriptor.colorAttachments[0].pixelFormat = .r8Unorm
+        let compoundSecondaryMaskAttachment = compoundSecondaryMaskDescriptor.colorAttachments[0]!
+        compoundSecondaryMaskAttachment.isBlendingEnabled = true
+        compoundSecondaryMaskAttachment.rgbBlendOperation = .max
+        compoundSecondaryMaskAttachment.alphaBlendOperation = .max
+        compoundSecondaryMaskAttachment.sourceRGBBlendFactor = .one
+        compoundSecondaryMaskAttachment.sourceAlphaBlendFactor = .one
+        compoundSecondaryMaskAttachment.destinationRGBBlendFactor = .one
+        compoundSecondaryMaskAttachment.destinationAlphaBlendFactor = .one
+        do {
+            self.compoundSecondaryMaskPipelineState = try device.makeRenderPipelineState(
+                descriptor: compoundSecondaryMaskDescriptor
+            )
+        } catch {
+            throw StageOneBrushRendererInitializationError.pipelineState("compoundSecondaryMask", error)
+        }
+
+        let compoundPrimaryBuildUpMaskDescriptor = MTLRenderPipelineDescriptor()
+        compoundPrimaryBuildUpMaskDescriptor.vertexFunction = vertexFunction
+        guard let compoundPrimaryBuildUpMaskFunction = library.makeFunction(
+            name: "stageOneCompoundPrimaryBuildUpMaskFragment"
+        ) else {
+            throw StageOneBrushRendererInitializationError.missingFunction(
+                "stageOneCompoundPrimaryBuildUpMaskFragment"
+            )
+        }
+        compoundPrimaryBuildUpMaskDescriptor.fragmentFunction = compoundPrimaryBuildUpMaskFunction
+        compoundPrimaryBuildUpMaskDescriptor.colorAttachments[0].pixelFormat = .r8Unorm
+        let compoundPrimaryBuildUpMaskAttachment = compoundPrimaryBuildUpMaskDescriptor.colorAttachments[0]!
+        compoundPrimaryBuildUpMaskAttachment.isBlendingEnabled = true
+        compoundPrimaryBuildUpMaskAttachment.rgbBlendOperation = .add
+        compoundPrimaryBuildUpMaskAttachment.alphaBlendOperation = .add
+        compoundPrimaryBuildUpMaskAttachment.sourceRGBBlendFactor = .one
+        compoundPrimaryBuildUpMaskAttachment.sourceAlphaBlendFactor = .one
+        compoundPrimaryBuildUpMaskAttachment.destinationRGBBlendFactor = .oneMinusSourceAlpha
+        compoundPrimaryBuildUpMaskAttachment.destinationAlphaBlendFactor = .oneMinusSourceAlpha
+        do {
+            self.compoundPrimaryBuildUpMaskPipelineState = try device.makeRenderPipelineState(
+                descriptor: compoundPrimaryBuildUpMaskDescriptor
+            )
+        } catch {
+            throw StageOneBrushRendererInitializationError.pipelineState("compoundPrimaryBuildUpMask", error)
+        }
+
+        let compoundSecondaryBuildUpMaskDescriptor = MTLRenderPipelineDescriptor()
+        compoundSecondaryBuildUpMaskDescriptor.vertexFunction = vertexFunction
+        guard let compoundSecondaryBuildUpMaskFunction = library.makeFunction(
+            name: "stageOneCompoundSecondaryBuildUpMaskFragment"
+        ) else {
+            throw StageOneBrushRendererInitializationError.missingFunction(
+                "stageOneCompoundSecondaryBuildUpMaskFragment"
+            )
+        }
+        compoundSecondaryBuildUpMaskDescriptor.fragmentFunction = compoundSecondaryBuildUpMaskFunction
+        compoundSecondaryBuildUpMaskDescriptor.colorAttachments[0].pixelFormat = .r8Unorm
+        let compoundSecondaryBuildUpMaskAttachment = compoundSecondaryBuildUpMaskDescriptor.colorAttachments[0]!
+        compoundSecondaryBuildUpMaskAttachment.isBlendingEnabled = true
+        compoundSecondaryBuildUpMaskAttachment.rgbBlendOperation = .add
+        compoundSecondaryBuildUpMaskAttachment.alphaBlendOperation = .add
+        compoundSecondaryBuildUpMaskAttachment.sourceRGBBlendFactor = .one
+        compoundSecondaryBuildUpMaskAttachment.sourceAlphaBlendFactor = .one
+        compoundSecondaryBuildUpMaskAttachment.destinationRGBBlendFactor = .oneMinusSourceAlpha
+        compoundSecondaryBuildUpMaskAttachment.destinationAlphaBlendFactor = .oneMinusSourceAlpha
+        do {
+            self.compoundSecondaryBuildUpMaskPipelineState = try device.makeRenderPipelineState(
+                descriptor: compoundSecondaryBuildUpMaskDescriptor
+            )
+        } catch {
+            throw StageOneBrushRendererInitializationError.pipelineState("compoundSecondaryBuildUpMask", error)
+        }
+
         let opacityCapCompositeDescriptor = MTLRenderPipelineDescriptor()
         guard
             let compositeVertexFunction = library.makeFunction(name: "stageOneCompositeVertex"),
@@ -1331,32 +1634,67 @@ final class StageOneBrushRenderer {
     }
 
     private static let maxSetBytesLength = 4096
+    private static let maxReusableUniformBufferCount = 8
+    private static let maxReusableUniformBufferBytes = 16 * 1024 * 1024
 
     private func setInstancedUniforms(
         _ uniformsArray: inout [BrushUniforms],
-        encoder: MTLRenderCommandEncoder
+        encoder: MTLRenderCommandEncoder,
+        commandBuffer: MTLCommandBuffer
     ) {
         let bufferLength = MemoryLayout<BrushUniforms>.stride * uniformsArray.count
         if bufferLength <= Self.maxSetBytesLength {
             encoder.setVertexBytes(&uniformsArray, length: bufferLength, index: 1)
             encoder.setFragmentBytes(&uniformsArray, length: bufferLength, index: 1)
         } else {
-            let buffer: MTLBuffer
-            if let cached = cachedUniformBuffer, cachedUniformBufferCapacity >= bufferLength {
-                cached.contents().copyMemory(from: &uniformsArray, byteCount: bufferLength)
-                buffer = cached
-            } else {
-                let allocSize = max(bufferLength, MemoryLayout<BrushUniforms>.stride * 64)
-                guard let newBuffer = device.makeBuffer(bytes: &uniformsArray, length: allocSize, options: .storageModeShared) else {
+            guard let buffer = leaseUniformBuffer(minimumLength: bufferLength) else {
+                return
+            }
+            uniformsArray.withUnsafeBytes { bytes in
+                guard let source = bytes.baseAddress else {
                     return
                 }
-                cachedUniformBuffer = newBuffer
-                cachedUniformBufferCapacity = allocSize
-                buffer = newBuffer
+                buffer.contents().copyMemory(from: source, byteCount: bufferLength)
             }
             encoder.setVertexBuffer(buffer, offset: 0, index: 1)
             encoder.setFragmentBuffer(buffer, offset: 0, index: 1)
+            let recycleLease = UniformBufferRecycleLease(renderer: self, buffer: buffer)
+            commandBuffer.addCompletedHandler { [recycleLease] _ in
+                recycleLease.recycle()
+            }
         }
+    }
+
+    private func leaseUniformBuffer(minimumLength: Int) -> MTLBuffer? {
+        reusableUniformBufferLock.lock()
+        let reusableIndex = reusableUniformBuffers.indices
+            .filter { reusableUniformBuffers[$0].length >= minimumLength }
+            .min { reusableUniformBuffers[$0].length < reusableUniformBuffers[$1].length }
+        if let reusableIndex {
+            let buffer = reusableUniformBuffers.remove(at: reusableIndex)
+            reusableUniformBufferBytes -= buffer.length
+            reusableUniformBufferLock.unlock()
+            return buffer
+        }
+        reusableUniformBufferLock.unlock()
+
+        let minimumBatchLength = MemoryLayout<BrushUniforms>.stride * 64
+        let requestedLength = max(minimumLength, minimumBatchLength)
+        let allocationLength = ((requestedLength + 4095) / 4096) * 4096
+        return device.makeBuffer(length: allocationLength, options: .storageModeShared)
+    }
+
+    fileprivate func recycleUniformBuffer(_ buffer: MTLBuffer) {
+        reusableUniformBufferLock.lock()
+        defer { reusableUniformBufferLock.unlock() }
+        guard
+            reusableUniformBuffers.count < Self.maxReusableUniformBufferCount,
+            reusableUniformBufferBytes + buffer.length <= Self.maxReusableUniformBufferBytes
+        else {
+            return
+        }
+        reusableUniformBuffers.append(buffer)
+        reusableUniformBufferBytes += buffer.length
     }
 
     @discardableResult
@@ -1456,7 +1794,93 @@ final class StageOneBrushRenderer {
         copyTexture(from: texture, to: originalTexture, commandQueue: commandQueue)
         return OpacityCapSessionResources(
             originalTexture: originalTexture,
-            alphaTexture: alphaTexture
+            alphaTexture: alphaTexture,
+            reusesCachedTextures: reusesCachedTextures
+        )
+    }
+
+    private func ensureCompoundSecondaryTexture(
+        for session: OpacityCapSessionResources,
+        matching texture: MTLTexture,
+        commandBuffer: MTLCommandBuffer
+    ) -> MTLTexture? {
+        if let existing = session.compoundSecondaryTexture {
+            return existing
+        }
+
+        let secondaryTexture: MTLTexture
+        if session.reusesCachedTextures,
+           let cached = cachedCompoundSecondaryTexture,
+           cached.width == texture.width,
+           cached.height == texture.height {
+            secondaryTexture = cached
+        } else {
+            let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+                pixelFormat: .r8Unorm,
+                width: texture.width,
+                height: texture.height,
+                mipmapped: false
+            )
+            descriptor.usage = [.renderTarget, .shaderRead]
+            descriptor.storageMode = .private
+            guard let created = device.makeTexture(descriptor: descriptor) else {
+                return nil
+            }
+            secondaryTexture = created
+            if session.reusesCachedTextures {
+                cachedCompoundSecondaryTexture = created
+            }
+        }
+
+        let clearPass = MTLRenderPassDescriptor()
+        clearPass.colorAttachments[0].texture = secondaryTexture
+        clearPass.colorAttachments[0].loadAction = .clear
+        clearPass.colorAttachments[0].storeAction = .store
+        clearPass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0)
+        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: clearPass) else {
+            return nil
+        }
+        encoder.endEncoding()
+        session.compoundSecondaryTexture = secondaryTexture
+        return secondaryTexture
+    }
+
+    private func usesIndependentCompoundMask(for stroke: StrokeDescriptor) -> Bool {
+        (stroke.tool == .brush || stroke.tool == .eraser) &&
+            stroke.brush.compoundBrush.enabled &&
+            stroke.brush.compoundBrush.mode == .overlay
+    }
+
+    private func compoundSecondarySamplingStroke(from stroke: StrokeDescriptor) -> StrokeDescriptor {
+        let secondary = stroke.brush.compoundBrush.secondary
+        var samplingBrush = stroke.brush
+        samplingBrush.size = secondary.resolvedBaseSize(for: stroke.brush.size)
+        samplingBrush.spacingPercent = secondary.spacingPercent
+        samplingBrush.scatterAmount = 0
+        samplingBrush.jitterAmount = 0
+        samplingBrush.stampRotationDegrees = secondary.angleDegrees
+        samplingBrush.followsStrokeDirection = secondary.followsStrokeDirection
+        samplingBrush.pressureSizeAmount = secondary.pressureSizeAmount
+        samplingBrush.sizeCurveLow = secondary.sizeCurveLow
+        samplingBrush.sizeCurveMid = secondary.sizeCurveMid
+        samplingBrush.sizeCurveHigh = secondary.sizeCurveHigh
+        samplingBrush.sizePressureCurve = nil
+        samplingBrush.pressureOpacityAmount = secondary.pressureOpacityAmount
+        samplingBrush.opacityCurveLow = secondary.opacityCurveLow
+        samplingBrush.opacityCurveMid = secondary.opacityCurveMid
+        samplingBrush.opacityCurveHigh = secondary.opacityCurveHigh
+        samplingBrush.opacityPressureCurve = secondary.opacityPressureCurve
+        samplingBrush.compoundBrush.enabled = false
+
+        return StrokeDescriptor(
+            tool: stroke.tool,
+            color: stroke.color,
+            brush: samplingBrush,
+            points: stroke.points,
+            selectionShape: stroke.selectionShape,
+            alphaLockEnabled: stroke.alphaLockEnabled,
+            skipLeadingStamp: stroke.skipLeadingStamp,
+            paintVariationSeed: stroke.paintVariationSeed
         )
     }
 
@@ -1594,7 +2018,7 @@ final class StageOneBrushRenderer {
                 preservesAlphaWhenAlphaLocked: preservesAlphaWhenAlphaLocked
             )
         }
-        setInstancedUniforms(&uniformsArray, encoder: encoder)
+        setInstancedUniforms(&uniformsArray, encoder: encoder, commandBuffer: commandBuffer)
         encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4, instanceCount: uniformsArray.count)
 
         encoder.endEncoding()
@@ -1611,16 +2035,42 @@ final class StageOneBrushRenderer {
         preservesAlphaWhenAlphaLocked: Bool = true,
         samplingState: inout BrushStrokeSamplingState?
     ) -> Int {
+        let usesIndependentCompoundMask = usesIndependentCompoundMask(for: stroke)
+        let usesCompoundBuildUp = usesIndependentCompoundMask && stroke.brush.buildMode == .buildUp
+        if usesIndependentCompoundMask, samplingState?.isFlushing == true {
+            session.compoundSecondarySamplingState?.isFlushing = true
+        }
+
         let samples = interpolatedPoints(for: stroke, samplingState: &samplingState)
-        guard !samples.isEmpty else {
+        var secondarySamples: [StampSample] = []
+        let secondaryStroke = usesIndependentCompoundMask
+            ? compoundSecondarySamplingStroke(from: stroke)
+            : nil
+        if let secondaryStroke {
+            secondarySamples = interpolatedPoints(
+                for: secondaryStroke,
+                samplingState: &session.compoundSecondarySamplingState
+            )
+        }
+        guard !samples.isEmpty || !secondarySamples.isEmpty else {
             return 0
         }
-        recordRenderedPixelBounds(
-            for: samples,
-            stroke: stroke,
-            texture: texture,
-            samplingState: &samplingState
-        )
+        if !samples.isEmpty {
+            recordRenderedPixelBounds(
+                for: samples,
+                stroke: stroke,
+                texture: texture,
+                samplingState: &samplingState
+            )
+        }
+        if !secondarySamples.isEmpty, let secondaryStroke {
+            recordRenderedPixelBounds(
+                for: secondarySamples,
+                stroke: secondaryStroke,
+                texture: texture,
+                samplingState: &samplingState
+            )
+        }
 
         let selectionShape = stroke.selectionShape?.clamped(
             to: CanvasSize(width: texture.width, height: texture.height)
@@ -1629,11 +2079,26 @@ final class StageOneBrushRenderer {
             for: selectionShape,
             canvasSize: CanvasSize(width: texture.width, height: texture.height)
         )
-        guard let dirtyRect = opacityCapDirtyRect(
-            for: samples,
-            stroke: stroke,
-            texture: texture
-        ) else {
+        let primaryDirtyRect = samples.isEmpty
+            ? nil
+            : opacityCapDirtyRect(for: samples, stroke: stroke, texture: texture)
+        let secondaryDirtyRect: MTLScissorRect? = if let secondaryStroke, !secondarySamples.isEmpty {
+            opacityCapDirtyRect(for: secondarySamples, stroke: secondaryStroke, texture: texture)
+        } else {
+            nil
+        }
+        guard let dirtyRect = unionScissorRects(primaryDirtyRect, secondaryDirtyRect) else {
+            return 0
+        }
+
+        let compoundSecondaryTexture = usesIndependentCompoundMask
+            ? ensureCompoundSecondaryTexture(
+                for: session,
+                matching: texture,
+                commandBuffer: commandBuffer
+            )
+            : nil
+        if usesIndependentCompoundMask, compoundSecondaryTexture == nil {
             return 0
         }
 
@@ -1642,8 +2107,17 @@ final class StageOneBrushRenderer {
         accumulationPassDescriptor.colorAttachments[0].loadAction = .load
         accumulationPassDescriptor.colorAttachments[0].storeAction = .store
 
-        if let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: accumulationPassDescriptor) {
-            encoder.setRenderPipelineState(opacityCapMaskPipelineState)
+        if !samples.isEmpty,
+           let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: accumulationPassDescriptor) {
+            let primaryMaskPipelineState: MTLRenderPipelineState
+            if usesCompoundBuildUp {
+                primaryMaskPipelineState = compoundPrimaryBuildUpMaskPipelineState
+            } else if usesIndependentCompoundMask {
+                primaryMaskPipelineState = compoundPrimaryMaskPipelineState
+            } else {
+                primaryMaskPipelineState = opacityCapMaskPipelineState
+            }
+            encoder.setRenderPipelineState(primaryMaskPipelineState)
             encoder.setVertexBuffer(vertexBuffer, offset: 0, index: 0)
             let primaryCustomTipTexture =
                 customTipTexture(for: primaryCustomTipMaskData(for: stroke), role: .primary) ?? defaultTipTexture
@@ -1672,10 +2146,57 @@ final class StageOneBrushRenderer {
                     preservesAlphaWhenAlphaLocked: preservesAlphaWhenAlphaLocked
                 )
             }
-            setInstancedUniforms(&uniformsArray, encoder: encoder)
+            setInstancedUniforms(&uniformsArray, encoder: encoder, commandBuffer: commandBuffer)
             encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4, instanceCount: uniformsArray.count)
 
             encoder.endEncoding()
+        }
+
+        if usesIndependentCompoundMask,
+           secondarySamples.isEmpty == false,
+           let compoundSecondaryTexture {
+            let secondaryPassDescriptor = MTLRenderPassDescriptor()
+            secondaryPassDescriptor.colorAttachments[0].texture = compoundSecondaryTexture
+            secondaryPassDescriptor.colorAttachments[0].loadAction = .load
+            secondaryPassDescriptor.colorAttachments[0].storeAction = .store
+
+            if let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: secondaryPassDescriptor) {
+                encoder.setRenderPipelineState(
+                    usesCompoundBuildUp
+                        ? compoundSecondaryBuildUpMaskPipelineState
+                        : compoundSecondaryMaskPipelineState
+                )
+                encoder.setVertexBuffer(vertexBuffer, offset: 0, index: 0)
+                let compoundSecondaryTipTexture =
+                    customTipTexture(
+                        for: compoundSecondaryCustomTipMaskData(for: stroke),
+                        role: .compoundSecondary
+                    ) ?? defaultTipTexture
+                encoder.setFragmentTexture(compoundSecondaryTipTexture, index: 6)
+                encoder.setFragmentSamplerState(tipSamplerState, index: 1)
+                encoder.setScissorRect(dirtyRect)
+
+                var secondaryUniforms = secondarySamples.map {
+                    makeCompoundSecondaryUniforms(
+                        for: $0,
+                        stroke: stroke,
+                        texture: texture,
+                        selectionShape: selectionShape
+                    )
+                }
+                setInstancedUniforms(
+                    &secondaryUniforms,
+                    encoder: encoder,
+                    commandBuffer: commandBuffer
+                )
+                encoder.drawPrimitives(
+                    type: .triangleStrip,
+                    vertexStart: 0,
+                    vertexCount: 4,
+                    instanceCount: secondaryUniforms.count
+                )
+                encoder.endEncoding()
+            }
         }
 
         let compositePassDescriptor = MTLRenderPassDescriptor()
@@ -1688,6 +2209,7 @@ final class StageOneBrushRenderer {
             encoder.setVertexBuffer(vertexBuffer, offset: 0, index: 0)
             encoder.setFragmentTexture(session.originalTexture, index: 0)
             encoder.setFragmentTexture(session.alphaTexture, index: 1)
+            encoder.setFragmentTexture(compoundSecondaryTexture ?? defaultTipTexture, index: 2)
             encoder.setFragmentSamplerState(compositeSamplerState, index: 0)
             encoder.setScissorRect(dirtyRect)
 
@@ -1724,6 +2246,7 @@ final class StageOneBrushRenderer {
                     stroke.color.alpha
                 ),
                 mode: stroke.tool == .eraser ? 1 : 0,
+                usesCompoundMask: usesIndependentCompoundMask ? 1 : 0,
                 paintJitterAmount: stroke.brush.effectivePaintJitterAmount,
                 paintContrastAmount: stroke.brush.effectivePaintContrastAmount,
                 jitterDirectionDegrees: avgJitterDir,
@@ -1740,7 +2263,7 @@ final class StageOneBrushRenderer {
             encoder.endEncoding()
         }
 
-        return samples.count
+        return max(samples.count, secondarySamples.count)
     }
 
     func debugInterpolatedStrokeSamples(
@@ -1748,6 +2271,16 @@ final class StageOneBrushRenderer {
         samplingState: inout BrushStrokeSamplingState?
     ) -> [StampSample] {
         interpolatedPoints(for: stroke, samplingState: &samplingState)
+    }
+
+    func debugInterpolatedCompoundSecondarySamples(
+        for stroke: StrokeDescriptor,
+        samplingState: inout BrushStrokeSamplingState?
+    ) -> [StampSample] {
+        interpolatedPoints(
+            for: compoundSecondarySamplingStroke(from: stroke),
+            samplingState: &samplingState
+        )
     }
 
     private func opacityCapDirtyRect(
@@ -1790,6 +2323,24 @@ final class StageOneBrushRenderer {
             return nil
         }
 
+        return MTLScissorRect(
+            x: originX,
+            y: originY,
+            width: endX - originX,
+            height: endY - originY
+        )
+    }
+
+    private func unionScissorRects(
+        _ lhs: MTLScissorRect?,
+        _ rhs: MTLScissorRect?
+    ) -> MTLScissorRect? {
+        guard let lhs else { return rhs }
+        guard let rhs else { return lhs }
+        let originX = min(lhs.x, rhs.x)
+        let originY = min(lhs.y, rhs.y)
+        let endX = max(lhs.x + lhs.width, rhs.x + rhs.width)
+        let endY = max(lhs.y + lhs.height, rhs.y + rhs.height)
         return MTLScissorRect(
             x: originX,
             y: originY,
@@ -1982,6 +2533,41 @@ final class StageOneBrushRenderer {
         )
     }
 
+    private func makeCompoundSecondaryUniforms(
+        for sample: StampSample,
+        stroke: StrokeDescriptor,
+        texture: MTLTexture,
+        selectionShape: SelectionShape?
+    ) -> BrushUniforms {
+        var uniforms = makeUniforms(
+            for: sample,
+            stroke: stroke,
+            texture: texture,
+            selectionShape: selectionShape,
+            modeOverride: 0,
+            includeBrushOpacity: true
+        )
+        uniforms.radius = max(uniforms.compoundSecondaryDiameterPx * 0.5, 0.5)
+
+        let advance = max(uniforms.compoundSecondaryAdvancePx, 1)
+        if stroke.brush.buildMode == .buildUp {
+            uniforms.buildUpOpacitySpacingRatio = min(
+                max(advance / max(uniforms.compoundSecondaryDiameterPx, 1), 0.02),
+                1
+            )
+        }
+        let stampIndex = Int((sample.arcLengthPx / advance).rounded())
+        let randomRotation = Float(stableScatterRandom(
+            x: sample.point.x,
+            y: sample.point.y,
+            index: stampIndex,
+            salt: 0xA24B_AED4
+        ))
+        uniforms.compoundSecondaryAngleDegrees +=
+            ((randomRotation * 2) - 1) * 180 * uniforms.compoundSecondaryTileRandomRotation
+        return uniforms
+    }
+
     private func brushTipShapeCode(_ shape: BrushTipShape) -> UInt32 {
         switch shape {
         case .hardRound:
@@ -2003,6 +2589,8 @@ final class StageOneBrushRenderer {
             return 1
         case .intersect:
             return 2
+        case .overlay:
+            return 3
         }
     }
 
@@ -2921,7 +3509,7 @@ final class StageOneBrushRenderer {
         var uniformsArray = samples.map {
             makeUniforms(for: $0, stroke: stroke, texture: texture, selectionShape: selectionShape)
         }
-        setInstancedUniforms(&uniformsArray, encoder: encoder)
+        setInstancedUniforms(&uniformsArray, encoder: encoder, commandBuffer: commandBuffer)
         encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4, instanceCount: uniformsArray.count)
 
         encoder.endEncoding()

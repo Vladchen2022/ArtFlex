@@ -220,4 +220,32 @@ struct PressureInputTests {
 
         #expect(abs(resolved - 0.18) < 0.0001)
     }
+
+    @Test
+    func zeroPressureAuxiliaryEventDoesNotEraseLastActivePressure() {
+        let resolved = resolveAuxiliaryBrushPressureUpdate(
+            rawPressure: 0,
+            lastPressure: 0.37,
+            strokeInputSampleCount: 8,
+            minimumTabletPressure: 0.02,
+            debugForceConstantPressure: false
+        )
+
+        #expect(resolved == 0.37)
+    }
+
+    @Test
+    func positiveAuxiliaryEventUpdatesPressureWithoutCreatingPositionSample() {
+        let resolved = resolveAuxiliaryBrushPressureUpdate(
+            rawPressure: 0.76,
+            lastPressure: 0.4,
+            strokeInputSampleCount: 8,
+            minimumTabletPressure: 0.02,
+            debugForceConstantPressure: false
+        )
+
+        #expect(resolved != nil)
+        #expect(resolved! > 0.4)
+        #expect(resolved! < 0.76)
+    }
 }

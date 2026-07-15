@@ -47,6 +47,31 @@ func resolveBrushInputPressure(
     return debugForceConstantPressure ? 1 : normalizedPressure
 }
 
+func resolveAuxiliaryBrushPressureUpdate(
+    rawPressure: Float,
+    lastPressure: Float?,
+    strokeInputSampleCount: Int,
+    minimumTabletPressure: Float,
+    debugForceConstantPressure: Bool
+) -> Float? {
+    // AppKit can deliver tabletPoint/pressureChange between positional drag events.
+    // Those callbacks update pressure state only; treating them as extra positions
+    // duplicates or rewinds the stroke path on some tablet drivers.
+    guard rawPressure > 0 else {
+        return lastPressure
+    }
+    return resolveBrushInputPressure(
+        rawPressure: rawPressure,
+        isTabletLikeEvent: true,
+        eventSubtypeIsTabletPoint: true,
+        sawTabletAuxiliaryEvent: true,
+        lastPressure: lastPressure,
+        strokeInputSampleCount: strokeInputSampleCount,
+        minimumTabletPressure: minimumTabletPressure,
+        debugForceConstantPressure: debugForceConstantPressure
+    )
+}
+
 private func emitSelectionTraceHost(_ message: String) {
     appendSelectionTrace(message)
 }
@@ -1638,10 +1663,10 @@ final class StrokeCaptureMTKView: MTKView {
         hoverLocation = convert(event.locationInWindow, from: nil)
         updateCursorIndicator()
         updateCursorAppearance()
-        strokeDelegate?.strokeCaptureView(self, didHoverCanvasAt: sample(from: event).location)
         if handleAuxiliaryBrushInputEvent(event, source: "tabletPoint") {
             return
         }
+        strokeDelegate?.strokeCaptureView(self, didHoverCanvasAt: sample(from: event).location)
         super.tabletPoint(with: event)
     }
 
@@ -1650,10 +1675,10 @@ final class StrokeCaptureMTKView: MTKView {
         hoverLocation = convert(event.locationInWindow, from: nil)
         updateCursorIndicator()
         updateCursorAppearance()
-        strokeDelegate?.strokeCaptureView(self, didHoverCanvasAt: sample(from: event).location)
         if handleAuxiliaryBrushInputEvent(event, source: "pressureChange") {
             return
         }
+        strokeDelegate?.strokeCaptureView(self, didHoverCanvasAt: sample(from: event).location)
         super.pressureChange(with: event)
     }
 
@@ -1889,16 +1914,18 @@ final class StrokeCaptureMTKView: MTKView {
         }
 
         sawTabletAuxiliaryEvent = true
+        lastPressure = resolveAuxiliaryBrushPressureUpdate(
+            rawPressure: Float(event.pressure),
+            lastPressure: lastPressure,
+            strokeInputSampleCount: strokeInputSampleCount,
+            minimumTabletPressure: minimumTabletPressure,
+            debugForceConstantPressure: debugForceConstantPressure
+        )
         if RuntimeDiagnostics.brushHotPathLoggingEnabled {
             brushStrokeLogger.debug(
                 "[auxEvent] source=\(source, privacy: .public) type=\(String(describing: event.type), privacy: .public) subtype=\(String(describing: event.subtype), privacy: .public) timestamp=\(event.timestamp, privacy: .public) rawPressure=\(Float(event.pressure), privacy: .public) deviceID=n/a"
             )
         }
-        let sample = smoothed(sample(from: event))
-        emitCoalescedStrokeSamples([sample])
-        lastSample = sample
-        strokePacketIndex += 1
-        setNeedsDisplay(bounds)
         return true
     }
     private func canvasRotationAngleDegrees(for location: CGPoint) -> Double {

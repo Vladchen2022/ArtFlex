@@ -613,8 +613,10 @@ struct CompoundBrushBuilderSheet: View {
 
     private var mixControls: some View {
         let mix = brush.compoundBrush.pressureMix
+        let mode = brush.compoundBrush.mode.editorEquivalent
+        let usesOverlay = mode == .overlay
         return VStack(alignment: .leading, spacing: 12) {
-            editorSectionHeader("组合方式", detail: "名称直接描述 B 纹理在哪些位置留下颜料")
+            editorSectionHeader("组合方式", detail: "可直接保留 B，也可用 B 叠加调制 A 的透明度")
 
             HStack(spacing: 8) {
                 ForEach(CompoundBrushMode.editorCases, id: \.self) { mode in
@@ -623,14 +625,19 @@ struct CompoundBrushBuilderSheet: View {
             }
 
             editorDivider
-            editorSectionHeader("压感组合", detail: "压力越大，结果可以从 B 纹理逐渐迁移到完整 A 外形")
+            editorSectionHeader(
+                "压感组合",
+                detail: usesOverlay
+                    ? "压力控制结果从原始 B 纹理逐渐迁移到 B 叠加调制 A"
+                    : "压力越大，结果可以从 B 纹理逐渐迁移到完整 A 外形"
+            )
 
-            CompoundPressureCurvePreview(mix: mix)
+            CompoundPressureCurvePreview(mix: mix, mode: mode)
                 .frame(height: 138)
 
             HStack(spacing: 7) {
-                pressurePresetButton("B → A", settings: .default)
-                pressurePresetButton("始终 A", settings: .primaryOnly)
+                pressurePresetButton(usesOverlay ? "B → 叠加" : "B → A", settings: .default)
+                pressurePresetButton(usesOverlay ? "始终叠加" : "始终 A", settings: .primaryOnly)
                 pressurePresetButton("始终 B", settings: .secondaryOnly)
                 pressurePresetButton("固定混合", settings: .balanced)
             }
@@ -656,7 +663,7 @@ struct CompoundBrushBuilderSheet: View {
             HStack {
                 Text("B 纹理")
                 Spacer()
-                Text("A 外形")
+                Text(usesOverlay ? "叠加结果" : "A 外形")
             }
             .font(.system(size: 10, weight: .bold))
             .foregroundStyle(Color.white.opacity(0.5))
@@ -673,7 +680,7 @@ struct CompoundBrushBuilderSheet: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(mode.displayName)
                         .font(.system(size: 11, weight: .bold))
-                    Text(mode == .subtract ? "保留 B 的空白" : "保留 B 的形状")
+                    Text(compoundModeDescription(mode))
                         .font(.system(size: 9, weight: .medium))
                         .foregroundStyle(Color.white.opacity(0.5))
                 }
@@ -691,6 +698,17 @@ struct CompoundBrushBuilderSheet: View {
         }
         .buttonStyle(.plain)
         .frame(maxWidth: .infinity)
+    }
+
+    private func compoundModeDescription(_ mode: CompoundBrushMode) -> String {
+        switch mode {
+        case .subtract:
+            return "保留 B 的空白"
+        case .overlay:
+            return "B 叠加调制 A"
+        case .textureBlend, .intersect:
+            return "保留 B 的形状"
+        }
     }
 
     private func pressurePresetButton(
@@ -729,7 +747,8 @@ struct CompoundBrushBuilderSheet: View {
 
     private func mixValueText(_ primaryWeight: Float) -> String {
         let primaryPercent = Int((min(max(primaryWeight, 0), 1) * 100).rounded())
-        return "B \(100 - primaryPercent) / A \(primaryPercent)"
+        let resultLabel = brush.compoundBrush.mode.editorEquivalent == .overlay ? "叠加" : "A"
+        return "B \(100 - primaryPercent) / \(resultLabel) \(primaryPercent)"
     }
 
     private func tipSourceControls(
@@ -945,6 +964,7 @@ struct CompoundBrushBuilderSheet: View {
         preview.opacityCurveLow = secondary.opacityCurveLow
         preview.opacityCurveMid = secondary.opacityCurveMid
         preview.opacityCurveHigh = secondary.opacityCurveHigh
+        preview.opacityPressureCurve = secondary.opacityPressureCurve
         return preview
     }
 
@@ -1109,6 +1129,7 @@ private struct CompoundPreviewImages: @unchecked Sendable {
 
 private struct CompoundPressureCurvePreview: View {
     let mix: CompoundPressureMixSettings
+    let mode: CompoundBrushMode
 
     var body: some View {
         GeometryReader { proxy in
@@ -1119,7 +1140,7 @@ private struct CompoundPressureCurvePreview: View {
 
                 VStack {
                     HStack {
-                        Text("A 外形")
+                        Text(mode == .overlay ? "叠加结果" : "A 外形")
                         Spacer()
                         Text("压力")
                     }
@@ -1163,6 +1184,9 @@ private struct CompoundModeGlyph: View {
                 let stripe = CGRect(x: x, y: bounds.minY + 5, width: 5, height: bounds.height - 10)
                 if mode == .subtract {
                     context.fill(Path(roundedRect: stripe, cornerRadius: 2), with: .color(.black.opacity(0.75)))
+                } else if mode == .overlay {
+                    let alpha = 0.25 + (CGFloat(index) * 0.13)
+                    context.fill(Path(roundedRect: stripe, cornerRadius: 2), with: .color(.white.opacity(alpha)))
                 } else {
                     context.fill(Path(roundedRect: stripe, cornerRadius: 2), with: .color(.white.opacity(0.78)))
                 }
