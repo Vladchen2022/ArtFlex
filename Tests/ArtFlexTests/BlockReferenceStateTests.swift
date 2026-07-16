@@ -859,10 +859,16 @@ struct BlockReferenceStateTests {
     }
 
     @Test
-    func rightInspectorExpandsOnlyForTheBlockReferenceTool() {
-        #expect(rightInspectorUsesExpandedBlockReferencePanel(activeTool: .blockReference))
-        #expect(rightInspectorUsesExpandedBlockReferencePanel(activeTool: .brush) == false)
-        #expect(rightInspectorUsesExpandedBlockReferencePanel(activeTool: .perspective) == false)
+    func rightInspectorUsesStructuredWorkspaceOnlyForTheBlockReferenceTool() {
+        #expect(rightInspectorUsesStructuredBlockReferenceWorkspace(activeTool: .blockReference))
+        #expect(rightInspectorUsesStructuredBlockReferenceWorkspace(activeTool: .brush) == false)
+        #expect(rightInspectorUsesStructuredBlockReferenceWorkspace(activeTool: .perspective) == false)
+        #expect(BlockReferencePanelPresentation.allCases == [
+            .library,
+            .context,
+            .objects,
+            .cameraSlots
+        ])
     }
 
     @Test

@@ -22,7 +22,7 @@ func rightInspectorColumnWidth(totalWidth: CGFloat) -> CGFloat {
     )
 }
 
-func rightInspectorUsesExpandedBlockReferencePanel(activeTool: ToolKind) -> Bool {
+func rightInspectorUsesStructuredBlockReferenceWorkspace(activeTool: ToolKind) -> Bool {
     activeTool == .blockReference
 }
 
@@ -409,6 +409,11 @@ struct RightInspectorView: View {
         case navigator = "导航器"
     }
 
+    private enum BlockReferenceObservationTab: String {
+        case navigator = "导航器"
+        case cameraSlots = "视角槽"
+    }
+
     @ObservedObject var viewModel: WorkspaceViewModel
     @State private var showsPressureCurveEditor = false
     @State private var showsPressureSizeCurveEditor = false
@@ -441,6 +446,8 @@ struct RightInspectorView: View {
     @State private var lastUsedAdjustmentTab: ParameterInspectorTab = .colorAdjustment
     @State private var parameterInspectorAutoRestoreTab: ParameterInspectorTab?
     @State private var topInspectorTab: TopInspectorTab = .navigator
+    @State private var blockReferenceObservationTab: BlockReferenceObservationTab = .navigator
+    @State private var blockReferencePanelTab: BlockReferencePanelTab = .build
     @State private var navigatorZoomPercentText = "100"
     @State private var textureFillPreviewMaterialScale: Float?
     @State private var textureFillPreviewCoverage: Float?
@@ -449,7 +456,7 @@ struct RightInspectorView: View {
     var body: some View {
         ZStack {
             GeometryReader { proxy in
-                if rightInspectorUsesExpandedBlockReferencePanel(
+                if rightInspectorUsesStructuredBlockReferenceWorkspace(
                     activeTool: viewModel.workspace.toolSession.activeTool
                 ) {
                     blockReferenceWorkspaceInspector(size: proxy.size)
@@ -1119,8 +1126,6 @@ struct RightInspectorView: View {
                 eyedropperParameterControls
             } else if viewModel.workspace.toolSession.activeTool == .perspective {
                 perspectiveParameterControls
-            } else if viewModel.workspace.toolSession.activeTool == .blockReference {
-                blockReferenceParameterControls
             } else if isLassoFillToolActive {
                 lassoFillParameterControls
             } else if usesFillParameterControls {
@@ -1525,23 +1530,112 @@ struct RightInspectorView: View {
         ]
     }
 
-    private var blockReferenceParameterControls: some View {
-        BlockReferenceParameterPanel(viewModel: viewModel)
-    }
-
     private func blockReferenceWorkspaceInspector(size: CGSize) -> some View {
-        ScrollView(.vertical, showsIndicators: true) {
-            InspectorPanel(title: "") {
-                BlockReferenceParameterPanel(viewModel: viewModel)
-                    .frame(
-                        maxWidth: .infinity,
-                        minHeight: max(size.height - 48, 0),
-                        alignment: .top
+        let columnWidth = rightInspectorColumnWidth(totalWidth: size.width)
+        return ScrollView(.vertical, showsIndicators: true) {
+            if viewModel.blockReferenceScene == nil {
+                InspectorPanel(title: "体块参考") {
+                    BlockReferenceParameterPanel(
+                        viewModel: viewModel,
+                        presentation: .context,
+                        selectedTab: $blockReferencePanelTab
                     )
+                    .frame(maxWidth: .infinity, minHeight: 180, alignment: .topLeading)
+                }
+                .padding(rightInspectorHorizontalPadding)
+            } else {
+                HStack(alignment: .top, spacing: rightInspectorColumnSpacing) {
+                    VStack(spacing: 12) {
+                        InspectorPanel(title: "参考图") {
+                            referenceImageSection
+                        }
+
+                        InspectorPanel(title: "") {
+                            BlockReferenceParameterPanel(
+                                viewModel: viewModel,
+                                presentation: .library,
+                                selectedTab: $blockReferencePanelTab
+                            )
+                        }
+                        .frame(minHeight: 420, alignment: .top)
+                    }
+                    .frame(width: columnWidth)
+                    .frame(maxHeight: .infinity, alignment: .top)
+
+                    VStack(spacing: 12) {
+                        blockReferenceObservationPanel(width: columnWidth)
+
+                        InspectorPanel(title: "") {
+                            BlockReferenceParameterPanel(
+                                viewModel: viewModel,
+                                presentation: .context,
+                                selectedTab: $blockReferencePanelTab
+                            )
+                        }
+
+                        InspectorPanel(title: "场景对象") {
+                            BlockReferenceParameterPanel(
+                                viewModel: viewModel,
+                                presentation: .objects,
+                                selectedTab: $blockReferencePanelTab
+                            )
+                        }
+                        .frame(minHeight: 260, alignment: .top)
+                    }
+                    .frame(width: columnWidth)
+                    .frame(maxHeight: .infinity, alignment: .top)
+                }
+                .padding(rightInspectorHorizontalPadding)
+                .frame(maxWidth: .infinity, minHeight: size.height, alignment: .top)
             }
-            .padding(rightInspectorHorizontalPadding)
         }
         .frame(width: size.width, height: size.height, alignment: .top)
+    }
+
+    private func blockReferenceObservationPanel(width: CGFloat) -> some View {
+        let contentWidth = topInspectorPanelContentWidth(panelWidth: width)
+        return VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                inspectorTabButton(
+                    title: BlockReferenceObservationTab.navigator.rawValue,
+                    isSelected: blockReferenceObservationTab == .navigator
+                ) {
+                    blockReferenceObservationTab = .navigator
+                }
+                inspectorTabButton(
+                    title: BlockReferenceObservationTab.cameraSlots.rawValue,
+                    isSelected: blockReferenceObservationTab == .cameraSlots
+                ) {
+                    blockReferenceObservationTab = .cameraSlots
+                }
+            }
+
+            if blockReferenceObservationTab == .navigator {
+                navigatorSection
+            } else {
+                BlockReferenceParameterPanel(
+                    viewModel: viewModel,
+                    presentation: .cameraSlots,
+                    selectedTab: $blockReferencePanelTab
+                )
+            }
+        }
+        .frame(
+            width: contentWidth,
+            height: topInspectorPanelHeight - (topInspectorPanelPadding * 2),
+            alignment: .topLeading
+        )
+        .padding(topInspectorPanelPadding)
+        .frame(width: width, height: topInspectorPanelHeight, alignment: .topLeading)
+        .clipped()
+        .background(
+            RoundedRectangle(cornerRadius: 12)
+                .fill(Color.white.opacity(0.06))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12)
+                        .stroke(Color.white.opacity(0.06), lineWidth: 1)
+                )
+        )
     }
     private func swiftUIColor(_ color: RGBAColor) -> Color {
         Color(

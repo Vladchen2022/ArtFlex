@@ -1,7 +1,7 @@
 import AppKit
 import SwiftUI
 
-private enum BlockReferencePanelTab: String, CaseIterable {
+enum BlockReferencePanelTab: String, CaseIterable {
     case build
     case transform
     case reference
@@ -29,9 +29,24 @@ private enum BlockReferencePanelTab: String, CaseIterable {
     }
 }
 
+enum BlockReferencePanelPresentation: CaseIterable, Equatable {
+    case library
+    case context
+    case objects
+    case cameraSlots
+}
+
+private enum BlockReferenceLibraryCategory: String, CaseIterable {
+    case primitives = "基础体"
+    case people = "人物"
+    case architecture = "建筑"
+}
+
 struct BlockReferenceParameterPanel: View {
     @ObservedObject var viewModel: WorkspaceViewModel
-    @State private var selectedTab: BlockReferencePanelTab = .build
+    let presentation: BlockReferencePanelPresentation
+    @Binding var selectedTab: BlockReferencePanelTab
+    @State private var selectedLibraryCategory: BlockReferenceLibraryCategory = .primitives
     @State private var arrayCount = 3
     @State private var arraySpacing = 40.0
     @State private var radialDegrees = 360.0
@@ -41,7 +56,16 @@ struct BlockReferenceParameterPanel: View {
 
     var body: some View {
         if let scene = viewModel.blockReferenceScene {
-            scenePanel(scene)
+            switch presentation {
+            case .library:
+                libraryPanel
+            case .context:
+                contextPanel(scene)
+            case .objects:
+                objectManagerPanel(scene)
+            case .cameraSlots:
+                cameraSlotList(scene)
+            }
         } else {
             VStack(alignment: .leading, spacing: 10) {
                 Text("体块参考已清除")
@@ -56,14 +80,14 @@ struct BlockReferenceParameterPanel: View {
         }
     }
 
-    private func scenePanel(_ scene: BlockReferenceScene) -> some View {
+    private func contextPanel(_ scene: BlockReferenceScene) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
-                Text("体块参考")
+                Text("工具与参数")
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(Color.white.opacity(0.92))
                 Spacer()
-                Text("\(scene.objects.count) 个")
+                Text(selectedTab.displayName)
                     .font(.system(size: 10, weight: .medium).monospacedDigit())
                     .foregroundStyle(Color.white.opacity(0.5))
             }
@@ -77,15 +101,14 @@ struct BlockReferenceParameterPanel: View {
             .pickerStyle(.segmented)
             .controlSize(.small)
 
-            Text(viewModel.blockReferenceEditorState.instruction)
+            Text(contextInstruction(scene))
                 .font(.system(size: 10, weight: .medium))
                 .foregroundStyle(Color.white.opacity(0.72))
                 .fixedSize(horizontal: false, vertical: true)
 
             switch selectedTab {
             case .build:
-                editorModeControls
-                objectList(scene)
+                buildOperationControls
             case .transform:
                 if let object = viewModel.selectedBlockReferenceObject {
                     if viewModel.selectedBlockReferenceObjectIDs.count > 1 {
@@ -98,7 +121,6 @@ struct BlockReferenceParameterPanel: View {
                     emptyTabHint("先在画布或“建模”标签选择体块。")
                 }
             case .reference:
-                displayControls(scene)
                 snapControls(scene)
                 referenceConstructionControls(scene)
                 if let object = viewModel.selectedBlockReferenceObject {
@@ -107,23 +129,11 @@ struct BlockReferenceParameterPanel: View {
             case .camera:
                 perspectiveMatchControls
                 cameraControls(scene.camera)
-                cameraSlotControls(scene)
+                perspectiveLineControls(scene)
             case .scene:
-                objectList(scene)
+                displayControls(scene)
                 sceneSnapshotControls(scene)
             }
-
-            HStack(spacing: 8) {
-                Button("冻结并绘画") {
-                    viewModel.freezeBlockReferenceAndSelectBrush()
-                }
-                .buttonStyle(.borderedProminent)
-                Button("完全清除", role: .destructive) {
-                    viewModel.clearBlockReferenceScene()
-                }
-                .buttonStyle(.bordered)
-            }
-            .controlSize(.small)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .font(.system(size: 11, weight: .medium))
@@ -131,29 +141,12 @@ struct BlockReferenceParameterPanel: View {
         .environment(\.colorScheme, .dark)
     }
 
-    private var editorModeControls: some View {
+    private var buildOperationControls: some View {
         VStack(spacing: 6) {
             HStack(spacing: 6) {
                 modeButton(.select, image: "cursorarrow")
                 modeButton(.measure, image: "ruler")
                 modeButton(.pickWorkPlane, image: "square.3.layers.3d")
-            }
-            HStack(spacing: 6) {
-                modeButton(.box, image: "cube")
-                modeButton(.cylinder, image: "cylinder")
-                modeButton(.cone, image: "triangle")
-                modeButton(.sphere, image: "circle")
-            }
-            HStack(spacing: 6) {
-                moduleButton(.standingHuman)
-                moduleButton(.seatedHuman)
-                moduleButton(.poseableHuman)
-            }
-            HStack(spacing: 6) {
-                moduleButton(.stairs)
-                moduleButton(.doorFrame)
-                moduleButton(.roomBox)
-                moduleButton(.table)
             }
             Toggle("表面直接建模", isOn: Binding(
                 get: { viewModel.blockReferenceEditorState.buildsDirectlyOnSurfaces },
@@ -164,25 +157,154 @@ struct BlockReferenceParameterPanel: View {
             .font(.system(size: 10, weight: .medium))
             .foregroundStyle(Color.white.opacity(0.82))
             .help("开启后，选择基础体块并在现有体块表面拖动，即以该表面作为本次工作面")
+
+            Text("从左侧体块库选择模型；在画布工作面拖出基面，再拖拉高度。")
+                .font(.system(size: 10, weight: .medium))
+                .foregroundStyle(Color.white.opacity(0.46))
+                .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 
-    private func objectList(_ scene: BlockReferenceScene) -> some View {
+    private var libraryPanel: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("体块库")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(Color.white.opacity(0.92))
+                Spacer()
+                Text("选择后在画布创建")
+                    .font(.system(size: 9, weight: .medium))
+                    .foregroundStyle(Color.white.opacity(0.42))
+            }
+
+            Picker("体块分类", selection: $selectedLibraryCategory) {
+                ForEach(BlockReferenceLibraryCategory.allCases, id: \.self) { category in
+                    Text(category.rawValue).tag(category)
+                }
+            }
+            .labelsHidden()
+            .pickerStyle(.segmented)
+            .controlSize(.small)
+
+            switch selectedLibraryCategory {
+            case .primitives:
+                LazyVGrid(columns: blockLibraryColumns, spacing: 7) {
+                    modeButton(.box, image: "cube")
+                    modeButton(.cylinder, image: "cylinder")
+                    modeButton(.cone, image: "triangle")
+                    modeButton(.sphere, image: "circle")
+                }
+            case .people:
+                LazyVGrid(columns: blockLibraryColumns, spacing: 7) {
+                    moduleButton(.standingHuman)
+                    moduleButton(.seatedHuman)
+                    moduleButton(.poseableHuman)
+                }
+            case .architecture:
+                LazyVGrid(columns: blockLibraryColumns, spacing: 7) {
+                    moduleButton(.stairs)
+                    moduleButton(.doorFrame)
+                    moduleButton(.roomBox)
+                    moduleButton(.table)
+                }
+            }
+
+            Spacer(minLength: 0)
+        }
+        .frame(maxWidth: .infinity, minHeight: 300, alignment: .topLeading)
+        .font(.system(size: 11, weight: .medium))
+        .foregroundStyle(Color.white.opacity(0.88))
+        .environment(\.colorScheme, .dark)
+    }
+
+    private var blockLibraryColumns: [GridItem] {
+        Array(repeating: GridItem(.flexible(), spacing: 7), count: 2)
+    }
+
+    private func objectManagerPanel(_ scene: BlockReferenceScene) -> some View {
+        VStack(alignment: .leading, spacing: 9) {
+            objectList(scene, showsTitle: false, maximumHeight: 330)
+            Divider().overlay(Color.white.opacity(0.08))
+            objectManagerActions(scene)
+        }
+        .frame(maxWidth: .infinity, minHeight: 220, alignment: .topLeading)
+        .font(.system(size: 11, weight: .medium))
+        .foregroundStyle(Color.white.opacity(0.88))
+        .environment(\.colorScheme, .dark)
+    }
+
+    private func objectManagerActions(_ scene: BlockReferenceScene) -> some View {
+        HStack(spacing: 7) {
+            Button {
+                viewModel.selectAllBlockReferenceObjects()
+            } label: {
+                Image(systemName: "checkmark.circle")
+            }
+            .help("选择全部体块")
+            .disabled(scene.objects.isEmpty)
+
+            Button {
+                viewModel.duplicateSelectedBlockReferenceObject()
+            } label: {
+                Image(systemName: "plus.square.on.square")
+            }
+            .help("复制所选")
+            .disabled(viewModel.selectedBlockReferenceObjectIDs.isEmpty)
+
+            Button(role: .destructive) {
+                viewModel.deleteSelectedBlockReferenceObject()
+            } label: {
+                Image(systemName: "trash")
+            }
+            .help("删除所选")
+            .disabled(viewModel.selectedBlockReferenceObjectIDs.isEmpty)
+
+            Spacer()
+
+            Menu {
+                Button("隔离所选") { viewModel.isolateSelectedBlockReferenceObjects() }
+                    .disabled(viewModel.selectedBlockReferenceObjectIDs.isEmpty)
+                Button("显示全部") { viewModel.showAllBlockReferenceObjects() }
+                    .disabled(scene.objects.isEmpty)
+                Button("编组所选") { viewModel.groupSelectedBlockReferenceObjects() }
+                    .disabled(viewModel.selectedBlockReferenceObjectIDs.count < 2)
+                Button("解组所选") { viewModel.ungroupSelectedBlockReferenceObjects() }
+                    .disabled(viewModel.selectedBlockReferenceObjectIDs.isEmpty)
+                Divider()
+                Button("完全清除场景", role: .destructive) {
+                    viewModel.clearBlockReferenceScene()
+                }
+            } label: {
+                Image(systemName: "ellipsis.circle")
+            }
+            .help("更多场景对象操作")
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.small)
+    }
+
+    private func objectList(
+        _ scene: BlockReferenceScene,
+        showsTitle: Bool = true,
+        maximumHeight: CGFloat = 190
+    ) -> some View {
         let selection = viewModel.selectedBlockReferenceObjectIDs
         let activeID = viewModel.blockReferenceEditorState.selectedObjectID
         return VStack(alignment: .leading, spacing: 6) {
-            HStack {
-                sectionTitle("场景对象")
-                Spacer()
-                if !selection.isEmpty {
-                    Text("已选 \(selection.count)")
-                        .font(.system(size: 10, weight: .semibold).monospacedDigit())
-                        .foregroundStyle(Color.accentColor)
+            if showsTitle {
+                HStack {
+                    sectionTitle("场景对象")
+                    Spacer()
+                    if !selection.isEmpty {
+                        Text("已选 \(selection.count)")
+                            .font(.system(size: 10, weight: .semibold).monospacedDigit())
+                            .foregroundStyle(Color.accentColor)
+                    }
                 }
             }
 
             if scene.objects.isEmpty {
-                Text("暂无体块；从上方选择几何体后在画布拖建。")
+                Text("暂无体块；从左侧体块库选择模型后在画布拖建。")
                     .font(.system(size: 10, weight: .medium))
                     .foregroundStyle(Color.white.opacity(0.38))
                     .frame(maxWidth: .infinity, minHeight: 42, alignment: .leading)
@@ -198,8 +320,29 @@ struct BlockReferenceParameterPanel: View {
                         }
                     }
                 }
-                .frame(maxHeight: 190)
+                .frame(maxHeight: maximumHeight)
             }
+        }
+    }
+
+    private func contextInstruction(_ scene: BlockReferenceScene) -> String {
+        switch selectedTab {
+        case .build:
+            return viewModel.blockReferenceEditorState.instruction
+        case .transform:
+            return viewModel.selectedBlockReferenceObjectIDs.isEmpty
+                ? "先在画布或场景对象面板选择体块，再进行精确变换。"
+                : "调整所选体块的位置、旋转、尺寸、枢轴、阵列与组织关系。"
+        case .reference:
+            return "管理活动工作面、捕捉、测量、构造辅助线和剖切观察。"
+        case .camera:
+            return viewModel.blockReferenceEditorState.perspectiveMatch.isActive
+                ? viewModel.blockReferenceEditorState.instruction
+                : "调整观察相机，或用画面直边匹配现有图片的透视。"
+        case .scene:
+            return scene.objects.isEmpty
+                ? "设置体块参考的显示方式；创建对象后可保存完整场景快照。"
+                : "控制整体显示，并保存或恢复包含相机与工作面的场景快照。"
         }
     }
 
@@ -1027,7 +1170,7 @@ struct BlockReferenceParameterPanel: View {
         }
     }
 
-    private func cameraSlotControls(_ scene: BlockReferenceScene) -> some View {
+    private func perspectiveLineControls(_ scene: BlockReferenceScene) -> some View {
         VStack(alignment: .leading, spacing: 7) {
             Divider().overlay(Color.white.opacity(0.08))
             sectionTitle("体块棱边透视")
@@ -1062,8 +1205,20 @@ struct BlockReferenceParameterPanel: View {
                 : "实时线直接延长活动体块的实际棱边，并随相机与体块同步；冻结后才成为可独立编辑的二维辅助。")
                 .font(.system(size: 10, weight: .medium))
                 .foregroundStyle(Color.white.opacity(0.62))
+        }
+    }
 
-            sectionTitle("视角槽")
+    private func cameraSlotList(_ scene: BlockReferenceScene) -> some View {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack {
+                Text("视角槽")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(Color.white.opacity(0.92))
+                Spacer()
+                Text("保存并调用 3D 视角")
+                    .font(.system(size: 9, weight: .medium))
+                    .foregroundStyle(Color.white.opacity(0.42))
+            }
             ForEach(1...5, id: \.self) { index in
                 let slot = scene.cameraSlots.first(where: { $0.index == index })
                 HStack(spacing: 6) {
@@ -1093,6 +1248,10 @@ struct BlockReferenceParameterPanel: View {
                 .controlSize(.mini)
             }
         }
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+        .font(.system(size: 11, weight: .medium))
+        .foregroundStyle(Color.white.opacity(0.88))
+        .environment(\.colorScheme, .dark)
     }
 
     private func sceneSnapshotControls(_ scene: BlockReferenceScene) -> some View {
