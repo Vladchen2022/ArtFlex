@@ -36,6 +36,8 @@ struct BlockReferenceParameterPanel: View {
     @State private var arraySpacing = 40.0
     @State private var radialDegrees = 360.0
     @State private var arrayAxis = BlockReferenceAxis.x
+    @State private var workingPlaneMoveAxis = BlockReferenceAxis.z
+    @State private var workingPlaneMoveDistance = 10.0
 
     var body: some View {
         if let scene = viewModel.blockReferenceScene {
@@ -103,6 +105,7 @@ struct BlockReferenceParameterPanel: View {
                     objectStyleControls(object)
                 }
             case .camera:
+                perspectiveMatchControls
                 cameraControls(scene.camera)
                 cameraSlotControls(scene)
             case .scene:
@@ -355,6 +358,49 @@ struct BlockReferenceParameterPanel: View {
             .font(.system(size: 10, weight: .medium, design: .monospaced))
             .foregroundStyle(Color.cyan.opacity(0.82))
             .fixedSize(horizontal: false, vertical: true)
+
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 7) {
+                    Text("移动工作面")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(Color.white.opacity(0.68))
+                    Picker("世界轴", selection: $workingPlaneMoveAxis) {
+                        ForEach(BlockReferenceAxis.allCases, id: \.self) { axis in
+                            Text(axis.displayName).tag(axis)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.segmented)
+                }
+                HStack(spacing: 6) {
+                    BlockNumberField(
+                        label: "距离",
+                        value: workingPlaneMoveDistance,
+                        scrubSensitivity: 0.5,
+                        minimumValue: 0,
+                        onEditingChanged: { _ in }
+                    ) { workingPlaneMoveDistance = $0 }
+                    Button("负向") {
+                        viewModel.translateBlockReferenceWorkingPlane(
+                            axis: workingPlaneMoveAxis,
+                            distance: -abs(workingPlaneMoveDistance)
+                        )
+                    }
+                    Button("正向") {
+                        viewModel.translateBlockReferenceWorkingPlane(
+                            axis: workingPlaneMoveAxis,
+                            distance: abs(workingPlaneMoveDistance)
+                        )
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.mini)
+                .disabled(abs(workingPlaneMoveDistance) <= 0.000_001)
+                Text("按世界 X/Y/Z 轴平移工作面；斜面沿自身法线移动仍使用下方“网格偏移”。")
+                    .font(.system(size: 9, weight: .medium))
+                    .foregroundStyle(Color.white.opacity(0.42))
+            }
         }
     }
 
@@ -590,6 +636,110 @@ struct BlockReferenceParameterPanel: View {
         }
     }
 
+    private var perspectiveMatchControls: some View {
+        let state = viewModel.blockReferenceEditorState.perspectiveMatch
+        let assessment = viewModel.blockReferencePerspectiveMatchAssessment
+        let planeAnchor = state.resolvedPlaneAnchor(
+            canvasSize: viewModel.workspace.document.canvasSize
+        )
+        let canApply = assessment != nil && planeAnchor != nil
+        return VStack(alignment: .leading, spacing: 7) {
+            HStack {
+                sectionTitle("画面透视匹配")
+                Spacer()
+                Text(assessment.map { planeAnchor == nil ? "需要工作面中心" : $0.quality.displayName }
+                    ?? "需要 X/Y/Z 各两条")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(matchQualityColor(assessment?.quality))
+            }
+
+            HStack(spacing: 6) {
+                Button(state.isActive ? "退出画线" : (state.hasAnyLines ? "继续画线" : "开始画线")) {
+                    if state.isActive {
+                        viewModel.stopBlockReferencePerspectiveMatch()
+                    } else {
+                        viewModel.startBlockReferencePerspectiveMatch()
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                Button("应用到相机") {
+                    viewModel.applyBlockReferencePerspectiveMatch()
+                }
+                .disabled(!canApply)
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+
+            HStack(spacing: 6) {
+                Button(state.isPickingPlaneAnchor ? "请点击画布…" : "拾取工作面中心") {
+                    viewModel.pickBlockReferencePerspectiveMatchPlaneAnchor()
+                }
+                .disabled(state.lineCount(for: .x) < 2 || state.lineCount(for: .y) < 2)
+                Button("恢复自动中心") {
+                    viewModel.useAutomaticBlockReferencePerspectiveMatchPlaneAnchor()
+                }
+                .disabled(state.planeAnchor == nil)
+                Spacer()
+                Text(state.planeAnchor == nil ? "自动" : "手动")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(Color.cyan.opacity(0.86))
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.mini)
+
+            Picker("参考方向", selection: Binding(
+                get: { state.activeAxis },
+                set: { viewModel.setBlockReferencePerspectiveMatchAxis($0) }
+            )) {
+                ForEach(BlockReferenceAxis.allCases, id: \.self) { axis in
+                    Text("\(axis.displayName)  \(state.lineCount(for: axis))/2").tag(axis)
+                }
+            }
+            .labelsHidden()
+            .pickerStyle(.segmented)
+            .disabled(!state.isActive)
+
+            HStack(spacing: 6) {
+                ForEach(BlockReferenceAxis.allCases, id: \.self) { axis in
+                    HStack(spacing: 4) {
+                        Circle()
+                            .fill(axisColor(axis))
+                            .frame(width: 6, height: 6)
+                        Text("\(axis.displayName) \(state.lineCount(for: axis))")
+                    }
+                    .font(.system(size: 9, weight: .semibold).monospacedDigit())
+                }
+                Spacer()
+                Button("撤销一条") { viewModel.undoLastBlockReferencePerspectiveMatchLine() }
+                    .disabled(!state.hasAnyLines)
+                Button("清当前") {
+                    viewModel.clearBlockReferencePerspectiveMatchAxis(state.activeAxis)
+                }
+                .disabled(state.lineCount(for: state.activeAxis) == 0)
+                Button("清空", role: .destructive) {
+                    viewModel.clearBlockReferencePerspectiveMatch()
+                }
+                .disabled(!state.hasAnyLines)
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.mini)
+
+            Text("红 X 与绿 Y 应优先取自同一个目标桌面或地面，交点区域用于自动定位工作面；蓝 Z 使用场景竖直边。也可手动拾取工作面中心。")
+                .font(.system(size: 10, weight: .medium))
+                .foregroundStyle(Color.white.opacity(0.58))
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private func matchQualityColor(_ quality: BlockReferencePerspectiveMatchQuality?) -> Color {
+        switch quality {
+        case .stable: return .green
+        case .approximate: return .yellow
+        case .poor: return .orange
+        case nil: return Color.white.opacity(0.42)
+        }
+    }
+
     private func cameraControls(_ camera: BlockReferenceCamera) -> some View {
         VStack(alignment: .leading, spacing: 7) {
             Divider().overlay(Color.white.opacity(0.08))
@@ -617,6 +767,15 @@ struct BlockReferenceParameterPanel: View {
                     set: { value in viewModel.setBlockReferenceCameraPitch(value) }
                 ),
                 range: -80...80
+            )
+            parameterSlider(
+                title: "滚转",
+                valueText: "\(Int(camera.rollDegrees.rounded()))°",
+                value: Binding(
+                    get: { camera.rollDegrees },
+                    set: { value in viewModel.setBlockReferenceCameraRoll(value) }
+                ),
+                range: -180...180
             )
             parameterSlider(
                 title: "距离",

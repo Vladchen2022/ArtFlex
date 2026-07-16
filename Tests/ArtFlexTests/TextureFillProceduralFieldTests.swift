@@ -23,6 +23,7 @@ struct TextureFillProceduralFieldTests {
         #expect(settings.materialScale == 1)
         #expect(settings.coverage == 0.58)
         #expect(settings.variation == 0.45)
+        #expect(settings.paintJitterAmount == 0)
         #expect(settings.arrangement == .directional)
     }
 
@@ -47,6 +48,26 @@ struct TextureFillProceduralFieldTests {
 
             #expect(decoded.arrangement == arrangement)
         }
+    }
+
+    @Test
+    func textureFillPaintJitterRoundTripsAndClampsToSupportedRange() throws {
+        var settings = TextureFillTipSettings.proceduralDefault
+        settings.paintJitterAmount = 0.64
+
+        let data = try JSONEncoder().encode(settings)
+        let decoded = try JSONDecoder().decode(TextureFillTipSettings.self, from: data)
+
+        #expect(decoded.paintJitterAmount == 0.64)
+
+        let clamped = TextureFillTipSettings(
+            sourceSemantic: .procedural,
+            tipAssetID: nil,
+            importedSourceInfo: nil,
+            customTipMaskData: nil,
+            paintJitterAmount: 2
+        )
+        #expect(clamped.paintJitterAmount == 1)
     }
 
     @Test

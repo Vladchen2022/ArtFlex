@@ -669,7 +669,7 @@ enum StageOneBrushPreviewRasterizer {
             selectionMaskAlphaBytes: Data(repeating: 255, count: width * height),
             fillCenter: CanvasPoint(x: Double(width) * 0.5, y: Double(height) * 0.5),
             color: color,
-            paintJitterAmount: brush.effectivePaintJitterAmount,
+            paintJitterAmount: tipSettings.paintJitterAmount,
             paintContrastAmount: brush.effectivePaintContrastAmount,
             distortionAmount: 0,
             materialTextureData: materialTextureData,
@@ -1183,7 +1183,7 @@ enum StageOneBrushPreviewRasterizer {
         hasher.combine(tipSettings.materialScale)
         hasher.combine(tipSettings.coverage)
         hasher.combine(tipSettings.variation)
-        hasher.combine(brush.effectivePaintJitterAmount)
+        hasher.combine(tipSettings.paintJitterAmount)
         hasher.combine(brush.effectivePaintContrastAmount)
         hasher.combine(color)
         hasher.combine(width)

@@ -436,7 +436,8 @@ struct CanvasContainerView: View {
                 }
 
                 if let blockScene = viewModel.blockReferenceScene,
-                   blockScene.display.isVisible {
+                   blockScene.display.isVisible,
+                   !viewModel.blockReferenceEditorState.perspectiveMatch.isActive {
                     BlockReferenceOverlay(
                         scene: blockScene,
                         editorState: viewModel.blockReferenceEditorState,
@@ -448,7 +449,19 @@ struct CanvasContainerView: View {
                     .allowsHitTesting(false)
                 }
 
-                if let guide = viewModel.perspectiveGuide, guide.isVisible {
+                if viewModel.workspace.toolSession.activeTool == .blockReference,
+                   viewModel.blockReferenceEditorState.perspectiveMatch.isActive {
+                    BlockReferencePerspectiveMatchOverlay(
+                        state: viewModel.blockReferenceEditorState.perspectiveMatch,
+                        transform: viewportTransform
+                    )
+                    .frame(width: geometry.size.width, height: geometry.size.height)
+                    .allowsHitTesting(false)
+                }
+
+                if let guide = viewModel.perspectiveGuide,
+                   guide.isVisible,
+                   !viewModel.perspectiveGuideMatchState.isActive {
                     PerspectiveGuideOverlay(
                         guide: guide,
                         selectedAnchorID: viewModel.selectedPerspectiveAnchorID,
@@ -460,8 +473,20 @@ struct CanvasContainerView: View {
                 }
 
                 if viewModel.workspace.toolSession.activeTool == .perspective,
+                   viewModel.perspectiveGuideMatchState.isActive {
+                    PerspectiveGuideMatchOverlay(
+                        state: viewModel.perspectiveGuideMatchState,
+                        candidate: viewModel.perspectiveGuideMatchCandidate,
+                        transform: viewportTransform
+                    )
+                    .frame(width: geometry.size.width, height: geometry.size.height)
+                    .allowsHitTesting(false)
+                }
+
+                if viewModel.workspace.toolSession.activeTool == .perspective,
                    let guide = viewModel.perspectiveGuide,
                    guide.isVisible,
+                   !viewModel.perspectiveGuideMatchState.isActive,
                    !viewModel.isPanModeActive {
                     PerspectiveGuideGestureOverlay(
                         transform: viewportTransform,
@@ -478,10 +503,26 @@ struct CanvasContainerView: View {
                     .frame(width: geometry.size.width, height: geometry.size.height)
                 }
 
+                if viewModel.workspace.toolSession.activeTool == .perspective,
+                   viewModel.perspectiveGuideMatchState.isActive,
+                   !viewModel.isPanModeActive {
+                    PerspectiveGuideGestureOverlay(
+                        transform: viewportTransform,
+                        onBegan: { point in
+                            onCanvasInteraction?()
+                            viewModel.beginPerspectiveGuideMatchLine(at: point)
+                        },
+                        onChanged: viewModel.updatePerspectiveGuideMatchLine,
+                        onEnded: viewModel.endPerspectiveGuideMatchLine
+                    )
+                    .frame(width: geometry.size.width, height: geometry.size.height)
+                }
+
                 if viewModel.workspace.toolSession.activeTool == .blockReference,
                    let blockScene = viewModel.blockReferenceScene,
                    blockScene.display.isVisible,
                    !blockScene.display.isFrozen,
+                   !viewModel.blockReferenceEditorState.perspectiveMatch.isActive,
                    !viewModel.isPanModeActive {
                     BlockReferenceGestureOverlay(
                         transform: viewportTransform,
@@ -531,8 +572,24 @@ struct CanvasContainerView: View {
                     .frame(width: geometry.size.width, height: geometry.size.height)
                 }
 
+                if viewModel.workspace.toolSession.activeTool == .blockReference,
+                   viewModel.blockReferenceEditorState.perspectiveMatch.isActive,
+                   !viewModel.isPanModeActive {
+                    PerspectiveGuideGestureOverlay(
+                        transform: viewportTransform,
+                        onBegan: { point in
+                            onCanvasInteraction?()
+                            viewModel.beginBlockReferencePerspectiveMatchLine(at: point)
+                        },
+                        onChanged: viewModel.updateBlockReferencePerspectiveMatchLine,
+                        onEnded: viewModel.endBlockReferencePerspectiveMatchLine
+                    )
+                    .frame(width: geometry.size.width, height: geometry.size.height)
+                }
+
                 if viewModel.workspace.toolSession.activeTool == .perspective,
-                   let guide = viewModel.perspectiveGuide {
+                   let guide = viewModel.perspectiveGuide,
+                   !viewModel.perspectiveGuideMatchState.isActive {
                     PerspectiveGuideHUD(
                         guide: guide,
                         onToggleLock: {
@@ -547,7 +604,8 @@ struct CanvasContainerView: View {
                 }
 
                 if viewModel.workspace.toolSession.activeTool == .blockReference,
-                   let blockScene = viewModel.blockReferenceScene {
+                   let blockScene = viewModel.blockReferenceScene,
+                   !viewModel.blockReferenceEditorState.perspectiveMatch.isActive {
                     BlockReferenceHUD(
                         scene: blockScene,
                         editorState: viewModel.blockReferenceEditorState,

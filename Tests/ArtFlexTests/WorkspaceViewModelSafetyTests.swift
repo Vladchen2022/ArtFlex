@@ -97,6 +97,20 @@ struct WorkspaceViewModelSafetyTests {
             selectedItemID: globalPatternID,
             recentItemIDs: [globalPatternID]
         )
+        let globalTextureID = UUID(uuidString: "00000000-0000-0000-0000-000000001003")!
+        currentWorkspace.textureFillLibrary = TextureFillLibraryState(
+            items: [
+                TextureFillLibraryItem(
+                    id: globalTextureID,
+                    displayName: "Global Texture",
+                    slotIndex: 0,
+                    settings: .proceduralDefault,
+                    sourceBrush: .stageOneDefault
+                )
+            ],
+            selectedItemID: globalTextureID,
+            recentItemIDs: [globalTextureID]
+        )
 
         var openedWorkspace = WorkspaceState.stageOneDefault
         openedWorkspace.document.metadata.name = "Opened Project"
@@ -129,6 +143,16 @@ struct WorkspaceViewModelSafetyTests {
             ],
             selectedItemID: projectPatternID
         )
+        openedWorkspace.textureFillLibrary = TextureFillLibraryState(
+            items: [
+                TextureFillLibraryItem(
+                    displayName: "Project Texture",
+                    slotIndex: 0,
+                    settings: .proceduralDefault,
+                    sourceBrush: .stageOneDefault
+                )
+            ]
+        )
 
         let resolvedWorkspace = WorkspaceViewModel.workspaceForOpenedProject(
             openedWorkspace,
@@ -138,6 +162,7 @@ struct WorkspaceViewModelSafetyTests {
         #expect(resolvedWorkspace.document.metadata.name == "Opened Project")
         #expect(resolvedWorkspace.brushLibrary == currentWorkspace.brushLibrary)
         #expect(resolvedWorkspace.patternLibrary == currentWorkspace.patternLibrary)
+        #expect(resolvedWorkspace.textureFillLibrary == currentWorkspace.textureFillLibrary)
     }
 
     @Test
@@ -2241,6 +2266,72 @@ struct WorkspaceViewModelSafetyTests {
 
     @Test
     @MainActor
+    func perspectiveImageMatchCreatesEditableGuidesAndIsOneUndoableChange() throws {
+        let canvasSize = CanvasSize(width: 1_200, height: 800)
+        let harness = try BrushEditingBoundaryHarness(canvasSize: canvasSize)
+        harness.viewModel.selectTool(.perspective)
+        let original = try #require(harness.viewModel.perspectiveGuide)
+        #expect(harness.viewModel.blockReferenceScene == nil)
+        let vanishingPoints: [PerspectiveGuideMatchRole: CanvasPoint] = [
+            .left: CanvasPoint(x: -420, y: 270),
+            .right: CanvasPoint(x: 1_760, y: 390),
+            .vertical: CanvasPoint(x: 610, y: -980)
+        ]
+        let starts: [PerspectiveGuideMatchRole: [CanvasPoint]] = [
+            .left: [CanvasPoint(x: 180, y: 420), CanvasPoint(x: 760, y: 610)],
+            .right: [CanvasPoint(x: 280, y: 570), CanvasPoint(x: 900, y: 430)],
+            .vertical: [CanvasPoint(x: 460, y: 650), CanvasPoint(x: 780, y: 590)]
+        ]
+
+        harness.viewModel.startPerspectiveGuideMatch()
+        for role in PerspectiveGuideMatchRole.allCases {
+            harness.viewModel.setPerspectiveGuideMatchRole(role)
+            let vanishingPoint = try #require(vanishingPoints[role])
+            for start in try #require(starts[role]) {
+                harness.viewModel.beginPerspectiveGuideMatchLine(at: start)
+                harness.viewModel.updatePerspectiveGuideMatchLine(to: CanvasPoint(
+                    x: start.x + (vanishingPoint.x - start.x) * 0.18,
+                    y: start.y + (vanishingPoint.y - start.y) * 0.18
+                ))
+                harness.viewModel.endPerspectiveGuideMatchLine()
+            }
+        }
+
+        #expect(harness.viewModel.perspectiveGuideMatchState.isComplete)
+        #expect(harness.viewModel.perspectiveGuideMatchCandidate != nil)
+        harness.viewModel.applyPerspectiveGuideMatch()
+
+        let applied = try #require(harness.viewModel.perspectiveGuide)
+        #expect(!harness.viewModel.perspectiveGuideMatchState.isActive)
+        #expect(applied.mode == .threePoint)
+        #expect(applied.anchors.count == 6)
+        #expect(harness.viewModel.blockReferenceScene == nil)
+        #expect(hypot(
+            applied.leftVanishingPoint.x - (vanishingPoints[.left]?.x ?? 0),
+            applied.leftVanishingPoint.y - (vanishingPoints[.left]?.y ?? 0)
+        ) < 0.001)
+
+        harness.viewModel.undo()
+        #expect(harness.viewModel.perspectiveGuide == original)
+        harness.viewModel.redo()
+        #expect(harness.viewModel.perspectiveGuide == applied)
+
+        harness.viewModel.beginPerspectiveGuideInteraction(
+            at: CanvasPoint(x: 600, y: 730),
+            hitRadius: 2
+        )
+        harness.viewModel.endPerspectiveGuideInteraction()
+        #expect(harness.viewModel.perspectiveGuide?.anchors.count == 7)
+
+        harness.viewModel.startPerspectiveGuideMatch()
+        #expect(harness.viewModel.perspectiveGuideMatchState.isActive)
+        harness.viewModel.selectTool(.brush)
+        #expect(!harness.viewModel.perspectiveGuideMatchState.isActive)
+        #expect(harness.viewModel.perspectiveGuide?.isLocked == true)
+    }
+
+    @Test
+    @MainActor
     func blockReferenceCreatesExtrudedObjectFreezesAndRestoresThroughHistory() throws {
         let harness = try BrushEditingBoundaryHarness(canvasSize: .init(width: 600, height: 480))
         harness.viewModel.selectTool(.blockReference)
@@ -2881,6 +2972,113 @@ struct WorkspaceViewModelSafetyTests {
 
         harness.viewModel.undo()
         #expect(harness.viewModel.blockReferenceScene?.camera == originalCamera)
+    }
+
+    @Test
+    @MainActor
+    func blockReferencePerspectiveMatchAppliesCameraAndSupportsUndo() throws {
+        let canvasSize = CanvasSize(width: 1_200, height: 800)
+        let harness = try BrushEditingBoundaryHarness(canvasSize: canvasSize)
+        harness.viewModel.selectTool(.blockReference)
+        let originalCamera = try #require(harness.viewModel.blockReferenceScene?.camera)
+        var expectedCamera = originalCamera
+        expectedCamera.yawDegrees = -34
+        expectedCamera.pitchDegrees = 20
+        expectedCamera.fieldOfViewDegrees = 50
+
+        var lines: [BlockReferencePerspectiveMatchLine] = []
+        for axis in BlockReferenceAxis.allCases {
+            let vanishingPoint = try #require(blockReferenceVanishingPoint(
+                direction: axis.unitVector,
+                camera: expectedCamera,
+                canvasSize: canvasSize
+            ))
+            for start in [
+                CanvasPoint(x: 180, y: 220 + Double(lines.count * 18)),
+                CanvasPoint(x: 920, y: 560 - Double(lines.count * 14))
+            ] {
+                lines.append(.init(
+                    axis: axis,
+                    start: start,
+                    end: CanvasPoint(
+                        x: start.x + (vanishingPoint.x - start.x) * 0.25,
+                        y: start.y + (vanishingPoint.y - start.y) * 0.25
+                    )
+                ))
+            }
+        }
+        harness.viewModel.blockReferenceEditorState.perspectiveMatch.lines = lines
+        #expect(harness.viewModel.blockReferencePerspectiveMatchCameraCandidate != nil)
+
+        let expectedPlaneAnchor = try #require(
+            harness.viewModel.blockReferenceEditorState.perspectiveMatch.resolvedPlaneAnchor(
+                canvasSize: canvasSize
+            )
+        )
+
+        harness.viewModel.applyBlockReferencePerspectiveMatch()
+
+        let applied = try #require(harness.viewModel.blockReferenceScene?.camera)
+        #expect(abs(applied.yawDegrees - expectedCamera.yawDegrees) < 0.5)
+        #expect(abs(applied.pitchDegrees - expectedCamera.pitchDegrees) < 0.5)
+        #expect(abs(applied.fieldOfViewDegrees - expectedCamera.fieldOfViewDegrees) < 0.5)
+        #expect(harness.viewModel.blockReferenceScene?.workingPlane == .ground)
+        let projectedOrigin = try #require(projectBlockPoint(
+            .zero,
+            camera: applied,
+            canvasSize: canvasSize
+        ))
+        #expect(hypot(
+            projectedOrigin.canvasPoint.x - expectedPlaneAnchor.x,
+            projectedOrigin.canvasPoint.y - expectedPlaneAnchor.y
+        ) < 0.001)
+        harness.viewModel.undo()
+        #expect(harness.viewModel.blockReferenceScene?.camera == originalCamera)
+    }
+
+    @Test
+    @MainActor
+    func activeBlockReferenceWorkingPlaneMovesAlongWorldAxesAndSupportsHistory() throws {
+        let harness = try BrushEditingBoundaryHarness(canvasSize: .init(width: 600, height: 480))
+        harness.viewModel.selectTool(.blockReference)
+        let sourceID = UUID()
+        _ = harness.viewModel.updateBlockReferenceDocument { scene in
+            scene?.objects = [BlockReferenceObject(
+                id: sourceID,
+                name: "桌面参考",
+                kind: .box,
+                position: .init(x: 12, y: 24, z: 75),
+                dimensions: .init(width: 120, depth: 80, height: 10)
+            )]
+            scene?.workingPlane = BlockWorkingPlane(
+                origin: .init(x: 12, y: 24, z: 80),
+                axisU: .unitX,
+                axisV: .unitY,
+                normal: .unitZ,
+                sourceObjectID: sourceID,
+                sourceFaceIndex: 2
+            )
+        }
+
+        harness.viewModel.translateBlockReferenceWorkingPlane(axis: .z, distance: -80)
+
+        let moved = try #require(harness.viewModel.blockReferenceScene?.workingPlane)
+        #expect(moved.origin == BlockVector3(x: 12, y: 24, z: 0))
+        #expect(moved.normal == .unitZ)
+        #expect(moved.sourceObjectID == nil)
+        #expect(moved.sourceFaceIndex == nil)
+        harness.viewModel.translateBlockReferenceWorkingPlane(axis: .x, distance: 15)
+        #expect(harness.viewModel.blockReferenceScene?.workingPlane.origin == .init(x: 27, y: 24, z: 0))
+
+        harness.viewModel.undo()
+        #expect(harness.viewModel.blockReferenceScene?.workingPlane.origin == .init(x: 12, y: 24, z: 0))
+        harness.viewModel.undo()
+        let restored = try #require(harness.viewModel.blockReferenceScene?.workingPlane)
+        #expect(restored.origin == .init(x: 12, y: 24, z: 80))
+        #expect(restored.sourceObjectID == sourceID)
+        #expect(restored.sourceFaceIndex == 2)
+        harness.viewModel.redo()
+        #expect(harness.viewModel.blockReferenceScene?.workingPlane.origin == .init(x: 12, y: 24, z: 0))
     }
 
     @Test

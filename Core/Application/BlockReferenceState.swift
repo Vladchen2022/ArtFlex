@@ -511,6 +511,11 @@ struct BlockReferenceCamera: Codable, Sendable, Equatable {
     var distance: Double
     var fieldOfViewDegrees: Double
     var isOrthographic: Bool
+    var rollDegrees: Double = 0
+    /// Optical principal point in normalized canvas coordinates. Keeping this
+    /// separate from framing lets a cropped or letterboxed reference image be
+    /// calibrated without pretending its optical center is the canvas center.
+    var principalPointNormalized = CanvasPoint(x: 0.5, y: 0.5)
 
     static let stageOneDefault = BlockReferenceCamera(
         target: BlockVector3(x: 0, y: 0, z: 70),
@@ -526,6 +531,56 @@ struct BlockReferenceCamera: Codable, Sendable, Equatable {
         pitchDegrees = min(max(pitchDegrees.isFinite ? pitchDegrees : 30, -89.9), 89.9)
         distance = min(max(distance.isFinite ? distance : 760, 20), 20_000)
         fieldOfViewDegrees = min(max(fieldOfViewDegrees.isFinite ? fieldOfViewDegrees : 42, 10), 120)
+        rollDegrees = rollDegrees.isFinite ? rollDegrees.truncatingRemainder(dividingBy: 360) : 0
+        principalPointNormalized.x = min(max(
+            principalPointNormalized.x.isFinite ? principalPointNormalized.x : 0.5,
+            -2
+        ), 3)
+        principalPointNormalized.y = min(max(
+            principalPointNormalized.y.isFinite ? principalPointNormalized.y : 0.5,
+            -2
+        ), 3)
+    }
+}
+
+extension BlockReferenceCamera {
+    private enum CodingKeys: String, CodingKey {
+        case target
+        case yawDegrees
+        case pitchDegrees
+        case distance
+        case fieldOfViewDegrees
+        case isOrthographic
+        case rollDegrees
+        case principalPointNormalized
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        target = try container.decode(BlockVector3.self, forKey: .target)
+        yawDegrees = try container.decode(Double.self, forKey: .yawDegrees)
+        pitchDegrees = try container.decode(Double.self, forKey: .pitchDegrees)
+        distance = try container.decode(Double.self, forKey: .distance)
+        fieldOfViewDegrees = try container.decode(Double.self, forKey: .fieldOfViewDegrees)
+        isOrthographic = try container.decode(Bool.self, forKey: .isOrthographic)
+        rollDegrees = try container.decodeIfPresent(Double.self, forKey: .rollDegrees) ?? 0
+        principalPointNormalized = try container.decodeIfPresent(
+            CanvasPoint.self,
+            forKey: .principalPointNormalized
+        ) ?? CanvasPoint(x: 0.5, y: 0.5)
+        normalize()
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(target, forKey: .target)
+        try container.encode(yawDegrees, forKey: .yawDegrees)
+        try container.encode(pitchDegrees, forKey: .pitchDegrees)
+        try container.encode(distance, forKey: .distance)
+        try container.encode(fieldOfViewDegrees, forKey: .fieldOfViewDegrees)
+        try container.encode(isOrthographic, forKey: .isOrthographic)
+        try container.encode(rollDegrees, forKey: .rollDegrees)
+        try container.encode(principalPointNormalized, forKey: .principalPointNormalized)
     }
 }
 
@@ -1002,6 +1057,7 @@ struct BlockReferenceEditorState: Sendable, Equatable {
     var awaitsMirrorAxis = false
     var selectedHumanJoint: BlockHumanJoint?
     var activeHumanJointAxis: BlockReferenceAxis?
+    var perspectiveMatch = BlockReferencePerspectiveMatchState()
     var instruction: String = "选择体块，或选择一种几何体开始建立。"
 
     var resolvedSelectedObjectIDs: Set<UUID> {

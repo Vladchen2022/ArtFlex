@@ -260,6 +260,25 @@ extension WorkspaceViewModel {
         }
     }
 
+    func translateBlockReferenceWorkingPlane(
+        axis: BlockReferenceAxis,
+        distance: Double
+    ) {
+        guard distance.isFinite, abs(distance) > 0.000_001 else { return }
+        _ = updateBlockReferenceDocument(operationKind: "blockReference.workPlane.translate") { scene in
+            guard var plane = scene?.workingPlane else { return }
+            plane.origin = plane.origin + axis.unitVector * distance
+            plane.sourceObjectID = nil
+            plane.sourceFaceIndex = nil
+            scene?.workingPlane = plane
+        }
+        blockReferenceEditorState.instruction = String(
+            format: "活动工作面已沿世界 %@ 轴移动 %+.1f。",
+            axis.displayName,
+            distance
+        )
+    }
+
     func addBlockReferenceConstructionAxis(_ axis: BlockReferenceAxis) {
         guard let scene = blockReferenceScene else { return }
         let line = BlockConstructionLine(

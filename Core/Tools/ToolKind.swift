@@ -1306,6 +1306,7 @@ struct TextureFillTipSettings: Codable, Equatable, Sendable {
     var materialScale: Float
     var coverage: Float
     var variation: Float
+    var paintJitterAmount: Float
 
     static let proceduralDefault = TextureFillTipSettings(
         sourceSemantic: .procedural,
@@ -1315,7 +1316,8 @@ struct TextureFillTipSettings: Codable, Equatable, Sendable {
         arrangement: .directional,
         materialScale: 1,
         coverage: 0.58,
-        variation: 0.45
+        variation: 0.45,
+        paintJitterAmount: 0
     )
 
     private enum CodingKeys: String, CodingKey {
@@ -1327,6 +1329,7 @@ struct TextureFillTipSettings: Codable, Equatable, Sendable {
         case materialScale
         case coverage
         case variation
+        case paintJitterAmount
     }
 
     init(
@@ -1337,7 +1340,8 @@ struct TextureFillTipSettings: Codable, Equatable, Sendable {
         arrangement: TextureFillArrangement = .directional,
         materialScale: Float = 1,
         coverage: Float = 0.58,
-        variation: Float = 0.45
+        variation: Float = 0.45,
+        paintJitterAmount: Float = 0
     ) {
         self.sourceSemantic = sourceSemantic
         self.tipAssetID = tipAssetID
@@ -1347,6 +1351,7 @@ struct TextureFillTipSettings: Codable, Equatable, Sendable {
         self.materialScale = min(max(materialScale, 0.25), 3)
         self.coverage = min(max(coverage, 0.1), 1)
         self.variation = min(max(variation, 0), 1)
+        self.paintJitterAmount = min(max(paintJitterAmount, 0), 1)
     }
 
     init(from decoder: any Decoder) throws {
@@ -1359,7 +1364,8 @@ struct TextureFillTipSettings: Codable, Equatable, Sendable {
             arrangement: try container.decodeIfPresent(TextureFillArrangement.self, forKey: .arrangement) ?? .directional,
             materialScale: try container.decodeIfPresent(Float.self, forKey: .materialScale) ?? 1,
             coverage: try container.decodeIfPresent(Float.self, forKey: .coverage) ?? 0.58,
-            variation: try container.decodeIfPresent(Float.self, forKey: .variation) ?? 0.45
+            variation: try container.decodeIfPresent(Float.self, forKey: .variation) ?? 0.45,
+            paintJitterAmount: try container.decodeIfPresent(Float.self, forKey: .paintJitterAmount) ?? 0
         )
     }
 }
@@ -1383,6 +1389,7 @@ struct ToolSessionState: Codable, Sendable, Equatable {
     var eraserBrush: BrushSettings
     var smudgeBrushUsesIndependentSettings: Bool
     var textureFillTip: TextureFillTipSettings
+    var textureFillBrushOverride: BrushSettings?
     var eyedropper: EyedropperSettings
 
     private var isSynchronizingBrushSlots = false
@@ -1396,6 +1403,7 @@ struct ToolSessionState: Codable, Sendable, Equatable {
         eraserBrush: BrushSettings? = nil,
         smudgeBrushUsesIndependentSettings: Bool = false,
         textureFillTip: TextureFillTipSettings = .proceduralDefault,
+        textureFillBrushOverride: BrushSettings? = nil,
         eyedropper: EyedropperSettings = .stageOneDefault
     ) {
         self.activeTool = activeTool
@@ -1406,6 +1414,7 @@ struct ToolSessionState: Codable, Sendable, Equatable {
         self.eraserBrush = eraserBrush ?? brush
         self.smudgeBrushUsesIndependentSettings = smudgeBrushUsesIndependentSettings
         self.textureFillTip = textureFillTip
+        self.textureFillBrushOverride = textureFillBrushOverride
         self.eyedropper = eyedropper
         synchronizeOnInitialization()
     }
@@ -1419,6 +1428,7 @@ struct ToolSessionState: Codable, Sendable, Equatable {
         case eraserBrush
         case smudgeBrushUsesIndependentSettings
         case textureFillTip
+        case textureFillBrushOverride
         case eyedropper
     }
 
@@ -1441,6 +1451,7 @@ struct ToolSessionState: Codable, Sendable, Equatable {
             smudgeBrushUsesIndependentSettings: decodedSmudgeUsesIndependent ?? (activeTool == .smudge),
             textureFillTip: try container.decodeIfPresent(TextureFillTipSettings.self, forKey: .textureFillTip)
                 ?? .proceduralDefault,
+            textureFillBrushOverride: try container.decodeIfPresent(BrushSettings.self, forKey: .textureFillBrushOverride),
             eyedropper: try container.decodeIfPresent(EyedropperSettings.self, forKey: .eyedropper)
                 ?? .stageOneDefault
         )
@@ -1456,6 +1467,7 @@ struct ToolSessionState: Codable, Sendable, Equatable {
         try container.encode(eraserBrush, forKey: .eraserBrush)
         try container.encode(smudgeBrushUsesIndependentSettings, forKey: .smudgeBrushUsesIndependentSettings)
         try container.encode(textureFillTip, forKey: .textureFillTip)
+        try container.encodeIfPresent(textureFillBrushOverride, forKey: .textureFillBrushOverride)
         try container.encode(eyedropper, forKey: .eyedropper)
     }
 

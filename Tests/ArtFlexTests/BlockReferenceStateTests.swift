@@ -1049,6 +1049,228 @@ struct BlockReferenceStateTests {
     }
 
     @Test
+    func offCenterRolledCameraAndThreePointGuideRoundTripExactly() throws {
+        let canvasSize = CanvasSize(width: 1_600, height: 1_000)
+        var camera = BlockReferenceCamera.stageOneDefault
+        camera.yawDegrees = -41
+        camera.pitchDegrees = 18
+        camera.rollDegrees = 13
+        camera.fieldOfViewDegrees = 54
+        camera.principalPointNormalized = CanvasPoint(x: 0.47, y: 0.31)
+        let x = try #require(blockReferenceVanishingPoint(
+            direction: .unitX,
+            camera: camera,
+            canvasSize: canvasSize
+        ))
+        let y = try #require(blockReferenceVanishingPoint(
+            direction: .unitY,
+            camera: camera,
+            canvasSize: canvasSize
+        ))
+        let z = try #require(blockReferenceVanishingPoint(
+            direction: .unitZ,
+            camera: camera,
+            canvasSize: canvasSize
+        ))
+        var guide = PerspectiveGuideState.initial(canvasSize: canvasSize)
+        let horizontal = [x, y].sorted { $0.x < $1.x }
+        guide.leftVanishingPoint = horizontal[0]
+        guide.rightVanishingPoint = horizontal[1]
+        guide.verticalVanishingPoint = z
+
+        let recovered = try #require(blockReferenceCameraMatchingPerspectiveGuide(
+            guide,
+            currentCamera: camera,
+            canvasSize: canvasSize
+        ))
+        #expect(abs(recovered.yawDegrees - camera.yawDegrees) < 0.001)
+        #expect(abs(recovered.pitchDegrees - camera.pitchDegrees) < 0.001)
+        #expect(abs(recovered.rollDegrees - camera.rollDegrees) < 0.001)
+        #expect(abs(recovered.fieldOfViewDegrees - camera.fieldOfViewDegrees) < 0.001)
+        #expect(abs(recovered.principalPointNormalized.x - camera.principalPointNormalized.x) < 0.000_001)
+        #expect(abs(recovered.principalPointNormalized.y - camera.principalPointNormalized.y) < 0.000_001)
+
+        for direction in [BlockVector3.unitX, .unitY, .unitZ] {
+            let expected = try #require(blockReferenceVanishingPoint(
+                direction: direction,
+                camera: camera,
+                canvasSize: canvasSize
+            ))
+            let actual = try #require(blockReferenceVanishingPoint(
+                direction: direction,
+                camera: recovered,
+                canvasSize: canvasSize
+            ))
+            #expect(hypot(actual.x - expected.x, actual.y - expected.y) < 0.001)
+        }
+    }
+
+    @Test
+    func legacyCameraDecodingDefaultsToCenteredPrincipalPointAndZeroRoll() throws {
+        let encoded = try JSONEncoder().encode(BlockReferenceCamera.stageOneDefault)
+        var object = try #require(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        object.removeValue(forKey: "rollDegrees")
+        object.removeValue(forKey: "principalPointNormalized")
+        let legacy = try JSONSerialization.data(withJSONObject: object)
+
+        let decoded = try JSONDecoder().decode(BlockReferenceCamera.self, from: legacy)
+        #expect(decoded.rollDegrees == 0)
+        #expect(decoded.principalPointNormalized == CanvasPoint(x: 0.5, y: 0.5))
+    }
+
+    @Test
+    func perspectiveMatchLinesRecoverVanishingPointsAndCamera() throws {
+        let canvasSize = CanvasSize(width: 1_600, height: 1_000)
+        var camera = BlockReferenceCamera.stageOneDefault
+        camera.yawDegrees = -38
+        camera.pitchDegrees = 24
+        camera.fieldOfViewDegrees = 48
+
+        func matchLine(
+            axis: BlockReferenceAxis,
+            start: CanvasPoint,
+            vanishingPoint: CanvasPoint
+        ) -> BlockReferencePerspectiveMatchLine {
+            BlockReferencePerspectiveMatchLine(
+                axis: axis,
+                start: start,
+                end: CanvasPoint(
+                    x: start.x + (vanishingPoint.x - start.x) * 0.2,
+                    y: start.y + (vanishingPoint.y - start.y) * 0.2
+                )
+            )
+        }
+
+        let vanishingPoints = try Dictionary(uniqueKeysWithValues: BlockReferenceAxis.allCases.map { axis in
+            let point = try #require(blockReferenceVanishingPoint(
+                direction: axis.unitVector,
+                camera: camera,
+                canvasSize: canvasSize
+            ))
+            return (axis, point)
+        })
+        var state = BlockReferencePerspectiveMatchState()
+        for axis in BlockReferenceAxis.allCases {
+            let point = try #require(vanishingPoints[axis])
+            state.lines.append(matchLine(
+                axis: axis,
+                start: CanvasPoint(x: 260, y: 310 + Double(state.lines.count * 35)),
+                vanishingPoint: point
+            ))
+            state.lines.append(matchLine(
+                axis: axis,
+                start: CanvasPoint(x: 1_120, y: 620 - Double(state.lines.count * 24)),
+                vanishingPoint: point
+            ))
+            let recoveredPoint = try #require(state.vanishingPoint(for: axis))
+            #expect(hypot(recoveredPoint.x - point.x, recoveredPoint.y - point.y) < 0.01)
+        }
+
+        let guide = try #require(blockReferencePerspectiveMatchGuide(
+            state: state,
+            canvasSize: canvasSize
+        ))
+        let recoveredCamera = try #require(blockReferenceCameraMatchingPerspectiveGuide(
+            guide,
+            currentCamera: camera,
+            canvasSize: canvasSize
+        ))
+        #expect(abs(recoveredCamera.yawDegrees - camera.yawDegrees) < 0.5)
+        #expect(abs(recoveredCamera.pitchDegrees - camera.pitchDegrees) < 0.5)
+        #expect(abs(recoveredCamera.fieldOfViewDegrees - camera.fieldOfViewDegrees) < 0.5)
+        #expect(guide.anchors.count == 6)
+        let assessment = try #require(makeBlockReferencePerspectiveMatchAssessment(
+            state: state,
+            currentCamera: camera,
+            canvasSize: canvasSize
+        ))
+        #expect(assessment.quality == .stable)
+    }
+
+    @Test
+    func perspectiveMatchRejectsCoincidentParallelImageLines() {
+        let lines = [
+            BlockReferencePerspectiveMatchLine(
+                axis: .x,
+                start: CanvasPoint(x: 10, y: 10),
+                end: CanvasPoint(x: 110, y: 10)
+            ),
+            BlockReferencePerspectiveMatchLine(
+                axis: .x,
+                start: CanvasPoint(x: 10, y: 40),
+                end: CanvasPoint(x: 110, y: 40)
+            )
+        ]
+        #expect(blockReferencePerspectiveMatchVanishingPoint(lines: lines) == nil)
+    }
+
+    @Test
+    func perspectiveMatchLocatesTheTargetPlaneCenterFromXYEdgeFamilies() throws {
+        let canvasSize = CanvasSize(width: 1_000, height: 800)
+        let xLines = [
+            BlockReferencePerspectiveMatchLine(
+                axis: .x,
+                start: .init(x: 180, y: 240),
+                end: .init(x: 820, y: 320)
+            ),
+            BlockReferencePerspectiveMatchLine(
+                axis: .x,
+                start: .init(x: 260, y: 560),
+                end: .init(x: 740, y: 500)
+            )
+        ]
+        let yLines = [
+            BlockReferencePerspectiveMatchLine(
+                axis: .y,
+                start: .init(x: 180, y: 240),
+                end: .init(x: 260, y: 560)
+            ),
+            BlockReferencePerspectiveMatchLine(
+                axis: .y,
+                start: .init(x: 820, y: 320),
+                end: .init(x: 740, y: 500)
+            )
+        ]
+        let anchor = try #require(blockReferencePerspectiveMatchPlaneAnchor(
+            xLines: xLines,
+            yLines: yLines,
+            canvasSize: canvasSize
+        ))
+        #expect(abs(anchor.x - 500) < 0.001)
+        #expect(abs(anchor.y - 410) < 0.001)
+    }
+
+    @Test
+    func cameraFramingPlacesAWorldPointExactlyAtTheRequestedCanvasAnchor() throws {
+        let canvasSize = CanvasSize(width: 1_200, height: 800)
+        var camera = BlockReferenceCamera.stageOneDefault
+        camera.yawDegrees = -32
+        camera.pitchDegrees = 26
+        camera.fieldOfViewDegrees = 55
+        let canvasAnchor = CanvasPoint(x: 790, y: 510)
+        let worldAnchor = BlockVector3(x: 0, y: 0, z: 0)
+
+        let anchored = blockReferenceCamera(
+            anchoring: worldAnchor,
+            at: canvasAnchor,
+            camera: camera,
+            canvasSize: canvasSize
+        )
+        let projected = try #require(projectBlockPoint(
+            worldAnchor,
+            camera: anchored,
+            canvasSize: canvasSize
+        ))
+        #expect(hypot(
+            projected.canvasPoint.x - canvasAnchor.x,
+            projected.canvasPoint.y - canvasAnchor.y
+        ) < 0.001)
+        #expect(anchored.yawDegrees == camera.yawDegrees)
+        #expect(anchored.pitchDegrees == camera.pitchDegrees)
+        #expect(anchored.fieldOfViewDegrees == camera.fieldOfViewDegrees)
+    }
+
+    @Test
     func centerGizmoHandlePerformsUniformScale() throws {
         let layout = try #require(blockReferenceGizmoLayout(
             object: BlockReferenceObject(

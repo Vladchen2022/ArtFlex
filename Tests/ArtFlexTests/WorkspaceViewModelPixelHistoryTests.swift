@@ -1823,11 +1823,11 @@ struct WorkspaceViewModelPixelHistoryTests {
 
     @Test
     @MainActor
-    func textureFillPreservesPaintColorVariationInsideTheMaterialField() throws {
+    func textureFillPaintJitterCreatesColorVariationInsideTheMaterialField() throws {
         let harness = try PixelHistoryHarness(canvasSize: .init(width: 512, height: 512))
         let layerID = harness.viewModel.workspace.document.activeLayerID
         harness.viewModel.setSelectedColor(.init(red: 0.76, green: 0.22, blue: 0.12, alpha: 1))
-        harness.viewModel.setPaintJitterAmount(0.75)
+        harness.viewModel.setTextureFillPaintJitterAmount(0.75)
 
         let anchor = CanvasPoint(x: 90, y: 430)
         let radius = 320.0

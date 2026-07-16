@@ -524,8 +524,8 @@ private final class BlockReferenceMetalSolidRenderer {
             isOrthographic: camera.isOrthographic
         ) else { return nil }
         let canvasPoint = CanvasPoint(
-            x: (ndcX * 0.5 + 0.5) * width,
-            y: (0.5 - ndcY * 0.5) * height
+            x: (camera.principalPointNormalized.x + ndcX * 0.5) * width,
+            y: (camera.principalPointNormalized.y - ndcY * 0.5) * height
         )
         let viewportPoint = transform.canvasToViewport(canvasPoint)
         guard viewportPoint.x.isFinite,

@@ -458,8 +458,8 @@ func blockReferenceVanishingPoint(
     let ndcX = direction.dot(basis.right) / (forward * fovScale * aspect)
     let ndcY = direction.dot(basis.up) / (forward * fovScale)
     return CanvasPoint(
-        x: (ndcX * 0.5 + 0.5) * width,
-        y: (0.5 - ndcY * 0.5) * height
+        x: (camera.principalPointNormalized.x + ndcX * 0.5) * width,
+        y: (camera.principalPointNormalized.y - ndcY * 0.5) * height
     )
 }
 
@@ -610,9 +610,40 @@ private func blockPerspectiveCanvasLine(
     return best
 }
 
-/// Recovers a camera from three orthogonal vanishing points using the canvas
-/// center as principal point. Sign ambiguity is resolved by choosing the valid
-/// camera closest to the current view, which makes round-tripping stable.
+/// Returns the optical principal point implied by three mutually orthogonal
+/// vanishing points. Under the square-pixel/zero-skew camera model this is the
+/// orthocenter of their image-space triangle.
+func blockReferencePrincipalPoint(
+    vanishingPoints: [CanvasPoint]
+) -> CanvasPoint? {
+    guard vanishingPoints.count == 3 else { return nil }
+    let a = vanishingPoints[0]
+    let b = vanishingPoints[1]
+    let c = vanishingPoints[2]
+    let firstSide = CanvasPoint(x: b.x - c.x, y: b.y - c.y)
+    let secondSide = CanvasPoint(x: a.x - c.x, y: a.y - c.y)
+    let firstResult = a.x * firstSide.x + a.y * firstSide.y
+    let secondResult = b.x * secondSide.x + b.y * secondSide.y
+    let determinant = firstSide.x * secondSide.y - firstSide.y * secondSide.x
+    let scale = max(
+        hypot(firstSide.x, firstSide.y) * hypot(secondSide.x, secondSide.y),
+        1
+    )
+    guard determinant.isFinite, abs(determinant) > scale * 0.000_000_000_1 else {
+        return nil
+    }
+    let point = CanvasPoint(
+        x: (firstResult * secondSide.y - firstSide.y * secondResult) / determinant,
+        y: (firstSide.x * secondResult - firstResult * secondSide.x) / determinant
+    )
+    return point.x.isFinite && point.y.isFinite ? point : nil
+}
+
+/// Recovers the complete perspective camera supported by the editor from
+/// three orthogonal vanishing points. The principal point is solved rather
+/// than assumed, and roll is retained instead of forcing the image vertical
+/// axis through the canvas center. Sign ambiguity is resolved by choosing the
+/// valid orientation closest to the current view.
 func blockReferenceCameraMatchingPerspectiveGuide(
     _ guide: PerspectiveGuideState,
     currentCamera: BlockReferenceCamera,
@@ -621,15 +652,19 @@ func blockReferenceCameraMatchingPerspectiveGuide(
     guard guide.mode == .threePoint else { return nil }
     let width = Double(max(canvasSize.width, 1))
     let height = Double(max(canvasSize.height, 1))
-    let center = CanvasPoint(x: width * 0.5, y: height * 0.5)
     let points = [guide.leftVanishingPoint, guide.rightVanishingPoint, guide.verticalVanishingPoint]
-    let centered = points.map { CanvasPoint(x: $0.x - center.x, y: center.y - $0.y) }
+    guard let principalPoint = blockReferencePrincipalPoint(vanishingPoints: points) else {
+        return nil
+    }
+    let centered = points.map {
+        CanvasPoint(x: $0.x - principalPoint.x, y: principalPoint.y - $0.y)
+    }
     let focalSquaredCandidates = [
         -(centered[0].x * centered[1].x + centered[0].y * centered[1].y),
         -(centered[0].x * centered[2].x + centered[0].y * centered[2].y),
         -(centered[1].x * centered[2].x + centered[1].y * centered[2].y)
-    ].filter { $0.isFinite && $0 > 1 }
-    guard !focalSquaredCandidates.isEmpty else { return nil }
+    ]
+    guard focalSquaredCandidates.allSatisfy({ $0.isFinite && $0 > 1 }) else { return nil }
     let focal = sqrt(focalSquaredCandidates.reduce(0, +) / Double(focalSquaredCandidates.count))
     let fov = 2 * atan(height / (2 * focal)) * 180 / .pi
     guard fov.isFinite, (10...120).contains(fov) else { return nil }
@@ -637,7 +672,7 @@ func blockReferenceCameraMatchingPerspectiveGuide(
     let cameraDirections = centered.map {
         BlockVector3(x: $0.x / focal, y: $0.y / focal, z: 1).normalized()
     }
-    var best: (score: Double, yaw: Double, pitch: Double)?
+    var best: (score: Double, yaw: Double, pitch: Double, roll: Double)?
     for sx in [-1.0, 1.0] {
         for sy in [-1.0, 1.0] {
             for sz in [-1.0, 1.0] {
@@ -652,13 +687,26 @@ func blockReferenceCameraMatchingPerspectiveGuide(
                 let fromTarget = -forward
                 let yaw = atan2(fromTarget.y, fromTarget.x) * 180 / .pi
                 let pitch = asin(min(max(fromTarget.z, -1), 1)) * 180 / .pi
-                let yawDelta = abs(atan2(
-                    sin((yaw - currentCamera.yawDegrees) * .pi / 180),
-                    cos((yaw - currentCamera.yawDegrees) * .pi / 180)
-                ) * 180 / .pi)
+                var baseRight = forward.cross(.unitZ).normalized(fallback: .unitX)
+                if abs(forward.dot(.unitZ)) > 0.995 {
+                    baseRight = forward.cross(.unitY).normalized(fallback: .unitX)
+                }
+                let baseUp = baseRight.cross(forward).normalized(fallback: .unitZ)
+                let roll = atan2(right.dot(baseUp), right.dot(baseRight)) * 180 / .pi
+                func angleDelta(_ lhs: Double, _ rhs: Double) -> Double {
+                    abs(atan2(
+                        sin((lhs - rhs) * .pi / 180),
+                        cos((lhs - rhs) * .pi / 180)
+                    ) * 180 / .pi)
+                }
+                let yawDelta = angleDelta(yaw, currentCamera.yawDegrees)
+                let rollDelta = angleDelta(roll, currentCamera.rollDegrees)
                 let orthogonalityError = abs(x.dot(y)) + abs(x.dot(z)) + abs(y.dot(z))
-                let score = yawDelta + abs(pitch - currentCamera.pitchDegrees) + orthogonalityError * 100
-                if best == nil || score < best!.score { best = (score, yaw, pitch) }
+                let score = yawDelta
+                    + abs(pitch - currentCamera.pitchDegrees)
+                    + rollDelta
+                    + orthogonalityError * 100
+                if best == nil || score < best!.score { best = (score, yaw, pitch, roll) }
             }
         }
     }
@@ -666,7 +714,12 @@ func blockReferenceCameraMatchingPerspectiveGuide(
     var camera = currentCamera
     camera.yawDegrees = best.yaw
     camera.pitchDegrees = best.pitch
+    camera.rollDegrees = best.roll
     camera.fieldOfViewDegrees = fov
+    camera.principalPointNormalized = CanvasPoint(
+        x: principalPoint.x / width,
+        y: principalPoint.y / height
+    )
     camera.isOrthographic = false
     camera.normalize()
     return camera

@@ -26,6 +26,10 @@ func rightInspectorUsesExpandedBlockReferencePanel(activeTool: ToolKind) -> Bool
     activeTool == .blockReference
 }
 
+func rightInspectorUsesTextureLibrary(activeTool: ToolKind) -> Bool {
+    activeTool == .lassoFill || activeTool == .textureFill
+}
+
 func topInspectorPanelContentWidth(panelWidth: CGFloat) -> CGFloat {
     max(0, panelWidth - (topInspectorPanelPadding * 2))
 }
@@ -238,6 +242,49 @@ private struct TextureFillResultPreview: View {
     }
 }
 
+private struct TextureFillLibraryThumbnailTile: View {
+    let request: TextureFillPreviewRequest
+
+    @State private var image: CGImage?
+
+    var body: some View {
+        GeometryReader { geometry in
+            ZStack {
+                Color.white
+
+                if let image {
+                    Image(decorative: image, scale: 1)
+                        .resizable()
+                        .interpolation(.high)
+                        .scaledToFill()
+                        .frame(width: geometry.size.width, height: geometry.size.height)
+                        .clipped()
+                } else {
+                    ProgressView()
+                        .controlSize(.small)
+                        .tint(Color.black.opacity(0.42))
+                }
+            }
+            .frame(width: geometry.size.width, height: geometry.size.height)
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+        }
+        .aspectRatio(1, contentMode: .fit)
+        .task(id: request) {
+            let nextImage = await Task.detached(priority: .utility) {
+                StageOneBrushPreviewRasterizer.textureFillPreviewImage(
+                    for: request.brush,
+                    tipSettings: request.tipSettings,
+                    color: request.color
+                )
+            }.value
+            guard !Task.isCancelled else { return }
+            image = nextImage
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("纹理预设缩略图")
+    }
+}
+
 private nonisolated func loadPatternThumbnailImage(from url: URL) -> CGImage? {
     guard
         let source = CGImageSourceCreateWithURL(url as CFURL, nil),
@@ -348,6 +395,7 @@ struct RightInspectorView: View {
     private enum LibraryInspectorTab: String {
         case brush = "画笔库"
         case pattern = "图案库"
+        case texture = "纹理库"
     }
 
     private enum ParameterInspectorTab: String {
@@ -369,6 +417,7 @@ struct RightInspectorView: View {
     @State private var sprayPatternIndex = 0
     @State private var draggedBrushPresetID: String?
     @State private var draggedPatternLibraryItemID: UUID?
+    @State private var draggedTextureFillLibraryItemID: UUID?
     @State private var draggedLayerID: LayerID?
     @State private var editingLayerID: LayerID?
     @State private var editingLayerName = ""
@@ -396,6 +445,7 @@ struct RightInspectorView: View {
     @State private var textureFillPreviewMaterialScale: Float?
     @State private var textureFillPreviewCoverage: Float?
     @State private var textureFillPreviewVariation: Float?
+    @State private var textureFillPreviewPaintJitterAmount: Float?
     var body: some View {
         ZStack {
             GeometryReader { proxy in
@@ -476,6 +526,9 @@ struct RightInspectorView: View {
         .onAppear {
             syncNavigatorZoomPercentText()
             syncBrightnessAdjustmentEditorModeToTab()
+            libraryInspectorTab = rightInspectorUsesTextureLibrary(
+                activeTool: viewModel.workspace.toolSession.activeTool
+            ) ? .texture : .brush
         }
         .onChange(of: viewModel.navigatorZoomPercent) { _, _ in
             syncNavigatorZoomPercentText()
@@ -492,11 +545,12 @@ struct RightInspectorView: View {
                 textureFillPreviewMaterialScale = nil
                 textureFillPreviewCoverage = nil
                 textureFillPreviewVariation = nil
+                textureFillPreviewPaintJitterAmount = nil
             }
             handleToolDrivenParameterInspectorTabChange(oldTool: oldTool, newTool: newTool)
-            if newTool == .brush {
-                libraryInspectorTab = .brush
-            }
+            libraryInspectorTab = rightInspectorUsesTextureLibrary(activeTool: newTool)
+                ? .texture
+                : .brush
         }
         .onChange(of: viewModel.brushLibraryRevealRequestID) { _, _ in
             libraryInspectorTab = .brush
@@ -1192,6 +1246,8 @@ struct RightInspectorView: View {
                         .foregroundStyle(Color.white.opacity(0.5))
                 }
 
+                perspectiveGuideMatchControls
+
                 Picker(
                     "透视类型",
                     selection: Binding(
@@ -1356,6 +1412,8 @@ struct RightInspectorView: View {
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(Color.white.opacity(0.9))
 
+                perspectiveGuideMatchControls
+
                 Text("视平线、消失点和辅助锚点均已从当前文档移除。")
                     .font(.system(size: 9, weight: .medium))
                     .foregroundStyle(Color.white.opacity(0.48))
@@ -1368,6 +1426,92 @@ struct RightInspectorView: View {
                 .controlSize(.small)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    @ViewBuilder
+    private var perspectiveGuideMatchControls: some View {
+        let state = viewModel.perspectiveGuideMatchState
+        if state.isActive {
+            VStack(alignment: .leading, spacing: 7) {
+                HStack {
+                    Text("匹配现有画面")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(Color.white.opacity(0.9))
+                    Spacer()
+                    Text(viewModel.perspectiveGuideMatchCandidate == nil ? "描边中" : "已求解")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(viewModel.perspectiveGuideMatchCandidate == nil
+                            ? Color.white.opacity(0.48)
+                            : Color.cyan)
+                }
+
+                Picker("匹配方向", selection: Binding(
+                    get: { state.activeRole },
+                    set: { viewModel.setPerspectiveGuideMatchRole($0) }
+                )) {
+                    ForEach(PerspectiveGuideMatchRole.allCases, id: \.self) { role in
+                        Text("\(role.displayName) \(state.lineCount(for: role))/2").tag(role)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.segmented)
+                .controlSize(.small)
+
+                HStack(spacing: 6) {
+                    Button("撤销一条") {
+                        viewModel.undoLastPerspectiveGuideMatchLine()
+                    }
+                    .disabled(!state.hasAnyLines)
+                    Button("清当前") {
+                        viewModel.clearPerspectiveGuideMatchRole(state.activeRole)
+                    }
+                    .disabled(state.lineCount(for: state.activeRole) == 0)
+                    Button("清空", role: .destructive) {
+                        viewModel.clearPerspectiveGuideMatch()
+                    }
+                    .disabled(!state.hasAnyLines)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.mini)
+
+                HStack(spacing: 6) {
+                    Button("退出匹配") {
+                        viewModel.stopPerspectiveGuideMatch()
+                    }
+                    Button("完成并继续辅助线") {
+                        viewModel.applyPerspectiveGuideMatch()
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(viewModel.perspectiveGuideMatchCandidate == nil)
+                }
+                .controlSize(.small)
+
+                Text(viewModel.perspectiveGuideMatchInstruction)
+                    .font(.system(size: 9, weight: .medium))
+                    .foregroundStyle(Color.white.opacity(0.58))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(8)
+            .background(
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(Color.black.opacity(0.12))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8)
+                            .stroke(Color.cyan.opacity(0.25), lineWidth: 1)
+                    )
+            )
+        } else {
+            Button("匹配现有画面…") {
+                viewModel.startPerspectiveGuideMatch()
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.small)
+
+            Text("依次描两组左右方向边和一组上/下方向边；只生成二维消失点与视平线，不创建体块或相机。")
+                .font(.system(size: 9, weight: .medium))
+                .foregroundStyle(Color.white.opacity(0.48))
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
@@ -1485,15 +1629,28 @@ struct RightInspectorView: View {
         previewSettings.materialScale = textureFillPreviewMaterialScale ?? settings.materialScale
         previewSettings.coverage = textureFillPreviewCoverage ?? settings.coverage
         previewSettings.variation = textureFillPreviewVariation ?? settings.variation
+        previewSettings.paintJitterAmount = textureFillPreviewPaintJitterAmount ?? settings.paintJitterAmount
         let previewRequest = TextureFillPreviewRequest(
             brush: viewModel.textureFillPreviewBrush,
             tipSettings: previewSettings,
             color: viewModel.textureFillPreviewColor
         )
         return VStack(alignment: .leading, spacing: 7) {
-            Text("纹理填充")
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(Color.white.opacity(0.92))
+            HStack(spacing: 8) {
+                Text("纹理填充")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(Color.white.opacity(0.92))
+
+                Spacer(minLength: 0)
+
+                compactIconButton(
+                    systemImage: "square.and.arrow.down",
+                    tooltip: "保存纹理到纹理库"
+                ) {
+                    viewModel.saveCurrentTextureFillPreset()
+                    libraryInspectorTab = .texture
+                }
+            }
 
             Text(textureFillTipSourceSummary)
                 .font(.system(size: 11, weight: .medium))
@@ -1509,7 +1666,8 @@ struct RightInspectorView: View {
                     tipImageLibrarySheetTarget = .textureFill
                 }
 
-                if viewModel.workspace.toolSession.textureFillTip.sourceSemantic == .importedImage {
+                if viewModel.workspace.toolSession.textureFillTip.sourceSemantic == .importedImage
+                    || viewModel.workspace.toolSession.textureFillBrushOverride != nil {
                     compactTextActionButton(
                         title: "使用当前画笔",
                         tooltip: "使用当前画笔生成纹理素材",
@@ -1594,6 +1752,22 @@ struct RightInspectorView: View {
                 onCommit: {
                     viewModel.setTextureFillVariation(Float($0 / 100))
                     textureFillPreviewVariation = nil
+                }
+            )
+
+            OptimizedCompactSlider(
+                title: "杂色",
+                valueText: "\(Int((settings.paintJitterAmount * 100).rounded()))%",
+                value: Binding(
+                    get: { Double(settings.paintJitterAmount * 100) },
+                    set: { _ in }
+                ),
+                range: 0...100,
+                liveValueText: { "\(Int($0.rounded()))%" },
+                onPreview: { textureFillPreviewPaintJitterAmount = Float($0 / 100) },
+                onCommit: {
+                    viewModel.setTextureFillPaintJitterAmount(Float($0 / 100))
+                    textureFillPreviewPaintJitterAmount = nil
                 }
             )
         }
@@ -1781,6 +1955,9 @@ struct RightInspectorView: View {
         let source = viewModel.workspace.toolSession.textureFillTip
         switch source.sourceSemantic {
         case .procedural:
+            if let savedBrush = viewModel.workspace.toolSession.textureFillBrushOverride {
+                return "纹理库画笔素材：\(savedBrush.tipShape.displayName)"
+            }
             let brush = viewModel.workspace.toolSession.drawingBrush
             return "当前画笔纹理：\(brush.tipShape.displayName)"
         case .customMask:
@@ -2233,6 +2410,7 @@ struct RightInspectorView: View {
             HStack(spacing: 8) {
                 libraryInspectorTabButton(.brush)
                 libraryInspectorTabButton(.pattern)
+                libraryInspectorTabButton(.texture)
             }
 
             switch libraryInspectorTab {
@@ -2240,6 +2418,8 @@ struct RightInspectorView: View {
                 brushLibrarySection
             case .pattern:
                 patternLibrarySection
+            case .texture:
+                textureFillLibrarySection
             }
         }
     }
@@ -2442,6 +2622,144 @@ struct RightInspectorView: View {
     }
 
     private func patternLibraryEmptyCell() -> some View {
+        RoundedRectangle(cornerRadius: 10)
+            .fill(Color.white.opacity(0.03))
+            .overlay {
+                RoundedRectangle(cornerRadius: 10)
+                    .stroke(Color.white.opacity(0.05), lineWidth: 1)
+            }
+            .aspectRatio(1, contentMode: .fit)
+    }
+
+    private var textureFillLibrarySection: some View {
+        GeometryReader { geometry in
+            let columnCount = 4
+            let spacing = 8.0
+            let outerInset = 12.0
+            let usableWidth = max(0.0, geometry.size.width - outerInset * 2)
+            let slotWidth = max(40.0, floor((usableWidth - spacing * Double(columnCount - 1)) / Double(columnCount)))
+            let contentWidth = (slotWidth * Double(columnCount)) + (spacing * Double(columnCount - 1))
+            let horizontalInset = max(0.0, floor((usableWidth - contentWidth) * 0.5)) + outerInset
+            let minimumLibraryRows = max(1, Int(ceil((geometry.size.height + spacing) / (slotWidth + spacing))))
+            let totalSlotCount = viewModel.workspace.textureFillLibrary.slotCount(
+                minRows: minimumLibraryRows,
+                columns: columnCount
+            )
+            let columns = Array(repeating: GridItem(.fixed(slotWidth), spacing: spacing), count: columnCount)
+
+            ScrollView(.vertical, showsIndicators: true) {
+                LazyVGrid(columns: columns, spacing: spacing) {
+                    ForEach(0..<totalSlotCount, id: \.self) { slotIndex in
+                        textureFillLibrarySlotCell(slotIndex: slotIndex)
+                    }
+                }
+                .padding(.horizontal, horizontalInset)
+                .padding(.vertical, 2)
+                .frame(maxWidth: .infinity, alignment: .top)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    @ViewBuilder
+    private func textureFillLibrarySlotCell(slotIndex: Int) -> some View {
+        let item = viewModel.workspace.textureFillLibrary.item(atSlot: slotIndex)
+
+        if let item {
+            textureFillLibraryItemCell(item)
+                .onDrop(of: [UTType.plainText.identifier], isTargeted: nil) { providers in
+                    moveTextureFillLibraryItemFromDrop(providers: providers, toSlot: slotIndex)
+                }
+        } else {
+            textureFillLibraryEmptyCell()
+                .onDrop(of: [UTType.plainText.identifier], isTargeted: nil) { providers in
+                    moveTextureFillLibraryItemFromDrop(providers: providers, toSlot: slotIndex)
+                }
+        }
+    }
+
+    private func textureFillLibraryItemCell(_ item: TextureFillLibraryItem) -> some View {
+        let isSelected = viewModel.workspace.textureFillLibrary.selectedItemID == item.id
+        let strokeColor: Color = isSelected ? Color.accentColor.opacity(0.9) : Color.white.opacity(0.06)
+        let strokeWidth: CGFloat = isSelected ? 1.5 : 1.0
+        let previewRequest = TextureFillPreviewRequest(
+            brush: item.sourceBrush ?? .stageOneDefault,
+            tipSettings: item.settings,
+            color: .black
+        )
+
+        return LongPressDraggableCell(
+            dragPayload: item.id.uuidString,
+            onActivate: {
+                viewModel.applyTextureFillLibraryItem(item.id)
+            },
+            onDragBegan: {
+                draggedTextureFillLibraryItemID = item.id
+            },
+            onDragEnded: {
+                draggedTextureFillLibraryItemID = nil
+            }
+        ) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 10)
+                    .fill(isSelected ? Color.accentColor.opacity(0.18) : Color.white.opacity(0.03))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 10)
+                            .stroke(strokeColor, lineWidth: strokeWidth)
+                    }
+
+                TextureFillLibraryThumbnailTile(request: previewRequest)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .padding(2)
+                    .allowsHitTesting(false)
+
+                if let tag = item.colorTag {
+                    brushColorTagCorner(tag)
+                        .allowsHitTesting(false)
+                }
+            }
+        }
+        .aspectRatio(1, contentMode: .fit)
+        .help(item.displayName)
+        .contextMenu {
+            Button("应用") {
+                viewModel.applyTextureFillLibraryItem(item.id)
+            }
+
+            Divider()
+
+            Menu("色标") {
+                ForEach(BrushColorTag.allCases, id: \.self) { tag in
+                    Button {
+                        viewModel.setTextureFillLibraryItemColorTag(tag, forItemID: item.id)
+                    } label: {
+                        HStack {
+                            Circle()
+                                .fill(colorForBrushTag(tag))
+                                .frame(width: 10, height: 10)
+                            Text(labelForBrushTag(tag))
+                        }
+                    }
+                }
+
+                Divider()
+
+                Button("清除色标") {
+                    viewModel.setTextureFillLibraryItemColorTag(nil, forItemID: item.id)
+                }
+                .disabled(item.colorTag == nil)
+            }
+
+            Divider()
+
+            Button("删除") {
+                viewModel.deleteTextureFillLibraryItem(item.id)
+            }
+        }
+    }
+
+    private func textureFillLibraryEmptyCell() -> some View {
         RoundedRectangle(cornerRadius: 10)
             .fill(Color.white.opacity(0.03))
             .overlay {
@@ -4012,6 +4330,32 @@ struct RightInspectorView: View {
             }
             DispatchQueue.main.async {
                 viewModel.movePatternLibraryItem(uuid, toSlot: slotIndex)
+            }
+        }
+        return true
+    }
+
+    private func moveTextureFillLibraryItemFromDrop(
+        providers: [NSItemProvider],
+        toSlot slotIndex: Int
+    ) -> Bool {
+        if let draggedTextureFillLibraryItemID {
+            viewModel.moveTextureFillLibraryItem(draggedTextureFillLibraryItemID, toSlot: slotIndex)
+            self.draggedTextureFillLibraryItemID = nil
+            return true
+        }
+
+        guard let provider = providers.first(where: { $0.canLoadObject(ofClass: NSString.self) }) else {
+            return false
+        }
+
+        provider.loadObject(ofClass: NSString.self) { object, _ in
+            guard let itemID = object as? NSString,
+                  let uuid = UUID(uuidString: String(itemID)) else {
+                return
+            }
+            DispatchQueue.main.async {
+                viewModel.moveTextureFillLibraryItem(uuid, toSlot: slotIndex)
             }
         }
         return true

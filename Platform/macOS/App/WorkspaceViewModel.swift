@@ -178,6 +178,7 @@ final class WorkspaceViewModel: ObservableObject {
     @Published private(set) var selectedMeshWarpControlPointIndices: Set<Int> = []
     @Published private(set) var selectedPerspectiveAnchorID: UUID?
     @Published var blockReferenceEditorState = BlockReferenceEditorState()
+    @Published var perspectiveGuideMatchState = PerspectiveGuideMatchState()
     @Published var isBlockReferenceCameraNavigating = false
     var blockReferenceCameraPreview: BlockReferenceCamera?
     let blockReferenceCameraRenderState = BlockReferenceCameraRenderState()
@@ -199,6 +200,7 @@ final class WorkspaceViewModel: ObservableObject {
     private let bootstrap: AppBootstrap
     private let brushLibraryPersistenceQueue = PersistenceSaveQueue(label: "ArtFlex.BrushLibraryPersistence")
     private let patternLibraryPersistenceQueue = PersistenceSaveQueue(label: "ArtFlex.PatternLibraryPersistence")
+    private let textureFillLibraryPersistenceQueue = PersistenceSaveQueue(label: "ArtFlex.TextureFillLibraryPersistence")
     var ideationBranchActivityHandler: (() -> Void)?
     var ideationOperationHandler: ((IdeationCanvasOperation) -> Void)?
     var ideationUndoHandler: (() -> Bool)?
@@ -366,6 +368,7 @@ final class WorkspaceViewModel: ObservableObject {
         resetSelectionTraceLog()
         let didSanitizePersistedBrushResources = Self.restorePersistedBrushLibraryIfAvailable(in: bootstrap)
         let didSanitizePersistedPatternLibrary = Self.restorePersistedPatternLibraryIfAvailable(in: bootstrap)
+        Self.restorePersistedTextureFillLibraryIfAvailable(in: bootstrap)
         Self.normalizeLegacySelectionIfNeeded(in: bootstrap.workspaceStore)
         Self.normalizeDisabledToolsIfNeeded(in: bootstrap.workspaceStore)
         let didApplyLaunchDefaultBrushPreset = Self.applyLaunchDefaultBrushPresetIfNeeded(in: bootstrap.workspaceStore)
@@ -813,6 +816,8 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     private func lockPerspectiveGuideForPainting() {
+        perspectiveGuideMatchState.isActive = false
+        perspectiveGuideMatchState.draftLine = nil
         selectedPerspectiveAnchorID = nil
         perspectiveGuideInteractionTarget = nil
         perspectiveGuideInteractionLastPoint = nil
@@ -1055,6 +1060,14 @@ final class WorkspaceViewModel: ObservableObject {
     func replacePerspectiveGuideFromBlockReference(_ guide: PerspectiveGuideState) {
         guard capturePerspectiveGuideCheckpoint(operationKind: "perspective.fromBlockCamera") else { return }
         replacePerspectiveGuide(guide)
+    }
+
+    @discardableResult
+    func replacePerspectiveGuideFromMatch(_ guide: PerspectiveGuideState) -> Bool {
+        guard capturePerspectiveGuideCheckpoint(operationKind: "perspective.match") else { return false }
+        selectedPerspectiveAnchorID = nil
+        replacePerspectiveGuide(guide)
+        return true
     }
 
     private func notePerspectiveGuideChanged() {
@@ -2415,6 +2428,7 @@ final class WorkspaceViewModel: ObservableObject {
             session.textureFillTip.tipAssetID = item.id
             session.textureFillTip.importedSourceInfo = item.sourceInfo
             session.textureFillTip.customTipMaskData = maskData
+            session.textureFillBrushOverride = nil
         }
         refresh()
         showStatus(.init(kind: .success, message: "已应用纹理填充素材"))
@@ -2426,11 +2440,14 @@ final class WorkspaceViewModel: ObservableObject {
             let scale = session.textureFillTip.materialScale
             let coverage = session.textureFillTip.coverage
             let variation = session.textureFillTip.variation
+            let paintJitterAmount = session.textureFillTip.paintJitterAmount
             session.textureFillTip = .proceduralDefault
             session.textureFillTip.arrangement = arrangement
             session.textureFillTip.materialScale = scale
             session.textureFillTip.coverage = coverage
             session.textureFillTip.variation = variation
+            session.textureFillTip.paintJitterAmount = paintJitterAmount
+            session.textureFillBrushOverride = nil
         }
         refresh()
         showStatus(.init(kind: .success, message: "已切回当前画笔纹理"))
@@ -2462,6 +2479,83 @@ final class WorkspaceViewModel: ObservableObject {
             session.textureFillTip.variation = min(max(variation, 0), 1)
         }
         refreshToolSessionOnly()
+    }
+
+    func setTextureFillPaintJitterAmount(_ amount: Float) {
+        bootstrap.workspaceStore.updateToolSession { session in
+            session.textureFillTip.paintJitterAmount = min(max(amount, 0), 1)
+        }
+        refreshToolSessionOnly()
+    }
+
+    func saveCurrentTextureFillPreset() {
+        let state = bootstrap.workspaceStore.state
+        let settings = state.toolSession.textureFillTip
+        let sourceBrush = state.toolSession.textureFillBrushOverride
+            ?? state.toolSession.drawingBrush
+
+        var savedItem: TextureFillLibraryItem?
+        bootstrap.workspaceStore.updateTextureFillLibrary { library in
+            savedItem = library.saveCurrentTexture(
+                settings: settings,
+                sourceBrush: sourceBrush
+            )
+        }
+        guard let savedItem else { return }
+        persistTextureFillLibrary()
+        refreshLightweight()
+        showStatus(.init(kind: .success, message: "已保存纹理：\(savedItem.displayName)"))
+    }
+
+    func applyTextureFillLibraryItem(_ itemID: UUID) {
+        guard let item = workspace.textureFillLibrary.item(id: itemID) else {
+            showStatus(.init(kind: .info, message: "未找到纹理预设"))
+            return
+        }
+
+        if workspace.toolSession.activeTool != .textureFill {
+            selectTool(.textureFill)
+        }
+        bootstrap.workspaceStore.updateToolSession { session in
+            session.textureFillTip = item.settings
+            session.textureFillBrushOverride = item.sourceBrush
+        }
+        bootstrap.workspaceStore.updateTextureFillLibrary { library in
+            library.selectItem(id: itemID)
+            library.noteItemUsed(itemID)
+        }
+        persistTextureFillLibrary()
+        refreshLightweight()
+        showStatus(.init(kind: .success, message: "已应用 \(item.displayName)"))
+    }
+
+    func moveTextureFillLibraryItem(_ itemID: UUID, toSlot targetSlotIndex: Int) {
+        var moved = false
+        bootstrap.workspaceStore.updateTextureFillLibrary { library in
+            moved = library.moveItem(id: itemID, toSlot: targetSlotIndex)
+        }
+        guard moved else { return }
+        persistTextureFillLibrary()
+        refreshLightweight()
+    }
+
+    func setTextureFillLibraryItemColorTag(_ tag: BrushColorTag?, forItemID itemID: UUID) {
+        bootstrap.workspaceStore.updateTextureFillLibrary { library in
+            library.setColorTag(tag, forItemID: itemID)
+        }
+        persistTextureFillLibrary()
+        refreshLightweight()
+    }
+
+    func deleteTextureFillLibraryItem(_ itemID: UUID) {
+        var didDelete = false
+        bootstrap.workspaceStore.updateTextureFillLibrary { library in
+            didDelete = library.removeItem(id: itemID)
+        }
+        guard didDelete else { return }
+        persistTextureFillLibrary()
+        refreshLightweight()
+        showStatus(.init(kind: .success, message: "已删除纹理预设"))
     }
 
     func moveTipImageLibraryItem(_ assetID: BrushTipImageAssetID, to targetIndex: Int) {
@@ -5599,11 +5693,11 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     var textureFillPreviewBrush: BrushSettings {
-        workspace.toolSession.drawingBrush
+        workspace.toolSession.textureFillBrushOverride ?? workspace.toolSession.drawingBrush
     }
 
     var textureFillPreviewColor: RGBAColor {
-        let drawingBrush = workspace.toolSession.drawingBrush
+        let drawingBrush = textureFillPreviewBrush
         return resolvedGeneratorColor(from: workspace.toolSession.selectedColor)
             .withAlpha(workspace.toolSession.selectedColor.alpha * min(max(drawingBrush.opacity, 0), 1))
     }
@@ -5919,6 +6013,7 @@ final class WorkspaceViewModel: ObservableObject {
         case .polygonSelection:
             cancelPolygonSelectionInteraction()
         case .perspective:
+            stopPerspectiveGuideMatch()
             selectedPerspectiveAnchorID = nil
             endPerspectiveGuideInteraction()
         case .blockReference:
@@ -6933,7 +7028,8 @@ final class WorkspaceViewModel: ObservableObject {
         }
 
         let tipSettings = workspace.toolSession.textureFillTip
-        let drawingBrush = workspace.toolSession.drawingBrush
+        let drawingBrush = workspace.toolSession.textureFillBrushOverride
+            ?? workspace.toolSession.drawingBrush
         let resolvedColor = resolvedGeneratorColor(from: workspace.toolSession.selectedColor)
             .withAlpha(workspace.toolSession.selectedColor.alpha * min(max(drawingBrush.opacity, 0), 1))
         textureFillSeedSequence &+= 1
@@ -7242,7 +7338,7 @@ final class WorkspaceViewModel: ObservableObject {
             selectionMaskAlphaBytes: boundedMask.alphaBytes,
             fillCenter: state.anchorPoint,
             color: state.color,
-            paintJitterAmount: state.brush.effectivePaintJitterAmount,
+            paintJitterAmount: state.tipSettings.paintJitterAmount,
             paintContrastAmount: state.brush.effectivePaintContrastAmount,
             distortionAmount: 0,
             alphaLockTexture: alphaLockTexture,
@@ -9528,6 +9624,10 @@ final class WorkspaceViewModel: ObservableObject {
                 return true
             }
             if event.keyCode == 53 {
+                if perspectiveGuideMatchState.isActive {
+                    stopPerspectiveGuideMatch()
+                    return true
+                }
                 selectedPerspectiveAnchorID = nil
                 endPerspectiveGuideInteraction()
                 return true
@@ -10844,6 +10944,7 @@ final class WorkspaceViewModel: ObservableObject {
 
         do {
             resetSnapshotToolState(resumeTimelapseIfNeeded: false)
+            perspectiveGuideMatchState = .init()
             let result = try bootstrap.persistenceController.openProject(from: url)
             let existingWorkspace = bootstrap.workspaceStore.state
             let openedWorkspace = Self.workspaceForOpenedProject(
@@ -10936,6 +11037,7 @@ final class WorkspaceViewModel: ObservableObject {
         }
 
         resetSnapshotToolState(resumeTimelapseIfNeeded: false)
+        perspectiveGuideMatchState = .init()
 
         let now = Date()
         let layers = ArtDocument.stageOneDefaultLayers()
@@ -10960,6 +11062,7 @@ final class WorkspaceViewModel: ObservableObject {
             colorPanel: workspace.colorPanel,
             brushLibrary: workspace.brushLibrary,
             patternLibrary: workspace.patternLibrary,
+            textureFillLibrary: workspace.textureFillLibrary,
             tipImageLibrary: workspace.tipImageLibrary,
             generator: workspace.generator,
             viewport: .stageOneDefault,
@@ -11230,6 +11333,7 @@ final class WorkspaceViewModel: ObservableObject {
         var resolvedWorkspace = openedWorkspace
         resolvedWorkspace.brushLibrary = currentWorkspace.brushLibrary
         resolvedWorkspace.patternLibrary = currentWorkspace.patternLibrary
+        resolvedWorkspace.textureFillLibrary = currentWorkspace.textureFillLibrary
         resolvedWorkspace.tipImageLibrary = mergeTipImageLibraries(
             base: currentWorkspace.tipImageLibrary,
             imported: normalizeImportedTipImageLibrary(openedWorkspace.tipImageLibrary)
@@ -11313,6 +11417,18 @@ final class WorkspaceViewModel: ObservableObject {
         }
     }
 
+    private func persistTextureFillLibrary() {
+        let library = bootstrap.workspaceStore.state.textureFillLibrary
+        let controller = bootstrap.textureFillLibraryPersistenceController
+        textureFillLibraryPersistenceQueue.enqueue {
+            try controller.saveLibrary(library)
+        } onError: { [weak self] error in
+            DispatchQueue.main.async {
+                self?.showStatus(.init(kind: .error, message: "保存纹理库失败：\(error.localizedDescription)"))
+            }
+        }
+    }
+
     @discardableResult
     private static func restorePersistedBrushLibraryIfAvailable(in bootstrap: AppBootstrap) -> Bool {
         guard let restored = bootstrap.brushLibraryPersistenceController.loadResources() else {
@@ -11372,6 +11488,19 @@ final class WorkspaceViewModel: ObservableObject {
         }
 
         return restored.didSanitize
+    }
+
+    private static func restorePersistedTextureFillLibraryIfAvailable(in bootstrap: AppBootstrap) {
+        guard let restored = bootstrap.textureFillLibraryPersistenceController.loadLibrary() else {
+            return
+        }
+
+        bootstrap.workspaceStore.updateTextureFillLibrary { library in
+            library = restored
+            if library.selectedItemID == nil {
+                library.selectedItemID = library.items.first?.id
+            }
+        }
     }
 
     @discardableResult
@@ -11621,6 +11750,7 @@ final class WorkspaceViewModel: ObservableObject {
             colorPanel: workspace.colorPanel,
             brushLibrary: workspace.brushLibrary,
             patternLibrary: workspace.patternLibrary,
+            textureFillLibrary: workspace.textureFillLibrary,
             tipImageLibrary: workspace.tipImageLibrary,
             generator: workspace.generator
         )
@@ -11643,6 +11773,10 @@ final class WorkspaceViewModel: ObservableObject {
         }
         if current.patternLibrary != context.patternLibrary {
             bootstrap.workspaceStore.updatePatternLibrary { $0 = context.patternLibrary }
+            didChange = true
+        }
+        if current.textureFillLibrary != context.textureFillLibrary {
+            bootstrap.workspaceStore.updateTextureFillLibrary { $0 = context.textureFillLibrary }
             didChange = true
         }
         if current.tipImageLibrary != context.tipImageLibrary {

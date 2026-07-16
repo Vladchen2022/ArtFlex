@@ -514,6 +514,26 @@ struct StageOneBrushPreviewRasterizerTests {
         ))
         #expect(try pixelData(in: changedShapeImage) != pixelData(in: lowImage))
 
+        var noisySettings = highCoverage
+        noisySettings.paintJitterAmount = 0.75
+        let noisyImage = try #require(StageOneBrushPreviewRasterizer.textureFillPreviewImage(
+            for: brush,
+            tipSettings: noisySettings,
+            color: RGBAColor(red: 0.76, green: 0.22, blue: 0.12, alpha: 1),
+            width: 192,
+            height: 84
+        ))
+        var flatColorSettings = noisySettings
+        flatColorSettings.paintJitterAmount = 0
+        let flatColorImage = try #require(StageOneBrushPreviewRasterizer.textureFillPreviewImage(
+            for: brush,
+            tipSettings: flatColorSettings,
+            color: RGBAColor(red: 0.76, green: 0.22, blue: 0.12, alpha: 1),
+            width: 192,
+            height: 84
+        ))
+        #expect(try pixelData(in: noisyImage) != pixelData(in: flatColorImage))
+
         let cachedHighImage = try #require(StageOneBrushPreviewRasterizer.textureFillPreviewImage(
             for: brush,
             tipSettings: highCoverage,

@@ -155,6 +155,8 @@ extension WorkspaceViewModel {
     }
 
     func activateBlockReferenceForEditing() {
+        blockReferenceEditorState.perspectiveMatch.isActive = false
+        blockReferenceEditorState.perspectiveMatch.draftLine = nil
         blockReferenceEditorState.phase = .idle
         blockReferenceEditorState.draft = nil
         blockReferenceEditorState.draftMeasurement = nil
@@ -190,6 +192,8 @@ extension WorkspaceViewModel {
     }
 
     func freezeBlockReferenceForPainting() {
+        blockReferenceEditorState.perspectiveMatch.isActive = false
+        blockReferenceEditorState.perspectiveMatch.draftLine = nil
         cancelBlockReferenceInteraction()
         _ = updateBlockReferenceDocument { scene in
             scene?.display.isFrozen = true
@@ -1279,6 +1283,10 @@ extension WorkspaceViewModel {
         updateBlockReferenceParameter { $0.camera.pitchDegrees = value }
     }
 
+    func setBlockReferenceCameraRoll(_ value: Double) {
+        updateBlockReferenceParameter { $0.camera.rollDegrees = value }
+    }
+
     func setBlockReferenceCameraDistance(_ value: Double) {
         updateBlockReferenceParameter { $0.camera.distance = value }
     }
@@ -1544,6 +1552,8 @@ extension WorkspaceViewModel {
         _ = updateBlockReferenceDocument(operationKind: "blockReference.cameraView") { scene in
             scene?.camera.yawDegrees = yaw
             scene?.camera.pitchDegrees = pitch
+            scene?.camera.rollDegrees = 0
+            scene?.camera.principalPointNormalized = CanvasPoint(x: 0.5, y: 0.5)
             scene?.camera.isOrthographic = true
         }
     }

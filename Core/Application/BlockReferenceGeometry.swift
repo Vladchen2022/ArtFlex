@@ -107,7 +107,14 @@ func blockCameraBasis(_ camera: BlockReferenceCamera) -> BlockCameraBasis {
     if abs(forward.dot(.unitZ)) > 0.995 {
         right = forward.cross(.unitY).normalized(fallback: .unitX)
     }
-    let up = right.cross(forward).normalized(fallback: .unitZ)
+    var up = right.cross(forward).normalized(fallback: .unitZ)
+    let roll = camera.rollDegrees * .pi / 180
+    if abs(roll) > 0.000_000_1 {
+        let baseRight = right
+        let baseUp = up
+        right = (baseRight * cos(roll) + baseUp * sin(roll)).normalized(fallback: baseRight)
+        up = (baseUp * cos(roll) - baseRight * sin(roll)).normalized(fallback: baseUp)
+    }
     return BlockCameraBasis(position: position, right: right, up: up, forward: forward)
 }
 
@@ -136,8 +143,8 @@ func projectBlockPoint(
     }
     return BlockProjectedPoint(
         canvasPoint: CanvasPoint(
-            x: (ndcX * 0.5 + 0.5) * width,
-            y: (0.5 - ndcY * 0.5) * height
+            x: (camera.principalPointNormalized.x + ndcX * 0.5) * width,
+            y: (camera.principalPointNormalized.y - ndcY * 0.5) * height
         ),
         cameraDepth: depth
     )
@@ -152,8 +159,8 @@ func blockCameraRay(
     let width = Double(max(canvasSize.width, 1))
     let height = Double(max(canvasSize.height, 1))
     let aspect = width / height
-    let ndcX = ((canvasPoint.x / width) * 2) - 1
-    let ndcY = 1 - ((canvasPoint.y / height) * 2)
+    let ndcX = ((canvasPoint.x / width) - camera.principalPointNormalized.x) * 2
+    let ndcY = (camera.principalPointNormalized.y - (canvasPoint.y / height)) * 2
     let fovScale = tan(camera.fieldOfViewDegrees * .pi / 360)
     if camera.isOrthographic {
         let verticalSpan = max(camera.distance * fovScale, 1)

@@ -22,4 +22,13 @@ struct TextureFillPhase0Tests {
         #expect(ToolKind.textureFill.displayName == "纹理填充")
         #expect(ToolSidebarGroup.orderedGroups.contains { $0.id == "texture-fill" } == false)
     }
+
+    @Test
+    func lassoFillToolGroupDrivesTheTextureLibraryWhileOtherToolsUseTheBrushLibrary() {
+        #expect(rightInspectorUsesTextureLibrary(activeTool: .lassoFill))
+        #expect(rightInspectorUsesTextureLibrary(activeTool: .textureFill))
+        #expect(!rightInspectorUsesTextureLibrary(activeTool: .brush))
+        #expect(!rightInspectorUsesTextureLibrary(activeTool: .eraser))
+        #expect(!rightInspectorUsesTextureLibrary(activeTool: .blockReference))
+    }
 }

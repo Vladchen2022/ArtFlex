@@ -239,6 +239,7 @@ final class HistoryController {
             colorPanel: current.colorPanel,
             brushLibrary: current.brushLibrary,
             patternLibrary: current.patternLibrary,
+            textureFillLibrary: current.textureFillLibrary,
             tipImageLibrary: current.tipImageLibrary,
             generator: current.generator,
             viewport: current.viewport,
