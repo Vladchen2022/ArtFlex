@@ -435,6 +435,19 @@ struct CanvasContainerView: View {
                         .allowsHitTesting(false)
                 }
 
+                if let blockScene = viewModel.blockReferenceScene,
+                   blockScene.display.isVisible {
+                    BlockReferenceOverlay(
+                        scene: blockScene,
+                        editorState: viewModel.blockReferenceEditorState,
+                        transform: viewportTransform,
+                        cameraRenderState: viewModel.blockReferenceCameraRenderState,
+                        rendersContinuously: viewModel.isBlockReferenceCameraNavigating
+                    )
+                    .frame(width: geometry.size.width, height: geometry.size.height)
+                    .allowsHitTesting(false)
+                }
+
                 if let guide = viewModel.perspectiveGuide, guide.isVisible {
                     PerspectiveGuideOverlay(
                         guide: guide,
@@ -465,6 +478,59 @@ struct CanvasContainerView: View {
                     .frame(width: geometry.size.width, height: geometry.size.height)
                 }
 
+                if viewModel.workspace.toolSession.activeTool == .blockReference,
+                   let blockScene = viewModel.blockReferenceScene,
+                   blockScene.display.isVisible,
+                   !blockScene.display.isFrozen,
+                   !viewModel.isPanModeActive {
+                    BlockReferenceGestureOverlay(
+                        transform: viewportTransform,
+                        onBegan: { point, modifiers in
+                            onCanvasInteraction?()
+                            viewModel.beginBlockReferenceInteraction(
+                                at: point,
+                                screenScale: viewportTransform.actualDisplayScale,
+                                modifiers: modifiers
+                            )
+                        },
+                        onChanged: { point in
+                            viewModel.updateBlockReferenceInteraction(
+                                to: point,
+                                screenScale: viewportTransform.actualDisplayScale
+                            )
+                        },
+                        onEnded: viewModel.endBlockReferenceInteraction,
+                        onNavigationBegan: viewModel.beginBlockReferenceCameraNavigation,
+                        onNavigationChanged: { mode, deltaX, deltaY in
+                            viewModel.updateBlockReferenceCameraNavigation(
+                                mode: mode,
+                                deltaX: deltaX,
+                                deltaY: deltaY,
+                                screenScale: viewportTransform.actualDisplayScale
+                            )
+                        },
+                        onNavigationEnded: viewModel.endBlockReferenceCameraNavigation,
+                        onZoom: viewModel.zoomBlockReferenceCamera,
+                        onHover: { point in
+                            viewModel.updateBlockReferenceGizmoHover(
+                                at: point,
+                                screenScale: viewportTransform.actualDisplayScale
+                            )
+                        },
+                        gizmoAdjustment: viewModel.blockReferenceEditorState.gizmoAdjustment,
+                        gizmoPopupPoint: viewModel.blockReferenceEditorState.gizmoAdjustment.flatMap {
+                            blockReferenceGizmoPopupViewportPoint(
+                                scene: blockScene,
+                                adjustment: $0,
+                                transform: viewportTransform
+                            )
+                        },
+                        onGizmoInputChanged: viewModel.setBlockReferenceGizmoAdjustmentInput,
+                        onGizmoFinish: viewModel.finishBlockReferenceGizmoAdjustment
+                    )
+                    .frame(width: geometry.size.width, height: geometry.size.height)
+                }
+
                 if viewModel.workspace.toolSession.activeTool == .perspective,
                    let guide = viewModel.perspectiveGuide {
                     PerspectiveGuideHUD(
@@ -473,6 +539,20 @@ struct CanvasContainerView: View {
                             viewModel.setPerspectiveGuideLocked(!guide.isLocked)
                         },
                         onClear: viewModel.clearPerspectiveGuide
+                    )
+                    .position(
+                        x: geometry.size.width / 2,
+                        y: abs(viewModel.workspace.viewport.rotationDegrees) > 0.05 ? 68 : 28
+                    )
+                }
+
+                if viewModel.workspace.toolSession.activeTool == .blockReference,
+                   let blockScene = viewModel.blockReferenceScene {
+                    BlockReferenceHUD(
+                        scene: blockScene,
+                        editorState: viewModel.blockReferenceEditorState,
+                        onCancel: viewModel.cancelBlockReferenceInteraction,
+                        onFreeze: viewModel.freezeBlockReferenceAndSelectBrush
                     )
                     .position(
                         x: geometry.size.width / 2,

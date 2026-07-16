@@ -177,6 +177,10 @@ final class WorkspaceViewModel: ObservableObject {
     @Published private(set) var freeTransformMeshWarpGrid: MeshWarpGrid?
     @Published private(set) var selectedMeshWarpControlPointIndices: Set<Int> = []
     @Published private(set) var selectedPerspectiveAnchorID: UUID?
+    @Published var blockReferenceEditorState = BlockReferenceEditorState()
+    @Published var isBlockReferenceCameraNavigating = false
+    var blockReferenceCameraPreview: BlockReferenceCamera?
+    let blockReferenceCameraRenderState = BlockReferenceCameraRenderState()
     @Published private(set) var isApplyingGradientCommit = false
     @Published private(set) var isBucketFillInProgress = false
     @Published private(set) var isSavingSnapshot = false
@@ -210,6 +214,17 @@ final class WorkspaceViewModel: ObservableObject {
     private var perspectiveGuideInteractionLastPoint: CanvasPoint?
     private var perspectiveGuideInteractionHasCheckpoint = false
     private var isAdjustingPerspectiveGuideStyle = false
+    var blockReferenceInteractionStartPoint: CanvasPoint?
+    var blockReferenceInteractionStartWorldPoint: BlockVector3?
+    var blockReferenceMoveStartPosition: BlockVector3?
+    var blockReferenceMoveStartPositions: [UUID: BlockVector3] = [:]
+    var blockReferenceInteractionHasCheckpoint = false
+    var blockReferenceGizmoDragSession: BlockReferenceGizmoDragSession?
+    var blockReferenceHumanJointDragSession: BlockHumanJointDragSession?
+    var isAdjustingBlockReferenceParameters = false
+    var blockReferenceCameraNavigationMode: BlockReferenceNavigationMode?
+    var blockReferenceCameraNavigationStart: BlockReferenceCamera?
+    var blockReferenceCameraNavigationHasCheckpoint = false
     private var layerThumbnailCache: [LayerID: CGImage] = [:]
     private var generatorStrokeSession = GeneratorStrokeSessionState()
     private var activeLassoRawPoints: [CanvasPoint] = []
@@ -397,7 +412,12 @@ final class WorkspaceViewModel: ObservableObject {
             if NSApp.keyWindow?.identifier?.rawValue == "ReferenceImageFloatingPanel" {
                 return event
             }
-            let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            if self.workspace.toolSession.activeTool == .blockReference,
+               !Self.isEditingTextInKeyWindow,
+               self.handleBlockReferenceKeyDown(event) {
+                return nil
+            }
+            let modifiers = event.modifierFlags.intersection([.command, .option, .control, .shift])
             guard modifiers == .command || modifiers == [.command, .shift] else { return event }
             let chars = event.charactersIgnoringModifiers
             if chars == "=" || chars == "+" {
@@ -418,6 +438,14 @@ final class WorkspaceViewModel: ObservableObject {
             }
             return event
         }
+    }
+
+    private static var isEditingTextInKeyWindow: Bool {
+        guard let responder = NSApp.keyWindow?.firstResponder else { return false }
+        if let textView = responder as? NSTextView {
+            return textView.isEditable
+        }
+        return responder is NSTextField
     }
 
     func selectTool(_ tool: ToolKind) {
@@ -539,6 +567,11 @@ final class WorkspaceViewModel: ObservableObject {
             lockPerspectiveGuideForPainting()
         } else if tool == .perspective {
             activatePerspectiveGuideForEditing()
+        }
+        if previousTool == .blockReference, tool != .blockReference {
+            freezeBlockReferenceForPainting()
+        } else if tool == .blockReference {
+            activateBlockReferenceForEditing()
         }
         syncBrightnessAdjustmentHotkeyState(for: tool)
         if let group = ToolSidebarGroup.group(containing: tool) {
@@ -1017,9 +1050,42 @@ final class WorkspaceViewModel: ObservableObject {
         notePerspectiveGuideChanged()
     }
 
+    /// Shared document bridge used by the 3D block-reference subsystem. Keeping
+    /// the store mutation here avoids coupling block geometry code to AppBootstrap.
+    func replacePerspectiveGuideFromBlockReference(_ guide: PerspectiveGuideState) {
+        guard capturePerspectiveGuideCheckpoint(operationKind: "perspective.fromBlockCamera") else { return }
+        replacePerspectiveGuide(guide)
+    }
+
     private func notePerspectiveGuideChanged() {
         hasUnsavedChanges = true
         refreshPerspectiveGuideOnly()
+    }
+
+    @discardableResult
+    func captureBlockReferenceHistoryCheckpoint(operationKind: String) -> Bool {
+        checkpointHistoryIfPossible(
+            operationKind: operationKind,
+            captureMode: .workspaceOnly
+        )
+    }
+
+    @discardableResult
+    func updateBlockReferenceDocument(
+        operationKind: String? = nil,
+        _ transform: (inout BlockReferenceScene?) -> Void
+    ) -> Bool {
+        if let operationKind,
+           !captureBlockReferenceHistoryCheckpoint(operationKind: operationKind) {
+            return false
+        }
+        bootstrap.workspaceStore.updateDocument { document in
+            transform(&document.blockReferenceScene)
+            document.blockReferenceScene?.normalize()
+        }
+        hasUnsavedChanges = true
+        refreshDocumentOverlayOnly()
+        return true
     }
 
     func setBrushSize(_ size: Float) {
@@ -5855,6 +5921,8 @@ final class WorkspaceViewModel: ObservableObject {
         case .perspective:
             selectedPerspectiveAnchorID = nil
             endPerspectiveGuideInteraction()
+        case .blockReference:
+            cancelBlockReferenceInteraction()
         default:
             break
         }
@@ -9466,6 +9534,11 @@ final class WorkspaceViewModel: ObservableObject {
             }
         }
 
+        if workspace.toolSession.activeTool == .blockReference,
+           handleBlockReferenceKeyDown(event) {
+            return true
+        }
+
         if workspace.toolSession.activeTool == .canvasCrop {
             if event.keyCode == 36 || event.keyCode == 76 {
                 applyCanvasCrop()
@@ -9808,6 +9881,31 @@ final class WorkspaceViewModel: ObservableObject {
         canRedo = bootstrap.historyController.canRedo
     }
 
+    /// 体块参考属于文档级 UI 场景，不参与图层合成，也不应重建 Metal 画布快照。
+    private func refreshBlockReferenceOnly() {
+        workspace = bootstrap.workspaceStore.state
+        let existingObjectIDs = Set(workspace.document.blockReferenceScene?.objects.map(\.id) ?? [])
+        blockReferenceEditorState.selectedObjectIDs.formIntersection(existingObjectIDs)
+        if let selectedObjectID = blockReferenceEditorState.selectedObjectID,
+           !existingObjectIDs.contains(selectedObjectID) {
+            blockReferenceEditorState.selectedObjectID = blockReferenceEditorState.selectedObjectIDs.first
+            blockReferenceEditorState.selectedFaceIndex = nil
+        }
+        canUndo = bootstrap.historyController.canUndo
+        canRedo = bootstrap.historyController.canRedo
+    }
+
+    private func refreshDocumentOverlayOnly() {
+        refreshPerspectiveGuideOnly()
+        let existingObjectIDs = Set(workspace.document.blockReferenceScene?.objects.map(\.id) ?? [])
+        blockReferenceEditorState.selectedObjectIDs.formIntersection(existingObjectIDs)
+        if let selectedObjectID = blockReferenceEditorState.selectedObjectID,
+           !existingObjectIDs.contains(selectedObjectID) {
+            blockReferenceEditorState.selectedObjectID = blockReferenceEditorState.selectedObjectIDs.first
+            blockReferenceEditorState.selectedFaceIndex = nil
+        }
+    }
+
     private func notePrimaryBrushTipDefinitionChanged() {
         strokeResetToken &+= 1
     }
@@ -10136,12 +10234,15 @@ final class WorkspaceViewModel: ObservableObject {
                 )
             }
             if restoresWorkspaceOnly {
-                refreshPerspectiveGuideOnly()
+                refreshDocumentOverlayOnly()
             } else {
                 refresh()
             }
             if didUndo, !restoresWorkspaceOnly {
                 scheduleNavigatorPreviewRefresh()
+            }
+            if didUndo, workspace.toolSession.activeTool == .blockReference {
+                blockReferenceEditorState.instruction = "已撤销上一项操作。"
             }
             showStatus(
                 .init(
@@ -10196,12 +10297,15 @@ final class WorkspaceViewModel: ObservableObject {
                 )
             }
             if restoresWorkspaceOnly {
-                refreshPerspectiveGuideOnly()
+                refreshDocumentOverlayOnly()
             } else {
                 refresh()
             }
             if didRedo, !restoresWorkspaceOnly {
                 scheduleNavigatorPreviewRefresh()
+            }
+            if didRedo, workspace.toolSession.activeTool == .blockReference {
+                blockReferenceEditorState.instruction = "已重做上一项操作。"
             }
             showStatus(
                 .init(
@@ -10946,6 +11050,7 @@ final class WorkspaceViewModel: ObservableObject {
         let activeSurface = surfaces.first { $0.layerID == workspace.document.activeLayerID }
         var renderDocument = workspace.document
         renderDocument.perspectiveGuide = nil
+        renderDocument.blockReferenceScene = nil
 
         return CanvasSceneSnapshot(
             renderSnapshot: CanvasRenderSnapshot(

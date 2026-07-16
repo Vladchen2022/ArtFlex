@@ -81,8 +81,11 @@ func shouldPrioritizeCanvasKeyHandlerBeforeToolShortcut(
     event: NSEvent,
     modifiers: NSEvent.ModifierFlags
 ) -> Bool {
-    guard activeTool == .brightnessAdjust else { return false }
     guard modifiers.isDisjoint(with: [.command, .option, .control]) else { return false }
+    if activeTool == .blockReference {
+        return true
+    }
+    guard activeTool == .brightnessAdjust else { return false }
     guard let key = event.charactersIgnoringModifiers?.lowercased(), key.count == 1 else { return false }
     return key == "b" || key == "e"
 }
@@ -613,7 +616,7 @@ func preferredBrushCursorMode(
     }
     if activeTool == .brush || activeTool == .eraser || activeTool == .smudge || activeTool == .brightnessAdjust ||
         activeTool == .canvasCrop || activeTool == .canvasRotate || activeTool == .straightLine ||
-        activeTool == .linearGradient || activeTool == .sectorGradient || activeTool == .polygonSelection || activeTool == .perspective ||
+        activeTool == .linearGradient || activeTool == .sectorGradient || activeTool == .polygonSelection || activeTool == .perspective || activeTool == .blockReference ||
         activeTool == .rectangleSelection || activeTool == .ellipseSelection || activeTool == .lassoSelection {
         return .crosshair
     }
@@ -1585,7 +1588,7 @@ final class StrokeCaptureMTKView: MTKView {
                 strokeDelegate?.strokeCaptureViewDidRequestCanvasToolCancel(self)
                 return
             }
-            if activeTool == .straightLine || activeTool == .linearGradient || activeTool == .sectorGradient || activeTool == .polygonSelection || activeTool == .perspective {
+            if activeTool == .straightLine || activeTool == .linearGradient || activeTool == .sectorGradient || activeTool == .polygonSelection || activeTool == .perspective || activeTool == .blockReference {
                 strokeDelegate?.strokeCaptureViewDidRequestCanvasToolCancel(self)
                 return
             }
@@ -2219,7 +2222,7 @@ final class StrokeCaptureMTKView: MTKView {
         switch activeTool {
         case .brush, .eraser, .smudge, .straightLine, .linearGradient, .sectorGradient, .brightnessAdjust:
             return true
-        case .eyedropper, .bucket, .polygonSelection, .lassoFill, .textureFill, .rectangleSelection, .ellipseSelection, .lassoSelection, .canvasRotate, .canvasCrop, .freeTransform, .perspective:
+        case .eyedropper, .bucket, .polygonSelection, .lassoFill, .textureFill, .rectangleSelection, .ellipseSelection, .lassoSelection, .canvasRotate, .canvasCrop, .freeTransform, .perspective, .blockReference:
             return false
         }
     }

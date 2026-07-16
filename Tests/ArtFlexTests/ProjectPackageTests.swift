@@ -208,6 +208,41 @@ struct ProjectPackageTests {
     }
 
     @Test
+    func packageRoundTripsBlockReferenceScene() throws {
+        var workspace = WorkspaceState.stageOneDefault
+        var scene = BlockReferenceScene.empty
+        scene.objects = [
+            BlockReferenceObject(
+                name: "方块 1",
+                kind: .box,
+                position: .init(x: 40, y: 60, z: 0),
+                rotation: .init(xDegrees: 12, yDegrees: 18, zDegrees: 24),
+                dimensions: .init(width: 100, depth: 80, height: 140)
+            )
+        ]
+        scene.workingPlane = BlockWorkingPlane(
+            origin: .init(x: 0, y: 0, z: 140),
+            axisU: .unitX,
+            axisV: .unitY,
+            normal: .unitZ,
+            sourceObjectID: scene.objects[0].id,
+            sourceFaceIndex: 1
+        )
+        scene.cameraSlots = [.init(index: 1, name: "主视角", camera: scene.camera)]
+        scene.constructionLines = [.init(name: "X 辅助", origin: .zero, direction: .unitX)]
+        scene.savedWorkingPlanes = [.init(name: "顶面", plane: scene.workingPlane)]
+        scene.section = .init(isEnabled: true, plane: scene.workingPlane, isInverted: false)
+        scene.snapshots = [blockReferenceSceneSnapshot(name: "工程内场景", scene: scene)]
+        workspace.document.blockReferenceScene = scene
+
+        let package = ProjectPackage.fromWorkspace(workspace, layerSnapshots: [])
+        let encoded = try JSONEncoder().encode(package)
+        let decoded = try JSONDecoder().decode(ProjectPackage.self, from: encoded)
+
+        #expect(decoded.workspaceState.document.blockReferenceScene == scene)
+    }
+
+    @Test
     func packagePreservesDormantImportedTipAssetsAcrossWorkspaceRoundTrip() {
         var workspace = WorkspaceState.stageOneDefault
         let primaryMask = Data([255, 96, 48, 0, 12])

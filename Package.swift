@@ -10,7 +10,12 @@ let package = Package(
     products: [
         .executable(name: "ArtFlex", targets: ["ArtFlex"])
     ],
-    dependencies: [],
+    dependencies: [
+        .package(
+            url: "https://github.com/nicklockwood/Euclid.git",
+            exact: "0.8.18"
+        )
+    ],
     targets: [
         .testTarget(
             name: "ArtFlexTests",
@@ -19,7 +24,9 @@ let package = Package(
         ),
         .executableTarget(
             name: "ArtFlex",
-            dependencies: [],
+            dependencies: [
+                .product(name: "Euclid", package: "Euclid")
+            ],
             path: ".",
             exclude: [
                 ".git",
@@ -29,6 +36,7 @@ let package = Package(
                 "DECISIONS.md",
                 "Docs",
                 "HANDOFF.md",
+                "HANDOFF_TEXTURE_FILL_2026-07-13.md",
                 "LICENSE",
                 "README.md",
                 "selection-trace.log",

@@ -37,7 +37,8 @@ struct ToolSidebarView: View {
         .group("canvas-rotate"),
         .group("canvas-crop"),
         .group("free-transform"),
-        .group("perspective")
+        .group("perspective"),
+        .group("block-reference")
     ]
 
     var body: some View {

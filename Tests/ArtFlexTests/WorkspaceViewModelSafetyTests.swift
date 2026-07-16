@@ -2241,6 +2241,763 @@ struct WorkspaceViewModelSafetyTests {
 
     @Test
     @MainActor
+    func blockReferenceCreatesExtrudedObjectFreezesAndRestoresThroughHistory() throws {
+        let harness = try BrushEditingBoundaryHarness(canvasSize: .init(width: 600, height: 480))
+        harness.viewModel.selectTool(.blockReference)
+        #expect(harness.viewModel.blockReferenceScene != nil)
+        #expect(harness.viewModel.workspace.toolSession.activeTool == .blockReference)
+
+        harness.viewModel.setBlockReferenceEditorMode(.box)
+        harness.viewModel.beginBlockReferenceInteraction(
+            at: .init(x: 250, y: 250),
+            screenScale: 1
+        )
+        harness.viewModel.updateBlockReferenceInteraction(
+            to: .init(x: 350, y: 330),
+            screenScale: 1
+        )
+        harness.viewModel.endBlockReferenceInteraction()
+        #expect(harness.viewModel.blockReferenceEditorState.phase == .awaitingExtrusion)
+
+        harness.viewModel.beginBlockReferenceInteraction(
+            at: .init(x: 350, y: 330),
+            screenScale: 1
+        )
+        harness.viewModel.updateBlockReferenceInteraction(
+            to: .init(x: 350, y: 230),
+            screenScale: 1
+        )
+        harness.viewModel.endBlockReferenceInteraction()
+
+        let object = try #require(harness.viewModel.blockReferenceScene?.objects.first)
+        #expect(object.kind == .box)
+        #expect(object.dimensions.width > 1)
+        #expect(object.dimensions.depth > 1)
+        #expect(object.dimensions.height > 1)
+
+        harness.viewModel.undo()
+        #expect(harness.viewModel.blockReferenceScene?.objects.isEmpty == true)
+        harness.viewModel.redo()
+        #expect(harness.viewModel.blockReferenceScene?.objects.count == 1)
+
+        harness.viewModel.selectTool(.brush)
+        #expect(harness.viewModel.blockReferenceScene?.display.isFrozen == true)
+        #expect(harness.viewModel.blockReferenceScene?.display.isVisible == true)
+    }
+
+    @Test
+    @MainActor
+    func blockReferenceNumericTransformPreviewsThenCommitsOneUndoableChange() throws {
+        let harness = try BrushEditingBoundaryHarness(canvasSize: .init(width: 600, height: 480))
+        harness.viewModel.selectTool(.blockReference)
+        let object = BlockReferenceObject(
+            name: "方块 1",
+            kind: .box,
+            position: .init(x: 10, y: 20, z: 0),
+            dimensions: .init(width: 80, depth: 60, height: 100)
+        )
+        _ = harness.viewModel.updateBlockReferenceDocument { scene in
+            scene?.objects.append(object)
+        }
+        harness.viewModel.blockReferenceEditorState.selectedObjectID = object.id
+
+        harness.viewModel.beginBlockReferenceNumericTransform(.move)
+        harness.viewModel.setBlockReferenceNumericTransformAxis(.x)
+        harness.viewModel.setBlockReferenceNumericTransformInput("-35")
+
+        #expect(harness.viewModel.selectedBlockReferenceObject?.position.x == 10)
+        #expect(harness.viewModel.displayedSelectedBlockReferenceObject?.position.x == -25)
+
+        harness.viewModel.commitBlockReferenceNumericTransform()
+        #expect(harness.viewModel.selectedBlockReferenceObject?.position.x == -25)
+        #expect(harness.viewModel.blockReferenceEditorState.numericTransform == nil)
+
+        harness.viewModel.undo()
+        #expect(harness.viewModel.selectedBlockReferenceObject?.position.x == 10)
+
+        let keySequence: [(String, UInt16)] = [
+            ("g", 5), ("x", 7), ("-", 27), ("3", 20), ("5", 23), ("\r", 36)
+        ]
+        for (characters, keyCode) in keySequence {
+            let event = makeCanvasKeyEvent(
+                type: .keyDown,
+                characters: characters,
+                charactersIgnoringModifiers: characters,
+                modifiers: [],
+                keyCode: keyCode
+            )
+            #expect(harness.viewModel.handleBlockReferenceKeyDown(event))
+        }
+        #expect(harness.viewModel.selectedBlockReferenceObject?.position.x == -25)
+    }
+
+    @Test
+    @MainActor
+    func blockReferenceControlShortcutsUsePhysicalKeyCodesForGroupAndUngroup() throws {
+        let harness = try BrushEditingBoundaryHarness(canvasSize: .init(width: 600, height: 480))
+        harness.viewModel.selectTool(.blockReference)
+        let objects = [
+            BlockReferenceObject(
+                name: "A", kind: .box, position: .init(x: -20, y: 0, z: 0),
+                dimensions: .init(width: 20, depth: 20, height: 20)
+            ),
+            BlockReferenceObject(
+                name: "B", kind: .box, position: .init(x: 20, y: 0, z: 0),
+                dimensions: .init(width: 20, depth: 20, height: 20)
+            )
+        ]
+        _ = harness.viewModel.updateBlockReferenceDocument { $0?.objects = objects }
+        harness.viewModel.selectAllBlockReferenceObjects()
+        let group = makeCanvasKeyEvent(
+            type: .keyDown,
+            characters: "\u{7}",
+            charactersIgnoringModifiers: "\u{7}",
+            modifiers: [.control],
+            keyCode: 5
+        )
+        #expect(harness.viewModel.handleBlockReferenceKeyDown(group))
+        #expect(harness.viewModel.blockReferenceScene?.groups.count == 1)
+
+        let ungroup = makeCanvasKeyEvent(
+            type: .keyDown,
+            characters: "\u{7}",
+            charactersIgnoringModifiers: "\u{7}",
+            modifiers: [.control, .shift],
+            keyCode: 5
+        )
+        #expect(harness.viewModel.handleBlockReferenceKeyDown(ungroup))
+        #expect(harness.viewModel.blockReferenceScene?.groups.isEmpty == true)
+    }
+
+    @Test
+    @MainActor
+    func blockReferenceGroupExpandsASelectedMemberAndTransformsAsOneUnit() throws {
+        let harness = try BrushEditingBoundaryHarness(canvasSize: .init(width: 600, height: 480))
+        harness.viewModel.selectTool(.blockReference)
+        let first = BlockReferenceObject(
+            name: "A", kind: .box, position: .init(x: -20, y: 0, z: 0),
+            dimensions: .init(width: 20, depth: 20, height: 20)
+        )
+        let second = BlockReferenceObject(
+            name: "B", kind: .box, position: .init(x: 20, y: 0, z: 0),
+            dimensions: .init(width: 20, depth: 20, height: 20)
+        )
+        _ = harness.viewModel.updateBlockReferenceDocument { $0?.objects = [first, second] }
+        harness.viewModel.selectAllBlockReferenceObjects()
+        harness.viewModel.groupSelectedBlockReferenceObjects()
+
+        // Reproduce a canvas click that stores only the clicked member as the raw selection.
+        harness.viewModel.blockReferenceEditorState.selectedObjectID = first.id
+        harness.viewModel.blockReferenceEditorState.selectedObjectIDs = [first.id]
+        #expect(harness.viewModel.selectedBlockReferenceObjectIDs == [first.id, second.id])
+
+        harness.viewModel.beginBlockReferenceNumericTransform(.rotate)
+        harness.viewModel.setBlockReferenceNumericTransformAxis(.z)
+        harness.viewModel.setBlockReferenceNumericTransformInput("90")
+        harness.viewModel.commitBlockReferenceNumericTransform()
+        let rotated = try #require(harness.viewModel.blockReferenceScene?.objects)
+        #expect(rotated[0].position.distance(to: .init(x: 0, y: -20, z: 0)) < 0.000_001)
+        #expect(rotated[1].position.distance(to: .init(x: 0, y: 20, z: 0)) < 0.000_001)
+
+        harness.viewModel.setSelectedBlockReferencePosition(.init(x: 10, y: -20, z: 0))
+        let moved = try #require(harness.viewModel.blockReferenceScene?.objects)
+        #expect(moved[0].position.distance(to: .init(x: 10, y: -20, z: 0)) < 0.000_001)
+        #expect(moved[1].position.distance(to: .init(x: 10, y: 20, z: 0)) < 0.000_001)
+
+        harness.viewModel.ungroupSelectedBlockReferenceObjects()
+        #expect(harness.viewModel.blockReferenceScene?.groups.isEmpty == true)
+        #expect(harness.viewModel.blockReferenceScene?.objects.allSatisfy { $0.groupID == nil } == true)
+    }
+
+    @Test
+    @MainActor
+    func blockReferenceShortcutAxisUsesWorldThenLocalOnRepeatedAxisKey() throws {
+        let harness = try BrushEditingBoundaryHarness(canvasSize: .init(width: 600, height: 480))
+        harness.viewModel.selectTool(.blockReference)
+        let object = BlockReferenceObject(
+            name: "旋转方块",
+            kind: .box,
+            position: .zero,
+            rotation: .init(xDegrees: 0, yDegrees: 0, zDegrees: 90),
+            dimensions: .stageOneDefault
+        )
+        _ = harness.viewModel.updateBlockReferenceDocument { $0?.objects = [object] }
+        harness.viewModel.selectBlockReferenceObject(object.id, extending: false)
+        harness.viewModel.setBlockReferenceGizmoCoordinateSpace(.local)
+
+        let event: (String, UInt16) -> NSEvent = { characters, keyCode in
+            makeCanvasKeyEvent(
+                type: .keyDown,
+                characters: characters,
+                charactersIgnoringModifiers: characters,
+                modifiers: [],
+                keyCode: keyCode
+            )
+        }
+        for input in [("g", 5), ("x", 7), ("1", 18), ("0", 29), ("\r", 36)] {
+            #expect(harness.viewModel.handleBlockReferenceKeyDown(event(input.0, UInt16(input.1))))
+        }
+        #expect(harness.viewModel.selectedBlockReferenceObject?.position.distance(to: .init(x: 10, y: 0, z: 0)) ?? 1 < 0.000_001)
+
+        harness.viewModel.undo()
+        for input in [("g", 5), ("x", 7), ("x", 7), ("1", 18), ("0", 29), ("\r", 36)] {
+            #expect(harness.viewModel.handleBlockReferenceKeyDown(event(input.0, UInt16(input.1))))
+        }
+        #expect(harness.viewModel.selectedBlockReferenceObject?.position.distance(to: .init(x: 0, y: 10, z: 0)) ?? 1 < 0.000_001)
+    }
+
+    @Test
+    @MainActor
+    func blockReferenceRestoresGroundPlaneAndCameraGuideCreatesSceneAnchors() throws {
+        let harness = try BrushEditingBoundaryHarness(canvasSize: .init(width: 600, height: 480))
+        harness.viewModel.selectTool(.blockReference)
+        let object = BlockReferenceObject(
+            name: "方块", kind: .box, position: .zero, dimensions: .stageOneDefault
+        )
+        _ = harness.viewModel.updateBlockReferenceDocument { scene in
+            scene?.objects = [object]
+            scene?.workingPlane = .init(
+                origin: .init(x: 10, y: 20, z: 30),
+                axisU: .unitY,
+                axisV: .unitZ,
+                normal: .unitX,
+                sourceObjectID: object.id,
+                sourceFaceIndex: 0
+            )
+        }
+        harness.viewModel.blockReferenceEditorState.mode = .pickWorkPlane
+        harness.viewModel.resetBlockReferenceWorkingPlane()
+        #expect(harness.viewModel.blockReferenceScene?.workingPlane == .ground)
+        #expect(harness.viewModel.blockReferenceEditorState.mode == .select)
+
+        harness.viewModel.createPerspectiveGuideFromBlockReferenceCamera()
+        let guide = try #require(harness.viewModel.perspectiveGuide)
+        #expect(guide.mode == .threePoint)
+        #expect(!guide.anchors.isEmpty)
+        #expect(!guide.isLocked)
+    }
+
+    @Test
+    @MainActor
+    func blockReferenceNumericScaleUsesTheSelectionPivotAndIsOneUndoableChange() throws {
+        let harness = try BrushEditingBoundaryHarness(canvasSize: .init(width: 600, height: 480))
+        harness.viewModel.selectTool(.blockReference)
+        let first = BlockReferenceObject(
+            name: "方块 1",
+            kind: .box,
+            position: .init(x: -40, y: 0, z: 20),
+            dimensions: .init(width: 40, depth: 60, height: 80)
+        )
+        let second = BlockReferenceObject(
+            name: "方块 2",
+            kind: .box,
+            position: .init(x: 40, y: 0, z: 20),
+            dimensions: .init(width: 40, depth: 60, height: 80)
+        )
+        _ = harness.viewModel.updateBlockReferenceDocument { scene in
+            scene?.objects.append(contentsOf: [first, second])
+        }
+        harness.viewModel.selectBlockReferenceObject(first.id, extending: false)
+        harness.viewModel.selectBlockReferenceObject(second.id, extending: true)
+
+        harness.viewModel.beginBlockReferenceNumericTransform(.scale)
+        harness.viewModel.setBlockReferenceNumericTransformInput("1.5")
+        #expect(harness.viewModel.blockReferenceScene?.objects == [first, second])
+        let transform = try #require(harness.viewModel.blockReferenceEditorState.numericTransform)
+        let preview = [transform.applying(to: first), transform.applying(to: second)]
+        #expect(preview[0].position.x == -60)
+        #expect(preview[1].position.x == 60)
+        #expect(preview[0].dimensions == BlockDimensions(width: 60, depth: 90, height: 120))
+
+        harness.viewModel.commitBlockReferenceNumericTransform()
+        let scaled = try #require(harness.viewModel.blockReferenceScene?.objects)
+        #expect(scaled[0].position.x == -60)
+        #expect(scaled[1].position.x == 60)
+        #expect(scaled[1].dimensions == BlockDimensions(width: 60, depth: 90, height: 120))
+
+        harness.viewModel.undo()
+        #expect(harness.viewModel.blockReferenceScene?.objects == [first, second])
+    }
+
+    @Test
+    @MainActor
+    func blockReferenceAdvancedSceneOperationsStayBoundedAndUndoable() throws {
+        let harness = try BrushEditingBoundaryHarness(canvasSize: .init(width: 600, height: 480))
+        harness.viewModel.selectTool(.blockReference)
+        let first = BlockReferenceObject(
+            name: "方块 1",
+            kind: .box,
+            position: .init(x: -30, y: 0, z: 20),
+            dimensions: .stageOneDefault
+        )
+        let second = BlockReferenceObject(
+            name: "方块 2",
+            kind: .box,
+            position: .init(x: 30, y: 0, z: 20),
+            dimensions: .stageOneDefault
+        )
+        _ = harness.viewModel.updateBlockReferenceDocument { scene in
+            scene?.objects.append(contentsOf: [first, second])
+        }
+        harness.viewModel.selectAllBlockReferenceObjects()
+        #expect(harness.viewModel.blockReferenceEditorState.instruction == "已选择全部 2 个可编辑体块。")
+        harness.viewModel.groupSelectedBlockReferenceObjects()
+        #expect(harness.viewModel.blockReferenceScene?.groups.count == 1)
+        #expect(harness.viewModel.blockReferenceEditorState.instruction == "已将 2 个体块编组。")
+
+        harness.viewModel.mirrorSelectedBlockReferenceObjects(axis: .x)
+        #expect(harness.viewModel.blockReferenceScene?.objects.count == 4)
+        #expect(harness.viewModel.blockReferenceEditorState.instruction == "已沿 X 轴生成镜像副本。")
+        harness.viewModel.undo()
+        #expect(harness.viewModel.blockReferenceScene?.objects.count == 2)
+
+        harness.viewModel.storeBlockReferenceCameraSlot(1)
+        harness.viewModel.addBlockReferenceConstructionAxis(.x)
+        harness.viewModel.saveCurrentBlockReferenceWorkingPlane()
+        harness.viewModel.setBlockReferenceSectionEnabled(true)
+        harness.viewModel.saveBlockReferenceSceneSnapshot()
+        let scene = try #require(harness.viewModel.blockReferenceScene)
+        #expect(scene.cameraSlots.first?.name == "视角 1")
+        #expect(scene.constructionLines.count == 1)
+        #expect(scene.savedWorkingPlanes.count == 1)
+        #expect(scene.section.isEnabled)
+        #expect(scene.snapshots.count == 1)
+        #expect(scene.snapshots[0].objects.count == 2)
+    }
+
+    @Test
+    @MainActor
+    func blockReferenceArraysAndHistoryNavigationReportCompletedState() throws {
+        let harness = try BrushEditingBoundaryHarness(canvasSize: .init(width: 600, height: 480))
+        harness.viewModel.selectTool(.blockReference)
+        let object = BlockReferenceObject(
+            name: "方块 1",
+            kind: .box,
+            position: .init(x: 40, y: 0, z: 20),
+            dimensions: .stageOneDefault
+        )
+        _ = harness.viewModel.updateBlockReferenceDocument { scene in
+            scene?.objects = [object]
+        }
+        harness.viewModel.selectBlockReferenceObject(object.id, extending: false)
+
+        harness.viewModel.createBlockReferenceLinearArray(count: 4, spacing: 30, axis: .y)
+        #expect(harness.viewModel.blockReferenceScene?.objects.count == 4)
+        #expect(harness.viewModel.blockReferenceEditorState.instruction == "已沿 Y 轴生成 3 个线性阵列副本。")
+
+        harness.viewModel.undo()
+        #expect(harness.viewModel.blockReferenceScene?.objects == [object])
+        #expect(harness.viewModel.blockReferenceEditorState.instruction == "已撤销上一项操作。")
+
+        harness.viewModel.redo()
+        #expect(harness.viewModel.blockReferenceScene?.objects.count == 4)
+        #expect(harness.viewModel.blockReferenceEditorState.instruction == "已重做上一项操作。")
+
+        harness.viewModel.undo()
+        harness.viewModel.selectBlockReferenceObject(object.id, extending: false)
+        harness.viewModel.setBlockReferencePivotMode(.workingPlaneOrigin)
+        harness.viewModel.createBlockReferenceRadialArray(count: 4, totalDegrees: 360, axis: .z)
+        #expect(harness.viewModel.blockReferenceScene?.objects.count == 4)
+        #expect(harness.viewModel.blockReferenceEditorState.instruction == "已绕 Z 轴生成 3 个环形阵列副本。")
+    }
+
+    @Test
+    @MainActor
+    func blockReferenceGizmoDragMovesAlongOneAxisAndKeepsOneEditableUndoStep() throws {
+        let canvasSize = CanvasSize(width: 600, height: 480)
+        let harness = try BrushEditingBoundaryHarness(canvasSize: canvasSize)
+        harness.viewModel.selectTool(.blockReference)
+        let object = BlockReferenceObject(
+            name: "方块 1",
+            kind: .box,
+            position: BlockVector3(x: 0, y: 0, z: 70),
+            dimensions: BlockDimensions(width: 80, depth: 60, height: 100)
+        )
+        _ = harness.viewModel.updateBlockReferenceDocument { scene in
+            scene?.objects.append(object)
+        }
+        harness.viewModel.blockReferenceEditorState.selectedObjectID = object.id
+        let scene = try #require(harness.viewModel.blockReferenceScene)
+        let layout = try #require(blockReferenceGizmoLayout(
+            object: object,
+            camera: scene.camera,
+            canvasSize: canvasSize,
+            screenScale: 1
+        ))
+        let move = try #require(layout.moveHandles.first(where: { $0.axis == .x }))
+        let dragEnd = CanvasPoint(
+            x: move.end.x + move.canvasDirection.x * 36,
+            y: move.end.y + move.canvasDirection.y * 36
+        )
+
+        #expect(harness.viewModel.updateBlockReferenceGizmoHover(at: move.end, screenScale: 1))
+        #expect(
+            harness.viewModel.blockReferenceEditorState.hoveredGizmoHandle
+                == BlockReferenceGizmoHandle(kind: .move, axis: .x)
+        )
+        harness.viewModel.beginBlockReferenceInteraction(at: move.end, screenScale: 1)
+        #expect(harness.viewModel.blockReferenceEditorState.phase == .transformingGizmo)
+        harness.viewModel.updateBlockReferenceInteraction(to: dragEnd, screenScale: 1)
+        harness.viewModel.endBlockReferenceInteraction()
+
+        #expect(harness.viewModel.selectedBlockReferenceObject?.position.x != 0)
+        let adjustment = try #require(harness.viewModel.blockReferenceEditorState.gizmoAdjustment)
+        #expect(adjustment.handle == BlockReferenceGizmoHandle(kind: .move, axis: .x))
+        harness.viewModel.setBlockReferenceGizmoAdjustmentInput("-25")
+        #expect(harness.viewModel.selectedBlockReferenceObject?.position == BlockVector3(x: -25, y: 0, z: 70))
+        harness.viewModel.finishBlockReferenceGizmoAdjustment()
+
+        harness.viewModel.undo()
+        #expect(harness.viewModel.selectedBlockReferenceObject?.position == object.position)
+    }
+
+    @Test
+    @MainActor
+    func blockReferenceLocalGizmoMouseDragUsesTheDisplayedObjectAxes() throws {
+        let canvasSize = CanvasSize(width: 600, height: 480)
+        let harness = try BrushEditingBoundaryHarness(canvasSize: canvasSize)
+        harness.viewModel.selectTool(.blockReference)
+        let object = BlockReferenceObject(
+            name: "局部轴方块",
+            kind: .box,
+            position: BlockVector3(x: 0, y: 0, z: 70),
+            rotation: BlockEulerRotation(xDegrees: 18, yDegrees: -12, zDegrees: 90),
+            dimensions: BlockDimensions(width: 80, depth: 60, height: 100)
+        )
+        _ = harness.viewModel.updateBlockReferenceDocument { scene in
+            scene?.objects.append(object)
+        }
+        harness.viewModel.blockReferenceEditorState.selectedObjectID = object.id
+        harness.viewModel.blockReferenceEditorState.selectedObjectIDs = [object.id]
+        for (characters, keyCode) in [("g", UInt16(5)), ("x", UInt16(7)), ("x", UInt16(7))] {
+            #expect(harness.viewModel.handleBlockReferenceKeyDown(makeCanvasKeyEvent(
+                type: .keyDown,
+                characters: characters,
+                charactersIgnoringModifiers: characters,
+                modifiers: [],
+                keyCode: keyCode
+            )))
+        }
+        #expect(harness.viewModel.blockReferenceEditorState.numericTransform?.coordinateSpace == .local)
+        #expect(harness.viewModel.blockReferenceEditorState.gizmoCoordinateSpace == .local)
+        let scene = try #require(harness.viewModel.blockReferenceScene)
+        let directions = harness.viewModel.blockReferenceGizmoAxisDirections
+        let layout = try #require(blockReferenceGizmoLayout(
+            center: object.position,
+            axisDirections: directions,
+            camera: scene.camera,
+            canvasSize: canvasSize,
+            screenScale: 1
+        ))
+        let move = try #require(layout.moveHandles.first(where: { $0.axis == .x }))
+        let dragEnd = CanvasPoint(
+            x: move.end.x + move.canvasDirection.x * 38,
+            y: move.end.y + move.canvasDirection.y * 38
+        )
+
+        #expect(harness.viewModel.updateBlockReferenceGizmoHover(at: move.end, screenScale: 1))
+        harness.viewModel.beginBlockReferenceInteraction(at: move.end, screenScale: 1)
+        #expect(harness.viewModel.blockReferenceEditorState.numericTransform == nil)
+        #expect(harness.viewModel.blockReferenceEditorState.phase == .transformingGizmo)
+        harness.viewModel.updateBlockReferenceInteraction(to: dragEnd, screenScale: 1)
+        harness.viewModel.endBlockReferenceInteraction()
+
+        let moved = try #require(harness.viewModel.selectedBlockReferenceObject)
+        let delta = moved.position - object.position
+        let localX = try #require(directions[.x])
+        #expect(delta.length > 1)
+        #expect(abs(delta.normalized().dot(localX)) > 0.999)
+    }
+
+    @Test
+    @MainActor
+    func blockReferenceLocalRotationRingStartsAndRotatesWithMouse() throws {
+        let canvasSize = CanvasSize(width: 600, height: 480)
+        let harness = try BrushEditingBoundaryHarness(canvasSize: canvasSize)
+        harness.viewModel.selectTool(.blockReference)
+        let object = BlockReferenceObject(
+            name: "局部旋转方块",
+            kind: .box,
+            position: BlockVector3(x: 0, y: 0, z: 70),
+            rotation: BlockEulerRotation(xDegrees: 22, yDegrees: 31, zDegrees: -17),
+            dimensions: .stageOneDefault
+        )
+        _ = harness.viewModel.updateBlockReferenceDocument { scene in
+            scene?.objects.append(object)
+        }
+        harness.viewModel.blockReferenceEditorState.selectedObjectID = object.id
+        harness.viewModel.blockReferenceEditorState.selectedObjectIDs = [object.id]
+        harness.viewModel.setBlockReferenceGizmoCoordinateSpace(.local)
+        let scene = try #require(harness.viewModel.blockReferenceScene)
+        let localDirections = harness.viewModel.blockReferenceGizmoAxisDirections
+        let layout = try #require(blockReferenceGizmoLayout(
+            center: object.position,
+            axisDirections: localDirections,
+            camera: scene.camera,
+            canvasSize: canvasSize,
+            screenScale: 1
+        ))
+        let ring = try #require(layout.rotationRings.first(where: { $0.axis == .y }))
+        let startIndex = try #require(ring.points.indices.first(where: { index in
+            index + 4 < ring.points.count
+                && blockReferenceGizmoHitTest(
+                    point: ring.points[index],
+                    layout: layout,
+                    screenScale: 1
+                ) == BlockReferenceGizmoHandle(kind: .rotate, axis: .y)
+        }))
+
+        harness.viewModel.beginBlockReferenceInteraction(at: ring.points[startIndex], screenScale: 1)
+        #expect(harness.viewModel.blockReferenceEditorState.phase == .transformingGizmo)
+        harness.viewModel.updateBlockReferenceInteraction(to: ring.points[startIndex + 4], screenScale: 1)
+        harness.viewModel.endBlockReferenceInteraction()
+
+        #expect(harness.viewModel.selectedBlockReferenceObject?.rotation != object.rotation)
+        #expect(harness.viewModel.blockReferenceEditorState.gizmoAdjustment?.axisDirections
+            == localDirections)
+    }
+
+    @Test
+    @MainActor
+    func blockReferenceGroupGizmoMovesEverySelectedObjectWithOneUndoStep() throws {
+        let canvasSize = CanvasSize(width: 600, height: 480)
+        let harness = try BrushEditingBoundaryHarness(canvasSize: canvasSize)
+        harness.viewModel.selectTool(.blockReference)
+        let first = BlockReferenceObject(
+            name: "方块 1",
+            kind: .box,
+            position: BlockVector3(x: -30, y: 0, z: 70),
+            dimensions: .stageOneDefault
+        )
+        let second = BlockReferenceObject(
+            name: "方块 2",
+            kind: .box,
+            position: BlockVector3(x: 30, y: 0, z: 70),
+            dimensions: .stageOneDefault
+        )
+        _ = harness.viewModel.updateBlockReferenceDocument { scene in
+            scene?.objects.append(contentsOf: [first, second])
+        }
+        harness.viewModel.selectBlockReferenceObject(first.id, extending: false)
+        harness.viewModel.selectBlockReferenceObject(second.id, extending: true)
+        let scene = try #require(harness.viewModel.blockReferenceScene)
+        let center = try #require(harness.viewModel.blockReferenceSelectionCenter)
+        let layout = try #require(blockReferenceGizmoLayout(
+            center: center,
+            axisDirections: harness.viewModel.blockReferenceGizmoAxisDirections,
+            camera: scene.camera,
+            canvasSize: canvasSize,
+            screenScale: 1
+        ))
+        let move = try #require(layout.moveHandles.first(where: { $0.axis == .x }))
+        let dragEnd = CanvasPoint(
+            x: move.end.x + move.canvasDirection.x * 30,
+            y: move.end.y + move.canvasDirection.y * 30
+        )
+
+        harness.viewModel.beginBlockReferenceInteraction(at: move.end, screenScale: 1)
+        harness.viewModel.updateBlockReferenceInteraction(to: dragEnd, screenScale: 1)
+        harness.viewModel.endBlockReferenceInteraction()
+        harness.viewModel.setBlockReferenceGizmoAdjustmentInput("40")
+
+        let moved = try #require(harness.viewModel.blockReferenceScene?.objects)
+        #expect(moved[0].position == BlockVector3(x: 10, y: 0, z: 70))
+        #expect(moved[1].position == BlockVector3(x: 70, y: 0, z: 70))
+
+        harness.viewModel.finishBlockReferenceGizmoAdjustment()
+        harness.viewModel.undo()
+        let restored = try #require(harness.viewModel.blockReferenceScene?.objects)
+        #expect(restored[0].position == first.position)
+        #expect(restored[1].position == second.position)
+    }
+
+    @Test
+    @MainActor
+    func blockReferenceRotationRingDragsAroundItsWorldAxis() throws {
+        let canvasSize = CanvasSize(width: 600, height: 480)
+        let harness = try BrushEditingBoundaryHarness(canvasSize: canvasSize)
+        harness.viewModel.selectTool(.blockReference)
+        let object = BlockReferenceObject(
+            name: "方块 1",
+            kind: .box,
+            position: BlockVector3(x: 0, y: 0, z: 70),
+            rotation: BlockEulerRotation(xDegrees: 15, yDegrees: -20, zDegrees: 25),
+            dimensions: BlockDimensions(width: 80, depth: 60, height: 100)
+        )
+        _ = harness.viewModel.updateBlockReferenceDocument { scene in
+            scene?.objects.append(object)
+        }
+        harness.viewModel.blockReferenceEditorState.selectedObjectID = object.id
+        let scene = try #require(harness.viewModel.blockReferenceScene)
+        let layout = try #require(blockReferenceGizmoLayout(
+            object: object,
+            camera: scene.camera,
+            canvasSize: canvasSize,
+            screenScale: 1
+        ))
+        let ring = try #require(layout.rotationRings.first(where: { $0.axis == .z }))
+        let startIndex = try #require(ring.points.indices.first(where: { index in
+            blockReferenceGizmoHitTest(
+                point: ring.points[index],
+                layout: layout,
+                screenScale: 1
+            ) == BlockReferenceGizmoHandle(kind: .rotate, axis: .z)
+            && index + 4 < ring.points.count
+        }))
+
+        harness.viewModel.beginBlockReferenceInteraction(at: ring.points[startIndex], screenScale: 1)
+        harness.viewModel.updateBlockReferenceInteraction(to: ring.points[startIndex + 4], screenScale: 1)
+        harness.viewModel.endBlockReferenceInteraction()
+
+        let adjustment = try #require(harness.viewModel.blockReferenceEditorState.gizmoAdjustment)
+        #expect(adjustment.handle == BlockReferenceGizmoHandle(kind: .rotate, axis: .z))
+        let rotated = try #require(harness.viewModel.selectedBlockReferenceObject)
+        #expect(rotated.rotation != object.rotation)
+        harness.viewModel.undo()
+        #expect(harness.viewModel.selectedBlockReferenceObject?.rotation == object.rotation)
+    }
+
+    @Test
+    @MainActor
+    func blockReferenceCameraNavigationChangesOnlyTheSceneCameraAndSupportsUndo() throws {
+        let harness = try BrushEditingBoundaryHarness(canvasSize: .init(width: 600, height: 480))
+        harness.viewModel.selectTool(.blockReference)
+        let originalCamera = try #require(harness.viewModel.blockReferenceScene?.camera)
+        let originalViewport = harness.viewModel.workspace.viewport
+
+        harness.viewModel.beginBlockReferenceCameraNavigation(.orbit)
+        harness.viewModel.updateBlockReferenceCameraNavigation(
+            mode: .orbit,
+            deltaX: 90,
+            deltaY: -30,
+            screenScale: 1
+        )
+        harness.viewModel.endBlockReferenceCameraNavigation()
+
+        let changedCamera = try #require(harness.viewModel.blockReferenceScene?.camera)
+        #expect(changedCamera.yawDegrees != originalCamera.yawDegrees)
+        #expect(changedCamera.pitchDegrees < originalCamera.pitchDegrees)
+        #expect(harness.viewModel.workspace.viewport == originalViewport)
+
+        harness.viewModel.undo()
+        #expect(harness.viewModel.blockReferenceScene?.camera == originalCamera)
+    }
+
+    @Test
+    @MainActor
+    func blockReferenceMultiSelectionMovesTogetherOnLocalAxisAndSupportsUndo() throws {
+        let harness = try BrushEditingBoundaryHarness(canvasSize: .init(width: 600, height: 480))
+        harness.viewModel.selectTool(.blockReference)
+        let first = BlockReferenceObject(
+            name: "方块 1",
+            kind: .box,
+            position: BlockVector3(x: -30, y: 0, z: 0),
+            dimensions: .stageOneDefault
+        )
+        let second = BlockReferenceObject(
+            name: "方块 2",
+            kind: .box,
+            position: BlockVector3(x: 30, y: 0, z: 0),
+            rotation: BlockEulerRotation(xDegrees: 0, yDegrees: 0, zDegrees: 90),
+            dimensions: .stageOneDefault
+        )
+        _ = harness.viewModel.updateBlockReferenceDocument { scene in
+            scene?.objects.append(contentsOf: [first, second])
+        }
+        harness.viewModel.selectBlockReferenceObject(first.id, extending: false)
+        harness.viewModel.selectBlockReferenceObject(second.id, extending: true)
+        #expect(harness.viewModel.selectedBlockReferenceObjectIDs == [first.id, second.id])
+        #expect(harness.viewModel.blockReferenceEditorState.selectedObjectID == second.id)
+
+        harness.viewModel.setBlockReferenceGizmoCoordinateSpace(.local)
+        harness.viewModel.beginBlockReferenceNumericTransform(.move)
+        harness.viewModel.setBlockReferenceNumericTransformAxis(.x)
+        harness.viewModel.setBlockReferenceNumericTransformInput("25")
+        harness.viewModel.commitBlockReferenceNumericTransform()
+
+        let moved = try #require(harness.viewModel.blockReferenceScene?.objects)
+        #expect(moved[0].position.distance(to: BlockVector3(x: -30, y: 25, z: 0)) < 0.000_001)
+        #expect(moved[1].position.distance(to: BlockVector3(x: 30, y: 25, z: 0)) < 0.000_001)
+
+        harness.viewModel.undo()
+        let restored = try #require(harness.viewModel.blockReferenceScene?.objects)
+        #expect(restored[0].position == first.position)
+        #expect(restored[1].position == second.position)
+    }
+
+    @Test
+    @MainActor
+    func blockReferenceVisibilityAndLockRemoveObjectsFromEditableSelection() throws {
+        let harness = try BrushEditingBoundaryHarness(canvasSize: .init(width: 600, height: 480))
+        harness.viewModel.selectTool(.blockReference)
+        let object = BlockReferenceObject(
+            name: "方块 1",
+            kind: .box,
+            position: .zero,
+            dimensions: .stageOneDefault
+        )
+        _ = harness.viewModel.updateBlockReferenceDocument { scene in
+            scene?.objects.append(object)
+        }
+        harness.viewModel.selectBlockReferenceObject(object.id, extending: false)
+
+        harness.viewModel.setBlockReferenceObjectLocked(object.id, isLocked: true)
+        #expect(harness.viewModel.blockReferenceScene?.objects.first?.isLocked == true)
+        #expect(harness.viewModel.selectedBlockReferenceObjectIDs.isEmpty)
+        #expect(harness.viewModel.editableSelectedBlockReferenceObjects.isEmpty)
+
+        harness.viewModel.setBlockReferenceObjectLocked(object.id, isLocked: false)
+        harness.viewModel.selectBlockReferenceObject(object.id, extending: false)
+        harness.viewModel.setBlockReferenceObjectVisibility(object.id, isVisible: false)
+        #expect(harness.viewModel.blockReferenceScene?.objects.first?.isVisible == false)
+        #expect(harness.viewModel.selectedBlockReferenceObjectIDs.isEmpty)
+        #expect(harness.viewModel.editableSelectedBlockReferenceObjects.isEmpty)
+    }
+
+    @Test
+    @MainActor
+    func blockReferenceBooleanUsesTheActiveObjectAndIsOneUndoableReplacement() throws {
+        let harness = try BrushEditingBoundaryHarness(canvasSize: .init(width: 600, height: 480))
+        harness.viewModel.selectTool(.blockReference)
+        let first = BlockReferenceObject(
+            name: "左主体",
+            kind: .box,
+            position: .zero,
+            dimensions: .init(width: 100, depth: 100, height: 100)
+        )
+        let second = BlockReferenceObject(
+            name: "右工具体",
+            kind: .box,
+            position: .init(x: 50, y: 0, z: 0),
+            dimensions: .init(width: 100, depth: 100, height: 100)
+        )
+        _ = harness.viewModel.updateBlockReferenceDocument { scene in
+            scene?.objects.append(contentsOf: [first, second])
+        }
+        harness.viewModel.selectBlockReferenceObject(second.id, extending: false)
+        harness.viewModel.selectBlockReferenceObject(first.id, extending: true)
+        #expect(harness.viewModel.selectedBlockReferenceObject?.id == first.id)
+        #expect(harness.viewModel.canApplyBlockReferenceBoolean)
+
+        harness.viewModel.applyBlockReferenceBoolean(.subtract)
+
+        let result = try #require(harness.viewModel.blockReferenceScene?.objects.first)
+        #expect(harness.viewModel.blockReferenceScene?.objects.count == 1)
+        #expect(result.customMesh != nil)
+        #expect(abs(result.dimensions.width - 50) < 0.001)
+        #expect(result.position.x < 0)
+        #expect(harness.viewModel.selectedBlockReferenceObject?.id == result.id)
+        #expect(harness.viewModel.blockReferenceEditorState.instruction.contains("左主体 − 右工具体"))
+
+        harness.viewModel.undo()
+        #expect(harness.viewModel.blockReferenceScene?.objects == [first, second])
+        harness.viewModel.redo()
+        #expect(harness.viewModel.blockReferenceScene?.objects.count == 1)
+        #expect(harness.viewModel.blockReferenceScene?.objects.first?.customMesh != nil)
+    }
+
+    @Test
+    @MainActor
     func lassoFillModeSwitchKeepsOneSidebarSurfaceAndRemembersTextureMode() throws {
         let harness = try BrushEditingBoundaryHarness(canvasSize: .init(width: 32, height: 32))
         let group = try #require(

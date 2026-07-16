@@ -114,6 +114,7 @@ enum ToolKind: String, Codable, Sendable {
     case canvasCrop
     case freeTransform
     case perspective
+    case blockReference
 }
 
 enum LassoFillMode: String, CaseIterable, Sendable, Equatable {
@@ -181,6 +182,8 @@ extension ToolKind {
             return "arrow.up.left.and.arrow.down.right"
         case .perspective:
             return "triangle"
+        case .blockReference:
+            return "cube.transparent"
         }
     }
 
@@ -224,6 +227,8 @@ extension ToolKind {
             return "移动变形"
         case .perspective:
             return "透视"
+        case .blockReference:
+            return "体块参考"
         }
     }
 
@@ -259,6 +264,8 @@ extension ToolKind {
             return "V"
         case .perspective:
             return "P"
+        case .blockReference:
+            return nil
         }
     }
 }
@@ -294,7 +301,8 @@ struct ToolSidebarGroup: Identifiable, Equatable, Sendable {
         .init(id: "canvas-rotate", tools: [.canvasRotate], shortcutKey: "R"),
         .init(id: "canvas-crop", tools: [.canvasCrop], shortcutKey: "C"),
         .init(id: "free-transform", tools: [.freeTransform], shortcutKey: "V"),
-        .init(id: "perspective", tools: [.perspective], shortcutKey: "P")
+        .init(id: "perspective", tools: [.perspective], shortcutKey: "P"),
+        .init(id: "block-reference", tools: [.blockReference], shortcutKey: nil)
     ]
 
     static func group(containing tool: ToolKind) -> ToolSidebarGroup? {

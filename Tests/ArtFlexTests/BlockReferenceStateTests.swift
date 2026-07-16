@@ -1,0 +1,1242 @@
+import AppKit
+import Foundation
+import Testing
+@testable import ArtFlex
+
+struct BlockReferenceStateTests {
+    @Test
+    func blockReferenceDisplayModeDefaultsToSolidAndDecodesLegacySettingsAsWireframe() throws {
+        #expect(BlockReferenceDisplaySettings.stageOneDefault.mode == .solid)
+
+        let legacyJSON = Data("""
+        {
+          "opacity": 0.52,
+          "showsFaces": true,
+          "showsEdges": true,
+          "isVisible": true,
+          "isFrozen": false
+        }
+        """.utf8)
+        let decoded = try JSONDecoder().decode(BlockReferenceDisplaySettings.self, from: legacyJSON)
+
+        #expect(decoded.mode == .wireframe)
+    }
+
+    @Test
+    func cameraProjectionAndRayIntersectionRoundTripOnGroundPlane() throws {
+        let canvasSize = CanvasSize(width: 1_200, height: 900)
+        let camera = BlockReferenceCamera.stageOneDefault
+        let point = BlockVector3(x: 85, y: -42, z: 0)
+        let projected = try #require(
+            projectBlockPoint(point, camera: camera, canvasSize: canvasSize)
+        )
+        let ray = blockCameraRay(
+            canvasPoint: projected.canvasPoint,
+            camera: camera,
+            canvasSize: canvasSize
+        )
+        let resolved = try #require(intersectBlockRay(ray, with: .ground))
+
+        #expect(abs(resolved.x - point.x) < 0.000_1)
+        #expect(abs(resolved.y - point.y) < 0.000_1)
+        #expect(abs(resolved.z - point.z) < 0.000_1)
+    }
+
+    @Test
+    func metalSolidDepthMappingIsMonotonicForBothCameraModes() throws {
+        for isOrthographic in [false, true] {
+            let near = try #require(blockReferenceMetalNormalizedDepth(
+                cameraDepth: 10,
+                nearDepth: 10,
+                farDepth: 1_000,
+                isOrthographic: isOrthographic
+            ))
+            let middle = try #require(blockReferenceMetalNormalizedDepth(
+                cameraDepth: 250,
+                nearDepth: 10,
+                farDepth: 1_000,
+                isOrthographic: isOrthographic
+            ))
+            let far = try #require(blockReferenceMetalNormalizedDepth(
+                cameraDepth: 1_000,
+                nearDepth: 10,
+                farDepth: 1_000,
+                isOrthographic: isOrthographic
+            ))
+
+            #expect(abs(near) < 0.000_001)
+            #expect(middle > near)
+            #expect(far > middle)
+            #expect(abs(far - 1) < 0.000_001)
+        }
+    }
+
+    @Test
+    @MainActor
+    func liveCameraRenderStateHandsOffOnlyAfterRendererReceivesCommittedCamera() throws {
+        let stored = BlockReferenceCamera.stageOneDefault
+        var live = stored
+        live.target = BlockVector3(x: 40, y: -25, z: 90)
+        live.yawDegrees += 18
+
+        let state = BlockReferenceCameraRenderState()
+        state.beginNavigation()
+        state.updateNavigation(camera: live)
+        #expect(state.camera == live)
+
+        state.finishNavigation(committedCamera: live)
+        state.rendererDidReceive(camera: stored)
+        #expect(state.camera == live)
+
+        state.rendererDidReceive(camera: live)
+        #expect(state.camera == nil)
+    }
+
+    @Test
+    func solidRendererUsesPerPixelDepthWithoutBackFaceCulling() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let rendererSource = try String(
+            contentsOf: root.appendingPathComponent(
+                "Platform/macOS/UI/BlockReferenceMetalSolidView.swift"
+            ),
+            encoding: .utf8
+        )
+        let overlaySource = try String(
+            contentsOf: root.appendingPathComponent(
+                "Platform/macOS/UI/BlockReferenceOverlay.swift"
+            ),
+            encoding: .utf8
+        )
+
+        #expect(rendererSource.contains("depthStencilPixelFormat = .depth32Float"))
+        #expect(rendererSource.contains("faceDepthDescriptor.depthCompareFunction = .less"))
+        #expect(rendererSource.contains("faceDepthDescriptor.isDepthWriteEnabled = true"))
+        #expect(rendererSource.contains("encoder.setCullMode(.none)"))
+        #expect(rendererSource.contains("view.setNeedsDisplay(view.bounds)"))
+        #expect(rendererSource.contains("presentsWithTransaction") == false)
+        #expect(rendererSource.contains("view.preferredFramesPerSecond = 120"))
+        #expect(rendererSource.contains("view.isPaused = !rendersContinuously"))
+        #expect(rendererSource.contains("cameraRenderState.camera"))
+        #expect(rendererSource.contains("makeGridSegments(scene: scene)"))
+        #expect(overlaySource.contains("BlockReferenceMetalSolidView("))
+        #expect(overlaySource.contains("if scene.display.mode == .wireframe"))
+        #expect(overlaySource.contains("TimelineView(.animation("))
+    }
+
+    @Test
+    func gridSnapUsesTheActiveWorkingPlaneCoordinates() {
+        var scene = BlockReferenceScene.empty
+        scene.snap.enabledKinds = [.grid]
+        scene.snap.gridSpacing = 20
+        scene.snap.screenTolerancePoints = 100
+        let candidate = scene.workingPlane.worldPoint(u: 37, v: 63)
+
+        let snapped = snappedBlockPoint(
+            candidate,
+            scene: scene,
+            canvasSize: .init(width: 1_200, height: 900),
+            screenScale: 1
+        )
+
+        #expect(snapped.kind == .grid)
+        #expect(snapped.point == BlockVector3(x: 40, y: 60, z: 0))
+    }
+
+    @Test
+    func extrusionHeightSnapsToAVisibleObjectVertexBeforeGrid() throws {
+        let source = BlockReferenceObject(
+            name: "高度参照",
+            kind: .box,
+            position: .zero,
+            dimensions: .init(width: 80, depth: 80, height: 83)
+        )
+        var scene = BlockReferenceScene.empty
+        scene.objects = [source]
+        scene.snap.enabledKinds = [.grid, .vertex]
+        scene.snap.gridSpacing = 20
+        let draft = BlockCreationDraft(
+            kind: .box,
+            plane: .ground,
+            baseStart: BlockVector3(x: -20, y: -20, z: 0),
+            baseEnd: BlockVector3(x: 20, y: 20, z: 0),
+            height: 1
+        )
+
+        let snapped = snappedBlockExtrusionHeight(
+            82,
+            draft: draft,
+            scene: scene,
+            canvasSize: .init(width: 1_200, height: 900),
+            screenScale: 1
+        )
+
+        #expect(snapped.kind == .vertex)
+        #expect(abs(snapped.height - 83) < 0.000_001)
+        #expect(try #require(snapped.snapPoint).z == 83)
+    }
+
+    @Test
+    func extrusionHeightUsesTheConstructionPlaneNormalOnSlantedPlanes() {
+        let plane = BlockWorkingPlane(
+            origin: .zero,
+            axisU: .unitY,
+            axisV: .unitZ,
+            normal: .unitX
+        )
+        let source = BlockReferenceObject(
+            name: "侧向高度参照",
+            kind: .box,
+            position: BlockVector3(x: 110, y: 0, z: 0),
+            dimensions: .init(width: 20, depth: 40, height: 40)
+        )
+        var scene = BlockReferenceScene.empty
+        scene.objects = [source]
+        scene.snap.enabledKinds = [.vertex]
+        scene.snap.screenTolerancePoints = 40
+        let draft = BlockCreationDraft(
+            kind: .box,
+            plane: plane,
+            baseStart: plane.worldPoint(u: -10, v: -10),
+            baseEnd: plane.worldPoint(u: 10, v: 10),
+            height: 1
+        )
+
+        let snapped = snappedBlockExtrusionHeight(
+            99,
+            draft: draft,
+            scene: scene,
+            canvasSize: .init(width: 1_200, height: 900),
+            screenScale: 1
+        )
+
+        #expect(snapped.kind == .vertex)
+        #expect(abs(snapped.height - 100) < 0.000_001)
+    }
+
+    @Test
+    func faceCanBecomeAWorkingPlaneAndAlignANewObject() throws {
+        let source = BlockReferenceObject(
+            name: "斜方块",
+            kind: .box,
+            position: .zero,
+            rotation: .init(xDegrees: 24, yDegrees: -18, zDegrees: 31),
+            dimensions: .init(width: 100, depth: 80, height: 60)
+        )
+        let face = try #require(blockObjectFaces(source).first(where: { $0.faceIndex == 1 }))
+        let plane = try #require(blockWorkingPlane(from: face))
+        let rotation = blockRotation(alignedTo: plane)
+        let rotatedNormal = blockRotate(.unitZ, rotation: rotation).normalized()
+
+        #expect(rotatedNormal.dot(plane.normal) > 0.999)
+        #expect(plane.sourceObjectID == source.id)
+        #expect(plane.sourceFaceIndex == face.faceIndex)
+    }
+
+    @Test
+    func primitiveMeshesRespectRequestedDimensions() {
+        for kind in BlockPrimitiveKind.allCases {
+            let object = BlockReferenceObject(
+                name: kind.displayName,
+                kind: kind,
+                position: .zero,
+                dimensions: .init(width: 120, depth: 80, height: 160)
+            )
+            let vertices = blockObjectFaces(object).flatMap(\.vertices)
+            #expect(vertices.isEmpty == false)
+            #expect(vertices.map(\.z).min() ?? 1 >= -0.000_1)
+            #expect(vertices.map(\.z).max() ?? 0 <= 160.000_1)
+            #expect(vertices.map(\.x).min() ?? 1 >= -60.000_1)
+            #expect(vertices.map(\.x).max() ?? 0 <= 60.000_1)
+        }
+    }
+
+    @Test
+    func curvedPrimitivesUseEightSegmentCrossSections() {
+        let dimensions = BlockDimensions(width: 120, depth: 80, height: 160)
+        let cylinder = BlockReferenceObject(
+            name: "圆柱",
+            kind: .cylinder,
+            position: .zero,
+            dimensions: dimensions
+        )
+        let cone = BlockReferenceObject(
+            name: "圆锥",
+            kind: .cone,
+            position: .zero,
+            dimensions: dimensions
+        )
+        let sphere = BlockReferenceObject(
+            name: "球体",
+            kind: .sphere,
+            position: .zero,
+            dimensions: dimensions
+        )
+
+        #expect(blockObjectFaces(cylinder).count == 10)
+        #expect(blockObjectFaces(cone).count == 9)
+        #expect(blockObjectFaces(sphere).count == 32)
+    }
+
+    @Test
+    func surfaceConstructionPlaneUsesTheHitFaceOnlyWhenEnabled() throws {
+        let source = BlockReferenceObject(
+            name: "承载方块",
+            kind: .box,
+            position: .zero,
+            dimensions: .init(width: 100, depth: 100, height: 100)
+        )
+        var scene = BlockReferenceScene.empty
+        scene.objects = [source]
+        let canvasSize = CanvasSize(width: 1_200, height: 900)
+        let projectedTopCenter = try #require(projectBlockPoint(
+            BlockVector3(x: 0, y: 0, z: 100),
+            camera: scene.camera,
+            canvasSize: canvasSize
+        ))
+
+        let directPlane = blockReferenceConstructionPlane(
+            scene: scene,
+            canvasPoint: projectedTopCenter.canvasPoint,
+            canvasSize: canvasSize,
+            buildsDirectlyOnSurfaces: true
+        )
+        let ordinaryPlane = blockReferenceConstructionPlane(
+            scene: scene,
+            canvasPoint: projectedTopCenter.canvasPoint,
+            canvasSize: canvasSize,
+            buildsDirectlyOnSurfaces: false
+        )
+
+        #expect(directPlane.sourceObjectID == source.id)
+        #expect(abs(directPlane.origin.z - 100) < 0.000_1)
+        #expect(ordinaryPlane == scene.workingPlane)
+    }
+
+    @Test
+    func parameterScrubbingUsesHorizontalDirectionPrecisionAndMinimums() {
+        #expect(blockReferenceScrubbedParameterValue(
+            startValue: 10,
+            horizontalTranslation: 25,
+            sensitivity: 0.2
+        ) == 15)
+        #expect(blockReferenceScrubbedParameterValue(
+            startValue: 10,
+            horizontalTranslation: -25,
+            sensitivity: 0.2
+        ) == 5)
+        #expect(blockReferenceScrubbedParameterValue(
+            startValue: 10,
+            horizontalTranslation: 25,
+            sensitivity: 0.2,
+            precisionScale: 0.1
+        ) == 10.5)
+        #expect(blockReferenceScrubbedParameterValue(
+            startValue: 2,
+            horizontalTranslation: -100,
+            sensitivity: 0.2,
+            minimumValue: 1
+        ) == 1)
+    }
+
+    @Test
+    func creationDraftExposesAnExactWorkingPlaneFootprint() {
+        let plane = BlockWorkingPlane(
+            origin: BlockVector3(x: 5, y: 7, z: 11),
+            axisU: .unitY,
+            axisV: .unitZ,
+            normal: .unitX
+        )
+        let draft = BlockCreationDraft(
+            kind: .box,
+            plane: plane,
+            baseStart: plane.worldPoint(u: 30, v: -10),
+            baseEnd: plane.worldPoint(u: -20, v: 40),
+            height: 1
+        )
+
+        #expect(draft.baseCorners.count == 4)
+        #expect(draft.baseCorners.allSatisfy {
+            abs(($0 - plane.origin).dot(plane.normal)) < 0.000_001
+        })
+        let coordinates = draft.baseCorners.map(plane.coordinates(of:))
+        #expect(coordinates.map(\.u).min() == -20)
+        #expect(coordinates.map(\.u).max() == 30)
+        #expect(coordinates.map(\.v).min() == -10)
+        #expect(coordinates.map(\.v).max() == 40)
+    }
+
+    @Test
+    func fixedHumanModulesUseExpectedProportionsAndRejectBooleanEditing() throws {
+        let standing = blockReferenceModuleObject(
+            kind: .standingHuman,
+            name: "站姿",
+            position: .zero
+        )
+        let seated = blockReferenceModuleObject(
+            kind: .seatedHuman,
+            name: "坐姿",
+            position: .zero
+        )
+        let standingVertices = blockObjectFaces(standing).flatMap(\.vertices)
+        let seatedVertices = blockObjectFaces(seated).flatMap(\.vertices)
+
+        #expect(standing.moduleKind == .standingHuman)
+        #expect(seated.moduleKind == .seatedHuman)
+        #expect(standing.customMesh?.faces.count == 42)
+        #expect(seated.customMesh?.faces.count == 42)
+        #expect(standing.dimensions.height == 170)
+        #expect(seated.dimensions.height == 132)
+        #expect(abs((standingVertices.map(\.z).min() ?? -1) - 0) < 0.000_1)
+        #expect(abs((standingVertices.map(\.z).max() ?? -1) - 170) < 0.000_1)
+        #expect(abs((seatedVertices.map(\.z).min() ?? -1) - 0) < 0.000_1)
+        #expect(abs((seatedVertices.map(\.z).max() ?? -1) - 132) < 0.000_1)
+        #expect(seated.dimensions.depth > standing.dimensions.depth)
+        #expect(standing.allowsGeometryEditing == false)
+        #expect(standing.allowsBooleanOperations == false)
+
+        let box = BlockReferenceObject(
+            name: "方块",
+            kind: .box,
+            position: .zero,
+            dimensions: .stageOneDefault
+        )
+        #expect(throws: BlockReferenceBooleanError.invalidInput) {
+            try blockReferenceBooleanObject(
+                active: standing,
+                other: box,
+                operation: .union,
+                name: "不允许"
+            )
+        }
+    }
+
+    @Test
+    func booleanOperationsCreateEditableArtFlexOwnedMeshes() throws {
+        let active = BlockReferenceObject(
+            name: "主体",
+            kind: .box,
+            position: .zero,
+            dimensions: .init(width: 100, depth: 100, height: 100)
+        )
+        let other = BlockReferenceObject(
+            name: "工具体",
+            kind: .box,
+            position: .init(x: 50, y: 0, z: 0),
+            dimensions: .init(width: 100, depth: 100, height: 100)
+        )
+
+        let union = try blockReferenceBooleanObject(
+            active: active,
+            other: other,
+            operation: .union,
+            name: "合并"
+        )
+        let intersection = try blockReferenceBooleanObject(
+            active: active,
+            other: other,
+            operation: .intersection,
+            name: "相交"
+        )
+        let subtraction = try blockReferenceBooleanObject(
+            active: active,
+            other: other,
+            operation: .subtract,
+            name: "减去"
+        )
+
+        #expect(union.customMesh?.faces.isEmpty == false)
+        #expect(abs(union.dimensions.width - 150) < 0.001)
+        #expect(abs(intersection.dimensions.width - 50) < 0.001)
+        #expect(abs(subtraction.dimensions.width - 50) < 0.001)
+        #expect(union.geometryDisplayName == "布尔结果")
+
+        var mirrored = union
+        mirrored.name = "方块 1 镜像"
+        #expect(mirrored.geometryDisplayName == "镜像体块")
+
+        var scaled = union
+        scaled.dimensions.width *= 2
+        let scaledVertices = blockObjectFaces(scaled).flatMap(\.vertices)
+        let scaledWidth = try #require(scaledVertices.map(\.x).max())
+            - (try #require(scaledVertices.map(\.x).min()))
+        #expect(abs(scaledWidth - 300) < 0.001)
+
+        let encoded = try JSONEncoder().encode(union)
+        let decoded = try JSONDecoder().decode(BlockReferenceObject.self, from: encoded)
+        #expect(decoded == union)
+        #expect(decoded.customMesh != nil)
+    }
+
+    @Test
+    func booleanIntersectionRejectsSeparatedObjectsWithoutChangingInputs() {
+        let active = BlockReferenceObject(
+            name: "主体",
+            kind: .box,
+            position: .zero,
+            dimensions: .stageOneDefault
+        )
+        let other = BlockReferenceObject(
+            name: "远处",
+            kind: .box,
+            position: .init(x: 1_000, y: 0, z: 0),
+            dimensions: .stageOneDefault
+        )
+
+        #expect(throws: BlockReferenceBooleanError.emptyResult) {
+            try blockReferenceBooleanObject(
+                active: active,
+                other: other,
+                operation: .intersection,
+                name: "空"
+            )
+        }
+    }
+
+    @Test
+    func everyLowPolyPrimitiveCanEnterTheBooleanPipeline() throws {
+        for kind in BlockPrimitiveKind.allCases {
+            let active = BlockReferenceObject(
+                name: "A",
+                kind: kind,
+                position: .zero,
+                dimensions: .init(width: 100, depth: 100, height: 100)
+            )
+            let other = BlockReferenceObject(
+                name: "B",
+                kind: kind,
+                position: .init(x: 20, y: 0, z: 0),
+                dimensions: .init(width: 100, depth: 100, height: 100)
+            )
+            let result = try blockReferenceBooleanObject(
+                active: active,
+                other: other,
+                operation: .union,
+                name: kind.displayName
+            )
+            #expect(result.customMesh?.faces.isEmpty == false)
+        }
+    }
+
+    @Test
+    func booleanResultCanBeUsedAsTheInputOfAnotherBoolean() throws {
+        let box = BlockReferenceObject(
+            name: "方块",
+            kind: .box,
+            position: .zero,
+            dimensions: .init(width: 80, depth: 80, height: 80)
+        )
+        let sphere = BlockReferenceObject(
+            name: "球体",
+            kind: .sphere,
+            position: .zero,
+            dimensions: .init(width: 100, depth: 100, height: 100)
+        )
+        let firstResult = try blockReferenceBooleanObject(
+            active: box,
+            other: sphere,
+            operation: .subtract,
+            name: "第一次结果"
+        )
+        let remoteBox = BlockReferenceObject(
+            name: "另一个方块",
+            kind: .box,
+            position: .init(x: 180, y: 0, z: 0),
+            dimensions: .init(width: 40, depth: 40, height: 40)
+        )
+
+        let secondResult = try blockReferenceBooleanObject(
+            active: firstResult,
+            other: remoteBox,
+            operation: .union,
+            name: "第二次结果"
+        )
+
+        #expect(secondResult.customMesh?.faces.isEmpty == false)
+    }
+
+    @Test
+    func cylinderCanSubtractAnOverlappingBox() throws {
+        let cylinder = BlockReferenceObject(
+            name: "圆柱",
+            kind: .cylinder,
+            position: .zero,
+            dimensions: .init(width: 80, depth: 80, height: 220)
+        )
+        let box = BlockReferenceObject(
+            name: "方块",
+            kind: .box,
+            position: .init(x: 20, y: 0, z: 60),
+            dimensions: .init(width: 80, depth: 100, height: 100)
+        )
+
+        let result = try blockReferenceBooleanObject(
+            active: cylinder,
+            other: box,
+            operation: .subtract,
+            name: "圆柱减方块"
+        )
+
+        #expect(result.customMesh?.faces.isEmpty == false)
+        #expect(result.dimensions.height > 100)
+        #expect(result.dimensions.width <= cylinder.dimensions.width + 0.001)
+    }
+
+    @Test
+    func transformGizmoKeepsAStableScreenSizeAndHitTestsMoveAndRotationHandles() throws {
+        let canvasSize = CanvasSize(width: 1_200, height: 900)
+        let object = BlockReferenceObject(
+            name: "方块",
+            kind: .box,
+            position: BlockVector3(x: 0, y: 0, z: 70),
+            dimensions: .stageOneDefault
+        )
+        let layout = try #require(blockReferenceGizmoLayout(
+            object: object,
+            camera: .stageOneDefault,
+            canvasSize: canvasSize,
+            screenScale: 2
+        ))
+        let xMove = try #require(layout.moveHandles.first(where: { $0.axis == .x }))
+        #expect(abs(hypot(xMove.end.x - xMove.start.x, xMove.end.y - xMove.start.y) * 2 - 66) < 0.001)
+        #expect(blockReferenceGizmoHitTest(
+            point: xMove.end,
+            layout: layout,
+            screenScale: 2
+        ) == BlockReferenceGizmoHandle(kind: .move, axis: .x))
+
+        let xScale = try #require(layout.scaleHandles.first(where: { $0.axis == .x }))
+        #expect(blockReferenceGizmoHitTest(
+            point: xScale.end,
+            layout: layout,
+            screenScale: 2
+        ) == BlockReferenceGizmoHandle(kind: .scale, axis: .x))
+
+        let zRing = try #require(layout.rotationRings.first(where: { $0.axis == .z }))
+        let zRotationPoint = try #require(zRing.points.first(where: { point in
+            blockReferenceGizmoHitTest(
+                point: point,
+                layout: layout,
+                screenScale: 2
+            ) == BlockReferenceGizmoHandle(kind: .rotate, axis: .z)
+        }))
+        #expect(blockReferenceGizmoHitTest(
+            point: zRotationPoint,
+            layout: layout,
+            screenScale: 2
+        ) == BlockReferenceGizmoHandle(kind: .rotate, axis: .z))
+    }
+
+    @Test
+    func gizmoRotationAngleUsesTheRequestedWorldAxis() {
+        let angle = blockReferenceGizmoSignedAngleDegrees(
+            from: .unitX,
+            to: .unitY,
+            around: .z
+        )
+        #expect(abs(angle - 90) < 0.000_001)
+        let reverse = blockReferenceGizmoSignedAngleDegrees(
+            from: .unitY,
+            to: .unitX,
+            around: .z
+        )
+        #expect(abs(reverse + 90) < 0.000_001)
+    }
+
+    @Test
+    func numericTransformsPreviewSignedMovementAndAxisRotation() {
+        let object = BlockReferenceObject(
+            name: "方块",
+            kind: .box,
+            position: .init(x: 10, y: 20, z: 30),
+            rotation: .init(xDegrees: 5, yDegrees: 10, zDegrees: 15),
+            dimensions: .stageOneDefault
+        )
+        let move = BlockReferenceNumericTransform(
+            objectID: object.id,
+            kind: .move,
+            axis: .x,
+            input: "-45.5",
+            originalPosition: object.position,
+            originalRotation: object.rotation
+        )
+        let moved = move.applying(to: object)
+        #expect(moved.position == BlockVector3(x: -35.5, y: 20, z: 30))
+
+        let rotate = BlockReferenceNumericTransform(
+            objectID: object.id,
+            kind: .rotate,
+            axis: .z,
+            input: "30",
+            originalPosition: object.position,
+            originalRotation: object.rotation
+        )
+        let rotated = rotate.applying(to: object)
+        #expect(abs(rotated.rotation.xDegrees - 5) < 1e-9)
+        #expect(abs(rotated.rotation.yDegrees - 10) < 1e-9)
+        #expect(abs(rotated.rotation.zDegrees - 45) < 1e-9)
+    }
+
+    @Test
+    func numericRotationComposesAroundTheRequestedWorldAxis() {
+        let original = BlockEulerRotation(xDegrees: 23, yDegrees: -31, zDegrees: 47)
+        let delta = BlockEulerRotation(xDegrees: 38, yDegrees: 0, zDegrees: 0)
+        let resolved = blockRotation(applyingWorldAxis: .x, degrees: 38, to: original)
+
+        for basis in [BlockVector3.unitX, .unitY, .unitZ] {
+            let expected = blockRotate(blockRotate(basis, rotation: original), rotation: delta)
+            let actual = blockRotate(basis, rotation: resolved)
+            #expect(actual.distance(to: expected) < 0.000_001)
+        }
+    }
+
+    @Test
+    func groupNumericTransformUsesOneSharedPivot() {
+        let first = BlockReferenceObject(
+            name: "方块 1",
+            kind: .box,
+            position: BlockVector3(x: 0, y: 0, z: 0),
+            dimensions: .stageOneDefault
+        )
+        let second = BlockReferenceObject(
+            name: "方块 2",
+            kind: .box,
+            position: BlockVector3(x: 10, y: 0, z: 0),
+            dimensions: .stageOneDefault
+        )
+        let snapshots = Dictionary(uniqueKeysWithValues: [first, second].map {
+            ($0.id, BlockReferenceObjectTransformSnapshot(position: $0.position, rotation: $0.rotation))
+        })
+        let transform = BlockReferenceNumericTransform(
+            objectID: second.id,
+            kind: .rotate,
+            axis: .z,
+            input: "90",
+            originalPosition: second.position,
+            originalRotation: second.rotation,
+            originalTransforms: snapshots,
+            pivot: BlockVector3(x: 5, y: 0, z: 0)
+        )
+
+        let rotatedFirst = transform.applying(to: first)
+        let rotatedSecond = transform.applying(to: second)
+        #expect(rotatedFirst.position.distance(to: BlockVector3(x: 5, y: -5, z: 0)) < 0.000_001)
+        #expect(rotatedSecond.position.distance(to: BlockVector3(x: 5, y: 5, z: 0)) < 0.000_001)
+        #expect(abs(rotatedFirst.rotation.zDegrees - 90) < 0.000_001)
+        #expect(abs(rotatedSecond.rotation.zDegrees - 90) < 0.000_001)
+    }
+
+    @Test
+    func legacyBlockReferenceObjectDefaultsToVisibleAndUnlocked() throws {
+        let object = BlockReferenceObject(
+            name: "旧方块",
+            kind: .box,
+            position: .zero,
+            dimensions: .stageOneDefault
+        )
+        let encoded = try JSONEncoder().encode(object)
+        var payload = try #require(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        payload.removeValue(forKey: "isVisible")
+        payload.removeValue(forKey: "isLocked")
+        payload.removeValue(forKey: "moduleKind")
+        let legacyData = try JSONSerialization.data(withJSONObject: payload)
+
+        let decoded = try JSONDecoder().decode(BlockReferenceObject.self, from: legacyData)
+        #expect(decoded.isVisible)
+        #expect(decoded.isLocked == false)
+        #expect(decoded.customMesh == nil)
+        #expect(decoded.moduleKind == nil)
+    }
+
+    @Test
+    @MainActor
+    func interactionViewRoutesShiftMiddleDragToScenePan() throws {
+        let view = BlockReferenceInteractionView(frame: CGRect(x: 0, y: 0, width: 500, height: 400))
+        let window = NSWindow(
+            contentRect: CGRect(x: 0, y: 0, width: 500, height: 400),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = view
+        var beganMode: BlockReferenceNavigationMode?
+        var changedMode: BlockReferenceNavigationMode?
+        var changedDelta = CGPoint.zero
+        var didEnd = false
+        view.onNavigationBegan = { beganMode = $0 }
+        view.onNavigationChanged = { mode, deltaX, deltaY in
+            changedMode = mode
+            changedDelta = CGPoint(x: deltaX, y: deltaY)
+        }
+        view.onNavigationEnded = { didEnd = true }
+
+        let down = try #require(NSEvent.mouseEvent(
+            with: .otherMouseDown,
+            location: CGPoint(x: 100, y: 100),
+            modifierFlags: [.shift],
+            timestamp: 1,
+            windowNumber: window.windowNumber,
+            context: nil,
+            eventNumber: 1,
+            clickCount: 1,
+            pressure: 1
+        ))
+        let dragged = try #require(NSEvent.mouseEvent(
+            with: .otherMouseDragged,
+            location: CGPoint(x: 145, y: 130),
+            modifierFlags: [.shift],
+            timestamp: 2,
+            windowNumber: window.windowNumber,
+            context: nil,
+            eventNumber: 2,
+            clickCount: 1,
+            pressure: 1
+        ))
+        let up = try #require(NSEvent.mouseEvent(
+            with: .otherMouseUp,
+            location: CGPoint(x: 145, y: 130),
+            modifierFlags: [.shift],
+            timestamp: 3,
+            windowNumber: window.windowNumber,
+            context: nil,
+            eventNumber: 3,
+            clickCount: 1,
+            pressure: 0
+        ))
+
+        view.otherMouseDown(with: down)
+        view.otherMouseDragged(with: dragged)
+        view.otherMouseUp(with: up)
+
+        #expect(beganMode == .pan)
+        #expect(changedMode == .pan)
+        #expect(abs(changedDelta.x) > 1)
+        #expect(abs(changedDelta.y) > 1)
+        #expect(didEnd)
+    }
+
+    @Test
+    @MainActor
+    func interactionViewOwnsAFocusableNativeGizmoValueField() throws {
+        let view = BlockReferenceInteractionView(frame: CGRect(x: 0, y: 0, width: 500, height: 400))
+        let keyboardBridge = KeyboardBridgeView(frame: .zero)
+        let rootView = NSView(frame: CGRect(x: 0, y: 0, width: 500, height: 400))
+        let window = NSWindow(
+            contentRect: CGRect(x: 0, y: 0, width: 500, height: 400),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        rootView.addSubview(view)
+        rootView.addSubview(keyboardBridge)
+        window.contentView = rootView
+        let adjustment = BlockReferenceGizmoAdjustment(
+            objectID: UUID(),
+            handle: BlockReferenceGizmoHandle(kind: .move, axis: .x),
+            input: "12",
+            originalPosition: .zero,
+            originalRotation: .zero
+        )
+        var changedInput: String?
+        view.onGizmoInputChanged = { changedInput = $0 }
+        view.configureGizmoEditor(adjustment: adjustment, center: CGPoint(x: 250, y: 200))
+
+        let field = try #require(
+            view.subviews
+                .flatMap(\.subviews)
+                .compactMap { $0 as? NSTextField }
+                .first(where: { $0.isEditable })
+        )
+        #expect(window.firstResponder === field.currentEditor())
+        #expect(field.currentEditor()?.selectedRange.length == field.stringValue.utf16.count)
+        keyboardBridge.activateIfNeeded()
+        #expect(window.firstResponder === field.currentEditor())
+        field.stringValue = "25"
+        view.controlTextDidChange(Notification(name: NSControl.textDidChangeNotification, object: field))
+        #expect(changedInput == "25")
+    }
+
+    @Test
+    func rightInspectorExpandsOnlyForTheBlockReferenceTool() {
+        #expect(rightInspectorUsesExpandedBlockReferencePanel(activeTool: .blockReference))
+        #expect(rightInspectorUsesExpandedBlockReferencePanel(activeTool: .brush) == false)
+        #expect(rightInspectorUsesExpandedBlockReferencePanel(activeTool: .perspective) == false)
+    }
+
+    @Test
+    func sceneRoundTripsAndLegacyDocumentWithoutSceneStillDecodes() throws {
+        var document = ArtDocument.stageOneDefault()
+        var scene = BlockReferenceScene.empty
+        scene.objects.append(BlockReferenceObject(
+            name: "方块 1",
+            kind: .box,
+            position: .init(x: 20, y: 40, z: 0),
+            dimensions: .init(width: 80, depth: 100, height: 120)
+        ))
+        scene.measurements.append(.init(start: .zero, end: .init(x: 30, y: 40, z: 0)))
+        document.blockReferenceScene = scene
+
+        let data = try JSONEncoder().encode(document)
+        let decoded = try JSONDecoder().decode(ArtDocument.self, from: data)
+        #expect(decoded.blockReferenceScene == scene)
+
+        var object = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        object.removeValue(forKey: "blockReferenceScene")
+        let legacyData = try JSONSerialization.data(withJSONObject: object)
+        let legacy = try JSONDecoder().decode(ArtDocument.self, from: legacyData)
+        #expect(legacy.blockReferenceScene == nil)
+    }
+
+    @Test
+    func advancedSceneFieldsRoundTripAndLegacySceneUsesSafeDefaults() throws {
+        var scene = BlockReferenceScene.empty
+        let group = BlockReferenceGroup(name: "建筑组", pivot: .zero)
+        var object = BlockReferenceObject(
+            name: "蓝色方块",
+            kind: .box,
+            position: .zero,
+            dimensions: .init(width: 40, depth: 50, height: 60),
+            groupID: group.id
+        )
+        object.style.colorTag = .blue
+        scene.objects = [object]
+        scene.groups = [group]
+        scene.cameraSlots = [.init(index: 1, name: "主视角", camera: scene.camera, isLocked: true)]
+        scene.constructionLines = [.init(name: "X 辅助", origin: .zero, direction: .unitX)]
+        scene.savedWorkingPlanes = [.init(name: "地面", plane: .ground)]
+        scene.section = .init(isEnabled: true, plane: .ground, isInverted: true)
+        scene.snapshots = [blockReferenceSceneSnapshot(name: "方案 A", scene: scene)]
+
+        let encoded = try JSONEncoder().encode(scene)
+        let decoded = try JSONDecoder().decode(BlockReferenceScene.self, from: encoded)
+        #expect(decoded == scene)
+
+        var legacyObject = try #require(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        for key in ["groups", "cameraSlots", "constructionLines", "savedWorkingPlanes", "section", "snapshots"] {
+            legacyObject.removeValue(forKey: key)
+        }
+        if var objects = legacyObject["objects"] as? [[String: Any]], !objects.isEmpty {
+            for key in ["groupID", "style", "humanPose", "moduleParameters"] {
+                objects[0].removeValue(forKey: key)
+            }
+            legacyObject["objects"] = objects
+        }
+        let legacyData = try JSONSerialization.data(withJSONObject: legacyObject)
+        let legacy = try JSONDecoder().decode(BlockReferenceScene.self, from: legacyData)
+        #expect(legacy.groups.isEmpty)
+        #expect(legacy.cameraSlots.isEmpty)
+        #expect(legacy.section == .disabled)
+        #expect(legacy.objects[0].style == .default)
+    }
+
+    @Test
+    func numericScaleSupportsUniformAndAxisConstrainedGroups() {
+        let first = BlockReferenceObject(
+            name: "A",
+            kind: .box,
+            position: .init(x: -10, y: 0, z: 0),
+            dimensions: .init(width: 20, depth: 30, height: 40)
+        )
+        let second = BlockReferenceObject(
+            name: "B",
+            kind: .box,
+            position: .init(x: 10, y: 0, z: 0),
+            dimensions: .init(width: 10, depth: 12, height: 14)
+        )
+        let snapshots = Dictionary(uniqueKeysWithValues: [first, second].map {
+            ($0.id, BlockReferenceObjectTransformSnapshot(
+                position: $0.position,
+                rotation: $0.rotation,
+                dimensions: $0.dimensions
+            ))
+        })
+        let uniform = BlockReferenceNumericTransform(
+            objectID: first.id,
+            kind: .scale,
+            axis: nil,
+            input: "2",
+            originalPosition: first.position,
+            originalRotation: first.rotation,
+            originalTransforms: snapshots,
+            pivot: .zero
+        )
+        let scaled = uniform.applying(to: first)
+        #expect(scaled.position.x == -20)
+        #expect(scaled.dimensions == .init(width: 40, depth: 60, height: 80))
+
+        var axisScale = uniform
+        axisScale.axis = .x
+        let constrained = axisScale.applying(to: second)
+        #expect(constrained.position.x == 20)
+        #expect(constrained.dimensions.width == 20)
+        #expect(constrained.dimensions.depth == 12)
+    }
+
+    @Test
+    func enhancedSnapPointsIncludeVerticesMidpointsAndFaceCenters() {
+        let object = BlockReferenceObject(
+            name: "方块",
+            kind: .box,
+            position: .zero,
+            dimensions: .init(width: 20, depth: 30, height: 40)
+        )
+        let kinds = Set(blockObjectSnapPoints(object).map(\.kind))
+        #expect(kinds.contains(.center))
+        #expect(kinds.contains(.vertex))
+        #expect(kinds.contains(.midpoint))
+        #expect(kinds.contains(.faceCenter))
+    }
+
+    @Test
+    func parametricModulesAndPoseableHumanStayLowPolygonAndBounded() throws {
+        for kind in [
+            BlockReferenceModuleKind.poseableHuman,
+            .stairs, .doorFrame, .roomBox, .table
+        ] {
+            let object = blockReferenceModuleObject(
+                kind: kind,
+                name: kind.displayName,
+                position: .zero
+            )
+            let mesh = try #require(object.customMesh)
+            #expect(mesh.faces.isEmpty == false)
+            #expect(mesh.faces.count <= BlockReferenceCustomMesh.maximumFaceCount)
+            #expect(object.dimensions.width > 0)
+            #expect(object.moduleKind == kind)
+        }
+    }
+
+    @Test
+    func sectionPlaneClipsCrossingFacesWithoutProducingInvalidPolygons() {
+        let face = [
+            BlockVector3(x: -10, y: -10, z: -10),
+            BlockVector3(x: 10, y: -10, z: -10),
+            BlockVector3(x: 10, y: 10, z: 10),
+            BlockVector3(x: -10, y: 10, z: 10)
+        ]
+        let clipped = blockReferenceClipFace(
+            face,
+            section: .init(isEnabled: true, plane: .ground, isInverted: false)
+        )
+        #expect(clipped.count >= 3)
+        #expect(clipped.allSatisfy { $0.z >= -0.000_001 })
+    }
+
+    @Test
+    func cameraAndThreePointGuideRoundTripWithinDrawingTolerance() throws {
+        let canvasSize = CanvasSize(width: 1_600, height: 1_000)
+        var camera = BlockReferenceCamera.stageOneDefault
+        camera.yawDegrees = -38
+        camera.pitchDegrees = 24
+        camera.fieldOfViewDegrees = 48
+        let x = try #require(blockReferenceVanishingPoint(direction: .unitX, camera: camera, canvasSize: canvasSize))
+        let y = try #require(blockReferenceVanishingPoint(direction: .unitY, camera: camera, canvasSize: canvasSize))
+        let z = try #require(blockReferenceVanishingPoint(direction: .unitZ, camera: camera, canvasSize: canvasSize))
+        var guide = PerspectiveGuideState.initial(canvasSize: canvasSize)
+        guide.leftVanishingPoint = x
+        guide.rightVanishingPoint = y
+        guide.verticalVanishingPoint = z
+        let recovered = try #require(blockReferenceCameraMatchingPerspectiveGuide(
+            guide,
+            currentCamera: camera,
+            canvasSize: canvasSize
+        ))
+        #expect(abs(recovered.yawDegrees - camera.yawDegrees) < 0.5)
+        #expect(abs(recovered.pitchDegrees - camera.pitchDegrees) < 0.5)
+        #expect(abs(recovered.fieldOfViewDegrees - camera.fieldOfViewDegrees) < 0.5)
+    }
+
+    @Test
+    func centerGizmoHandlePerformsUniformScale() throws {
+        let layout = try #require(blockReferenceGizmoLayout(
+            object: BlockReferenceObject(
+                name: "方块",
+                kind: .box,
+                position: .init(x: 0, y: 0, z: 20),
+                dimensions: .init(width: 40, depth: 50, height: 60)
+            ),
+            camera: .stageOneDefault,
+            canvasSize: .init(width: 800, height: 600),
+            screenScale: 1
+        ))
+        let handle = try #require(blockReferenceGizmoHitTest(
+            point: layout.center,
+            layout: layout,
+            screenScale: 1
+        ))
+        #expect(handle.isUniformScale)
+        let adjustment = BlockReferenceGizmoAdjustment(
+            objectID: UUID(),
+            handle: handle,
+            input: "2",
+            originalPosition: .zero,
+            originalRotation: .zero
+        )
+        #expect(adjustment.numericTransform.axis == nil)
+    }
+
+    @Test
+    func geometricMirrorReflectsVerticesInsteadOfOnlyDuplicatingTransform() throws {
+        let source = BlockReferenceObject(
+            name: "不对称体",
+            kind: .box,
+            position: .zero,
+            dimensions: .init(width: 4, depth: 3, height: 2),
+            customMesh: .init(
+                faces: [[
+                    .init(x: 0, y: 0, z: 0),
+                    .init(x: 3, y: 0, z: 0),
+                    .init(x: 1, y: 2, z: 1)
+                ]],
+                baseDimensions: .init(width: 4, depth: 3, height: 2)
+            )
+        )
+        let mirrored = try #require(blockReferenceMirroredObject(
+            source,
+            pivot: .zero,
+            normal: .unitX,
+            name: "镜像"
+        ))
+        let originalX = blockObjectFaces(source).flatMap(\.vertices).map(\.x).sorted()
+        let mirroredX = blockObjectFaces(mirrored).flatMap(\.vertices).map(\.x).sorted()
+        #expect(mirrored.customMesh != nil)
+        #expect(zip(originalX.reversed(), mirroredX).allSatisfy { abs(-$0.0 - $0.1) < 0.000_001 })
+    }
+
+    @Test
+    func featureEdgesHideCoplanarBooleanSubdivisionButKeepOuterBoundary() {
+        let id = UUID()
+        let a = BlockVector3(x: 0, y: 0, z: 0)
+        let b = BlockVector3(x: 10, y: 0, z: 0)
+        let c = BlockVector3(x: 10, y: 10, z: 0)
+        let d = BlockVector3(x: 0, y: 10, z: 0)
+        let faces = [
+            BlockMeshFace(objectID: id, faceIndex: 0, vertices: [a, b, c], normal: .unitZ),
+            BlockMeshFace(objectID: id, faceIndex: 1, vertices: [a, c, d], normal: .unitZ)
+        ]
+        let mask = blockReferenceFeatureEdgeMask(faces: faces)
+        #expect(mask[0] == [true, true, false])
+        #expect(mask[1] == [false, true, true])
+    }
+
+    @Test
+    func nearClippedPolygonDoesNotIndexOriginalFeatureMask() {
+        let originalMask = [true, false, true, true]
+
+        #expect(blockReferenceShouldRenderProjectedEdge(
+            featureMask: originalMask,
+            projectedEdgeIndex: 1,
+            preservesOriginalTopology: true
+        ) == false)
+        #expect(blockReferenceShouldRenderProjectedEdge(
+            featureMask: originalMask,
+            projectedEdgeIndex: 4,
+            preservesOriginalTopology: false
+        ))
+        #expect(blockReferenceShouldRenderProjectedEdge(
+            featureMask: originalMask,
+            projectedEdgeIndex: 4,
+            preservesOriginalTopology: true
+        ))
+    }
+
+    @Test
+    func poseableHumanHasPelvisMultiAxisShouldersAndPosteriorKneeFlexion() throws {
+        var pose = BlockHumanPose.standing
+        pose.leftShoulderFlexionDegrees = 90
+        pose.leftKneeDegrees = 90
+        let rig = blockReferencePoseableHumanRig(pose: pose)
+        let leftShoulder = try #require(rig.joints[.leftShoulder])
+        let leftElbow = try #require(rig.joints[.leftElbow])
+        #expect(leftElbow.y > leftShoulder.y + 20)
+        #expect(rig.geometry.faces.flatMap { $0 }.map(\.y).min() ?? 0 < -35)
+        #expect(rig.geometry.faces.contains { face in
+            face.count == 4
+                && face.allSatisfy { abs($0.z - 89.5) < 0.000_001 }
+                && (face.map(\.x).max() ?? 0) >= 14.5
+                && (face.map(\.x).min() ?? 0) <= -14.5
+        })
+    }
+
+    @Test
+    func humanJointAxisControlsRespectAnatomicalDegreesOfFreedom() {
+        let shoulder = blockReferenceHumanPose(
+            .standing,
+            rotating: .rightShoulder,
+            around: .y,
+            by: 25
+        )
+        #expect(shoulder.rightShoulderDegrees == -19)
+
+        let elbow = blockReferenceHumanPose(
+            .standing,
+            rotating: .leftElbow,
+            around: .x,
+            by: 40
+        )
+        #expect(elbow.leftElbowDegrees == 40)
+
+        let knee = blockReferenceHumanPose(
+            .standing,
+            rotating: .leftKnee,
+            around: .x,
+            by: -55
+        )
+        #expect(knee.leftKneeDegrees == 55)
+        #expect(BlockHumanJoint.leftKnee.rotationAxes == [.x])
+        #expect(BlockHumanJoint.leftHip.rotationAxes == [.x, .y, .z])
+        #expect(BlockHumanJoint.pelvis.rotationAxes == [.z])
+    }
+
+    @Test
+    func poseableHumanUsesParentedJointFramesAndPelvisHorizontalRotation() throws {
+        var pose = BlockHumanPose.standing
+        pose.pelvisYawDegrees = 90
+        pose.torsoYawDegrees = 25
+        pose.leftShoulderFlexionDegrees = 40
+        pose.leftShoulderTwistDegrees = 30
+        let rig = blockReferencePoseableHumanRig(pose: pose)
+        let hip = try #require(rig.joints[.leftHip])
+        let shoulder = try #require(rig.joints[.leftShoulder])
+        let elbowAxis = try #require(rig.jointAxes[.leftElbow]?[.x])
+
+        #expect(abs(hip.x) < 0.000_001)
+        #expect(hip.y < -10)
+        #expect(abs(shoulder.y) > 10)
+        #expect(elbowAxis.distance(to: .unitX) > 0.1)
+        #expect(rig.jointAxes[.pelvis]?[.z] == .unitZ)
+    }
+
+    @Test
+    func livePerspectiveLinesComeFromActualEdgesAndFollowCameraOrbit() throws {
+        let canvasSize = CanvasSize(width: 800, height: 600)
+        let object = BlockReferenceObject(
+            name: "旋转方块",
+            kind: .box,
+            position: .init(x: 0, y: 0, z: 40),
+            rotation: .init(xDegrees: 10, yDegrees: 20, zDegrees: 25),
+            dimensions: .init(width: 120, depth: 90, height: 80)
+        )
+        let camera = BlockReferenceCamera.stageOneDefault
+        let lines = blockReferencePerspectiveEdgeLines(
+            object: object,
+            camera: camera,
+            canvasSize: canvasSize
+        )
+        #expect(Set(lines.map(\.axis)) == Set(BlockReferenceAxis.allCases))
+        #expect(lines.allSatisfy {
+            $0.edgeStart != $0.edgeEnd && $0.lineStart != $0.lineEnd
+        })
+
+        var orbited = camera
+        orbited.yawDegrees += 24
+        let changed = blockReferencePerspectiveEdgeLines(
+            object: object,
+            camera: orbited,
+            canvasSize: canvasSize
+        )
+        #expect(changed != lines)
+    }
+}

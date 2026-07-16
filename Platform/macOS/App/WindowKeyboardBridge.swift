@@ -123,7 +123,13 @@ final class KeyboardBridgeView: NSView {
     }
 
     private func shouldPreserveCurrentFirstResponder(_ responder: Any?) -> Bool {
-        false
+        if let textView = responder as? NSTextView, textView.isEditable {
+            return true
+        }
+        if let textField = responder as? NSTextField, textField.isEditable {
+            return true
+        }
+        return false
     }
 
     private func shouldAllowWorkspaceShortcut(for responder: Any?) -> Bool {

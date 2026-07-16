@@ -22,6 +22,10 @@ func rightInspectorColumnWidth(totalWidth: CGFloat) -> CGFloat {
     )
 }
 
+func rightInspectorUsesExpandedBlockReferencePanel(activeTool: ToolKind) -> Bool {
+    activeTool == .blockReference
+}
+
 func topInspectorPanelContentWidth(panelWidth: CGFloat) -> CGFloat {
     max(0, panelWidth - (topInspectorPanelPadding * 2))
 }
@@ -395,59 +399,65 @@ struct RightInspectorView: View {
     var body: some View {
         ZStack {
             GeometryReader { proxy in
-                let columnWidth = rightInspectorColumnWidth(totalWidth: proxy.size.width)
-                ScrollView(.vertical, showsIndicators: true) {
-                    HStack(alignment: .top, spacing: rightInspectorColumnSpacing) {
-                    VStack(spacing: 12) {
-                        InspectorPanel(title: "参考图") {
-                            referenceImageSection
-                        }
+                if rightInspectorUsesExpandedBlockReferencePanel(
+                    activeTool: viewModel.workspace.toolSession.activeTool
+                ) {
+                    blockReferenceWorkspaceInspector(size: proxy.size)
+                } else {
+                    let columnWidth = rightInspectorColumnWidth(totalWidth: proxy.size.width)
+                    ScrollView(.vertical, showsIndicators: true) {
+                        HStack(alignment: .top, spacing: rightInspectorColumnSpacing) {
+                        VStack(spacing: 12) {
+                            InspectorPanel(title: "参考图") {
+                                referenceImageSection
+                            }
 
-                        InspectorPanel(title: "颜色") {
-                            ColorSectionView(
-                                proxy: viewModel.colorPanelProxy,
-                                viewModel: viewModel
-                            )
-                        }
-
-                        InspectorPanel(title: "") {
-                            libraryInspectorSection
-                        }
-                        .frame(maxHeight: .infinity, alignment: .top)
-                    }
-                    .frame(width: columnWidth)
-                    .frame(maxHeight: .infinity, alignment: .top)
-
-                    VStack(spacing: 12) {
-                        tipNavigatorPanel(width: columnWidth)
-                        .overlay {
-                            RoundedRectangle(cornerRadius: 12)
-                                .stroke(
-                                    highlightsPrimaryTipEditor ? Color.accentColor.opacity(0.92) : Color.clear,
-                                    lineWidth: 2
+                            InspectorPanel(title: "颜色") {
+                                ColorSectionView(
+                                    proxy: viewModel.colorPanelProxy,
+                                    viewModel: viewModel
                                 )
-                        }
-                        .shadow(
-                            color: highlightsPrimaryTipEditor ? Color.accentColor.opacity(0.22) : .clear,
-                            radius: 12
-                        )
+                            }
 
-                        InspectorPanel(title: "") {
-                            parameterInspectorSection
+                            InspectorPanel(title: "") {
+                                libraryInspectorSection
+                            }
+                            .frame(maxHeight: .infinity, alignment: .top)
                         }
+                        .frame(width: columnWidth)
+                        .frame(maxHeight: .infinity, alignment: .top)
 
-                        InspectorPanel(title: "图层") {
-                            layersSection
+                        VStack(spacing: 12) {
+                            tipNavigatorPanel(width: columnWidth)
+                            .overlay {
+                                RoundedRectangle(cornerRadius: 12)
+                                    .stroke(
+                                        highlightsPrimaryTipEditor ? Color.accentColor.opacity(0.92) : Color.clear,
+                                        lineWidth: 2
+                                    )
+                            }
+                            .shadow(
+                                color: highlightsPrimaryTipEditor ? Color.accentColor.opacity(0.22) : .clear,
+                                radius: 12
+                            )
+
+                            InspectorPanel(title: "") {
+                                parameterInspectorSection
+                            }
+
+                            InspectorPanel(title: "图层") {
+                                layersSection
+                            }
+                            .frame(maxHeight: .infinity, alignment: .top)
                         }
+                        .frame(width: columnWidth)
                         .frame(maxHeight: .infinity, alignment: .top)
                     }
-                    .frame(width: columnWidth)
-                    .frame(maxHeight: .infinity, alignment: .top)
+                        .padding(rightInspectorHorizontalPadding)
+                        .frame(maxWidth: .infinity, minHeight: proxy.size.height, alignment: .top)
+                    }
+                    .frame(width: proxy.size.width, height: proxy.size.height, alignment: .top)
                 }
-                    .padding(rightInspectorHorizontalPadding)
-                    .frame(maxWidth: .infinity, minHeight: proxy.size.height, alignment: .top)
-                }
-                .frame(width: proxy.size.width, height: proxy.size.height, alignment: .top)
             }
 
             if showsCompoundBrushBuilder {
@@ -1055,6 +1065,8 @@ struct RightInspectorView: View {
                 eyedropperParameterControls
             } else if viewModel.workspace.toolSession.activeTool == .perspective {
                 perspectiveParameterControls
+            } else if viewModel.workspace.toolSession.activeTool == .blockReference {
+                blockReferenceParameterControls
             } else if isLassoFillToolActive {
                 lassoFillParameterControls
             } else if usesFillParameterControls {
@@ -1369,6 +1381,24 @@ struct RightInspectorView: View {
         ]
     }
 
+    private var blockReferenceParameterControls: some View {
+        BlockReferenceParameterPanel(viewModel: viewModel)
+    }
+
+    private func blockReferenceWorkspaceInspector(size: CGSize) -> some View {
+        ScrollView(.vertical, showsIndicators: true) {
+            InspectorPanel(title: "") {
+                BlockReferenceParameterPanel(viewModel: viewModel)
+                    .frame(
+                        maxWidth: .infinity,
+                        minHeight: max(size.height - 48, 0),
+                        alignment: .top
+                    )
+            }
+            .padding(rightInspectorHorizontalPadding)
+        }
+        .frame(width: size.width, height: size.height, alignment: .top)
+    }
     private func swiftUIColor(_ color: RGBAColor) -> Color {
         Color(
             red: Double(color.red),
