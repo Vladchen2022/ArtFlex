@@ -1557,7 +1557,15 @@ struct RightInspectorView: View {
                                 selectedTab: $blockReferencePanelTab
                             )
                         }
-                        .frame(minHeight: 420, alignment: .top)
+
+                        InspectorPanel(title: "场景对象") {
+                            BlockReferenceParameterPanel(
+                                viewModel: viewModel,
+                                presentation: .objects,
+                                selectedTab: $blockReferencePanelTab
+                            )
+                        }
+                        .frame(minHeight: 260, alignment: .top)
                     }
                     .frame(width: columnWidth)
                     .frame(maxHeight: .infinity, alignment: .top)
@@ -1572,15 +1580,8 @@ struct RightInspectorView: View {
                                 selectedTab: $blockReferencePanelTab
                             )
                         }
-
-                        InspectorPanel(title: "场景对象") {
-                            BlockReferenceParameterPanel(
-                                viewModel: viewModel,
-                                presentation: .objects,
-                                selectedTab: $blockReferencePanelTab
-                            )
-                        }
-                        .frame(minHeight: 260, alignment: .top)
+                        .frame(width: columnWidth)
+                        .clipped()
                     }
                     .frame(width: columnWidth)
                     .frame(maxHeight: .infinity, alignment: .top)

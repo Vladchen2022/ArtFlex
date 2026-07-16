@@ -42,6 +42,22 @@ private enum BlockReferenceLibraryCategory: String, CaseIterable {
     case architecture = "建筑"
 }
 
+private enum BlockReferenceTransformDetail: String {
+    case geometry = "构造"
+    case pivot = "枢轴"
+    case organization = "组织"
+    case array = "阵列"
+
+    var symbolName: String {
+        switch self {
+        case .geometry: return "slider.horizontal.3"
+        case .pivot: return "scope"
+        case .organization: return "square.3.layers.3d"
+        case .array: return "square.grid.3x3"
+        }
+    }
+}
+
 struct BlockReferenceParameterPanel: View {
     @ObservedObject var viewModel: WorkspaceViewModel
     let presentation: BlockReferencePanelPresentation
@@ -53,6 +69,7 @@ struct BlockReferenceParameterPanel: View {
     @State private var arrayAxis = BlockReferenceAxis.x
     @State private var workingPlaneMoveAxis = BlockReferenceAxis.z
     @State private var workingPlaneMoveDistance = 10.0
+    @State private var expandedTransformDetail: BlockReferenceTransformDetail?
 
     var body: some View {
         if let scene = viewModel.blockReferenceScene {
@@ -113,10 +130,15 @@ struct BlockReferenceParameterPanel: View {
                 if let object = viewModel.selectedBlockReferenceObject {
                     if viewModel.selectedBlockReferenceObjectIDs.count > 1 {
                         multipleSelectionControls(activeObject: object)
+                        transformDetailControls(object: object, includesGeometry: false)
                     } else {
                         selectedObjectControls(object)
+                        transformDetailControls(
+                            object: object,
+                            includesGeometry: object.moduleKind?.isParametric == true
+                                || object.moduleKind == .poseableHuman
+                        )
                     }
-                    advancedTransformControls
                 } else {
                     emptyTabHint("先在画布或“建模”标签选择体块。")
                 }
@@ -209,9 +231,8 @@ struct BlockReferenceParameterPanel: View {
                 }
             }
 
-            Spacer(minLength: 0)
         }
-        .frame(maxWidth: .infinity, minHeight: 300, alignment: .topLeading)
+        .frame(maxWidth: .infinity, alignment: .topLeading)
         .font(.system(size: 11, weight: .medium))
         .foregroundStyle(Color.white.opacity(0.88))
         .environment(\.colorScheme, .dark)
@@ -584,9 +605,6 @@ struct BlockReferenceParameterPanel: View {
                     if axis == 2 { dimensions.height = value }
                     viewModel.setSelectedBlockReferenceDimensions(dimensions)
                 }
-                if let kind = object.moduleKind, kind.isParametric {
-                    parametricModuleControls(object)
-                }
             } else {
                 Text(object.moduleKind == .poseableHuman
                     ? "可摆姿人体 · 内部体块不可拆分，不参与布尔运算。"
@@ -594,10 +612,6 @@ struct BlockReferenceParameterPanel: View {
                     .font(.system(size: 10, weight: .medium))
                     .foregroundStyle(Color.white.opacity(0.46))
                     .fixedSize(horizontal: false, vertical: true)
-            }
-
-            if object.moduleKind == .poseableHuman {
-                poseableHumanControls(object)
             }
 
             TripleBlockNumberFields(
@@ -714,7 +728,14 @@ struct BlockReferenceParameterPanel: View {
                     viewModel.beginBlockReferenceNumericTransform(.scale)
                 }
                 .tint(transform?.kind == .scale ? Color.accentColor : Color.gray)
-                Spacer()
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.mini)
+
+            HStack(spacing: 7) {
+                Text("坐标")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(Color.white.opacity(0.55))
                 Picker("", selection: Binding(
                     get: { viewModel.blockReferenceEditorState.gizmoCoordinateSpace },
                     set: { viewModel.setBlockReferenceGizmoCoordinateSpace($0) }
@@ -725,9 +746,8 @@ struct BlockReferenceParameterPanel: View {
                 }
                 .labelsHidden()
                 .pickerStyle(.segmented)
-                .frame(width: 150)
+                .frame(maxWidth: .infinity)
             }
-            .buttonStyle(.bordered)
             .controlSize(.mini)
 
             if isEditingObject, let transform {
@@ -961,9 +981,82 @@ struct BlockReferenceParameterPanel: View {
         }
     }
 
-    private var advancedTransformControls: some View {
-        VStack(alignment: .leading, spacing: 9) {
+    private func transformDetailControls(
+        object: BlockReferenceObject,
+        includesGeometry: Bool
+    ) -> some View {
+        let details: [BlockReferenceTransformDetail] = includesGeometry
+            ? [.geometry, .pivot, .organization, .array]
+            : [.pivot, .organization, .array]
+        let visibleDetail = expandedTransformDetail.flatMap { details.contains($0) ? $0 : nil }
+        return VStack(alignment: .leading, spacing: 8) {
             Divider().overlay(Color.white.opacity(0.08))
+            HStack(spacing: 5) {
+                ForEach(details, id: \.self) { detail in
+                    transformDetailButton(
+                        detail,
+                        title: detail == .geometry && object.moduleKind == .poseableHuman
+                            ? "姿势"
+                            : detail.rawValue,
+                        isSelected: visibleDetail == detail
+                    )
+                }
+            }
+
+            if let visibleDetail {
+                Group {
+                    switch visibleDetail {
+                    case .geometry:
+                        transformGeometryControls(object)
+                    case .pivot:
+                        pivotControls
+                    case .organization:
+                        organizationControls
+                    case .array:
+                        arrayControls
+                    }
+                }
+                .transition(.opacity.combined(with: .move(edge: .top)))
+            } else {
+                Text("枢轴、组织和阵列按需展开；同一时间只显示一组高级参数。")
+                    .font(.system(size: 9, weight: .medium))
+                    .foregroundStyle(Color.white.opacity(0.4))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .animation(.easeInOut(duration: 0.16), value: visibleDetail)
+    }
+
+    private func transformDetailButton(
+        _ detail: BlockReferenceTransformDetail,
+        title: String,
+        isSelected: Bool
+    ) -> some View {
+        Button {
+            withAnimation(.easeInOut(duration: 0.16)) {
+                expandedTransformDetail = isSelected ? nil : detail
+            }
+        } label: {
+            Label(title, systemImage: detail.symbolName)
+                .font(.system(size: 9, weight: .semibold))
+                .frame(maxWidth: .infinity, minHeight: 25)
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.mini)
+        .tint(isSelected ? Color.accentColor : Color.gray)
+    }
+
+    @ViewBuilder
+    private func transformGeometryControls(_ object: BlockReferenceObject) -> some View {
+        if object.moduleKind == .poseableHuman {
+            poseableHumanControls(object)
+        } else if object.moduleKind?.isParametric == true {
+            parametricModuleControls(object)
+        }
+    }
+
+    private var pivotControls: some View {
+        VStack(alignment: .leading, spacing: 8) {
             sectionTitle("变换枢轴")
             Picker("枢轴", selection: Binding(
                 get: { viewModel.blockReferenceScene?.pivotMode ?? .selectionCenter },
@@ -982,9 +1075,13 @@ struct BlockReferenceParameterPanel: View {
             }
             .buttonStyle(.bordered)
             .controlSize(.small)
+        }
+    }
 
+    private var organizationControls: some View {
+        VStack(alignment: .leading, spacing: 8) {
             sectionTitle("批量与组织")
-            HStack(spacing: 6) {
+            LazyVGrid(columns: blockLibraryColumns, spacing: 6) {
                 Button("编组 ⌃G") { viewModel.groupSelectedBlockReferenceObjects() }
                     .disabled(viewModel.selectedBlockReferenceObjectIDs.count < 2)
                 Button("解组 ⌃⇧G") { viewModel.ungroupSelectedBlockReferenceObjects() }
@@ -1008,7 +1105,12 @@ struct BlockReferenceParameterPanel: View {
             }
             .buttonStyle(.bordered)
             .controlSize(.mini)
+        }
+    }
 
+    private var arrayControls: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            sectionTitle("阵列")
             Stepper("阵列数量 \(arrayCount)", value: $arrayCount, in: 2...32)
                 .font(.system(size: 11, weight: .medium))
             HStack(spacing: 7) {
@@ -1548,9 +1650,12 @@ private struct TripleBlockNumberFields: View {
                     ) { value in
                         onCommit(index, value)
                     }
+                    .frame(minWidth: 0, maxWidth: .infinity)
                 }
             }
+            .frame(minWidth: 0, maxWidth: .infinity)
         }
+        .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
     }
 }
 
@@ -1585,9 +1690,9 @@ private struct BlockNumberField: View {
                     onEditingChanged(scrubbing)
                 }
             )
-            .frame(minHeight: 22)
+            .frame(minWidth: 0, maxWidth: .infinity, minHeight: 22)
         }
-        .frame(maxWidth: .infinity)
+        .frame(minWidth: 0, maxWidth: .infinity)
         .onAppear { syncText() }
         .onChange(of: value) { _, _ in
             if !isScrubbing { syncText() }
@@ -1631,6 +1736,7 @@ private struct BlockScrubbableNumberTextField: NSViewRepresentable {
         field.font = .monospacedSystemFont(ofSize: 10, weight: .regular)
         field.toolTip = "水平拖动调整；单击输入精确数值；按住 Shift 精细调整"
         field.delegate = context.coordinator
+        field.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
         let pan = NSPanGestureRecognizer(
             target: context.coordinator,
