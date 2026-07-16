@@ -409,11 +409,6 @@ struct RightInspectorView: View {
         case navigator = "导航器"
     }
 
-    private enum BlockReferenceObservationTab: String {
-        case navigator = "导航器"
-        case cameraSlots = "视角槽"
-    }
-
     @ObservedObject var viewModel: WorkspaceViewModel
     @State private var showsPressureCurveEditor = false
     @State private var showsPressureSizeCurveEditor = false
@@ -446,7 +441,6 @@ struct RightInspectorView: View {
     @State private var lastUsedAdjustmentTab: ParameterInspectorTab = .colorAdjustment
     @State private var parameterInspectorAutoRestoreTab: ParameterInspectorTab?
     @State private var topInspectorTab: TopInspectorTab = .navigator
-    @State private var blockReferenceObservationTab: BlockReferenceObservationTab = .navigator
     @State private var blockReferencePanelTab: BlockReferencePanelTab = .build
     @State private var navigatorZoomPercentText = "100"
     @State private var textureFillPreviewMaterialScale: Float?
@@ -1553,6 +1547,14 @@ struct RightInspectorView: View {
                         InspectorPanel(title: "") {
                             BlockReferenceParameterPanel(
                                 viewModel: viewModel,
+                                presentation: .cameraSlots,
+                                selectedTab: $blockReferencePanelTab
+                            )
+                        }
+
+                        InspectorPanel(title: "") {
+                            BlockReferenceParameterPanel(
+                                viewModel: viewModel,
                                 presentation: .library,
                                 selectedTab: $blockReferencePanelTab
                             )
@@ -1570,14 +1572,17 @@ struct RightInspectorView: View {
                     .frame(width: columnWidth)
                     .frame(maxHeight: .infinity, alignment: .top)
 
-                    VStack(spacing: 12) {
-                        blockReferenceObservationPanel(width: columnWidth)
-
+                    VStack(spacing: 0) {
                         InspectorPanel(title: "") {
                             BlockReferenceParameterPanel(
                                 viewModel: viewModel,
                                 presentation: .context,
                                 selectedTab: $blockReferencePanelTab
+                            )
+                            .frame(
+                                maxWidth: .infinity,
+                                minHeight: max(size.height - 24, 0),
+                                alignment: .topLeading
                             )
                         }
                         .frame(width: columnWidth)
@@ -1591,52 +1596,6 @@ struct RightInspectorView: View {
             }
         }
         .frame(width: size.width, height: size.height, alignment: .top)
-    }
-
-    private func blockReferenceObservationPanel(width: CGFloat) -> some View {
-        let contentWidth = topInspectorPanelContentWidth(panelWidth: width)
-        return VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 8) {
-                inspectorTabButton(
-                    title: BlockReferenceObservationTab.navigator.rawValue,
-                    isSelected: blockReferenceObservationTab == .navigator
-                ) {
-                    blockReferenceObservationTab = .navigator
-                }
-                inspectorTabButton(
-                    title: BlockReferenceObservationTab.cameraSlots.rawValue,
-                    isSelected: blockReferenceObservationTab == .cameraSlots
-                ) {
-                    blockReferenceObservationTab = .cameraSlots
-                }
-            }
-
-            if blockReferenceObservationTab == .navigator {
-                navigatorSection
-            } else {
-                BlockReferenceParameterPanel(
-                    viewModel: viewModel,
-                    presentation: .cameraSlots,
-                    selectedTab: $blockReferencePanelTab
-                )
-            }
-        }
-        .frame(
-            width: contentWidth,
-            height: topInspectorPanelHeight - (topInspectorPanelPadding * 2),
-            alignment: .topLeading
-        )
-        .padding(topInspectorPanelPadding)
-        .frame(width: width, height: topInspectorPanelHeight, alignment: .topLeading)
-        .clipped()
-        .background(
-            RoundedRectangle(cornerRadius: 12)
-                .fill(Color.white.opacity(0.06))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 12)
-                        .stroke(Color.white.opacity(0.06), lineWidth: 1)
-                )
-        )
     }
     private func swiftUIColor(_ color: RGBAColor) -> Color {
         Color(
