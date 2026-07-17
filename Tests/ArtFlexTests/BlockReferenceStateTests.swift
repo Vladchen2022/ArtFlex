@@ -1077,6 +1077,72 @@ struct BlockReferenceStateTests {
     }
 
     @Test
+    func requestedPrimitiveModulesAreClosedLowPolygonMeshesWithBottomCenterAnchors() throws {
+        let specifications: [(
+            kind: BlockReferenceModuleKind,
+            dimensions: BlockDimensions,
+            faceCount: Int
+        )] = [
+            (.squareFrustum, .init(width: 120, depth: 120, height: 60), 6),
+            (.squarePyramid, .init(width: 120, depth: 120, height: 120), 5),
+            (.hemisphere, .init(width: 120, depth: 120, height: 60), 17),
+            (.torus, .init(width: 160, depth: 160, height: 40), 32),
+            (.hollowCylinder, .init(width: 120, depth: 120, height: 120), 32)
+        ]
+
+        for specification in specifications {
+            let geometry = try #require(blockReferenceAdvancedModuleGeometry(kind: specification.kind))
+            #expect(geometry.dimensions == specification.dimensions)
+            #expect(geometry.faces.count == specification.faceCount)
+            #expect(geometry.faces.allSatisfy { $0.count >= 3 })
+            #expect(geometry.faces.allSatisfy { face in
+                (face[1] - face[0]).cross(face[2] - face[0]).length > 0.000_001
+            })
+            #expect(blockReferenceTestEdgeUseCounts(geometry.faces).values.allSatisfy { $0 == 2 })
+
+            let bounds = blockReferenceTestBounds(geometry.faces)
+            #expect(abs(bounds.minX + specification.dimensions.width * 0.5) < 0.000_001)
+            #expect(abs(bounds.maxX - specification.dimensions.width * 0.5) < 0.000_001)
+            #expect(abs(bounds.minY + specification.dimensions.depth * 0.5) < 0.000_001)
+            #expect(abs(bounds.maxY - specification.dimensions.depth * 0.5) < 0.000_001)
+            #expect(abs(bounds.minZ) < 0.000_001)
+            #expect(abs(bounds.maxZ - specification.dimensions.height) < 0.000_001)
+
+            let object = blockReferenceModuleObject(
+                kind: specification.kind,
+                name: specification.kind.displayName,
+                position: .init(x: 40, y: 50, z: 60)
+            )
+            #expect(object.moduleKind == specification.kind)
+            #expect(object.moduleBasePointOffset == .zero)
+            #expect(blockReferenceObjectModuleBasePoint(object) == object.position)
+            #expect(object.allowsGeometryEditing)
+        }
+
+        let frustum = try #require(blockReferenceAdvancedModuleGeometry(kind: .squareFrustum))
+        let frustumBottom = blockReferenceTestBounds([frustum.faces[0]])
+        let frustumTop = blockReferenceTestBounds([frustum.faces[1]])
+        #expect(frustumBottom.maxX - frustumBottom.minX == 120)
+        #expect(frustumTop.maxX - frustumTop.minX == 72)
+
+        let hemisphere = try #require(blockReferenceAdvancedModuleGeometry(kind: .hemisphere))
+        let hemisphereLevels = Set(hemisphere.faces.flatMap { $0 }.map(\.z))
+        #expect(hemisphereLevels.count == 3)
+
+        let torus = try #require(blockReferenceAdvancedModuleGeometry(kind: .torus))
+        let torusVertices = torus.faces.flatMap { $0 }
+        #expect(torusVertices.contains { abs($0.x - 80) < 0.000_001 && abs($0.y) < 0.000_001 && abs($0.z - 20) < 0.000_001 })
+        #expect(torusVertices.contains { abs($0.x - 60) < 0.000_001 && abs($0.y) < 0.000_001 && abs($0.z - 40) < 0.000_001 })
+        #expect(torusVertices.contains { abs($0.x - 40) < 0.000_001 && abs($0.y) < 0.000_001 && abs($0.z - 20) < 0.000_001 })
+        #expect(torusVertices.contains { abs($0.x - 60) < 0.000_001 && abs($0.y) < 0.000_001 && abs($0.z) < 0.000_001 })
+
+        let hollowCylinder = try #require(blockReferenceAdvancedModuleGeometry(kind: .hollowCylinder))
+        let cylinderRadii = hollowCylinder.faces.flatMap { $0 }.map { hypot($0.x, $0.y) }
+        #expect(cylinderRadii.contains { abs($0 - 60) < 0.000_001 })
+        #expect(cylinderRadii.contains { abs($0 - 36) < 0.000_001 })
+    }
+
+    @Test
     func architecturalModuleComponentsMeetAtTheirBoundariesWithoutCrossing() throws {
         let door = try #require(blockReferenceAdvancedModuleGeometry(kind: .doorFrame))
         #expect(door.faces.count == 18)
@@ -1642,4 +1708,38 @@ private func blockReferenceTestBounds(_ faces: [[BlockVector3]]) -> BlockReferen
         minZ: vertices.map(\.z).min() ?? 0,
         maxZ: vertices.map(\.z).max() ?? 0
     )
+}
+
+private struct BlockReferenceTestEdge: Hashable {
+    var first: BlockVector3
+    var second: BlockVector3
+
+    init(_ first: BlockVector3, _ second: BlockVector3) {
+        if Self.isOrdered(first, before: second) {
+            self.first = first
+            self.second = second
+        } else {
+            self.first = second
+            self.second = first
+        }
+    }
+
+    private static func isOrdered(_ lhs: BlockVector3, before rhs: BlockVector3) -> Bool {
+        if lhs.x != rhs.x { return lhs.x < rhs.x }
+        if lhs.y != rhs.y { return lhs.y < rhs.y }
+        return lhs.z < rhs.z
+    }
+}
+
+private func blockReferenceTestEdgeUseCounts(
+    _ faces: [[BlockVector3]]
+) -> [BlockReferenceTestEdge: Int] {
+    var counts: [BlockReferenceTestEdge: Int] = [:]
+    for face in faces {
+        for index in face.indices {
+            let next = (index + 1) % face.count
+            counts[BlockReferenceTestEdge(face[index], face[next]), default: 0] += 1
+        }
+    }
+    return counts
 }

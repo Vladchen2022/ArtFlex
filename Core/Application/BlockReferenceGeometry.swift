@@ -1139,7 +1139,8 @@ func blockReferenceModuleObject(
             ),
             by: BlockVector3(x: 0, y: 0, z: 108)
         )
-    case .poseableHuman, .stairs, .doorFrame, .roomBox, .table:
+    case .squareFrustum, .squarePyramid, .hemisphere, .torus, .hollowCylinder,
+         .poseableHuman, .stairs, .doorFrame, .roomBox, .table:
         preconditionFailure("Advanced module geometry must resolve before the legacy switch")
     }
 

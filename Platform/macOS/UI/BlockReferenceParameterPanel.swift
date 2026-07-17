@@ -260,6 +260,11 @@ struct BlockReferenceParameterPanel: View {
                     modeButton(.cylinder, image: "cylinder", horizontalLayout: true)
                     modeButton(.cone, image: "triangle", horizontalLayout: true)
                     modeButton(.sphere, image: "circle", horizontalLayout: true)
+                    moduleButton(.squareFrustum)
+                    moduleButton(.squarePyramid)
+                    moduleButton(.hemisphere)
+                    moduleButton(.torus)
+                    moduleButton(.hollowCylinder)
                     persistentModuleButtons(in: .primitives)
                 }
             case .builtIn(.people):
@@ -1888,6 +1893,9 @@ struct BlockReferenceParameterPanel: View {
     }
 
     private func moduleHelp(_ kind: BlockReferenceModuleKind) -> String {
+        if kind.isBasicGeometryReference {
+            return "添加\(kind.displayName)，可调整宽、深、高并参与常规变换"
+        }
         if kind == .poseableHuman {
             return "添加可摆姿人体，可调整主要关节、移动和旋转"
         }

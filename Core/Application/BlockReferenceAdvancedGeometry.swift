@@ -97,6 +97,21 @@ func blockReferenceAdvancedModuleGeometry(
     var parameters = parameters
     parameters.normalize()
     switch kind {
+    case .squareFrustum:
+        return blockReferenceSquareFrustumGeometry()
+
+    case .squarePyramid:
+        return blockReferenceSquarePyramidGeometry()
+
+    case .hemisphere:
+        return blockReferenceHemisphereGeometry()
+
+    case .torus:
+        return blockReferenceTorusGeometry()
+
+    case .hollowCylinder:
+        return blockReferenceHollowCylinderGeometry()
+
     case .poseableHuman:
         return blockReferencePoseableHumanGeometry(pose: pose)
     case .stairs:
@@ -197,6 +212,152 @@ func blockReferenceAdvancedModuleGeometry(
 
     case .standingHuman, .seatedHuman:
         return nil
+    }
+}
+
+private func blockReferenceSquareFrustumGeometry() -> BlockReferenceModuleGeometry {
+    let dimensions = BlockDimensions(width: 120, depth: 120, height: 60)
+    let bottom = blockReferenceRectangleRing(width: 120, depth: 120, z: 0)
+    let top = blockReferenceRectangleRing(width: 72, depth: 72, z: dimensions.height)
+    var faces: [[BlockVector3]] = [Array(bottom.reversed()), top]
+    faces += blockReferenceFaces(between: bottom, and: top)
+    return .init(dimensions: dimensions, faces: faces)
+}
+
+private func blockReferenceSquarePyramidGeometry() -> BlockReferenceModuleGeometry {
+    let dimensions = BlockDimensions(width: 120, depth: 120, height: 120)
+    let bottom = blockReferenceRectangleRing(width: dimensions.width, depth: dimensions.depth, z: 0)
+    let apex = BlockVector3(x: 0, y: 0, z: dimensions.height)
+    var faces: [[BlockVector3]] = [Array(bottom.reversed())]
+    for index in bottom.indices {
+        let next = (index + 1) % bottom.count
+        faces.append([bottom[index], bottom[next], apex])
+    }
+    return .init(dimensions: dimensions, faces: faces)
+}
+
+private func blockReferenceHemisphereGeometry() -> BlockReferenceModuleGeometry {
+    let radius = 60.0
+    let dimensions = BlockDimensions(width: radius * 2, depth: radius * 2, height: radius)
+    let equator = blockReferenceCircularRing(radius: radius, z: 0, segments: 8)
+    let middleAngle = Double.pi * 0.25
+    let middle = blockReferenceCircularRing(
+        radius: cos(middleAngle) * radius,
+        z: sin(middleAngle) * radius,
+        segments: 8
+    )
+    let pole = BlockVector3(x: 0, y: 0, z: radius)
+    var faces: [[BlockVector3]] = [Array(equator.reversed())]
+    faces += blockReferenceFaces(between: equator, and: middle)
+    for index in middle.indices {
+        let next = (index + 1) % middle.count
+        faces.append([middle[index], middle[next], pole])
+    }
+    return .init(dimensions: dimensions, faces: faces)
+}
+
+private func blockReferenceTorusGeometry() -> BlockReferenceModuleGeometry {
+    let majorRadius = 60.0
+    let tubeRadius = 20.0
+    let segments = 8
+    let centerZ = tubeRadius
+    // A square rotated 45 degrees has its four corners on the radial and vertical axes.
+    let crossSection: [(radial: Double, vertical: Double)] = [
+        (tubeRadius, 0),
+        (0, tubeRadius),
+        (-tubeRadius, 0),
+        (0, -tubeRadius)
+    ]
+    let rings = (0..<segments).map { index in
+        let angle = Double(index) / Double(segments) * .pi * 2
+        let cosine = cos(angle)
+        let sine = sin(angle)
+        return crossSection.map { point in
+            let radius = majorRadius + point.radial
+            return BlockVector3(
+                x: cosine * radius,
+                y: sine * radius,
+                z: centerZ + point.vertical
+            )
+        }
+    }
+    var faces: [[BlockVector3]] = []
+    for segment in 0..<segments {
+        let nextSegment = (segment + 1) % segments
+        for side in crossSection.indices {
+            let nextSide = (side + 1) % crossSection.count
+            faces.append([
+                rings[segment][side],
+                rings[nextSegment][side],
+                rings[nextSegment][nextSide],
+                rings[segment][nextSide]
+            ])
+        }
+    }
+    let outerDiameter = (majorRadius + tubeRadius) * 2
+    return .init(
+        dimensions: .init(width: outerDiameter, depth: outerDiameter, height: tubeRadius * 2),
+        faces: faces
+    )
+}
+
+private func blockReferenceHollowCylinderGeometry() -> BlockReferenceModuleGeometry {
+    let outerRadius = 60.0
+    let innerRadius = 36.0
+    let height = 120.0
+    let segments = 8
+    let outerBottom = blockReferenceCircularRing(radius: outerRadius, z: 0, segments: segments)
+    let outerTop = blockReferenceCircularRing(radius: outerRadius, z: height, segments: segments)
+    let innerBottom = blockReferenceCircularRing(radius: innerRadius, z: 0, segments: segments)
+    let innerTop = blockReferenceCircularRing(radius: innerRadius, z: height, segments: segments)
+    var faces: [[BlockVector3]] = []
+    for index in 0..<segments {
+        let next = (index + 1) % segments
+        faces.append([outerBottom[index], outerBottom[next], outerTop[next], outerTop[index]])
+        faces.append([innerBottom[next], innerBottom[index], innerTop[index], innerTop[next]])
+        faces.append([outerTop[index], outerTop[next], innerTop[next], innerTop[index]])
+        faces.append([outerBottom[next], outerBottom[index], innerBottom[index], innerBottom[next]])
+    }
+    return .init(
+        dimensions: .init(width: outerRadius * 2, depth: outerRadius * 2, height: height),
+        faces: faces
+    )
+}
+
+private func blockReferenceRectangleRing(
+    width: Double,
+    depth: Double,
+    z: Double
+) -> [BlockVector3] {
+    let halfWidth = width * 0.5
+    let halfDepth = depth * 0.5
+    return [
+        .init(x: -halfWidth, y: -halfDepth, z: z),
+        .init(x: halfWidth, y: -halfDepth, z: z),
+        .init(x: halfWidth, y: halfDepth, z: z),
+        .init(x: -halfWidth, y: halfDepth, z: z)
+    ]
+}
+
+private func blockReferenceCircularRing(
+    radius: Double,
+    z: Double,
+    segments: Int
+) -> [BlockVector3] {
+    (0..<segments).map { index in
+        let angle = Double(index) / Double(segments) * .pi * 2
+        return .init(x: cos(angle) * radius, y: sin(angle) * radius, z: z)
+    }
+}
+
+private func blockReferenceFaces(
+    between lower: [BlockVector3],
+    and upper: [BlockVector3]
+) -> [[BlockVector3]] {
+    guard lower.count == upper.count, lower.count >= 3 else { return [] }
+    return lower.indices.map { index in
+        let next = (index + 1) % lower.count
+        return [lower[index], lower[next], upper[next], upper[index]]
     }
 }
 

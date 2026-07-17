@@ -1361,6 +1361,8 @@ extension WorkspaceViewModel {
             blockReferenceEditorState.instruction = "已添加可摆姿人体；在“变换”标签调整主要关节。"
         } else if kind.isParametric {
             blockReferenceEditorState.instruction = "已添加\(kind.displayName)；在“变换”标签调整尺寸和构造参数。"
+        } else if kind.isBasicGeometryReference {
+            blockReferenceEditorState.instruction = "已添加\(kind.displayName)；在“变换”标签可直接调整宽、深、高。"
         } else {
             blockReferenceEditorState.instruction = "已添加\(kind.displayName)；固定比例不可改尺寸，可直接移动或旋转。"
         }
@@ -1893,7 +1895,7 @@ extension WorkspaceViewModel {
 
     func setSelectedBlockReferenceDimensions(_ dimensions: BlockDimensions) {
         guard selectedBlockReferenceObject?.allowsGeometryEditing == true else {
-            blockReferenceEditorState.instruction = "固定人体模块不可修改尺寸；可以移动或旋转。"
+            blockReferenceEditorState.instruction = "固定参考模块不可修改尺寸；可以移动或旋转。"
             return
         }
         updateSelectedBlockReferenceObject { $0.dimensions = dimensions }

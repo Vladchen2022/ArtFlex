@@ -82,6 +82,11 @@ enum BlockPrimitiveKind: String, Codable, CaseIterable, Sendable, Equatable {
 }
 
 enum BlockReferenceModuleKind: String, Codable, CaseIterable, Sendable, Equatable {
+    case squareFrustum
+    case squarePyramid
+    case hemisphere
+    case torus
+    case hollowCylinder
     case standingHuman
     case seatedHuman
     case poseableHuman
@@ -92,6 +97,11 @@ enum BlockReferenceModuleKind: String, Codable, CaseIterable, Sendable, Equatabl
 
     var displayName: String {
         switch self {
+        case .squareFrustum: return "四边梯形体"
+        case .squarePyramid: return "四边方锥体"
+        case .hemisphere: return "半圆体"
+        case .torus: return "圆环体"
+        case .hollowCylinder: return "圆筒体"
         case .standingHuman: return "站姿人体"
         case .seatedHuman: return "坐姿人体"
         case .poseableHuman: return "可摆姿人体"
@@ -104,6 +114,11 @@ enum BlockReferenceModuleKind: String, Codable, CaseIterable, Sendable, Equatabl
 
     var symbolName: String {
         switch self {
+        case .squareFrustum: return "square.3.layers.3d"
+        case .squarePyramid: return "pyramid"
+        case .hemisphere: return "circle.bottomhalf.filled"
+        case .torus: return "circle.dotted.circle"
+        case .hollowCylinder: return "cylinder.split.1x2"
         case .standingHuman: return "figure.stand"
         case .seatedHuman: return "figure.seated.side"
         case .poseableHuman: return "figure.arms.open"
@@ -117,14 +132,28 @@ enum BlockReferenceModuleKind: String, Codable, CaseIterable, Sendable, Equatabl
     var isHumanReference: Bool {
         switch self {
         case .standingHuman, .seatedHuman, .poseableHuman: return true
-        case .stairs, .doorFrame, .roomBox, .table: return false
+        case .squareFrustum, .squarePyramid, .hemisphere, .torus, .hollowCylinder,
+             .stairs, .doorFrame, .roomBox, .table:
+            return false
+        }
+    }
+
+    var isBasicGeometryReference: Bool {
+        switch self {
+        case .squareFrustum, .squarePyramid, .hemisphere, .torus, .hollowCylinder:
+            return true
+        case .standingHuman, .seatedHuman, .poseableHuman,
+             .stairs, .doorFrame, .roomBox, .table:
+            return false
         }
     }
 
     var isParametric: Bool {
         switch self {
         case .stairs, .doorFrame, .roomBox, .table: return true
-        case .standingHuman, .seatedHuman, .poseableHuman: return false
+        case .squareFrustum, .squarePyramid, .hemisphere, .torus, .hollowCylinder,
+             .standingHuman, .seatedHuman, .poseableHuman:
+            return false
         }
     }
 }
@@ -451,7 +480,11 @@ struct BlockReferenceObject: Identifiable, Codable, Sendable, Equatable {
         return customMesh == nil ? kind.symbolName : "circle.grid.cross"
     }
 
-    var allowsGeometryEditing: Bool { moduleKind == nil || moduleKind?.isParametric == true }
+    var allowsGeometryEditing: Bool {
+        moduleKind == nil
+            || moduleKind?.isParametric == true
+            || moduleKind?.isBasicGeometryReference == true
+    }
     var allowsBooleanOperations: Bool { moduleKind == nil }
 }
 
