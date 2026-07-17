@@ -384,11 +384,17 @@ struct BlockReferenceParameterPanel: View {
     private func objectManagerPanel(_ scene: BlockReferenceScene) -> some View {
         VStack(alignment: .leading, spacing: 9) {
             objectList(scene, showsTitle: false, maximumHeight: 330)
+            Spacer(minLength: 0)
             Divider().overlay(Color.white.opacity(0.08))
             objectManagerActions(scene)
             moduleBasePointControls(scene)
         }
-        .frame(maxWidth: .infinity, minHeight: 220, alignment: .topLeading)
+        .frame(
+            maxWidth: .infinity,
+            minHeight: 220,
+            maxHeight: .infinity,
+            alignment: .topLeading
+        )
         .font(.system(size: 11, weight: .medium))
         .foregroundStyle(Color.white.opacity(0.88))
         .environment(\.colorScheme, .dark)
