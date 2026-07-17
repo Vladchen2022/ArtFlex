@@ -123,7 +123,34 @@ struct BlockReferenceCustomModuleInstance: Identifiable, Codable, Sendable, Equa
 }
 
 struct BlockReferenceModuleLibraryState: Codable, Sendable, Equatable {
+    static let primitivesCategoryID = UUID(uuidString: "77D52157-2E1E-412F-8889-A95B66A4F443")!
+    static let peopleCategoryID = UUID(uuidString: "480B76EA-39CE-436E-AE07-2865DD2DD9DE")!
+    static let architectureCategoryID = UUID(uuidString: "E7ECB567-B2E4-42AE-A701-EA4351734CC6")!
     static let defaultCategoryID = UUID(uuidString: "A27F5D49-F92C-47D7-B418-0F269561C115")!
+
+    static let builtInCategories: [BlockReferenceModuleCategory] = [
+        BlockReferenceModuleCategory(
+            id: primitivesCategoryID,
+            name: "基础体",
+            createdAt: .distantPast
+        ),
+        BlockReferenceModuleCategory(
+            id: peopleCategoryID,
+            name: "人物",
+            createdAt: .distantPast
+        ),
+        BlockReferenceModuleCategory(
+            id: architectureCategoryID,
+            name: "建筑",
+            createdAt: .distantPast
+        )
+    ]
+
+    static let defaultCategory = BlockReferenceModuleCategory(
+        id: defaultCategoryID,
+        name: "自定义",
+        createdAt: .distantPast
+    )
 
     var categories: [BlockReferenceModuleCategory]
     var modules: [BlockReferenceModuleAsset]
@@ -142,26 +169,44 @@ struct BlockReferenceModuleLibraryState: Codable, Sendable, Equatable {
 
     static let empty = BlockReferenceModuleLibraryState()
 
+    /// Categories rendered as separate user-managed tabs after the three preset tabs.
+    /// This includes the reserved “自定义” category and categories created by the user.
+    var nonPresetCategories: [BlockReferenceModuleCategory] {
+        let presetIDs = Set(Self.builtInCategories.map(\.id))
+        return categories.filter { !presetIDs.contains($0.id) }
+    }
+
     mutating func normalize() {
         var seenCategoryIDs = Set<UUID>()
-        categories = categories.filter { seenCategoryIDs.insert($0.id).inserted }
-        if !categories.contains(where: { $0.id == Self.defaultCategoryID }) {
-            categories.insert(
-                BlockReferenceModuleCategory(
-                    id: Self.defaultCategoryID,
-                    name: "自定义",
-                    createdAt: .distantPast
-                ),
-                at: 0
-            )
+        let reservedCategories = Self.builtInCategories + [Self.defaultCategory]
+        let reservedIDs = Set(reservedCategories.map(\.id))
+        let legacyCategoryAliases: [UUID: UUID] = Dictionary(
+            uniqueKeysWithValues: categories.compactMap { category -> (UUID, UUID)? in
+                guard !reservedIDs.contains(category.id),
+                      let reserved = reservedCategories.first(where: {
+                          $0.name.caseInsensitiveCompare(category.name) == .orderedSame
+                      })
+                else { return nil }
+                return (category.id, reserved.id)
+            }
+        )
+        let customCategories = categories.filter {
+            seenCategoryIDs.insert($0.id).inserted
+                && !reservedIDs.contains($0.id)
+                && legacyCategoryAliases[$0.id] == nil
         }
-        categories = Array(categories.prefix(64))
+        categories = Array((reservedCategories + customCategories).prefix(64))
         let validCategoryIDs = Set(categories.map(\.id))
         var seenModuleIDs = Set<UUID>()
         modules = modules
             .filter { !$0.templateObjects.isEmpty && seenModuleIDs.insert($0.id).inserted }
             .prefix(512)
             .map { asset in
+                if let migratedCategoryID = legacyCategoryAliases[asset.categoryID] {
+                    var migrated = asset
+                    migrated.categoryID = migratedCategoryID
+                    return migrated
+                }
                 guard validCategoryIDs.contains(asset.categoryID) else {
                     var repaired = asset
                     repaired.categoryID = Self.defaultCategoryID
@@ -169,6 +214,7 @@ struct BlockReferenceModuleLibraryState: Codable, Sendable, Equatable {
                 }
                 return asset
             }
+        selectedCategoryID = legacyCategoryAliases[selectedCategoryID] ?? selectedCategoryID
         if !validCategoryIDs.contains(selectedCategoryID) {
             selectedCategoryID = Self.defaultCategoryID
         }

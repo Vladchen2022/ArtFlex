@@ -892,6 +892,8 @@ struct BlockReferenceNumericTransform: Sendable, Equatable {
     var originalPosition: BlockVector3
     var originalRotation: BlockEulerRotation
     var originalTransforms: [UUID: BlockReferenceObjectTransformSnapshot]
+    var originalModuleBasePoints: [UUID: BlockVector3]
+    var originalCustomPivot: BlockVector3?
     var pivot: BlockVector3
     var axisDirections: [BlockReferenceAxis: BlockVector3]
     var coordinateSpace: BlockReferenceGizmoCoordinateSpace
@@ -904,6 +906,8 @@ struct BlockReferenceNumericTransform: Sendable, Equatable {
         originalPosition: BlockVector3,
         originalRotation: BlockEulerRotation,
         originalTransforms: [UUID: BlockReferenceObjectTransformSnapshot]? = nil,
+        originalModuleBasePoints: [UUID: BlockVector3] = [:],
+        originalCustomPivot: BlockVector3? = nil,
         pivot: BlockVector3? = nil,
         axisDirections: [BlockReferenceAxis: BlockVector3]? = nil,
         coordinateSpace: BlockReferenceGizmoCoordinateSpace = .world
@@ -921,6 +925,8 @@ struct BlockReferenceNumericTransform: Sendable, Equatable {
                 dimensions: .stageOneDefault
             )
         ]
+        self.originalModuleBasePoints = originalModuleBasePoints
+        self.originalCustomPivot = originalCustomPivot
         self.pivot = pivot ?? originalPosition
         self.axisDirections = axisDirections ?? Dictionary(
             uniqueKeysWithValues: BlockReferenceAxis.allCases.map { ($0, $0.unitVector) }
@@ -983,6 +989,26 @@ struct BlockReferenceNumericTransform: Sendable, Equatable {
         return result
     }
 
+    func applying(to point: BlockVector3) -> BlockVector3 {
+        guard let value else { return point }
+        switch kind {
+        case .move:
+            guard let axis else { return point }
+            let direction = axisDirections[axis]?.normalized(fallback: axis.unitVector) ?? axis.unitVector
+            return point + direction * value
+        case .rotate:
+            guard let axis else { return point }
+            let direction = axisDirections[axis]?.normalized(fallback: axis.unitVector) ?? axis.unitVector
+            return pivot + blockRotateAroundAxis(point - pivot, axis: direction, degrees: value)
+        case .scale:
+            let factor = min(max(abs(value), 0.01), 100)
+            guard let axis else { return pivot + (point - pivot) * factor }
+            let direction = axisDirections[axis]?.normalized(fallback: axis.unitVector) ?? axis.unitVector
+            let offset = point - pivot
+            return point + direction * (offset.dot(direction) * (factor - 1))
+        }
+    }
+
     var summary: String {
         let axisText = axis.map { "\($0.displayName)轴" } ?? "选择轴"
         let inputText = input.isEmpty ? "输入数值" : input
@@ -997,6 +1023,8 @@ struct BlockReferenceGizmoAdjustment: Sendable, Equatable {
     var originalPosition: BlockVector3
     var originalRotation: BlockEulerRotation
     var originalTransforms: [UUID: BlockReferenceObjectTransformSnapshot]
+    var originalModuleBasePoints: [UUID: BlockVector3]
+    var originalCustomPivot: BlockVector3?
     var pivot: BlockVector3
     var axisDirections: [BlockReferenceAxis: BlockVector3]
 
@@ -1007,6 +1035,8 @@ struct BlockReferenceGizmoAdjustment: Sendable, Equatable {
         originalPosition: BlockVector3,
         originalRotation: BlockEulerRotation,
         originalTransforms: [UUID: BlockReferenceObjectTransformSnapshot]? = nil,
+        originalModuleBasePoints: [UUID: BlockVector3] = [:],
+        originalCustomPivot: BlockVector3? = nil,
         pivot: BlockVector3? = nil,
         axisDirections: [BlockReferenceAxis: BlockVector3]? = nil
     ) {
@@ -1022,6 +1052,8 @@ struct BlockReferenceGizmoAdjustment: Sendable, Equatable {
                 dimensions: .stageOneDefault
             )
         ]
+        self.originalModuleBasePoints = originalModuleBasePoints
+        self.originalCustomPivot = originalCustomPivot
         self.pivot = pivot ?? originalPosition
         self.axisDirections = axisDirections ?? Dictionary(
             uniqueKeysWithValues: BlockReferenceAxis.allCases.map { ($0, $0.unitVector) }
@@ -1046,6 +1078,8 @@ struct BlockReferenceGizmoAdjustment: Sendable, Equatable {
             originalPosition: originalPosition,
             originalRotation: originalRotation,
             originalTransforms: originalTransforms,
+            originalModuleBasePoints: originalModuleBasePoints,
+            originalCustomPivot: originalCustomPivot,
             pivot: pivot,
             axisDirections: axisDirections
         )

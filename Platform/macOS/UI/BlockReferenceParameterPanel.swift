@@ -40,6 +40,17 @@ private enum BlockReferenceLibraryCategory: String, CaseIterable, Hashable {
     case primitives = "基础体"
     case people = "人物"
     case architecture = "建筑"
+
+    var persistentCategoryID: UUID {
+        switch self {
+        case .primitives:
+            return BlockReferenceModuleLibraryState.primitivesCategoryID
+        case .people:
+            return BlockReferenceModuleLibraryState.peopleCategoryID
+        case .architecture:
+            return BlockReferenceModuleLibraryState.architectureCategoryID
+        }
+    }
 }
 
 private enum BlockReferenceLibrarySelection: Hashable {
@@ -222,7 +233,7 @@ struct BlockReferenceParameterPanel: View {
                             selection: .builtIn(category)
                         )
                     }
-                    ForEach(viewModel.blockReferenceModuleLibrary.categories) { category in
+                    ForEach(viewModel.blockReferenceModuleLibrary.nonPresetCategories) { category in
                         libraryCategoryButton(
                             title: category.name,
                             selection: .custom(category.id)
@@ -248,12 +259,14 @@ struct BlockReferenceParameterPanel: View {
                     modeButton(.cylinder, image: "cylinder", horizontalLayout: true)
                     modeButton(.cone, image: "triangle", horizontalLayout: true)
                     modeButton(.sphere, image: "circle", horizontalLayout: true)
+                    persistentModuleButtons(in: .primitives)
                 }
             case .builtIn(.people):
                 LazyVGrid(columns: blockLibraryColumns, spacing: 7) {
                     moduleButton(.standingHuman)
                     moduleButton(.seatedHuman)
                     moduleButton(.poseableHuman)
+                    persistentModuleButtons(in: .people)
                 }
             case .builtIn(.architecture):
                 LazyVGrid(columns: blockLibraryColumns, spacing: 7) {
@@ -261,6 +274,7 @@ struct BlockReferenceParameterPanel: View {
                     moduleButton(.doorFrame)
                     moduleButton(.roomBox)
                     moduleButton(.table)
+                    persistentModuleButtons(in: .architecture)
                 }
             case .custom(let categoryID):
                 let modules = viewModel.blockReferenceModuleLibrary.modules(in: categoryID)
@@ -321,6 +335,13 @@ struct BlockReferenceParameterPanel: View {
 
     private var blockLibraryColumns: [GridItem] {
         Array(repeating: GridItem(.flexible(), spacing: 7), count: 2)
+    }
+
+    @ViewBuilder
+    private func persistentModuleButtons(in category: BlockReferenceLibraryCategory) -> some View {
+        ForEach(viewModel.blockReferenceModuleLibrary.modules(in: category.persistentCategoryID)) { asset in
+            customModuleButton(asset)
+        }
     }
 
     private func objectManagerPanel(_ scene: BlockReferenceScene) -> some View {

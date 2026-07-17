@@ -68,6 +68,55 @@ extension WorkspaceViewModel {
         blockReferenceAxisDirections(for: blockReferenceEditorState.gizmoCoordinateSpace)
     }
 
+    private func blockReferenceModuleBasePointSnapshots(
+        in scene: BlockReferenceScene,
+        transformedObjectIDs: Set<UUID>
+    ) -> [UUID: BlockVector3] {
+        Dictionary(uniqueKeysWithValues: scene.customModuleInstances.compactMap { instance in
+            let memberIDs = Set(instance.objectIDs)
+            guard !memberIDs.isEmpty, memberIDs.isSubset(of: transformedObjectIDs) else { return nil }
+            return (instance.id, instance.basePoint)
+        })
+    }
+
+    private func blockReferenceTrackedCustomPivot(
+        in scene: BlockReferenceScene,
+        moduleBasePoints: [UUID: BlockVector3]
+    ) -> BlockVector3? {
+        guard scene.pivotMode == .custom,
+              moduleBasePoints.values.contains(where: { ($0 - scene.customPivot).length < 0.000_001 })
+        else { return nil }
+        return scene.customPivot
+    }
+
+    private func applyBlockReferenceAnchorTransform(
+        _ transform: BlockReferenceNumericTransform,
+        to scene: inout BlockReferenceScene
+    ) {
+        for index in scene.customModuleInstances.indices {
+            let instanceID = scene.customModuleInstances[index].id
+            guard let original = transform.originalModuleBasePoints[instanceID] else { continue }
+            scene.customModuleInstances[index].basePoint = transform.applying(to: original)
+        }
+        if let original = transform.originalCustomPivot {
+            scene.customPivot = transform.applying(to: original)
+        }
+    }
+
+    private func syncBlockReferencePivotToSelectedModule() {
+        guard let scene = blockReferenceScene else { return }
+        let selectedIDs = selectedBlockReferenceObjectIDs
+        guard let instance = scene.customModuleInstances.first(where: {
+            let memberIDs = Set($0.objectIDs)
+            return !memberIDs.isEmpty && memberIDs.isSubset(of: selectedIDs)
+        }) else { return }
+        guard scene.pivotMode != .custom || scene.customPivot != instance.basePoint else { return }
+        _ = updateBlockReferenceDocument { stored in
+            stored?.customPivot = instance.basePoint
+            stored?.pivotMode = .custom
+        }
+    }
+
     private func blockReferenceAxisDirections(
         for space: BlockReferenceGizmoCoordinateSpace,
         activeRotation: BlockEulerRotation? = nil
@@ -100,9 +149,18 @@ extension WorkspaceViewModel {
 
     func useSelectionCenterAsBlockReferencePivot() {
         guard let center = blockReferenceSelectionCenter else { return }
+        let selectedIDs = selectedBlockReferenceObjectIDs
         _ = updateBlockReferenceDocument(operationKind: "blockReference.pivot.selection") { scene in
             scene?.customPivot = center
             scene?.pivotMode = .custom
+            guard var value = scene else { return }
+            for index in value.customModuleInstances.indices {
+                let memberIDs = Set(value.customModuleInstances[index].objectIDs)
+                if !memberIDs.isEmpty, memberIDs.isSubset(of: selectedIDs) {
+                    value.customModuleInstances[index].basePoint = center
+                }
+            }
+            scene = value
         }
         blockReferenceEditorState.instruction = "模块基准点已设为所选体块中心；载入模块时此点会落在活动工作面原点。"
     }
@@ -168,6 +226,7 @@ extension WorkspaceViewModel {
         }
         blockReferenceEditorState.selectedObjectIDs = selection
         blockReferenceEditorState.selectedFaceIndex = nil
+        syncBlockReferencePivotToSelectedModule()
         if selection.isEmpty {
             blockReferenceEditorState.instruction = "未选择体块。"
         } else {
@@ -196,6 +255,8 @@ extension WorkspaceViewModel {
         blockReferenceInteractionStartWorldPoint = nil
         blockReferenceMoveStartPosition = nil
         blockReferenceMoveStartPositions = [:]
+        blockReferenceMoveStartModuleBasePoints = [:]
+        blockReferenceMoveStartCustomPivot = nil
         blockReferenceInteractionHasCheckpoint = false
         blockReferenceGizmoDragSession = nil
         blockReferenceCameraNavigationMode = nil
@@ -398,6 +459,14 @@ extension WorkspaceViewModel {
                     .filter { movableIDs.contains($0.id) }
                     .map { ($0.id, $0.position) }
             )
+            blockReferenceMoveStartModuleBasePoints = blockReferenceModuleBasePointSnapshots(
+                in: scene,
+                transformedObjectIDs: movableIDs
+            )
+            blockReferenceMoveStartCustomPivot = blockReferenceTrackedCustomPivot(
+                in: scene,
+                moduleBasePoints: blockReferenceMoveStartModuleBasePoints
+            )
             blockReferenceEditorState.phase = .movingObject
 
         case .pickWorkPlane:
@@ -439,8 +508,17 @@ extension WorkspaceViewModel {
             }
             guard let pickedPoint else { return }
             _ = updateBlockReferenceDocument(operationKind: "blockReference.pivot.pick") { stored in
-                stored?.customPivot = pickedPoint
-                stored?.pivotMode = .custom
+                guard var value = stored else { return }
+                value.customPivot = pickedPoint
+                value.pivotMode = .custom
+                let selectedIDs = blockReferenceEditorState.resolvedSelectedObjectIDs
+                for index in value.customModuleInstances.indices {
+                    let memberIDs = Set(value.customModuleInstances[index].objectIDs)
+                    if !memberIDs.isEmpty, memberIDs.isSubset(of: selectedIDs) {
+                        value.customModuleInstances[index].basePoint = pickedPoint
+                    }
+                }
+                stored = value
             }
             blockReferenceEditorState.mode = .select
             blockReferenceEditorState.instruction = "模块基准点已设置；载入模块时此点会落在活动工作面原点。"
@@ -568,11 +646,20 @@ extension WorkspaceViewModel {
             }
             let appliedDelta = snapped.point - startPosition
             let startPositions = blockReferenceMoveStartPositions
+            let startModuleBasePoints = blockReferenceMoveStartModuleBasePoints
+            let startCustomPivot = blockReferenceMoveStartCustomPivot
             _ = updateBlockReferenceDocument { stored in
                 guard var scene = stored else { return }
                 for index in scene.objects.indices {
                     guard let original = startPositions[scene.objects[index].id] else { continue }
                     scene.objects[index].position = original + appliedDelta
+                }
+                for index in scene.customModuleInstances.indices {
+                    guard let original = startModuleBasePoints[scene.customModuleInstances[index].id] else { continue }
+                    scene.customModuleInstances[index].basePoint = original + appliedDelta
+                }
+                if let startCustomPivot {
+                    scene.customPivot = startCustomPivot + appliedDelta
                 }
                 stored = scene
             }
@@ -635,6 +722,8 @@ extension WorkspaceViewModel {
             blockReferenceInteractionStartWorldPoint = nil
             blockReferenceMoveStartPosition = nil
             blockReferenceMoveStartPositions = [:]
+            blockReferenceMoveStartModuleBasePoints = [:]
+            blockReferenceMoveStartCustomPivot = nil
             blockReferenceInteractionHasCheckpoint = false
 
         case .transformingGizmo:
@@ -688,6 +777,8 @@ extension WorkspaceViewModel {
         blockReferenceInteractionStartWorldPoint = nil
         blockReferenceMoveStartPosition = nil
         blockReferenceMoveStartPositions = [:]
+        blockReferenceMoveStartModuleBasePoints = [:]
+        blockReferenceMoveStartCustomPivot = nil
         blockReferenceInteractionHasCheckpoint = false
         blockReferenceGizmoDragSession = nil
         blockReferenceHumanJointDragSession = nil
@@ -834,6 +925,7 @@ extension WorkspaceViewModel {
                 guard adjustment.originalTransforms[scene.objects[index].id] != nil else { continue }
                 scene.objects[index] = adjustment.applying(to: scene.objects[index])
             }
+            applyBlockReferenceAnchorTransform(adjustment.numericTransform, to: &scene)
             stored = scene
         }
     }
@@ -916,6 +1008,11 @@ extension WorkspaceViewModel {
             }
         }
 
+        let transformedObjectIDs = Set(selectedObjects.map(\.id))
+        let moduleBasePoints = blockReferenceModuleBasePointSnapshots(
+            in: scene,
+            transformedObjectIDs: transformedObjectIDs
+        )
         let adjustment = BlockReferenceGizmoAdjustment(
             objectID: object.id,
             handle: handle,
@@ -929,6 +1026,11 @@ extension WorkspaceViewModel {
                     dimensions: $0.dimensions
                 ))
             }),
+            originalModuleBasePoints: moduleBasePoints,
+            originalCustomPivot: blockReferenceTrackedCustomPivot(
+                in: scene,
+                moduleBasePoints: moduleBasePoints
+            ),
             pivot: center,
             axisDirections: axisDirections
         )
@@ -1046,6 +1148,7 @@ extension WorkspaceViewModel {
                 guard session.adjustment.originalTransforms[scene.objects[index].id] != nil else { continue }
                 scene.objects[index] = session.adjustment.applying(to: scene.objects[index])
             }
+            applyBlockReferenceAnchorTransform(session.adjustment.numericTransform, to: &scene)
             stored = scene
         }
         blockReferenceGizmoDragSession = session
@@ -1339,6 +1442,12 @@ extension WorkspaceViewModel {
         let objects = editableSelectedBlockReferenceObjects
         guard !objects.isEmpty else { return }
         let pivot = resolvedBlockReferencePivot ?? object.position
+        guard let scene = blockReferenceScene else { return }
+        let transformedObjectIDs = Set(objects.map(\.id))
+        let moduleBasePoints = blockReferenceModuleBasePointSnapshots(
+            in: scene,
+            transformedObjectIDs: transformedObjectIDs
+        )
         blockReferenceEditorState.phase = .idle
         blockReferenceEditorState.draft = nil
         blockReferenceEditorState.draftMeasurement = nil
@@ -1357,6 +1466,11 @@ extension WorkspaceViewModel {
                     dimensions: $0.dimensions
                 ))
             }),
+            originalModuleBasePoints: moduleBasePoints,
+            originalCustomPivot: blockReferenceTrackedCustomPivot(
+                in: scene,
+                moduleBasePoints: moduleBasePoints
+            ),
             pivot: pivot,
             axisDirections: blockReferenceGizmoAxisDirections,
             coordinateSpace: blockReferenceEditorState.gizmoCoordinateSpace
@@ -1455,6 +1569,7 @@ extension WorkspaceViewModel {
                     guard transform.originalTransforms[scene.objects[index].id] != nil else { continue }
                     scene.objects[index] = transform.applying(to: scene.objects[index])
                 }
+                applyBlockReferenceAnchorTransform(transform, to: &scene)
                 stored = scene
             }
         }
@@ -1785,9 +1900,25 @@ extension WorkspaceViewModel {
               !selected.isLocked else { return }
         let ids = selectedBlockReferenceObjectIDs
         let delta = position - selected.position
+        guard let currentScene = blockReferenceScene else { return }
+        let moduleBasePoints = blockReferenceModuleBasePointSnapshots(
+            in: currentScene,
+            transformedObjectIDs: ids
+        )
+        let trackedCustomPivot = blockReferenceTrackedCustomPivot(
+            in: currentScene,
+            moduleBasePoints: moduleBasePoints
+        )
         updateBlockReferenceParameter { scene in
             for index in scene.objects.indices where ids.contains(scene.objects[index].id) {
                 scene.objects[index].position = scene.objects[index].position + delta
+            }
+            for index in scene.customModuleInstances.indices {
+                guard let original = moduleBasePoints[scene.customModuleInstances[index].id] else { continue }
+                scene.customModuleInstances[index].basePoint = original + delta
+            }
+            if let trackedCustomPivot {
+                scene.customPivot = trackedCustomPivot + delta
             }
         }
     }
@@ -1797,24 +1928,40 @@ extension WorkspaceViewModel {
               selected.isVisible,
               !selected.isLocked else { return }
         let ids = selectedBlockReferenceObjectIDs
-        guard ids.count > 1 else {
-            updateSelectedBlockReferenceObject { $0.rotation = rotation }
-            return
+        guard let currentScene = blockReferenceScene else { return }
+        let pivot = ids.count > 1 ? (resolvedBlockReferencePivot ?? selected.position) : selected.position
+        let moduleBasePoints = blockReferenceModuleBasePointSnapshots(
+            in: currentScene,
+            transformedObjectIDs: ids
+        )
+        let trackedCustomPivot = blockReferenceTrackedCustomPivot(
+            in: currentScene,
+            moduleBasePoints: moduleBasePoints
+        )
+        let transformPoint: (BlockVector3) -> BlockVector3 = { point in
+            pivot + blockApplyRotationBasisChange(
+                point - pivot,
+                from: selected.rotation,
+                to: rotation
+            )
         }
-        let pivot = resolvedBlockReferencePivot ?? selected.position
         updateBlockReferenceParameter { scene in
             for index in scene.objects.indices where ids.contains(scene.objects[index].id) {
-                let offset = scene.objects[index].position - pivot
-                scene.objects[index].position = pivot + blockApplyRotationBasisChange(
-                    offset,
-                    from: selected.rotation,
-                    to: rotation
-                )
+                if ids.count > 1 {
+                    scene.objects[index].position = transformPoint(scene.objects[index].position)
+                }
                 scene.objects[index].rotation = blockRotation(
                     applyingBasisChangeFrom: selected.rotation,
                     to: rotation,
                     to: scene.objects[index].rotation
                 )
+            }
+            for index in scene.customModuleInstances.indices {
+                guard let original = moduleBasePoints[scene.customModuleInstances[index].id] else { continue }
+                scene.customModuleInstances[index].basePoint = transformPoint(original)
+            }
+            if let trackedCustomPivot {
+                scene.customPivot = transformPoint(trackedCustomPivot)
             }
         }
     }

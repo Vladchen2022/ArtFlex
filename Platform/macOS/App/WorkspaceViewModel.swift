@@ -223,6 +223,8 @@ final class WorkspaceViewModel: ObservableObject {
     var blockReferenceInteractionStartWorldPoint: BlockVector3?
     var blockReferenceMoveStartPosition: BlockVector3?
     var blockReferenceMoveStartPositions: [UUID: BlockVector3] = [:]
+    var blockReferenceMoveStartModuleBasePoints: [UUID: BlockVector3] = [:]
+    var blockReferenceMoveStartCustomPivot: BlockVector3?
     var blockReferenceInteractionHasCheckpoint = false
     var blockReferenceGizmoDragSession: BlockReferenceGizmoDragSession?
     var blockReferenceHumanJointDragSession: BlockHumanJointDragSession?

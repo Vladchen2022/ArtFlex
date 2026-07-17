@@ -91,6 +91,8 @@ extension WorkspaceViewModel {
                 value.groups.append(group)
             }
             value.customModuleInstances.append(result.instance)
+            value.customPivot = result.instance.basePoint
+            value.pivotMode = .custom
             stored = value
         }
         guard didInstantiate else { return }

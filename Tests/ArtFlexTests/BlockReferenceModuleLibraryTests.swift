@@ -5,6 +5,46 @@ import Testing
 
 struct BlockReferenceModuleLibraryTests {
     @Test
+    func presetCategoriesAcceptPersistentUserModulesWithoutDuplicatingCustomCategories() throws {
+        var library = BlockReferenceModuleLibraryState.empty
+        #expect(library.categories.map(\.name) == ["基础体", "人物", "建筑", "自定义"])
+        #expect(library.nonPresetCategories.map(\.name) == ["自定义"])
+        #expect(library.addCategory(named: "建筑") == nil)
+
+        let addedModule = library.addModule(
+            named: "自制门框",
+            categoryID: BlockReferenceModuleLibraryState.architectureCategoryID,
+            sourceObjects: [makeObject(name: "门框", position: .zero)],
+            basePoint: .zero
+        )
+        let module = try #require(addedModule)
+        #expect(module.categoryID == BlockReferenceModuleLibraryState.architectureCategoryID)
+        #expect(library.modules(in: BlockReferenceModuleLibraryState.architectureCategoryID).map(\.id) == [module.id])
+
+        let decoded = try JSONDecoder().decode(
+            BlockReferenceModuleLibraryState.self,
+            from: JSONEncoder().encode(library)
+        )
+        #expect(decoded == library)
+
+        let legacyCategory = BlockReferenceModuleCategory(name: "建筑")
+        let legacyAsset = BlockReferenceModuleAsset(
+            categoryID: legacyCategory.id,
+            name: "旧版建筑模块",
+            sourceObjects: [makeObject(name: "墙体", position: .zero)],
+            basePoint: .zero
+        )
+        let migrated = BlockReferenceModuleLibraryState(
+            categories: [legacyCategory],
+            modules: [legacyAsset],
+            selectedCategoryID: legacyCategory.id
+        )
+        #expect(!migrated.categories.contains { $0.id == legacyCategory.id })
+        #expect(migrated.module(id: legacyAsset.id)?.categoryID == BlockReferenceModuleLibraryState.architectureCategoryID)
+        #expect(migrated.selectedCategoryID == BlockReferenceModuleLibraryState.architectureCategoryID)
+    }
+
+    @Test
     func moduleStoresEditableObjectsRelativeToBasePointAndInstantiatesFreshIDs() throws {
         let first = makeObject(name: "桌面", position: .init(x: 120, y: 80, z: 75))
         let second = makeObject(name: "桌腿", position: .init(x: 90, y: 60, z: 35))
@@ -211,6 +251,81 @@ struct BlockReferenceModuleLibraryTests {
         )
         #expect(instance.basePoint == target)
         #expect(loaded.position == target + (source.position - basePoint))
+    }
+
+    @Test
+    @MainActor
+    func loadedModuleBasePointFollowsWholeModuleTransformsButNotComponentEdits() throws {
+        guard let metalContext = MetalDeviceContext() else { return }
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ArtFlexBlockModuleAnchorTransformTests-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let bootstrap = try AppBootstrap(
+            workspaceStore: WorkspaceStore(),
+            metalContext: metalContext,
+            layerSurfaceStore: StageOneLayerSurfaceStore(),
+            blockReferenceModuleLibraryPersistenceController: .init(rootDirectoryURL: root)
+        )
+        let viewModel = WorkspaceViewModel(
+            bootstrap: bootstrap,
+            installsZoomKeyboardMonitor: false,
+            preparesInitialTextures: false
+        )
+        viewModel.createEmptyBlockReferenceScene()
+        let first = makeObject(name: "模块上部", position: .init(x: 20, y: 0, z: 30))
+        let second = makeObject(name: "模块下部", position: .init(x: -20, y: 0, z: 10))
+        _ = viewModel.updateBlockReferenceDocument { scene in
+            scene?.objects = [first, second]
+            scene?.pivotMode = .custom
+            scene?.customPivot = .zero
+        }
+        viewModel.blockReferenceEditorState.selectedObjectIDs = [first.id, second.id]
+        viewModel.blockReferenceEditorState.selectedObjectID = second.id
+        let assetID = try #require(viewModel.saveSelectedBlockReferenceObjectsAsModule(
+            named: "可移动模块",
+            categoryID: BlockReferenceModuleLibraryState.architectureCategoryID
+        ))
+
+        let target = BlockVector3(x: 100, y: 50, z: 0)
+        _ = viewModel.updateBlockReferenceDocument { scene in
+            scene?.workingPlane.origin = target
+        }
+        viewModel.instantiateBlockReferenceModule(assetID: assetID)
+        let initialInstance = try #require(viewModel.blockReferenceScene?.customModuleInstances.last)
+        let initialPositions = Dictionary(uniqueKeysWithValues: try #require(
+            viewModel.blockReferenceScene?.objects
+                .filter { Set(initialInstance.objectIDs).contains($0.id) }
+                .map { ($0.id, $0.position) }
+        ))
+        #expect(viewModel.blockReferenceScene?.customPivot == target)
+        #expect(viewModel.blockReferenceScene?.pivotMode == .custom)
+
+        let active = try #require(viewModel.selectedBlockReferenceObject)
+        let delta = BlockVector3(x: 35, y: -12, z: 8)
+        viewModel.setSelectedBlockReferencePosition(active.position + delta)
+        let movedInstance = try #require(viewModel.blockReferenceScene?.customModuleInstances.last)
+        #expect(movedInstance.basePoint == target + delta)
+        #expect(viewModel.blockReferenceScene?.customPivot == target + delta)
+        for objectID in movedInstance.objectIDs {
+            let moved = try #require(viewModel.blockReferenceScene?.objects.first { $0.id == objectID })
+            #expect(moved.position == initialPositions[objectID]! + delta)
+        }
+
+        viewModel.beginBlockReferenceNumericTransform(.move)
+        viewModel.setBlockReferenceNumericTransformAxis(.z)
+        viewModel.setBlockReferenceNumericTransformInput("12")
+        viewModel.commitBlockReferenceNumericTransform()
+        let numericallyMovedInstance = try #require(viewModel.blockReferenceScene?.customModuleInstances.last)
+        let expectedWholeModuleAnchor = target + delta + BlockVector3(x: 0, y: 0, z: 12)
+        #expect(numericallyMovedInstance.basePoint == expectedWholeModuleAnchor)
+        #expect(viewModel.blockReferenceScene?.customPivot == expectedWholeModuleAnchor)
+
+        let editedObjectID = try #require(numericallyMovedInstance.objectIDs.first)
+        viewModel.beginEditingBlockReferenceModuleInstance(containing: editedObjectID)
+        viewModel.selectBlockReferenceObject(editedObjectID, extending: false)
+        let editedObject = try #require(viewModel.selectedBlockReferenceObject)
+        viewModel.setSelectedBlockReferencePosition(editedObject.position + .init(x: 20, y: 0, z: 0))
+        #expect(viewModel.blockReferenceScene?.customModuleInstances.last?.basePoint == expectedWholeModuleAnchor)
     }
 
     private func makeObject(name: String, position: BlockVector3) -> BlockReferenceObject {
