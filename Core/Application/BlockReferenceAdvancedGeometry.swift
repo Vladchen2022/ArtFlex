@@ -130,44 +130,63 @@ func blockReferenceAdvancedModuleGeometry(
         )
 
     case .doorFrame:
-        let frame = max(parameters.thickness, 4)
         let width = 100.0
         let depth = max(parameters.secondarySize, 8)
         let height = 220.0
+        let frame = min(max(parameters.thickness, 4), width * 0.45)
         let side = BlockDimensions(width: frame, depth: depth, height: height - frame)
         let top = BlockDimensions(width: width, depth: depth, height: frame)
-        let faces = blockReferenceTranslatedFaces(blockBoxFaces(dimensions: side), by: .zero)
-            + blockReferenceTranslatedFaces(blockBoxFaces(dimensions: side), by: .init(x: width - frame, y: 0, z: 0))
+        let sideOffset = (width - frame) * 0.5
+        let faces = blockReferenceTranslatedFaces(
+            blockBoxFaces(dimensions: side),
+            by: .init(x: -sideOffset, y: 0, z: 0)
+        )
+            + blockReferenceTranslatedFaces(
+                blockBoxFaces(dimensions: side),
+                by: .init(x: sideOffset, y: 0, z: 0)
+            )
             + blockReferenceTranslatedFaces(blockBoxFaces(dimensions: top), by: .init(x: 0, y: 0, z: height - frame))
         return .init(dimensions: .init(width: width, depth: depth, height: height), faces: faces)
 
     case .roomBox:
-        let thickness = max(parameters.thickness, 4)
         let width = 360.0
         let depth = max(parameters.secondarySize * 8, 240)
         let height = 260.0
+        let thickness = min(
+            max(parameters.thickness, 4),
+            min(width, min(depth, height)) * 0.25
+        )
         let floor = BlockDimensions(width: width, depth: depth, height: thickness)
-        let back = BlockDimensions(width: width, depth: thickness, height: height)
-        let side = BlockDimensions(width: thickness, depth: depth, height: height)
+        let wallHeight = height - thickness
+        let back = BlockDimensions(width: width, depth: thickness, height: wallHeight)
+        let side = BlockDimensions(width: thickness, depth: depth - thickness, height: wallHeight)
         let faces = blockReferenceTranslatedFaces(blockBoxFaces(dimensions: floor), by: .zero)
-            + blockReferenceTranslatedFaces(blockBoxFaces(dimensions: back), by: .zero)
-            + blockReferenceTranslatedFaces(blockBoxFaces(dimensions: side), by: .zero)
+            + blockReferenceTranslatedFaces(
+                blockBoxFaces(dimensions: back),
+                by: .init(x: 0, y: (depth - thickness) * 0.5, z: thickness)
+            )
+            + blockReferenceTranslatedFaces(
+                blockBoxFaces(dimensions: side),
+                by: .init(x: -(width - thickness) * 0.5, y: -thickness * 0.5, z: thickness)
+            )
         return .init(dimensions: .init(width: width, depth: depth, height: height), faces: faces)
 
     case .table:
-        let topThickness = max(parameters.thickness, 4)
         let width = 140.0
         let depth = max(parameters.secondarySize * 2, 60)
         let height = 76.0
-        let legSize = max(topThickness * 0.7, 4)
+        let topThickness = min(max(parameters.thickness, 4), height * 0.5)
+        let legSize = min(max(topThickness * 0.7, 4), min(width, depth) * 0.4)
         let top = BlockDimensions(width: width, depth: depth, height: topThickness)
         let leg = BlockDimensions(width: legSize, depth: legSize, height: height - topThickness)
         var faces = blockReferenceTranslatedFaces(
             blockBoxFaces(dimensions: top),
             by: .init(x: 0, y: 0, z: height - topThickness)
         )
-        for x in [0.0, width - legSize] {
-            for y in [0.0, depth - legSize] {
+        let legXOffset = (width - legSize) * 0.5
+        let legYOffset = (depth - legSize) * 0.5
+        for x in [-legXOffset, legXOffset] {
+            for y in [-legYOffset, legYOffset] {
                 faces += blockReferenceTranslatedFaces(
                     blockBoxFaces(dimensions: leg),
                     by: .init(x: x, y: y, z: 0)

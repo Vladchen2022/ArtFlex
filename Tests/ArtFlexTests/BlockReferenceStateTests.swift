@@ -1015,6 +1015,98 @@ struct BlockReferenceStateTests {
     }
 
     @Test
+    func architecturalModuleComponentsMeetAtTheirBoundariesWithoutCrossing() throws {
+        let door = try #require(blockReferenceAdvancedModuleGeometry(kind: .doorFrame))
+        #expect(door.faces.count == 18)
+        let leftPost = blockReferenceTestBounds(Array(door.faces[0..<6]))
+        let rightPost = blockReferenceTestBounds(Array(door.faces[6..<12]))
+        let lintel = blockReferenceTestBounds(Array(door.faces[12..<18]))
+        #expect(leftPost.maxZ == lintel.minZ)
+        #expect(rightPost.maxZ == lintel.minZ)
+        #expect(lintel.minX == leftPost.minX)
+        #expect(lintel.maxX == rightPost.maxX)
+
+        let table = try #require(blockReferenceAdvancedModuleGeometry(kind: .table))
+        #expect(table.faces.count == 30)
+        let tabletop = blockReferenceTestBounds(Array(table.faces[0..<6]))
+        for start in stride(from: 6, to: 30, by: 6) {
+            let leg = blockReferenceTestBounds(Array(table.faces[start..<(start + 6)]))
+            #expect(leg.maxZ == tabletop.minZ)
+            #expect(leg.minX >= tabletop.minX)
+            #expect(leg.maxX <= tabletop.maxX)
+            #expect(leg.minY >= tabletop.minY)
+            #expect(leg.maxY <= tabletop.maxY)
+        }
+
+        let room = try #require(blockReferenceAdvancedModuleGeometry(kind: .roomBox))
+        #expect(room.faces.count == 18)
+        let floor = blockReferenceTestBounds(Array(room.faces[0..<6]))
+        let backWall = blockReferenceTestBounds(Array(room.faces[6..<12]))
+        let sideWall = blockReferenceTestBounds(Array(room.faces[12..<18]))
+        #expect(floor.maxZ == backWall.minZ)
+        #expect(floor.maxZ == sideWall.minZ)
+        #expect(sideWall.maxY == backWall.minY)
+        #expect(sideWall.minX == backWall.minX)
+
+        let extremeParameters = BlockReferenceModuleParameters(
+            count: 5,
+            secondarySize: 1,
+            thickness: 10_000
+        )
+        for kind in [
+            BlockReferenceModuleKind.doorFrame,
+            .roomBox,
+            .table
+        ] {
+            let geometry = try #require(blockReferenceAdvancedModuleGeometry(
+                kind: kind,
+                parameters: extremeParameters
+            ))
+            let bounds = blockReferenceTestBounds(geometry.faces)
+            #expect(bounds.minX >= -(geometry.dimensions.width * 0.5))
+            #expect(bounds.maxX <= geometry.dimensions.width * 0.5)
+            #expect(bounds.minY >= -(geometry.dimensions.depth * 0.5))
+            #expect(bounds.maxY <= geometry.dimensions.depth * 0.5)
+            #expect(bounds.minZ >= 0)
+            #expect(bounds.maxZ <= geometry.dimensions.height)
+        }
+    }
+
+    @Test
+    func decodingAStoredParametricModuleRegeneratesItsDerivedMesh() throws {
+        let staleMesh = BlockReferenceCustomMesh(
+            faces: blockBoxFaces(dimensions: .init(width: 2, depth: 2, height: 2)),
+            baseDimensions: .init(width: 2, depth: 2, height: 2)
+        )
+        let stored = BlockReferenceObject(
+            name: "旧门框",
+            kind: .box,
+            position: .init(x: 40, y: 50, z: 60),
+            rotation: .init(xDegrees: 10, yDegrees: 20, zDegrees: 30),
+            dimensions: .init(width: 200, depth: 60, height: 440),
+            customMesh: staleMesh,
+            moduleKind: .doorFrame,
+            moduleParameters: .default
+        )
+
+        let decoded = try JSONDecoder().decode(
+            BlockReferenceObject.self,
+            from: JSONEncoder().encode(stored)
+        )
+        let mesh = try #require(decoded.customMesh)
+        let leftPost = blockReferenceTestBounds(Array(mesh.faces[0..<6]))
+        let rightPost = blockReferenceTestBounds(Array(mesh.faces[6..<12]))
+        let lintel = blockReferenceTestBounds(Array(mesh.faces[12..<18]))
+
+        #expect(decoded.position == stored.position)
+        #expect(decoded.rotation == stored.rotation)
+        #expect(decoded.dimensions == stored.dimensions)
+        #expect(mesh.baseDimensions == .init(width: 100, depth: 30, height: 220))
+        #expect(leftPost.maxZ == lintel.minZ)
+        #expect(rightPost.maxZ == lintel.minZ)
+    }
+
+    @Test
     func sectionPlaneClipsCrossingFacesWithoutProducingInvalidPolygons() {
         let face = [
             BlockVector3(x: -10, y: -10, z: -10),
@@ -1467,4 +1559,25 @@ struct BlockReferenceStateTests {
         )
         #expect(changed != lines)
     }
+}
+
+private struct BlockReferenceTestBounds {
+    var minX: Double
+    var maxX: Double
+    var minY: Double
+    var maxY: Double
+    var minZ: Double
+    var maxZ: Double
+}
+
+private func blockReferenceTestBounds(_ faces: [[BlockVector3]]) -> BlockReferenceTestBounds {
+    let vertices = faces.flatMap { $0 }
+    return BlockReferenceTestBounds(
+        minX: vertices.map(\.x).min() ?? 0,
+        maxX: vertices.map(\.x).max() ?? 0,
+        minY: vertices.map(\.y).min() ?? 0,
+        maxY: vertices.map(\.y).max() ?? 0,
+        minZ: vertices.map(\.z).min() ?? 0,
+        maxZ: vertices.map(\.z).max() ?? 0
+    )
 }

@@ -399,6 +399,7 @@ struct BlockReferenceObject: Identifiable, Codable, Sendable, Equatable {
         humanPose = try container.decodeIfPresent(BlockHumanPose.self, forKey: .humanPose)
         moduleParameters = try container.decodeIfPresent(BlockReferenceModuleParameters.self, forKey: .moduleParameters)
         normalize()
+        regenerateDerivedModuleGeometryIfNeeded()
     }
 
     mutating func normalize() {
@@ -411,6 +412,21 @@ struct BlockReferenceObject: Identifiable, Codable, Sendable, Equatable {
         style.normalize()
         humanPose?.normalize()
         moduleParameters?.normalize()
+    }
+
+    private mutating func regenerateDerivedModuleGeometryIfNeeded() {
+        guard
+            let moduleKind,
+            let geometry = blockReferenceAdvancedModuleGeometry(
+                kind: moduleKind,
+                parameters: moduleParameters ?? .default,
+                pose: humanPose ?? .standing
+            )
+        else { return }
+        customMesh = BlockReferenceCustomMesh(
+            faces: geometry.faces,
+            baseDimensions: geometry.dimensions
+        )
     }
 
     var geometryDisplayName: String {
