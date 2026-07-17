@@ -7,9 +7,10 @@ struct BlockReferenceModuleLibraryTests {
     @Test
     func presetCategoriesAcceptPersistentUserModulesWithoutDuplicatingCustomCategories() throws {
         var library = BlockReferenceModuleLibraryState.empty
-        #expect(library.categories.map(\.name) == ["基础体", "人物", "建筑", "自定义"])
+        #expect(library.categories.map(\.name) == ["基础体", "人物", "建筑", "交通工具", "自定义"])
         #expect(library.nonPresetCategories.map(\.name) == ["自定义"])
         #expect(library.addCategory(named: "建筑") == nil)
+        #expect(library.addCategory(named: "交通工具") == nil)
 
         let addedModule = library.addModule(
             named: "自制门框",
@@ -34,14 +35,23 @@ struct BlockReferenceModuleLibraryTests {
             sourceObjects: [makeObject(name: "墙体", position: .zero)],
             basePoint: .zero
         )
+        let legacyTransportationCategory = BlockReferenceModuleCategory(name: "交通工具")
+        let legacyTransportationAsset = BlockReferenceModuleAsset(
+            categoryID: legacyTransportationCategory.id,
+            name: "旧版交通工具模块",
+            sourceObjects: [makeObject(name: "车身", position: .zero)],
+            basePoint: .zero
+        )
         let migrated = BlockReferenceModuleLibraryState(
-            categories: [legacyCategory],
-            modules: [legacyAsset],
-            selectedCategoryID: legacyCategory.id
+            categories: [legacyCategory, legacyTransportationCategory],
+            modules: [legacyAsset, legacyTransportationAsset],
+            selectedCategoryID: legacyTransportationCategory.id
         )
         #expect(!migrated.categories.contains { $0.id == legacyCategory.id })
+        #expect(!migrated.categories.contains { $0.id == legacyTransportationCategory.id })
         #expect(migrated.module(id: legacyAsset.id)?.categoryID == BlockReferenceModuleLibraryState.architectureCategoryID)
-        #expect(migrated.selectedCategoryID == BlockReferenceModuleLibraryState.architectureCategoryID)
+        #expect(migrated.module(id: legacyTransportationAsset.id)?.categoryID == BlockReferenceModuleLibraryState.transportationCategoryID)
+        #expect(migrated.selectedCategoryID == BlockReferenceModuleLibraryState.transportationCategoryID)
     }
 
     @Test
@@ -83,11 +93,19 @@ struct BlockReferenceModuleLibraryTests {
         defer { try? FileManager.default.removeItem(at: root) }
 
         var library = BlockReferenceModuleLibraryState.empty
-        let addedCategory = library.addCategory(named: "交通工具")
+        let addedCategory = library.addCategory(named: "道具")
         let category = try #require(addedCategory)
-        #expect(library.addCategory(named: "交通工具") == nil)
-        let addedModule = library.addModule(
+        #expect(library.addCategory(named: "道具") == nil)
+        let addedTransportationModule = library.addModule(
             named: "车辆",
+            categoryID: BlockReferenceModuleLibraryState.transportationCategoryID,
+            sourceObjects: [makeObject(name: "车身", position: .zero)],
+            basePoint: .zero
+        )
+        let transportationModule = try #require(addedTransportationModule)
+        #expect(transportationModule.categoryID == BlockReferenceModuleLibraryState.transportationCategoryID)
+        let addedModule = library.addModule(
+            named: "道具模块",
             categoryID: category.id,
             sourceObjects: [makeObject(name: "车身", position: .zero)],
             basePoint: .zero

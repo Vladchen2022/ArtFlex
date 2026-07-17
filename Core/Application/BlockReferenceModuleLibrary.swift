@@ -126,6 +126,7 @@ struct BlockReferenceModuleLibraryState: Codable, Sendable, Equatable {
     static let primitivesCategoryID = UUID(uuidString: "77D52157-2E1E-412F-8889-A95B66A4F443")!
     static let peopleCategoryID = UUID(uuidString: "480B76EA-39CE-436E-AE07-2865DD2DD9DE")!
     static let architectureCategoryID = UUID(uuidString: "E7ECB567-B2E4-42AE-A701-EA4351734CC6")!
+    static let transportationCategoryID = UUID(uuidString: "C0F7AEBF-07F8-4DE8-93F6-738F82CD5E1B")!
     static let defaultCategoryID = UUID(uuidString: "A27F5D49-F92C-47D7-B418-0F269561C115")!
 
     static let builtInCategories: [BlockReferenceModuleCategory] = [
@@ -142,6 +143,11 @@ struct BlockReferenceModuleLibraryState: Codable, Sendable, Equatable {
         BlockReferenceModuleCategory(
             id: architectureCategoryID,
             name: "建筑",
+            createdAt: .distantPast
+        ),
+        BlockReferenceModuleCategory(
+            id: transportationCategoryID,
+            name: "交通工具",
             createdAt: .distantPast
         )
     ]

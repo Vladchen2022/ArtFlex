@@ -1143,6 +1143,76 @@ struct BlockReferenceStateTests {
     }
 
     @Test
+    func transportationModulesUseClosedLowPolygonGeometryAndReasonableProportions() throws {
+        let specifications: [(
+            kind: BlockReferenceModuleKind,
+            bodyPartCount: Int,
+            wheelCount: Int,
+            expectedFaceCount: Int
+        )] = [
+            (.sedan, 3, 4, 146),
+            (.suv, 4, 4, 152),
+            (.smallTruck, 3, 4, 146),
+            (.largeTruck, 3, 6, 210),
+            (.bicycle, 4, 2, 88),
+            (.motorcycle, 4, 2, 88)
+        ]
+
+        for specification in specifications {
+            let geometry = try #require(blockReferenceAdvancedModuleGeometry(kind: specification.kind))
+            #expect(specification.bodyPartCount <= 4)
+            #expect(geometry.faces.count == specification.expectedFaceCount)
+            #expect(geometry.faces.count == specification.bodyPartCount * 6 + specification.wheelCount * 32)
+            #expect(geometry.faces.allSatisfy { $0.count >= 3 })
+            #expect(geometry.faces.allSatisfy { face in
+                (face[1] - face[0]).cross(face[2] - face[0]).length > 0.000_001
+            })
+            #expect(blockReferenceTestEdgeUseCounts(geometry.faces).values.allSatisfy { $0 == 2 })
+
+            let bounds = blockReferenceTestBounds(geometry.faces)
+            #expect(abs(bounds.minX + geometry.dimensions.width * 0.5) < 0.000_001)
+            #expect(abs(bounds.maxX - geometry.dimensions.width * 0.5) < 0.000_001)
+            #expect(abs(bounds.minY + geometry.dimensions.depth * 0.5) < 0.000_001)
+            #expect(abs(bounds.maxY - geometry.dimensions.depth * 0.5) < 0.000_001)
+            #expect(abs(bounds.minZ) < 0.000_001)
+            #expect(abs(bounds.maxZ - geometry.dimensions.height) < 0.000_001)
+
+            let position = BlockVector3(x: 40, y: 50, z: 60)
+            let object = blockReferenceModuleObject(
+                kind: specification.kind,
+                name: specification.kind.displayName,
+                position: position
+            )
+            #expect(object.moduleKind == specification.kind)
+            #expect(object.moduleBasePointOffset == .zero)
+            #expect(blockReferenceObjectModuleBasePoint(object) == position)
+            #expect(!object.allowsGeometryEditing)
+            #expect(specification.kind.isTransportationReference)
+        }
+
+        let sedan = try #require(blockReferenceAdvancedModuleGeometry(kind: .sedan))
+        let suv = try #require(blockReferenceAdvancedModuleGeometry(kind: .suv))
+        let smallTruck = try #require(blockReferenceAdvancedModuleGeometry(kind: .smallTruck))
+        let largeTruck = try #require(blockReferenceAdvancedModuleGeometry(kind: .largeTruck))
+        let bicycle = try #require(blockReferenceAdvancedModuleGeometry(kind: .bicycle))
+        let motorcycle = try #require(blockReferenceAdvancedModuleGeometry(kind: .motorcycle))
+
+        #expect(sedan.dimensions.depth / sedan.dimensions.width > 2)
+        #expect(sedan.dimensions.height / sedan.dimensions.width > 0.7)
+        #expect(sedan.dimensions.height / sedan.dimensions.width < 1)
+        #expect(suv.dimensions.depth / suv.dimensions.width > 2)
+        #expect(suv.dimensions.height > sedan.dimensions.height)
+        #expect(smallTruck.dimensions.depth / smallTruck.dimensions.width > 2)
+        #expect(smallTruck.dimensions.height > sedan.dimensions.height)
+        #expect(largeTruck.dimensions.depth / largeTruck.dimensions.width > 2.5)
+        #expect(largeTruck.dimensions.height > smallTruck.dimensions.height)
+        #expect(bicycle.dimensions.width < 20)
+        #expect(bicycle.dimensions.depth > bicycle.dimensions.height * 1.8)
+        #expect(motorcycle.dimensions.depth > motorcycle.dimensions.width * 3)
+        #expect(motorcycle.dimensions.height > motorcycle.dimensions.width * 1.5)
+    }
+
+    @Test
     func architecturalModuleComponentsMeetAtTheirBoundariesWithoutCrossing() throws {
         let door = try #require(blockReferenceAdvancedModuleGeometry(kind: .doorFrame))
         #expect(door.faces.count == 18)

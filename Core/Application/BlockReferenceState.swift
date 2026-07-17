@@ -87,6 +87,12 @@ enum BlockReferenceModuleKind: String, Codable, CaseIterable, Sendable, Equatabl
     case hemisphere
     case torus
     case hollowCylinder
+    case sedan
+    case suv
+    case smallTruck
+    case largeTruck
+    case bicycle
+    case motorcycle
     case standingHuman
     case seatedHuman
     case poseableHuman
@@ -102,6 +108,12 @@ enum BlockReferenceModuleKind: String, Codable, CaseIterable, Sendable, Equatabl
         case .hemisphere: return "半圆体"
         case .torus: return "圆环体"
         case .hollowCylinder: return "圆筒体"
+        case .sedan: return "小轿车"
+        case .suv: return "SUV汽车"
+        case .smallTruck: return "小型卡车"
+        case .largeTruck: return "中大型卡车"
+        case .bicycle: return "自行车"
+        case .motorcycle: return "摩托车"
         case .standingHuman: return "站姿人体"
         case .seatedHuman: return "坐姿人体"
         case .poseableHuman: return "可摆姿人体"
@@ -119,6 +131,12 @@ enum BlockReferenceModuleKind: String, Codable, CaseIterable, Sendable, Equatabl
         case .hemisphere: return "circle.bottomhalf.filled"
         case .torus: return "circle.dotted.circle"
         case .hollowCylinder: return "cylinder.split.1x2"
+        case .sedan: return "car.side"
+        case .suv: return "suv.side"
+        case .smallTruck: return "box.truck"
+        case .largeTruck: return "truck.box"
+        case .bicycle: return "bicycle"
+        case .motorcycle: return "motorcycle"
         case .standingHuman: return "figure.stand"
         case .seatedHuman: return "figure.seated.side"
         case .poseableHuman: return "figure.arms.open"
@@ -133,6 +151,18 @@ enum BlockReferenceModuleKind: String, Codable, CaseIterable, Sendable, Equatabl
         switch self {
         case .standingHuman, .seatedHuman, .poseableHuman: return true
         case .squareFrustum, .squarePyramid, .hemisphere, .torus, .hollowCylinder,
+             .sedan, .suv, .smallTruck, .largeTruck, .bicycle, .motorcycle,
+             .stairs, .doorFrame, .roomBox, .table:
+            return false
+        }
+    }
+
+    var isTransportationReference: Bool {
+        switch self {
+        case .sedan, .suv, .smallTruck, .largeTruck, .bicycle, .motorcycle:
+            return true
+        case .squareFrustum, .squarePyramid, .hemisphere, .torus, .hollowCylinder,
+             .standingHuman, .seatedHuman, .poseableHuman,
              .stairs, .doorFrame, .roomBox, .table:
             return false
         }
@@ -143,6 +173,7 @@ enum BlockReferenceModuleKind: String, Codable, CaseIterable, Sendable, Equatabl
         case .squareFrustum, .squarePyramid, .hemisphere, .torus, .hollowCylinder:
             return true
         case .standingHuman, .seatedHuman, .poseableHuman,
+             .sedan, .suv, .smallTruck, .largeTruck, .bicycle, .motorcycle,
              .stairs, .doorFrame, .roomBox, .table:
             return false
         }
@@ -152,6 +183,7 @@ enum BlockReferenceModuleKind: String, Codable, CaseIterable, Sendable, Equatabl
         switch self {
         case .stairs, .doorFrame, .roomBox, .table: return true
         case .squareFrustum, .squarePyramid, .hemisphere, .torus, .hollowCylinder,
+             .sedan, .suv, .smallTruck, .largeTruck, .bicycle, .motorcycle,
              .standingHuman, .seatedHuman, .poseableHuman:
             return false
         }

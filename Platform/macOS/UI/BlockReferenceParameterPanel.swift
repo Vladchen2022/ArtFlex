@@ -40,6 +40,7 @@ private enum BlockReferenceLibraryCategory: String, CaseIterable, Hashable {
     case primitives = "基础体"
     case people = "人物"
     case architecture = "建筑"
+    case transportation = "交通工具"
 
     var persistentCategoryID: UUID {
         switch self {
@@ -49,6 +50,8 @@ private enum BlockReferenceLibraryCategory: String, CaseIterable, Hashable {
             return BlockReferenceModuleLibraryState.peopleCategoryID
         case .architecture:
             return BlockReferenceModuleLibraryState.architectureCategoryID
+        case .transportation:
+            return BlockReferenceModuleLibraryState.transportationCategoryID
         }
     }
 }
@@ -281,6 +284,16 @@ struct BlockReferenceParameterPanel: View {
                     moduleButton(.roomBox)
                     moduleButton(.table)
                     persistentModuleButtons(in: .architecture)
+                }
+            case .builtIn(.transportation):
+                LazyVGrid(columns: blockLibraryColumns, spacing: 7) {
+                    moduleButton(.sedan)
+                    moduleButton(.suv)
+                    moduleButton(.smallTruck)
+                    moduleButton(.largeTruck)
+                    moduleButton(.bicycle)
+                    moduleButton(.motorcycle)
+                    persistentModuleButtons(in: .transportation)
                 }
             case .custom(let categoryID):
                 let modules = viewModel.blockReferenceModuleLibrary.modules(in: categoryID)
@@ -857,9 +870,7 @@ struct BlockReferenceParameterPanel: View {
                     viewModel.setSelectedBlockReferenceDimensions(dimensions)
                 }
             } else {
-                Text(object.moduleKind == .poseableHuman
-                    ? "可摆姿人体 · 内部体块不可拆分，不参与布尔运算。"
-                    : "固定人体模块 · 比例和内部体块不可编辑，不参与布尔运算。")
+                Text(fixedModuleEditingDescription(object.moduleKind))
                     .font(.system(size: 10, weight: .medium))
                     .foregroundStyle(Color.white.opacity(0.46))
                     .fixedSize(horizontal: false, vertical: true)
@@ -1903,6 +1914,16 @@ struct BlockReferenceParameterPanel: View {
             return "添加\(kind.displayName)，可调整尺寸和构造参数"
         }
         return "添加固定比例的\(kind.displayName)，可移动和旋转"
+    }
+
+    private func fixedModuleEditingDescription(_ kind: BlockReferenceModuleKind?) -> String {
+        if kind == .poseableHuman {
+            return "可摆姿人体 · 内部体块不可拆分，不参与布尔运算。"
+        }
+        if kind?.isHumanReference == true {
+            return "固定人体模块 · 比例和内部体块不可编辑，不参与布尔运算。"
+        }
+        return "固定比例模块 · 内部体块不可拆分，不参与布尔运算。"
     }
 
     private func sectionTitle(_ text: String) -> some View {

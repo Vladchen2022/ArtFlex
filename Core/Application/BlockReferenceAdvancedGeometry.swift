@@ -112,6 +112,9 @@ func blockReferenceAdvancedModuleGeometry(
     case .hollowCylinder:
         return blockReferenceHollowCylinderGeometry()
 
+    case .sedan, .suv, .smallTruck, .largeTruck, .bicycle, .motorcycle:
+        return blockReferenceTransportationGeometry(kind)
+
     case .poseableHuman:
         return blockReferencePoseableHumanGeometry(pose: pose)
     case .stairs:
@@ -259,8 +262,25 @@ private func blockReferenceHemisphereGeometry() -> BlockReferenceModuleGeometry 
 private func blockReferenceTorusGeometry() -> BlockReferenceModuleGeometry {
     let majorRadius = 60.0
     let tubeRadius = 20.0
-    let segments = 8
-    let centerZ = tubeRadius
+    let faces = blockReferenceTorusFaces(
+        majorRadius: majorRadius,
+        tubeRadius: tubeRadius,
+        segments: 8,
+        centerZ: tubeRadius
+    )
+    let outerDiameter = (majorRadius + tubeRadius) * 2
+    return .init(
+        dimensions: .init(width: outerDiameter, depth: outerDiameter, height: tubeRadius * 2),
+        faces: faces
+    )
+}
+
+private func blockReferenceTorusFaces(
+    majorRadius: Double,
+    tubeRadius: Double,
+    segments: Int,
+    centerZ: Double
+) -> [[BlockVector3]] {
     // A square rotated 45 degrees has its four corners on the radial and vertical axes.
     let crossSection: [(radial: Double, vertical: Double)] = [
         (tubeRadius, 0),
@@ -294,11 +314,7 @@ private func blockReferenceTorusGeometry() -> BlockReferenceModuleGeometry {
             ])
         }
     }
-    let outerDiameter = (majorRadius + tubeRadius) * 2
-    return .init(
-        dimensions: .init(width: outerDiameter, depth: outerDiameter, height: tubeRadius * 2),
-        faces: faces
-    )
+    return faces
 }
 
 private func blockReferenceHollowCylinderGeometry() -> BlockReferenceModuleGeometry {
@@ -359,6 +375,253 @@ private func blockReferenceFaces(
         let next = (index + 1) % lower.count
         return [lower[index], lower[next], upper[next], upper[index]]
     }
+}
+
+private func blockReferenceTransportationGeometry(
+    _ kind: BlockReferenceModuleKind
+) -> BlockReferenceModuleGeometry {
+    var faces: [[BlockVector3]] = []
+
+    switch kind {
+    case .sedan:
+        // 4.30 m-class sedan: three body masses and four low-poly ring wheels.
+        faces += blockReferenceVehicleBox(
+            width: 180, depth: 430, height: 50,
+            centerY: 0, bottomZ: 25
+        )
+        faces += blockReferenceVehicleFrustum(
+            bottomWidth: 180, bottomDepth: 400,
+            topWidth: 168, topDepth: 360,
+            height: 45, centerY: 0, bottomZ: 75
+        )
+        faces += blockReferenceVehicleFrustum(
+            bottomWidth: 150, bottomDepth: 220,
+            topWidth: 125, topDepth: 145,
+            height: 50, centerY: -10, bottomZ: 120
+        )
+        for x in [-87.0, 87.0] {
+            for y in [-150.0, 150.0] {
+                faces += blockReferenceWheelFaces(
+                    center: .init(x: x, y: y, z: 32),
+                    outerRadius: 32,
+                    tubeRadius: 9
+                )
+            }
+        }
+
+    case .suv:
+        // Taller 4.60 m SUV: four body masses and four larger wheels.
+        faces += blockReferenceVehicleBox(
+            width: 190, depth: 460, height: 55,
+            centerY: 0, bottomZ: 28
+        )
+        faces += blockReferenceVehicleBox(
+            width: 185, depth: 420, height: 55,
+            centerY: 0, bottomZ: 83
+        )
+        faces += blockReferenceVehicleFrustum(
+            bottomWidth: 175, bottomDepth: 320,
+            topWidth: 155, topDepth: 285,
+            height: 60, centerY: -10, bottomZ: 138
+        )
+        faces += blockReferenceVehicleBox(
+            width: 155, depth: 275, height: 10,
+            centerY: -10, bottomZ: 198
+        )
+        for x in [-94.0, 94.0] {
+            for y in [-165.0, 165.0] {
+                faces += blockReferenceWheelFaces(
+                    center: .init(x: x, y: y, z: 36),
+                    outerRadius: 36,
+                    tubeRadius: 10
+                )
+            }
+        }
+
+    case .smallTruck:
+        // Compact two-axle truck: chassis, cargo box and cab.
+        faces += blockReferenceVehicleBox(
+            width: 180, depth: 470, height: 28,
+            centerY: 0, bottomZ: 38
+        )
+        faces += blockReferenceVehicleBox(
+            width: 176, depth: 250, height: 85,
+            centerY: -95, bottomZ: 66
+        )
+        faces += blockReferenceVehicleFrustum(
+            bottomWidth: 176, bottomDepth: 155,
+            topWidth: 160, topDepth: 135,
+            height: 110, centerY: 135, bottomZ: 66
+        )
+        for x in [-88.0, 88.0] {
+            for y in [-150.0, 155.0] {
+                faces += blockReferenceWheelFaces(
+                    center: .init(x: x, y: y, z: 36),
+                    outerRadius: 36,
+                    tubeRadius: 10
+                )
+            }
+        }
+
+    case .largeTruck:
+        // 7.80 m-class three-axle truck: chassis, cargo box and cab.
+        faces += blockReferenceVehicleBox(
+            width: 240, depth: 780, height: 35,
+            centerY: 0, bottomZ: 60
+        )
+        faces += blockReferenceVehicleBox(
+            width: 250, depth: 500, height: 220,
+            centerY: -125, bottomZ: 95
+        )
+        faces += blockReferenceVehicleFrustum(
+            bottomWidth: 245, bottomDepth: 210,
+            topWidth: 225, topDepth: 190,
+            height: 210, centerY: 270, bottomZ: 95
+        )
+        for x in [-123.0, 123.0] {
+            for y in [-280.0, -160.0, 280.0] {
+                faces += blockReferenceWheelFaces(
+                    center: .init(x: x, y: y, z: 50),
+                    outerRadius: 50,
+                    tubeRadius: 14
+                )
+            }
+        }
+
+    case .bicycle:
+        // Four box-section frame members and two ring wheels.
+        let rearHub = BlockVector3(x: 0, y: -70, z: 38)
+        let crank = BlockVector3(x: 0, y: -5, z: 48)
+        let seat = BlockVector3(x: 0, y: -25, z: 100)
+        let head = BlockVector3(x: 0, y: 50, z: 92)
+        let frontHub = BlockVector3(x: 0, y: 70, z: 38)
+        faces += blockReferenceSegmentBoxFaces(start: rearHub, end: crank, width: 6, depth: 6)
+        faces += blockReferenceSegmentBoxFaces(start: crank, end: seat, width: 6, depth: 6)
+        faces += blockReferenceSegmentBoxFaces(start: seat, end: head, width: 6, depth: 6)
+        faces += blockReferenceSegmentBoxFaces(start: head, end: frontHub, width: 6, depth: 6)
+        for y in [-70.0, 70.0] {
+            faces += blockReferenceWheelFaces(
+                center: .init(x: 0, y: y, z: 38),
+                outerRadius: 38,
+                tubeRadius: 5
+            )
+        }
+
+    case .motorcycle:
+        // Four body masses: lower body, tank, seat and front fork.
+        faces += blockReferenceVehicleFrustum(
+            bottomWidth: 50, bottomDepth: 100,
+            topWidth: 40, topDepth: 80,
+            height: 35, centerY: 0, bottomZ: 45
+        )
+        faces += blockReferenceVehicleFrustum(
+            bottomWidth: 48, bottomDepth: 62,
+            topWidth: 36, topDepth: 48,
+            height: 38, centerY: 25, bottomZ: 80
+        )
+        faces += blockReferenceVehicleBox(
+            width: 45, depth: 70, height: 12,
+            centerY: -35, bottomZ: 92
+        )
+        faces += blockReferenceSegmentBoxFaces(
+            start: .init(x: 0, y: 82, z: 36),
+            end: .init(x: 0, y: 58, z: 118),
+            width: 8,
+            depth: 8
+        )
+        for y in [-82.0, 82.0] {
+            faces += blockReferenceWheelFaces(
+                center: .init(x: 0, y: y, z: 36),
+                outerRadius: 36,
+                tubeRadius: 8
+            )
+        }
+
+    case .squareFrustum, .squarePyramid, .hemisphere, .torus, .hollowCylinder,
+         .standingHuman, .seatedHuman, .poseableHuman,
+         .stairs, .doorFrame, .roomBox, .table:
+        preconditionFailure("Transportation geometry requires a transportation module kind")
+    }
+
+    return blockReferenceNormalizedModuleGeometry(faces)
+}
+
+private func blockReferenceVehicleBox(
+    width: Double,
+    depth: Double,
+    height: Double,
+    centerY: Double,
+    bottomZ: Double
+) -> [[BlockVector3]] {
+    blockReferenceTranslatedFaces(
+        blockBoxFaces(dimensions: .init(width: width, depth: depth, height: height)),
+        by: .init(x: 0, y: centerY, z: bottomZ)
+    )
+}
+
+private func blockReferenceVehicleFrustum(
+    bottomWidth: Double,
+    bottomDepth: Double,
+    topWidth: Double,
+    topDepth: Double,
+    height: Double,
+    centerY: Double,
+    bottomZ: Double
+) -> [[BlockVector3]] {
+    let bottom = blockReferenceRectangleRing(width: bottomWidth, depth: bottomDepth, z: 0)
+    let top = blockReferenceRectangleRing(width: topWidth, depth: topDepth, z: height)
+    var faces: [[BlockVector3]] = [Array(bottom.reversed()), top]
+    faces += blockReferenceFaces(between: bottom, and: top)
+    return blockReferenceTranslatedFaces(faces, by: .init(x: 0, y: centerY, z: bottomZ))
+}
+
+private func blockReferenceWheelFaces(
+    center: BlockVector3,
+    outerRadius: Double,
+    tubeRadius: Double
+) -> [[BlockVector3]] {
+    let ring = blockReferenceTorusFaces(
+        majorRadius: outerRadius - tubeRadius,
+        tubeRadius: tubeRadius,
+        segments: 8,
+        centerZ: 0
+    )
+    let rotation = BlockEulerRotation(xDegrees: 0, yDegrees: 90, zDegrees: 0)
+    return ring.map { face in
+        face.map { blockRotate($0, rotation: rotation) + center }
+    }
+}
+
+private func blockReferenceNormalizedModuleGeometry(
+    _ faces: [[BlockVector3]]
+) -> BlockReferenceModuleGeometry {
+    let points = faces.flatMap { $0 }
+    guard let first = points.first else {
+        return .init(dimensions: .init(width: 1, depth: 1, height: 1), faces: [])
+    }
+    var minX = first.x
+    var maxX = first.x
+    var minY = first.y
+    var maxY = first.y
+    var minZ = first.z
+    var maxZ = first.z
+    for point in points.dropFirst() {
+        minX = min(minX, point.x)
+        maxX = max(maxX, point.x)
+        minY = min(minY, point.y)
+        maxY = max(maxY, point.y)
+        minZ = min(minZ, point.z)
+        maxZ = max(maxZ, point.z)
+    }
+    let offset = BlockVector3(
+        x: -(minX + maxX) * 0.5,
+        y: -(minY + maxY) * 0.5,
+        z: -minZ
+    )
+    return .init(
+        dimensions: .init(width: maxX - minX, depth: maxY - minY, height: maxZ - minZ),
+        faces: blockReferenceTranslatedFaces(faces, by: offset)
+    )
 }
 
 func blockReferencePoseableHumanGeometry(pose rawPose: BlockHumanPose) -> BlockReferenceModuleGeometry {
