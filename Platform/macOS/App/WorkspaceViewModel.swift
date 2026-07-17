@@ -231,6 +231,7 @@ final class WorkspaceViewModel: ObservableObject {
     var isAdjustingBlockReferenceParameters = false
     var blockReferenceCameraNavigationMode: BlockReferenceNavigationMode?
     var blockReferenceCameraNavigationStart: BlockReferenceCamera?
+    var blockReferenceCameraZoomCommitTask: Task<Void, Never>?
     private var layerThumbnailCache: [LayerID: CGImage] = [:]
     private var generatorStrokeSession = GeneratorStrokeSessionState()
     private var activeLassoRawPoints: [CanvasPoint] = []
@@ -1091,6 +1092,7 @@ final class WorkspaceViewModel: ObservableObject {
     @discardableResult
     func updateBlockReferenceDocument(
         operationKind: String? = nil,
+        normalizesScene: Bool = true,
         _ transform: (inout BlockReferenceScene?) -> Void
     ) -> Bool {
         if let operationKind,
@@ -1099,7 +1101,9 @@ final class WorkspaceViewModel: ObservableObject {
         }
         bootstrap.workspaceStore.updateDocument { document in
             transform(&document.blockReferenceScene)
-            document.blockReferenceScene?.normalize()
+            if normalizesScene {
+                document.blockReferenceScene?.normalize()
+            }
         }
         hasUnsavedChanges = true
         refreshDocumentOverlayOnly()

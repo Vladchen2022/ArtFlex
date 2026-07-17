@@ -509,7 +509,7 @@ struct BlockReferenceParameterPanel: View {
             } else {
                 ScrollView {
                     LazyVStack(spacing: 4) {
-                        ForEach(Array(scene.objects.reversed())) { object in
+                        ForEach(scene.objects.reversed()) { object in
                             objectRow(
                                 object,
                                 isSelected: selection.contains(object.id),

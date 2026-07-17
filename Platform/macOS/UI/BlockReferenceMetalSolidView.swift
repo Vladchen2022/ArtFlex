@@ -52,6 +52,7 @@ struct BlockReferenceMetalSolidView: NSViewRepresentable {
         private var scene: BlockReferenceScene?
         private var editorState: BlockReferenceEditorState?
         private var transform: CanvasViewportTransform?
+        private var selectedObjectIDs: Set<UUID> = []
 
         init(cameraRenderState: BlockReferenceCameraRenderState) {
             self.cameraRenderState = cameraRenderState
@@ -69,6 +70,11 @@ struct BlockReferenceMetalSolidView: NSViewRepresentable {
             self.scene = scene
             self.editorState = editorState
             self.transform = transform
+            selectedObjectIDs = blockReferenceExpandedSelectionIDs(
+                in: scene,
+                selection: editorState.resolvedSelectedObjectIDs
+            )
+            renderer?.prepareGeometrySource(scene: scene, editorState: editorState)
             cameraRenderState.rendererDidReceive(camera: scene.camera)
         }
 
@@ -84,6 +90,7 @@ struct BlockReferenceMetalSolidView: NSViewRepresentable {
             renderer.draw(
                 scene: scene,
                 editorState: editorState,
+                selectedObjectIDs: selectedObjectIDs,
                 transform: transform,
                 in: view
             )
@@ -147,6 +154,24 @@ private struct BlockReferenceMetalGeometryCacheKey: Equatable {
 private struct BlockReferenceMetalGeometrySource {
     var renderedFaces: [(face: BlockMeshFace, isDraft: Bool, style: BlockReferenceObjectStyle)]
     var featureMasks: [UUID: [Int: [Bool]]]
+    var faceVertexCapacity: Int
+    var edgeVertexCapacity: Int
+}
+
+private struct BlockReferenceMetalBufferSlot {
+    var faceBuffer: MTLBuffer?
+    var faceCapacity = 0
+    var edgeBuffer: MTLBuffer?
+    var edgeCapacity = 0
+}
+
+func blockReferenceMetalBufferCapacity(requiredByteCount: Int) -> Int {
+    guard requiredByteCount > 0 else { return 0 }
+    let allocationPageSize = 4_096
+    return max(
+        allocationPageSize,
+        ((requiredByteCount + allocationPageSize - 1) / allocationPageSize) * allocationPageSize
+    )
 }
 
 @MainActor
@@ -158,6 +183,9 @@ private final class BlockReferenceMetalSolidRenderer {
     private let edgeDepthState: MTLDepthStencilState
     private var geometryCacheKey: BlockReferenceMetalGeometryCacheKey?
     private var geometrySource: BlockReferenceMetalGeometrySource?
+    private var bufferSlots = Array(repeating: BlockReferenceMetalBufferSlot(), count: 3)
+    private var nextBufferSlotIndex = 0
+    private let inFlightBufferSemaphore = DispatchSemaphore(value: 3)
 
     init(context: MetalDeviceContext) throws {
         self.context = context
@@ -249,6 +277,7 @@ private final class BlockReferenceMetalSolidRenderer {
     func draw(
         scene: BlockReferenceScene,
         editorState: BlockReferenceEditorState,
+        selectedObjectIDs: Set<UUID>,
         transform: CanvasViewportTransform,
         in view: MTKView
     ) {
@@ -260,6 +289,7 @@ private final class BlockReferenceMetalSolidRenderer {
         let geometry = makeGeometry(
             scene: scene,
             editorState: editorState,
+            selectedObjectIDs: selectedObjectIDs,
             transform: transform,
             viewportSize: view.bounds.size
         )
@@ -268,32 +298,40 @@ private final class BlockReferenceMetalSolidRenderer {
             return
         }
 
-        guard let commandBuffer = context.commandQueue.makeCommandBuffer(),
-              let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPass) else { return }
+        guard let commandBuffer = context.commandQueue.makeCommandBuffer() else { return }
+        inFlightBufferSemaphore.wait()
+        let slotIndex = nextBufferSlotIndex
+        nextBufferSlotIndex = (nextBufferSlotIndex + 1) % bufferSlots.count
+        var slot = bufferSlots[slotIndex]
+        let faceBuffer = upload(
+            geometry.faces,
+            to: &slot.faceBuffer,
+            capacity: &slot.faceCapacity,
+            label: "Block Reference Face Vertices"
+        )
+        let edgeBuffer = upload(
+            geometry.edges,
+            to: &slot.edgeBuffer,
+            capacity: &slot.edgeCapacity,
+            label: "Block Reference Edge Vertices"
+        )
+        bufferSlots[slotIndex] = slot
+        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPass) else {
+            inFlightBufferSemaphore.signal()
+            return
+        }
         commandBuffer.label = "Block Reference Solid"
         encoder.label = "Block Reference Solid Depth Pass"
         encoder.setCullMode(.none)
 
-        if !geometry.faces.isEmpty,
-           let faceBuffer = context.device.makeBuffer(
-               bytes: geometry.faces,
-               length: geometry.faces.count * MemoryLayout<BlockReferenceSolidVertex>.stride,
-               options: .storageModeShared
-           ) {
-            faceBuffer.label = "Block Reference Face Vertices"
+        if !geometry.faces.isEmpty, let faceBuffer {
             encoder.setRenderPipelineState(facePipeline)
             encoder.setDepthStencilState(faceDepthState)
             encoder.setVertexBuffer(faceBuffer, offset: 0, index: 0)
             encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: geometry.faces.count)
         }
 
-        if !geometry.edges.isEmpty,
-           let edgeBuffer = context.device.makeBuffer(
-               bytes: geometry.edges,
-               length: geometry.edges.count * MemoryLayout<BlockReferenceSolidVertex>.stride,
-               options: .storageModeShared
-           ) {
-            edgeBuffer.label = "Block Reference Edge Vertices"
+        if !geometry.edges.isEmpty, let edgeBuffer {
             encoder.setRenderPipelineState(edgePipeline)
             encoder.setDepthStencilState(edgeDepthState)
             encoder.setVertexBuffer(edgeBuffer, offset: 0, index: 0)
@@ -301,8 +339,32 @@ private final class BlockReferenceMetalSolidRenderer {
         }
 
         encoder.endEncoding()
+        commandBuffer.addCompletedHandler { [inFlightBufferSemaphore] _ in
+            inFlightBufferSemaphore.signal()
+        }
         commandBuffer.present(drawable)
         commandBuffer.commit()
+    }
+
+    private func upload(
+        _ vertices: [BlockReferenceSolidVertex],
+        to buffer: inout MTLBuffer?,
+        capacity: inout Int,
+        label: String
+    ) -> MTLBuffer? {
+        guard !vertices.isEmpty else { return nil }
+        let byteCount = vertices.count * MemoryLayout<BlockReferenceSolidVertex>.stride
+        if buffer == nil || capacity < byteCount {
+            capacity = blockReferenceMetalBufferCapacity(requiredByteCount: byteCount)
+            buffer = context.device.makeBuffer(length: capacity, options: .storageModeShared)
+            buffer?.label = label
+        }
+        guard let buffer else { return nil }
+        vertices.withUnsafeBytes { bytes in
+            guard let source = bytes.baseAddress else { return }
+            buffer.contents().copyMemory(from: source, byteCount: byteCount)
+        }
+        return buffer
     }
 
     private func clear(renderPass: MTLRenderPassDescriptor, drawable: CAMetalDrawable) {
@@ -316,10 +378,11 @@ private final class BlockReferenceMetalSolidRenderer {
     private func makeGeometry(
         scene: BlockReferenceScene,
         editorState: BlockReferenceEditorState,
+        selectedObjectIDs: Set<UUID>,
         transform: CanvasViewportTransform,
         viewportSize: CGSize
     ) -> (faces: [BlockReferenceSolidVertex], edges: [BlockReferenceSolidVertex]) {
-        let source = geometrySource(scene: scene, editorState: editorState)
+        guard let source = geometrySource else { return ([], []) }
         let renderedFaces = source.renderedFaces
         let featureMasks = source.featureMasks
         let gridSegments = scene.display.isFrozen
@@ -327,25 +390,34 @@ private final class BlockReferenceMetalSolidRenderer {
             : makeGridSegments(scene: scene) + makeConstructionSegments(scene: scene)
 
         let cameraBasis = blockCameraBasis(scene.camera)
-        let positiveDepths = (
-            renderedFaces.flatMap { $0.face.vertices }
-                + gridSegments.flatMap { [$0.start, $0.end] }
-        )
-            .map { ($0 - cameraBasis.position).dot(cameraBasis.forward) }
-            .filter { $0 > 0.01 }
-        guard let minimumDepth = positiveDepths.min(),
-              let maximumDepth = positiveDepths.max() else { return ([], []) }
+        var minimumDepth = Double.greatestFiniteMagnitude
+        var maximumDepth = -Double.greatestFiniteMagnitude
+        for renderedFace in renderedFaces {
+            for vertex in renderedFace.face.vertices {
+                let depth = (vertex - cameraBasis.position).dot(cameraBasis.forward)
+                guard depth > 0.01 else { continue }
+                minimumDepth = min(minimumDepth, depth)
+                maximumDepth = max(maximumDepth, depth)
+            }
+        }
+        for segment in gridSegments {
+            for vertex in [segment.start, segment.end] {
+                let depth = (vertex - cameraBasis.position).dot(cameraBasis.forward)
+                guard depth > 0.01 else { continue }
+                minimumDepth = min(minimumDepth, depth)
+                maximumDepth = max(maximumDepth, depth)
+            }
+        }
+        guard minimumDepth.isFinite, maximumDepth.isFinite else { return ([], []) }
         let depthSpan = max(maximumDepth - minimumDepth, 1)
         let nearDepth = max(0.01, minimumDepth - depthSpan * 0.25)
         let farDepth = max(maximumDepth + depthSpan * 0.25, nearDepth + 1)
-        let selectedIDs = blockReferenceExpandedSelectionIDs(
-            in: scene,
-            selection: editorState.resolvedSelectedObjectIDs
-        )
         let accent = blockReferenceAccentColor()
 
         var faceVertices: [BlockReferenceSolidVertex] = []
         var edgeVertices: [BlockReferenceSolidVertex] = []
+        faceVertices.reserveCapacity(source.faceVertexCapacity)
+        edgeVertices.reserveCapacity(source.edgeVertexCapacity + gridSegments.count * 6)
         for renderedFace in renderedFaces {
             let face = renderedFace.face
             let isDraft = renderedFace.isDraft
@@ -373,7 +445,7 @@ private final class BlockReferenceMetalSolidRenderer {
             }
             guard projected.count == clipped.count else { continue }
 
-            let isSelected = !scene.display.isFrozen && selectedIDs.contains(face.objectID)
+            let isSelected = !scene.display.isFrozen && selectedObjectIDs.contains(face.objectID)
             let isActive = isSelected && face.objectID == editorState.selectedObjectID
             let isSelectedFace = isActive && face.faceIndex == editorState.selectedFaceIndex
             if blockReferenceShouldRenderFaces(display: scene.display) {
@@ -459,19 +531,17 @@ private final class BlockReferenceMetalSolidRenderer {
         return (faceVertices, edgeVertices)
     }
 
-    private func geometrySource(
+    func prepareGeometrySource(
         scene: BlockReferenceScene,
         editorState: BlockReferenceEditorState
-    ) -> BlockReferenceMetalGeometrySource {
+    ) {
         let key = BlockReferenceMetalGeometryCacheKey(
             objects: scene.objects,
             isFrozen: scene.display.isFrozen,
             draft: editorState.draft,
             numericTransform: editorState.numericTransform
         )
-        if key == geometryCacheKey, let geometrySource {
-            return geometrySource
-        }
+        guard key != geometryCacheKey || geometrySource == nil else { return }
 
         var objects = scene.objects.filter {
             $0.isVisible && (!scene.display.isFrozen || $0.style.includedInFrozenReference)
@@ -499,11 +569,16 @@ private final class BlockReferenceMetalSolidRenderer {
         })
         let source = BlockReferenceMetalGeometrySource(
             renderedFaces: renderedFaces.map { (face: $0.0, isDraft: $0.1, style: $0.2) },
-            featureMasks: featureMasks
+            featureMasks: featureMasks,
+            faceVertexCapacity: renderedFaces.reduce(into: 0) { capacity, renderedFace in
+                capacity += max(renderedFace.0.vertices.count - 2, 0) * 3
+            },
+            edgeVertexCapacity: renderedFaces.reduce(into: 0) { capacity, renderedFace in
+                capacity += renderedFace.0.vertices.count * 6
+            }
         )
         geometryCacheKey = key
         geometrySource = source
-        return source
     }
 
     private func makeGridSegments(scene: BlockReferenceScene) -> [BlockReferenceGridSegment] {

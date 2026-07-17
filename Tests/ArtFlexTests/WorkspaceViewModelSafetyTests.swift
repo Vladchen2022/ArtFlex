@@ -2976,6 +2976,37 @@ struct WorkspaceViewModelSafetyTests {
 
     @Test
     @MainActor
+    func blockReferenceWheelZoomUsesLivePreviewAndCommitsOnce() throws {
+        let harness = try BrushEditingBoundaryHarness(canvasSize: .init(width: 600, height: 480))
+        harness.viewModel.selectTool(.blockReference)
+        let originalCamera = try #require(harness.viewModel.workspace.document.blockReferenceScene?.camera)
+        let originalCanUndo = harness.viewModel.canUndo
+
+        harness.viewModel.zoomBlockReferenceCamera(by: 0.9)
+        harness.viewModel.zoomBlockReferenceCamera(by: 0.8)
+
+        let preview = try #require(harness.viewModel.blockReferenceCameraPreview)
+        #expect(abs(preview.distance - originalCamera.distance * 0.72) < 0.000_001)
+        #expect(harness.viewModel.workspace.document.blockReferenceScene?.camera == originalCamera)
+        #expect(harness.viewModel.blockReferenceCameraRenderState.camera == preview)
+        #expect(harness.viewModel.isBlockReferenceCameraNavigating)
+
+        harness.viewModel.commitPendingBlockReferenceCameraZoom()
+
+        #expect(harness.viewModel.workspace.document.blockReferenceScene?.camera == preview)
+        #expect(harness.viewModel.blockReferenceCameraPreview == nil)
+        #expect(harness.viewModel.isBlockReferenceCameraNavigating == false)
+        #expect(harness.viewModel.canUndo == originalCanUndo)
+
+        harness.viewModel.zoomBlockReferenceCamera(by: 1.1)
+        let interruptedPreview = try #require(harness.viewModel.blockReferenceCameraPreview)
+        harness.viewModel.endBlockReferenceCameraNavigation()
+        #expect(harness.viewModel.workspace.document.blockReferenceScene?.camera == interruptedPreview)
+        #expect(harness.viewModel.canUndo == originalCanUndo)
+    }
+
+    @Test
+    @MainActor
     func blockReferencePerspectiveMatchAppliesCameraAndSupportsUndo() throws {
         let canvasSize = CanvasSize(width: 1_200, height: 800)
         let harness = try BrushEditingBoundaryHarness(canvasSize: canvasSize)

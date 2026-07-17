@@ -45,13 +45,29 @@ extension WorkspaceViewModel {
     }
 
     var blockReferenceSelectionCenter: BlockVector3? {
-        let objects = editableSelectedBlockReferenceObjects
+        blockReferenceSelectionCenter(of: editableSelectedBlockReferenceObjects)
+    }
+
+    private func blockReferenceSelectionCenter(
+        of objects: [BlockReferenceObject]
+    ) -> BlockVector3? {
         guard !objects.isEmpty else { return nil }
         return objects.reduce(.zero) { $0 + $1.position } / Double(objects.count)
     }
 
     var resolvedBlockReferencePivot: BlockVector3? {
         guard let scene = blockReferenceScene else { return blockReferenceSelectionCenter }
+        return resolvedBlockReferencePivot(
+            in: scene,
+            editableObjects: editableSelectedBlockReferenceObjects
+        )
+    }
+
+    private func resolvedBlockReferencePivot(
+        in scene: BlockReferenceScene,
+        editableObjects: [BlockReferenceObject]
+    ) -> BlockVector3? {
+        let selectionCenter = blockReferenceSelectionCenter(of: editableObjects)
         if scene.pivotMode == .custom,
            let moduleBasePoint = blockReferenceSelectedModuleBasePoint(
                in: scene,
@@ -62,9 +78,11 @@ extension WorkspaceViewModel {
         }
         switch scene.pivotMode {
         case .selectionCenter:
-            return blockReferenceSelectionCenter
+            return selectionCenter
         case .activeObject:
-            return selectedBlockReferenceObject?.position ?? blockReferenceSelectionCenter
+            return scene.objects.first(where: {
+                $0.id == blockReferenceEditorState.selectedObjectID
+            })?.position ?? selectionCenter
         case .workingPlaneOrigin:
             return scene.workingPlane.origin
         case .custom:
@@ -128,7 +146,8 @@ extension WorkspaceViewModel {
 
     private func blockReferenceAxisDirections(
         for space: BlockReferenceGizmoCoordinateSpace,
-        activeRotation: BlockEulerRotation? = nil
+        activeRotation: BlockEulerRotation? = nil,
+        workingPlane: BlockWorkingPlane? = nil
     ) -> [BlockReferenceAxis: BlockVector3] {
         return Dictionary(uniqueKeysWithValues: BlockReferenceAxis.allCases.map { axis in
             let direction: BlockVector3
@@ -139,10 +158,11 @@ extension WorkspaceViewModel {
                 let rotation = activeRotation ?? selectedBlockReferenceObject?.rotation ?? .zero
                 direction = blockRotate(axis.unitVector, rotation: rotation)
             case .workingPlane:
+                let plane = workingPlane ?? blockReferenceScene?.workingPlane
                 switch axis {
-                case .x: direction = blockReferenceScene?.workingPlane.axisU ?? .unitX
-                case .y: direction = blockReferenceScene?.workingPlane.axisV ?? .unitY
-                case .z: direction = blockReferenceScene?.workingPlane.normal ?? .unitZ
+                case .x: direction = plane?.axisU ?? .unitX
+                case .y: direction = plane?.axisV ?? .unitY
+                case .z: direction = plane?.normal ?? .unitZ
                 }
             }
             return (axis, direction.normalized(fallback: axis.unitVector))
@@ -271,6 +291,8 @@ extension WorkspaceViewModel {
         blockReferenceCameraNavigationMode = nil
         blockReferenceCameraNavigationStart = nil
         blockReferenceCameraPreview = nil
+        blockReferenceCameraZoomCommitTask?.cancel()
+        blockReferenceCameraZoomCommitTask = nil
         blockReferenceCameraRenderState.cancelNavigation()
         isBlockReferenceCameraNavigating = false
         blockReferenceEditorState.hoveredGizmoHandle = nil
@@ -338,7 +360,7 @@ extension WorkspaceViewModel {
         modifiers: NSEvent.ModifierFlags = []
     ) {
         guard workspace.toolSession.activeTool == .blockReference,
-              var scene = blockReferenceScene,
+              let scene = blockReferenceScene,
               scene.display.isVisible,
               !scene.display.isFrozen else { return }
 
@@ -571,14 +593,13 @@ extension WorkspaceViewModel {
             blockReferenceEditorState.snapPoint = worldPoint
             blockReferenceEditorState.phase = .drawingBase
         }
-        scene.normalize()
     }
 
     func updateBlockReferenceInteraction(
         to point: CanvasPoint,
         screenScale: Double
     ) {
-        guard var scene = blockReferenceScene else { return }
+        guard let scene = blockReferenceScene else { return }
         switch blockReferenceEditorState.phase {
         case .drawingBase:
             guard var draft = blockReferenceEditorState.draft,
@@ -656,7 +677,7 @@ extension WorkspaceViewModel {
             let startPositions = blockReferenceMoveStartPositions
             let startModuleBasePoints = blockReferenceMoveStartModuleBasePoints
             let startCustomPivot = blockReferenceMoveStartCustomPivot
-            _ = updateBlockReferenceDocument { stored in
+            _ = updateBlockReferenceDocument(normalizesScene: false) { stored in
                 guard var scene = stored else { return }
                 for index in scene.objects.indices {
                     guard let original = startPositions[scene.objects[index].id] else { continue }
@@ -694,7 +715,6 @@ extension WorkspaceViewModel {
         case .idle, .awaitingExtrusion:
             break
         }
-        scene.normalize()
     }
 
     func endBlockReferenceInteraction() {
@@ -724,6 +744,7 @@ extension WorkspaceViewModel {
             }
 
         case .movingObject:
+            let needsFinalNormalization = blockReferenceInteractionHasCheckpoint
             blockReferenceEditorState.phase = .idle
             blockReferenceEditorState.snapPoint = nil
             blockReferenceInteractionStartPoint = nil
@@ -733,6 +754,9 @@ extension WorkspaceViewModel {
             blockReferenceMoveStartModuleBasePoints = [:]
             blockReferenceMoveStartCustomPivot = nil
             blockReferenceInteractionHasCheckpoint = false
+            if needsFinalNormalization {
+                _ = updateBlockReferenceDocument { _ in }
+            }
 
         case .transformingGizmo:
             if let session = blockReferenceGizmoDragSession,
@@ -948,12 +972,34 @@ extension WorkspaceViewModel {
               blockReferenceEditorState.selectedHumanJoint == nil,
               let point,
               let scene = blockReferenceScene,
-              !scene.display.isFrozen,
-              let center = resolvedBlockReferencePivot,
-              !editableSelectedBlockReferenceObjects.isEmpty,
+              !scene.display.isFrozen else {
+            if blockReferenceEditorState.hoveredGizmoHandle != nil {
+                blockReferenceEditorState.hoveredGizmoHandle = nil
+            }
+            return false
+        }
+        let selectedIDs = blockReferenceExpandedSelectionIDs(
+            in: scene,
+            selection: blockReferenceEditorState.resolvedSelectedObjectIDs
+        )
+        let editableObjects = scene.objects.filter {
+            selectedIDs.contains($0.id) && $0.isVisible && !$0.isLocked
+        }
+        let activeRotation = scene.objects.first(where: {
+            $0.id == blockReferenceEditorState.selectedObjectID
+        })?.rotation ?? .zero
+        guard !editableObjects.isEmpty,
+              let center = resolvedBlockReferencePivot(
+                  in: scene,
+                  editableObjects: editableObjects
+              ),
               let layout = blockReferenceGizmoLayout(
                 center: center,
-                axisDirections: blockReferenceGizmoAxisDirections,
+                axisDirections: blockReferenceAxisDirections(
+                    for: blockReferenceEditorState.gizmoCoordinateSpace,
+                    activeRotation: activeRotation,
+                    workingPlane: scene.workingPlane
+                ),
                 camera: scene.camera,
                 canvasSize: workspace.document.canvasSize,
                 screenScale: screenScale
@@ -1375,8 +1421,11 @@ extension WorkspaceViewModel {
     }
 
     func setBlockReferenceOpacity(_ opacity: Float) {
-        _ = updateBlockReferenceDocument { scene in
-            scene?.display.opacity = opacity
+        _ = updateBlockReferenceDocument(normalizesScene: false) { scene in
+            guard var value = scene else { return }
+            value.display.opacity = opacity
+            value.display.normalize()
+            scene = value
         }
     }
 
@@ -1409,8 +1458,15 @@ extension WorkspaceViewModel {
     }
 
     func setBlockReferenceGridSpacing(_ spacing: Double) {
-        updateBlockReferenceParameter { scene in
-            scene.snap.gridSpacing = spacing
+        let operationKind = isAdjustingBlockReferenceParameters ? nil : "blockReference.parameters"
+        _ = updateBlockReferenceDocument(
+            operationKind: operationKind,
+            normalizesScene: false
+        ) { scene in
+            guard var value = scene else { return }
+            value.snap.gridSpacing = spacing
+            value.snap.normalize()
+            scene = value
         }
     }
 
@@ -1421,23 +1477,23 @@ extension WorkspaceViewModel {
     }
 
     func setBlockReferenceCameraYaw(_ value: Double) {
-        updateBlockReferenceParameter { $0.camera.yawDegrees = value }
+        updateBlockReferenceCameraParameter { $0.yawDegrees = value }
     }
 
     func setBlockReferenceCameraPitch(_ value: Double) {
-        updateBlockReferenceParameter { $0.camera.pitchDegrees = value }
+        updateBlockReferenceCameraParameter { $0.pitchDegrees = value }
     }
 
     func setBlockReferenceCameraRoll(_ value: Double) {
-        updateBlockReferenceParameter { $0.camera.rollDegrees = value }
+        updateBlockReferenceCameraParameter { $0.rollDegrees = value }
     }
 
     func setBlockReferenceCameraDistance(_ value: Double) {
-        updateBlockReferenceParameter { $0.camera.distance = value }
+        updateBlockReferenceCameraParameter { $0.distance = value }
     }
 
     func setBlockReferenceCameraFieldOfView(_ value: Double) {
-        updateBlockReferenceParameter { $0.camera.fieldOfViewDegrees = value }
+        updateBlockReferenceCameraParameter { $0.fieldOfViewDegrees = value }
     }
 
     func setBlockReferenceOrthographic(_ enabled: Bool) {
@@ -1596,6 +1652,9 @@ extension WorkspaceViewModel {
     }
 
     func beginBlockReferenceCameraNavigation(_ mode: BlockReferenceNavigationMode) {
+        if blockReferenceCameraNavigationMode == .zoom {
+            commitPendingBlockReferenceCameraZoom()
+        }
         guard let scene = blockReferenceScene,
               scene.display.isVisible,
               !scene.display.isFrozen else { return }
@@ -1641,9 +1700,18 @@ extension WorkspaceViewModel {
     }
 
     func endBlockReferenceCameraNavigation() {
+        let operationKind = blockReferenceCameraZoomCommitTask == nil
+            ? "blockReference.cameraNavigation"
+            : nil
+        blockReferenceCameraZoomCommitTask?.cancel()
+        blockReferenceCameraZoomCommitTask = nil
+        finishBlockReferenceCameraNavigation(operationKind: operationKind)
+    }
+
+    private func finishBlockReferenceCameraNavigation(operationKind: String?) {
         if let camera = blockReferenceCameraPreview {
             let didCommit = updateBlockReferenceDocument(
-                operationKind: "blockReference.cameraNavigation"
+                operationKind: operationKind
             ) { scene in
                 scene?.camera = camera
             }
@@ -1663,9 +1731,43 @@ extension WorkspaceViewModel {
 
     func zoomBlockReferenceCamera(by multiplier: Double) {
         guard multiplier.isFinite, multiplier > 0 else { return }
-        _ = updateBlockReferenceDocument { scene in
-            scene?.camera.distance *= multiplier
+        if isBlockReferenceCameraNavigating,
+           blockReferenceCameraNavigationMode != .zoom {
+            endBlockReferenceCameraNavigation()
         }
+
+        var camera: BlockReferenceCamera
+        if blockReferenceCameraNavigationMode == .zoom,
+           let preview = blockReferenceCameraPreview {
+            camera = preview
+        } else {
+            guard let scene = blockReferenceScene,
+                  scene.display.isVisible,
+                  !scene.display.isFrozen else { return }
+            camera = scene.camera
+            blockReferenceCameraNavigationMode = .zoom
+            blockReferenceCameraNavigationStart = scene.camera
+            blockReferenceCameraRenderState.beginNavigation()
+            isBlockReferenceCameraNavigating = true
+        }
+        camera.distance *= multiplier
+        camera.normalize()
+        blockReferenceCameraPreview = camera
+        blockReferenceCameraRenderState.updateNavigation(camera: camera)
+
+        blockReferenceCameraZoomCommitTask?.cancel()
+        blockReferenceCameraZoomCommitTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .milliseconds(140))
+            guard !Task.isCancelled else { return }
+            self?.commitPendingBlockReferenceCameraZoom()
+        }
+    }
+
+    func commitPendingBlockReferenceCameraZoom() {
+        blockReferenceCameraZoomCommitTask?.cancel()
+        blockReferenceCameraZoomCommitTask = nil
+        guard blockReferenceCameraNavigationMode == .zoom else { return }
+        finishBlockReferenceCameraNavigation(operationKind: nil)
     }
 
     func frameBlockReferenceCamera(selectedOnly: Bool) {
@@ -1978,6 +2080,21 @@ extension WorkspaceViewModel {
         _ = updateBlockReferenceDocument(operationKind: operationKind) { scene in
             guard var value = scene else { return }
             transform(&value)
+            scene = value
+        }
+    }
+
+    private func updateBlockReferenceCameraParameter(
+        _ transform: (inout BlockReferenceCamera) -> Void
+    ) {
+        let operationKind = isAdjustingBlockReferenceParameters ? nil : "blockReference.parameters"
+        _ = updateBlockReferenceDocument(
+            operationKind: operationKind,
+            normalizesScene: false
+        ) { scene in
+            guard var value = scene else { return }
+            transform(&value.camera)
+            value.camera.normalize()
             scene = value
         }
     }

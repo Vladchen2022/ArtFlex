@@ -96,6 +96,10 @@ struct BlockReferenceStateTests {
         #expect(blockReferencePreferredFramesPerSecond(maximumFramesPerSecond: 60) == 60)
         #expect(blockReferencePreferredFramesPerSecond(maximumFramesPerSecond: 120) == 120)
         #expect(blockReferencePreferredFramesPerSecond(maximumFramesPerSecond: 240) == 120)
+        #expect(blockReferenceMetalBufferCapacity(requiredByteCount: 0) == 0)
+        #expect(blockReferenceMetalBufferCapacity(requiredByteCount: 1) == 4_096)
+        #expect(blockReferenceMetalBufferCapacity(requiredByteCount: 4_096) == 4_096)
+        #expect(blockReferenceMetalBufferCapacity(requiredByteCount: 4_097) == 8_192)
     }
 
     @Test
@@ -147,6 +151,8 @@ struct BlockReferenceStateTests {
         #expect(rendererSource.contains("blockReferencePreferredFramesPerSecond("))
         #expect(rendererSource.contains("view.isPaused = !rendersContinuously"))
         #expect(rendererSource.contains("cameraRenderState.camera"))
+        #expect(rendererSource.contains("inFlightBufferSemaphore"))
+        #expect(rendererSource.contains("makeBuffer(\n               bytes: geometry") == false)
         #expect(rendererSource.contains("makeGridSegments(scene: scene)"))
         #expect(overlaySource.contains("BlockReferenceMetalSolidView("))
         #expect(overlaySource.contains("if scene.display.mode == .wireframe") == false)
