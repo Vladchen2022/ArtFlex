@@ -226,6 +226,8 @@ open -n .build/ArtFlex.app
 pgrep -x ArtFlex | wc -l   # 必须为 1
 ```
 
+这是强制发布步骤，不是可选验证：每次完成软件更新后，必须主动替换应用包、退出所有旧版与隔离预览进程，并只启动一个 `.build/ArtFlex.app`。如果当前文档未保存，先保存到用户指定位置；无法取得位置时保存带时间戳的恢复副本，再重启并重新载入该副本。不得把“请用户自行重启”作为交付结果。
+
 当前用于测试的 bundle：
 
 - `/Users/victorcloux/Desktop/ArtFlex/.build/ArtFlex.app`
