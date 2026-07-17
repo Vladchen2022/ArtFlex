@@ -72,6 +72,15 @@ struct BlockReferenceStateTests {
     }
 
     @Test
+    func metalSolidEdgesDoNotAdvanceInFrontOfOccludingFaces() {
+        let faceDepth: Float = 0.75
+        let hiddenEdgeDepth: Float = 0.750_005
+
+        #expect(blockReferenceMetalOcclusionPreservingEdgeDepth(faceDepth) == faceDepth)
+        #expect(blockReferenceMetalOcclusionPreservingEdgeDepth(hiddenEdgeDepth) > faceDepth)
+    }
+
+    @Test
     func displayModesHaveDistinctFaceRenderingAndUseTheDisplayRefreshRate() {
         var display = BlockReferenceDisplaySettings.stageOneDefault
         #expect(blockReferenceShouldRenderFaces(display: display))

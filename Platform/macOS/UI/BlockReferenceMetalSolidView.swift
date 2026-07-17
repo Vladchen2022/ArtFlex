@@ -653,13 +653,12 @@ private final class BlockReferenceMetalSolidRenderer {
     private func solidVertex(
         _ projected: BlockReferenceProjectedSolidVertex,
         color: SIMD4<Float>,
-        viewportSize: CGSize,
-        depthBias: Float = 0
+        viewportSize: CGSize
     ) -> BlockReferenceSolidVertex {
         let clipX = Float(projected.screenPoint.x / Double(viewportSize.width) * 2 - 1)
         let clipY = Float(1 - projected.screenPoint.y / Double(viewportSize.height) * 2)
         return BlockReferenceSolidVertex(
-            position: SIMD4(clipX, clipY, max(projected.normalizedDepth - depthBias, 0), 1),
+            position: SIMD4(clipX, clipY, projected.normalizedDepth, 1),
             color: color
         )
     }
@@ -679,31 +678,34 @@ private final class BlockReferenceMetalSolidRenderer {
         let startPositive = BlockReferenceProjectedSolidVertex(
             screenPoint: start.screenPoint + perpendicular,
             depth: start.depth,
-            normalizedDepth: start.normalizedDepth
+            normalizedDepth: blockReferenceMetalOcclusionPreservingEdgeDepth(start.normalizedDepth)
         )
         let startNegative = BlockReferenceProjectedSolidVertex(
             screenPoint: start.screenPoint - perpendicular,
             depth: start.depth,
-            normalizedDepth: start.normalizedDepth
+            normalizedDepth: blockReferenceMetalOcclusionPreservingEdgeDepth(start.normalizedDepth)
         )
         let endPositive = BlockReferenceProjectedSolidVertex(
             screenPoint: end.screenPoint + perpendicular,
             depth: end.depth,
-            normalizedDepth: end.normalizedDepth
+            normalizedDepth: blockReferenceMetalOcclusionPreservingEdgeDepth(end.normalizedDepth)
         )
         let endNegative = BlockReferenceProjectedSolidVertex(
             screenPoint: end.screenPoint - perpendicular,
             depth: end.depth,
-            normalizedDepth: end.normalizedDepth
+            normalizedDepth: blockReferenceMetalOcclusionPreservingEdgeDepth(end.normalizedDepth)
         )
-        let depthBias: Float = 0.000_01
-        vertices.append(solidVertex(startPositive, color: color, viewportSize: viewportSize, depthBias: depthBias))
-        vertices.append(solidVertex(startNegative, color: color, viewportSize: viewportSize, depthBias: depthBias))
-        vertices.append(solidVertex(endPositive, color: color, viewportSize: viewportSize, depthBias: depthBias))
-        vertices.append(solidVertex(endPositive, color: color, viewportSize: viewportSize, depthBias: depthBias))
-        vertices.append(solidVertex(startNegative, color: color, viewportSize: viewportSize, depthBias: depthBias))
-        vertices.append(solidVertex(endNegative, color: color, viewportSize: viewportSize, depthBias: depthBias))
+        vertices.append(solidVertex(startPositive, color: color, viewportSize: viewportSize))
+        vertices.append(solidVertex(startNegative, color: color, viewportSize: viewportSize))
+        vertices.append(solidVertex(endPositive, color: color, viewportSize: viewportSize))
+        vertices.append(solidVertex(endPositive, color: color, viewportSize: viewportSize))
+        vertices.append(solidVertex(startNegative, color: color, viewportSize: viewportSize))
+        vertices.append(solidVertex(endNegative, color: color, viewportSize: viewportSize))
     }
+}
+
+func blockReferenceMetalOcclusionPreservingEdgeDepth(_ normalizedDepth: Float) -> Float {
+    min(max(normalizedDepth.isFinite ? normalizedDepth : 1, 0), 1)
 }
 
 func blockReferenceShouldRenderFaces(display: BlockReferenceDisplaySettings) -> Bool {
