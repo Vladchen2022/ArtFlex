@@ -869,8 +869,6 @@ struct BlockReferenceStateTests {
             .objects,
             .cameraSlots
         ])
-        #expect(blockReferenceToolPanelContentHeight(totalHeight: 1_000) == 676)
-        #expect(blockReferenceToolPanelContentHeight(totalHeight: 300) == 0)
     }
 
     @Test

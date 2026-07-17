@@ -27,16 +27,6 @@ func rightInspectorUsesStructuredBlockReferenceWorkspace(activeTool: ToolKind) -
     activeTool == .blockReference
 }
 
-func blockReferenceToolPanelContentHeight(totalHeight: CGFloat) -> CGFloat {
-    max(
-        0,
-        totalHeight
-            - ((rightInspectorHorizontalPadding + inspectorPanelPadding) * 2)
-            - topInspectorPanelHeight
-            - rightInspectorColumnSpacing
-    )
-}
-
 func rightInspectorUsesTextureLibrary(activeTool: ToolKind) -> Bool {
     activeTool == .lassoFill || activeTool == .textureFill
 }
@@ -1555,20 +1545,14 @@ struct RightInspectorView: View {
                             referenceImageSection
                         }
 
-                        InspectorPanel(title: "") {
+                        InspectorPanel(title: "", fillsAvailableHeight: true) {
                             BlockReferenceParameterPanel(
                                 viewModel: viewModel,
                                 presentation: .context,
                                 selectedTab: $blockReferencePanelTab
                             )
-                            .frame(
-                                maxWidth: .infinity,
-                                minHeight: blockReferenceToolPanelContentHeight(
-                                    totalHeight: size.height
-                                ),
-                                alignment: .topLeading
-                            )
                         }
+                        .frame(maxHeight: .infinity, alignment: .top)
                     }
                     .frame(width: columnWidth)
                     .frame(maxHeight: .infinity, alignment: .top)
@@ -1590,14 +1574,14 @@ struct RightInspectorView: View {
                             )
                         }
 
-                        InspectorPanel(title: "场景对象") {
+                        InspectorPanel(title: "场景对象", fillsAvailableHeight: true) {
                             BlockReferenceParameterPanel(
                                 viewModel: viewModel,
                                 presentation: .objects,
                                 selectedTab: $blockReferencePanelTab
                             )
                         }
-                        .frame(minHeight: 260, alignment: .top)
+                        .frame(minHeight: 260, maxHeight: .infinity, alignment: .top)
                     }
                     .frame(width: columnWidth)
                     .frame(maxHeight: .infinity, alignment: .top)
@@ -5270,7 +5254,18 @@ private struct ColorSectionView: View {
 
 private struct InspectorPanel<Content: View>: View {
     let title: String
-    @ViewBuilder let content: Content
+    let fillsAvailableHeight: Bool
+    let content: Content
+
+    init(
+        title: String,
+        fillsAvailableHeight: Bool = false,
+        @ViewBuilder content: () -> Content
+    ) {
+        self.title = title
+        self.fillsAvailableHeight = fillsAvailableHeight
+        self.content = content()
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: title.isEmpty ? 0 : 10) {
@@ -5282,7 +5277,11 @@ private struct InspectorPanel<Content: View>: View {
             content
         }
         .padding(inspectorPanelPadding)
-        .frame(maxWidth: .infinity)
+        .frame(
+            maxWidth: .infinity,
+            maxHeight: fillsAvailableHeight ? .infinity : nil,
+            alignment: .topLeading
+        )
         .background(
             RoundedRectangle(cornerRadius: 12)
                 .fill(Color.white.opacity(0.06))
