@@ -211,10 +211,10 @@ struct BlockReferenceParameterPanel: View {
             switch selectedLibraryCategory {
             case .primitives:
                 LazyVGrid(columns: blockLibraryColumns, spacing: 7) {
-                    modeButton(.box, image: "cube")
-                    modeButton(.cylinder, image: "cylinder")
-                    modeButton(.cone, image: "triangle")
-                    modeButton(.sphere, image: "circle")
+                    modeButton(.box, image: "cube", horizontalLayout: true)
+                    modeButton(.cylinder, image: "cylinder", horizontalLayout: true)
+                    modeButton(.cone, image: "triangle", horizontalLayout: true)
+                    modeButton(.sphere, image: "circle", horizontalLayout: true)
                 }
             case .people:
                 LazyVGrid(columns: blockLibraryColumns, spacing: 7) {
@@ -1539,19 +1539,36 @@ struct BlockReferenceParameterPanel: View {
             .frame(maxWidth: .infinity, minHeight: 50, alignment: .leading)
     }
 
-    private func modeButton(_ mode: BlockReferenceEditorMode, image: String) -> some View {
+    private func modeButton(
+        _ mode: BlockReferenceEditorMode,
+        image: String,
+        horizontalLayout: Bool = false
+    ) -> some View {
         let isSelected = viewModel.blockReferenceEditorState.mode == mode
         return Button {
             viewModel.setBlockReferenceEditorMode(mode)
         } label: {
-            VStack(spacing: 3) {
-                Image(systemName: image)
-                    .font(.system(size: 11, weight: .semibold))
-                Text(mode.displayName)
-                    .font(.system(size: 10, weight: .semibold))
-                    .lineLimit(1)
+            Group {
+                if horizontalLayout {
+                    HStack(spacing: 5) {
+                        Image(systemName: image)
+                            .font(.system(size: 11, weight: .semibold))
+                        Text(mode.displayName)
+                            .font(.system(size: 10, weight: .semibold))
+                            .lineLimit(1)
+                    }
+                    .frame(maxWidth: .infinity, minHeight: 30)
+                } else {
+                    VStack(spacing: 3) {
+                        Image(systemName: image)
+                            .font(.system(size: 11, weight: .semibold))
+                        Text(mode.displayName)
+                            .font(.system(size: 10, weight: .semibold))
+                            .lineLimit(1)
+                    }
+                    .frame(maxWidth: .infinity, minHeight: 36)
+                }
             }
-            .frame(maxWidth: .infinity, minHeight: 36)
             .foregroundStyle(isSelected ? Color.white : Color.white.opacity(0.72))
             .background(
                 RoundedRectangle(cornerRadius: 7)

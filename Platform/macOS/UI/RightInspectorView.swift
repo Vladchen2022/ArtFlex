@@ -14,6 +14,7 @@ private let topInspectorControlIconSize: CGFloat = 11.5
 private let topInspectorPanelPadding: CGFloat = 12
 private let rightInspectorHorizontalPadding: CGFloat = 12
 private let rightInspectorColumnSpacing: CGFloat = 12
+private let inspectorPanelPadding: CGFloat = 12
 
 func rightInspectorColumnWidth(totalWidth: CGFloat) -> CGFloat {
     max(
@@ -24,6 +25,16 @@ func rightInspectorColumnWidth(totalWidth: CGFloat) -> CGFloat {
 
 func rightInspectorUsesStructuredBlockReferenceWorkspace(activeTool: ToolKind) -> Bool {
     activeTool == .blockReference
+}
+
+func blockReferenceToolPanelContentHeight(totalHeight: CGFloat) -> CGFloat {
+    max(
+        0,
+        totalHeight
+            - ((rightInspectorHorizontalPadding + inspectorPanelPadding) * 2)
+            - topInspectorPanelHeight
+            - rightInspectorColumnSpacing
+    )
 }
 
 func rightInspectorUsesTextureLibrary(activeTool: ToolKind) -> Bool {
@@ -1547,6 +1558,25 @@ struct RightInspectorView: View {
                         InspectorPanel(title: "") {
                             BlockReferenceParameterPanel(
                                 viewModel: viewModel,
+                                presentation: .context,
+                                selectedTab: $blockReferencePanelTab
+                            )
+                            .frame(
+                                maxWidth: .infinity,
+                                minHeight: blockReferenceToolPanelContentHeight(
+                                    totalHeight: size.height
+                                ),
+                                alignment: .topLeading
+                            )
+                        }
+                    }
+                    .frame(width: columnWidth)
+                    .frame(maxHeight: .infinity, alignment: .top)
+
+                    VStack(spacing: 12) {
+                        InspectorPanel(title: "") {
+                            BlockReferenceParameterPanel(
+                                viewModel: viewModel,
                                 presentation: .cameraSlots,
                                 selectedTab: $blockReferencePanelTab
                             )
@@ -1568,25 +1598,6 @@ struct RightInspectorView: View {
                             )
                         }
                         .frame(minHeight: 260, alignment: .top)
-                    }
-                    .frame(width: columnWidth)
-                    .frame(maxHeight: .infinity, alignment: .top)
-
-                    VStack(spacing: 0) {
-                        InspectorPanel(title: "") {
-                            BlockReferenceParameterPanel(
-                                viewModel: viewModel,
-                                presentation: .context,
-                                selectedTab: $blockReferencePanelTab
-                            )
-                            .frame(
-                                maxWidth: .infinity,
-                                minHeight: max(size.height - 24, 0),
-                                alignment: .topLeading
-                            )
-                        }
-                        .frame(width: columnWidth)
-                        .clipped()
                     }
                     .frame(width: columnWidth)
                     .frame(maxHeight: .infinity, alignment: .top)
@@ -5270,7 +5281,7 @@ private struct InspectorPanel<Content: View>: View {
             }
             content
         }
-        .padding(12)
+        .padding(inspectorPanelPadding)
         .frame(maxWidth: .infinity)
         .background(
             RoundedRectangle(cornerRadius: 12)
