@@ -75,6 +75,7 @@ struct AppBootstrap {
     let brushLibraryPersistenceController: BrushLibraryPersistenceController
     let patternLibraryPersistenceController: PatternLibraryPersistenceController
     let textureFillLibraryPersistenceController: TextureFillLibraryPersistenceController
+    let blockReferenceModuleLibraryPersistenceController: BlockReferenceModuleLibraryPersistenceController
     let imagePaletteExtractor: ImagePaletteExtractor
     let timelapseRecorder: TimelapseRecorderController
     let drawingStatsController: DrawingStatsController
@@ -87,6 +88,7 @@ struct AppBootstrap {
         brushLibraryPersistenceController: BrushLibraryPersistenceController? = nil,
         patternLibraryPersistenceController: PatternLibraryPersistenceController? = nil,
         textureFillLibraryPersistenceController: TextureFillLibraryPersistenceController? = nil,
+        blockReferenceModuleLibraryPersistenceController: BlockReferenceModuleLibraryPersistenceController? = nil,
         sharedMetalServices: AppSharedMetalServices? = nil,
         drawingStatsController: DrawingStatsController? = nil
     ) throws {
@@ -149,6 +151,8 @@ struct AppBootstrap {
         )
         self.textureFillLibraryPersistenceController = textureFillLibraryPersistenceController
             ?? TextureFillLibraryPersistenceController(rootDirectoryURL: testPersistenceRoot)
+        self.blockReferenceModuleLibraryPersistenceController = blockReferenceModuleLibraryPersistenceController
+            ?? BlockReferenceModuleLibraryPersistenceController(rootDirectoryURL: testPersistenceRoot)
         self.imagePaletteExtractor = ImagePaletteExtractor()
         self.timelapseRecorder = TimelapseRecorderController(
             workspaceStore: workspaceStore,

@@ -240,6 +240,7 @@ final class HistoryController {
             brushLibrary: current.brushLibrary,
             patternLibrary: current.patternLibrary,
             textureFillLibrary: current.textureFillLibrary,
+            blockReferenceModuleLibrary: current.blockReferenceModuleLibrary,
             tipImageLibrary: current.tipImageLibrary,
             generator: current.generator,
             viewport: current.viewport,

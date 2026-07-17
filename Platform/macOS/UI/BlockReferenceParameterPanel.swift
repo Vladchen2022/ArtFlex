@@ -36,10 +36,20 @@ enum BlockReferencePanelPresentation: CaseIterable, Equatable {
     case cameraSlots
 }
 
-private enum BlockReferenceLibraryCategory: String, CaseIterable {
+private enum BlockReferenceLibraryCategory: String, CaseIterable, Hashable {
     case primitives = "基础体"
     case people = "人物"
     case architecture = "建筑"
+}
+
+private enum BlockReferenceLibrarySelection: Hashable {
+    case builtIn(BlockReferenceLibraryCategory)
+    case custom(UUID)
+}
+
+private enum BlockReferencePendingModuleSave {
+    case new(categoryID: UUID, preferredObjectID: UUID)
+    case saveAsNew(categoryID: UUID, instanceObjectID: UUID)
 }
 
 private enum BlockReferenceTransformDetail: String {
@@ -62,7 +72,12 @@ struct BlockReferenceParameterPanel: View {
     @ObservedObject var viewModel: WorkspaceViewModel
     let presentation: BlockReferencePanelPresentation
     @Binding var selectedTab: BlockReferencePanelTab
-    @State private var selectedLibraryCategory: BlockReferenceLibraryCategory = .primitives
+    @State private var selectedLibrarySelection: BlockReferenceLibrarySelection = .builtIn(.primitives)
+    @State private var isNewModuleCategoryAlertPresented = false
+    @State private var newModuleCategoryName = ""
+    @State private var pendingModuleSave: BlockReferencePendingModuleSave?
+    @State private var pendingModuleName = ""
+    @State private var isModuleNameAlertPresented = false
     @State private var arrayCount = 3
     @State private var arraySpacing = 40.0
     @State private var radialDegrees = 360.0
@@ -199,35 +214,68 @@ struct BlockReferenceParameterPanel: View {
                     .foregroundStyle(Color.white.opacity(0.42))
             }
 
-            Picker("体块分类", selection: $selectedLibraryCategory) {
-                ForEach(BlockReferenceLibraryCategory.allCases, id: \.self) { category in
-                    Text(category.rawValue).tag(category)
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 5) {
+                    ForEach(BlockReferenceLibraryCategory.allCases, id: \.self) { category in
+                        libraryCategoryButton(
+                            title: category.rawValue,
+                            selection: .builtIn(category)
+                        )
+                    }
+                    ForEach(viewModel.blockReferenceModuleLibrary.categories) { category in
+                        libraryCategoryButton(
+                            title: category.name,
+                            selection: .custom(category.id)
+                        )
+                    }
+                    Button {
+                        newModuleCategoryName = ""
+                        isNewModuleCategoryAlertPresented = true
+                    } label: {
+                        Image(systemName: "plus")
+                            .frame(width: 22, height: 22)
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.mini)
+                    .help("新建体块类目")
                 }
             }
-            .labelsHidden()
-            .pickerStyle(.segmented)
-            .controlSize(.small)
 
-            switch selectedLibraryCategory {
-            case .primitives:
+            switch selectedLibrarySelection {
+            case .builtIn(.primitives):
                 LazyVGrid(columns: blockLibraryColumns, spacing: 7) {
                     modeButton(.box, image: "cube", horizontalLayout: true)
                     modeButton(.cylinder, image: "cylinder", horizontalLayout: true)
                     modeButton(.cone, image: "triangle", horizontalLayout: true)
                     modeButton(.sphere, image: "circle", horizontalLayout: true)
                 }
-            case .people:
+            case .builtIn(.people):
                 LazyVGrid(columns: blockLibraryColumns, spacing: 7) {
                     moduleButton(.standingHuman)
                     moduleButton(.seatedHuman)
                     moduleButton(.poseableHuman)
                 }
-            case .architecture:
+            case .builtIn(.architecture):
                 LazyVGrid(columns: blockLibraryColumns, spacing: 7) {
                     moduleButton(.stairs)
                     moduleButton(.doorFrame)
                     moduleButton(.roomBox)
                     moduleButton(.table)
+                }
+            case .custom(let categoryID):
+                let modules = viewModel.blockReferenceModuleLibrary.modules(in: categoryID)
+                if modules.isEmpty {
+                    Text("此类目为空。选中场景体块后，在“场景对象”中右键存入这里。")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(Color.white.opacity(0.42))
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, minHeight: 58, alignment: .topLeading)
+                } else {
+                    LazyVGrid(columns: blockLibraryColumns, spacing: 7) {
+                        ForEach(modules) { asset in
+                            customModuleButton(asset)
+                        }
+                    }
                 }
             }
 
@@ -236,6 +284,39 @@ struct BlockReferenceParameterPanel: View {
         .font(.system(size: 11, weight: .medium))
         .foregroundStyle(Color.white.opacity(0.88))
         .environment(\.colorScheme, .dark)
+        .alert("新建体块类目", isPresented: $isNewModuleCategoryAlertPresented) {
+            TextField("例如：交通工具", text: $newModuleCategoryName)
+            Button("取消", role: .cancel) {}
+            Button("新建") {
+                if let categoryID = viewModel.createBlockReferenceModuleCategory(named: newModuleCategoryName) {
+                    selectedLibrarySelection = .custom(categoryID)
+                }
+            }
+        } message: {
+            Text("类目会持久保存在体块库中。")
+        }
+    }
+
+    private func libraryCategoryButton(
+        title: String,
+        selection: BlockReferenceLibrarySelection
+    ) -> some View {
+        let isSelected = selectedLibrarySelection == selection
+        return Button {
+            selectedLibrarySelection = selection
+        } label: {
+            Text(title)
+                .font(.system(size: 10, weight: .semibold))
+                .lineLimit(1)
+                .padding(.horizontal, 9)
+                .frame(minHeight: 24)
+                .foregroundStyle(isSelected ? Color.white : Color.white.opacity(0.7))
+                .background(
+                    RoundedRectangle(cornerRadius: 6)
+                        .fill(isSelected ? Color.accentColor : Color.white.opacity(0.07))
+                )
+        }
+        .buttonStyle(.plain)
     }
 
     private var blockLibraryColumns: [GridItem] {
@@ -252,6 +333,17 @@ struct BlockReferenceParameterPanel: View {
         .font(.system(size: 11, weight: .medium))
         .foregroundStyle(Color.white.opacity(0.88))
         .environment(\.colorScheme, .dark)
+        .alert("保存到体块库", isPresented: $isModuleNameAlertPresented) {
+            TextField("模块名称", text: $pendingModuleName)
+            Button("取消", role: .cancel) {
+                pendingModuleSave = nil
+            }
+            Button("保存") {
+                commitPendingModuleSave()
+            }
+        } message: {
+            Text("模块会保留各个体块，并以当前枢轴作为基准点。")
+        }
     }
 
     private func objectManagerActions(_ scene: BlockReferenceScene) -> some View {
@@ -429,6 +521,78 @@ struct BlockReferenceParameterPanel: View {
         }
         .buttonStyle(.borderless)
         .controlSize(.mini)
+        .contextMenu {
+            objectModuleContextMenu(object)
+        }
+    }
+
+    @ViewBuilder
+    private func objectModuleContextMenu(_ object: BlockReferenceObject) -> some View {
+        if let instance = viewModel.blockReferenceCustomModuleInstance(containing: object.id) {
+            let asset = viewModel.blockReferenceModuleAsset(for: instance)
+            Button("编辑模块部件") {
+                viewModel.beginEditingBlockReferenceModuleInstance(containing: object.id)
+            }
+            Button("保存并替换“\(asset?.name ?? "原模块")”") {
+                viewModel.replaceEditedBlockReferenceModule(containing: object.id)
+            }
+            .disabled(asset == nil)
+            Menu("另存为新模块") {
+                ForEach(viewModel.blockReferenceModuleLibrary.categories) { category in
+                    Button(category.name) {
+                        prepareModuleSave(
+                            .saveAsNew(categoryID: category.id, instanceObjectID: object.id),
+                            suggestedName: "\(asset?.name ?? object.name) 副本"
+                        )
+                    }
+                }
+            }
+            Divider()
+            Button("不回存体块库（保留场景修改）") {
+                viewModel.detachBlockReferenceModuleInstance(containing: object.id)
+            }
+        } else {
+            Menu("将所选体块存入体块库") {
+                ForEach(viewModel.blockReferenceModuleLibrary.categories) { category in
+                    Button(category.name) {
+                        prepareModuleSave(
+                            .new(categoryID: category.id, preferredObjectID: object.id),
+                            suggestedName: viewModel.suggestedBlockReferenceModuleName(
+                                preferredObjectID: object.id
+                            )
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    private func prepareModuleSave(
+        _ pending: BlockReferencePendingModuleSave,
+        suggestedName: String
+    ) {
+        pendingModuleSave = pending
+        pendingModuleName = suggestedName
+        isModuleNameAlertPresented = true
+    }
+
+    private func commitPendingModuleSave() {
+        guard let pendingModuleSave else { return }
+        switch pendingModuleSave {
+        case .new(let categoryID, let preferredObjectID):
+            _ = viewModel.saveSelectedBlockReferenceObjectsAsModule(
+                named: pendingModuleName,
+                categoryID: categoryID,
+                preferredObjectID: preferredObjectID
+            )
+        case .saveAsNew(let categoryID, let instanceObjectID):
+            _ = viewModel.saveEditedBlockReferenceModuleAsNew(
+                containing: instanceObjectID,
+                named: pendingModuleName,
+                categoryID: categoryID
+            )
+        }
+        self.pendingModuleSave = nil
     }
 
     private func displayControls(_ scene: BlockReferenceScene) -> some View {
@@ -1598,6 +1762,43 @@ struct BlockReferenceParameterPanel: View {
         }
         .buttonStyle(.plain)
         .help(moduleHelp(kind))
+    }
+
+    private func customModuleButton(_ asset: BlockReferenceModuleAsset) -> some View {
+        Button {
+            viewModel.instantiateBlockReferenceModule(assetID: asset.id)
+        } label: {
+            HStack(spacing: 5) {
+                Image(systemName: asset.symbolName)
+                    .font(.system(size: 11, weight: .semibold))
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(asset.name)
+                        .font(.system(size: 10, weight: .semibold))
+                        .lineLimit(1)
+                    Text("\(asset.templateObjects.count) 个体块")
+                        .font(.system(size: 9, weight: .medium).monospacedDigit())
+                        .foregroundStyle(Color.white.opacity(0.4))
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 8)
+            .frame(maxWidth: .infinity, minHeight: 34)
+            .foregroundStyle(Color.white.opacity(0.78))
+            .background(
+                RoundedRectangle(cornerRadius: 7)
+                    .fill(Color.white.opacity(0.07))
+            )
+        }
+        .buttonStyle(.plain)
+        .help("在活动工作面原点载入“\(asset.name)”")
+        .contextMenu {
+            Button("载入") {
+                viewModel.instantiateBlockReferenceModule(assetID: asset.id)
+            }
+            Button("载入并编辑部件") {
+                viewModel.instantiateBlockReferenceModule(assetID: asset.id, forEditing: true)
+            }
+        }
     }
 
     private func moduleHelp(_ kind: BlockReferenceModuleKind) -> String {

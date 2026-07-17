@@ -708,6 +708,7 @@ struct BlockReferenceScene: Codable, Sendable, Equatable {
     var snapshots: [BlockReferenceSceneSnapshot]
     var pivotMode: BlockReferencePivotMode
     var customPivot: BlockVector3
+    var customModuleInstances: [BlockReferenceCustomModuleInstance]
 
     init(
         objects: [BlockReferenceObject],
@@ -723,7 +724,8 @@ struct BlockReferenceScene: Codable, Sendable, Equatable {
         section: BlockSectionSettings = .disabled,
         snapshots: [BlockReferenceSceneSnapshot] = [],
         pivotMode: BlockReferencePivotMode = .selectionCenter,
-        customPivot: BlockVector3 = .zero
+        customPivot: BlockVector3 = .zero,
+        customModuleInstances: [BlockReferenceCustomModuleInstance] = []
     ) {
         self.objects = objects
         self.measurements = measurements
@@ -739,13 +741,14 @@ struct BlockReferenceScene: Codable, Sendable, Equatable {
         self.snapshots = snapshots
         self.pivotMode = pivotMode
         self.customPivot = customPivot
+        self.customModuleInstances = customModuleInstances
         normalize()
     }
 
     private enum CodingKeys: String, CodingKey {
         case objects, measurements, workingPlane, camera, display, snap
         case groups, cameraSlots, constructionLines, savedWorkingPlanes, section, snapshots
-        case pivotMode, customPivot
+        case pivotMode, customPivot, customModuleInstances
     }
 
     init(from decoder: Decoder) throws {
@@ -764,6 +767,10 @@ struct BlockReferenceScene: Codable, Sendable, Equatable {
         snapshots = try container.decodeIfPresent([BlockReferenceSceneSnapshot].self, forKey: .snapshots) ?? []
         pivotMode = try container.decodeIfPresent(BlockReferencePivotMode.self, forKey: .pivotMode) ?? .selectionCenter
         customPivot = try container.decodeIfPresent(BlockVector3.self, forKey: .customPivot) ?? .zero
+        customModuleInstances = try container.decodeIfPresent(
+            [BlockReferenceCustomModuleInstance].self,
+            forKey: .customModuleInstances
+        ) ?? []
         normalize()
     }
 
@@ -783,6 +790,11 @@ struct BlockReferenceScene: Codable, Sendable, Equatable {
             return normalized
         }
         let validObjectIDs = Set(objects.map(\.id))
+        customModuleInstances = customModuleInstances.compactMap { instance in
+            var repaired = instance
+            repaired.objectIDs = repaired.objectIDs.filter(validObjectIDs.contains)
+            return repaired.objectIDs.isEmpty ? nil : repaired
+        }
         groups = groups.filter { group in objects.contains(where: { $0.groupID == group.id }) }
         let validGroupIDs = Set(groups.map(\.id))
         for index in objects.indices where objects[index].groupID.map({ !validGroupIDs.contains($0) }) == true {

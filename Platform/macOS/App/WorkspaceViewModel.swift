@@ -201,6 +201,9 @@ final class WorkspaceViewModel: ObservableObject {
     private let brushLibraryPersistenceQueue = PersistenceSaveQueue(label: "ArtFlex.BrushLibraryPersistence")
     private let patternLibraryPersistenceQueue = PersistenceSaveQueue(label: "ArtFlex.PatternLibraryPersistence")
     private let textureFillLibraryPersistenceQueue = PersistenceSaveQueue(label: "ArtFlex.TextureFillLibraryPersistence")
+    private let blockReferenceModuleLibraryPersistenceQueue = PersistenceSaveQueue(
+        label: "ArtFlex.BlockReferenceModuleLibraryPersistence"
+    )
     var ideationBranchActivityHandler: (() -> Void)?
     var ideationOperationHandler: ((IdeationCanvasOperation) -> Void)?
     var ideationUndoHandler: (() -> Bool)?
@@ -369,6 +372,7 @@ final class WorkspaceViewModel: ObservableObject {
         let didSanitizePersistedBrushResources = Self.restorePersistedBrushLibraryIfAvailable(in: bootstrap)
         let didSanitizePersistedPatternLibrary = Self.restorePersistedPatternLibraryIfAvailable(in: bootstrap)
         Self.restorePersistedTextureFillLibraryIfAvailable(in: bootstrap)
+        Self.restorePersistedBlockReferenceModuleLibraryIfAvailable(in: bootstrap)
         Self.normalizeLegacySelectionIfNeeded(in: bootstrap.workspaceStore)
         Self.normalizeDisabledToolsIfNeeded(in: bootstrap.workspaceStore)
         let didApplyLaunchDefaultBrushPreset = Self.applyLaunchDefaultBrushPresetIfNeeded(in: bootstrap.workspaceStore)
@@ -1099,6 +1103,18 @@ final class WorkspaceViewModel: ObservableObject {
         hasUnsavedChanges = true
         refreshDocumentOverlayOnly()
         return true
+    }
+
+    /// Updates the global reusable module library without marking the current drawing dirty.
+    func updateBlockReferenceModuleLibrary(
+        _ transform: (inout BlockReferenceModuleLibraryState) -> Void
+    ) {
+        bootstrap.workspaceStore.updateBlockReferenceModuleLibrary { library in
+            transform(&library)
+            library.normalize()
+        }
+        persistBlockReferenceModuleLibrary()
+        refreshLightweight(reason: "block-reference-module-library")
     }
 
     func setBrushSize(_ size: Float) {
@@ -11063,6 +11079,7 @@ final class WorkspaceViewModel: ObservableObject {
             brushLibrary: workspace.brushLibrary,
             patternLibrary: workspace.patternLibrary,
             textureFillLibrary: workspace.textureFillLibrary,
+            blockReferenceModuleLibrary: workspace.blockReferenceModuleLibrary,
             tipImageLibrary: workspace.tipImageLibrary,
             generator: workspace.generator,
             viewport: .stageOneDefault,
@@ -11334,6 +11351,7 @@ final class WorkspaceViewModel: ObservableObject {
         resolvedWorkspace.brushLibrary = currentWorkspace.brushLibrary
         resolvedWorkspace.patternLibrary = currentWorkspace.patternLibrary
         resolvedWorkspace.textureFillLibrary = currentWorkspace.textureFillLibrary
+        resolvedWorkspace.blockReferenceModuleLibrary = currentWorkspace.blockReferenceModuleLibrary
         resolvedWorkspace.tipImageLibrary = mergeTipImageLibraries(
             base: currentWorkspace.tipImageLibrary,
             imported: normalizeImportedTipImageLibrary(openedWorkspace.tipImageLibrary)
@@ -11429,6 +11447,18 @@ final class WorkspaceViewModel: ObservableObject {
         }
     }
 
+    private func persistBlockReferenceModuleLibrary() {
+        let library = bootstrap.workspaceStore.state.blockReferenceModuleLibrary
+        let controller = bootstrap.blockReferenceModuleLibraryPersistenceController
+        blockReferenceModuleLibraryPersistenceQueue.enqueue {
+            try controller.saveLibrary(library)
+        } onError: { [weak self] error in
+            DispatchQueue.main.async {
+                self?.showStatus(.init(kind: .error, message: "保存体块库失败：\(error.localizedDescription)"))
+            }
+        }
+    }
+
     @discardableResult
     private static func restorePersistedBrushLibraryIfAvailable(in bootstrap: AppBootstrap) -> Bool {
         guard let restored = bootstrap.brushLibraryPersistenceController.loadResources() else {
@@ -11500,6 +11530,15 @@ final class WorkspaceViewModel: ObservableObject {
             if library.selectedItemID == nil {
                 library.selectedItemID = library.items.first?.id
             }
+        }
+    }
+
+    private static func restorePersistedBlockReferenceModuleLibraryIfAvailable(in bootstrap: AppBootstrap) {
+        guard let restored = bootstrap.blockReferenceModuleLibraryPersistenceController.loadLibrary() else {
+            return
+        }
+        bootstrap.workspaceStore.updateBlockReferenceModuleLibrary { library in
+            library = restored
         }
     }
 

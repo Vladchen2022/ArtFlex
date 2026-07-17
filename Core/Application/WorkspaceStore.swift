@@ -7,6 +7,7 @@ struct WorkspaceState: Codable, Sendable, Equatable {
     var brushLibrary: BrushLibraryState
     var patternLibrary: PatternLibraryState
     var textureFillLibrary: TextureFillLibraryState
+    var blockReferenceModuleLibrary: BlockReferenceModuleLibraryState
     var tipImageLibrary: TipImageLibraryState
     var generator: GeneratorSettings
     var viewport: CanvasViewport
@@ -19,6 +20,7 @@ struct WorkspaceState: Codable, Sendable, Equatable {
         brushLibrary: BrushLibraryState,
         patternLibrary: PatternLibraryState = .init(),
         textureFillLibrary: TextureFillLibraryState = .init(),
+        blockReferenceModuleLibrary: BlockReferenceModuleLibraryState = .empty,
         tipImageLibrary: TipImageLibraryState = .empty,
         generator: GeneratorSettings,
         viewport: CanvasViewport,
@@ -30,6 +32,7 @@ struct WorkspaceState: Codable, Sendable, Equatable {
         self.brushLibrary = brushLibrary
         self.patternLibrary = patternLibrary
         self.textureFillLibrary = textureFillLibrary
+        self.blockReferenceModuleLibrary = blockReferenceModuleLibrary
         self.tipImageLibrary = tipImageLibrary
         self.generator = generator
         self.viewport = viewport
@@ -43,6 +46,7 @@ struct WorkspaceState: Codable, Sendable, Equatable {
         case brushLibrary
         case patternLibrary
         case textureFillLibrary
+        case blockReferenceModuleLibrary
         case tipImageLibrary
         case generator
         case viewport
@@ -61,6 +65,10 @@ struct WorkspaceState: Codable, Sendable, Equatable {
                 TextureFillLibraryState.self,
                 forKey: .textureFillLibrary
             ) ?? .init(),
+            blockReferenceModuleLibrary: try container.decodeIfPresent(
+                BlockReferenceModuleLibraryState.self,
+                forKey: .blockReferenceModuleLibrary
+            ) ?? .empty,
             tipImageLibrary: try container.decodeIfPresent(TipImageLibraryState.self, forKey: .tipImageLibrary) ?? .empty,
             generator: try container.decode(GeneratorSettings.self, forKey: .generator),
             viewport: try container.decode(CanvasViewport.self, forKey: .viewport),
@@ -76,6 +84,7 @@ struct WorkspaceState: Codable, Sendable, Equatable {
         try container.encode(brushLibrary, forKey: .brushLibrary)
         try container.encode(patternLibrary, forKey: .patternLibrary)
         try container.encode(textureFillLibrary, forKey: .textureFillLibrary)
+        try container.encode(blockReferenceModuleLibrary, forKey: .blockReferenceModuleLibrary)
         try container.encode(tipImageLibrary, forKey: .tipImageLibrary)
         try container.encode(generator, forKey: .generator)
         try container.encode(viewport, forKey: .viewport)
@@ -89,6 +98,7 @@ struct WorkspaceState: Codable, Sendable, Equatable {
         brushLibrary: .stageOneDefault,
         patternLibrary: .init(),
         textureFillLibrary: .init(),
+        blockReferenceModuleLibrary: .empty,
         tipImageLibrary: .empty,
         generator: .stageOneDefault,
         viewport: .stageOneDefault,
@@ -130,6 +140,10 @@ final class WorkspaceStore {
 
     func updateTextureFillLibrary(_ transform: (inout TextureFillLibraryState) -> Void) {
         transform(&state.textureFillLibrary)
+    }
+
+    func updateBlockReferenceModuleLibrary(_ transform: (inout BlockReferenceModuleLibraryState) -> Void) {
+        transform(&state.blockReferenceModuleLibrary)
     }
 
     func updateTipImageLibrary(_ transform: (inout TipImageLibraryState) -> Void) {
