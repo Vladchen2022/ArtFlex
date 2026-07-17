@@ -325,6 +325,7 @@ struct BlockReferenceObject: Identifiable, Codable, Sendable, Equatable {
     var dimensions: BlockDimensions
     var customMesh: BlockReferenceCustomMesh?
     var moduleKind: BlockReferenceModuleKind?
+    var moduleBasePointOffset: BlockVector3?
     var isVisible: Bool
     var isLocked: Bool
     var groupID: UUID?
@@ -341,6 +342,7 @@ struct BlockReferenceObject: Identifiable, Codable, Sendable, Equatable {
         dimensions: BlockDimensions,
         customMesh: BlockReferenceCustomMesh? = nil,
         moduleKind: BlockReferenceModuleKind? = nil,
+        moduleBasePointOffset: BlockVector3? = nil,
         isVisible: Bool = true,
         isLocked: Bool = false,
         groupID: UUID? = nil,
@@ -356,6 +358,7 @@ struct BlockReferenceObject: Identifiable, Codable, Sendable, Equatable {
         self.dimensions = dimensions
         self.customMesh = customMesh
         self.moduleKind = moduleKind
+        self.moduleBasePointOffset = moduleBasePointOffset
         self.isVisible = isVisible
         self.isLocked = isLocked
         self.groupID = groupID
@@ -374,6 +377,7 @@ struct BlockReferenceObject: Identifiable, Codable, Sendable, Equatable {
         case dimensions
         case customMesh
         case moduleKind
+        case moduleBasePointOffset
         case isVisible
         case isLocked
         case groupID
@@ -392,6 +396,10 @@ struct BlockReferenceObject: Identifiable, Codable, Sendable, Equatable {
         dimensions = try container.decode(BlockDimensions.self, forKey: .dimensions)
         customMesh = try container.decodeIfPresent(BlockReferenceCustomMesh.self, forKey: .customMesh)
         moduleKind = try container.decodeIfPresent(BlockReferenceModuleKind.self, forKey: .moduleKind)
+        moduleBasePointOffset = try container.decodeIfPresent(
+            BlockVector3.self,
+            forKey: .moduleBasePointOffset
+        )
         isVisible = try container.decodeIfPresent(Bool.self, forKey: .isVisible) ?? true
         isLocked = try container.decodeIfPresent(Bool.self, forKey: .isLocked) ?? false
         groupID = try container.decodeIfPresent(UUID.self, forKey: .groupID)
@@ -409,6 +417,9 @@ struct BlockReferenceObject: Identifiable, Codable, Sendable, Equatable {
         rotation.normalize()
         dimensions.normalize()
         customMesh?.normalize()
+        if moduleBasePointOffset?.x.isFinite == false { moduleBasePointOffset?.x = 0 }
+        if moduleBasePointOffset?.y.isFinite == false { moduleBasePointOffset?.y = 0 }
+        if moduleBasePointOffset?.z.isFinite == false { moduleBasePointOffset?.z = 0 }
         style.normalize()
         humanPose?.normalize()
         moduleParameters?.normalize()
@@ -790,9 +801,12 @@ struct BlockReferenceScene: Codable, Sendable, Equatable {
             return normalized
         }
         let validObjectIDs = Set(objects.map(\.id))
+        var claimedModuleObjectIDs = Set<UUID>()
         customModuleInstances = customModuleInstances.compactMap { instance in
             var repaired = instance
-            repaired.objectIDs = repaired.objectIDs.filter(validObjectIDs.contains)
+            repaired.objectIDs = repaired.objectIDs.filter {
+                validObjectIDs.contains($0) && claimedModuleObjectIDs.insert($0).inserted
+            }
             return repaired.objectIDs.isEmpty ? nil : repaired
         }
         groups = groups.filter { group in objects.contains(where: { $0.groupID == group.id }) }
@@ -985,6 +999,20 @@ struct BlockReferenceNumericTransform: Sendable, Equatable {
                 )
             }
         }
+        if object.moduleKind != nil,
+           let localBasePoint = object.moduleBasePointOffset {
+            var originalObject = object
+            originalObject.position = snapshot.position
+            originalObject.rotation = snapshot.rotation
+            originalObject.dimensions = snapshot.dimensions
+            let transformedBasePoint = applying(
+                to: blockTransformPoint(localBasePoint, object: originalObject)
+            )
+            result.moduleBasePointOffset = blockInverseTransformPoint(
+                transformedBasePoint,
+                object: result
+            )
+        }
         result.normalize()
         return result
     }
@@ -1146,4 +1174,69 @@ func blockReferenceExpandedSelectionIDs(
             .filter { $0.groupID.map(selectedGroupIDs.contains) == true }
             .map(\.id)
     )
+}
+
+func blockReferenceSelectedModuleBasePoint(
+    in scene: BlockReferenceScene,
+    selection: Set<UUID>,
+    activeObjectID: UUID?
+) -> BlockVector3? {
+    let selectedIDs = blockReferenceExpandedSelectionIDs(in: scene, selection: selection)
+    guard !selectedIDs.isEmpty else { return nil }
+
+    let exactInstances = scene.customModuleInstances.filter {
+        Set($0.objectIDs) == selectedIDs
+    }
+    if let activeObjectID,
+       let instance = exactInstances.first(where: { $0.objectIDs.contains(activeObjectID) }) {
+        return instance.basePoint
+    }
+    if let instance = exactInstances.first {
+        return instance.basePoint
+    }
+
+    guard selectedIDs.count == 1,
+          let objectID = activeObjectID ?? selectedIDs.first,
+          selectedIDs.contains(objectID),
+          !scene.customModuleInstances.contains(where: { $0.objectIDs.contains(objectID) }),
+          let object = scene.objects.first(where: { $0.id == objectID })
+    else { return nil }
+    return blockReferenceObjectModuleBasePoint(object)
+}
+
+@discardableResult
+func blockReferenceSetSelectedModuleBasePoint(
+    _ basePoint: BlockVector3,
+    in scene: inout BlockReferenceScene,
+    selection: Set<UUID>,
+    activeObjectID: UUID?
+) -> Bool {
+    let selectedIDs = blockReferenceExpandedSelectionIDs(in: scene, selection: selection)
+    guard !selectedIDs.isEmpty else { return false }
+
+    let exactInstanceIndices = scene.customModuleInstances.indices.filter {
+        Set(scene.customModuleInstances[$0].objectIDs) == selectedIDs
+    }
+    let instanceIndex = activeObjectID.flatMap { activeID in
+        exactInstanceIndices.first(where: {
+            scene.customModuleInstances[$0].objectIDs.contains(activeID)
+        })
+    } ?? exactInstanceIndices.first
+    if let instanceIndex {
+        scene.customModuleInstances[instanceIndex].basePoint = basePoint
+        return true
+    }
+
+    guard selectedIDs.count == 1,
+          let objectID = activeObjectID ?? selectedIDs.first,
+          selectedIDs.contains(objectID),
+          !scene.customModuleInstances.contains(where: { $0.objectIDs.contains(objectID) }),
+          let objectIndex = scene.objects.firstIndex(where: { $0.id == objectID }),
+          scene.objects[objectIndex].moduleKind != nil
+    else { return false }
+    scene.objects[objectIndex].moduleBasePointOffset = blockInverseTransformPoint(
+        basePoint,
+        object: scene.objects[objectIndex]
+    )
+    return true
 }

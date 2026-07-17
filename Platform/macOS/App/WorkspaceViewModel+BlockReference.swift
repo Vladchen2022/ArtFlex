@@ -52,6 +52,14 @@ extension WorkspaceViewModel {
 
     var resolvedBlockReferencePivot: BlockVector3? {
         guard let scene = blockReferenceScene else { return blockReferenceSelectionCenter }
+        if scene.pivotMode == .custom,
+           let moduleBasePoint = blockReferenceSelectedModuleBasePoint(
+               in: scene,
+               selection: blockReferenceEditorState.resolvedSelectedObjectIDs,
+               activeObjectID: blockReferenceEditorState.selectedObjectID
+           ) {
+            return moduleBasePoint
+        }
         switch scene.pivotMode {
         case .selectionCenter:
             return blockReferenceSelectionCenter
@@ -104,16 +112,17 @@ extension WorkspaceViewModel {
     }
 
     private func syncBlockReferencePivotToSelectedModule() {
-        guard let scene = blockReferenceScene else { return }
-        let selectedIDs = selectedBlockReferenceObjectIDs
-        guard let instance = scene.customModuleInstances.first(where: {
-            let memberIDs = Set($0.objectIDs)
-            return !memberIDs.isEmpty && memberIDs.isSubset(of: selectedIDs)
-        }) else { return }
-        guard scene.pivotMode != .custom || scene.customPivot != instance.basePoint else { return }
+        guard let scene = blockReferenceScene,
+              scene.pivotMode == .custom,
+              let basePoint = blockReferenceSelectedModuleBasePoint(
+                  in: scene,
+                  selection: blockReferenceEditorState.resolvedSelectedObjectIDs,
+                  activeObjectID: blockReferenceEditorState.selectedObjectID
+              ),
+              scene.customPivot != basePoint
+        else { return }
         _ = updateBlockReferenceDocument { stored in
-            stored?.customPivot = instance.basePoint
-            stored?.pivotMode = .custom
+            stored?.customPivot = basePoint
         }
     }
 
@@ -151,15 +160,15 @@ extension WorkspaceViewModel {
         guard let center = blockReferenceSelectionCenter else { return }
         let selectedIDs = selectedBlockReferenceObjectIDs
         _ = updateBlockReferenceDocument(operationKind: "blockReference.pivot.selection") { scene in
-            scene?.customPivot = center
-            scene?.pivotMode = .custom
             guard var value = scene else { return }
-            for index in value.customModuleInstances.indices {
-                let memberIDs = Set(value.customModuleInstances[index].objectIDs)
-                if !memberIDs.isEmpty, memberIDs.isSubset(of: selectedIDs) {
-                    value.customModuleInstances[index].basePoint = center
-                }
-            }
+            value.customPivot = center
+            value.pivotMode = .custom
+            blockReferenceSetSelectedModuleBasePoint(
+                center,
+                in: &value,
+                selection: selectedIDs,
+                activeObjectID: blockReferenceEditorState.selectedObjectID
+            )
             scene = value
         }
         blockReferenceEditorState.instruction = "模块基准点已设为所选体块中心；载入模块时此点会落在活动工作面原点。"
@@ -442,6 +451,7 @@ extension WorkspaceViewModel {
             blockReferenceEditorState.selectedObjectIDs = selection
             blockReferenceEditorState.selectedObjectID = face.objectID
             blockReferenceEditorState.selectedFaceIndex = face.faceIndex
+            syncBlockReferencePivotToSelectedModule()
             guard let selected = scene.objects.first(where: { $0.id == face.objectID }),
                   !selected.isLocked,
                   let worldPoint = blockWorldPoint(
@@ -510,13 +520,12 @@ extension WorkspaceViewModel {
                 guard var value = stored else { return }
                 value.customPivot = pickedPoint
                 value.pivotMode = .custom
-                let selectedIDs = blockReferenceEditorState.resolvedSelectedObjectIDs
-                for index in value.customModuleInstances.indices {
-                    let memberIDs = Set(value.customModuleInstances[index].objectIDs)
-                    if !memberIDs.isEmpty, memberIDs.isSubset(of: selectedIDs) {
-                        value.customModuleInstances[index].basePoint = pickedPoint
-                    }
-                }
+                blockReferenceSetSelectedModuleBasePoint(
+                    pickedPoint,
+                    in: &value,
+                    selection: blockReferenceEditorState.resolvedSelectedObjectIDs,
+                    activeObjectID: blockReferenceEditorState.selectedObjectID
+                )
                 stored = value
             }
             blockReferenceEditorState.mode = .select
@@ -1347,6 +1356,7 @@ extension WorkspaceViewModel {
         blockReferenceEditorState.selectedObjectIDs = [object.id]
         blockReferenceEditorState.selectedFaceIndex = nil
         blockReferenceEditorState.mode = .select
+        syncBlockReferencePivotToSelectedModule()
         if kind == .poseableHuman {
             blockReferenceEditorState.instruction = "已添加可摆姿人体；在“变换”标签调整主要关节。"
         } else if kind.isParametric {

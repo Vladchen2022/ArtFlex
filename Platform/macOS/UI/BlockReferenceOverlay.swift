@@ -363,7 +363,13 @@ struct BlockReferenceOverlay: View {
         case .workingPlaneOrigin:
             selectionCenter = scene.workingPlane.origin
         case .custom:
-            selectionCenter = scene.customPivot
+            let storedBasePoint = blockReferenceSelectedModuleBasePoint(
+                in: scene,
+                selection: editorState.resolvedSelectedObjectIDs,
+                activeObjectID: activeID
+            ) ?? scene.customPivot
+            selectionCenter = editorState.numericTransform?.applying(to: storedBasePoint)
+                ?? storedBasePoint
         }
         let axisDirections: [BlockReferenceAxis: BlockVector3]
         if let captured = editorState.numericTransform?.axisDirections
@@ -555,8 +561,15 @@ struct BlockReferenceOverlay: View {
     private func drawModuleBasePointMarker(in context: GraphicsContext) {
         guard !scene.display.isFrozen,
               scene.pivotMode == .custom,
-              !editorState.resolvedSelectedObjectIDs.isEmpty,
-              let point = viewportPoint(scene.customPivot) else { return }
+              !editorState.resolvedSelectedObjectIDs.isEmpty else { return }
+        let storedBasePoint = blockReferenceSelectedModuleBasePoint(
+            in: scene,
+            selection: editorState.resolvedSelectedObjectIDs,
+            activeObjectID: editorState.selectedObjectID
+        ) ?? scene.customPivot
+        let displayedBasePoint = editorState.numericTransform?.applying(to: storedBasePoint)
+            ?? storedBasePoint
+        guard let point = viewportPoint(displayedBasePoint) else { return }
         let center = CGPoint(x: point.x, y: point.y)
         let outer = CGRect(x: center.x - 9, y: center.y - 9, width: 18, height: 18)
         let inner = CGRect(x: center.x - 3, y: center.y - 3, width: 6, height: 6)

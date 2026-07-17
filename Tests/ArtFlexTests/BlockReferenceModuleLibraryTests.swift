@@ -336,6 +336,81 @@ struct BlockReferenceModuleLibraryTests {
         #expect(viewModel.blockReferenceScene?.customModuleInstances.last?.basePoint == expectedWholeModuleAnchor)
     }
 
+    @Test
+    func eachModuleResolvesAndMovesOnlyItsOwnBasePoint() throws {
+        let chair = makeObject(name: "椅子", position: .init(x: -120, y: 0, z: 0))
+        let human = blockReferenceModuleObject(
+            kind: .standingHuman,
+            name: "站姿人体",
+            position: .init(x: 160, y: 30, z: 0)
+        )
+        let chairBasePoint = BlockVector3(x: -120, y: 0, z: 0)
+        let chairInstance = BlockReferenceCustomModuleInstance(
+            assetID: UUID(),
+            objectIDs: [chair.id],
+            basePoint: chairBasePoint
+        )
+        var scene = BlockReferenceScene.empty
+        scene.objects = [chair, human]
+        scene.customPivot = chairBasePoint
+        scene.pivotMode = .custom
+        scene.customModuleInstances = [chairInstance]
+
+        #expect(blockReferenceSelectedModuleBasePoint(
+            in: scene,
+            selection: [human.id],
+            activeObjectID: human.id
+        ) == human.position)
+        #expect(blockReferenceSelectedModuleBasePoint(
+            in: scene,
+            selection: [chair.id],
+            activeObjectID: chair.id
+        ) == chairBasePoint)
+
+        let pickedHumanBasePoint = human.position + BlockVector3(x: 12, y: 0, z: 0)
+        #expect(blockReferenceSetSelectedModuleBasePoint(
+            pickedHumanBasePoint,
+            in: &scene,
+            selection: [human.id],
+            activeObjectID: human.id
+        ))
+        #expect(scene.customModuleInstances.first?.basePoint == chairBasePoint)
+        #expect(scene.customPivot == chairBasePoint)
+
+        let humanIndex = try #require(scene.objects.firstIndex(where: { $0.id == human.id }))
+        scene.objects[humanIndex].position = human.position + BlockVector3(x: 0, y: 40, z: 0)
+        scene.objects[humanIndex].rotation.zDegrees = 90
+        let movedHumanBasePoint = try #require(blockReferenceObjectModuleBasePoint(scene.objects[humanIndex]))
+        #expect(abs(movedHumanBasePoint.x - human.position.x) < 0.000_001)
+        #expect(abs(movedHumanBasePoint.y - (human.position.y + 52)) < 0.000_001)
+        #expect(abs(movedHumanBasePoint.z - human.position.z) < 0.000_001)
+        let movedHuman = scene.objects[humanIndex]
+        let scale = BlockReferenceNumericTransform(
+            objectID: movedHuman.id,
+            kind: .scale,
+            axis: nil,
+            input: "2",
+            originalPosition: movedHuman.position,
+            originalRotation: movedHuman.rotation,
+            originalTransforms: [
+                movedHuman.id: BlockReferenceObjectTransformSnapshot(
+                    position: movedHuman.position,
+                    rotation: movedHuman.rotation,
+                    dimensions: movedHuman.dimensions
+                )
+            ],
+            pivot: movedHumanBasePoint
+        )
+        let scaledHuman = scale.applying(to: movedHuman)
+        let scaledHumanBasePoint = try #require(blockReferenceObjectModuleBasePoint(scaledHuman))
+        #expect(scaledHumanBasePoint.distance(to: movedHumanBasePoint) < 0.000_001)
+        #expect(blockReferenceSelectedModuleBasePoint(
+            in: scene,
+            selection: [chair.id],
+            activeObjectID: chair.id
+        ) == chairBasePoint)
+    }
+
     private func makeObject(name: String, position: BlockVector3) -> BlockReferenceObject {
         BlockReferenceObject(
             name: name,

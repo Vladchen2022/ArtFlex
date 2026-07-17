@@ -564,6 +564,23 @@ func blockTransformPoint(_ point: BlockVector3, object: BlockReferenceObject) ->
     object.position + blockRotate(point, rotation: object.rotation)
 }
 
+func blockInverseTransformPoint(_ point: BlockVector3, object: BlockReferenceObject) -> BlockVector3 {
+    let relative = point - object.position
+    let axisX = blockRotate(.unitX, rotation: object.rotation)
+    let axisY = blockRotate(.unitY, rotation: object.rotation)
+    let axisZ = blockRotate(.unitZ, rotation: object.rotation)
+    return BlockVector3(
+        x: relative.dot(axisX),
+        y: relative.dot(axisY),
+        z: relative.dot(axisZ)
+    )
+}
+
+func blockReferenceObjectModuleBasePoint(_ object: BlockReferenceObject) -> BlockVector3? {
+    guard object.moduleKind != nil else { return nil }
+    return blockTransformPoint(object.moduleBasePointOffset ?? .zero, object: object)
+}
+
 func blockRotate(_ point: BlockVector3, rotation: BlockEulerRotation) -> BlockVector3 {
     let x = rotation.xDegrees * .pi / 180
     let y = rotation.yDegrees * .pi / 180
@@ -1079,6 +1096,7 @@ func blockReferenceModuleObject(
                 baseDimensions: advanced.dimensions
             ),
             moduleKind: kind,
+            moduleBasePointOffset: .zero,
             humanPose: kind == .poseableHuman ? pose : nil,
             moduleParameters: kind.isParametric ? parameters : nil
         )
@@ -1135,7 +1153,8 @@ func blockReferenceModuleObject(
             faces: faces,
             baseDimensions: dimensions
         ),
-        moduleKind: kind
+        moduleKind: kind,
+        moduleBasePointOffset: .zero
     )
 }
 
