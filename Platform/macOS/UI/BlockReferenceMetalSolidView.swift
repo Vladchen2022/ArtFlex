@@ -23,7 +23,7 @@ struct BlockReferenceMetalSolidView: NSViewRepresentable {
         view.clearDepth = 1
         view.framebufferOnly = true
         view.autoResizeDrawable = true
-        view.preferredFramesPerSecond = 120
+        view.updatePreferredFramesPerSecond()
         view.enableSetNeedsDisplay = !rendersContinuously
         view.isPaused = !rendersContinuously
         view.wantsLayer = true
@@ -36,6 +36,7 @@ struct BlockReferenceMetalSolidView: NSViewRepresentable {
 
     func updateNSView(_ view: BlockReferenceTransparentMTKView, context: Context) {
         context.coordinator.update(scene: scene, editorState: editorState, transform: transform)
+        view.updatePreferredFramesPerSecond()
         view.enableSetNeedsDisplay = !rendersContinuously
         view.isPaused = !rendersContinuously
         if !rendersContinuously {
@@ -92,6 +93,22 @@ struct BlockReferenceMetalSolidView: NSViewRepresentable {
 
 final class BlockReferenceTransparentMTKView: MTKView {
     override var isOpaque: Bool { false }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        updatePreferredFramesPerSecond()
+    }
+
+    func updatePreferredFramesPerSecond() {
+        preferredFramesPerSecond = blockReferencePreferredFramesPerSecond(
+            maximumFramesPerSecond: window?.screen?.maximumFramesPerSecond
+                ?? NSScreen.main?.maximumFramesPerSecond
+        )
+    }
+}
+
+func blockReferencePreferredFramesPerSecond(maximumFramesPerSecond: Int?) -> Int {
+    min(max(maximumFramesPerSecond ?? 60, 30), 120)
 }
 
 private enum BlockReferenceMetalSolidRendererError: Error {
@@ -120,6 +137,18 @@ private struct BlockReferenceGridSegment {
     var lineWidth: Double
 }
 
+private struct BlockReferenceMetalGeometryCacheKey: Equatable {
+    var objects: [BlockReferenceObject]
+    var isFrozen: Bool
+    var draft: BlockCreationDraft?
+    var numericTransform: BlockReferenceNumericTransform?
+}
+
+private struct BlockReferenceMetalGeometrySource {
+    var renderedFaces: [(face: BlockMeshFace, isDraft: Bool, style: BlockReferenceObjectStyle)]
+    var featureMasks: [UUID: [Int: [Bool]]]
+}
+
 @MainActor
 private final class BlockReferenceMetalSolidRenderer {
     private let context: MetalDeviceContext
@@ -127,6 +156,8 @@ private final class BlockReferenceMetalSolidRenderer {
     private let edgePipeline: MTLRenderPipelineState
     private let faceDepthState: MTLDepthStencilState
     private let edgeDepthState: MTLDepthStencilState
+    private var geometryCacheKey: BlockReferenceMetalGeometryCacheKey?
+    private var geometrySource: BlockReferenceMetalGeometrySource?
 
     init(context: MetalDeviceContext) throws {
         self.context = context
@@ -288,36 +319,16 @@ private final class BlockReferenceMetalSolidRenderer {
         transform: CanvasViewportTransform,
         viewportSize: CGSize
     ) -> (faces: [BlockReferenceSolidVertex], edges: [BlockReferenceSolidVertex]) {
-        var objects = scene.objects.filter {
-            $0.isVisible && (!scene.display.isFrozen || $0.style.includedInFrozenReference)
-        }.map { object in
-            (editorState.numericTransform?.applying(to: object) ?? object, false)
-        }
-        if let draft = editorState.draft {
-            objects.append((BlockReferenceObject(
-                id: UUID(uuidString: "00000000-0000-0000-0000-000000000001")!,
-                name: "草稿",
-                kind: draft.kind,
-                position: draft.center,
-                rotation: blockRotation(alignedTo: draft.plane),
-                dimensions: draft.dimensions
-            ), true))
-        }
-
-        let renderedFaces = objects.flatMap { object, isDraft in
-            blockObjectFaces(object).map { ($0, isDraft, object.style) }
-        }
-        let featureMasks = Dictionary(uniqueKeysWithValues: objects.map { object, _ in
-            let faces = blockObjectFaces(object)
-            return (object.id, blockReferenceFeatureEdgeMask(faces: faces))
-        })
+        let source = geometrySource(scene: scene, editorState: editorState)
+        let renderedFaces = source.renderedFaces
+        let featureMasks = source.featureMasks
         let gridSegments = scene.display.isFrozen
             ? []
             : makeGridSegments(scene: scene) + makeConstructionSegments(scene: scene)
 
         let cameraBasis = blockCameraBasis(scene.camera)
         let positiveDepths = (
-            renderedFaces.flatMap { $0.0.vertices }
+            renderedFaces.flatMap { $0.face.vertices }
                 + gridSegments.flatMap { [$0.start, $0.end] }
         )
             .map { ($0 - cameraBasis.position).dot(cameraBasis.forward) }
@@ -335,7 +346,10 @@ private final class BlockReferenceMetalSolidRenderer {
 
         var faceVertices: [BlockReferenceSolidVertex] = []
         var edgeVertices: [BlockReferenceSolidVertex] = []
-        for (face, isDraft, style) in renderedFaces {
+        for renderedFace in renderedFaces {
+            let face = renderedFace.face
+            let isDraft = renderedFace.isDraft
+            let style = renderedFace.style
             let sectionClipped = blockReferenceClipFace(face.vertices, section: scene.section)
             let nearClipChangedTopology = sectionClipped.contains { vertex in
                 (vertex - cameraBasis.position).dot(cameraBasis.forward) < nearDepth
@@ -362,8 +376,8 @@ private final class BlockReferenceMetalSolidRenderer {
             let isSelected = !scene.display.isFrozen && selectedIDs.contains(face.objectID)
             let isActive = isSelected && face.objectID == editorState.selectedObjectID
             let isSelectedFace = isActive && face.faceIndex == editorState.selectedFaceIndex
-            let faceColor = scene.display.showsFaces
-                ? blockReferenceFaceColor(
+            if blockReferenceShouldRenderFaces(display: scene.display) {
+                let faceColor = blockReferenceFaceColor(
                     normal: face.normal,
                     isDraft: isDraft,
                     isSelected: isSelected,
@@ -372,12 +386,11 @@ private final class BlockReferenceMetalSolidRenderer {
                     accent: accent,
                     style: style
                 )
-                : .zero
-
-            for index in 1..<(projected.count - 1) {
-                faceVertices.append(solidVertex(projected[0], color: faceColor, viewportSize: viewportSize))
-                faceVertices.append(solidVertex(projected[index], color: faceColor, viewportSize: viewportSize))
-                faceVertices.append(solidVertex(projected[index + 1], color: faceColor, viewportSize: viewportSize))
+                for index in 1..<(projected.count - 1) {
+                    faceVertices.append(solidVertex(projected[0], color: faceColor, viewportSize: viewportSize))
+                    faceVertices.append(solidVertex(projected[index], color: faceColor, viewportSize: viewportSize))
+                    faceVertices.append(solidVertex(projected[index + 1], color: faceColor, viewportSize: viewportSize))
+                }
             }
 
             guard scene.display.showsEdges else { continue }
@@ -444,6 +457,53 @@ private final class BlockReferenceMetalSolidRenderer {
             )
         }
         return (faceVertices, edgeVertices)
+    }
+
+    private func geometrySource(
+        scene: BlockReferenceScene,
+        editorState: BlockReferenceEditorState
+    ) -> BlockReferenceMetalGeometrySource {
+        let key = BlockReferenceMetalGeometryCacheKey(
+            objects: scene.objects,
+            isFrozen: scene.display.isFrozen,
+            draft: editorState.draft,
+            numericTransform: editorState.numericTransform
+        )
+        if key == geometryCacheKey, let geometrySource {
+            return geometrySource
+        }
+
+        var objects = scene.objects.filter {
+            $0.isVisible && (!scene.display.isFrozen || $0.style.includedInFrozenReference)
+        }.map { object in
+            (editorState.numericTransform?.applying(to: object) ?? object, false)
+        }
+        if let draft = editorState.draft {
+            objects.append((BlockReferenceObject(
+                id: UUID(uuidString: "00000000-0000-0000-0000-000000000001")!,
+                name: "草稿",
+                kind: draft.kind,
+                position: draft.center,
+                rotation: blockRotation(alignedTo: draft.plane),
+                dimensions: draft.dimensions
+            ), true))
+        }
+
+        let renderedFaces = objects.flatMap { object, isDraft in
+            blockObjectFaces(object).map { ($0, isDraft, object.style) }
+        }
+        let facesByObjectID = Dictionary(grouping: renderedFaces, by: { $0.0.objectID })
+        let featureMasks = Dictionary(uniqueKeysWithValues: objects.map { object, _ in
+            let faces = facesByObjectID[object.id]?.map(\.0) ?? []
+            return (object.id, blockReferenceFeatureEdgeMask(faces: faces))
+        })
+        let source = BlockReferenceMetalGeometrySource(
+            renderedFaces: renderedFaces.map { (face: $0.0, isDraft: $0.1, style: $0.2) },
+            featureMasks: featureMasks
+        )
+        geometryCacheKey = key
+        geometrySource = source
+        return source
     }
 
     private func makeGridSegments(scene: BlockReferenceScene) -> [BlockReferenceGridSegment] {
@@ -644,6 +704,10 @@ private final class BlockReferenceMetalSolidRenderer {
         vertices.append(solidVertex(startNegative, color: color, viewportSize: viewportSize, depthBias: depthBias))
         vertices.append(solidVertex(endNegative, color: color, viewportSize: viewportSize, depthBias: depthBias))
     }
+}
+
+func blockReferenceShouldRenderFaces(display: BlockReferenceDisplaySettings) -> Bool {
+    display.mode == .solid && display.showsFaces
 }
 
 func blockReferenceShouldRenderProjectedEdge(

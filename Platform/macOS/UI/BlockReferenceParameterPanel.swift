@@ -686,6 +686,8 @@ struct BlockReferenceParameterPanel: View {
                     get: { scene.display.showsFaces },
                     set: { value in viewModel.setBlockReferenceShowsFaces(value) }
                 ))
+                .disabled(scene.display.mode == .wireframe)
+                .help(scene.display.mode == .wireframe ? "线框模式只显示边；切换到实体后可控制面显示。" : "显示或隐藏实体表面")
                 Toggle("边", isOn: Binding(
                     get: { scene.display.showsEdges },
                     set: { value in viewModel.setBlockReferenceShowsEdges(value) }

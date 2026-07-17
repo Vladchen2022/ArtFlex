@@ -261,7 +261,6 @@ extension WorkspaceViewModel {
         blockReferenceGizmoDragSession = nil
         blockReferenceCameraNavigationMode = nil
         blockReferenceCameraNavigationStart = nil
-        blockReferenceCameraNavigationHasCheckpoint = false
         blockReferenceCameraPreview = nil
         blockReferenceCameraRenderState.cancelNavigation()
         isBlockReferenceCameraNavigating = false
@@ -1590,7 +1589,6 @@ extension WorkspaceViewModel {
               !scene.display.isFrozen else { return }
         blockReferenceCameraNavigationMode = mode
         blockReferenceCameraNavigationStart = scene.camera
-        blockReferenceCameraNavigationHasCheckpoint = false
         blockReferenceCameraPreview = nil
         blockReferenceCameraRenderState.beginNavigation()
         isBlockReferenceCameraNavigating = true
@@ -1605,10 +1603,6 @@ extension WorkspaceViewModel {
         guard blockReferenceCameraNavigationMode == mode,
               let start = blockReferenceCameraNavigationStart,
               abs(deltaX) + abs(deltaY) > 0.01 else { return }
-        if !blockReferenceCameraNavigationHasCheckpoint {
-            guard captureBlockReferenceHistoryCheckpoint(operationKind: "blockReference.cameraNavigation") else { return }
-            blockReferenceCameraNavigationHasCheckpoint = true
-        }
         var camera = start
         switch mode {
         case .orbit:
@@ -1636,7 +1630,9 @@ extension WorkspaceViewModel {
 
     func endBlockReferenceCameraNavigation() {
         if let camera = blockReferenceCameraPreview {
-            let didCommit = updateBlockReferenceDocument { scene in
+            let didCommit = updateBlockReferenceDocument(
+                operationKind: "blockReference.cameraNavigation"
+            ) { scene in
                 scene?.camera = camera
             }
             if didCommit {
@@ -1651,7 +1647,6 @@ extension WorkspaceViewModel {
         isBlockReferenceCameraNavigating = false
         blockReferenceCameraNavigationMode = nil
         blockReferenceCameraNavigationStart = nil
-        blockReferenceCameraNavigationHasCheckpoint = false
     }
 
     func zoomBlockReferenceCamera(by multiplier: Double) {

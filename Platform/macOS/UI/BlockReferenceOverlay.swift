@@ -10,32 +10,14 @@ struct BlockReferenceOverlay: View {
 
     var body: some View {
         ZStack {
-            if scene.display.mode == .wireframe {
-                TimelineView(.animation(
-                    minimumInterval: 1.0 / 120.0,
-                    paused: !rendersContinuously
-                )) { _ in
-                    Canvas { context, _ in
-                        var renderScene = scene
-                        if let liveCamera = cameraRenderState.camera {
-                            renderScene.camera = liveCamera
-                        }
-                        drawWorkingPlane(in: context, scene: renderScene)
-                        drawWireframeObjects(in: context, scene: renderScene)
-                    }
-                }
-            }
-
-            if scene.display.mode == .solid {
-                BlockReferenceMetalSolidView(
-                    scene: scene,
-                    editorState: editorState,
-                    transform: transform,
-                    cameraRenderState: cameraRenderState,
-                    rendersContinuously: rendersContinuously
-                )
-                .opacity(Double(scene.display.opacity))
-            }
+            BlockReferenceMetalSolidView(
+                scene: scene,
+                editorState: editorState,
+                transform: transform,
+                cameraRenderState: cameraRenderState,
+                rendersContinuously: rendersContinuously
+            )
+            .opacity(Double(scene.display.opacity))
 
             if scene.display.showsPerspectiveGuides {
                 TimelineView(.animation(

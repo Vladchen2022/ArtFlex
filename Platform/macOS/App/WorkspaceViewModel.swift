@@ -231,7 +231,6 @@ final class WorkspaceViewModel: ObservableObject {
     var isAdjustingBlockReferenceParameters = false
     var blockReferenceCameraNavigationMode: BlockReferenceNavigationMode?
     var blockReferenceCameraNavigationStart: BlockReferenceCamera?
-    var blockReferenceCameraNavigationHasCheckpoint = false
     private var layerThumbnailCache: [LayerID: CGImage] = [:]
     private var generatorStrokeSession = GeneratorStrokeSessionState()
     private var activeLassoRawPoints: [CanvasPoint] = []

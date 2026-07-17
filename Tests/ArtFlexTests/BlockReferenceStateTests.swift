@@ -72,6 +72,24 @@ struct BlockReferenceStateTests {
     }
 
     @Test
+    func displayModesHaveDistinctFaceRenderingAndUseTheDisplayRefreshRate() {
+        var display = BlockReferenceDisplaySettings.stageOneDefault
+        #expect(blockReferenceShouldRenderFaces(display: display))
+
+        display.mode = .wireframe
+        #expect(!blockReferenceShouldRenderFaces(display: display))
+
+        display.mode = .solid
+        display.showsFaces = false
+        #expect(!blockReferenceShouldRenderFaces(display: display))
+
+        #expect(blockReferencePreferredFramesPerSecond(maximumFramesPerSecond: nil) == 60)
+        #expect(blockReferencePreferredFramesPerSecond(maximumFramesPerSecond: 60) == 60)
+        #expect(blockReferencePreferredFramesPerSecond(maximumFramesPerSecond: 120) == 120)
+        #expect(blockReferencePreferredFramesPerSecond(maximumFramesPerSecond: 240) == 120)
+    }
+
+    @Test
     @MainActor
     func liveCameraRenderStateHandsOffOnlyAfterRendererReceivesCommittedCamera() throws {
         let stored = BlockReferenceCamera.stageOneDefault
@@ -117,12 +135,12 @@ struct BlockReferenceStateTests {
         #expect(rendererSource.contains("encoder.setCullMode(.none)"))
         #expect(rendererSource.contains("view.setNeedsDisplay(view.bounds)"))
         #expect(rendererSource.contains("presentsWithTransaction") == false)
-        #expect(rendererSource.contains("view.preferredFramesPerSecond = 120"))
+        #expect(rendererSource.contains("blockReferencePreferredFramesPerSecond("))
         #expect(rendererSource.contains("view.isPaused = !rendersContinuously"))
         #expect(rendererSource.contains("cameraRenderState.camera"))
         #expect(rendererSource.contains("makeGridSegments(scene: scene)"))
         #expect(overlaySource.contains("BlockReferenceMetalSolidView("))
-        #expect(overlaySource.contains("if scene.display.mode == .wireframe"))
+        #expect(overlaySource.contains("if scene.display.mode == .wireframe") == false)
         #expect(overlaySource.contains("TimelineView(.animation("))
     }
 
