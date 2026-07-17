@@ -27,6 +27,16 @@ extension WorkspaceViewModel {
         return categoryID
     }
 
+    func deleteBlockReferenceModule(assetID: UUID) {
+        var removedAsset: BlockReferenceModuleAsset?
+        updateBlockReferenceModuleLibrary { library in
+            removedAsset = library.removeModule(id: assetID)
+        }
+        blockReferenceEditorState.instruction = removedAsset.map {
+            "已从体块库删除“\($0.name)”；场景中已载入的体块保持不变。"
+        } ?? "删除模块失败：模块已不存在。"
+    }
+
     func suggestedBlockReferenceModuleName(preferredObjectID: UUID? = nil) -> String {
         let preferred = preferredObjectID.flatMap { objectID in
             blockReferenceScene?.objects.first { $0.id == objectID }

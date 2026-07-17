@@ -112,6 +112,14 @@ struct BlockReferenceModuleLibraryTests {
         let controller = BlockReferenceModuleLibraryPersistenceController(rootDirectoryURL: root)
         try controller.saveLibrary(library)
         #expect(controller.loadLibrary() == library)
+
+        let removed = library.removeModule(id: original.id)
+        #expect(removed?.id == original.id)
+        #expect(library.module(id: original.id) == nil)
+        #expect(library.categories.contains { $0.id == category.id })
+        #expect(library.removeModule(id: original.id) == nil)
+        try controller.saveLibrary(library)
+        #expect(controller.loadLibrary() == library)
     }
 
     @Test

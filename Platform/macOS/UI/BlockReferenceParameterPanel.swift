@@ -89,6 +89,7 @@ struct BlockReferenceParameterPanel: View {
     @State private var pendingModuleSave: BlockReferencePendingModuleSave?
     @State private var pendingModuleName = ""
     @State private var isModuleNameAlertPresented = false
+    @State private var pendingModuleDeletion: BlockReferenceModuleAsset?
     @State private var arrayCount = 3
     @State private var arraySpacing = 40.0
     @State private var radialDegrees = 360.0
@@ -308,6 +309,24 @@ struct BlockReferenceParameterPanel: View {
             }
         } message: {
             Text("类目会持久保存在体块库中。")
+        }
+        .alert(
+            "删除模块？",
+            isPresented: Binding(
+                get: { pendingModuleDeletion != nil },
+                set: { if !$0 { pendingModuleDeletion = nil } }
+            ),
+            presenting: pendingModuleDeletion
+        ) { asset in
+            Button("删除", role: .destructive) {
+                viewModel.deleteBlockReferenceModule(assetID: asset.id)
+                pendingModuleDeletion = nil
+            }
+            Button("取消", role: .cancel) {
+                pendingModuleDeletion = nil
+            }
+        } message: { asset in
+            Text("“\(asset.name)”会从体块库永久删除。场景中已载入的体块不会被删除。")
         }
     }
 
@@ -1858,6 +1877,10 @@ struct BlockReferenceParameterPanel: View {
             }
             Button("载入并编辑部件") {
                 viewModel.instantiateBlockReferenceModule(assetID: asset.id, forEditing: true)
+            }
+            Divider()
+            Button("删除模块", role: .destructive) {
+                pendingModuleDeletion = asset
             }
         }
     }

@@ -279,6 +279,12 @@ struct BlockReferenceModuleLibraryState: Codable, Sendable, Equatable {
         return replacement
     }
 
+    @discardableResult
+    mutating func removeModule(id: UUID) -> BlockReferenceModuleAsset? {
+        guard let index = modules.firstIndex(where: { $0.id == id }) else { return nil }
+        return modules.remove(at: index)
+    }
+
     func modules(in categoryID: UUID) -> [BlockReferenceModuleAsset] {
         modules.filter { $0.categoryID == categoryID }
     }
