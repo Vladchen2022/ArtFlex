@@ -7856,6 +7856,9 @@ final class WorkspaceViewModel: ObservableObject {
             case .move:
                 selectedMeshWarpControlPointIndices = []
                 activeMeshWarpDragControlPointIndices = nil
+            case .meshArea:
+                selectedMeshWarpControlPointIndices = []
+                activeMeshWarpDragControlPointIndices = nil
             case .scale, .rotate:
                 activeMeshWarpDragControlPointIndices = nil
             }
@@ -7961,6 +7964,15 @@ final class WorkspaceViewModel: ObservableObject {
             )
             let draggedIndices = activeMeshWarpDragControlPointIndices ?? [index]
             let nextGrid = startGrid.movingControlPoints(at: draggedIndices, by: delta)
+            transformState.meshWarpGrid = nextGrid
+            setFreeTransformMeshWarpGrid(nextGrid)
+        case .meshArea(let parameter):
+            guard let startGrid = transformState.dragStartMeshWarpGrid else { return }
+            let delta = CanvasPoint(
+                x: point.x - dragStartPoint.x,
+                y: point.y - dragStartPoint.y
+            )
+            let nextGrid = startGrid.movingSurface(at: parameter, by: delta)
             transformState.meshWarpGrid = nextGrid
             setFreeTransformMeshWarpGrid(nextGrid)
         }

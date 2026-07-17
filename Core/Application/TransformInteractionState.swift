@@ -38,6 +38,7 @@ enum FreeTransformInteractionMode: Sendable, Equatable {
     case scale(FreeTransformHandle)
     case rotate
     case meshPoint(Int)
+    case meshArea(MeshWarpParameter)
 }
 
 enum FreeTransformToolMode: String, CaseIterable, Sendable, Equatable {
@@ -48,6 +49,11 @@ enum FreeTransformToolMode: String, CaseIterable, Sendable, Equatable {
 struct MeshWarpVertex: Sendable, Equatable {
     var canvasPosition: CanvasPoint
     var textureCoordinate: CanvasPoint
+}
+
+struct MeshWarpParameter: Sendable, Equatable {
+    var u: Double
+    var v: Double
 }
 
 struct MeshWarpGrid: Sendable, Equatable {
@@ -179,108 +185,218 @@ struct MeshWarpGrid: Sendable, Equatable {
         return bestIndex
     }
 
+    var cornerControlPointIndices: [Int] {
+        guard columns >= 2, rows >= 2 else { return [] }
+        return [
+            0,
+            columns - 1,
+            (rows - 1) * columns,
+            (rows * columns) - 1
+        ]
+    }
+
+    func nearestCornerControlPoint(to point: CanvasPoint, radius: Double) -> Int? {
+        var bestIndex: Int?
+        var bestDistance = max(radius, 0)
+        for index in cornerControlPointIndices where controlPoints.indices.contains(index) {
+            let controlPoint = controlPoints[index]
+            let distance = hypot(controlPoint.x - point.x, controlPoint.y - point.y)
+            if distance <= bestDistance {
+                bestDistance = distance
+                bestIndex = index
+            }
+        }
+        return bestIndex
+    }
+
+    func surfacePoint(at parameter: MeshWarpParameter) -> CanvasPoint? {
+        let weights = controlPointWeights(at: parameter)
+        guard weights.count == controlPoints.count, !weights.isEmpty else { return nil }
+
+        var result = CanvasPoint(x: 0, y: 0)
+        for (point, weight) in zip(controlPoints, weights) {
+            result.x += point.x * weight
+            result.y += point.y * weight
+        }
+        return result
+    }
+
+    func movingSurface(at parameter: MeshWarpParameter, by delta: CanvasPoint) -> MeshWarpGrid {
+        let weights = controlPointWeights(at: parameter)
+        guard weights.count == controlPoints.count, !weights.isEmpty else { return self }
+
+        let response = weights.reduce(0) { partial, weight in
+            partial + (weight * weight)
+        }
+        guard response > 0.000_001 else { return self }
+
+        var next = self
+        for index in next.controlPoints.indices {
+            let influence = weights[index] / response
+            next.controlPoints[index] = CanvasPoint(
+                x: controlPoints[index].x + (delta.x * influence),
+                y: controlPoints[index].y + (delta.y * influence)
+            )
+        }
+        return next
+    }
+
+    func surfaceParameter(containing point: CanvasPoint, subdivisions: Int = 24) -> MeshWarpParameter? {
+        let steps = max(subdivisions, 4)
+        let sampledPoints = sampledSurface(horizontalSteps: steps, verticalSteps: steps)
+        guard sampledPoints.count == (steps + 1) * (steps + 1) else { return nil }
+
+        for row in 0..<steps {
+            let v0 = Double(row) / Double(steps)
+            let v1 = Double(row + 1) / Double(steps)
+            for column in 0..<steps {
+                let u0 = Double(column) / Double(steps)
+                let u1 = Double(column + 1) / Double(steps)
+                let parameterA = MeshWarpParameter(u: u0, v: v0)
+                let parameterB = MeshWarpParameter(u: u1, v: v0)
+                let parameterC = MeshWarpParameter(u: u0, v: v1)
+                let parameterD = MeshWarpParameter(u: u1, v: v1)
+                let topLeftIndex = (row * (steps + 1)) + column
+                let pointA = sampledPoints[topLeftIndex]
+                let pointB = sampledPoints[topLeftIndex + 1]
+                let pointC = sampledPoints[topLeftIndex + steps + 1]
+                let pointD = sampledPoints[topLeftIndex + steps + 2]
+
+                if let barycentric = Self.barycentricCoordinates(
+                    for: point,
+                    triangle: (pointA, pointC, pointB)
+                ) {
+                    return Self.interpolateParameter(
+                        barycentric,
+                        triangle: (parameterA, parameterC, parameterB)
+                    )
+                }
+                if let barycentric = Self.barycentricCoordinates(
+                    for: point,
+                    triangle: (pointB, pointC, pointD)
+                ) {
+                    return Self.interpolateParameter(
+                        barycentric,
+                        triangle: (parameterB, parameterC, parameterD)
+                    )
+                }
+            }
+        }
+        return nil
+    }
+
     func tessellatedVertices(subdivisionsPerCell: Int = 8) -> [MeshWarpVertex] {
         guard columns >= 2, rows >= 2 else { return [] }
         guard controlPoints.count == columns * rows else { return [] }
         let subdivisions = max(subdivisionsPerCell, 1)
+        let horizontalSteps = (columns - 1) * subdivisions
+        let verticalSteps = (rows - 1) * subdivisions
+        let sampledPoints = sampledSurface(
+            horizontalSteps: horizontalSteps,
+            verticalSteps: verticalSteps
+        )
+        guard sampledPoints.count == (horizontalSteps + 1) * (verticalSteps + 1) else { return [] }
+
         var vertices: [MeshWarpVertex] = []
-        vertices.reserveCapacity((columns - 1) * (rows - 1) * subdivisions * subdivisions * 6)
+        vertices.reserveCapacity(horizontalSteps * verticalSteps * 6)
 
-        for row in 0..<(rows - 1) {
-            for column in 0..<(columns - 1) {
-                guard
-                    let topLeft = point(row: row, column: column),
-                    let topRight = point(row: row, column: column + 1),
-                    let bottomLeft = point(row: row + 1, column: column),
-                    let bottomRight = point(row: row + 1, column: column + 1)
-                else {
-                    continue
-                }
-
-                for subdivisionRow in 0..<subdivisions {
-                    let v0 = Double(subdivisionRow) / Double(subdivisions)
-                    let v1 = Double(subdivisionRow + 1) / Double(subdivisions)
-                    for subdivisionColumn in 0..<subdivisions {
-                        let u0 = Double(subdivisionColumn) / Double(subdivisions)
-                        let u1 = Double(subdivisionColumn + 1) / Double(subdivisions)
-
-                        let a = meshWarpVertex(
-                            cellColumn: column,
-                            cellRow: row,
-                            localU: u0,
-                            localV: v0,
-                            topLeft: topLeft,
-                            topRight: topRight,
-                            bottomLeft: bottomLeft,
-                            bottomRight: bottomRight
-                        )
-                        let b = meshWarpVertex(
-                            cellColumn: column,
-                            cellRow: row,
-                            localU: u1,
-                            localV: v0,
-                            topLeft: topLeft,
-                            topRight: topRight,
-                            bottomLeft: bottomLeft,
-                            bottomRight: bottomRight
-                        )
-                        let c = meshWarpVertex(
-                            cellColumn: column,
-                            cellRow: row,
-                            localU: u0,
-                            localV: v1,
-                            topLeft: topLeft,
-                            topRight: topRight,
-                            bottomLeft: bottomLeft,
-                            bottomRight: bottomRight
-                        )
-                        let d = meshWarpVertex(
-                            cellColumn: column,
-                            cellRow: row,
-                            localU: u1,
-                            localV: v1,
-                            topLeft: topLeft,
-                            topRight: topRight,
-                            bottomLeft: bottomLeft,
-                            bottomRight: bottomRight
-                        )
-                        vertices.append(contentsOf: [a, c, b, b, c, d])
-                    }
-                }
+        for row in 0..<verticalSteps {
+            let v0 = Double(row) / Double(verticalSteps)
+            let v1 = Double(row + 1) / Double(verticalSteps)
+            for column in 0..<horizontalSteps {
+                let u0 = Double(column) / Double(horizontalSteps)
+                let u1 = Double(column + 1) / Double(horizontalSteps)
+                let topLeftIndex = (row * (horizontalSteps + 1)) + column
+                let pointA = sampledPoints[topLeftIndex]
+                let pointB = sampledPoints[topLeftIndex + 1]
+                let pointC = sampledPoints[topLeftIndex + horizontalSteps + 1]
+                let pointD = sampledPoints[topLeftIndex + horizontalSteps + 2]
+                let a = MeshWarpVertex(canvasPosition: pointA, textureCoordinate: .init(x: u0, y: v0))
+                let b = MeshWarpVertex(canvasPosition: pointB, textureCoordinate: .init(x: u1, y: v0))
+                let c = MeshWarpVertex(canvasPosition: pointC, textureCoordinate: .init(x: u0, y: v1))
+                let d = MeshWarpVertex(canvasPosition: pointD, textureCoordinate: .init(x: u1, y: v1))
+                vertices.append(contentsOf: [a, c, b, b, c, d])
             }
         }
         return vertices
     }
 
-    private func meshWarpVertex(
-        cellColumn: Int,
-        cellRow: Int,
-        localU: Double,
-        localV: Double,
-        topLeft: CanvasPoint,
-        topRight: CanvasPoint,
-        bottomLeft: CanvasPoint,
-        bottomRight: CanvasPoint
-    ) -> MeshWarpVertex {
-        let top = CanvasPoint(
-            x: topLeft.x + ((topRight.x - topLeft.x) * localU),
-            y: topLeft.y + ((topRight.y - topLeft.y) * localU)
-        )
-        let bottom = CanvasPoint(
-            x: bottomLeft.x + ((bottomRight.x - bottomLeft.x) * localU),
-            y: bottomLeft.y + ((bottomRight.y - bottomLeft.y) * localU)
-        )
-        let canvasPosition = CanvasPoint(
-            x: top.x + ((bottom.x - top.x) * localV),
-            y: top.y + ((bottom.y - top.y) * localV)
-        )
-        let textureCoordinate = CanvasPoint(
-            x: (Double(cellColumn) + localU) / Double(columns - 1),
-            y: (Double(cellRow) + localV) / Double(rows - 1)
-        )
-        return MeshWarpVertex(
-            canvasPosition: canvasPosition,
-            textureCoordinate: textureCoordinate
+    private func sampledSurface(horizontalSteps: Int, verticalSteps: Int) -> [CanvasPoint] {
+        guard horizontalSteps > 0, verticalSteps > 0 else { return [] }
+        var points: [CanvasPoint] = []
+        points.reserveCapacity((horizontalSteps + 1) * (verticalSteps + 1))
+        for row in 0...verticalSteps {
+            let v = Double(row) / Double(verticalSteps)
+            for column in 0...horizontalSteps {
+                let u = Double(column) / Double(horizontalSteps)
+                guard let point = surfacePoint(at: .init(u: u, v: v)) else { return [] }
+                points.append(point)
+            }
+        }
+        return points
+    }
+
+    private func controlPointWeights(at parameter: MeshWarpParameter) -> [Double] {
+        guard columns >= 2, rows >= 2 else { return [] }
+        guard controlPoints.count == columns * rows else { return [] }
+        let horizontalWeights = Self.bernsteinWeights(parameter: parameter.u, count: columns)
+        let verticalWeights = Self.bernsteinWeights(parameter: parameter.v, count: rows)
+        var weights: [Double] = []
+        weights.reserveCapacity(controlPoints.count)
+        for verticalWeight in verticalWeights {
+            for horizontalWeight in horizontalWeights {
+                weights.append(horizontalWeight * verticalWeight)
+            }
+        }
+        return weights
+    }
+
+    private static func bernsteinWeights(parameter: Double, count: Int) -> [Double] {
+        let degree = max(count - 1, 1)
+        let t = min(max(parameter, 0), 1)
+        return (0...degree).map { index in
+            binomialCoefficient(degree, index) *
+                pow(t, Double(index)) *
+                pow(1 - t, Double(degree - index))
+        }
+    }
+
+    private static func binomialCoefficient(_ n: Int, _ k: Int) -> Double {
+        let resolvedK = min(k, n - k)
+        guard resolvedK > 0 else { return 1 }
+        return (1...resolvedK).reduce(1) { result, index in
+            result * Double(n - resolvedK + index) / Double(index)
+        }
+    }
+
+    private static func barycentricCoordinates(
+        for point: CanvasPoint,
+        triangle: (CanvasPoint, CanvasPoint, CanvasPoint)
+    ) -> (Double, Double, Double)? {
+        let (a, b, c) = triangle
+        let ab = CanvasPoint(x: b.x - a.x, y: b.y - a.y)
+        let ac = CanvasPoint(x: c.x - a.x, y: c.y - a.y)
+        let ap = CanvasPoint(x: point.x - a.x, y: point.y - a.y)
+        let denominator = (ab.x * ac.y) - (ab.y * ac.x)
+        guard abs(denominator) > 0.000_001 else { return nil }
+
+        let weightB = ((ap.x * ac.y) - (ap.y * ac.x)) / denominator
+        let weightC = ((ab.x * ap.y) - (ab.y * ap.x)) / denominator
+        let weightA = 1 - weightB - weightC
+        let tolerance = -0.000_1
+        guard weightA >= tolerance, weightB >= tolerance, weightC >= tolerance else { return nil }
+        return (weightA, weightB, weightC)
+    }
+
+    private static func interpolateParameter(
+        _ weights: (Double, Double, Double),
+        triangle: (MeshWarpParameter, MeshWarpParameter, MeshWarpParameter)
+    ) -> MeshWarpParameter {
+        let (weightA, weightB, weightC) = weights
+        let (a, b, c) = triangle
+        return MeshWarpParameter(
+            u: (a.u * weightA) + (b.u * weightB) + (c.u * weightC),
+            v: (a.v * weightA) + (b.v * weightB) + (c.v * weightC)
         )
     }
 }
@@ -653,8 +769,11 @@ func meshWarpInteractionMode(
     handleRadius: Double
 ) -> FreeTransformInteractionMode {
     guard let grid else { return .move }
-    if let index = grid.nearestControlPoint(to: point, radius: handleRadius) {
+    if let index = grid.nearestCornerControlPoint(to: point, radius: handleRadius) {
         return .meshPoint(index)
+    }
+    if let parameter = grid.surfaceParameter(containing: point) {
+        return .meshArea(parameter)
     }
     return .move
 }

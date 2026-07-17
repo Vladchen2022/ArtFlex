@@ -1994,7 +1994,7 @@ private struct FreeTransformHUD: View {
                 Text(selectedMeshPointCount > 0 ? "已选 \(selectedMeshPointCount) 点" : "Shift 多选")
                     .font(.system(size: 10.5, weight: .medium))
                     .foregroundStyle(Color.white.opacity(0.72))
-                    .help("按住 Shift 点击可追加或移除网格锚点")
+                    .help("按住 Shift 点击可追加或移除四角锚点；拖动格内区域可局部变形")
             }
 
             Button(action: onApply) {
@@ -3208,19 +3208,23 @@ private struct MeshWarpGridOverlay: View {
         ZStack(alignment: .topLeading) {
             Path { path in
                 for row in 0..<grid.rows {
-                    guard let first = grid.point(row: row, column: 0) else { continue }
+                    let v = Double(row) / Double(max(grid.rows - 1, 1))
+                    guard let first = grid.surfacePoint(at: .init(u: 0, v: v)) else { continue }
                     path.move(to: map(first))
-                    for column in 1..<grid.columns {
-                        if let point = grid.point(row: row, column: column) {
+                    for step in 1...guideSubdivisions {
+                        let u = Double(step) / Double(guideSubdivisions)
+                        if let point = grid.surfacePoint(at: .init(u: u, v: v)) {
                             path.addLine(to: map(point))
                         }
                     }
                 }
                 for column in 0..<grid.columns {
-                    guard let first = grid.point(row: 0, column: column) else { continue }
+                    let u = Double(column) / Double(max(grid.columns - 1, 1))
+                    guard let first = grid.surfacePoint(at: .init(u: u, v: 0)) else { continue }
                     path.move(to: map(first))
-                    for row in 1..<grid.rows {
-                        if let point = grid.point(row: row, column: column) {
+                    for step in 1...guideSubdivisions {
+                        let v = Double(step) / Double(guideSubdivisions)
+                        if let point = grid.surfacePoint(at: .init(u: u, v: v)) {
                             path.addLine(to: map(point))
                         }
                     }
@@ -3231,27 +3235,34 @@ private struct MeshWarpGridOverlay: View {
                 style: StrokeStyle(lineWidth: 1.15, dash: [5, 3])
             )
 
-            ForEach(Array(grid.controlPoints.enumerated()), id: \.offset) { index, point in
-                let isActive: Bool = {
-                    guard case .meshPoint(let activeIndex) = activeInteractionMode else {
-                        return false
-                    }
-                    return activeIndex == index
-                }()
-                let isSelected = selectedControlPointIndices.contains(index)
-                Circle()
-                    .fill(isSelected ? Color.accentColor : Color.white)
-                    .frame(
-                        width: isActive ? 12 : (isSelected ? 10 : 9),
-                        height: isActive ? 12 : (isSelected ? 10 : 9)
-                    )
-                    .overlay(
-                        Circle()
-                            .stroke(Color.black.opacity(0.72), lineWidth: 1.2)
-                    )
-                    .position(map(point))
+            ForEach(grid.cornerControlPointIndices, id: \.self) { index in
+                if grid.controlPoints.indices.contains(index) {
+                    let point = grid.controlPoints[index]
+                    let isActive: Bool = {
+                        guard case .meshPoint(let activeIndex) = activeInteractionMode else {
+                            return false
+                        }
+                        return activeIndex == index
+                    }()
+                    let isSelected = selectedControlPointIndices.contains(index)
+                    Circle()
+                        .fill(isSelected ? Color.accentColor : Color.white)
+                        .frame(
+                            width: isActive ? 12 : (isSelected ? 10 : 9),
+                            height: isActive ? 12 : (isSelected ? 10 : 9)
+                        )
+                        .overlay(
+                            Circle()
+                                .stroke(Color.black.opacity(0.72), lineWidth: 1.2)
+                        )
+                        .position(map(point))
+                }
             }
         }
+    }
+
+    private var guideSubdivisions: Int {
+        max((max(grid.columns, grid.rows) - 1) * 8, 8)
     }
 
     private func map(_ point: CanvasPoint) -> CGPoint {

@@ -329,20 +329,42 @@ struct TransformInteractionStateTests {
     }
 
     @Test
-    func meshWarpHitTestingPrioritizesAnchorsAndStateRequiresApply() {
+    func meshWarpHitTestingPrioritizesCornerAnchorsAndUsesInteriorAreaDrag() {
         let grid = MeshWarpGrid.regular(
             bounds: CanvasRect(
                 origin: .init(x: 20, y: 30),
                 size: .init(x: 90, y: 90)
             )
         )
-        let anchor = grid.controlPoints[6]
+        let corner = grid.controlPoints[0]
         #expect(
             meshWarpInteractionMode(
-                point: .init(x: anchor.x + 2, y: anchor.y - 1),
+                point: .init(x: corner.x + 2, y: corner.y - 1),
                 grid: grid,
                 handleRadius: 8
-            ) == .meshPoint(6)
+            ) == .meshPoint(0)
+        )
+
+        let interiorPoint = CanvasPoint(x: 65, y: 75)
+        let interiorMode = meshWarpInteractionMode(
+            point: interiorPoint,
+            grid: grid,
+            handleRadius: 8
+        )
+        guard case .meshArea(let parameter) = interiorMode else {
+            Issue.record("格内位置必须进入局部网格变形，而不是移动整个网格")
+            return
+        }
+        #expect(abs(parameter.u - 0.5) < 0.001)
+        #expect(abs(parameter.v - 0.5) < 0.001)
+
+        let hiddenControlPoint = grid.controlPoints[6]
+        #expect(
+            meshWarpInteractionMode(
+                point: hiddenControlPoint,
+                grid: grid,
+                handleRadius: 8
+            ) != .meshPoint(6)
         )
 
         var state = TransformInteractionState()
@@ -353,6 +375,28 @@ struct TransformInteractionStateTests {
         )
         #expect(state.hasPendingTransform)
         #expect(state.clearBehavior() == .apply)
+    }
+
+    @Test
+    func meshWarpAreaDragMakesGrabbedSurfacePointFollowThePointer() throws {
+        let grid = MeshWarpGrid.regular(
+            bounds: CanvasRect(
+                origin: .init(x: 10, y: 20),
+                size: .init(x: 120, y: 90)
+            )
+        )
+        let parameter = MeshWarpParameter(u: 0.5, v: 0.5)
+        let originalPoint = try #require(grid.surfacePoint(at: parameter))
+        #expect(abs(originalPoint.x - 70) < 0.0001)
+        #expect(abs(originalPoint.y - 65) < 0.0001)
+
+        let delta = CanvasPoint(x: 18, y: -11)
+        let movedGrid = grid.movingSurface(at: parameter, by: delta)
+        let movedPoint = try #require(movedGrid.surfacePoint(at: parameter))
+
+        #expect(abs(movedPoint.x - (originalPoint.x + delta.x)) < 0.0001)
+        #expect(abs(movedPoint.y - (originalPoint.y + delta.y)) < 0.0001)
+        #expect(!movedGrid.isIdentity)
     }
 
     @Test

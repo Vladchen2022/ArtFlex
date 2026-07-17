@@ -211,6 +211,54 @@ struct WorkspaceViewModelPixelHistoryTests {
 
     @Test
     @MainActor
+    func meshWarpDraggingInsideGridLocallyMovesTheGrabbedPixels() throws {
+        let harness = try PixelHistoryHarness(canvasSize: .init(width: 64, height: 64))
+        let layerID = harness.addLayer()
+        try fillOpaqueRect(
+            in: harness,
+            layerID: layerID,
+            originX: 16,
+            originY: 16,
+            width: 32,
+            height: 32,
+            color: .init(red: 0.3, green: 0.7, blue: 0.4, alpha: 1)
+        )
+
+        harness.viewModel.selectTool(.freeTransform)
+        harness.viewModel.setFreeTransformToolMode(.mesh)
+        let initialGrid = try #require(harness.viewModel.displayedMeshWarpGrid)
+        let parameter = MeshWarpParameter(u: 0.5, v: 0.5)
+        let startPoint = try #require(initialGrid.surfacePoint(at: parameter))
+        let interactionMode = meshWarpInteractionMode(
+            point: startPoint,
+            grid: initialGrid,
+            handleRadius: 2
+        )
+        guard case .meshArea = interactionMode else {
+            Issue.record("格内拖动必须进入局部曲面变形模式")
+            return
+        }
+
+        let delta = CanvasPoint(x: 7, y: -5)
+        let endPoint = CanvasPoint(x: startPoint.x + delta.x, y: startPoint.y + delta.y)
+        harness.viewModel.beginSelectionTransform(at: startPoint, mode: interactionMode)
+        harness.viewModel.updateSelectionTransform(to: endPoint)
+
+        let movedGrid = try #require(harness.viewModel.displayedMeshWarpGrid)
+        let movedSurfacePoint = try #require(movedGrid.surfacePoint(at: parameter))
+        #expect(abs(movedSurfacePoint.x - endPoint.x) < 0.0001)
+        #expect(abs(movedSurfacePoint.y - endPoint.y) < 0.0001)
+
+        let originalCorner = initialGrid.controlPoints[0]
+        let movedCorner = movedGrid.controlPoints[0]
+        #expect(abs((movedCorner.x - originalCorner.x) - delta.x) > 0.1)
+        #expect(abs((movedCorner.y - originalCorner.y) - delta.y) > 0.1)
+
+        harness.viewModel.commitSelectionTransform(at: endPoint)
+    }
+
+    @Test
+    @MainActor
     func meshWarpShiftSelectsAndDragsMultipleAnchors() throws {
         let harness = try PixelHistoryHarness(canvasSize: .init(width: 64, height: 64))
         let layerID = harness.addLayer()
