@@ -328,6 +328,7 @@ struct BlockReferenceParameterPanel: View {
             objectList(scene, showsTitle: false, maximumHeight: 330)
             Divider().overlay(Color.white.opacity(0.08))
             objectManagerActions(scene)
+            moduleBasePointControls(scene)
         }
         .frame(maxWidth: .infinity, minHeight: 220, alignment: .topLeading)
         .font(.system(size: 11, weight: .medium))
@@ -394,6 +395,32 @@ struct BlockReferenceParameterPanel: View {
         }
         .buttonStyle(.bordered)
         .controlSize(.small)
+    }
+
+    private func moduleBasePointControls(_ scene: BlockReferenceScene) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Divider().overlay(Color.white.opacity(0.08))
+            HStack(spacing: 6) {
+                Button {
+                    viewModel.beginPickingBlockReferenceModuleBasePoint()
+                } label: {
+                    Label("拾取模块基准点", systemImage: "scope")
+                }
+                Button("使用所选中心") {
+                    viewModel.useSelectionCenterAsBlockReferencePivot()
+                }
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.mini)
+            .disabled(viewModel.selectedBlockReferenceObjectIDs.isEmpty)
+
+            Text(scene.pivotMode == .custom
+                 ? "已设置：载入模块时此点落在活动工作面原点"
+                 : "默认使用所选体块中心作为模块基准点")
+                .font(.system(size: 9, weight: .medium))
+                .foregroundStyle(Color.white.opacity(0.43))
+                .fixedSize(horizontal: false, vertical: true)
+        }
     }
 
     private func objectList(
@@ -528,6 +555,19 @@ struct BlockReferenceParameterPanel: View {
 
     @ViewBuilder
     private func objectModuleContextMenu(_ object: BlockReferenceObject) -> some View {
+        Button("拾取模块基准点…") {
+            if !viewModel.selectedBlockReferenceObjectIDs.contains(object.id) {
+                viewModel.selectBlockReferenceObject(object.id, extending: false)
+            }
+            viewModel.beginPickingBlockReferenceModuleBasePoint()
+        }
+        Button("基准点使用所选中心") {
+            if !viewModel.selectedBlockReferenceObjectIDs.contains(object.id) {
+                viewModel.selectBlockReferenceObject(object.id, extending: false)
+            }
+            viewModel.useSelectionCenterAsBlockReferencePivot()
+        }
+        Divider()
         if let instance = viewModel.blockReferenceCustomModuleInstance(containing: object.id) {
             let asset = viewModel.blockReferenceModuleAsset(for: instance)
             Button("编辑模块部件") {
@@ -1233,9 +1273,9 @@ struct BlockReferenceParameterPanel: View {
             .labelsHidden()
             .pickerStyle(.segmented)
             HStack(spacing: 6) {
-                Button("枢轴=所选中心") { viewModel.useSelectionCenterAsBlockReferencePivot() }
+                Button("基准点=所选中心") { viewModel.useSelectionCenterAsBlockReferencePivot() }
                     .disabled(viewModel.selectedBlockReferenceObjectIDs.isEmpty)
-                Button("画布拾取枢轴") { viewModel.setBlockReferenceEditorMode(.setPivot) }
+                Button("画布拾取基准点") { viewModel.beginPickingBlockReferenceModuleBasePoint() }
             }
             .buttonStyle(.bordered)
             .controlSize(.small)

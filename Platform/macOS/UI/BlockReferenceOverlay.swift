@@ -57,6 +57,7 @@ struct BlockReferenceOverlay: View {
                     drawDraftBaseFootprint(in: context)
                     drawHumanJointHandles(in: context)
                     drawTransformGizmo(in: context)
+                    drawModuleBasePointMarker(in: context)
                     drawMeasurements(in: context)
                     drawInteractionHints(in: context)
                     drawWorkingPlaneIndicator(in: context)
@@ -569,6 +570,25 @@ struct BlockReferenceOverlay: View {
         )
     }
 
+    private func drawModuleBasePointMarker(in context: GraphicsContext) {
+        guard !scene.display.isFrozen,
+              scene.pivotMode == .custom,
+              !editorState.resolvedSelectedObjectIDs.isEmpty,
+              let point = viewportPoint(scene.customPivot) else { return }
+        let center = CGPoint(x: point.x, y: point.y)
+        let outer = CGRect(x: center.x - 9, y: center.y - 9, width: 18, height: 18)
+        let inner = CGRect(x: center.x - 3, y: center.y - 3, width: 6, height: 6)
+        context.fill(Path(ellipseIn: outer), with: .color(Color.black.opacity(0.66)))
+        context.stroke(Path(ellipseIn: outer), with: .color(Color.orange.opacity(0.98)), lineWidth: 2)
+        context.fill(Path(ellipseIn: inner), with: .color(Color.orange.opacity(0.98)))
+        context.draw(
+            Text("模块基准点")
+                .font(.system(size: 10, weight: .bold))
+                .foregroundStyle(Color.orange),
+            at: CGPoint(x: center.x + 48, y: center.y - 15)
+        )
+    }
+
     private func drawMeasurements(in context: GraphicsContext) {
         let opacity = Double(scene.display.opacity)
         let allMeasurements = scene.measurements + [editorState.draftMeasurement].compactMap { $0 }
@@ -722,6 +742,7 @@ struct BlockReferenceGestureOverlay: NSViewRepresentable {
     let onNavigationEnded: () -> Void
     let onZoom: (Double) -> Void
     let onHover: (CanvasPoint?) -> Bool
+    let contextMenuItems: (CanvasPoint) -> [BlockReferenceContextMenuItem]
     let gizmoAdjustment: BlockReferenceGizmoAdjustment?
     let gizmoPopupPoint: CGPoint?
     let onGizmoInputChanged: (String) -> Void
@@ -747,6 +768,7 @@ struct BlockReferenceGestureOverlay: NSViewRepresentable {
         view.onNavigationEnded = onNavigationEnded
         view.onZoom = onZoom
         view.onHover = onHover
+        view.contextMenuItems = contextMenuItems
         view.onGizmoInputChanged = onGizmoInputChanged
         view.onGizmoFinish = onGizmoFinish
         view.configureGizmoEditor(adjustment: gizmoAdjustment, center: gizmoPopupPoint)
@@ -763,6 +785,7 @@ final class BlockReferenceInteractionView: NSView, NSTextFieldDelegate {
     var onNavigationEnded: (() -> Void)?
     var onZoom: ((Double) -> Void)?
     var onHover: ((CanvasPoint?) -> Bool)?
+    var contextMenuItems: ((CanvasPoint) -> [BlockReferenceContextMenuItem])?
     var onGizmoInputChanged: ((String) -> Void)?
     var onGizmoFinish: (() -> Void)?
 
@@ -936,6 +959,15 @@ final class BlockReferenceInteractionView: NSView, NSTextFieldDelegate {
         NSCursor.crosshair.set()
     }
 
+    override func menu(for event: NSEvent) -> NSMenu? {
+        let items = contextMenuItems?(canvasPoint(for: event)) ?? []
+        guard !items.isEmpty else { return nil }
+        let menu = NSMenu(title: "体块")
+        menu.autoenablesItems = false
+        appendContextMenuItems(items, to: menu)
+        return menu
+    }
+
     override func mouseDown(with event: NSEvent) {
         isPrimaryDragging = true
         let point = canvasPoint(for: event)
@@ -1014,6 +1046,57 @@ final class BlockReferenceInteractionView: NSView, NSTextFieldDelegate {
             CanvasPoint(x: point.x, y: point.y),
             clamped: false
         )
+    }
+
+    private func appendContextMenuItems(
+        _ items: [BlockReferenceContextMenuItem],
+        to menu: NSMenu
+    ) {
+        for item in items {
+            switch item {
+            case .action(let title, let isEnabled, let perform):
+                let menuItem = NSMenuItem(
+                    title: title,
+                    action: #selector(performBlockReferenceContextMenuAction(_:)),
+                    keyEquivalent: ""
+                )
+                menuItem.target = self
+                menuItem.isEnabled = isEnabled
+                menuItem.representedObject = BlockReferenceContextMenuActionBox(perform: perform)
+                menu.addItem(menuItem)
+            case .submenu(let title, let children):
+                let menuItem = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+                let submenu = NSMenu(title: title)
+                submenu.autoenablesItems = false
+                appendContextMenuItems(children, to: submenu)
+                menuItem.submenu = submenu
+                menu.addItem(menuItem)
+            case .separator:
+                menu.addItem(.separator())
+            }
+        }
+    }
+
+    @objc private func performBlockReferenceContextMenuAction(_ sender: NSMenuItem) {
+        (sender.representedObject as? BlockReferenceContextMenuActionBox)?.perform()
+    }
+}
+
+indirect enum BlockReferenceContextMenuItem {
+    case action(title: String, isEnabled: Bool = true, perform: () -> Void)
+    case submenu(title: String, items: [BlockReferenceContextMenuItem])
+    case separator
+}
+
+private final class BlockReferenceContextMenuActionBox: NSObject {
+    private let action: () -> Void
+
+    init(perform action: @escaping () -> Void) {
+        self.action = action
+    }
+
+    func perform() {
+        action()
     }
 }
 

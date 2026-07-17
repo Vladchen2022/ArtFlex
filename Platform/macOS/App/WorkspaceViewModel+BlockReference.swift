@@ -104,6 +104,37 @@ extension WorkspaceViewModel {
             scene?.customPivot = center
             scene?.pivotMode = .custom
         }
+        blockReferenceEditorState.instruction = "模块基准点已设为所选体块中心；载入模块时此点会落在活动工作面原点。"
+    }
+
+    func beginPickingBlockReferenceModuleBasePoint() {
+        guard !selectedBlockReferenceObjectIDs.isEmpty else {
+            blockReferenceEditorState.instruction = "请先选择要保存为模块的体块。"
+            return
+        }
+        cancelBlockReferenceInteraction()
+        blockReferenceEditorState.mode = .setPivot
+        blockReferenceEditorState.instruction = "请在画布上点击模块基准点；载入模块时此点会落在活动工作面原点。"
+    }
+
+    @discardableResult
+    func prepareBlockReferenceContextSelection(at point: CanvasPoint) -> UUID? {
+        guard let scene = blockReferenceScene else { return nil }
+        if let face = blockHitTestFace(
+            scene: scene,
+            canvasPoint: point,
+            canvasSize: workspace.document.canvasSize
+        ) {
+            if !selectedBlockReferenceObjectIDs.contains(face.objectID) {
+                selectBlockReferenceObject(face.objectID, extending: false)
+            } else {
+                blockReferenceEditorState.selectedObjectID = face.objectID
+                blockReferenceEditorState.selectedFaceIndex = face.faceIndex
+            }
+            return face.objectID
+        }
+        return blockReferenceEditorState.selectedObjectID
+            ?? selectedBlockReferenceObjectIDs.first
     }
 
     func selectBlockReferenceObject(_ objectID: UUID, extending: Bool) {
@@ -412,7 +443,7 @@ extension WorkspaceViewModel {
                 stored?.pivotMode = .custom
             }
             blockReferenceEditorState.mode = .select
-            blockReferenceEditorState.instruction = "已在场景中设置自定枢轴。"
+            blockReferenceEditorState.instruction = "模块基准点已设置；载入模块时此点会落在活动工作面原点。"
 
         case .measure:
             guard let worldPoint = blockWorldPoint(

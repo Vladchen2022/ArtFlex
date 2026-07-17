@@ -64,7 +64,7 @@ extension WorkspaceViewModel {
         }
         blockReferenceEditorState.instruction = assetID == nil
             ? "保存模块失败：体块库已满或选区无效。"
-            : "已将 \(sources.count) 个体块按当前枢轴存入体块库。"
+            : "已将 \(sources.count) 个体块按当前模块基准点存入体块库；载入时该点会落在活动工作面原点。"
         return assetID
     }
 

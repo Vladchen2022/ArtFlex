@@ -158,6 +158,61 @@ struct BlockReferenceModuleLibraryTests {
         #expect(replaced.templateObjects.contains { $0.position.x == 65 })
     }
 
+    @Test
+    @MainActor
+    func moduleBasePointLoadsExactlyAtTheActiveWorkingPlaneOrigin() throws {
+        guard let metalContext = MetalDeviceContext() else { return }
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ArtFlexBlockModuleBasePointTests-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let bootstrap = try AppBootstrap(
+            workspaceStore: WorkspaceStore(),
+            metalContext: metalContext,
+            layerSurfaceStore: StageOneLayerSurfaceStore(),
+            blockReferenceModuleLibraryPersistenceController: .init(rootDirectoryURL: root)
+        )
+        let viewModel = WorkspaceViewModel(
+            bootstrap: bootstrap,
+            installsZoomKeyboardMonitor: false,
+            preparesInitialTextures: false
+        )
+        viewModel.createEmptyBlockReferenceScene()
+        let source = makeObject(
+            name: "桌体",
+            position: .init(x: 40, y: 30, z: 25)
+        )
+        let basePoint = BlockVector3(x: 10, y: 15, z: 5)
+        _ = viewModel.updateBlockReferenceDocument { scene in
+            scene?.objects = [source]
+            scene?.pivotMode = .custom
+            scene?.customPivot = basePoint
+        }
+        viewModel.selectBlockReferenceObject(source.id, extending: false)
+
+        viewModel.beginPickingBlockReferenceModuleBasePoint()
+        #expect(viewModel.blockReferenceEditorState.mode == .setPivot)
+        #expect(viewModel.blockReferenceEditorState.instruction.contains("模块基准点"))
+        viewModel.cancelBlockReferenceInteraction()
+
+        let assetID = try #require(viewModel.saveSelectedBlockReferenceObjectsAsModule(
+            named: "桌体模块",
+            categoryID: BlockReferenceModuleLibraryState.defaultCategoryID
+        ))
+        let target = BlockVector3(x: 180, y: -35, z: 12)
+        _ = viewModel.updateBlockReferenceDocument { scene in
+            scene?.workingPlane.origin = target
+        }
+        viewModel.instantiateBlockReferenceModule(assetID: assetID)
+
+        let instance = try #require(viewModel.blockReferenceScene?.customModuleInstances.last)
+        let loadedID = try #require(instance.objectIDs.first)
+        let loaded = try #require(
+            viewModel.blockReferenceScene?.objects.first(where: { $0.id == loadedID })
+        )
+        #expect(instance.basePoint == target)
+        #expect(loaded.position == target + (source.position - basePoint))
+    }
+
     private func makeObject(name: String, position: BlockVector3) -> BlockReferenceObject {
         BlockReferenceObject(
             name: name,

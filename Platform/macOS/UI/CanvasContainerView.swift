@@ -558,6 +558,9 @@ struct CanvasContainerView: View {
                                 screenScale: viewportTransform.actualDisplayScale
                             )
                         },
+                        contextMenuItems: { point in
+                            blockReferenceContextMenuItems(at: point)
+                        },
                         gizmoAdjustment: viewModel.blockReferenceEditorState.gizmoAdjustment,
                         gizmoPopupPoint: viewModel.blockReferenceEditorState.gizmoAdjustment.flatMap {
                             blockReferenceGizmoPopupViewportPoint(
@@ -846,6 +849,106 @@ struct CanvasContainerView: View {
             }
         } message: {
             Text("输入 1–512 px。羽化会柔化选区边缘，并可通过撤销恢复。")
+        }
+    }
+
+    private func blockReferenceContextMenuItems(
+        at point: CanvasPoint
+    ) -> [BlockReferenceContextMenuItem] {
+        guard let objectID = viewModel.prepareBlockReferenceContextSelection(at: point) else {
+            return []
+        }
+        var items: [BlockReferenceContextMenuItem] = [
+            .action(title: "拾取模块基准点…", isEnabled: true) {
+                viewModel.beginPickingBlockReferenceModuleBasePoint()
+            },
+            .action(title: "基准点使用所选中心", isEnabled: true) {
+                viewModel.useSelectionCenterAsBlockReferencePivot()
+            },
+            .separator
+        ]
+
+        if let instance = viewModel.blockReferenceCustomModuleInstance(containing: objectID) {
+            let asset = viewModel.blockReferenceModuleAsset(for: instance)
+            items.append(contentsOf: [
+                .action(title: "编辑模块部件", isEnabled: true) {
+                    viewModel.beginEditingBlockReferenceModuleInstance(containing: objectID)
+                },
+                .action(
+                    title: "保存并替换“\(asset?.name ?? "原模块")”",
+                    isEnabled: asset != nil
+                ) {
+                    viewModel.replaceEditedBlockReferenceModule(containing: objectID)
+                },
+                .submenu(
+                    title: "另存为新模块",
+                    items: viewModel.blockReferenceModuleLibrary.categories.map { category in
+                        .action(title: category.name, isEnabled: true) {
+                            promptForBlockReferenceModuleName(
+                                suggestedName: "\(asset?.name ?? "自定义模块") 副本"
+                            ) { name in
+                                viewModel.saveEditedBlockReferenceModuleAsNew(
+                                    containing: objectID,
+                                    named: name,
+                                    categoryID: category.id
+                                )
+                            }
+                        }
+                    }
+                ),
+                .separator,
+                .action(title: "不回存体块库（保留场景修改）", isEnabled: true) {
+                    viewModel.detachBlockReferenceModuleInstance(containing: objectID)
+                }
+            ])
+        } else {
+            let suggestedName = viewModel.suggestedBlockReferenceModuleName(
+                preferredObjectID: objectID
+            )
+            items.append(
+                .submenu(
+                    title: "将所选体块存入体块库",
+                    items: viewModel.blockReferenceModuleLibrary.categories.map { category in
+                        .action(title: category.name, isEnabled: true) {
+                            promptForBlockReferenceModuleName(suggestedName: suggestedName) { name in
+                                viewModel.saveSelectedBlockReferenceObjectsAsModule(
+                                    named: name,
+                                    categoryID: category.id,
+                                    preferredObjectID: objectID
+                                )
+                            }
+                        }
+                    }
+                )
+            )
+        }
+        return items
+    }
+
+    private func promptForBlockReferenceModuleName(
+        suggestedName: String,
+        onSave: @escaping (String) -> Void
+    ) {
+        let alert = NSAlert()
+        alert.messageText = "保存到体块库"
+        alert.informativeText = "模块会保留各个体块；载入时，模块基准点会落在活动工作面原点。"
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "保存")
+        alert.addButton(withTitle: "取消")
+
+        let nameField = NSTextField(frame: NSRect(x: 0, y: 0, width: 280, height: 24))
+        nameField.stringValue = suggestedName
+        nameField.placeholderString = "模块名称"
+        alert.accessoryView = nameField
+
+        let commit: (NSApplication.ModalResponse) -> Void = { response in
+            guard response == .alertFirstButtonReturn else { return }
+            onSave(nameField.stringValue)
+        }
+        if let window = NSApp.keyWindow ?? NSApp.mainWindow {
+            alert.beginSheetModal(for: window, completionHandler: commit)
+        } else {
+            commit(alert.runModal())
         }
     }
 

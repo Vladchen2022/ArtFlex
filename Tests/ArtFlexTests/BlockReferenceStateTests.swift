@@ -859,6 +859,41 @@ struct BlockReferenceStateTests {
     }
 
     @Test
+    @MainActor
+    func interactionViewBuildsAndDispatchesTheNativeBlockContextMenu() throws {
+        let view = BlockReferenceInteractionView(frame: CGRect(x: 0, y: 0, width: 500, height: 400))
+        var requestedPoint: CanvasPoint?
+        var didPerform = false
+        view.contextMenuItems = { point in
+            requestedPoint = point
+            return [
+                .action(title: "拾取模块基准点…", isEnabled: true) {
+                    didPerform = true
+                }
+            ]
+        }
+        let event = try #require(NSEvent.mouseEvent(
+            with: .rightMouseDown,
+            location: CGPoint(x: 145, y: 130),
+            modifierFlags: [],
+            timestamp: 1,
+            windowNumber: 0,
+            context: nil,
+            eventNumber: 1,
+            clickCount: 1,
+            pressure: 1
+        ))
+
+        let menu = try #require(view.menu(for: event))
+        #expect(requestedPoint == CanvasPoint(x: 145, y: 270))
+        #expect(menu.items.map(\.title) == ["拾取模块基准点…"])
+        let item = try #require(menu.items.first)
+        let action = try #require(item.action)
+        _ = (item.target as? NSObject)?.perform(action, with: item)
+        #expect(didPerform)
+    }
+
+    @Test
     func rightInspectorUsesStructuredWorkspaceOnlyForTheBlockReferenceTool() {
         #expect(rightInspectorUsesStructuredBlockReferenceWorkspace(activeTool: .blockReference))
         #expect(rightInspectorUsesStructuredBlockReferenceWorkspace(activeTool: .brush) == false)
