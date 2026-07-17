@@ -1213,6 +1213,35 @@ struct BlockReferenceStateTests {
     }
 
     @Test
+    func transportationWheelDimensionsMatchReferenceTireSpecifications() throws {
+        struct WheelExpectation {
+            let kind: BlockReferenceModuleKind
+            let faceOffset: Int
+            let outsideDiameter: Double
+            let overallWidth: Double
+        }
+
+        let expectations: [WheelExpectation] = [
+            .init(kind: .sedan, faceOffset: 18, outsideDiameter: 63.19, overallWidth: 20.5),
+            .init(kind: .suv, faceOffset: 24, outsideDiameter: 72.43, overallWidth: 22.5),
+            .init(kind: .smallTruck, faceOffset: 18, outsideDiameter: 77.19, overallWidth: 21.5),
+            .init(kind: .largeTruck, faceOffset: 18, outsideDiameter: 42.2 * 2.54, overallWidth: 10.8 * 2.54),
+            .init(kind: .bicycle, faceOffset: 24, outsideDiameter: 69.2, overallWidth: 3.5),
+            .init(kind: .motorcycle, faceOffset: 24, outsideDiameter: 62.38, overallWidth: 16),
+            .init(kind: .motorcycle, faceOffset: 56, outsideDiameter: 59.98, overallWidth: 12)
+        ]
+
+        for expectation in expectations {
+            let geometry = try #require(blockReferenceAdvancedModuleGeometry(kind: expectation.kind))
+            let wheelFaces = Array(geometry.faces[expectation.faceOffset..<(expectation.faceOffset + 32)])
+            let bounds = blockReferenceTestBounds(wheelFaces)
+            #expect(abs((bounds.maxX - bounds.minX) - expectation.overallWidth) < 0.000_001)
+            #expect(abs((bounds.maxY - bounds.minY) - expectation.outsideDiameter) < 0.000_001)
+            #expect(abs((bounds.maxZ - bounds.minZ) - expectation.outsideDiameter) < 0.000_001)
+        }
+    }
+
+    @Test
     func architecturalModuleComponentsMeetAtTheirBoundariesWithoutCrossing() throws {
         let door = try #require(blockReferenceAdvancedModuleGeometry(kind: .doorFrame))
         #expect(door.faces.count == 18)

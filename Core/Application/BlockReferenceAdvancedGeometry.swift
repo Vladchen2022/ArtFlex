@@ -264,7 +264,8 @@ private func blockReferenceTorusGeometry() -> BlockReferenceModuleGeometry {
     let tubeRadius = 20.0
     let faces = blockReferenceTorusFaces(
         majorRadius: majorRadius,
-        tubeRadius: tubeRadius,
+        radialHalfThickness: tubeRadius,
+        axialHalfWidth: tubeRadius,
         segments: 8,
         centerZ: tubeRadius
     )
@@ -277,16 +278,18 @@ private func blockReferenceTorusGeometry() -> BlockReferenceModuleGeometry {
 
 private func blockReferenceTorusFaces(
     majorRadius: Double,
-    tubeRadius: Double,
+    radialHalfThickness: Double,
+    axialHalfWidth: Double,
     segments: Int,
     centerZ: Double
 ) -> [[BlockVector3]] {
-    // A square rotated 45 degrees has its four corners on the radial and vertical axes.
+    // The four-sided cross-section keeps the low-poly style while allowing wheels to
+    // represent sidewall height and tire width independently.
     let crossSection: [(radial: Double, vertical: Double)] = [
-        (tubeRadius, 0),
-        (0, tubeRadius),
-        (-tubeRadius, 0),
-        (0, -tubeRadius)
+        (radialHalfThickness, 0),
+        (0, axialHalfWidth),
+        (-radialHalfThickness, 0),
+        (0, -axialHalfWidth)
     ]
     let rings = (0..<segments).map { index in
         let angle = Double(index) / Double(segments) * .pi * 2
@@ -315,6 +318,56 @@ private func blockReferenceTorusFaces(
         }
     }
     return faces
+}
+
+private struct BlockReferenceWheelSpecification {
+    let outerRadius: Double
+    let radialHalfThickness: Double
+    let axialHalfWidth: Double
+
+    var majorRadius: Double { outerRadius - radialHalfThickness }
+
+    static func metric(
+        sectionWidthMM: Double,
+        aspectRatio: Double,
+        rimDiameterInches: Double
+    ) -> BlockReferenceWheelSpecification {
+        let sectionWidthCM = sectionWidthMM / 10
+        let sidewallHeightCM = sectionWidthCM * aspectRatio / 100
+        let rimRadiusCM = rimDiameterInches * 2.54 * 0.5
+        return .init(
+            outerRadius: rimRadiusCM + sidewallHeightCM,
+            radialHalfThickness: sidewallHeightCM * 0.5,
+            axialHalfWidth: sectionWidthCM * 0.5
+        )
+    }
+
+    static func etrto(
+        sectionWidthMM: Double,
+        beadSeatDiameterMM: Double
+    ) -> BlockReferenceWheelSpecification {
+        let sectionWidthCM = sectionWidthMM / 10
+        let rimRadiusCM = beadSeatDiameterMM / 20
+        return .init(
+            outerRadius: rimRadiusCM + sectionWidthCM,
+            radialHalfThickness: sectionWidthCM * 0.5,
+            axialHalfWidth: sectionWidthCM * 0.5
+        )
+    }
+
+    static func measured(
+        outerDiameterMM: Double,
+        overallWidthMM: Double,
+        rimDiameterInches: Double
+    ) -> BlockReferenceWheelSpecification {
+        let outerRadiusCM = outerDiameterMM / 20
+        let rimRadiusCM = rimDiameterInches * 2.54 * 0.5
+        return .init(
+            outerRadius: outerRadiusCM,
+            radialHalfThickness: (outerRadiusCM - rimRadiusCM) * 0.5,
+            axialHalfWidth: overallWidthMM / 20
+        )
+    }
 }
 
 private func blockReferenceHollowCylinderGeometry() -> BlockReferenceModuleGeometry {
@@ -384,6 +437,11 @@ private func blockReferenceTransportationGeometry(
 
     switch kind {
     case .sedan:
+        let wheel = BlockReferenceWheelSpecification.metric(
+            sectionWidthMM: 205,
+            aspectRatio: 55,
+            rimDiameterInches: 16
+        )
         // 4.30 m-class sedan: three body masses and four low-poly ring wheels.
         faces += blockReferenceVehicleBox(
             width: 180, depth: 430, height: 50,
@@ -402,14 +460,18 @@ private func blockReferenceTransportationGeometry(
         for x in [-87.0, 87.0] {
             for y in [-150.0, 150.0] {
                 faces += blockReferenceWheelFaces(
-                    center: .init(x: x, y: y, z: 32),
-                    outerRadius: 32,
-                    tubeRadius: 9
+                    center: .init(x: x, y: y, z: wheel.outerRadius),
+                    specification: wheel
                 )
             }
         }
 
     case .suv:
+        let wheel = BlockReferenceWheelSpecification.metric(
+            sectionWidthMM: 225,
+            aspectRatio: 65,
+            rimDiameterInches: 17
+        )
         // Taller 4.60 m SUV: four body masses and four larger wheels.
         faces += blockReferenceVehicleBox(
             width: 190, depth: 460, height: 55,
@@ -431,14 +493,18 @@ private func blockReferenceTransportationGeometry(
         for x in [-94.0, 94.0] {
             for y in [-165.0, 165.0] {
                 faces += blockReferenceWheelFaces(
-                    center: .init(x: x, y: y, z: 36),
-                    outerRadius: 36,
-                    tubeRadius: 10
+                    center: .init(x: x, y: y, z: wheel.outerRadius),
+                    specification: wheel
                 )
             }
         }
 
     case .smallTruck:
+        let wheel = BlockReferenceWheelSpecification.metric(
+            sectionWidthMM: 215,
+            aspectRatio: 85,
+            rimDiameterInches: 16
+        )
         // Compact two-axle truck: chassis, cargo box and cab.
         faces += blockReferenceVehicleBox(
             width: 180, depth: 470, height: 28,
@@ -456,14 +522,18 @@ private func blockReferenceTransportationGeometry(
         for x in [-88.0, 88.0] {
             for y in [-150.0, 155.0] {
                 faces += blockReferenceWheelFaces(
-                    center: .init(x: x, y: y, z: 36),
-                    outerRadius: 36,
-                    tubeRadius: 10
+                    center: .init(x: x, y: y, z: wheel.outerRadius),
+                    specification: wheel
                 )
             }
         }
 
     case .largeTruck:
+        let wheel = BlockReferenceWheelSpecification.measured(
+            outerDiameterMM: 42.2 * 25.4,
+            overallWidthMM: 10.8 * 25.4,
+            rimDiameterInches: 22.5
+        )
         // 7.80 m-class three-axle truck: chassis, cargo box and cab.
         faces += blockReferenceVehicleBox(
             width: 240, depth: 780, height: 35,
@@ -481,33 +551,45 @@ private func blockReferenceTransportationGeometry(
         for x in [-123.0, 123.0] {
             for y in [-280.0, -160.0, 280.0] {
                 faces += blockReferenceWheelFaces(
-                    center: .init(x: x, y: y, z: 50),
-                    outerRadius: 50,
-                    tubeRadius: 14
+                    center: .init(x: x, y: y, z: wheel.outerRadius),
+                    specification: wheel
                 )
             }
         }
 
     case .bicycle:
+        let wheel = BlockReferenceWheelSpecification.etrto(
+            sectionWidthMM: 35,
+            beadSeatDiameterMM: 622
+        )
         // Four box-section frame members and two ring wheels.
-        let rearHub = BlockVector3(x: 0, y: -70, z: 38)
+        let rearHub = BlockVector3(x: 0, y: -70, z: wheel.outerRadius)
         let crank = BlockVector3(x: 0, y: -5, z: 48)
         let seat = BlockVector3(x: 0, y: -25, z: 100)
         let head = BlockVector3(x: 0, y: 50, z: 92)
-        let frontHub = BlockVector3(x: 0, y: 70, z: 38)
+        let frontHub = BlockVector3(x: 0, y: 70, z: wheel.outerRadius)
         faces += blockReferenceSegmentBoxFaces(start: rearHub, end: crank, width: 6, depth: 6)
         faces += blockReferenceSegmentBoxFaces(start: crank, end: seat, width: 6, depth: 6)
         faces += blockReferenceSegmentBoxFaces(start: seat, end: head, width: 6, depth: 6)
         faces += blockReferenceSegmentBoxFaces(start: head, end: frontHub, width: 6, depth: 6)
         for y in [-70.0, 70.0] {
             faces += blockReferenceWheelFaces(
-                center: .init(x: 0, y: y, z: 38),
-                outerRadius: 38,
-                tubeRadius: 5
+                center: .init(x: 0, y: y, z: wheel.outerRadius),
+                specification: wheel
             )
         }
 
     case .motorcycle:
+        let frontWheel = BlockReferenceWheelSpecification.metric(
+            sectionWidthMM: 120,
+            aspectRatio: 70,
+            rimDiameterInches: 17
+        )
+        let rearWheel = BlockReferenceWheelSpecification.metric(
+            sectionWidthMM: 160,
+            aspectRatio: 60,
+            rimDiameterInches: 17
+        )
         // Four body masses: lower body, tank, seat and front fork.
         faces += blockReferenceVehicleFrustum(
             bottomWidth: 50, bottomDepth: 100,
@@ -524,18 +606,19 @@ private func blockReferenceTransportationGeometry(
             centerY: -35, bottomZ: 92
         )
         faces += blockReferenceSegmentBoxFaces(
-            start: .init(x: 0, y: 82, z: 36),
+            start: .init(x: 0, y: 82, z: frontWheel.outerRadius),
             end: .init(x: 0, y: 58, z: 118),
             width: 8,
             depth: 8
         )
-        for y in [-82.0, 82.0] {
-            faces += blockReferenceWheelFaces(
-                center: .init(x: 0, y: y, z: 36),
-                outerRadius: 36,
-                tubeRadius: 8
-            )
-        }
+        faces += blockReferenceWheelFaces(
+            center: .init(x: 0, y: -82, z: rearWheel.outerRadius),
+            specification: rearWheel
+        )
+        faces += blockReferenceWheelFaces(
+            center: .init(x: 0, y: 82, z: frontWheel.outerRadius),
+            specification: frontWheel
+        )
 
     case .squareFrustum, .squarePyramid, .hemisphere, .torus, .hollowCylinder,
          .standingHuman, .seatedHuman, .poseableHuman,
@@ -577,12 +660,12 @@ private func blockReferenceVehicleFrustum(
 
 private func blockReferenceWheelFaces(
     center: BlockVector3,
-    outerRadius: Double,
-    tubeRadius: Double
+    specification: BlockReferenceWheelSpecification
 ) -> [[BlockVector3]] {
     let ring = blockReferenceTorusFaces(
-        majorRadius: outerRadius - tubeRadius,
-        tubeRadius: tubeRadius,
+        majorRadius: specification.majorRadius,
+        radialHalfThickness: specification.radialHalfThickness,
+        axialHalfWidth: specification.axialHalfWidth,
         segments: 8,
         centerZ: 0
     )
