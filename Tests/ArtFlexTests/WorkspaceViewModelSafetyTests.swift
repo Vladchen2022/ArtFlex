@@ -3295,23 +3295,29 @@ struct WorkspaceViewModelSafetyTests {
 
     @Test
     @MainActor
-    func compoundPressureMixEditingPreservesMonotonicOrderAndAppliesPresetsAtomically() throws {
+    func compoundPressureMixEditingSupportsBidirectionalAndNonMonotonicCurves() throws {
         let harness = try BrushEditingBoundaryHarness()
 
         harness.viewModel.setCompoundPressureMix(.default)
         harness.viewModel.setCompoundPrimaryMixAtLowPressure(0.8)
         var mix = harness.viewModel.workspace.toolSession.brush.compoundBrush.pressureMix
         #expect(mix.primaryAtLowPressure == 0.8)
-        #expect(mix.primaryAtMidPressure == 0.8)
+        #expect(mix.primaryAtMidPressure == 0.45)
         #expect(mix.primaryAtHighPressure == 1)
 
         harness.viewModel.setCompoundPrimaryMixAtMidPressure(0.4)
         mix = harness.viewModel.workspace.toolSession.brush.compoundBrush.pressureMix
-        #expect(mix.primaryAtMidPressure == 0.8)
+        #expect(mix.primaryAtMidPressure == 0.4)
 
         harness.viewModel.setCompoundPrimaryMixAtHighPressure(0.2)
         mix = harness.viewModel.workspace.toolSession.brush.compoundBrush.pressureMix
-        #expect(mix.primaryAtHighPressure == 0.8)
+        #expect(mix.primaryAtHighPressure == 0.2)
+
+        harness.viewModel.setCompoundPressureMix(.reversed)
+        #expect(harness.viewModel.workspace.toolSession.brush.compoundBrush.pressureMix == .reversed)
+
+        harness.viewModel.setCompoundPressureMix(.secondaryAtMidPressure)
+        #expect(harness.viewModel.workspace.toolSession.brush.compoundBrush.pressureMix == .secondaryAtMidPressure)
 
         harness.viewModel.setCompoundPressureMix(.balanced)
         #expect(harness.viewModel.workspace.toolSession.brush.compoundBrush.pressureMix == .balanced)

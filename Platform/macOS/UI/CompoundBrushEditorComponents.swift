@@ -1,0 +1,538 @@
+import AppKit
+import SwiftUI
+
+enum CompoundBrushPreviewChannel: String, CaseIterable, Identifiable {
+    case result = "结果"
+    case primary = "A 外形"
+    case secondary = "B 纹理"
+
+    var id: String { rawValue }
+}
+
+enum CompoundBrushPreviewBackground: String, CaseIterable, Identifiable {
+    case dark = "深色"
+    case light = "浅色"
+    case checkerboard = "棋盘"
+
+    var id: String { rawValue }
+
+    var systemImage: String {
+        switch self {
+        case .dark: return "moon.fill"
+        case .light: return "sun.max.fill"
+        case .checkerboard: return "checkerboard.rectangle"
+        }
+    }
+}
+
+struct CompoundBrushDrawingPad: NSViewRepresentable {
+    let brush: BrushSettings
+    let pressure: Float
+    let background: CompoundBrushPreviewBackground
+    let clearToken: Int
+
+    func makeNSView(context: Context) -> CompoundBrushDrawingPadNSView {
+        CompoundBrushDrawingPadNSView(
+            brush: brush,
+            pressure: pressure,
+            background: background,
+            clearToken: clearToken
+        )
+    }
+
+    func updateNSView(_ nsView: CompoundBrushDrawingPadNSView, context: Context) {
+        nsView.update(
+            brush: brush,
+            pressure: pressure,
+            background: background,
+            clearToken: clearToken
+        )
+    }
+}
+
+final class CompoundBrushDrawingPadNSView: NSView {
+    private let resolution = 256
+    private var brush: BrushSettings
+    private var fixedPressure: Float
+    private var previewBackground: CompoundBrushPreviewBackground
+    private var clearToken: Int
+    private var strokes: [[StrokePoint]] = []
+    private var activeStroke: [StrokePoint] = []
+    private var activeSession: StageOneBrushPreviewRasterizer.StrokeAlphaSession?
+    private var strokeBaseAlpha: [UInt8] = []
+    private var activeStrokeAlpha: [UInt8]
+    private var displayAlpha: [UInt8]
+    private var cachedImage: CGImage?
+    private var rerenderGeneration = 0
+
+    init(
+        brush: BrushSettings,
+        pressure: Float,
+        background: CompoundBrushPreviewBackground,
+        clearToken: Int
+    ) {
+        self.brush = brush
+        self.fixedPressure = pressure
+        self.previewBackground = background
+        self.clearToken = clearToken
+        self.activeStrokeAlpha = [UInt8](repeating: 0, count: 256 * 256)
+        self.displayAlpha = [UInt8](repeating: 0, count: 256 * 256)
+        super.init(frame: .zero)
+        wantsLayer = true
+        layer?.cornerRadius = 8
+        layer?.masksToBounds = true
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override var acceptsFirstResponder: Bool { true }
+
+    func update(
+        brush: BrushSettings,
+        pressure: Float,
+        background: CompoundBrushPreviewBackground,
+        clearToken: Int
+    ) {
+        fixedPressure = min(max(pressure, 0.01), 1)
+
+        if previewBackground != background {
+            previewBackground = background
+            cachedImage = nil
+            needsDisplay = true
+        }
+
+        if self.clearToken != clearToken {
+            self.clearToken = clearToken
+            clear()
+        }
+
+        guard self.brush != brush else { return }
+        self.brush = brush
+        rerenderStoredStrokes()
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        drawBackground()
+
+        if cachedImage == nil {
+            cachedImage = makeStrokeImage()
+        }
+        guard let cachedImage, let context = NSGraphicsContext.current?.cgContext else { return }
+        context.interpolationQuality = .none
+        context.draw(cachedImage, in: bounds.insetBy(dx: 4, dy: 4))
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        window?.makeFirstResponder(self)
+        let point = strokePoint(for: convert(event.locationInWindow, from: nil), event: event)
+        activeStroke = [point]
+        strokeBaseAlpha = displayAlpha
+        activeStrokeAlpha = [UInt8](repeating: 0, count: resolution * resolution)
+        activeSession = StageOneBrushPreviewRasterizer.makeStrokeAlphaSession(
+            for: brush,
+            resolution: resolution
+        )
+        if let update = activeSession?.append(points: [point, point]) {
+            mergeActiveStroke(update)
+        }
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        let point = strokePoint(for: convert(event.locationInWindow, from: nil), event: event)
+        guard let previous = activeStroke.last else { return }
+        let dx = point.x - previous.x
+        let dy = point.y - previous.y
+        guard (dx * dx) + (dy * dy) >= 0.25 else { return }
+        activeStroke.append(point)
+        if let update = activeSession?.append(points: [previous, point]) {
+            mergeActiveStroke(update)
+        }
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        if activeStroke.count == 1, let onlyPoint = activeStroke.first {
+            activeStroke.append(onlyPoint)
+        }
+        if let update = activeSession?.finish() {
+            mergeActiveStroke(update)
+        }
+        if activeStroke.isEmpty == false {
+            strokes.append(activeStroke)
+        }
+        activeStroke = []
+        activeSession = nil
+        strokeBaseAlpha = []
+        activeStrokeAlpha = [UInt8](repeating: 0, count: resolution * resolution)
+    }
+
+    private func clear() {
+        rerenderGeneration &+= 1
+        strokes.removeAll(keepingCapacity: true)
+        activeStroke.removeAll(keepingCapacity: true)
+        activeSession = nil
+        strokeBaseAlpha.removeAll(keepingCapacity: true)
+        activeStrokeAlpha = [UInt8](repeating: 0, count: resolution * resolution)
+        displayAlpha = [UInt8](repeating: 0, count: resolution * resolution)
+        invalidateStrokeImage()
+    }
+
+    private func rerenderStoredStrokes() {
+        rerenderGeneration &+= 1
+        let generation = rerenderGeneration
+        let brush = brush
+        let strokes = strokes
+        guard strokes.isEmpty == false else {
+            displayAlpha = [UInt8](repeating: 0, count: resolution * resolution)
+            invalidateStrokeImage()
+            return
+        }
+
+        Task { @MainActor [weak self] in
+            let rendered = await Task.detached(priority: .utility) {
+                var canvas = [UInt8](repeating: 0, count: 256 * 256)
+                for stroke in strokes {
+                    var samplingState: BrushStrokeSamplingState?
+                    guard let alpha = StageOneBrushPreviewRasterizer.strokeAlphaBytes(
+                        for: brush,
+                        resolution: 256,
+                        points: stroke,
+                        samplingState: &samplingState,
+                        flushPendingSamples: true
+                    ) else { continue }
+                    canvas = Self.composited(base: canvas, stroke: alpha, buildMode: brush.buildMode)
+                }
+                return canvas
+            }.value
+
+            guard let self, generation == rerenderGeneration else { return }
+            displayAlpha = rendered
+            invalidateStrokeImage()
+        }
+    }
+
+    private func mergeActiveStroke(_ update: StageOneBrushPreviewRasterizer.StrokeAlphaUpdate) {
+        let bounds = update.bounds
+        guard
+            bounds.originX >= 0,
+            bounds.originY >= 0,
+            bounds.originX + bounds.width <= resolution,
+            bounds.originY + bounds.height <= resolution,
+            update.alphaBytes.count == bounds.width * bounds.height
+        else { return }
+
+        for localY in 0..<bounds.height {
+            let sourceStart = localY * bounds.width
+            let destinationStart = ((bounds.originY + localY) * resolution) + bounds.originX
+            activeStrokeAlpha.replaceSubrange(
+                destinationStart..<(destinationStart + bounds.width),
+                with: update.alphaBytes[sourceStart..<(sourceStart + bounds.width)]
+            )
+        }
+
+        let base = strokeBaseAlpha.count == displayAlpha.count ? strokeBaseAlpha : displayAlpha
+        displayAlpha = Self.composited(base: base, stroke: activeStrokeAlpha, buildMode: brush.buildMode)
+        invalidateStrokeImage()
+    }
+
+    nonisolated private static func composited(
+        base: [UInt8],
+        stroke: [UInt8],
+        buildMode: BrushBuildMode
+    ) -> [UInt8] {
+        guard base.count == stroke.count else { return base }
+        var result = base
+        for index in result.indices {
+            switch buildMode {
+            case .opacityCap:
+                result[index] = max(base[index], stroke[index])
+            case .buildUp:
+                let source = Int(stroke[index])
+                let destination = Int(base[index])
+                result[index] = UInt8(clamping: source + ((destination * (255 - source) + 127) / 255))
+            }
+        }
+        return result
+    }
+
+    private func invalidateStrokeImage() {
+        cachedImage = nil
+        needsDisplay = true
+    }
+
+    private func strokePoint(for point: CGPoint, event: NSEvent) -> StrokePoint {
+        let normalizedX = min(max(point.x / max(bounds.width, 1), 0), 1)
+        let normalizedY = min(max(point.y / max(bounds.height, 1), 0), 1)
+        let eventPressure = event.pressure
+        let isTabletPressureEvent = event.type == .tabletPoint
+            || event.type == .pressure
+            || event.subtype == .tabletPoint
+        let pressure = isTabletPressureEvent && eventPressure > 0.01
+            ? eventPressure
+            : fixedPressure
+        return StrokePoint(
+            x: Double(normalizedX * CGFloat(resolution - 1)),
+            y: Double(normalizedY * CGFloat(resolution - 1)),
+            pressure: pressure
+        )
+    }
+
+    private func drawBackground() {
+        switch previewBackground {
+        case .dark:
+            NSColor(calibratedWhite: 0.055, alpha: 1).setFill()
+            bounds.fill()
+        case .light:
+            NSColor(calibratedWhite: 0.94, alpha: 1).setFill()
+            bounds.fill()
+        case .checkerboard:
+            NSColor(calibratedWhite: 0.18, alpha: 1).setFill()
+            bounds.fill()
+            let cell: CGFloat = 12
+            NSColor(calibratedWhite: 0.27, alpha: 1).setFill()
+            var y: CGFloat = 0
+            var row = 0
+            while y < bounds.height {
+                var x: CGFloat = row.isMultiple(of: 2) ? 0 : cell
+                while x < bounds.width {
+                    NSRect(x: x, y: y, width: cell, height: cell).fill()
+                    x += cell * 2
+                }
+                y += cell
+                row += 1
+            }
+        }
+    }
+
+    private func makeStrokeImage() -> CGImage? {
+        let drawsDarkStroke = previewBackground == .light
+        var rgba = [UInt8](repeating: 0, count: resolution * resolution * 4)
+        for index in displayAlpha.indices {
+            let color: UInt8 = drawsDarkStroke ? 18 : 245
+            let alpha = displayAlpha[index]
+            let premultipliedColor = UInt8((Int(color) * Int(alpha) + 127) / 255)
+            rgba[(index * 4)] = premultipliedColor
+            rgba[(index * 4) + 1] = premultipliedColor
+            rgba[(index * 4) + 2] = premultipliedColor
+            rgba[(index * 4) + 3] = alpha
+        }
+        guard
+            let provider = CGDataProvider(data: Data(rgba) as CFData),
+            let colorSpace = CGColorSpace(name: CGColorSpace.sRGB)
+        else { return nil }
+
+        return CGImage(
+            width: resolution,
+            height: resolution,
+            bitsPerComponent: 8,
+            bitsPerPixel: 32,
+            bytesPerRow: resolution * 4,
+            space: colorSpace,
+            bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
+            provider: provider,
+            decode: nil,
+            shouldInterpolate: false,
+            intent: .defaultIntent
+        )
+    }
+}
+
+struct CompoundPressureMixCurveEditor: View {
+    let mix: CompoundPressureMixSettings
+    let mode: CompoundBrushMode
+    let onChange: (CompoundPressureMixSettings) -> Void
+
+    var body: some View {
+        GeometryReader { proxy in
+            let plot = proxy.frame(in: .local).insetBy(dx: 18, dy: 18)
+            ZStack {
+                RoundedRectangle(cornerRadius: 7)
+                    .fill(Color.black.opacity(0.22))
+
+                Path { path in
+                    for division in 0...4 {
+                        let x = plot.minX + (plot.width * CGFloat(division) / 4)
+                        path.move(to: CGPoint(x: x, y: plot.minY))
+                        path.addLine(to: CGPoint(x: x, y: plot.maxY))
+                        let y = plot.minY + (plot.height * CGFloat(division) / 4)
+                        path.move(to: CGPoint(x: plot.minX, y: y))
+                        path.addLine(to: CGPoint(x: plot.maxX, y: y))
+                    }
+                }
+                .stroke(Color.white.opacity(0.07), lineWidth: 1)
+
+                Path { path in
+                    let points = controlPoints(in: plot)
+                    path.move(to: points[0])
+                    path.addLine(to: points[1])
+                    path.addLine(to: points[2])
+                }
+                .stroke(Color.accentColor, style: StrokeStyle(lineWidth: 2.5, lineJoin: .round))
+
+                ForEach(0..<3, id: \.self) { index in
+                    let point = controlPoints(in: plot)[index]
+                    Circle()
+                        .fill(Color.white)
+                        .overlay(Circle().stroke(Color.accentColor, lineWidth: 2))
+                        .frame(width: 14, height: 14)
+                        .position(point)
+                        .contentShape(Circle().inset(by: -8))
+                        .gesture(
+                            DragGesture(minimumDistance: 0)
+                                .onChanged { drag in
+                                    updatePoint(index, y: drag.location.y, plot: plot)
+                                }
+                        )
+                        .help(["轻压", "中压", "重压"][index])
+                }
+
+                VStack {
+                    HStack {
+                        Text(mode == .overlay ? "叠加" : "A")
+                        Spacer()
+                        Text("拖动白点")
+                    }
+                    Spacer()
+                    HStack {
+                        Text("B")
+                        Spacer()
+                        Text("轻压 → 重压")
+                    }
+                }
+                .font(.system(size: 9, weight: .bold))
+                .foregroundStyle(Color.white.opacity(0.38))
+                .padding(7)
+                .allowsHitTesting(false)
+            }
+        }
+    }
+
+    private func controlPoints(in rect: CGRect) -> [CGPoint] {
+        [
+            CGPoint(x: rect.minX, y: rect.maxY - (rect.height * CGFloat(mix.primaryAtLowPressure))),
+            CGPoint(x: rect.midX, y: rect.maxY - (rect.height * CGFloat(mix.primaryAtMidPressure))),
+            CGPoint(x: rect.maxX, y: rect.maxY - (rect.height * CGFloat(mix.primaryAtHighPressure)))
+        ]
+    }
+
+    private func updatePoint(_ index: Int, y: CGFloat, plot: CGRect) {
+        let weight = Float(min(max((plot.maxY - y) / max(plot.height, 1), 0), 1))
+        var updated = mix
+        switch index {
+        case 0: updated.primaryAtLowPressure = weight
+        case 1: updated.primaryAtMidPressure = weight
+        default: updated.primaryAtHighPressure = weight
+        }
+        onChange(updated)
+    }
+}
+
+struct CompoundEditorSlider: View {
+    let title: String
+    let value: Double
+    let range: ClosedRange<Double>
+    let valueText: (Double) -> String
+    let onCommit: (Double) -> Void
+
+    @State private var draftValue: Double
+    @State private var text: String
+    @State private var isSliding = false
+    @FocusState private var isTextFocused: Bool
+
+    init(
+        title: String,
+        value: Double,
+        range: ClosedRange<Double>,
+        valueText: @escaping (Double) -> String,
+        onCommit: @escaping (Double) -> Void
+    ) {
+        self.title = title
+        self.value = value
+        self.range = range
+        self.valueText = valueText
+        self.onCommit = onCommit
+        _draftValue = State(initialValue: min(max(value, range.lowerBound), range.upperBound))
+        _text = State(initialValue: valueText(value))
+    }
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text(title)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(Color.white.opacity(0.82))
+                .frame(width: 92, alignment: .leading)
+
+            Slider(
+                value: $draftValue,
+                in: range,
+                onEditingChanged: { editing in
+                    isSliding = editing
+                    if editing == false {
+                        commit(draftValue)
+                    }
+                }
+            )
+            .controlSize(.small)
+            .onChange(of: draftValue) { _, updated in
+                if isTextFocused == false {
+                    text = valueText(updated)
+                }
+            }
+
+            TextField("", text: $text)
+                .textFieldStyle(.roundedBorder)
+                .font(.system(size: 10, weight: .semibold).monospacedDigit())
+                .multilineTextAlignment(.trailing)
+                .frame(width: 76)
+                .focused($isTextFocused)
+                .onSubmit {
+                    commitText()
+                    isTextFocused = false
+                }
+                .onChange(of: isTextFocused) { wasFocused, isFocused in
+                    if wasFocused, isFocused == false {
+                        commitText()
+                    }
+                }
+        }
+        .onChange(of: value) { _, updated in
+            guard isSliding == false, isTextFocused == false else { return }
+            draftValue = min(max(updated, range.lowerBound), range.upperBound)
+            text = valueText(draftValue)
+        }
+    }
+
+    private func commitText() {
+        guard let parsed = parsedValue(from: text) else {
+            text = valueText(draftValue)
+            return
+        }
+        let clamped = min(max(parsed, range.lowerBound), range.upperBound)
+        draftValue = clamped
+        commit(clamped)
+    }
+
+    private func commit(_ newValue: Double) {
+        let clamped = min(max(newValue, range.lowerBound), range.upperBound)
+        draftValue = clamped
+        text = valueText(clamped)
+        onCommit(clamped)
+    }
+
+    private func parsedValue(from source: String) -> Double? {
+        let normalized = source.replacingOccurrences(of: ",", with: ".")
+        guard let range = normalized.range(
+            of: #"[-+]?(?:\d+(?:\.\d*)?|\.\d+)"#,
+            options: .regularExpression
+        ), let number = Double(normalized[range]) else {
+            return nil
+        }
+        if valueText(value).contains("%"), self.range.upperBound <= 1.0001 {
+            return number / 100
+        }
+        return number
+    }
+}

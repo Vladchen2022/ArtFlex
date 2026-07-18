@@ -402,6 +402,18 @@ struct CompoundPressureMixSettings: Codable, Equatable, Sendable {
         primaryAtHighPressure: 0.5
     )
 
+    static let reversed = CompoundPressureMixSettings(
+        primaryAtLowPressure: 1,
+        primaryAtMidPressure: 0.45,
+        primaryAtHighPressure: 0
+    )
+
+    static let secondaryAtMidPressure = CompoundPressureMixSettings(
+        primaryAtLowPressure: 1,
+        primaryAtMidPressure: 0,
+        primaryAtHighPressure: 1
+    )
+
     func resolvedPrimaryWeight(for pressure: Float) -> Float {
         let clampedPressure = min(max(pressure, 0), 1)
         if clampedPressure <= 0.5 {

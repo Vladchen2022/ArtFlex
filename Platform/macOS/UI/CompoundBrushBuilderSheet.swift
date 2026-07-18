@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 struct CompoundBrushBuilderSheet: View {
@@ -41,6 +42,11 @@ struct CompoundBrushBuilderSheet: View {
     @State private var initialBrush: BrushSettings?
     @State private var previewTask: Task<Void, Never>?
     @State private var previewGeneration = 0
+    @State private var previewChannel: CompoundBrushPreviewChannel = .result
+    @State private var previewBackground: CompoundBrushPreviewBackground = .dark
+    @State private var previewPressure: Float = 0.5
+    @State private var drawingPadClearToken = 0
+    @State private var didFinalizeEditing = false
 
     private var brush: BrushSettings { viewModel.workspace.toolSession.brush }
 
@@ -48,9 +54,8 @@ struct CompoundBrushBuilderSheet: View {
         VStack(spacing: 0) {
             header
             Divider().overlay(Color.white.opacity(0.08))
-            pressurePreviewStrip
-            componentSelector
-            scopePicker
+            livePreviewWorkspace
+            scopeNavigator
             Divider().overlay(Color.white.opacity(0.08))
 
             ScrollView(.vertical, showsIndicators: true) {
@@ -76,6 +81,9 @@ struct CompoundBrushBuilderSheet: View {
         .onDisappear {
             previewTask?.cancel()
             previewTask = nil
+            if didFinalizeEditing == false, let initialBrush {
+                viewModel.restoreCompoundBrushEditingSnapshot(initialBrush)
+            }
         }
         .sheet(item: $tipLibraryTarget) { target in
             tipImageLibrarySheet(for: target)
@@ -84,7 +92,7 @@ struct CompoundBrushBuilderSheet: View {
 
     private var header: some View {
         HStack(spacing: 10) {
-            Button(action: onClose) {
+            Button(action: cancelAndClose) {
                 Image(systemName: "chevron.right")
                     .frame(width: 28, height: 28)
             }
@@ -104,7 +112,7 @@ struct CompoundBrushBuilderSheet: View {
             Spacer(minLength: 8)
 
             Toggle(
-                "启用",
+                brush.compoundBrush.enabled ? "已启用" : "已停用",
                 isOn: Binding(
                     get: { brush.compoundBrush.enabled },
                     set: { viewModel.setCompoundBrushEnabled($0) }
@@ -117,6 +125,105 @@ struct CompoundBrushBuilderSheet: View {
         }
         .padding(.horizontal, 14)
         .frame(height: 54)
+    }
+
+    private var livePreviewWorkspace: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Text("真实渲染画板")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(Color.white.opacity(0.88))
+
+                Picker("预览通道", selection: $previewChannel) {
+                    ForEach(CompoundBrushPreviewChannel.allCases) { channel in
+                        Text(channel.rawValue).tag(channel)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.segmented)
+                .controlSize(.small)
+                .frame(maxWidth: 230)
+
+                Spacer(minLength: 0)
+
+                Menu {
+                    ForEach(CompoundBrushPreviewBackground.allCases) { background in
+                        Button {
+                            previewBackground = background
+                        } label: {
+                            Label(background.rawValue, systemImage: background.systemImage)
+                        }
+                    }
+                } label: {
+                    Image(systemName: previewBackground.systemImage)
+                        .frame(width: 28, height: 26)
+                }
+                .menuStyle(.borderlessButton)
+                .help("切换预览背景")
+
+                Button {
+                    drawingPadClearToken &+= 1
+                } label: {
+                    Image(systemName: "trash")
+                        .frame(width: 28, height: 26)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(Color.white.opacity(0.82))
+                .background(RoundedRectangle(cornerRadius: 6).fill(Color.white.opacity(0.07)))
+                .help("清空画板")
+            }
+
+            ZStack(alignment: .topLeading) {
+                CompoundBrushDrawingPad(
+                    brush: drawingPadBrush,
+                    pressure: previewPressure,
+                    background: previewBackground,
+                    clearToken: drawingPadClearToken
+                )
+                .frame(height: 154)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8)
+                        .stroke(Color.white.opacity(0.10), lineWidth: 1)
+                )
+
+                if previewChannel == .result, brush.compoundBrush.enabled == false {
+                    Text("组合已停用：结果通道按真实状态仅显示 A")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(Color.orange.opacity(0.9))
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 5)
+                        .background(.black.opacity(0.52), in: RoundedRectangle(cornerRadius: 5))
+                        .padding(7)
+                        .allowsHitTesting(false)
+                }
+            }
+
+            HStack(spacing: 8) {
+                Text("画板压力")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(Color.white.opacity(0.62))
+                Slider(
+                    value: Binding(
+                        get: { Double(previewPressure) },
+                        set: { previewPressure = Float($0) }
+                    ),
+                    in: 0.05...1
+                )
+                .controlSize(.small)
+                Text("\(Int(previewPressure * 100))%")
+                    .font(.system(size: 10, weight: .semibold).monospacedDigit())
+                    .foregroundStyle(Color.white.opacity(0.66))
+                    .frame(width: 36, alignment: .trailing)
+                Text("拖动画板直接试笔；参数变化会重放已有笔迹")
+                    .font(.system(size: 9, weight: .medium))
+                    .foregroundStyle(Color.white.opacity(0.40))
+            }
+
+            pressurePreviewStrip
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .background(Color.black.opacity(0.16))
     }
 
     private var pressurePreviewStrip: some View {
@@ -141,9 +248,7 @@ struct CompoundBrushBuilderSheet: View {
                 pressurePreviewCell(title: "重 85%", image: heavyPressurePreviewImage)
             }
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 10)
-        .background(Color.black.opacity(0.16))
+        .padding(.top, 2)
     }
 
     private func pressurePreviewCell(title: String, image: CGImage?) -> some View {
@@ -162,7 +267,7 @@ struct CompoundBrushBuilderSheet: View {
                         .foregroundStyle(Color.white.opacity(0.34))
                 }
             }
-            .frame(height: 52)
+            .frame(height: 38)
             .clipShape(RoundedRectangle(cornerRadius: 6))
 
             Text(title)
@@ -172,127 +277,57 @@ struct CompoundBrushBuilderSheet: View {
         .frame(maxWidth: .infinity)
     }
 
-    private var componentSelector: some View {
-        HStack(spacing: 8) {
-            componentButton(
-                title: "A 外形笔尖",
-                subtitle: primaryTipSummary(for: brush),
-                image: primaryPreviewImage,
-                scope: .primary
-            )
-
-            VStack(spacing: 3) {
-                Image(systemName: brush.compoundBrush.mode.editorEquivalent == .subtract
-                    ? "circle.slash"
-                    : "circle.grid.cross")
-                    .font(.system(size: 15, weight: .semibold))
-                Text(brush.compoundBrush.mode.editorEquivalent.displayName)
-                    .font(.system(size: 9, weight: .bold))
-                    .multilineTextAlignment(.center)
-            }
-            .foregroundStyle(Color.accentColor.opacity(0.92))
-            .frame(width: 74)
-            .contentShape(Rectangle())
-            .onTapGesture { selectedScope = .mix }
-            .help("编辑组合方式")
-
-            componentButton(
-                title: "B 纹理笔尖",
-                subtitle: secondaryTipSummary(for: brush.compoundBrush.secondary),
-                image: secondaryPreviewImage,
-                scope: .secondary
-            )
+    private var scopeNavigator: some View {
+        HStack(spacing: 7) {
+            scopeNavigatorButton(.overall, systemImage: "slider.horizontal.3", preview: nil)
+            scopeNavigatorButton(.primary, systemImage: nil, preview: primaryPreviewImage)
+            scopeNavigatorButton(.mix, systemImage: "circle.grid.cross", preview: nil)
+            scopeNavigatorButton(.secondary, systemImage: nil, preview: secondaryPreviewImage)
         }
         .padding(.horizontal, 14)
-        .padding(.vertical, 10)
+        .padding(.vertical, 9)
         .background(Color.white.opacity(0.025))
     }
 
-    private func componentButton(
-        title: String,
-        subtitle: String,
-        image: CGImage?,
-        scope: EditorScope
+    private func scopeNavigatorButton(
+        _ scope: EditorScope,
+        systemImage: String?,
+        preview: CGImage?
     ) -> some View {
         Button {
             selectedScope = scope
         } label: {
-            HStack(spacing: 8) {
+            VStack(spacing: 4) {
                 ZStack {
-                    Color.black.opacity(0.34)
-                    if let image {
-                        Image(decorative: image, scale: 1)
+                    if let preview {
+                        Image(decorative: preview, scale: 1)
                             .resizable()
                             .interpolation(.none)
                             .scaledToFit()
-                            .padding(5)
+                            .padding(3)
+                    } else if let systemImage {
+                        Image(systemName: systemImage)
+                            .font(.system(size: 13, weight: .semibold))
                     }
                 }
-                .frame(width: 46, height: 46)
-                .clipShape(RoundedRectangle(cornerRadius: 6))
+                .frame(height: 25)
 
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(title)
-                        .font(.system(size: 11, weight: .bold))
-                        .foregroundStyle(.white)
-                    Text(subtitle)
-                        .font(.system(size: 9, weight: .medium))
-                        .foregroundStyle(Color.white.opacity(0.5))
-                        .lineLimit(1)
-                }
-                Spacer(minLength: 0)
+                Text(scope.rawValue)
+                    .font(.system(size: 9, weight: .bold))
+                    .lineLimit(1)
             }
-            .padding(7)
+            .foregroundStyle(selectedScope == scope ? Color.white : Color.white.opacity(0.62))
+            .frame(maxWidth: .infinity, minHeight: 49)
             .background(
                 RoundedRectangle(cornerRadius: 7)
-                    .fill(selectedScope == scope ? Color.accentColor.opacity(0.16) : Color.white.opacity(0.045))
+                    .fill(selectedScope == scope ? Color.accentColor.opacity(0.76) : Color.white.opacity(0.05))
             )
             .overlay(
                 RoundedRectangle(cornerRadius: 7)
-                    .stroke(selectedScope == scope ? Color.accentColor.opacity(0.86) : Color.white.opacity(0.07), lineWidth: 1)
+                    .stroke(selectedScope == scope ? Color.accentColor : Color.white.opacity(0.07), lineWidth: 1)
             )
         }
         .buttonStyle(.plain)
-        .frame(maxWidth: .infinity)
-    }
-
-    private var scopePicker: some View {
-        HStack(spacing: 6) {
-            ForEach(EditorScope.allCases) { scope in
-                Button {
-                    selectedScope = scope
-                } label: {
-                    Text(scope.rawValue)
-                        .font(.system(size: 10, weight: .bold))
-                        .foregroundStyle(
-                            selectedScope == scope
-                                ? Color.white
-                                : Color.white.opacity(0.62)
-                        )
-                        .frame(maxWidth: .infinity, minHeight: 27)
-                        .background(
-                            RoundedRectangle(cornerRadius: 6)
-                                .fill(
-                                    selectedScope == scope
-                                        ? Color.accentColor.opacity(0.82)
-                                        : Color.white.opacity(0.055)
-                                )
-                        )
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 6)
-                                .stroke(
-                                    selectedScope == scope
-                                        ? Color.accentColor.opacity(0.95)
-                                        : Color.white.opacity(0.07),
-                                    lineWidth: 1
-                                )
-                        )
-                }
-                .buttonStyle(.plain)
-            }
-        }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 9)
     }
 
     @ViewBuilder
@@ -632,11 +667,20 @@ struct CompoundBrushBuilderSheet: View {
                     : "压力越大，结果可以从 B 纹理逐渐迁移到完整 A 外形"
             )
 
-            CompoundPressureCurvePreview(mix: mix, mode: mode)
+            CompoundPressureMixCurveEditor(
+                mix: mix,
+                mode: mode,
+                onChange: viewModel.setCompoundPressureMix
+            )
                 .frame(height: 138)
 
             HStack(spacing: 7) {
                 pressurePresetButton(usesOverlay ? "B → 叠加" : "B → A", settings: .default)
+                pressurePresetButton(usesOverlay ? "叠加 → B" : "A → B", settings: .reversed)
+                pressurePresetButton("中压 B", settings: .secondaryAtMidPressure)
+            }
+
+            HStack(spacing: 7) {
                 pressurePresetButton(usesOverlay ? "始终叠加" : "始终 A", settings: .primaryOnly)
                 pressurePresetButton("始终 B", settings: .secondaryOnly)
                 pressurePresetButton("固定混合", settings: .balanced)
@@ -644,20 +688,17 @@ struct CompoundBrushBuilderSheet: View {
 
             mixSlider(
                 title: "轻压结果",
-                value: Double(mix.primaryAtLowPressure),
-                valueText: mixValueText(mix.primaryAtLowPressure)
+                value: Double(mix.primaryAtLowPressure)
             ) { viewModel.setCompoundPrimaryMixAtLowPressure(Float($0)) }
 
             mixSlider(
                 title: "中压结果",
-                value: Double(mix.primaryAtMidPressure),
-                valueText: mixValueText(mix.primaryAtMidPressure)
+                value: Double(mix.primaryAtMidPressure)
             ) { viewModel.setCompoundPrimaryMixAtMidPressure(Float($0)) }
 
             mixSlider(
                 title: "重压结果",
-                value: Double(mix.primaryAtHighPressure),
-                valueText: mixValueText(mix.primaryAtHighPressure)
+                value: Double(mix.primaryAtHighPressure)
             ) { viewModel.setCompoundPrimaryMixAtHighPressure(Float($0)) }
 
             HStack {
@@ -732,23 +773,15 @@ struct CompoundBrushBuilderSheet: View {
     private func mixSlider(
         title: String,
         value: Double,
-        valueText: String,
         onCommit: @escaping (Double) -> Void
     ) -> some View {
-        OptimizedCompactSlider(
+        CompoundEditorSlider(
             title: title,
-            valueText: valueText,
-            value: Binding(get: { value }, set: { _ in }),
+            value: value,
             range: 0...1,
-            liveValueText: { mixValueText(Float($0)) },
+            valueText: { "\(Int(($0 * 100).rounded()))%" },
             onCommit: onCommit
         )
-    }
-
-    private func mixValueText(_ primaryWeight: Float) -> String {
-        let primaryPercent = Int((min(max(primaryWeight, 0), 1) * 100).rounded())
-        let resultLabel = brush.compoundBrush.mode.editorEquivalent == .overlay ? "叠加" : "A"
-        return "B \(100 - primaryPercent) / \(resultLabel) \(primaryPercent)"
     }
 
     private func tipSourceControls(
@@ -834,12 +867,11 @@ struct CompoundBrushBuilderSheet: View {
         liveValueText: @escaping (Double) -> String,
         onCommit: @escaping (Double) -> Void
     ) -> some View {
-        OptimizedCompactSlider(
+        CompoundEditorSlider(
             title: title,
-            valueText: valueText,
-            value: Binding(get: { value }, set: { _ in }),
+            value: value,
             range: range,
-            liveValueText: liveValueText,
+            valueText: liveValueText,
             onCommit: onCommit
         )
     }
@@ -877,11 +909,71 @@ struct CompoundBrushBuilderSheet: View {
 
             Spacer()
 
-            Button("完成") { onClose() }
+            Button(action: saveAsPreset) {
+                Label("另存为笔刷", systemImage: "square.and.arrow.down")
+            }
+            .buttonStyle(CompoundEditorButtonStyle(isProminent: false))
+
+            Button("取消", action: cancelAndClose)
+                .buttonStyle(CompoundEditorButtonStyle(isProminent: false))
+                .keyboardShortcut(.cancelAction)
+
+            Button("应用", action: applyAndClose)
                 .buttonStyle(CompoundEditorButtonStyle(isProminent: true))
+                .keyboardShortcut(.defaultAction)
         }
         .padding(.horizontal, 14)
         .frame(height: 48)
+    }
+
+    private var drawingPadBrush: BrushSettings {
+        switch previewChannel {
+        case .result:
+            var result = brush
+            result.compoundBrush.mode = result.compoundBrush.mode.editorEquivalent
+            return result
+        case .primary:
+            var primary = brush
+            primary.compoundBrush.enabled = false
+            return primary
+        case .secondary:
+            return secondaryPreviewBrush(from: brush)
+        }
+    }
+
+    private func cancelAndClose() {
+        let openingBrush = initialBrush
+        endFocusedTextEditing()
+        Task { @MainActor in
+            await Task.yield()
+            if let openingBrush {
+                viewModel.restoreCompoundBrushEditingSnapshot(openingBrush)
+            }
+            didFinalizeEditing = true
+            onClose()
+        }
+    }
+
+    private func applyAndClose() {
+        endFocusedTextEditing()
+        Task { @MainActor in
+            await Task.yield()
+            didFinalizeEditing = true
+            onClose()
+        }
+    }
+
+    private func saveAsPreset() {
+        endFocusedTextEditing()
+        Task { @MainActor in
+            await Task.yield()
+            viewModel.saveCurrentBrushPreset()
+            initialBrush = brush
+        }
+    }
+
+    private func endFocusedTextEditing() {
+        NSApp.keyWindow?.makeFirstResponder(nil)
     }
 
     private func schedulePreviews(for brush: BrushSettings, immediate: Bool = false) {
@@ -889,7 +981,6 @@ struct CompoundBrushBuilderSheet: View {
         previewGeneration &+= 1
         let generation = previewGeneration
         var previewBrush = brush
-        previewBrush.compoundBrush.enabled = true
         previewBrush.compoundBrush.mode = previewBrush.compoundBrush.mode.editorEquivalent
 
         previewTask = Task { @MainActor in
@@ -1024,9 +1115,9 @@ struct CompoundBrushBuilderSheet: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Text(target.title)
                         .font(.system(size: 20, weight: .bold))
-                    Text("选择素材后点击完成，将它应用到当前笔尖。")
+                    Text("选择素材后点击应用；右键素材可删除。")
                         .font(.system(size: 12))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(Color.white.opacity(0.55))
                 }
                 Spacer()
                 Button("导入") {
@@ -1037,7 +1128,7 @@ struct CompoundBrushBuilderSheet: View {
                     }
                 }
                 .buttonStyle(.bordered)
-                Button("完成") {
+                Button("应用") {
                     if let assetID = selectedPendingAssetID {
                         switch target {
                         case .primary:
@@ -1052,13 +1143,13 @@ struct CompoundBrushBuilderSheet: View {
             }
 
             ScrollView {
-                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 10), count: 5), spacing: 10) {
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 132, maximum: 180), spacing: 10)], spacing: 10) {
                     ForEach(items) { item in
                         Button {
                             setPendingSelection(item.id, for: target)
                         } label: {
                             VStack(alignment: .leading, spacing: 7) {
-                                ZStack(alignment: .topTrailing) {
+                                ZStack {
                                     Color.black.frame(height: 90)
                                     if let image = StageOneBrushPreviewRasterizer.importedAssetImage(
                                         from: item.maskData,
@@ -1071,17 +1162,6 @@ struct CompoundBrushBuilderSheet: View {
                                             .padding(8)
                                             .frame(maxWidth: .infinity, minHeight: 90, maxHeight: 90)
                                     }
-                                    Button {
-                                        _ = viewModel.deleteTipImageLibraryItem(item.id)
-                                        if pendingSelection(for: target) == item.id {
-                                            setPendingSelection(nil, for: target)
-                                        }
-                                    } label: {
-                                        Image(systemName: "xmark.circle.fill")
-                                    }
-                                    .buttonStyle(.plain)
-                                    .foregroundStyle(.white.opacity(0.88), .black.opacity(0.72))
-                                    .padding(5)
                                 }
                                 .clipShape(RoundedRectangle(cornerRadius: 6))
 
@@ -1094,23 +1174,34 @@ struct CompoundBrushBuilderSheet: View {
                             }
                             .padding(7)
                             .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(RoundedRectangle(cornerRadius: 7).fill(Color.white))
+                            .background(RoundedRectangle(cornerRadius: 7).fill(Color.white.opacity(0.055)))
                             .overlay(
                                 RoundedRectangle(cornerRadius: 7)
                                     .stroke(
-                                        selectedPendingAssetID == item.id ? Color.accentColor : Color.black.opacity(0.08),
+                                        selectedPendingAssetID == item.id ? Color.accentColor : Color.white.opacity(0.08),
                                         lineWidth: selectedPendingAssetID == item.id ? 2 : 1
                                     )
                             )
                         }
                         .buttonStyle(.plain)
+                        .contextMenu {
+                            Button(role: .destructive) {
+                                _ = viewModel.deleteTipImageLibraryItem(item.id)
+                                if pendingSelection(for: target) == item.id {
+                                    setPendingSelection(nil, for: target)
+                                }
+                            } label: {
+                                Label("删除素材", systemImage: "trash")
+                            }
+                        }
                     }
                 }
             }
         }
         .padding(18)
         .frame(minWidth: 820, minHeight: 600)
-        .background(Color(red: 0.96, green: 0.96, blue: 0.97))
+        .foregroundStyle(.white)
+        .background(Color(red: 0.10, green: 0.10, blue: 0.11))
     }
 }
 
@@ -1125,51 +1216,6 @@ private struct CompoundPreviewImages: @unchecked Sendable {
     let light: CGImage?
     let medium: CGImage?
     let heavy: CGImage?
-}
-
-private struct CompoundPressureCurvePreview: View {
-    let mix: CompoundPressureMixSettings
-    let mode: CompoundBrushMode
-
-    var body: some View {
-        GeometryReader { proxy in
-            let rect = proxy.frame(in: .local)
-            ZStack {
-                RoundedRectangle(cornerRadius: 7)
-                    .fill(Color.black.opacity(0.22))
-
-                VStack {
-                    HStack {
-                        Text(mode == .overlay ? "叠加结果" : "A 外形")
-                        Spacer()
-                        Text("压力")
-                    }
-                    Spacer()
-                    HStack {
-                        Text("B 纹理")
-                        Spacer()
-                        Text("轻 → 重")
-                    }
-                }
-                .font(.system(size: 9, weight: .bold))
-                .foregroundStyle(Color.white.opacity(0.38))
-                .padding(9)
-
-                Path { path in
-                    for sampleIndex in 0..<128 {
-                        let pressure = Float(sampleIndex) / 127
-                        let primaryWeight = mix.resolvedPrimaryWeight(for: pressure)
-                        let point = CGPoint(
-                            x: 12 + ((rect.width - 24) * CGFloat(pressure)),
-                            y: (rect.height - 12) - ((rect.height - 24) * CGFloat(primaryWeight))
-                        )
-                        sampleIndex == 0 ? path.move(to: point) : path.addLine(to: point)
-                    }
-                }
-                .stroke(Color.accentColor, lineWidth: 2.5)
-            }
-        }
-    }
 }
 
 private struct CompoundModeGlyph: View {
