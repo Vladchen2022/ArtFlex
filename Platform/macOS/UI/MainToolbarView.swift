@@ -120,7 +120,7 @@ struct MainToolbarView: View {
                 .frame(height: 18)
         }
         .buttonStyle(.plain)
-        .help(title)
+        .buttonTooltip(title)
     }
 
     private func compactSlider(
@@ -166,7 +166,12 @@ struct MainToolbarView: View {
             )
         }
         .buttonStyle(.plain)
-        .help(helpText ?? (isOn ? "已锁定画布：主画布不能缩放、旋转或移动" : "锁定画布：主画布不能缩放、旋转或移动"))
+        .buttonTooltip(
+            title,
+            help: helpText ?? (isOn
+                ? "已锁定画布：主画布不能缩放、旋转或移动"
+                : "锁定画布：主画布不能缩放、旋转或移动")
+        )
     }
 }
 

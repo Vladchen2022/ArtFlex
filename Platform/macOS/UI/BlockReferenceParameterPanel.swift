@@ -252,7 +252,7 @@ struct BlockReferenceParameterPanel: View {
                     }
                     .buttonStyle(.bordered)
                     .controlSize(.mini)
-                    .help("新建体块类目")
+                    .buttonTooltip("新建体块类目")
                 }
             }
 
@@ -418,7 +418,7 @@ struct BlockReferenceParameterPanel: View {
             } label: {
                 Image(systemName: "checkmark.circle")
             }
-            .help("选择全部体块")
+            .buttonTooltip("选择全部体块")
             .disabled(scene.objects.isEmpty)
 
             Button {
@@ -426,7 +426,7 @@ struct BlockReferenceParameterPanel: View {
             } label: {
                 Image(systemName: "plus.square.on.square")
             }
-            .help("复制所选")
+            .buttonTooltip("复制所选")
             .disabled(viewModel.selectedBlockReferenceObjectIDs.isEmpty)
 
             Button(role: .destructive) {
@@ -434,7 +434,7 @@ struct BlockReferenceParameterPanel: View {
             } label: {
                 Image(systemName: "trash")
             }
-            .help("删除所选")
+            .buttonTooltip("删除所选")
             .disabled(viewModel.selectedBlockReferenceObjectIDs.isEmpty)
 
             Spacer()
@@ -455,7 +455,7 @@ struct BlockReferenceParameterPanel: View {
             } label: {
                 Image(systemName: "ellipsis.circle")
             }
-            .help("更多场景对象操作")
+            .buttonTooltip("更多场景对象操作")
         }
         .buttonStyle(.bordered)
         .controlSize(.small)
@@ -600,7 +600,7 @@ struct BlockReferenceParameterPanel: View {
                 Image(systemName: object.isVisible ? "eye" : "eye.slash")
                     .frame(width: 16, height: 24)
             }
-            .help(object.isVisible ? "隐藏体块" : "显示体块")
+            .buttonTooltip(object.isVisible ? "隐藏体块" : "显示体块")
 
             Button {
                 viewModel.setBlockReferenceObjectLocked(object.id, isLocked: !object.isLocked)
@@ -608,7 +608,7 @@ struct BlockReferenceParameterPanel: View {
                 Image(systemName: object.isLocked ? "lock.fill" : "lock.open")
                     .frame(width: 16, height: 24)
             }
-            .help(object.isLocked ? "解锁体块" : "锁定体块")
+            .buttonTooltip(object.isLocked ? "解锁体块" : "锁定体块")
         }
         .buttonStyle(.borderless)
         .controlSize(.mini)
@@ -849,11 +849,13 @@ struct BlockReferenceParameterPanel: View {
                 } label: {
                     Image(systemName: "plus.square.on.square")
                 }
+                .buttonTooltip("复制所选体块")
                 Button(role: .destructive) {
                     viewModel.deleteSelectedBlockReferenceObject()
                 } label: {
                     Image(systemName: "trash")
                 }
+                .buttonTooltip("删除所选体块")
             }
             .buttonStyle(.bordered)
             .controlSize(.mini)
@@ -929,11 +931,13 @@ struct BlockReferenceParameterPanel: View {
                 } label: {
                     Image(systemName: "plus.square.on.square")
                 }
+                .buttonTooltip("复制所选体块")
                 Button(role: .destructive) {
                     viewModel.deleteSelectedBlockReferenceObject()
                 } label: {
                     Image(systemName: "trash")
                 }
+                .buttonTooltip("删除所选体块")
             }
             .buttonStyle(.bordered)
             .controlSize(.mini)
@@ -1608,10 +1612,12 @@ struct BlockReferenceParameterPanel: View {
                     } label: {
                         Image(systemName: slot?.isLocked == true ? "lock.fill" : "lock.open")
                     }
+                    .buttonTooltip(slot?.isLocked == true ? "解锁视角槽 \(index)" : "锁定视角槽 \(index)")
                     .disabled(slot == nil)
                     Button(role: .destructive) { viewModel.clearBlockReferenceCameraSlot(index) } label: {
                         Image(systemName: "trash")
                     }
+                    .buttonTooltip("清除视角槽 \(index)")
                     .disabled(slot == nil || slot?.isLocked == true)
                 }
                 .buttonStyle(.bordered)
@@ -1646,6 +1652,7 @@ struct BlockReferenceParameterPanel: View {
                         Button(role: .destructive) { viewModel.deleteBlockReferenceSceneSnapshot(snapshot.id) } label: {
                             Image(systemName: "trash")
                         }
+                        .buttonTooltip("删除场景快照 \(snapshot.name)")
                     }
                     .buttonStyle(.bordered)
                     .controlSize(.mini)

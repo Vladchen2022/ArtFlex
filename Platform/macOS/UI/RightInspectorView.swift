@@ -858,7 +858,7 @@ struct RightInspectorView: View {
                 }
                 .buttonStyle(.plain)
                 .disabled(viewModel.selectedReferenceImageSlot?.asset == nil)
-                .help("放大参考图")
+                .buttonTooltip("放大参考图")
 
                 Button {
                     viewModel.toggleCanvasLuminosityReference()
@@ -880,7 +880,7 @@ struct RightInspectorView: View {
                         )
                 }
                 .buttonStyle(.plain)
-                .help("黑白模式 (LAB L通道)")
+                .buttonTooltip("参考图黑白模式", help: "黑白模式 (LAB L通道)")
 
                 referenceImagePickedColorSwatch
 
@@ -902,7 +902,7 @@ struct RightInspectorView: View {
                 }
                 .buttonStyle(.plain)
                 .disabled(viewModel.selectedReferenceImageSlot?.asset == nil)
-                .help("清除当前参考图")
+                .buttonTooltip("清除当前参考图")
             }
         }
         .frame(maxWidth: .infinity, alignment: .topLeading)
@@ -1059,7 +1059,7 @@ struct RightInspectorView: View {
             }
         }
         .buttonStyle(.plain)
-        .accessibilityLabel("参考图 \(slot.labelText)")
+        .buttonTooltip("参考图 \(slot.labelText)")
         .accessibilityValue(isLoading ? "载入中" : (isLoaded ? "已载入" : "空"))
         .contextMenu {
             if isLoaded {
@@ -3225,7 +3225,7 @@ struct RightInspectorView: View {
                             .foregroundStyle(activeLayer.clipTargetLayerID == nil ? Color.white.opacity(0.66) : Color.accentColor)
                     }
                     .buttonStyle(.plain)
-                    .help(activeLayer.clipTargetLayerID == nil ? "创建剪贴图层" : "解除剪贴图层")
+                    .buttonTooltip(activeLayer.clipTargetLayerID == nil ? "创建剪贴图层" : "解除剪贴图层")
                 }
 
                 LayerOpacitySlider(
@@ -3444,7 +3444,7 @@ struct RightInspectorView: View {
         }
         .buttonStyle(.plain)
         .contentShape(Rectangle())
-        .help(tooltip)
+        .buttonTooltip(tooltip)
     }
 
     private func compactTextActionButton(
@@ -3482,7 +3482,7 @@ struct RightInspectorView: View {
         }
         .buttonStyle(.plain)
         .contentShape(Rectangle())
-        .help(tooltip)
+        .buttonTooltip(tooltip)
     }
 
     private func compactIconButton(
@@ -3510,7 +3510,7 @@ struct RightInspectorView: View {
         }
         .buttonStyle(.plain)
         .contentShape(Rectangle())
-        .help(tooltip)
+        .buttonTooltip(tooltip)
     }
 
     private func inspectorLabeledSlider(
@@ -3583,6 +3583,7 @@ struct RightInspectorView: View {
                         .frame(width: 12, height: 20)
                 }
                 .buttonStyle(.plain)
+                .buttonTooltip(collapsedLayerGroupIDs.contains(layer.id) ? "展开图层组" : "折叠图层组")
 
                 Image(systemName: "folder.fill")
                     .font(.system(size: 16, weight: .medium))
@@ -3655,7 +3656,7 @@ struct RightInspectorView: View {
                     .frame(width: 16, height: 16)
             }
             .buttonStyle(.plain)
-            .help(layer.isVisible ? "隐藏图层" : "显示图层")
+            .buttonTooltip(layer.isVisible ? "隐藏图层" : "显示图层")
 
             if layer.isPaintLayer {
                 Button {
@@ -3671,7 +3672,7 @@ struct RightInspectorView: View {
                     .frame(width: 16, height: 16)
                 }
                 .buttonStyle(.plain)
-                .help(layer.locksTransparentPixels ? "解除锁定透明像素" : "锁定透明像素")
+                .buttonTooltip(layer.locksTransparentPixels ? "解除锁定透明像素" : "锁定透明像素")
             }
 
             Button {
@@ -3683,7 +3684,7 @@ struct RightInspectorView: View {
                     .frame(width: 16, height: 16)
             }
             .buttonStyle(.plain)
-            .help(layer.isLocked ? "解锁图层" : "锁定图层")
+            .buttonTooltip(layer.isLocked ? "解锁图层" : "锁定图层")
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 6)
@@ -3816,7 +3817,7 @@ struct RightInspectorView: View {
                 )
         }
         .buttonStyle(.plain)
-        .help(tooltip)
+        .buttonTooltip(tooltip)
     }
 
     @ViewBuilder
@@ -4012,7 +4013,7 @@ struct RightInspectorView: View {
                     )
             }
             .buttonStyle(.plain)
-            .help("清空笔尖")
+            .buttonTooltip("清空笔尖")
             .padding(8)
         }
         .onDrop(of: [UTType.fileURL.identifier, UTType.image.identifier], isTargeted: $isTipImageDropTarget) { providers in
@@ -5753,7 +5754,7 @@ private struct ColorSectionView: View {
         }
         .buttonStyle(.plain)
         .contentShape(Rectangle())
-        .help(tooltip)
+        .buttonTooltip(tooltip)
     }
 
     private func bufferedCompactParameterSlider(

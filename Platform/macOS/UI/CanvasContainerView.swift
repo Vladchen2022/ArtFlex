@@ -1247,7 +1247,7 @@ private struct CanvasRotationHUD: View {
             .buttonStyle(.plain)
             .disabled(isLocked)
             .opacity(isLocked ? 0.4 : 1)
-            .help("将画布旋转恢复到 0°")
+            .buttonTooltip("重置画布旋转", help: "将画布旋转恢复到 0°")
         }
         .padding(.horizontal, 12)
         .frame(height: 32)
@@ -1290,7 +1290,7 @@ private struct CanvasCropHUD: View {
             .background(RoundedRectangle(cornerRadius: 6).fill(Color.white.opacity(0.12)))
             .disabled(bounds == nil)
             .opacity(bounds == nil ? 0.4 : 1)
-            .help("应用裁剪 (Enter)")
+            .buttonTooltip("应用裁剪", help: "应用裁剪 (Enter)")
 
             Button(action: onCancel) {
                 Image(systemName: "xmark")
@@ -1300,7 +1300,7 @@ private struct CanvasCropHUD: View {
             .buttonStyle(.plain)
             .foregroundStyle(Color.white)
             .background(RoundedRectangle(cornerRadius: 6).fill(Color.white.opacity(0.12)))
-            .help("取消裁剪 (Esc)")
+            .buttonTooltip("取消裁剪", help: "取消裁剪 (Esc)")
         }
         .padding(.horizontal, 12)
         .frame(height: 32)
@@ -2011,7 +2011,7 @@ private struct FreeTransformHUD: View {
             .buttonStyle(.plain)
             .disabled(isApplying)
             .opacity(isApplying ? 0.5 : 1)
-            .help("应用当前自由变形")
+            .buttonTooltip("应用自由变形")
 
             Button(action: onCancel) {
                 Text("取消")
@@ -2027,7 +2027,7 @@ private struct FreeTransformHUD: View {
             .buttonStyle(.plain)
             .disabled(isApplying)
             .opacity(isApplying ? 0.5 : 1)
-            .help("取消当前自由变形")
+            .buttonTooltip("取消自由变形")
         }
         .padding(.horizontal, 12)
         .frame(height: 32)

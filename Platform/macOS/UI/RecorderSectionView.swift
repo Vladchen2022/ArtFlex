@@ -224,6 +224,6 @@ struct RecorderSectionView: View {
                 )
         }
         .buttonStyle(.plain)
-        .help(tooltip)
+        .buttonTooltip(tooltip)
     }
 }

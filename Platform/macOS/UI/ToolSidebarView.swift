@@ -461,7 +461,7 @@ private struct ToolSidebarGroupButton: View {
                 .menuStyle(.borderlessButton)
                 .menuIndicator(.hidden)
                 .fixedSize()
-                .help("切换\(group.defaultTool.displayName)组工具")
+                .buttonTooltip("切换\(group.defaultTool.displayName)组工具")
             }
         }
         .frame(width: sidebarButtonWidth, height: sidebarButtonHeight)

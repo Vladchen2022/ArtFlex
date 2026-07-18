@@ -144,7 +144,7 @@ struct CompoundBrushBuilderSheet: View {
             }
             .buttonStyle(.plain)
             .foregroundStyle(Color.white.opacity(0.9))
-            .help("返回右侧面板")
+            .buttonTooltip("返回右侧面板")
 
             VStack(alignment: .leading, spacing: 2) {
                 Text("组合笔刷编辑器")
@@ -170,7 +170,7 @@ struct CompoundBrushBuilderSheet: View {
             .buttonStyle(.plain)
             .disabled(undoStack.isEmpty && historyAnchorBrush == nil)
             .keyboardShortcut("z", modifiers: .command)
-            .help("撤销编辑")
+            .buttonTooltip("撤销编辑")
 
             Button(action: redoEditing) {
                 Image(systemName: "arrow.uturn.forward")
@@ -179,7 +179,7 @@ struct CompoundBrushBuilderSheet: View {
             .buttonStyle(.plain)
             .disabled(redoStack.isEmpty)
             .keyboardShortcut("z", modifiers: [.command, .shift])
-            .help("重做编辑")
+            .buttonTooltip("重做编辑")
 
             Toggle(
                 brush.compoundBrush.enabled ? "已启用" : "已停用",
@@ -229,7 +229,7 @@ struct CompoundBrushBuilderSheet: View {
                         .frame(width: 28, height: 26)
                 }
                 .menuStyle(.borderlessButton)
-                .help("切换预览背景")
+                .buttonTooltip("切换预览背景")
 
                 Button {
                     drawingPadClearToken &+= 1
@@ -240,7 +240,7 @@ struct CompoundBrushBuilderSheet: View {
                 .buttonStyle(.plain)
                 .foregroundStyle(Color.white.opacity(0.82))
                 .background(RoundedRectangle(cornerRadius: 6).fill(Color.white.opacity(0.07)))
-                .help("清空画板")
+                .buttonTooltip("清空画板")
             }
 
             ZStack(alignment: .topLeading) {
@@ -382,7 +382,7 @@ struct CompoundBrushBuilderSheet: View {
                     RoundedRectangle(cornerRadius: 5)
                         .fill(previewPattern == pattern ? Color.accentColor.opacity(0.14) : Color.white.opacity(0.05))
                 )
-                .help(pattern.rawValue)
+                .buttonTooltip(pattern.rawValue)
             }
 
             Spacer(minLength: 4)
@@ -395,7 +395,7 @@ struct CompoundBrushBuilderSheet: View {
             }
             .buttonStyle(.plain)
             .foregroundStyle(previewSeedLocked ? Color.accentColor : Color.white.opacity(0.66))
-            .help(previewSeedLocked ? "随机结果已锁定，便于对比参数" : "参数变化时重新随机")
+            .buttonTooltip(previewSeedLocked ? "解除随机锁定" : "锁定随机结果")
 
             Button(action: randomizePreviewSeed) {
                 Image(systemName: "dice.fill")
@@ -404,7 +404,7 @@ struct CompoundBrushBuilderSheet: View {
             .buttonStyle(.plain)
             .foregroundStyle(Color.white.opacity(0.72))
             .background(RoundedRectangle(cornerRadius: 5).fill(Color.white.opacity(0.05)))
-            .help("重新随机")
+            .buttonTooltip("重新随机")
         }
     }
 
@@ -427,13 +427,13 @@ struct CompoundBrushBuilderSheet: View {
             } label: {
                 Label("A", systemImage: isPrimaryLocked ? "lock.fill" : "lock.open")
             }
-            .help(isPrimaryLocked ? "解除 A 锁定" : "锁定 A")
+            .buttonTooltip(isPrimaryLocked ? "解除 A 锁定" : "锁定 A")
 
             Button("A → B") {
                 viewModel.copyCompoundPrimaryTipToSecondary()
             }
             .disabled(isPrimaryLocked || isSecondaryLocked)
-            .help("把 A 的笔尖与响应复制到 B")
+            .buttonTooltip("把 A 的笔尖与响应复制到 B")
 
             Button {
                 viewModel.swapCompoundPrimaryAndSecondaryTips()
@@ -441,20 +441,20 @@ struct CompoundBrushBuilderSheet: View {
                 Label("交换", systemImage: "arrow.left.arrow.right")
             }
             .disabled(isPrimaryLocked || isSecondaryLocked)
-            .help("交换 A 与 B")
+            .buttonTooltip("交换 A 与 B")
 
             Button("B → A") {
                 viewModel.copyCompoundSecondaryTipToPrimary()
             }
             .disabled(isPrimaryLocked || isSecondaryLocked)
-            .help("把 B 的笔尖与响应复制到 A")
+            .buttonTooltip("把 B 的笔尖与响应复制到 A")
 
             Button {
                 isSecondaryLocked.toggle()
             } label: {
                 Label("B", systemImage: isSecondaryLocked ? "lock.fill" : "lock.open")
             }
-            .help(isSecondaryLocked ? "解除 B 锁定" : "锁定 B")
+            .buttonTooltip(isSecondaryLocked ? "解除 B 锁定" : "锁定 B")
 
             Spacer(minLength: 4)
 
@@ -462,7 +462,7 @@ struct CompoundBrushBuilderSheet: View {
                 .toggleStyle(.switch)
                 .controlSize(.mini)
                 .font(.system(size: 9, weight: .semibold))
-                .help("只影响预览，不改变画笔参数")
+                .buttonTooltip("预览压力", help: "只影响预览，不改变画笔参数")
         }
         .buttonStyle(CompoundEditorButtonStyle(isProminent: false))
         .padding(.horizontal, 14)
@@ -1079,7 +1079,7 @@ struct CompoundBrushBuilderSheet: View {
         .foregroundStyle(Color.white.opacity(0.88))
         .background(RoundedRectangle(cornerRadius: 6).fill(Color.white.opacity(0.08)))
         .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.white.opacity(0.08), lineWidth: 1))
-        .help(help)
+        .buttonTooltip(help)
     }
 
     private func editorSlider(

@@ -177,7 +177,7 @@ struct SnapshotCompareGridView: View {
                     .padding(6)
             }
             .buttonStyle(.plain)
-            .help("删除快照 \(index)")
+            .buttonTooltip("删除快照 \(index)")
         }
         .onDrag {
             draggedSnapshotID = snapshot.id
@@ -263,6 +263,7 @@ struct SnapshotCompareGridView: View {
                             .padding(8)
                     }
                     .buttonStyle(.plain)
+                    .buttonTooltip("清除对比槽 \(slot)")
                 }
             }
         }

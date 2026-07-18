@@ -304,7 +304,7 @@ private struct QuickColorPickerBrushSlotDot: View {
         .buttonStyle(.plain)
         .disabled(preset == nil)
         .opacity(preset == nil ? 0.32 : 1)
-        .help("快捷画笔 \(slotIndex + 1)")
+        .buttonTooltip("快捷画笔 \(slotIndex + 1)")
     }
 
     private var dotFillColor: Color {
