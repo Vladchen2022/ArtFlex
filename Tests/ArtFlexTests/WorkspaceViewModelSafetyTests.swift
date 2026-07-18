@@ -3893,6 +3893,51 @@ struct WorkspaceViewModelSafetyTests {
         #expect(harness.viewModel.workspace.toolSession.brush.customTipSourceSemantic == .procedural)
         #expect(harness.viewModel.strokeResetToken == committedStrokeResetToken + 1)
     }
+
+    @Test
+    @MainActor
+    func brushTipDraftUndoRedoAndDiscardNeverMutateCommittedTip() throws {
+        let harness = try BrushEditingBoundaryHarness()
+        let baselineMask = makeVerticalTipMask(side: 16)
+        let firstDraft = Data(repeating: 64, count: 16 * 16)
+        let secondDraft = Data(repeating: 192, count: 16 * 16)
+        harness.viewModel.updateCustomTipMask(baselineMask)
+
+        harness.viewModel.updateBrushTipDraft(firstDraft)
+        harness.viewModel.updateBrushTipDraft(secondDraft)
+        #expect(harness.viewModel.canUndoBrushTipDraft)
+        #expect(harness.viewModel.workspace.toolSession.brush.customTipMaskData == baselineMask)
+
+        harness.viewModel.undoBrushTipDraft()
+        #expect(harness.viewModel.brushTipDraftMaskData == firstDraft)
+        #expect(harness.viewModel.canRedoBrushTipDraft)
+
+        harness.viewModel.redoBrushTipDraft()
+        #expect(harness.viewModel.brushTipDraftMaskData == secondDraft)
+
+        harness.viewModel.discardBrushTipDraft()
+        #expect(!harness.viewModel.hasPendingBrushTipDraft)
+        #expect(!harness.viewModel.canUndoBrushTipDraft)
+        #expect(!harness.viewModel.canRedoBrushTipDraft)
+        #expect(harness.viewModel.workspace.toolSession.brush.customTipMaskData == baselineMask)
+    }
+
+    @Test
+    @MainActor
+    func fittingCanvasRespectsViewportLock() throws {
+        let harness = try BrushEditingBoundaryHarness()
+        harness.viewModel.updateCanvasViewportSize(.init(width: 1200, height: 900))
+        harness.viewModel.setNavigatorZoomPercent(250)
+        let zoomedViewport = harness.viewModel.workspace.viewport
+
+        harness.viewModel.setCanvasViewportLocked(true)
+        harness.viewModel.fitCanvasToWindow()
+        #expect(harness.viewModel.workspace.viewport == zoomedViewport)
+
+        harness.viewModel.setCanvasViewportLocked(false)
+        harness.viewModel.fitCanvasToWindow()
+        #expect(harness.viewModel.workspace.viewport == .stageOneDefault)
+    }
 }
 
 @MainActor

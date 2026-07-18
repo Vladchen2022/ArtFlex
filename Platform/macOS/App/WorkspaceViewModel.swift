@@ -193,6 +193,8 @@ final class WorkspaceViewModel: ObservableObject {
     @Published private(set) var isColorBlocksPanelFocused = false
     @Published private(set) var brushTipDraftMaskData: Data?
     @Published private(set) var hasPendingBrushTipDraft = false
+    @Published private(set) var canUndoBrushTipDraft = false
+    @Published private(set) var canRedoBrushTipDraft = false
     private(set) var lassoSamplingDebugPoints: [CanvasPoint] = []
     private(set) var samePathCommittedDebugShape: SelectionShape?
     private(set) var samePathPreviewDebugShape: SelectionShape?
@@ -210,6 +212,8 @@ final class WorkspaceViewModel: ObservableObject {
     var ideationRedoHandler: (() -> Bool)?
     var canvasContentChangeHandler: (() -> Void)?
     private var isApplyingMirroredIdeationOperation = false
+    private var brushTipDraftSnapshot: BrushTipDraftSnapshot?
+    private var brushTipDraftHistory = BrushTipDraftHistory()
     private var statusDismissTask: Task<Void, Never>?
     private var isAdjustingLayerOpacity = false
     private var activeLayerOpacityChangeDidMutate = false
@@ -1494,21 +1498,52 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func updateBrushTipDraft(_ data: Data?) {
-        guard brushTipDraftMaskData != data || hasPendingBrushTipDraft == false else {
-            return
-        }
-        brushTipDraftMaskData = data
-        hasPendingBrushTipDraft = true
+        setBrushTipDraftSnapshot(
+            BrushTipDraftSnapshot(
+                maskData: data,
+                sourceSemantic: data == nil ? .procedural : .customMask,
+                assetID: nil,
+                sourceInfo: nil
+            )
+        )
     }
 
     func clearBrushTipDraft() {
         updateBrushTipDraft(nil)
     }
 
+    func undoBrushTipDraft() {
+        let current = activeBrushTipDraftSnapshot
+        guard let previous = brushTipDraftHistory.undo(current: current) else { return }
+        restoreBrushTipDraftSnapshot(previous)
+    }
+
+    func redoBrushTipDraft() {
+        let current = activeBrushTipDraftSnapshot
+        guard let next = brushTipDraftHistory.redo(current: current) else { return }
+        restoreBrushTipDraftSnapshot(next)
+    }
+
+    func discardBrushTipDraft() {
+        discardPendingBrushTipDraft()
+    }
+
     @discardableResult
     func applyBrushTipDraft() -> Bool {
-        guard hasPendingBrushTipDraft else { return false }
-        updateCustomTipMask(brushTipDraftMaskData)
+        guard hasPendingBrushTipDraft, let draft = brushTipDraftSnapshot else { return false }
+        bootstrap.workspaceStore.updateToolSession { session in
+            session.brush.tipShape = .customRound
+            session.brush.customTipSourceSemantic = draft.sourceSemantic
+            session.brush.customTipAssetID = draft.assetID
+            session.brush.customTipImportedSourceInfo = draft.sourceInfo
+            session.brush.customTipMaskData = draft.maskData
+            session.brush.customTipEnvelopeMaskData = makeEnvelopeMaskData(from: draft.maskData)
+        }
+        discardPendingBrushTipDraft()
+        notePrimaryBrushTipDefinitionChanged()
+        StageOneBrushPreviewRasterizer.resetCache()
+        persistBrushLibrary()
+        refreshToolSessionOnly()
         return true
     }
 
@@ -1745,12 +1780,19 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func importBrushTipImageFromDisk() {
-        guard let url = bootstrap.filePanelService.presentImageOpenPanel() else {
-            showStatus(.init(kind: .info, message: "已取消选择图片"))
+        guard let url = selectBrushTipImageURLFromDisk() else {
             return
         }
 
         importBrushTipImage(from: url)
+    }
+
+    func selectBrushTipImageURLFromDisk() -> URL? {
+        guard let url = bootstrap.filePanelService.presentImageOpenPanel() else {
+            showStatus(.init(kind: .info, message: "已取消选择图片"))
+            return nil
+        }
+        return url
     }
 
     @discardableResult
@@ -1801,6 +1843,43 @@ final class WorkspaceViewModel: ObservableObject {
         persistBrushLibrary()
         refresh()
         showStatus(.init(kind: .success, message: "已从\(sourceDescription)导入笔尖"))
+        return true
+    }
+
+    func brushTipImportPreviewMask(
+        from image: NSImage,
+        options: BrushTipImageImportOptions
+    ) -> Data? {
+        makeBrushTipMaskPair(from: image, options: options)?.detail
+    }
+
+    @discardableResult
+    func stageImportedBrushTipImage(
+        _ image: NSImage,
+        sourceDescription: String,
+        options: BrushTipImageImportOptions
+    ) -> Bool {
+        guard let maskPair = makeBrushTipMaskPair(from: image, options: options) else {
+            showStatus(.init(kind: .error, message: "当前设置无法生成有效笔尖"))
+            return false
+        }
+
+        let sourceInfo = makeImportedTipSourceInfo(
+            from: image,
+            sourceDescription: sourceDescription
+        )
+        let item = upsertTipImageLibraryItem(maskData: maskPair.detail, sourceInfo: sourceInfo)
+        setBrushTipDraftSnapshot(
+            BrushTipDraftSnapshot(
+                maskData: item.maskData,
+                sourceSemantic: .importedImage,
+                assetID: item.id,
+                sourceInfo: item.sourceInfo
+            )
+        )
+        persistBrushLibrary()
+        refreshToolSessionOnly()
+        showStatus(.init(kind: .success, message: "已载入笔尖草稿，确认后应用"))
         return true
     }
 
@@ -1903,27 +1982,39 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     private func makeBrushTipMaskPair(from image: NSImage) -> (detail: Data, envelope: Data)? {
+        makeBrushTipMaskPair(from: image, options: BrushTipImageImportOptions())
+    }
+
+    private func makeBrushTipMaskPair(
+        from image: NSImage,
+        options: BrushTipImageImportOptions
+    ) -> (detail: Data, envelope: Data)? {
         guard
-            let source = extractedMaskBytes(from: image),
-            let detectedBounds = contentBoundsIgnoringThinGuides(
-                mask: source.bytes,
-                width: source.width,
-                height: source.height
-            )
+            let source = extractedMaskBytes(from: image, options: options)
         else {
             return nil
         }
 
-        let expandedBounds = detectedBounds.insetBy(
-            dx: -CGFloat(Self.brushTipCanonicalPadding),
-            dy: -CGFloat(Self.brushTipCanonicalPadding)
-        )
-        let cropped = cropMaskBytes(
-            source.bytes,
-            width: source.width,
-            height: source.height,
-            bounds: expandedBounds
-        )
+        let cropped: (bytes: [UInt8], width: Int, height: Int)
+        if options.cropsToContent,
+           let detectedBounds = contentBoundsIgnoringThinGuides(
+               mask: source.bytes,
+               width: source.width,
+               height: source.height
+           ) {
+            let expandedBounds = detectedBounds.insetBy(
+                dx: -CGFloat(Self.brushTipCanonicalPadding),
+                dy: -CGFloat(Self.brushTipCanonicalPadding)
+            )
+            cropped = cropMaskBytes(
+                source.bytes,
+                width: source.width,
+                height: source.height,
+                bounds: expandedBounds
+            )
+        } else {
+            cropped = source
+        }
 
         guard let detail = resampledSquareMaskData(
             from: cropped.bytes,
@@ -2036,11 +2127,65 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     private func discardPendingBrushTipDraft() {
+        brushTipDraftSnapshot = nil
         brushTipDraftMaskData = nil
         hasPendingBrushTipDraft = false
+        brushTipDraftHistory.reset()
+        syncBrushTipDraftHistoryAvailability()
     }
 
-    private func extractedMaskBytes(from image: NSImage) -> (bytes: [UInt8], width: Int, height: Int)? {
+    private var committedBrushTipSnapshot: BrushTipDraftSnapshot {
+        let brush = workspace.toolSession.brush
+        return BrushTipDraftSnapshot(
+            maskData: brush.customTipMaskData,
+            sourceSemantic: effectiveBrushTipSourceSemantic(for: brush),
+            assetID: brush.customTipAssetID,
+            sourceInfo: brush.customTipImportedSourceInfo
+        )
+    }
+
+    private var activeBrushTipDraftSnapshot: BrushTipDraftSnapshot {
+        brushTipDraftSnapshot ?? committedBrushTipSnapshot
+    }
+
+    private func effectiveBrushTipSourceSemantic(for brush: BrushSettings) -> TipSourceSemantic {
+        if brush.customTipMaskData == nil {
+            return .procedural
+        }
+        return brush.customTipSourceSemantic
+    }
+
+    private func setBrushTipDraftSnapshot(_ snapshot: BrushTipDraftSnapshot) {
+        let current = activeBrushTipDraftSnapshot
+        guard current != snapshot else { return }
+        brushTipDraftHistory.record(current: current, next: snapshot)
+        restoreBrushTipDraftSnapshot(snapshot)
+    }
+
+    private func restoreBrushTipDraftSnapshot(_ snapshot: BrushTipDraftSnapshot) {
+        let baseline = committedBrushTipSnapshot
+        if snapshot == baseline {
+            brushTipDraftSnapshot = nil
+            brushTipDraftMaskData = nil
+            hasPendingBrushTipDraft = false
+        } else {
+            brushTipDraftSnapshot = snapshot
+            brushTipDraftMaskData = snapshot.maskData
+            hasPendingBrushTipDraft = true
+        }
+        syncBrushTipDraftHistoryAvailability()
+        StageOneBrushPreviewRasterizer.resetCache()
+    }
+
+    private func syncBrushTipDraftHistoryAvailability() {
+        canUndoBrushTipDraft = brushTipDraftHistory.canUndo
+        canRedoBrushTipDraft = brushTipDraftHistory.canRedo
+    }
+
+    private func extractedMaskBytes(
+        from image: NSImage,
+        options: BrushTipImageImportOptions = BrushTipImageImportOptions()
+    ) -> (bytes: [UInt8], width: Int, height: Int)? {
         guard
             let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil),
             let colorSpace = CGColorSpace(name: CGColorSpace.sRGB)
@@ -2070,7 +2215,11 @@ final class WorkspaceViewModel: ObservableObject {
         context.interpolationQuality = .high
         context.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
 
-        var mask = [UInt8](repeating: 0, count: width * height)
+        var darknessMask = [UInt8](repeating: 0, count: width * height)
+        var alphaMask = [UInt8](repeating: 0, count: width * height)
+        var darknessMass = 0.0
+        var alphaMass = 0.0
+        var hasMeaningfulTransparency = false
         for index in 0..<(width * height) {
             let offset = index * bytesPerPixel
             let red = Double(rgba[offset])
@@ -2079,7 +2228,41 @@ final class WorkspaceViewModel: ObservableObject {
             let alpha = Double(rgba[offset + 3]) / 255.0
             let luminance = (0.299 * red) + (0.587 * green) + (0.114 * blue)
             let darkness = (255.0 - luminance) * alpha
-            mask[index] = UInt8(clamping: Int(darkness.rounded()))
+            let darknessByte = UInt8(clamping: Int(darkness.rounded()))
+            let alphaByte = rgba[offset + 3]
+            darknessMask[index] = darknessByte
+            alphaMask[index] = alphaByte
+            darknessMass += Double(darknessByte)
+            alphaMass += Double(alphaByte)
+            hasMeaningfulTransparency = hasMeaningfulTransparency || alphaByte < 250
+        }
+
+        let interpretation: BrushTipImageInterpretation
+        switch options.interpretation {
+        case .automatic:
+            interpretation = hasMeaningfulTransparency && darknessMass < alphaMass * 0.35
+                ? .alpha
+                : .luminance
+        case .luminance, .alpha:
+            interpretation = options.interpretation
+        }
+
+        var mask = interpretation == .alpha ? alphaMask : darknessMask
+        if options.isInverted {
+            for index in mask.indices {
+                let alpha = alphaMask[index]
+                if interpretation == .luminance {
+                    mask[index] = UInt8(clamping: max(0, Int(alpha) - Int(mask[index])))
+                } else {
+                    mask[index] = 255 - mask[index]
+                }
+            }
+        }
+        if options.usesThreshold {
+            let threshold = UInt8(clamping: Int((min(max(options.threshold, 0), 1) * 255).rounded()))
+            for index in mask.indices {
+                mask[index] = mask[index] >= threshold ? 255 : 0
+            }
         }
 
         return (mask, width, height)
@@ -4735,6 +4918,7 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func fitCanvasToWindow() {
+        guard !isCanvasViewportLocked else { return }
         bootstrap.workspaceStore.updateViewport { viewport in
             viewport = .stageOneDefault
         }
@@ -4834,9 +5018,14 @@ final class WorkspaceViewModel: ObservableObject {
             CanvasPoint(x: 0, y: latestCanvasViewportSize.height)
         ]
 
-        return viewportCorners.map { point in
-            transform.viewportToCanvas(point, clamped: true)
+        let canvasPolygon = viewportCorners.map { point in
+            transform.viewportToCanvas(point, clamped: false)
         }
+        let clipped = NavigatorGeometry.clippedCanvasPolygon(
+            canvasPolygon,
+            canvasSize: workspace.document.canvasSize
+        )
+        return clipped.count >= 3 ? clipped : nil
     }
 
     func setNavigatorPreviewVisible(_ isVisible: Bool) {

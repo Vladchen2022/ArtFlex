@@ -211,6 +211,17 @@ private enum TipImageLibrarySheetTarget: String, Identifiable {
     }
 }
 
+private enum BrushTipCanvasDisplayMode {
+    case edit
+    case strokePreview
+}
+
+private struct BrushTipImportCandidate: Identifiable {
+    let id = UUID()
+    let image: NSImage
+    let sourceLabel: String
+}
+
 private struct PressAndHoldActionButton: View {
     let title: String
     let isEnabled: Bool
@@ -578,6 +589,9 @@ struct RightInspectorView: View {
     @State private var showsBrushRandomControls = false
     @State private var showsPressureAdvancedControls = false
     @State private var tipPaintMode: TipPaintMode = .round
+    @State private var tipEditorBrushSize: Float = 28
+    @State private var brushTipCanvasDisplayMode: BrushTipCanvasDisplayMode = .edit
+    @State private var brushTipImportCandidate: BrushTipImportCandidate?
     @State private var presetShapeIndex = 0
     @State private var sprayPatternIndex = 0
     @State private var draggedBrushPresetID: String?
@@ -727,6 +741,23 @@ struct RightInspectorView: View {
             tipImageLibrarySheet(for: target) {
                 tipImageLibrarySheetTarget = nil
             }
+        }
+        .sheet(item: $brushTipImportCandidate) { candidate in
+            BrushTipImportSheet(
+                candidate: candidate,
+                viewModel: viewModel,
+                onCancel: { brushTipImportCandidate = nil },
+                onApply: { options in
+                    if viewModel.stageImportedBrushTipImage(
+                        candidate.image,
+                        sourceDescription: candidate.sourceLabel,
+                        options: options
+                    ) {
+                        brushTipCanvasDisplayMode = .edit
+                        brushTipImportCandidate = nil
+                    }
+                }
+            )
         }
     }
 
@@ -1172,17 +1203,6 @@ struct RightInspectorView: View {
 
             HStack(spacing: 4) {
                 compactToolButton(
-                    systemImage: "arrow.clockwise",
-                    tooltip: "刷新导航器",
-                    width: topInspectorControlButtonWidth,
-                    height: topInspectorControlButtonHeight,
-                    iconSize: topInspectorControlIconSize,
-                    cornerRadius: topInspectorControlCornerRadius
-                ) {
-                    viewModel.refreshNavigatorPreviewNow()
-                }
-
-                compactToolButton(
                     systemImage: "arrow.down.right.and.arrow.up.left",
                     tooltip: "适合窗口 (Cmd+0)",
                     width: topInspectorControlButtonWidth,
@@ -1193,6 +1213,7 @@ struct RightInspectorView: View {
                     viewModel.fitCanvasToWindow()
                     syncNavigatorZoomPercentText()
                 }
+                .disabled(viewModel.isCanvasViewportLocked)
 
                 compactToolButton(
                     systemImage: "viewfinder",
@@ -1205,15 +1226,41 @@ struct RightInspectorView: View {
                     viewModel.setCanvasToActualPixels()
                     syncNavigatorZoomPercentText()
                 }
+                .disabled(viewModel.isCanvasViewportLocked)
+
+                compactToolButton(
+                    systemImage: "minus",
+                    tooltip: "缩小画布",
+                    width: topInspectorControlButtonWidth,
+                    height: topInspectorControlButtonHeight,
+                    iconSize: topInspectorControlIconSize,
+                    cornerRadius: topInspectorControlCornerRadius
+                ) {
+                    viewModel.setNavigatorZoomPercent(viewModel.navigatorZoomPercent / 1.25)
+                }
+                .disabled(viewModel.isCanvasViewportLocked)
 
                 Slider(
                     value: Binding(
-                        get: { viewModel.navigatorZoomPercent },
-                        set: { viewModel.setNavigatorZoomPercent($0) }
+                        get: { NavigatorZoomMapping.sliderPosition(for: viewModel.navigatorZoomPercent) },
+                        set: { viewModel.setNavigatorZoomPercent(NavigatorZoomMapping.percent(forSliderPosition: $0)) }
                     ),
-                    in: 5...3200
+                    in: 0...1
                 )
                 .frame(minWidth: 32, maxWidth: .infinity)
+                .disabled(viewModel.isCanvasViewportLocked)
+
+                compactToolButton(
+                    systemImage: "plus",
+                    tooltip: "放大画布",
+                    width: topInspectorControlButtonWidth,
+                    height: topInspectorControlButtonHeight,
+                    iconSize: topInspectorControlIconSize,
+                    cornerRadius: topInspectorControlCornerRadius
+                ) {
+                    viewModel.setNavigatorZoomPercent(viewModel.navigatorZoomPercent * 1.25)
+                }
+                .disabled(viewModel.isCanvasViewportLocked)
 
                 HStack(spacing: 4) {
                     TextField("", text: $navigatorZoomPercentText)
@@ -1221,7 +1268,7 @@ struct RightInspectorView: View {
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(Color.white.opacity(0.92))
                         .multilineTextAlignment(.trailing)
-                        .frame(width: 28)
+                        .frame(width: 34)
                         .onSubmit {
                             commitNavigatorZoomPercentText()
                         }
@@ -1240,31 +1287,52 @@ struct RightInspectorView: View {
                     RoundedRectangle(cornerRadius: topInspectorControlCornerRadius)
                         .stroke(Color.white.opacity(0.08), lineWidth: 1)
                 )
+                .disabled(viewModel.isCanvasViewportLocked)
 
-                compactToolButton(
-                    systemImage: viewModel.showsTransparencyCheckerboard ? "checkerboard.rectangle" : "rectangle.fill",
-                    tooltip: "切换透明区域背景",
-                    width: topInspectorControlButtonWidth,
-                    height: topInspectorControlButtonHeight,
-                    iconSize: topInspectorControlIconSize,
-                    cornerRadius: topInspectorControlCornerRadius
-                ) {
-                    viewModel.showsTransparencyCheckerboard.toggle()
-                }
-
-                compactToolButton(
-                    systemImage: viewModel.isPixelGridEnabled ? "grid" : "grid.circle",
-                    tooltip: "切换高倍像素网格",
-                    width: topInspectorControlButtonWidth,
-                    height: topInspectorControlButtonHeight,
-                    iconSize: topInspectorControlIconSize,
-                    cornerRadius: topInspectorControlCornerRadius
-                ) {
-                    viewModel.isPixelGridEnabled.toggle()
-                }
+                navigatorOptionsMenu
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var navigatorOptionsMenu: some View {
+        Menu {
+            Button("刷新导航器", systemImage: "arrow.clockwise") {
+                viewModel.refreshNavigatorPreviewNow()
+            }
+            Button(
+                viewModel.showsTransparencyCheckerboard ? "隐藏透明背景" : "显示透明背景",
+                systemImage: "checkerboard.rectangle"
+            ) {
+                viewModel.showsTransparencyCheckerboard.toggle()
+            }
+            Button(
+                viewModel.isPixelGridEnabled ? "隐藏高倍像素网格" : "显示高倍像素网格",
+                systemImage: "grid"
+            ) {
+                viewModel.isPixelGridEnabled.toggle()
+            }
+            Divider()
+            Button("归零画布旋转", systemImage: "rotate.left") {
+                viewModel.setViewportRotation(0)
+            }
+            .disabled(viewModel.isCanvasViewportLocked || abs(viewModel.workspace.viewport.rotationDegrees) < 0.001)
+        } label: {
+            Image(systemName: "ellipsis")
+                .font(.system(size: topInspectorControlIconSize, weight: .bold))
+                .foregroundStyle(Color.white.opacity(0.9))
+                .frame(width: topInspectorControlButtonWidth, height: topInspectorControlButtonHeight)
+                .background(
+                    RoundedRectangle(cornerRadius: topInspectorControlCornerRadius)
+                        .fill(Color.white.opacity(0.10))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: topInspectorControlCornerRadius)
+                        .stroke(Color.white.opacity(0.08), lineWidth: 1)
+                )
+        }
+        .menuStyle(.borderlessButton)
+        .buttonTooltip("导航器显示与画布选项")
     }
 
     private func syncNavigatorZoomPercentText() {
@@ -2003,34 +2071,48 @@ struct RightInspectorView: View {
         let signedRotation = rawRotation > 180 ? rawRotation - 360 : rawRotation
 
         return VStack(alignment: .leading, spacing: 9) {
-            if compoundEnabled {
-                HStack(spacing: 8) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("组合笔刷快速参数")
-                            .font(.system(size: 10.5, weight: .bold))
-                            .foregroundStyle(Color.white.opacity(0.9))
-                        Text("此处只调整整体响应，A/B 独立参数在编辑器中修改")
-                            .font(.system(size: 8.5, weight: .medium))
-                            .foregroundStyle(Color.white.opacity(0.5))
-                            .lineLimit(2)
-                    }
-                    Spacer(minLength: 4)
+            HStack(spacing: 8) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("组合笔刷")
+                        .font(.system(size: 10.5, weight: .bold))
+                        .foregroundStyle(Color.white.opacity(0.9))
+                    Text(compoundEnabled ? "已启用 · A/B 参数在编辑器中修改" : "将两个笔尖组合为一条笔触")
+                        .font(.system(size: 8.5, weight: .medium))
+                        .foregroundStyle(Color.white.opacity(0.5))
+                        .lineLimit(2)
+                }
+                Spacer(minLength: 4)
+                Toggle(
+                    "",
+                    isOn: Binding(
+                        get: { viewModel.workspace.toolSession.brush.compoundBrush.enabled },
+                        set: { viewModel.setCompoundBrushEnabled($0) }
+                    )
+                )
+                .labelsHidden()
+                .toggleStyle(.switch)
+                .controlSize(.mini)
+                .buttonTooltip("启用或停用组合笔刷")
+                if compoundEnabled {
                     Button("编辑 A/B") {
                         showsCompoundBrushBuilder = true
                     }
                     .buttonStyle(.bordered)
                     .controlSize(.mini)
                 }
-                .padding(8)
-                .background(
-                    RoundedRectangle(cornerRadius: 8)
-                        .fill(Color.accentColor.opacity(0.09))
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 8)
-                        .stroke(Color.accentColor.opacity(0.28), lineWidth: 1)
-                )
             }
+            .padding(8)
+            .background(
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(compoundEnabled ? Color.accentColor.opacity(0.09) : Color.white.opacity(0.035))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 8)
+                    .stroke(
+                        compoundEnabled ? Color.accentColor.opacity(0.28) : Color.white.opacity(0.07),
+                        lineWidth: 1
+                    )
+            )
 
             brushParameterSectionHeader("笔尖排布")
 
@@ -3329,15 +3411,62 @@ struct RightInspectorView: View {
                 .disabled(!viewModel.hasPendingBrushTipDraft)
 
                 compactToolButton(
-                    systemImage: "photo.badge.plus",
-                    tooltip: "从图片导入笔尖",
+                    systemImage: "arrow.uturn.backward",
+                    tooltip: "撤销笔尖编辑 (Cmd+Z)",
                     isSelected: false,
                     width: topInspectorControlButtonWidth,
                     height: topInspectorControlButtonHeight,
                     iconSize: topInspectorControlIconSize,
                     cornerRadius: topInspectorControlCornerRadius
                 ) {
-                    viewModel.importBrushTipImageFromDisk()
+                    viewModel.undoBrushTipDraft()
+                }
+                .disabled(!viewModel.canUndoBrushTipDraft)
+
+                compactToolButton(
+                    systemImage: "arrow.uturn.forward",
+                    tooltip: "重做笔尖编辑 (Shift+Cmd+Z)",
+                    isSelected: false,
+                    width: topInspectorControlButtonWidth,
+                    height: topInspectorControlButtonHeight,
+                    iconSize: topInspectorControlIconSize,
+                    cornerRadius: topInspectorControlCornerRadius
+                ) {
+                    viewModel.redoBrushTipDraft()
+                }
+                .disabled(!viewModel.canRedoBrushTipDraft)
+
+                compactToolButton(
+                    systemImage: brushTipCanvasDisplayMode == .edit ? "scribble.variable" : "pencil.and.outline",
+                    tooltip: brushTipCanvasDisplayMode == .edit ? "查看真实笔触预览" : "返回笔尖编辑",
+                    isSelected: brushTipCanvasDisplayMode == .strokePreview,
+                    width: topInspectorControlButtonWidth,
+                    height: topInspectorControlButtonHeight,
+                    iconSize: topInspectorControlIconSize,
+                    cornerRadius: topInspectorControlCornerRadius
+                ) {
+                    brushTipCanvasDisplayMode = brushTipCanvasDisplayMode == .edit
+                        ? .strokePreview
+                        : .edit
+                }
+
+                compactToolButton(
+                    systemImage: "photo.badge.plus",
+                    tooltip: "导入并预处理笔尖图片",
+                    isSelected: false,
+                    width: topInspectorControlButtonWidth,
+                    height: topInspectorControlButtonHeight,
+                    iconSize: topInspectorControlIconSize,
+                    cornerRadius: topInspectorControlCornerRadius
+                ) {
+                    guard let url = viewModel.selectBrushTipImageURLFromDisk(),
+                          let image = NSImage(contentsOf: url) else {
+                        return
+                    }
+                    brushTipImportCandidate = BrushTipImportCandidate(
+                        image: image,
+                        sourceLabel: url.deletingPathExtension().lastPathComponent
+                    )
                 }
 
                 compactToolButton(
@@ -3353,46 +3482,7 @@ struct RightInspectorView: View {
                     tipImageLibrarySheetTarget = .primary
                 }
 
-                compactToolButton(
-                    systemImage: "eraser.fill",
-                    tooltip: tipPaintMode == .eraser ? "切回笔刷绘制" : "切换到橡皮",
-                    isSelected: tipPaintMode == .eraser,
-                    width: topInspectorControlButtonWidth,
-                    height: topInspectorControlButtonHeight,
-                    iconSize: topInspectorControlIconSize,
-                    cornerRadius: topInspectorControlCornerRadius
-                ) {
-                    tipPaintMode = tipPaintMode == .eraser ? .round : .eraser
-                }
-
-                Toggle(
-                    "",
-                    isOn: Binding(
-                        get: { viewModel.workspace.toolSession.brush.compoundBrush.enabled },
-                        set: { viewModel.setCompoundBrushEnabled($0) }
-                    )
-                )
-                .labelsHidden()
-                .toggleStyle(.switch)
-                .controlSize(.mini)
-                .frame(width: 34)
-                .help("启用或停用组合笔刷")
-
-                compactTextActionButton(
-                    title: "编辑组合…",
-                    tooltip: "编辑组合笔刷",
-                    minWidth: 76,
-                    isProminent: viewModel.workspace.toolSession.brush.compoundBrush.enabled,
-                    fillsAvailableWidth: true,
-                    height: topInspectorControlButtonHeight,
-                    cornerRadius: topInspectorControlCornerRadius,
-                    fontSize: 11,
-                    horizontalPadding: 6
-                ) {
-                    withAnimation(.easeOut(duration: 0.16)) {
-                        showsCompoundBrushBuilder = true
-                    }
-                }
+                brushTipEditingMenu
             }
 
             if let restoreTitle = primaryDormantTipRestoreTitle(for: viewModel.workspace.toolSession.brush) {
@@ -3403,6 +3493,46 @@ struct RightInspectorView: View {
 
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var brushTipEditingMenu: some View {
+        Menu {
+            Section("编辑工具") {
+                Button("圆形画笔 (B)") { tipPaintMode = .round }
+                Button("方形画笔 (S)") { tipPaintMode = .square }
+                Button("橡皮擦 (E)") { tipPaintMode = .eraser }
+            }
+            Section("画笔尺寸 · \(Int(tipEditorBrushSize.rounded())) px") {
+                Button("减小画笔") { tipEditorBrushSize = max(2, tipEditorBrushSize - 4) }
+                Button("增大画笔") { tipEditorBrushSize = min(128, tipEditorBrushSize + 4) }
+            }
+            Section("变换") {
+                Button("顺时针旋转 90°") { rotateCustomTip() }
+                Button("水平翻转") { flipCustomTipHorizontally() }
+                Button("垂直翻转") { flipCustomTipVertically() }
+                Button("居中并适配") { centerAndFitCustomTip() }
+            }
+            Divider()
+            Button("放弃未确认修改", role: .destructive) {
+                viewModel.discardBrushTipDraft()
+            }
+            .disabled(!viewModel.hasPendingBrushTipDraft)
+        } label: {
+            Image(systemName: tipPaintMode.systemImage)
+                .font(.system(size: topInspectorControlIconSize, weight: .bold))
+                .foregroundStyle(Color.white.opacity(0.9))
+                .frame(width: topInspectorControlButtonWidth, height: topInspectorControlButtonHeight)
+                .background(
+                    RoundedRectangle(cornerRadius: topInspectorControlCornerRadius)
+                        .fill(Color.white.opacity(0.10))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: topInspectorControlCornerRadius)
+                        .stroke(Color.white.opacity(0.08), lineWidth: 1)
+                )
+        }
+        .menuStyle(.borderlessButton)
+        .buttonTooltip("笔尖编辑工具与变换")
     }
 
     private func effectivePrimaryTipSourceSemantic(for brush: BrushSettings) -> TipSourceSemantic {
@@ -3952,30 +4082,44 @@ struct RightInspectorView: View {
                 RoundedRectangle(cornerRadius: 10)
                     .fill(Color.black.opacity(0.14))
 
-                TipMaskCanvasView(
-                    maskData: editorMaskData,
-                    syncToken: tipMaskEditorSyncToken(
-                        maskData: editorMaskData,
-                        sourceSemantic: tipSemantic,
-                        assetID: viewModel.hasPendingBrushTipDraft ? nil : viewModel.workspace.toolSession.brush.customTipAssetID,
-                        fitImportedPreview: tipFitPreview
-                    ),
-                    fitImportedPreview: tipFitPreview,
-                    paintMode: tipPaintMode,
-                    drawingBrush: viewModel.workspace.toolSession.brush,
-                    onRequestPaintModeShortcut: { mode in
-                        tipPaintMode = mode
-                    },
-                    onFocusChanged: { isFocused in
-                        viewModel.setBrushTipCanvasFocused(isFocused)
-                    },
-                    onImportImage: { image in
-                        _ = viewModel.importBrushTipImage(from: image)
-                    },
-                    onUpdateMask: { data in
-                        viewModel.updateBrushTipDraft(data)
+                Group {
+                    if brushTipCanvasDisplayMode == .strokePreview {
+                        BrushTipStrokePreview(
+                            brush: brushTipPreviewBrush(maskData: editorMaskData),
+                            maskData: editorMaskData
+                        )
+                    } else {
+                        TipMaskCanvasView(
+                            maskData: editorMaskData,
+                            syncToken: tipMaskEditorSyncToken(
+                                maskData: editorMaskData,
+                                sourceSemantic: tipSemantic,
+                                assetID: viewModel.hasPendingBrushTipDraft ? nil : viewModel.workspace.toolSession.brush.customTipAssetID,
+                                fitImportedPreview: tipFitPreview
+                            ),
+                            fitImportedPreview: tipFitPreview,
+                            paintMode: tipPaintMode,
+                            editorBrushSize: tipEditorBrushSize,
+                            onRequestPaintModeShortcut: { mode in
+                                tipPaintMode = mode
+                            },
+                            onFocusChanged: { isFocused in
+                                viewModel.setBrushTipCanvasFocused(isFocused)
+                            },
+                            onImportImage: { image in
+                                brushTipImportCandidate = BrushTipImportCandidate(
+                                    image: image,
+                                    sourceLabel: "拖入图片"
+                                )
+                            },
+                            onUndo: { viewModel.undoBrushTipDraft() },
+                            onRedo: { viewModel.redoBrushTipDraft() },
+                            onUpdateMask: { data in
+                                viewModel.updateBrushTipDraft(data)
+                            }
+                        )
                     }
-                )
+                }
                 .frame(
                     width: presentation.documentDisplaySize.x,
                     height: presentation.documentDisplaySize.y
@@ -3996,29 +4140,43 @@ struct RightInspectorView: View {
                 )
         )
         .overlay(alignment: .topTrailing) {
-            Button {
-                viewModel.clearBrushTipDraft()
-            } label: {
-                Image(systemName: "trash")
-                    .font(.system(size: topInspectorControlIconSize, weight: .bold))
-                    .foregroundStyle(Color.white.opacity(0.72))
-                    .frame(width: topInspectorControlButtonWidth, height: topInspectorControlButtonHeight)
-                    .background(
-                        RoundedRectangle(cornerRadius: topInspectorControlCornerRadius)
-                            .fill(Color.white.opacity(0.10))
-                    )
-                    .overlay(
-                        RoundedRectangle(cornerRadius: topInspectorControlCornerRadius)
-                            .stroke(Color.white.opacity(0.08), lineWidth: 1)
-                    )
+            if brushTipCanvasDisplayMode == .edit {
+                Button {
+                    viewModel.clearBrushTipDraft()
+                } label: {
+                    Image(systemName: "trash")
+                        .font(.system(size: topInspectorControlIconSize, weight: .bold))
+                        .foregroundStyle(Color.white.opacity(0.72))
+                        .frame(width: topInspectorControlButtonWidth, height: topInspectorControlButtonHeight)
+                        .background(
+                            RoundedRectangle(cornerRadius: topInspectorControlCornerRadius)
+                                .fill(Color.white.opacity(0.10))
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: topInspectorControlCornerRadius)
+                                .stroke(Color.white.opacity(0.08), lineWidth: 1)
+                        )
+                }
+                .buttonStyle(.plain)
+                .buttonTooltip("清空笔尖草稿")
+                .padding(8)
             }
-            .buttonStyle(.plain)
-            .buttonTooltip("清空笔尖")
-            .padding(8)
         }
         .onDrop(of: [UTType.fileURL.identifier, UTType.image.identifier], isTargeted: $isTipImageDropTarget) { providers in
             importTipImageFromDrop(providers: providers)
         }
+    }
+
+    private func brushTipPreviewBrush(maskData: Data?) -> BrushSettings {
+        var brush = viewModel.workspace.toolSession.brush
+        brush.tipShape = .customRound
+        brush.customTipSourceSemantic = maskData == nil ? .procedural : .customMask
+        brush.customTipAssetID = nil
+        brush.customTipImportedSourceInfo = nil
+        brush.customTipMaskData = maskData
+        brush.customTipEnvelopeMaskData = nil
+        brush.compoundBrush.enabled = false
+        return brush
     }
 
     private func importTipImageFromDrop(providers: [NSItemProvider]) -> Bool {
@@ -4026,7 +4184,10 @@ struct RightInspectorView: View {
             imageProvider.loadObject(ofClass: NSImage.self) { object, _ in
                 guard let image = object as? NSImage else { return }
                 DispatchQueue.main.async {
-                    _ = viewModel.importBrushTipImage(from: image)
+                    brushTipImportCandidate = BrushTipImportCandidate(
+                        image: image,
+                        sourceLabel: "拖入图片"
+                    )
                 }
             }
             return true
@@ -4048,7 +4209,11 @@ struct RightInspectorView: View {
 
                 guard let url else { return }
                 DispatchQueue.main.async {
-                    _ = viewModel.importBrushTipImage(from: url)
+                    guard let image = NSImage(contentsOf: url) else { return }
+                    brushTipImportCandidate = BrushTipImportCandidate(
+                        image: image,
+                        sourceLabel: url.deletingPathExtension().lastPathComponent
+                    )
                 }
             }
             return true
@@ -4552,7 +4717,7 @@ struct RightInspectorView: View {
     }
 
     private func rotateCustomTip() {
-        guard let current = resampledMaskData(viewModel.workspace.toolSession.brush.customTipMaskData, targetResolution: tipMaskResolution) else {
+        guard let current = editableBrushTipMaskData else {
             return
         }
 
@@ -4566,7 +4731,7 @@ struct RightInspectorView: View {
                 destination[(destinationY * tipMaskResolution) + destinationX] = source[sourceIndex]
             }
         }
-        viewModel.updateCustomTipMask(Data(destination))
+        viewModel.updateBrushTipDraft(Data(destination))
     }
 
     private func flipCustomTipHorizontally() {
@@ -4582,7 +4747,7 @@ struct RightInspectorView: View {
     }
 
     private func flipCustomTip(mapping: (Int, Int) -> (Int, Int)) {
-        guard let current = resampledMaskData(viewModel.workspace.toolSession.brush.customTipMaskData, targetResolution: tipMaskResolution) else {
+        guard let current = editableBrushTipMaskData else {
             return
         }
 
@@ -4595,7 +4760,54 @@ struct RightInspectorView: View {
                 destination[(mapped.1 * tipMaskResolution) + mapped.0] = source[sourceIndex]
             }
         }
-        viewModel.updateCustomTipMask(Data(destination))
+        viewModel.updateBrushTipDraft(Data(destination))
+    }
+
+    private var editableBrushTipMaskData: Data? {
+        let source = viewModel.hasPendingBrushTipDraft
+            ? viewModel.brushTipDraftMaskData
+            : viewModel.workspace.toolSession.brush.customTipMaskData
+        return resampledMaskData(source, targetResolution: tipMaskResolution)
+    }
+
+    private func centerAndFitCustomTip() {
+        guard let current = editableBrushTipMaskData else { return }
+        let source = [UInt8](current)
+        var minX = tipMaskResolution
+        var minY = tipMaskResolution
+        var maxX = -1
+        var maxY = -1
+        for y in 0..<tipMaskResolution {
+            for x in 0..<tipMaskResolution where source[(y * tipMaskResolution) + x] > 1 {
+                minX = min(minX, x)
+                minY = min(minY, y)
+                maxX = max(maxX, x)
+                maxY = max(maxY, y)
+            }
+        }
+        guard maxX >= minX, maxY >= minY else { return }
+
+        let contentWidth = maxX - minX + 1
+        let contentHeight = maxY - minY + 1
+        let targetSide = Int(Double(tipMaskResolution) * 0.84)
+        let scale = min(
+            Double(targetSide) / Double(contentWidth),
+            Double(targetSide) / Double(contentHeight)
+        )
+        let drawWidth = max(1, Int((Double(contentWidth) * scale).rounded()))
+        let drawHeight = max(1, Int((Double(contentHeight) * scale).rounded()))
+        let offsetX = (tipMaskResolution - drawWidth) / 2
+        let offsetY = (tipMaskResolution - drawHeight) / 2
+        var destination = [UInt8](repeating: 0, count: source.count)
+        for y in 0..<drawHeight {
+            let sourceY = min(maxY, minY + Int(Double(y) / scale))
+            for x in 0..<drawWidth {
+                let sourceX = min(maxX, minX + Int(Double(x) / scale))
+                destination[((offsetY + y) * tipMaskResolution) + offsetX + x] =
+                    source[(sourceY * tipMaskResolution) + sourceX]
+            }
+        }
+        viewModel.updateBrushTipDraft(Data(destination))
     }
 
     private func makePresetTipMask(for index: Int, intensity: UInt8) -> Data {
@@ -5840,6 +6052,7 @@ private struct NavigatorPreviewPanel: View {
     let visibleCanvasPolygon: [CanvasPoint]?
     let canvasSize: CanvasSize
     let viewModel: WorkspaceViewModel
+    @State private var isDraggingViewport = false
 
     var body: some View {
         GeometryReader { proxy in
@@ -5953,7 +6166,8 @@ private struct NavigatorPreviewPanel: View {
                     NavigatorVisibleRegionOverlay(
                         polygon: polygon,
                         presentation: presentation,
-                        canvasSize: canvasSize
+                        canvasSize: canvasSize,
+                        isDragging: isDraggingViewport
                     )
                     .allowsHitTesting(false)
                 }
@@ -5963,12 +6177,20 @@ private struct NavigatorPreviewPanel: View {
                     .gesture(
                         DragGesture(minimumDistance: 0)
                             .onChanged { value in
+                                if !isDraggingViewport {
+                                    isDraggingViewport = true
+                                    NSCursor.closedHand.set()
+                                }
                                 viewModel.centerViewport(
                                     on: navigatorCanvasPoint(
                                         for: value.location,
                                         presentation: presentation
                                     )
                                 )
+                            }
+                            .onEnded { _ in
+                                isDraggingViewport = false
+                                NSCursor.openHand.set()
                             }
                     )
                     .onHover { hovering in
@@ -6007,9 +6229,10 @@ private struct NavigatorVisibleRegionOverlay: View {
     let polygon: [CanvasPoint]
     let presentation: CanvasPresentation
     let canvasSize: CanvasSize
+    let isDragging: Bool
 
     var body: some View {
-        Path { path in
+        let regionPath = Path { path in
             guard let first = polygon.first else { return }
             path.move(to: mappedPoint(for: first))
             for point in polygon.dropFirst() {
@@ -6017,7 +6240,14 @@ private struct NavigatorVisibleRegionOverlay: View {
             }
             path.closeSubpath()
         }
-        .stroke(Color.accentColor.opacity(0.96), lineWidth: 1.5)
+        regionPath
+            .fill(Color.accentColor.opacity(isDragging ? 0.16 : 0.08))
+            .overlay(
+                regionPath.stroke(Color.black.opacity(0.72), lineWidth: 3)
+            )
+            .overlay(
+                regionPath.stroke(Color.accentColor.opacity(0.98), lineWidth: isDragging ? 2 : 1.5)
+            )
     }
 
     private func mappedPoint(for point: CanvasPoint) -> CGPoint {
@@ -6697,10 +6927,182 @@ private func makeColorPanelImage(
     )
 }
 
+private struct BrushTipStrokePreview: View {
+    let brush: BrushSettings
+    let maskData: Data?
+
+    private let samples: [(String, Float)] = [
+        ("轻", 0.2),
+        ("中", 0.5),
+        ("重", 0.85)
+    ]
+
+    var body: some View {
+        VStack(spacing: 5) {
+            ForEach(Array(samples.enumerated()), id: \.offset) { index, sample in
+                HStack(spacing: 6) {
+                    Text(sample.0)
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundStyle(Color.white.opacity(0.58))
+                        .frame(width: 14)
+
+                    if let image = StageOneBrushPreviewRasterizer.compoundStrokePreviewImage(
+                        for: brush,
+                        resolution: 64,
+                        width: 360,
+                        pressure: sample.1,
+                        paintVariationSeed: UInt32(index)
+                    ) {
+                        Image(decorative: image, scale: 1)
+                            .resizable()
+                            .interpolation(.high)
+                            .scaledToFit()
+                    } else {
+                        Text(maskData == nil ? "当前为程序化圆形笔尖" : "无法生成预览")
+                            .font(.system(size: 9, weight: .medium))
+                            .foregroundStyle(Color.white.opacity(0.45))
+                    }
+                }
+                .frame(maxWidth: .infinity, minHeight: 43, maxHeight: 43)
+                .padding(.horizontal, 6)
+                .background(RoundedRectangle(cornerRadius: 7).fill(Color.black.opacity(0.35)))
+            }
+        }
+        .padding(7)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color.black.opacity(0.14))
+    }
+}
+
+private struct BrushTipImportSheet: View {
+    let candidate: BrushTipImportCandidate
+    @ObservedObject var viewModel: WorkspaceViewModel
+    let onCancel: () -> Void
+    let onApply: (BrushTipImageImportOptions) -> Void
+
+    @State private var options = BrushTipImageImportOptions()
+
+    private var previewMaskData: Data? {
+        viewModel.brushTipImportPreviewMask(from: candidate.image, options: options)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("导入笔尖图片")
+                        .font(.system(size: 17, weight: .bold))
+                    Text("先确认取样方式；原图不会被修改")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Text(candidate.sourceLabel)
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+
+            HStack(spacing: 12) {
+                importPreviewCard(title: "原图") {
+                    Image(nsImage: candidate.image)
+                        .resizable()
+                        .interpolation(.high)
+                        .scaledToFit()
+                }
+                importPreviewCard(title: "笔尖遮罩") {
+                    if let previewMaskData,
+                       let image = StageOneBrushPreviewRasterizer.editorMaskImage(
+                           from: previewMaskData,
+                           resolution: tipMaskResolution,
+                           cropToContent: false
+                       ) {
+                        Image(decorative: image, scale: 1)
+                            .resizable()
+                            .interpolation(.none)
+                            .scaledToFit()
+                    } else {
+                        Text("当前设置没有可用内容")
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 10) {
+                Picker("取样", selection: $options.interpretation) {
+                    ForEach(BrushTipImageInterpretation.allCases, id: \.self) { interpretation in
+                        Text(interpretation.displayName).tag(interpretation)
+                    }
+                }
+                .pickerStyle(.segmented)
+
+                HStack(spacing: 18) {
+                    Toggle("反相", isOn: $options.isInverted)
+                    Toggle("自动裁切内容", isOn: $options.cropsToContent)
+                    Toggle("阈值", isOn: $options.usesThreshold)
+                }
+                .toggleStyle(.checkbox)
+
+                if options.usesThreshold {
+                    HStack(spacing: 10) {
+                        Text("阈值")
+                            .font(.system(size: 11, weight: .semibold))
+                        Slider(value: $options.threshold, in: 0.02...0.98)
+                        Text("\(Int((options.threshold * 100).rounded()))%")
+                            .font(.system(size: 10, weight: .semibold).monospacedDigit())
+                            .frame(width: 34, alignment: .trailing)
+                    }
+                }
+            }
+
+            HStack {
+                Spacer()
+                Button("取消", action: onCancel)
+                    .keyboardShortcut(.cancelAction)
+                Button("载入为草稿") { onApply(options) }
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(previewMaskData == nil)
+            }
+        }
+        .padding(18)
+        .frame(width: 560)
+        .interactiveDismissDisabled()
+    }
+
+    private func importPreviewCard<Content: View>(
+        title: String,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title)
+                .font(.system(size: 10, weight: .bold))
+                .foregroundStyle(.secondary)
+            ZStack {
+                RoundedRectangle(cornerRadius: 9)
+                    .fill(Color.black.opacity(0.14))
+                content()
+                    .padding(8)
+            }
+            .frame(maxWidth: .infinity, minHeight: 190, maxHeight: 190)
+            .overlay(RoundedRectangle(cornerRadius: 9).stroke(Color.primary.opacity(0.10)))
+        }
+        .frame(maxWidth: .infinity)
+    }
+}
+
 private enum TipPaintMode {
     case round
     case square
     case eraser
+
+    var systemImage: String {
+        switch self {
+        case .round: "circle.fill"
+        case .square: "square.fill"
+        case .eraser: "eraser.fill"
+        }
+    }
 }
 
 private struct TipMaskCanvasView: NSViewRepresentable {
@@ -6708,10 +7110,12 @@ private struct TipMaskCanvasView: NSViewRepresentable {
     let syncToken: String
     let fitImportedPreview: Bool
     let paintMode: TipPaintMode
-    let drawingBrush: BrushSettings
+    let editorBrushSize: Float
     let onRequestPaintModeShortcut: (TipPaintMode) -> Void
     let onFocusChanged: (Bool) -> Void
     let onImportImage: (NSImage) -> Void
+    let onUndo: () -> Void
+    let onRedo: () -> Void
     let onUpdateMask: (Data) -> Void
 
     func makeCoordinator() -> Coordinator {
@@ -6719,6 +7123,8 @@ private struct TipMaskCanvasView: NSViewRepresentable {
             onRequestPaintModeShortcut: onRequestPaintModeShortcut,
             onFocusChanged: onFocusChanged,
             onImportImage: onImportImage,
+            onUndo: onUndo,
+            onRedo: onRedo,
             onUpdateMask: onUpdateMask
         )
     }
@@ -6731,7 +7137,7 @@ private struct TipMaskCanvasView: NSViewRepresentable {
             syncToken: syncToken,
             fitImportedPreview: fitImportedPreview,
             paintMode: paintMode,
-            drawingBrush: drawingBrush
+            editorBrushSize: editorBrushSize
         )
         return view
     }
@@ -6743,7 +7149,7 @@ private struct TipMaskCanvasView: NSViewRepresentable {
             syncToken: syncToken,
             fitImportedPreview: fitImportedPreview,
             paintMode: paintMode,
-            drawingBrush: drawingBrush
+            editorBrushSize: editorBrushSize
         )
     }
 
@@ -6751,17 +7157,23 @@ private struct TipMaskCanvasView: NSViewRepresentable {
         let onRequestPaintModeShortcut: (TipPaintMode) -> Void
         let onFocusChanged: (Bool) -> Void
         let onImportImage: (NSImage) -> Void
+        let onUndo: () -> Void
+        let onRedo: () -> Void
         let onUpdateMask: (Data) -> Void
 
         init(
             onRequestPaintModeShortcut: @escaping (TipPaintMode) -> Void,
             onFocusChanged: @escaping (Bool) -> Void,
             onImportImage: @escaping (NSImage) -> Void,
+            onUndo: @escaping () -> Void,
+            onRedo: @escaping () -> Void,
             onUpdateMask: @escaping (Data) -> Void
         ) {
             self.onRequestPaintModeShortcut = onRequestPaintModeShortcut
             self.onFocusChanged = onFocusChanged
             self.onImportImage = onImportImage
+            self.onUndo = onUndo
+            self.onRedo = onRedo
             self.onUpdateMask = onUpdateMask
         }
     }
@@ -6776,7 +7188,7 @@ private final class TipMaskEditorNSView: NSView {
         count: tipMaskResolution * tipMaskResolution * 4
     )
     private var paintMode: TipPaintMode = .round
-    private var drawingBrush = BrushSettings.stageOneDefault
+    private var editorBrushSize: Float = 28
     private var fitImportedPreview = false
     private var lastPaintPoint: CGPoint?
     private var hoverLocation: CGPoint?
@@ -6812,10 +7224,10 @@ private final class TipMaskEditorNSView: NSView {
         syncToken: String,
         fitImportedPreview: Bool,
         paintMode: TipPaintMode,
-        drawingBrush: BrushSettings
+        editorBrushSize: Float
     ) {
         self.paintMode = paintMode
-        self.drawingBrush = drawingBrush
+        self.editorBrushSize = min(max(editorBrushSize, 2), 128)
 
         if syncToken != externalSyncToken {
             externalSyncToken = syncToken
@@ -7025,8 +7437,17 @@ private final class TipMaskEditorNSView: NSView {
     private func handleShortcutEvent(_ event: NSEvent) -> Bool {
         let modifiers = event.modifierFlags.intersection([.command, .control, .option])
         if modifiers.contains(.command) || modifiers.contains(.control) {
-            if event.charactersIgnoringModifiers?.lowercased() == "v" {
+            let shortcut = event.charactersIgnoringModifiers?.lowercased()
+            if shortcut == "v" {
                 return importImageFromPasteboard(NSPasteboard.general)
+            }
+            if shortcut == "z" {
+                if event.modifierFlags.contains(.shift) {
+                    coordinator?.onRedo()
+                } else {
+                    coordinator?.onUndo()
+                }
+                return true
             }
             return false
         }
@@ -7041,6 +7462,9 @@ private final class TipMaskEditorNSView: NSView {
             return true
         case "b":
             coordinator?.onRequestPaintModeShortcut(.round)
+            return true
+        case "s":
+            coordinator?.onRequestPaintModeShortcut(.square)
             return true
         default:
             return false
@@ -7097,7 +7521,7 @@ private final class TipMaskEditorNSView: NSView {
     }
 
     private func currentRadius() -> Double {
-        min(max(Double(drawingBrush.size) * 0.4, 3.0), 28.0)
+        Double(editorBrushSize) * 0.5
     }
 
     private func flushIncrementalDisplayIfNeeded() {
@@ -7181,7 +7605,7 @@ private final class TipMaskEditorNSView: NSView {
             update.alphaBytes,
             bounds: update.bounds,
             paintMode: paintMode,
-            buildMode: drawingBrush.buildMode
+            buildMode: .buildUp
         )
     }
 
@@ -7279,7 +7703,20 @@ private final class TipMaskEditorNSView: NSView {
     }
 
     private func strokeBrushSettings(for paintMode: TipPaintMode) -> BrushSettings {
-        var brush = drawingBrush
+        var brush = BrushSettings.stageOneDefault
+        brush.size = editorBrushSize
+        brush.opacity = 1
+        brush.spacingPercent = 5
+        brush.scatterAmount = 0
+        brush.jitterAmount = 0
+        brush.colorJitterAmount = 0
+        brush.paintJitterAmount = 0
+        brush.paintContrastAmount = 0
+        brush.stampRotationDegrees = 0
+        brush.followsStrokeDirection = false
+        brush.pressureSizeAmount = 0
+        brush.pressureOpacityAmount = 0
+        brush.compoundBrush.enabled = false
         switch paintMode {
         case .square:
             brush.tipShape = .square
@@ -7289,7 +7726,7 @@ private final class TipMaskEditorNSView: NSView {
             brush.customTipMaskData = nil
             brush.customTipEnvelopeMaskData = nil
         case .round, .eraser:
-            break
+            brush.tipShape = .hardRound
         }
         return brush
     }
