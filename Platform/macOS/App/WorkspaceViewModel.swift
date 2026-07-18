@@ -1516,6 +1516,31 @@ final class WorkspaceViewModel: ObservableObject {
         bootstrap.workspaceStore.updateToolSession { session in
             session.brush = brush
         }
+        StageOneBrushPreviewRasterizer.resetCache()
+        refresh()
+    }
+
+    func copyCompoundPrimaryTipToSecondary() {
+        bootstrap.workspaceStore.updateToolSession { session in
+            session.brush.copyPrimaryTipToCompoundSecondary()
+        }
+        StageOneBrushPreviewRasterizer.resetCache()
+        refresh()
+    }
+
+    func copyCompoundSecondaryTipToPrimary() {
+        bootstrap.workspaceStore.updateToolSession { session in
+            session.brush.copyCompoundSecondaryTipToPrimary()
+        }
+        StageOneBrushPreviewRasterizer.resetCache()
+        refresh()
+    }
+
+    func swapCompoundPrimaryAndSecondaryTips() {
+        bootstrap.workspaceStore.updateToolSession { session in
+            session.brush.swapCompoundPrimaryAndSecondaryTips()
+        }
+        StageOneBrushPreviewRasterizer.resetCache()
         refresh()
     }
 
@@ -3700,6 +3725,43 @@ final class WorkspaceViewModel: ObservableObject {
         persistBrushLibrary()
         refresh()
         showStatus(.init(kind: .success, message: "已保存画笔"))
+    }
+
+    @discardableResult
+    func saveNamedBrushPreset(
+        name: String,
+        colorTag: BrushColorTag?,
+        replacingPresetID: String?,
+        allowsDuplicate: Bool
+    ) -> BrushPresetSaveResult {
+        var result: BrushPresetSaveResult?
+        bootstrap.workspaceStore.updateBrushLibrary { library in
+            result = library.saveNamedPreset(
+                brush: workspace.toolSession.brush,
+                name: name,
+                colorTag: colorTag,
+                replacingPresetID: replacingPresetID,
+                allowsDuplicate: allowsDuplicate
+            )
+        }
+        _ = synchronizeTipImageLibraryFromWorkspace(persistIfChanged: false)
+        persistBrushLibrary()
+        refresh()
+
+        guard let resolved = result else {
+            preconditionFailure("Brush library update did not return a save result")
+        }
+        let message: String
+        switch resolved.disposition {
+        case .created:
+            message = "已新建画笔“\(resolved.preset.name)”"
+        case .replaced:
+            message = "已替换画笔“\(resolved.preset.name)”"
+        case .selectedExisting:
+            message = "相同画笔已存在，已选中“\(resolved.preset.name)”"
+        }
+        showStatus(.init(kind: .success, message: message))
+        return resolved
     }
 
     @discardableResult

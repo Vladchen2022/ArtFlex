@@ -133,6 +133,46 @@ struct BrushLibraryStateTests {
     }
 
     @Test
+    func namedPresetSaveCreatesReplacesAndDetectsDuplicates() {
+        var brush = BrushSettings.stageOneDefault
+        brush.size = 41
+        var library = BrushLibraryState.stageOneDefault
+
+        let created = library.saveNamedPreset(
+            brush: brush,
+            name: "颗粒组合",
+            colorTag: .orange
+        )
+        #expect(created.disposition == .created)
+        #expect(created.preset.name == "颗粒组合")
+        #expect(created.preset.colorTag == .orange)
+        #expect(library.presets.count == 1)
+
+        let duplicate = library.saveNamedPreset(
+            brush: brush,
+            name: "重复名称",
+            colorTag: .blue
+        )
+        #expect(duplicate.disposition == .selectedExisting)
+        #expect(duplicate.preset.id == created.preset.id)
+        #expect(library.presets.count == 1)
+
+        brush.opacity = 0.47
+        let replaced = library.saveNamedPreset(
+            brush: brush,
+            name: "颗粒组合 2",
+            colorTag: .purple,
+            replacingPresetID: created.preset.id
+        )
+        #expect(replaced.disposition == .replaced)
+        #expect(replaced.preset.id == created.preset.id)
+        #expect(replaced.preset.name == "颗粒组合 2")
+        #expect(replaced.preset.brush.opacity == 0.47)
+        #expect(replaced.preset.colorTag == .purple)
+        #expect(library.presets.count == 1)
+    }
+
+    @Test
     func removingLikelyAutoSavedDuplicatePresetsKeepsIntentionalVariantsAndRemapsSelection() {
         var duplicateBrush = BrushSettings.stageOneDefault
         duplicateBrush.size = 31

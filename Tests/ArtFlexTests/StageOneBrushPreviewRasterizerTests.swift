@@ -5,6 +5,31 @@ import Testing
 
 struct StageOneBrushPreviewRasterizerTests {
     @Test
+    func previewVariationSeedIsStableAndCanBeRerolled() throws {
+        var brush = BrushSettings.stageOneDefault
+        brush.size = 24
+        brush.spacingPercent = 18
+        brush.paintJitterAmount = 1
+        brush.paintContrastAmount = 0.6
+
+        func render(seed: UInt32) throws -> Data {
+            let image = try #require(StageOneBrushPreviewRasterizer.compoundStrokePreviewImage(
+                for: brush,
+                resolution: 256,
+                pressure: 0.7,
+                paintVariationSeed: seed
+            ))
+            return try pixelData(in: image)
+        }
+
+        let first = try render(seed: 17)
+        let repeated = try render(seed: 17)
+        let rerolled = try render(seed: 29)
+        #expect(first == repeated)
+        #expect(first != rerolled)
+    }
+
+    @Test
     func brushLibraryStrokePreviewUsesSparseBoundedStampCount() {
         #expect(StageOneBrushPreviewRasterizer.libraryStrokePreviewStampCount(spacingPercent: 0) == 7)
         #expect(StageOneBrushPreviewRasterizer.libraryStrokePreviewStampCount(spacingPercent: 18) == 7)

@@ -12,6 +12,7 @@ enum StageOneBrushPreviewRasterizer {
     final class StrokeAlphaSession {
         private let texture: MTLTexture
         private let brush: BrushSettings
+        private let paintVariationSeed: UInt32
         private var samplingState: BrushStrokeSamplingState?
         private var opacityCapSession: OpacityCapSessionResources?
         private var packetCount = 0
@@ -20,7 +21,8 @@ enum StageOneBrushPreviewRasterizer {
 
         fileprivate init?(
             brush: BrushSettings,
-            resolution: Int
+            resolution: Int,
+            paintVariationSeed: UInt32
         ) {
             guard
                 resolution > 0,
@@ -35,6 +37,7 @@ enum StageOneBrushPreviewRasterizer {
 
             self.texture = texture
             self.brush = brush
+            self.paintVariationSeed = paintVariationSeed
 
             StageOneBrushPreviewRasterizer.compoundPreviewRendererLock.lock()
             defer { StageOneBrushPreviewRasterizer.compoundPreviewRendererLock.unlock() }
@@ -71,6 +74,7 @@ enum StageOneBrushPreviewRasterizer {
                 resolution: texture.width,
                 points: accumulatedPoints,
                 samplingState: &finalSamplingState,
+                paintVariationSeed: paintVariationSeed,
                 flushPendingSamples: true
             ) else {
                 return nil
@@ -117,7 +121,8 @@ enum StageOneBrushPreviewRasterizer {
                 brush: brush,
                 points: points,
                 selectionShape: nil,
-                skipLeadingStamp: packetCount > 0
+                skipLeadingStamp: packetCount > 0,
+                paintVariationSeed: paintVariationSeed
             )
 
             encode(
@@ -296,7 +301,8 @@ enum StageOneBrushPreviewRasterizer {
         for brush: BrushSettings,
         resolution: Int = 256,
         width: Int? = nil,
-        pressure: Float
+        pressure: Float,
+        paintVariationSeed: UInt32 = 0
     ) -> CGImage? {
         compoundPreviewRendererLock.lock()
         defer { compoundPreviewRendererLock.unlock() }
@@ -308,7 +314,8 @@ enum StageOneBrushPreviewRasterizer {
             for: brush,
             resolution: resolution,
             width: previewWidth,
-            pressure: pressure
+            pressure: pressure,
+            paintVariationSeed: paintVariationSeed
         )
         if let cached = cache.object(forKey: cacheKey) {
             return cached.image
@@ -322,7 +329,13 @@ enum StageOneBrushPreviewRasterizer {
         }
 
         clearPreviewTexture(texture, commandQueue: context.commandQueue)
-        let stroke = makeCompoundPreviewStroke(for: brush, width: previewWidth, height: previewHeight, pressure: pressure)
+        let stroke = makeCompoundPreviewStroke(
+            for: brush,
+            width: previewWidth,
+            height: previewHeight,
+            pressure: pressure,
+            paintVariationSeed: paintVariationSeed
+        )
         var samplingState: BrushStrokeSamplingState?
 
         if stroke.brush.requiresStrokeMaskSession {
@@ -368,6 +381,7 @@ enum StageOneBrushPreviewRasterizer {
         resolution: Int,
         points: [StrokePoint],
         samplingState: inout BrushStrokeSamplingState?,
+        paintVariationSeed: UInt32 = 0,
         flushPendingSamples: Bool = false
     ) -> [UInt8]? {
         compoundPreviewRendererLock.lock()
@@ -391,7 +405,8 @@ enum StageOneBrushPreviewRasterizer {
             color: .white,
             brush: brush,
             points: points,
-            selectionShape: nil
+            selectionShape: nil,
+            paintVariationSeed: paintVariationSeed
         )
 
         if tool == .brush && brush.requiresStrokeMaskSession {
@@ -421,7 +436,8 @@ enum StageOneBrushPreviewRasterizer {
                     points: [],
                     selectionShape: nil,
                     alphaLockEnabled: false,
-                    skipLeadingStamp: true
+                    skipLeadingStamp: true,
+                    paintVariationSeed: paintVariationSeed
                 )
                 _ = context.renderer.encodeOpacityCapStroke(
                     stroke: flushStroke,
@@ -460,7 +476,8 @@ enum StageOneBrushPreviewRasterizer {
                     points: [],
                     selectionShape: nil,
                     alphaLockEnabled: false,
-                    skipLeadingStamp: true
+                    skipLeadingStamp: true,
+                    paintVariationSeed: paintVariationSeed
                 )
                 _ = context.renderer.encodeStroke(
                     stroke: flushStroke,
@@ -482,11 +499,13 @@ enum StageOneBrushPreviewRasterizer {
 
     static func makeStrokeAlphaSession(
         for brush: BrushSettings,
-        resolution: Int
+        resolution: Int,
+        paintVariationSeed: UInt32 = 0
     ) -> StrokeAlphaSession? {
         StrokeAlphaSession(
             brush: brush,
-            resolution: resolution
+            resolution: resolution,
+            paintVariationSeed: paintVariationSeed
         )
     }
 
@@ -1080,7 +1099,8 @@ enum StageOneBrushPreviewRasterizer {
         for brush: BrushSettings,
         resolution: Int,
         width: Int? = nil,
-        pressure: Float
+        pressure: Float,
+        paintVariationSeed: UInt32 = 0
     ) -> NSString {
         var hasher = Hasher()
         brushHasher(brush, into: &hasher)
@@ -1140,6 +1160,7 @@ enum StageOneBrushPreviewRasterizer {
         hasher.combine(mix.primaryAtHighPressure)
         hasher.combine(resolution)
         hasher.combine(pressure)
+        hasher.combine(paintVariationSeed)
         return NSString(string: String(hasher.finalize()))
     }
 
@@ -1278,7 +1299,8 @@ enum StageOneBrushPreviewRasterizer {
         for brush: BrushSettings,
         width: Int,
         height: Int,
-        pressure: Float
+        pressure: Float,
+        paintVariationSeed: UInt32
     ) -> StrokeDescriptor {
         let w = Double(width)
         let h = Double(height)
@@ -1296,7 +1318,8 @@ enum StageOneBrushPreviewRasterizer {
             color: .white,
             brush: brush,
             points: points,
-            selectionShape: nil
+            selectionShape: nil,
+            paintVariationSeed: paintVariationSeed
         )
     }
 

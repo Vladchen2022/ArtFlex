@@ -19,6 +19,17 @@ struct BrushPreset: Codable, Sendable, Equatable, Identifiable {
     var colorTag: BrushColorTag? = nil
 }
 
+enum BrushPresetSaveDisposition: Sendable, Equatable {
+    case created
+    case replaced
+    case selectedExisting
+}
+
+struct BrushPresetSaveResult: Sendable, Equatable {
+    var preset: BrushPreset
+    var disposition: BrushPresetSaveDisposition
+}
+
 extension BrushPreset {
     static let pressureGrainCrayonPresetID = "builtin-pressure-grain-crayon"
     static let pressureGrainCrayonSourceTipAssetID = BrushTipImageAssetID(
@@ -239,6 +250,44 @@ struct BrushLibraryState: Codable, Sendable, Equatable {
         presets.append(preset)
         selectedPresetID = preset.id
         return preset
+    }
+
+    mutating func saveNamedPreset(
+        brush: BrushSettings,
+        name: String,
+        colorTag: BrushColorTag?,
+        replacingPresetID: String? = nil,
+        allowsDuplicate: Bool = false
+    ) -> BrushPresetSaveResult {
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if let replacingPresetID,
+           let index = presets.firstIndex(where: { $0.id == replacingPresetID && !$0.isBuiltIn }) {
+            presets[index].name = trimmedName.isEmpty ? presets[index].name : trimmedName
+            presets[index].brush = brush
+            presets[index].colorTag = colorTag
+            selectedPresetID = replacingPresetID
+            return BrushPresetSaveResult(preset: presets[index], disposition: .replaced)
+        }
+
+        if allowsDuplicate == false,
+           let existing = presets.first(where: { !$0.isBuiltIn && $0.brush == brush }) {
+            selectedPresetID = existing.id
+            return BrushPresetSaveResult(preset: existing, disposition: .selectedExisting)
+        }
+
+        let nextCustomIndex = presets.filter { !$0.isBuiltIn }.count + 1
+        let preset = BrushPreset(
+            id: UUID().uuidString,
+            name: trimmedName.isEmpty ? "笔刷 \(nextCustomIndex)" : trimmedName,
+            brush: brush,
+            isBuiltIn: false,
+            slotIndex: firstEmptySlotIndex(),
+            colorTag: colorTag
+        )
+        presets.append(preset)
+        selectedPresetID = preset.id
+        return BrushPresetSaveResult(preset: preset, disposition: .created)
     }
 
     mutating func deletePreset(id: String) -> Bool {

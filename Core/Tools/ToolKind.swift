@@ -1286,6 +1286,73 @@ extension BrushSettings {
             compoundBrush.mode == .overlay
         )
     }
+
+    var primaryTipAsCompoundSecondary: CompoundSecondaryTipSettings {
+        CompoundSecondaryTipSettings(
+            tipShape: tipShape,
+            sourceSemantic: customTipSourceSemantic,
+            tipAssetID: customTipAssetID,
+            importedSourceInfo: customTipImportedSourceInfo,
+            customTipMaskData: customTipMaskData,
+            softness: customTipSoftness,
+            roundness: customTipRoundness,
+            angleDegrees: stampRotationDegrees,
+            followsStrokeDirection: followsStrokeDirection,
+            sizeMode: .relativeToPrimary,
+            size: size,
+            relativeSizeRatio: 1,
+            spacingPercent: spacingPercent,
+            pressureSizeAmount: pressureSizeAmount,
+            pressureOpacityAmount: pressureOpacityAmount,
+            sizeCurveLow: sizeCurveLow,
+            sizeCurveMid: sizeCurveMid,
+            sizeCurveHigh: sizeCurveHigh,
+            opacityCurveLow: opacityCurveLow,
+            opacityCurveMid: opacityCurveMid,
+            opacityCurveHigh: opacityCurveHigh,
+            opacityPressureCurve: opacityPressureCurve,
+            tileRandomRotation: compoundBrush.secondary.tileRandomRotation
+        )
+    }
+
+    mutating func copyPrimaryTipToCompoundSecondary() {
+        compoundBrush.secondary = primaryTipAsCompoundSecondary
+    }
+
+    mutating func copyCompoundSecondaryTipToPrimary() {
+        let secondary = compoundBrush.secondary
+        tipShape = secondary.tipShape
+        customTipSourceSemantic = secondary.sourceSemantic
+        customTipAssetID = secondary.tipAssetID
+        customTipImportedSourceInfo = secondary.importedSourceInfo
+        customTipMaskData = secondary.customTipMaskData
+        customTipEnvelopeMaskData = secondary.customTipMaskData
+        customTipSoftness = secondary.softness
+        customTipRoundness = secondary.roundness
+        customTipAngleDegrees = secondary.angleDegrees
+        stampRotationDegrees = secondary.angleDegrees
+        followsStrokeDirection = secondary.followsStrokeDirection
+        size = secondary.resolvedBaseSize(for: size)
+        spacingPercent = secondary.spacingPercent
+        pressureSizeAmount = secondary.pressureSizeAmount
+        pressureOpacityAmount = secondary.pressureOpacityAmount
+        sizeCurveLow = secondary.sizeCurveLow
+        sizeCurveMid = secondary.sizeCurveMid
+        sizeCurveHigh = secondary.sizeCurveHigh
+        sizePressureCurve = nil
+        opacityCurveLow = secondary.opacityCurveLow
+        opacityCurveMid = secondary.opacityCurveMid
+        opacityCurveHigh = secondary.opacityCurveHigh
+        opacityPressureCurve = secondary.opacityPressureCurve
+    }
+
+    mutating func swapCompoundPrimaryAndSecondaryTips() {
+        var originalPrimary = primaryTipAsCompoundSecondary
+        originalPrimary.sizeMode = .absolutePixels
+        originalPrimary.size = size
+        copyCompoundSecondaryTipToPrimary()
+        compoundBrush.secondary = originalPrimary
+    }
 }
 
 enum TextureFillArrangement: String, Codable, Equatable, Sendable, CaseIterable {

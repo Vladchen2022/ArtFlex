@@ -46,6 +46,20 @@ struct CompoundBrushBuilderSheet: View {
     @State private var previewBackground: CompoundBrushPreviewBackground = .dark
     @State private var previewPressure: Float = 0.5
     @State private var drawingPadClearToken = 0
+    @State private var previewSeed: UInt32 = 0xA17F_1E25
+    @State private var previewSeedLocked = true
+    @State private var previewPattern: CompoundBrushPreviewPath?
+    @State private var previewPatternToken = 0
+    @State private var isPrimaryLocked = false
+    @State private var isSecondaryLocked = false
+    @State private var isSecondaryBypassed = false
+    @State private var undoStack: [BrushSettings] = []
+    @State private var redoStack: [BrushSettings] = []
+    @State private var lastObservedBrush: BrushSettings?
+    @State private var historyAnchorBrush: BrushSettings?
+    @State private var ignoredHistoryBrush: BrushSettings?
+    @State private var historyTask: Task<Void, Never>?
+    @State private var isSaveSheetPresented = false
     @State private var didFinalizeEditing = false
 
     private var brush: BrushSettings { viewModel.workspace.toolSession.brush }
@@ -56,10 +70,21 @@ struct CompoundBrushBuilderSheet: View {
             Divider().overlay(Color.white.opacity(0.08))
             livePreviewWorkspace
             scopeNavigator
+            operationBar
             Divider().overlay(Color.white.opacity(0.08))
 
             ScrollView(.vertical, showsIndicators: true) {
-                scopeContent
+                VStack(alignment: .leading, spacing: 10) {
+                    diagnosticsPanel
+                    if selectedScopeIsLocked {
+                        Label("当前区域已锁定，先解除锁定再修改。", systemImage: "lock.fill")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(Color.orange.opacity(0.9))
+                    }
+                    scopeContent
+                        .disabled(selectedScopeIsLocked)
+                        .opacity(selectedScopeIsLocked ? 0.55 : 1)
+                }
                     .padding(14)
                     .frame(maxWidth: .infinity, alignment: .topLeading)
             }
@@ -73,20 +98,41 @@ struct CompoundBrushBuilderSheet: View {
             if initialBrush == nil {
                 initialBrush = brush
             }
+            lastObservedBrush = brush
             schedulePreviews(for: brush, immediate: true)
         }
         .onChange(of: brush) { _, updatedBrush in
+            observeBrushChange(updatedBrush)
+            if previewSeedLocked == false {
+                randomizePreviewSeed()
+            }
             schedulePreviews(for: updatedBrush)
+        }
+        .onChange(of: isSecondaryBypassed) { _, _ in
+            schedulePreviews(for: brush, immediate: true)
+        }
+        .onChange(of: previewSeed) { _, _ in
+            schedulePreviews(for: brush, immediate: true)
         }
         .onDisappear {
             previewTask?.cancel()
             previewTask = nil
+            historyTask?.cancel()
+            historyTask = nil
             if didFinalizeEditing == false, let initialBrush {
                 viewModel.restoreCompoundBrushEditingSnapshot(initialBrush)
             }
         }
         .sheet(item: $tipLibraryTarget) { target in
             tipImageLibrarySheet(for: target)
+        }
+        .sheet(isPresented: $isSaveSheetPresented) {
+            CompoundBrushSaveSheet(
+                brush: brush,
+                library: viewModel.workspace.brushLibrary,
+                onSave: saveNamedPreset,
+                onCancel: { isSaveSheetPresented = false }
+            )
         }
     }
 
@@ -110,6 +156,30 @@ struct CompoundBrushBuilderSheet: View {
             }
 
             Spacer(minLength: 8)
+
+            if initialBrush != brush {
+                Label("已修改", systemImage: "circle.fill")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(.orange)
+            }
+
+            Button(action: undoEditing) {
+                Image(systemName: "arrow.uturn.backward")
+                    .frame(width: 24, height: 24)
+            }
+            .buttonStyle(.plain)
+            .disabled(undoStack.isEmpty && historyAnchorBrush == nil)
+            .keyboardShortcut("z", modifiers: .command)
+            .help("撤销编辑")
+
+            Button(action: redoEditing) {
+                Image(systemName: "arrow.uturn.forward")
+                    .frame(width: 24, height: 24)
+            }
+            .buttonStyle(.plain)
+            .disabled(redoStack.isEmpty)
+            .keyboardShortcut("z", modifiers: [.command, .shift])
+            .help("重做编辑")
 
             Toggle(
                 brush.compoundBrush.enabled ? "已启用" : "已停用",
@@ -178,7 +248,10 @@ struct CompoundBrushBuilderSheet: View {
                     brush: drawingPadBrush,
                     pressure: previewPressure,
                     background: previewBackground,
-                    clearToken: drawingPadClearToken
+                    clearToken: drawingPadClearToken,
+                    paintVariationSeed: previewSeed,
+                    testPattern: previewPattern,
+                    testPatternToken: previewPatternToken
                 )
                 .frame(height: 154)
                 .overlay(
@@ -196,7 +269,20 @@ struct CompoundBrushBuilderSheet: View {
                         .padding(7)
                         .allowsHitTesting(false)
                 }
+
+                if previewChannel == .result, isSecondaryBypassed {
+                    Text("B 已临时旁路")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(Color.orange.opacity(0.9))
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 5)
+                        .background(.black.opacity(0.52), in: RoundedRectangle(cornerRadius: 5))
+                        .padding(7)
+                        .allowsHitTesting(false)
+                }
             }
+
+            previewToolBar
 
             HStack(spacing: 8) {
                 Text("画板压力")
@@ -210,7 +296,7 @@ struct CompoundBrushBuilderSheet: View {
                     in: 0.05...1
                 )
                 .controlSize(.small)
-                Text("\(Int(previewPressure * 100))%")
+                Text("\(Int((previewPressure * 100).rounded()))%")
                     .font(.system(size: 10, weight: .semibold).monospacedDigit())
                     .foregroundStyle(Color.white.opacity(0.66))
                     .frame(width: 36, alignment: .trailing)
@@ -277,6 +363,51 @@ struct CompoundBrushBuilderSheet: View {
         .frame(maxWidth: .infinity)
     }
 
+    private var previewToolBar: some View {
+        HStack(spacing: 6) {
+            Text("标准试笔")
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(Color.white.opacity(0.52))
+            ForEach(CompoundBrushPreviewPath.allCases) { pattern in
+                Button {
+                    previewPattern = pattern
+                    previewPatternToken &+= 1
+                } label: {
+                    Image(systemName: pattern.systemImage)
+                        .frame(width: 24, height: 22)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(previewPattern == pattern ? Color.accentColor : Color.white.opacity(0.72))
+                .background(
+                    RoundedRectangle(cornerRadius: 5)
+                        .fill(previewPattern == pattern ? Color.accentColor.opacity(0.14) : Color.white.opacity(0.05))
+                )
+                .help(pattern.rawValue)
+            }
+
+            Spacer(minLength: 4)
+
+            Button {
+                previewSeedLocked.toggle()
+            } label: {
+                Image(systemName: previewSeedLocked ? "lock.fill" : "lock.open")
+                    .frame(width: 24, height: 22)
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(previewSeedLocked ? Color.accentColor : Color.white.opacity(0.66))
+            .help(previewSeedLocked ? "随机结果已锁定，便于对比参数" : "参数变化时重新随机")
+
+            Button(action: randomizePreviewSeed) {
+                Image(systemName: "dice.fill")
+                    .frame(width: 24, height: 22)
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(Color.white.opacity(0.72))
+            .background(RoundedRectangle(cornerRadius: 5).fill(Color.white.opacity(0.05)))
+            .help("重新随机")
+        }
+    }
+
     private var scopeNavigator: some View {
         HStack(spacing: 7) {
             scopeNavigatorButton(.overall, systemImage: "slider.horizontal.3", preview: nil)
@@ -287,6 +418,90 @@ struct CompoundBrushBuilderSheet: View {
         .padding(.horizontal, 14)
         .padding(.vertical, 9)
         .background(Color.white.opacity(0.025))
+    }
+
+    private var operationBar: some View {
+        HStack(spacing: 6) {
+            Button {
+                isPrimaryLocked.toggle()
+            } label: {
+                Label("A", systemImage: isPrimaryLocked ? "lock.fill" : "lock.open")
+            }
+            .help(isPrimaryLocked ? "解除 A 锁定" : "锁定 A")
+
+            Button("A → B") {
+                viewModel.copyCompoundPrimaryTipToSecondary()
+            }
+            .disabled(isPrimaryLocked || isSecondaryLocked)
+            .help("把 A 的笔尖与响应复制到 B")
+
+            Button {
+                viewModel.swapCompoundPrimaryAndSecondaryTips()
+            } label: {
+                Label("交换", systemImage: "arrow.left.arrow.right")
+            }
+            .disabled(isPrimaryLocked || isSecondaryLocked)
+            .help("交换 A 与 B")
+
+            Button("B → A") {
+                viewModel.copyCompoundSecondaryTipToPrimary()
+            }
+            .disabled(isPrimaryLocked || isSecondaryLocked)
+            .help("把 B 的笔尖与响应复制到 A")
+
+            Button {
+                isSecondaryLocked.toggle()
+            } label: {
+                Label("B", systemImage: isSecondaryLocked ? "lock.fill" : "lock.open")
+            }
+            .help(isSecondaryLocked ? "解除 B 锁定" : "锁定 B")
+
+            Spacer(minLength: 4)
+
+            Toggle("旁路 B", isOn: $isSecondaryBypassed)
+                .toggleStyle(.switch)
+                .controlSize(.mini)
+                .font(.system(size: 9, weight: .semibold))
+                .help("只影响预览，不改变画笔参数")
+        }
+        .buttonStyle(CompoundEditorButtonStyle(isProminent: false))
+        .padding(.horizontal, 14)
+        .padding(.vertical, 7)
+        .background(Color.white.opacity(0.018))
+    }
+
+    private var selectedScopeIsLocked: Bool {
+        switch selectedScope {
+        case .primary: return isPrimaryLocked
+        case .secondary: return isSecondaryLocked
+        case .overall, .mix: return false
+        }
+    }
+
+    @ViewBuilder
+    private var diagnosticsPanel: some View {
+        let diagnostics = CompoundBrushDiagnostics.evaluate(brush)
+        if diagnostics.isEmpty == false {
+            VStack(alignment: .leading, spacing: 5) {
+                ForEach(diagnostics.prefix(3)) { diagnostic in
+                    Label(
+                        diagnostic.message,
+                        systemImage: diagnostic.severity == .warning
+                            ? "exclamationmark.triangle.fill"
+                            : "info.circle.fill"
+                    )
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(
+                        diagnostic.severity == .warning
+                            ? Color.orange.opacity(0.92)
+                            : Color.white.opacity(0.52)
+                    )
+                }
+            }
+            .padding(9)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color.white.opacity(0.035), in: RoundedRectangle(cornerRadius: 7))
+        }
     }
 
     private func scopeNavigatorButton(
@@ -351,9 +566,9 @@ struct CompoundBrushBuilderSheet: View {
             editorSlider(
                 title: "整体透明",
                 value: Double(brush.opacity),
-                valueText: "\(Int(brush.opacity * 100))%",
+                valueText: "\(Int((brush.opacity * 100).rounded()))%",
                 range: 0...1,
-                liveValueText: { "\(Int($0 * 100))%" }
+                liveValueText: { "\(Int(($0 * 100).rounded()))%" }
             ) { viewModel.setBrushOpacity(Float($0)) }
 
             editorSlider(
@@ -367,9 +582,9 @@ struct CompoundBrushBuilderSheet: View {
             editorSlider(
                 title: "位置抖动",
                 value: Double(brush.jitterAmount),
-                valueText: "\(Int(brush.jitterAmount * 100))%",
+                valueText: "\(Int((brush.jitterAmount * 100).rounded()))%",
                 range: 0...1,
-                liveValueText: { "\(Int($0 * 100))%" }
+                liveValueText: { "\(Int(($0 * 100).rounded()))%" }
             ) { viewModel.setBrushJitterAmount(Float($0)) }
 
             editorDivider
@@ -378,17 +593,17 @@ struct CompoundBrushBuilderSheet: View {
             editorSlider(
                 title: "整体大小压感",
                 value: Double(brush.compoundBrush.globalPressureSizeAmount),
-                valueText: "\(Int(brush.compoundBrush.globalPressureSizeAmount * 100))%",
+                valueText: "\(Int((brush.compoundBrush.globalPressureSizeAmount * 100).rounded()))%",
                 range: 0...1,
-                liveValueText: { "\(Int($0 * 100))%" }
+                liveValueText: { "\(Int(($0 * 100).rounded()))%" }
             ) { viewModel.setPressureSizeAmount(Float($0)) }
 
             editorSlider(
                 title: "整体透明压感",
                 value: Double(brush.compoundBrush.globalPressureOpacityAmount),
-                valueText: "\(Int(brush.compoundBrush.globalPressureOpacityAmount * 100))%",
+                valueText: "\(Int((brush.compoundBrush.globalPressureOpacityAmount * 100).rounded()))%",
                 range: 0...1,
-                liveValueText: { "\(Int($0 * 100))%" }
+                liveValueText: { "\(Int(($0 * 100).rounded()))%" }
             ) { viewModel.setPressureOpacityAmount(Float($0)) }
 
             editorDivider
@@ -397,17 +612,17 @@ struct CompoundBrushBuilderSheet: View {
             editorSlider(
                 title: "杂色",
                 value: Double(brush.compoundBrush.globalPaintJitterAmount),
-                valueText: "\(Int(brush.compoundBrush.globalPaintJitterAmount * 100))%",
+                valueText: "\(Int((brush.compoundBrush.globalPaintJitterAmount * 100).rounded()))%",
                 range: 0...1,
-                liveValueText: { "\(Int($0 * 100))%" }
+                liveValueText: { "\(Int(($0 * 100).rounded()))%" }
             ) { viewModel.setPaintJitterAmount(Float($0)) }
 
             editorSlider(
                 title: "颜料反差",
                 value: Double(brush.compoundBrush.globalPaintContrastAmount),
-                valueText: "\(Int(brush.compoundBrush.globalPaintContrastAmount * 100))%",
+                valueText: "\(Int((brush.compoundBrush.globalPaintContrastAmount * 100).rounded()))%",
                 range: 0...1,
-                liveValueText: { "\(Int($0 * 100))%" }
+                liveValueText: { "\(Int(($0 * 100).rounded()))%" }
             ) { viewModel.setPaintContrastAmount(Float($0)) }
 
             Toggle(
@@ -426,9 +641,9 @@ struct CompoundBrushBuilderSheet: View {
                 editorSlider(
                     title: "透明修正",
                     value: Double(brush.buildUpOpacityCompensationAmount),
-                    valueText: "\(Int(brush.buildUpOpacityCompensationAmount * 100))%",
+                    valueText: "\(Int((brush.buildUpOpacityCompensationAmount * 100).rounded()))%",
                     range: 0...1,
-                    liveValueText: { "\(Int($0 * 100))%" }
+                    liveValueText: { "\(Int(($0 * 100).rounded()))%" }
                 ) { viewModel.setBuildUpOpacityCompensationAmount(Float($0)) }
             }
         }
@@ -489,17 +704,17 @@ struct CompoundBrushBuilderSheet: View {
             editorSlider(
                 title: "A 大小压感",
                 value: Double(brush.pressureSizeAmount),
-                valueText: "\(Int(brush.pressureSizeAmount * 100))%",
+                valueText: "\(Int((brush.pressureSizeAmount * 100).rounded()))%",
                 range: 0...1,
-                liveValueText: { "\(Int($0 * 100))%" }
+                liveValueText: { "\(Int(($0 * 100).rounded()))%" }
             ) { viewModel.setCompoundPrimaryPressureSizeAmount(Float($0)) }
 
             editorSlider(
                 title: "A 透明压感",
                 value: Double(brush.pressureOpacityAmount),
-                valueText: "\(Int(brush.pressureOpacityAmount * 100))%",
+                valueText: "\(Int((brush.pressureOpacityAmount * 100).rounded()))%",
                 range: 0...1,
-                liveValueText: { "\(Int($0 * 100))%" }
+                liveValueText: { "\(Int(($0 * 100).rounded()))%" }
             ) { viewModel.setCompoundPrimaryPressureOpacityAmount(Float($0)) }
 
             if brush.tipShape == .customRound {
@@ -508,16 +723,16 @@ struct CompoundBrushBuilderSheet: View {
                 editorSlider(
                     title: "柔度",
                     value: Double(brush.customTipSoftness),
-                    valueText: "\(Int(brush.customTipSoftness * 100))%",
+                    valueText: "\(Int((brush.customTipSoftness * 100).rounded()))%",
                     range: 0...1,
-                    liveValueText: { "\(Int($0 * 100))%" }
+                    liveValueText: { "\(Int(($0 * 100).rounded()))%" }
                 ) { viewModel.setCustomTipSoftness(Float($0)) }
                 editorSlider(
                     title: "圆度",
                     value: Double(brush.customTipRoundness),
-                    valueText: "\(Int(brush.customTipRoundness * 100))%",
+                    valueText: "\(Int((brush.customTipRoundness * 100).rounded()))%",
                     range: 0.25...1,
-                    liveValueText: { "\(Int($0 * 100))%" }
+                    liveValueText: { "\(Int(($0 * 100).rounded()))%" }
                 ) { viewModel.setCustomTipRoundness(Float($0)) }
             }
         }
@@ -564,7 +779,7 @@ struct CompoundBrushBuilderSheet: View {
                     ? Double(secondary.relativeSizeRatio * 100)
                     : Double(secondary.size),
                 valueText: secondary.sizeMode == .relativeToPrimary
-                    ? "\(Int(secondary.relativeSizeRatio * 100))%"
+                    ? "\(Int((secondary.relativeSizeRatio * 100).rounded()))%"
                     : "\(Int(secondary.size)) px",
                 range: secondary.sizeMode == .relativeToPrimary ? 5...400 : 1...512,
                 liveValueText: { value in
@@ -597,9 +812,9 @@ struct CompoundBrushBuilderSheet: View {
             editorSlider(
                 title: "B 随机旋转",
                 value: Double(secondary.tileRandomRotation),
-                valueText: "\(Int(secondary.tileRandomRotation * 100))%",
+                valueText: "\(Int((secondary.tileRandomRotation * 100).rounded()))%",
                 range: 0...1,
-                liveValueText: { "\(Int($0 * 100))%" }
+                liveValueText: { "\(Int(($0 * 100).rounded()))%" }
             ) { viewModel.setCompoundSecondaryTileRandomRotation(Float($0)) }
 
             editorDivider
@@ -608,17 +823,17 @@ struct CompoundBrushBuilderSheet: View {
             editorSlider(
                 title: "B 大小压感",
                 value: Double(secondary.pressureSizeAmount),
-                valueText: "\(Int(secondary.pressureSizeAmount * 100))%",
+                valueText: "\(Int((secondary.pressureSizeAmount * 100).rounded()))%",
                 range: 0...1,
-                liveValueText: { "\(Int($0 * 100))%" }
+                liveValueText: { "\(Int(($0 * 100).rounded()))%" }
             ) { viewModel.setCompoundSecondaryPressureSizeAmount(Float($0)) }
 
             editorSlider(
                 title: "B 透明压感",
                 value: Double(secondary.pressureOpacityAmount),
-                valueText: "\(Int(secondary.pressureOpacityAmount * 100))%",
+                valueText: "\(Int((secondary.pressureOpacityAmount * 100).rounded()))%",
                 range: 0...1,
-                liveValueText: { "\(Int($0 * 100))%" }
+                liveValueText: { "\(Int(($0 * 100).rounded()))%" }
             ) { viewModel.setCompoundSecondaryPressureOpacityAmount(Float($0)) }
 
             if secondary.tipShape == .customRound {
@@ -627,16 +842,16 @@ struct CompoundBrushBuilderSheet: View {
                 editorSlider(
                     title: "柔度",
                     value: Double(secondary.softness),
-                    valueText: "\(Int(secondary.softness * 100))%",
+                    valueText: "\(Int((secondary.softness * 100).rounded()))%",
                     range: 0...1,
-                    liveValueText: { "\(Int($0 * 100))%" }
+                    liveValueText: { "\(Int(($0 * 100).rounded()))%" }
                 ) { viewModel.setCompoundSecondaryTipSoftness(Float($0)) }
                 editorSlider(
                     title: "圆度",
                     value: Double(secondary.roundness),
-                    valueText: "\(Int(secondary.roundness * 100))%",
+                    valueText: "\(Int((secondary.roundness * 100).rounded()))%",
                     range: 0.25...1,
-                    liveValueText: { "\(Int($0 * 100))%" }
+                    liveValueText: { "\(Int(($0 * 100).rounded()))%" }
                 ) { viewModel.setCompoundSecondaryTipRoundness(Float($0)) }
             }
 
@@ -899,7 +1114,7 @@ struct CompoundBrushBuilderSheet: View {
         HStack(spacing: 9) {
             Button {
                 if let initialBrush {
-                    viewModel.restoreCompoundBrushEditingSnapshot(initialBrush)
+                    restoreOpeningSnapshot(initialBrush)
                 }
             } label: {
                 Label("恢复打开时状态", systemImage: "arrow.uturn.backward")
@@ -909,8 +1124,8 @@ struct CompoundBrushBuilderSheet: View {
 
             Spacer()
 
-            Button(action: saveAsPreset) {
-                Label("另存为笔刷", systemImage: "square.and.arrow.down")
+            Button(action: presentSaveSheet) {
+                Label("保存笔刷…", systemImage: "square.and.arrow.down")
             }
             .buttonStyle(CompoundEditorButtonStyle(isProminent: false))
 
@@ -931,6 +1146,9 @@ struct CompoundBrushBuilderSheet: View {
         case .result:
             var result = brush
             result.compoundBrush.mode = result.compoundBrush.mode.editorEquivalent
+            if isSecondaryBypassed {
+                result.compoundBrush.enabled = false
+            }
             return result
         case .primary:
             var primary = brush
@@ -963,12 +1181,110 @@ struct CompoundBrushBuilderSheet: View {
         }
     }
 
-    private func saveAsPreset() {
+    private func presentSaveSheet() {
         endFocusedTextEditing()
         Task { @MainActor in
             await Task.yield()
-            viewModel.saveCurrentBrushPreset()
-            initialBrush = brush
+            isSaveSheetPresented = true
+        }
+    }
+
+    private func saveNamedPreset(
+        name: String,
+        colorTag: BrushColorTag?,
+        replacingPresetID: String?,
+        allowsDuplicate: Bool
+    ) {
+        _ = viewModel.saveNamedBrushPreset(
+            name: name,
+            colorTag: colorTag,
+            replacingPresetID: replacingPresetID,
+            allowsDuplicate: allowsDuplicate
+        )
+        initialBrush = brush
+        isSaveSheetPresented = false
+    }
+
+    private func randomizePreviewSeed() {
+        previewSeed = previewSeed &* 1_664_525 &+ 1_013_904_223
+        if previewSeed == 0 {
+            previewSeed = 1
+        }
+    }
+
+    private func observeBrushChange(_ updatedBrush: BrushSettings) {
+        if ignoredHistoryBrush == updatedBrush {
+            ignoredHistoryBrush = nil
+            lastObservedBrush = updatedBrush
+            return
+        }
+        guard let previous = lastObservedBrush, previous != updatedBrush else {
+            lastObservedBrush = updatedBrush
+            return
+        }
+        if historyAnchorBrush == nil {
+            historyAnchorBrush = previous
+        }
+        lastObservedBrush = updatedBrush
+        redoStack.removeAll(keepingCapacity: true)
+        historyTask?.cancel()
+        historyTask = Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(220))
+            guard !Task.isCancelled else { return }
+            flushPendingHistory()
+        }
+    }
+
+    private func flushPendingHistory() {
+        historyTask?.cancel()
+        historyTask = nil
+        guard let anchor = historyAnchorBrush else { return }
+        historyAnchorBrush = nil
+        guard anchor != brush else { return }
+        undoStack.append(anchor)
+        if undoStack.count > 60 {
+            undoStack.removeFirst(undoStack.count - 60)
+        }
+    }
+
+    private func applyHistorySnapshot(_ snapshot: BrushSettings) {
+        ignoredHistoryBrush = snapshot
+        lastObservedBrush = snapshot
+        viewModel.restoreCompoundBrushEditingSnapshot(snapshot)
+    }
+
+    private func undoEditing() {
+        endFocusedTextEditing()
+        Task { @MainActor in
+            await Task.yield()
+            flushPendingHistory()
+            guard let target = undoStack.popLast() else { return }
+            redoStack.append(brush)
+            applyHistorySnapshot(target)
+        }
+    }
+
+    private func redoEditing() {
+        endFocusedTextEditing()
+        Task { @MainActor in
+            await Task.yield()
+            flushPendingHistory()
+            guard let target = redoStack.popLast() else { return }
+            undoStack.append(brush)
+            applyHistorySnapshot(target)
+        }
+    }
+
+    private func restoreOpeningSnapshot(_ snapshot: BrushSettings) {
+        endFocusedTextEditing()
+        Task { @MainActor in
+            await Task.yield()
+            flushPendingHistory()
+            if snapshot != brush {
+                undoStack.append(brush)
+                redoStack.removeAll(keepingCapacity: true)
+                applyHistorySnapshot(snapshot)
+            }
         }
     }
 
@@ -982,6 +1298,10 @@ struct CompoundBrushBuilderSheet: View {
         let generation = previewGeneration
         var previewBrush = brush
         previewBrush.compoundBrush.mode = previewBrush.compoundBrush.mode.editorEquivalent
+        if isSecondaryBypassed {
+            previewBrush.compoundBrush.enabled = false
+        }
+        let paintVariationSeed = previewSeed
 
         previewTask = Task { @MainActor in
             if !immediate {
@@ -998,19 +1318,22 @@ struct CompoundBrushBuilderSheet: View {
                     for: input.primary,
                     resolution: 72,
                     width: 220,
-                    pressure: 0.2
+                    pressure: 0.2,
+                    paintVariationSeed: paintVariationSeed
                 )
                 let medium = StageOneBrushPreviewRasterizer.compoundStrokePreviewImage(
                     for: input.primary,
                     resolution: 72,
                     width: 220,
-                    pressure: 0.5
+                    pressure: 0.5,
+                    paintVariationSeed: paintVariationSeed
                 )
                 let heavy = StageOneBrushPreviewRasterizer.compoundStrokePreviewImage(
                     for: input.primary,
                     resolution: 72,
                     width: 220,
-                    pressure: 0.85
+                    pressure: 0.85,
+                    paintVariationSeed: paintVariationSeed
                 )
                 return CompoundPreviewImages(
                     primary: primary,

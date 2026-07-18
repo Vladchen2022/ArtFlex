@@ -25,18 +25,82 @@ enum CompoundBrushPreviewBackground: String, CaseIterable, Identifiable {
     }
 }
 
+enum CompoundBrushPreviewPath: String, CaseIterable, Identifiable {
+    case straight = "直线"
+    case curve = "曲线"
+    case pressureRamp = "压感"
+    case scribble = "涂写"
+
+    var id: String { rawValue }
+
+    var systemImage: String {
+        switch self {
+        case .straight: return "line.diagonal"
+        case .curve: return "scribble.variable"
+        case .pressureRamp: return "arrow.right"
+        case .scribble: return "pencil.and.scribble"
+        }
+    }
+
+    func points(resolution: Int, pressure: Float) -> [StrokePoint] {
+        let size = Double(resolution)
+        let fixedPressure = min(max(pressure, 0.01), 1)
+        switch self {
+        case .straight:
+            return (0...32).map { index in
+                let t = Double(index) / 32
+                return StrokePoint(x: size * (0.08 + (0.84 * t)), y: size * 0.5, pressure: fixedPressure)
+            }
+        case .curve:
+            return (0...56).map { index in
+                let t = Double(index) / 56
+                return StrokePoint(
+                    x: size * (0.07 + (0.86 * t)),
+                    y: size * (0.5 + (sin(t * .pi * 2) * 0.23)),
+                    pressure: fixedPressure
+                )
+            }
+        case .pressureRamp:
+            return (0...48).map { index in
+                let t = Double(index) / 48
+                return StrokePoint(
+                    x: size * (0.07 + (0.86 * t)),
+                    y: size * 0.5,
+                    pressure: Float(0.06 + (0.94 * t))
+                )
+            }
+        case .scribble:
+            return (0...88).map { index in
+                let t = Double(index) / 88
+                let angle = t * .pi * 4
+                return StrokePoint(
+                    x: size * (0.5 + (cos(angle) * (0.35 - (0.12 * t)))),
+                    y: size * (0.5 + (sin(angle * 1.5) * 0.28)),
+                    pressure: fixedPressure
+                )
+            }
+        }
+    }
+}
+
 struct CompoundBrushDrawingPad: NSViewRepresentable {
     let brush: BrushSettings
     let pressure: Float
     let background: CompoundBrushPreviewBackground
     let clearToken: Int
+    let paintVariationSeed: UInt32
+    let testPattern: CompoundBrushPreviewPath?
+    let testPatternToken: Int
 
     func makeNSView(context: Context) -> CompoundBrushDrawingPadNSView {
         CompoundBrushDrawingPadNSView(
             brush: brush,
             pressure: pressure,
             background: background,
-            clearToken: clearToken
+            clearToken: clearToken,
+            paintVariationSeed: paintVariationSeed,
+            testPattern: testPattern,
+            testPatternToken: testPatternToken
         )
     }
 
@@ -45,7 +109,10 @@ struct CompoundBrushDrawingPad: NSViewRepresentable {
             brush: brush,
             pressure: pressure,
             background: background,
-            clearToken: clearToken
+            clearToken: clearToken,
+            paintVariationSeed: paintVariationSeed,
+            testPattern: testPattern,
+            testPatternToken: testPatternToken
         )
     }
 }
@@ -56,6 +123,9 @@ final class CompoundBrushDrawingPadNSView: NSView {
     private var fixedPressure: Float
     private var previewBackground: CompoundBrushPreviewBackground
     private var clearToken: Int
+    private var paintVariationSeed: UInt32
+    private var testPattern: CompoundBrushPreviewPath?
+    private var testPatternToken: Int
     private var strokes: [[StrokePoint]] = []
     private var activeStroke: [StrokePoint] = []
     private var activeSession: StageOneBrushPreviewRasterizer.StrokeAlphaSession?
@@ -69,12 +139,18 @@ final class CompoundBrushDrawingPadNSView: NSView {
         brush: BrushSettings,
         pressure: Float,
         background: CompoundBrushPreviewBackground,
-        clearToken: Int
+        clearToken: Int,
+        paintVariationSeed: UInt32,
+        testPattern: CompoundBrushPreviewPath?,
+        testPatternToken: Int
     ) {
         self.brush = brush
         self.fixedPressure = pressure
         self.previewBackground = background
         self.clearToken = clearToken
+        self.paintVariationSeed = paintVariationSeed
+        self.testPattern = testPattern
+        self.testPatternToken = testPatternToken
         self.activeStrokeAlpha = [UInt8](repeating: 0, count: 256 * 256)
         self.displayAlpha = [UInt8](repeating: 0, count: 256 * 256)
         super.init(frame: .zero)
@@ -94,7 +170,10 @@ final class CompoundBrushDrawingPadNSView: NSView {
         brush: BrushSettings,
         pressure: Float,
         background: CompoundBrushPreviewBackground,
-        clearToken: Int
+        clearToken: Int,
+        paintVariationSeed: UInt32,
+        testPattern: CompoundBrushPreviewPath?,
+        testPatternToken: Int
     ) {
         fixedPressure = min(max(pressure, 0.01), 1)
 
@@ -109,9 +188,24 @@ final class CompoundBrushDrawingPadNSView: NSView {
             clear()
         }
 
-        guard self.brush != brush else { return }
-        self.brush = brush
-        rerenderStoredStrokes()
+        var needsRerender = false
+        if self.brush != brush {
+            self.brush = brush
+            needsRerender = true
+        }
+        if self.paintVariationSeed != paintVariationSeed {
+            self.paintVariationSeed = paintVariationSeed
+            needsRerender = true
+        }
+        self.testPattern = testPattern
+        if self.testPatternToken != testPatternToken {
+            self.testPatternToken = testPatternToken
+            loadTestPattern()
+            return
+        }
+        if needsRerender {
+            rerenderStoredStrokes()
+        }
     }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -134,7 +228,8 @@ final class CompoundBrushDrawingPadNSView: NSView {
         activeStrokeAlpha = [UInt8](repeating: 0, count: resolution * resolution)
         activeSession = StageOneBrushPreviewRasterizer.makeStrokeAlphaSession(
             for: brush,
-            resolution: resolution
+            resolution: resolution,
+            paintVariationSeed: paintVariationSeed
         )
         if let update = activeSession?.append(points: [point, point]) {
             mergeActiveStroke(update)
@@ -180,11 +275,28 @@ final class CompoundBrushDrawingPadNSView: NSView {
         invalidateStrokeImage()
     }
 
+    private func loadTestPattern() {
+        rerenderGeneration &+= 1
+        activeStroke.removeAll(keepingCapacity: true)
+        activeSession = nil
+        strokeBaseAlpha.removeAll(keepingCapacity: true)
+        activeStrokeAlpha = [UInt8](repeating: 0, count: resolution * resolution)
+        displayAlpha = [UInt8](repeating: 0, count: resolution * resolution)
+        if let testPattern {
+            strokes = [testPattern.points(resolution: resolution, pressure: fixedPressure)]
+            rerenderStoredStrokes()
+        } else {
+            strokes.removeAll(keepingCapacity: true)
+            invalidateStrokeImage()
+        }
+    }
+
     private func rerenderStoredStrokes() {
         rerenderGeneration &+= 1
         let generation = rerenderGeneration
         let brush = brush
         let strokes = strokes
+        let paintVariationSeed = paintVariationSeed
         guard strokes.isEmpty == false else {
             displayAlpha = [UInt8](repeating: 0, count: resolution * resolution)
             invalidateStrokeImage()
@@ -201,6 +313,7 @@ final class CompoundBrushDrawingPadNSView: NSView {
                         resolution: 256,
                         points: stroke,
                         samplingState: &samplingState,
+                        paintVariationSeed: paintVariationSeed,
                         flushPendingSamples: true
                     ) else { continue }
                     canvas = Self.composited(base: canvas, stroke: alpha, buildMode: brush.buildMode)
