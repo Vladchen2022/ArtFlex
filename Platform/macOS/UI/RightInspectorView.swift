@@ -16,6 +16,163 @@ private let rightInspectorHorizontalPadding: CGFloat = 12
 private let rightInspectorColumnSpacing: CGFloat = 12
 private let inspectorPanelPadding: CGFloat = 12
 
+private enum BrushParameterSliderScale {
+    case linear
+    case logarithmic
+}
+
+private struct BrushParameterSliderRow: View {
+    let title: String
+    let value: Double
+    let range: ClosedRange<Double>
+    let scale: BrushParameterSliderScale
+    let formatter: (Double) -> String
+    let onPreview: (Double) -> Void
+    let onCommit: (Double) -> Void
+
+    @State private var sliderPosition: Double
+    @State private var valueText: String
+    @State private var isDragging = false
+    @State private var lastPreviewTime = Date.distantPast
+    @FocusState private var isValueFieldFocused: Bool
+
+    private let previewThrottleInterval: TimeInterval = 0.05
+
+    init(
+        title: String,
+        value: Double,
+        range: ClosedRange<Double>,
+        scale: BrushParameterSliderScale = .linear,
+        formatter: @escaping (Double) -> String,
+        onPreview: @escaping (Double) -> Void,
+        onCommit: @escaping (Double) -> Void
+    ) {
+        self.title = title
+        self.value = value
+        self.range = range
+        self.scale = scale
+        self.formatter = formatter
+        self.onPreview = onPreview
+        self.onCommit = onCommit
+        _sliderPosition = State(initialValue: Self.sliderPosition(for: value, range: range, scale: scale))
+        _valueText = State(initialValue: formatter(value))
+    }
+
+    var body: some View {
+        HStack(spacing: 7) {
+            Text(title)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(Color.white.opacity(0.84))
+                .frame(width: 58, alignment: .leading)
+
+            Slider(
+                value: $sliderPosition,
+                in: sliderRange,
+                onEditingChanged: handleDraggingChanged
+            )
+            .onChange(of: sliderPosition) { _, newPosition in
+                guard isDragging else { return }
+                let newValue = resolvedValue(for: newPosition)
+                valueText = formatter(newValue)
+                let now = Date()
+                guard now.timeIntervalSince(lastPreviewTime) >= previewThrottleInterval else { return }
+                lastPreviewTime = now
+                onPreview(newValue)
+            }
+
+            TextField("", text: $valueText)
+                .textFieldStyle(.plain)
+                .font(.system(size: 10.5, weight: .semibold).monospacedDigit())
+                .foregroundStyle(Color.white.opacity(0.96))
+                .multilineTextAlignment(.trailing)
+                .focused($isValueFieldFocused)
+                .onSubmit(commitTextValue)
+                .frame(width: 48, height: 20)
+                .padding(.horizontal, 4)
+                .background(
+                    RoundedRectangle(cornerRadius: 5)
+                        .fill(Color.black.opacity(isValueFieldFocused ? 0.28 : 0.12))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 5)
+                        .stroke(
+                            isValueFieldFocused ? Color.accentColor.opacity(0.7) : Color.white.opacity(0.06),
+                            lineWidth: 1
+                        )
+                )
+        }
+        .onChange(of: value) { _, newValue in
+            guard !isDragging, !isValueFieldFocused else { return }
+            sliderPosition = Self.sliderPosition(for: newValue, range: range, scale: scale)
+            valueText = formatter(newValue)
+        }
+        .onChange(of: isValueFieldFocused) { wasFocused, focused in
+            if wasFocused, !focused {
+                commitTextValue()
+            }
+        }
+    }
+
+    private var sliderRange: ClosedRange<Double> {
+        scale == .linear ? range : 0...1
+    }
+
+    private func handleDraggingChanged(_ dragging: Bool) {
+        isDragging = dragging
+        if dragging {
+            sliderPosition = Self.sliderPosition(for: value, range: range, scale: scale)
+            valueText = formatter(value)
+        } else {
+            let finalValue = resolvedValue(for: sliderPosition)
+            valueText = formatter(finalValue)
+            onPreview(finalValue)
+            onCommit(finalValue)
+        }
+    }
+
+    private func commitTextValue() {
+        let allowed = valueText.filter { "0123456789.-".contains($0) }
+        guard let parsed = Double(allowed), parsed.isFinite else {
+            valueText = formatter(value)
+            return
+        }
+        let clamped = min(max(parsed, range.lowerBound), range.upperBound)
+        sliderPosition = Self.sliderPosition(for: clamped, range: range, scale: scale)
+        valueText = formatter(clamped)
+        onPreview(clamped)
+        onCommit(clamped)
+    }
+
+    private func resolvedValue(for position: Double) -> Double {
+        switch scale {
+        case .linear:
+            return min(max(position, range.lowerBound), range.upperBound)
+        case .logarithmic:
+            let lower = max(range.lowerBound, 0.000_001)
+            let upper = max(range.upperBound, lower)
+            let exponent = min(max(position, 0), 1)
+            return lower * pow(upper / lower, exponent)
+        }
+    }
+
+    private static func sliderPosition(
+        for value: Double,
+        range: ClosedRange<Double>,
+        scale: BrushParameterSliderScale
+    ) -> Double {
+        let clamped = min(max(value, range.lowerBound), range.upperBound)
+        switch scale {
+        case .linear:
+            return clamped
+        case .logarithmic:
+            let lower = max(range.lowerBound, 0.000_001)
+            let upper = max(range.upperBound, lower)
+            guard upper > lower else { return 0 }
+            return log(clamped / lower) / log(upper / lower)
+        }
+    }
+}
+
 func rightInspectorColumnWidth(totalWidth: CGFloat) -> CGFloat {
     max(
         0,
@@ -413,6 +570,8 @@ struct RightInspectorView: View {
     @ObservedObject var viewModel: WorkspaceViewModel
     @State private var showsPressureCurveEditor = false
     @State private var showsPressureSizeCurveEditor = false
+    @State private var showsBrushRandomControls = false
+    @State private var showsPressureAdvancedControls = false
     @State private var tipPaintMode: TipPaintMode = .round
     @State private var presetShapeIndex = 0
     @State private var sprayPatternIndex = 0
@@ -1831,91 +1990,239 @@ struct RightInspectorView: View {
     }
 
     private var fullBrushParameterControls: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            OptimizedCompactSlider(
+        let brush = viewModel.workspace.toolSession.brush
+        let compoundEnabled = brush.compoundBrush.enabled
+        let rawRotation = Double(brush.stampRotationDegrees)
+        let signedRotation = rawRotation > 180 ? rawRotation - 360 : rawRotation
+
+        return VStack(alignment: .leading, spacing: 9) {
+            if compoundEnabled {
+                HStack(spacing: 8) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("组合笔刷快速参数")
+                            .font(.system(size: 10.5, weight: .bold))
+                            .foregroundStyle(Color.white.opacity(0.9))
+                        Text("此处只调整整体响应，A/B 独立参数在编辑器中修改")
+                            .font(.system(size: 8.5, weight: .medium))
+                            .foregroundStyle(Color.white.opacity(0.5))
+                            .lineLimit(2)
+                    }
+                    Spacer(minLength: 4)
+                    Button("编辑 A/B") {
+                        showsCompoundBrushBuilder = true
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.mini)
+                }
+                .padding(8)
+                .background(
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(Color.accentColor.opacity(0.09))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8)
+                        .stroke(Color.accentColor.opacity(0.28), lineWidth: 1)
+                )
+            }
+
+            brushParameterSectionHeader("笔尖排布")
+
+            BrushParameterSliderRow(
                 title: "间距",
-                valueText: "\(Int(viewModel.workspace.toolSession.brush.spacingPercent))%",
-                value: Binding(
-                    get: { Double(viewModel.workspace.toolSession.brush.spacingPercent) },
-                    set: { _ in }
-                ),
-                range: 5...150,
-                liveValueText: { "\(Int($0))%" },
+                value: Double(brush.spacingPercent),
+                range: 1...1_000,
+                scale: .logarithmic,
+                formatter: { "\(Int($0.rounded()))%" },
+                onPreview: { viewModel.setBrushSpacingPercent(Float($0)) },
                 onCommit: { viewModel.setBrushSpacingPercent(Float($0)) }
             )
 
-            OptimizedCompactSlider(
-                title: "散布",
-                valueText: String(format: "%.1fx", viewModel.workspace.toolSession.brush.scatterAmount),
-                value: Binding(
-                    get: { Double(viewModel.workspace.toolSession.brush.scatterAmount) },
-                    set: { _ in }
-                ),
-                range: 0...5,
-                liveValueText: { String(format: "%.1fx", $0) },
-                onCommit: { viewModel.setBrushScatterAmount(Float($0)) }
+            BrushParameterSliderRow(
+                title: "位置散布",
+                value: Double(brush.scatterAmount * 50),
+                range: 0...250,
+                formatter: { "\(Int($0.rounded()))%" },
+                onPreview: { viewModel.setBrushScatterAmount(Float($0 / 50)) },
+                onCommit: { viewModel.setBrushScatterAmount(Float($0 / 50)) }
             )
 
-            OptimizedCompactSlider(
-                title: "旋转",
-                valueText: "\(Int(viewModel.workspace.toolSession.brush.stampRotationDegrees))°",
-                value: Binding(
-                    get: { Double(viewModel.workspace.toolSession.brush.stampRotationDegrees) },
-                    set: { _ in }
-                ),
-                range: 0...360,
-                liveValueText: { "\(Int($0))°" },
-                onCommit: { viewModel.setBrushStampRotationDegrees(Float($0)) }
-            )
-
-            brushJitterSlider
-
-            Divider()
-                .overlay(Color.white.opacity(0.08))
-                .padding(.vertical, 2)
-
-            paintJitterSlider
-
-            OptimizedCompactSlider(
-                title: "大小压感",
-                valueText: "\(Int(viewModel.displayedPressureSizeAmount * 100))%",
-                value: Binding(
-                    get: { Double(viewModel.displayedPressureSizeAmount) },
-                    set: { _ in }
-                ),
-                range: 0...1,
-                liveValueText: { "\(Int($0 * 100))%" },
-                onCommit: { viewModel.setPressureSizeAmount(Float($0)) }
-            )
-
-            OptimizedCompactSlider(
-                title: "透明压感",
-                valueText: "\(Int(viewModel.displayedPressureOpacityAmount * 100))%",
-                value: Binding(
-                    get: { Double(viewModel.displayedPressureOpacityAmount) },
-                    set: { _ in }
-                ),
-                range: 0...1,
-                liveValueText: { "\(Int($0 * 100))%" },
-                onCommit: { viewModel.setPressureOpacityAmount(Float($0)) }
-            )
-
-            if viewModel.workspace.toolSession.brush.buildMode == .buildUp {
-                Divider()
-                    .overlay(Color.white.opacity(0.08))
-                    .padding(.vertical, 2)
-
-                OptimizedCompactSlider(
-                    title: "透明修正",
-                    valueText: "\(Int(viewModel.displayedBuildUpOpacityCompensationAmount * 100))%",
-                    value: Binding(
-                        get: { Double(viewModel.displayedBuildUpOpacityCompensationAmount) },
-                        set: { _ in }
-                    ),
-                    range: 0...1,
-                    liveValueText: { "\(Int($0 * 100))%" },
-                    onCommit: { viewModel.setBuildUpOpacityCompensationAmount(Float($0)) }
+            if brush.tipShape.hasVisibleRotation {
+                BrushParameterSliderRow(
+                    title: "笔尖角度",
+                    value: signedRotation,
+                    range: -180...180,
+                    formatter: { "\(Int($0.rounded()))°" },
+                    onPreview: { viewModel.setBrushStampRotationDegrees(Float($0)) },
+                    onCommit: { viewModel.setBrushStampRotationDegrees(Float($0)) }
                 )
+
+                Toggle(
+                    "跟随笔迹方向",
+                    isOn: Binding(
+                        get: { brush.followsStrokeDirection },
+                        set: { viewModel.setBrushFollowsStrokeDirection($0) }
+                    )
+                )
+                .toggleStyle(.switch)
+                .controlSize(.mini)
+                .font(.system(size: 10.5, weight: .semibold))
+                .foregroundStyle(Color.white.opacity(0.78))
+            }
+
+            brushDisclosureButton(
+                title: "随机变化",
+                isExpanded: showsBrushRandomControls
+            ) {
+                showsBrushRandomControls.toggle()
+            }
+
+            if showsBrushRandomControls {
+                BrushParameterSliderRow(
+                    title: "尺寸随机",
+                    value: Double(brush.sizeJitterAmount * 100),
+                    range: 0...100,
+                    formatter: { "\(Int($0.rounded()))%" },
+                    onPreview: { viewModel.setBrushSizeJitterAmount(Float($0 / 100)) },
+                    onCommit: { viewModel.setBrushSizeJitterAmount(Float($0 / 100)) }
+                )
+
+                if brush.tipShape.hasVisibleRotation {
+                    BrushParameterSliderRow(
+                        title: "角度随机",
+                        value: Double(brush.angleJitterAmount * 180),
+                        range: 0...180,
+                        formatter: { "\(Int($0.rounded()))°" },
+                        onPreview: { viewModel.setBrushAngleJitterAmount(Float($0 / 180)) },
+                        onCommit: { viewModel.setBrushAngleJitterAmount(Float($0 / 180)) }
+                    )
+                }
+            }
+
+            brushSectionDivider
+            brushParameterSectionHeader(
+                compoundEnabled ? "整体压力响应" : "压力响应",
+                detail: compoundEnabled ? "A/B 共用当前曲线，独立响应请进入组合编辑器" : nil
+            )
+
+            BrushParameterSliderRow(
+                title: compoundEnabled ? "整体尺寸" : "尺寸压感",
+                value: Double(viewModel.displayedPressureSizeAmount * 100),
+                range: 0...100,
+                formatter: { "\(Int($0.rounded()))%" },
+                onPreview: { viewModel.setPressureSizeAmount(Float($0 / 100)) },
+                onCommit: { viewModel.setPressureSizeAmount(Float($0 / 100)) }
+            )
+
+            BrushParameterSliderRow(
+                title: compoundEnabled ? "整体透明" : "不透明压感",
+                value: Double(viewModel.displayedPressureOpacityAmount * 100),
+                range: 0...100,
+                formatter: { "\(Int($0.rounded()))%" },
+                onPreview: { viewModel.setPressureOpacityAmount(Float($0 / 100)) },
+                onCommit: { viewModel.setPressureOpacityAmount(Float($0 / 100)) }
+            )
+
+            if !compoundEnabled {
+                HStack(spacing: 7) {
+                    pressureCurveButton(
+                        title: "尺寸曲线",
+                        systemImage: "waveform.path.ecg",
+                        isEnabled: viewModel.displayedPressureSizeAmount > 0.0001
+                    ) {
+                        showsPressureSizeCurveEditor.toggle()
+                    }
+                    .popover(isPresented: $showsPressureSizeCurveEditor, arrowEdge: .bottom) {
+                        pressureSizeCurveEditor
+                            .padding(14)
+                            .frame(width: 296, height: 236, alignment: .topLeading)
+                            .background(Color(red: 0.965, green: 0.965, blue: 0.955))
+                    }
+
+                    pressureCurveButton(
+                        title: "透明曲线",
+                        systemImage: "drop",
+                        isEnabled: viewModel.displayedPressureOpacityAmount > 0.0001
+                    ) {
+                        showsPressureCurveEditor.toggle()
+                    }
+                    .popover(isPresented: $showsPressureCurveEditor, arrowEdge: .bottom) {
+                        pressureCurveEditor
+                            .padding(14)
+                            .frame(width: 296, height: 236, alignment: .topLeading)
+                            .background(Color(red: 0.965, green: 0.965, blue: 0.955))
+                    }
+                }
+            }
+
+            brushDisclosureButton(
+                title: "压力高级设置",
+                isExpanded: showsPressureAdvancedControls
+            ) {
+                showsPressureAdvancedControls.toggle()
+            }
+
+            if showsPressureAdvancedControls {
+                BrushParameterSliderRow(
+                    title: "最小尺寸",
+                    value: Double(brush.sizeLowerBound * 100),
+                    range: 0...100,
+                    formatter: { "\(Int($0.rounded()))%" },
+                    onPreview: { viewModel.setSizeLowerBound(Float($0 / 100)) },
+                    onCommit: { viewModel.setSizeLowerBound(Float($0 / 100)) }
+                )
+                .opacity(viewModel.displayedPressureSizeAmount > 0.0001 ? 1 : 0.45)
+                .allowsHitTesting(viewModel.displayedPressureSizeAmount > 0.0001)
+
+                BrushParameterSliderRow(
+                    title: "压感灵敏度",
+                    value: Double(brush.pressureSensitivity),
+                    range: 0.25...2,
+                    formatter: { String(format: "%.2fx", $0) },
+                    onPreview: { viewModel.setPressureSensitivity(Float($0)) },
+                    onCommit: { viewModel.setPressureSensitivity(Float($0)) }
+                )
+            }
+
+            brushSectionDivider
+            brushParameterSectionHeader("颜料与叠加")
+
+            BrushParameterSliderRow(
+                title: "杂色",
+                value: Double(viewModel.displayedPaintJitterAmount * 100),
+                range: 0...100,
+                formatter: { "\(Int($0.rounded()))%" },
+                onPreview: { viewModel.setPaintJitterAmount(Float($0 / 100)) },
+                onCommit: { viewModel.setPaintJitterAmount(Float($0 / 100)) }
+            )
+
+            Picker(
+                "叠加方式",
+                selection: Binding(
+                    get: { brush.buildMode },
+                    set: { viewModel.setBrushBuildMode($0) }
+                )
+            ) {
+                Text("自然叠加").tag(BrushBuildMode.buildUp)
+                Text("不透明度封顶").tag(BrushBuildMode.opacityCap)
+            }
+            .pickerStyle(.segmented)
+            .controlSize(.small)
+            .labelsHidden()
+
+            if brush.buildMode == .buildUp {
+                BrushParameterSliderRow(
+                    title: "叠加补偿",
+                    value: Double(viewModel.displayedBuildUpOpacityCompensationAmount * 100),
+                    range: 0...100,
+                    formatter: { "\(Int($0.rounded()))%" },
+                    onPreview: { viewModel.setBuildUpOpacityCompensationAmount(Float($0 / 100)) },
+                    onCommit: { viewModel.setBuildUpOpacityCompensationAmount(Float($0 / 100)) }
+                )
+
+                Text("补偿紧密笔尖重复叠加造成的浓度变化；100% 时尽量保持目标不透明度。")
+                    .font(.system(size: 8.5, weight: .medium))
+                    .foregroundStyle(Color.white.opacity(0.42))
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
     }
@@ -1949,55 +2256,73 @@ struct RightInspectorView: View {
     }
 
     private var brushAdvancedActions: some View {
-        HStack(spacing: 8) {
-            compactIconButton(
-                systemImage: "square.3.layers.3d.top.filled",
-                tooltip: viewModel.workspace.toolSession.brush.buildMode == .opacityCap
-                    ? "关闭不透明度封顶"
-                    : "开启不透明度封顶",
-                isSelected: viewModel.workspace.toolSession.brush.buildMode == .opacityCap
-            ) {
-                viewModel.setBrushBuildMode(
-                    viewModel.workspace.toolSession.brush.buildMode == .opacityCap
-                        ? .buildUp
-                        : .opacityCap
-                )
-            }
-
-            compactIconButton(
-                systemImage: "location.north.line.fill",
-                tooltip: viewModel.workspace.toolSession.brush.followsStrokeDirection ? "关闭跟随笔迹方向" : "开启跟随笔迹方向",
-                isSelected: viewModel.workspace.toolSession.brush.followsStrokeDirection
-            ) {
-                viewModel.setBrushFollowsStrokeDirection(!viewModel.workspace.toolSession.brush.followsStrokeDirection)
-            }
-
-            compactIconButton(systemImage: "waveform.path.ecg", tooltip: "大小压感曲线") {
-                showsPressureSizeCurveEditor.toggle()
-            }
-            .popover(isPresented: $showsPressureSizeCurveEditor, arrowEdge: .bottom) {
-                pressureSizeCurveEditor
-                    .padding(14)
-                    .frame(width: 296, height: 236, alignment: .topLeading)
-                    .background(Color(red: 0.965, green: 0.965, blue: 0.955))
-            }
-
-            compactIconButton(systemImage: "drop", tooltip: "透明压感曲线") {
-                showsPressureCurveEditor.toggle()
-            }
-            .popover(isPresented: $showsPressureCurveEditor, arrowEdge: .bottom) {
-                pressureCurveEditor
-                    .padding(14)
-                    .frame(width: 296, height: 236, alignment: .topLeading)
-                    .background(Color(red: 0.965, green: 0.965, blue: 0.955))
-            }
-
+        HStack {
             Spacer(minLength: 0)
-
-            compactIconButton(systemImage: "square.and.arrow.down", tooltip: "存为笔刷") {
+            Button {
                 viewModel.saveCurrentBrushPreset()
+            } label: {
+                Label("保存到画笔库", systemImage: "square.and.arrow.down")
+                    .font(.system(size: 10.5, weight: .semibold))
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+        }
+    }
+
+    private var brushSectionDivider: some View {
+        Divider()
+            .overlay(Color.white.opacity(0.08))
+            .padding(.vertical, 2)
+    }
+
+    private func brushParameterSectionHeader(_ title: String, detail: String? = nil) -> some View {
+        VStack(alignment: .leading, spacing: 1) {
+            Text(title)
+                .font(.system(size: 10.5, weight: .bold))
+                .foregroundStyle(Color.white.opacity(0.72))
+            if let detail {
+                Text(detail)
+                    .font(.system(size: 8.5, weight: .medium))
+                    .foregroundStyle(Color.white.opacity(0.4))
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
+    }
+
+    private func brushDisclosureButton(
+        title: String,
+        isExpanded: Bool,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            HStack(spacing: 5) {
+                Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                    .font(.system(size: 8, weight: .bold))
+                Text(title)
+                    .font(.system(size: 9.5, weight: .semibold))
+                Spacer(minLength: 0)
+            }
+            .foregroundStyle(Color.white.opacity(0.58))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func pressureCurveButton(
+        title: String,
+        systemImage: String,
+        isEnabled: Bool,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Label(title, systemImage: systemImage)
+                .font(.system(size: 9.5, weight: .semibold))
+                .frame(maxWidth: .infinity)
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.mini)
+        .disabled(!isEnabled)
+        .help(isEnabled ? "编辑\(title)" : "先提高对应的压感强度")
     }
 
     private var textureFillTipSourceSummary: String {
@@ -4545,7 +4870,7 @@ struct RightInspectorView: View {
         let spacingPx = max(Float(Double(brush.size) * Double(brush.spacingPercent) / 100.0), 0.5)
         let stampDiameterPx = max(Float(brush.size) * Float(sizeFactor), 1)
         let compensationAmount = BrushSettings.resolvedBuildUpCompensationAmount(
-            automaticCompensationAmount: Float(opacityResponse),
+            automaticCompensationAmount: brush.buildMode == .buildUp ? 1 : 0,
             brushCompensationAmount: brush.buildUpOpacityCompensationAmount
         )
         let visibleOpacity = brush.buildMode == .buildUp

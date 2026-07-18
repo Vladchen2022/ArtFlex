@@ -1161,7 +1161,7 @@ final class WorkspaceViewModel: ObservableObject {
 
     func setBrushSpacingPercent(_ percent: Float) {
         bootstrap.workspaceStore.updateToolSession { session in
-            session.brush.spacingPercent = min(max(percent, 5), 150)
+            session.brush.spacingPercent = min(max(percent, 1), 1_000)
         }
         refresh()
     }
@@ -1176,6 +1176,20 @@ final class WorkspaceViewModel: ObservableObject {
     func setBrushJitterAmount(_ amount: Float) {
         bootstrap.workspaceStore.updateToolSession { session in
             session.brush.jitterAmount = min(max(amount, 0), 1)
+        }
+        refresh()
+    }
+
+    func setBrushSizeJitterAmount(_ amount: Float) {
+        bootstrap.workspaceStore.updateToolSession { session in
+            session.brush.sizeJitterAmount = min(max(amount, 0), 1)
+        }
+        refresh()
+    }
+
+    func setBrushAngleJitterAmount(_ amount: Float) {
+        bootstrap.workspaceStore.updateToolSession { session in
+            session.brush.angleJitterAmount = min(max(amount, 0), 1)
         }
         refresh()
     }

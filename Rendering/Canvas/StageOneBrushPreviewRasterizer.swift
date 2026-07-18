@@ -1112,6 +1112,8 @@ enum StageOneBrushPreviewRasterizer {
         hasher.combine(brush.spacingPercent)
         hasher.combine(brush.scatterAmount)
         hasher.combine(brush.jitterAmount)
+        hasher.combine(brush.sizeJitterAmount)
+        hasher.combine(brush.angleJitterAmount)
         hasher.combine(brush.paintJitterAmount)
         hasher.combine(brush.paintContrastAmount)
         hasher.combine(brush.stampRotationDegrees)
@@ -1176,6 +1178,8 @@ enum StageOneBrushPreviewRasterizer {
         hasher.combine(brush.spacingPercent)
         hasher.combine(brush.scatterAmount)
         hasher.combine(brush.jitterAmount)
+        hasher.combine(brush.sizeJitterAmount)
+        hasher.combine(brush.angleJitterAmount)
         hasher.combine(brush.stampRotationDegrees)
         hasher.combine(brush.followsStrokeDirection)
         hasher.combine(

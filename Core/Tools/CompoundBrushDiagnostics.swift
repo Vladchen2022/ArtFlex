@@ -59,7 +59,7 @@ enum CompoundBrushDiagnostics {
 
         if brush.spacingPercent <= 7,
            secondary.spacingPercent <= 10,
-           max(brush.scatterAmount, brush.jitterAmount) > 0.5 {
+           max(brush.scatterAmount, max(brush.sizeJitterAmount, brush.angleJitterAmount)) > 0.5 {
             diagnostics.append(.init(
                 id: "dense-stamp-load",
                 severity: .warning,

@@ -72,6 +72,15 @@ enum BrushTipShape: String, Codable, Sendable, Equatable, Hashable, CaseIterable
             return distance <= 1 ? 1 : 0
         }
     }
+
+    var hasVisibleRotation: Bool {
+        switch self {
+        case .hardRound, .softRound:
+            return false
+        case .square, .customRound:
+            return true
+        }
+    }
 }
 
 enum TipSourceSemantic: String, Codable, Sendable, Equatable, Hashable {
@@ -796,6 +805,8 @@ struct BrushSettings: Codable, Sendable, Equatable {
     var spacingPercent: Float
     var scatterAmount: Float
     var jitterAmount: Float
+    var sizeJitterAmount: Float
+    var angleJitterAmount: Float
     var colorJitterAmount: Float
     var paintJitterAmount: Float
     var paintContrastAmount: Float
@@ -832,6 +843,8 @@ struct BrushSettings: Codable, Sendable, Equatable {
         spacingPercent: 15,
         scatterAmount: 0,
         jitterAmount: 0,
+        sizeJitterAmount: 0,
+        angleJitterAmount: 0,
         colorJitterAmount: 0,
         paintJitterAmount: 0,
         paintContrastAmount: 0,
@@ -869,6 +882,8 @@ struct BrushSettings: Codable, Sendable, Equatable {
         case spacingPercent
         case scatterAmount
         case jitterAmount
+        case sizeJitterAmount
+        case angleJitterAmount
         case colorJitterAmount
         case paintJitterAmount
         case paintContrastAmount
@@ -906,6 +921,8 @@ struct BrushSettings: Codable, Sendable, Equatable {
         spacingPercent: Float,
         scatterAmount: Float,
         jitterAmount: Float,
+        sizeJitterAmount: Float? = nil,
+        angleJitterAmount: Float? = nil,
         colorJitterAmount: Float = 0,
         paintJitterAmount: Float = 0,
         paintContrastAmount: Float = 0,
@@ -941,6 +958,8 @@ struct BrushSettings: Codable, Sendable, Equatable {
         self.spacingPercent = spacingPercent
         self.scatterAmount = scatterAmount
         self.jitterAmount = jitterAmount
+        self.sizeJitterAmount = sizeJitterAmount ?? jitterAmount
+        self.angleJitterAmount = angleJitterAmount ?? jitterAmount
         self.colorJitterAmount = colorJitterAmount
         self.paintJitterAmount = paintJitterAmount
         self.paintContrastAmount = paintContrastAmount
@@ -981,6 +1000,8 @@ struct BrushSettings: Codable, Sendable, Equatable {
         spacingPercent = try container.decodeIfPresent(Float.self, forKey: .spacingPercent) ?? defaults.spacingPercent
         scatterAmount = try container.decodeIfPresent(Float.self, forKey: .scatterAmount) ?? defaults.scatterAmount
         jitterAmount = try container.decodeIfPresent(Float.self, forKey: .jitterAmount) ?? defaults.jitterAmount
+        sizeJitterAmount = try container.decodeIfPresent(Float.self, forKey: .sizeJitterAmount) ?? jitterAmount
+        angleJitterAmount = try container.decodeIfPresent(Float.self, forKey: .angleJitterAmount) ?? jitterAmount
         colorJitterAmount = try container.decodeIfPresent(Float.self, forKey: .colorJitterAmount) ?? defaults.colorJitterAmount
         paintJitterAmount = try container.decodeIfPresent(Float.self, forKey: .paintJitterAmount) ?? defaults.paintJitterAmount
         paintContrastAmount = try container.decodeIfPresent(Float.self, forKey: .paintContrastAmount) ?? defaults.paintContrastAmount
@@ -1022,7 +1043,11 @@ struct BrushSettings: Codable, Sendable, Equatable {
         try container.encode(spacingPercent, forKey: .spacingPercent)
         try container.encode(scatterAmount, forKey: .scatterAmount)
         try container.encode(jitterAmount, forKey: .jitterAmount)
+        try container.encode(sizeJitterAmount, forKey: .sizeJitterAmount)
+        try container.encode(angleJitterAmount, forKey: .angleJitterAmount)
         try container.encode(colorJitterAmount, forKey: .colorJitterAmount)
+        try container.encode(paintJitterAmount, forKey: .paintJitterAmount)
+        try container.encode(paintContrastAmount, forKey: .paintContrastAmount)
         try container.encode(stampRotationDegrees, forKey: .stampRotationDegrees)
         try container.encode(followsStrokeDirection, forKey: .followsStrokeDirection)
         try container.encode(customTipSourceSemantic, forKey: .customTipSourceSemantic)
@@ -1179,6 +1204,15 @@ struct BrushSettings: Codable, Sendable, Equatable {
         return (1 - response) + (response * curvedPressure)
     }
 
+    static func resolvedSizeJitterMultiplier(
+        randomUnitValue: Float,
+        amount: Float
+    ) -> Float {
+        let random = min(max(randomUnitValue, 0), 1)
+        let clampedAmount = min(max(amount, 0), 1)
+        return max(1 + (clampedAmount * ((random * 2) - 1)), 0.05)
+    }
+
     var effectivePaintJitterAmount: Float {
         compoundBrush.enabled
             ? compoundBrush.globalPaintJitterAmount
@@ -1233,6 +1267,21 @@ struct BrushSettings: Codable, Sendable, Equatable {
             pressure: remapped,
             state: state
         )
+    }
+
+    static func resolvedSizeCurvePressure(
+        pressure: Float,
+        pressureSensitivity: Float,
+        sizeLowerBound: Float,
+        state: CurveChannelState
+    ) -> Float {
+        let remapped = remappedOpacityPressure(
+            pressure: pressure,
+            pressureSensitivity: pressureSensitivity
+        )
+        let curved = samplePressureCurve(pressure: remapped, state: state)
+        let lowerBound = min(max(sizeLowerBound, 0), 1)
+        return lowerBound + ((1 - lowerBound) * curved)
     }
 
     static func spacingCompensatedBuildUpAlpha(

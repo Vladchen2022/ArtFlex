@@ -1858,6 +1858,8 @@ final class StageOneBrushRenderer {
         samplingBrush.spacingPercent = secondary.spacingPercent
         samplingBrush.scatterAmount = 0
         samplingBrush.jitterAmount = 0
+        samplingBrush.sizeJitterAmount = 0
+        samplingBrush.angleJitterAmount = 0
         samplingBrush.stampRotationDegrees = secondary.angleDegrees
         samplingBrush.followsStrokeDirection = secondary.followsStrokeDirection
         samplingBrush.pressureSizeAmount = secondary.pressureSizeAmount
@@ -2433,11 +2435,7 @@ final class StageOneBrushRenderer {
         let primaryStampDiameterPx = max(stroke.brush.size * sizeFactor, 1)
         let automaticBuildUpOpacityCompensationAmount: Float =
             (stroke.tool == .brush || stroke.tool == .eraser) && stroke.brush.buildMode == .buildUp
-            ? (
-                compoundEnabled
-                ? globalOpacityResponse
-                : primaryOpacityResponse
-            )
+            ? 1
             : 0
         let buildUpOpacityCompensationAmount = BrushSettings.resolvedBuildUpCompensationAmount(
             automaticCompensationAmount: automaticBuildUpOpacityCompensationAmount,
@@ -3179,7 +3177,8 @@ final class StageOneBrushRenderer {
         stroke: StrokeDescriptor
     ) -> StampSample {
         let scatterAmount = max(stroke.brush.scatterAmount, 0)
-        let jitterAmount = min(max(stroke.brush.jitterAmount, 0), 1)
+        let sizeJitterAmount = min(max(stroke.brush.sizeJitterAmount, 0), 1)
+        let angleJitterAmount = min(max(stroke.brush.angleJitterAmount, 0), 1)
         let scatterRadius = Double(stroke.brush.size) * Double(scatterAmount) * 0.5
         let radial = scatterAmount > 0.0001
             ? pow(stableScatterRandom(x: point.x, y: point.y, index: index, salt: 0x9E37_79B9), 0.55)
@@ -3191,8 +3190,11 @@ final class StageOneBrushRenderer {
         let offsetY = sin(spreadAngle) * scatterRadius * radial
         let sizeRandom = Float(stableScatterRandom(x: point.x, y: point.y, index: index, salt: 0xC2B2_AE35))
         let rotationRandom = Float(stableScatterRandom(x: point.x, y: point.y, index: index, salt: 0x27D4_EB2F))
-        let sizeMultiplier = max(1 - (jitterAmount * 1.5 * sizeRandom), 0.05)
-        let angleJitter = (rotationRandom * 2 - 1) * 180 * jitterAmount
+        let sizeMultiplier = BrushSettings.resolvedSizeJitterMultiplier(
+            randomUnitValue: sizeRandom,
+            amount: sizeJitterAmount
+        )
+        let angleJitter = (rotationRandom * 2 - 1) * 180 * angleJitterAmount
         let offsetPoint = StrokePoint(
             x: point.x + offsetX,
             y: point.y + offsetY,
@@ -3240,8 +3242,10 @@ final class StageOneBrushRenderer {
     }
 
     private func sizeCurvePressure(for pressure: Float, stroke: StrokeDescriptor) -> Float {
-        BrushSettings.samplePressureCurve(
+        BrushSettings.resolvedSizeCurvePressure(
             pressure: pressure,
+            pressureSensitivity: stroke.brush.pressureSensitivity,
+            sizeLowerBound: stroke.brush.sizeLowerBound,
             state: stroke.brush.resolvedSizePressureCurveState
         )
     }

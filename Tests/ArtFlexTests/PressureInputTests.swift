@@ -112,6 +112,75 @@ struct PressureInputTests {
     }
 
     @Test
+    func buildUpCompensationCanOperateWithoutOpacityPressureResponse() {
+        let amount = BrushSettings.resolvedBuildUpCompensationAmount(
+            automaticCompensationAmount: 1,
+            brushCompensationAmount: 0.72
+        )
+
+        #expect(abs(amount - 0.72) < 0.0001)
+    }
+
+    @Test
+    func sizeJitterIsCenteredAroundTheConfiguredBrushSize() {
+        #expect(abs(BrushSettings.resolvedSizeJitterMultiplier(randomUnitValue: 0.5, amount: 1) - 1) < 0.0001)
+        #expect(abs(BrushSettings.resolvedSizeJitterMultiplier(randomUnitValue: 1, amount: 1) - 2) < 0.0001)
+        #expect(abs(BrushSettings.resolvedSizeJitterMultiplier(randomUnitValue: 0, amount: 0.5) - 0.5) < 0.0001)
+        #expect(abs(BrushSettings.resolvedSizeJitterMultiplier(randomUnitValue: 0.2, amount: 0) - 1) < 0.0001)
+    }
+
+    @Test
+    func sizePressureRespectsSensitivityAndMinimumSize() {
+        let state = CurveChannelState(points: [
+            .init(x: 0, y: 0),
+            .init(x: 1, y: 1)
+        ])
+        let result = BrushSettings.resolvedSizeCurvePressure(
+            pressure: 0,
+            pressureSensitivity: 1,
+            sizeLowerBound: 0.3,
+            state: state
+        )
+
+        #expect(abs(result - 0.3) < 0.0001)
+    }
+
+    @Test
+    func legacyCombinedJitterMigratesToIndependentSizeAndAngleJitter() throws {
+        var brush = BrushSettings.stageOneDefault
+        brush.jitterAmount = 0.42
+        let encoded = try JSONEncoder().encode(brush)
+        var object = try #require(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        object.removeValue(forKey: "sizeJitterAmount")
+        object.removeValue(forKey: "angleJitterAmount")
+        let legacyData = try JSONSerialization.data(withJSONObject: object)
+
+        let decoded = try JSONDecoder().decode(BrushSettings.self, from: legacyData)
+
+        #expect(abs(decoded.sizeJitterAmount - 0.42) < 0.0001)
+        #expect(abs(decoded.angleJitterAmount - 0.42) < 0.0001)
+    }
+
+    @Test
+    func independentJitterAndPaintJitterRoundTrip() throws {
+        var brush = BrushSettings.stageOneDefault
+        brush.sizeJitterAmount = 0.31
+        brush.angleJitterAmount = 0.67
+        brush.paintJitterAmount = 0.48
+        brush.paintContrastAmount = 0.23
+
+        let decoded = try JSONDecoder().decode(
+            BrushSettings.self,
+            from: JSONEncoder().encode(brush)
+        )
+
+        #expect(decoded.sizeJitterAmount == 0.31)
+        #expect(decoded.angleJitterAmount == 0.67)
+        #expect(decoded.paintJitterAmount == 0.48)
+        #expect(decoded.paintContrastAmount == 0.23)
+    }
+
+    @Test
     func opacityCapCurveKeepsLightStartAndAllowsFastRamp() {
         let points: [(x: Float, y: Float)] = [
             (0.0, 0.0),

@@ -654,7 +654,7 @@ private func quickColorPickerPreviewBrushStrokeMetrics(
     let spacingPx = max(Float(Double(brush.size) * Double(brush.spacingPercent) / 100.0), 0.5)
     let stampDiameterPx = max(Float(brush.size) * Float(rawSizeFactor), 1)
     let compensationAmount = BrushSettings.resolvedBuildUpCompensationAmount(
-        automaticCompensationAmount: Float(opacityResponse),
+        automaticCompensationAmount: brush.buildMode == .buildUp ? 1 : 0,
         brushCompensationAmount: brush.buildUpOpacityCompensationAmount
     )
     let visibleOpacity = brush.buildMode == .buildUp

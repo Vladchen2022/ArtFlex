@@ -572,7 +572,7 @@ struct CompoundBrushBuilderSheet: View {
             ) { viewModel.setBrushOpacity(Float($0)) }
 
             editorSlider(
-                title: "散布",
+                title: "位置散布",
                 value: Double(brush.scatterAmount),
                 valueText: String(format: "%.1fx", brush.scatterAmount),
                 range: 0...5,
@@ -580,12 +580,20 @@ struct CompoundBrushBuilderSheet: View {
             ) { viewModel.setBrushScatterAmount(Float($0)) }
 
             editorSlider(
-                title: "位置抖动",
-                value: Double(brush.jitterAmount),
-                valueText: "\(Int((brush.jitterAmount * 100).rounded()))%",
+                title: "尺寸随机",
+                value: Double(brush.sizeJitterAmount),
+                valueText: "\(Int((brush.sizeJitterAmount * 100).rounded()))%",
                 range: 0...1,
                 liveValueText: { "\(Int(($0 * 100).rounded()))%" }
-            ) { viewModel.setBrushJitterAmount(Float($0)) }
+            ) { viewModel.setBrushSizeJitterAmount(Float($0)) }
+
+            editorSlider(
+                title: "角度随机",
+                value: Double(brush.angleJitterAmount),
+                valueText: "\(Int((brush.angleJitterAmount * 180).rounded()))°",
+                range: 0...1,
+                liveValueText: { "\(Int(($0 * 180).rounded()))°" }
+            ) { viewModel.setBrushAngleJitterAmount(Float($0)) }
 
             editorDivider
             editorSectionHeader("整体压感", detail: "区别于 A、B 各自的压感响应")
@@ -686,7 +694,7 @@ struct CompoundBrushBuilderSheet: View {
                 title: "A 间距",
                 value: Double(brush.spacingPercent),
                 valueText: "\(Int(brush.spacingPercent))%",
-                range: 5...150,
+                range: 1...1_000,
                 liveValueText: { "\(Int($0))%" }
             ) { viewModel.setBrushSpacingPercent(Float($0)) }
 
