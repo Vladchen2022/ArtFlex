@@ -59,7 +59,7 @@ struct ArtFlexApp: App {
                 .keyboardShortcut("d")
                 .disabled(commandTargetViewModel.isTransformingSelection)
 
-                Button("删除选区内容或图层") {
+                Button("删除选区内容") {
                     commandTargetViewModel.deleteSelectionOrActiveLayer()
                 }
                 .keyboardShortcut(.delete, modifiers: [])

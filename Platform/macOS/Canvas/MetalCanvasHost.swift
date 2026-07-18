@@ -2698,7 +2698,24 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
             let currentTransformPlan = currentTransformPreviewPlan()
             let previewEncodeStart = DispatchTime.now().uptimeNanoseconds
 
-            let orderedVisibleLayers = snapshot.layerSurfaces.compactMap { surface -> (LayerSurfaceID, MTLTexture, Float)? in
+            typealias VisibleLayerEntry = (
+                surfaceID: LayerSurfaceID,
+                layerID: LayerID,
+                texture: MTLTexture,
+                opacity: Float,
+                blendMode: LayerBlendMode,
+                clipTargetLayerID: LayerID?
+            )
+            var visibleTextureByLayerID: [LayerID: MTLTexture] = [:]
+            for surface in snapshot.layerSurfaces where surface.isVisible {
+                let texture = surface.surfaceID == activeLayerSurfaceID
+                    ? (activeBrushDisplayTexture ?? layerSurfaceStore.texture(for: surface.surfaceID))
+                    : layerSurfaceStore.texture(for: surface.surfaceID)
+                if let texture {
+                    visibleTextureByLayerID[surface.layerID] = texture
+                }
+            }
+            let orderedVisibleLayers = snapshot.layerSurfaces.compactMap { surface -> VisibleLayerEntry? in
                 let resolvedTexture: MTLTexture?
                 if surface.surfaceID == activeLayerSurfaceID, let activeBrushDisplayTexture {
                     resolvedTexture = activeBrushDisplayTexture
@@ -2710,6 +2727,11 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
                     return nil
                 }
 
+                if let clipTargetLayerID = surface.clipTargetLayerID,
+                   visibleTextureByLayerID[clipTargetLayerID] == nil {
+                    return nil
+                }
+
                 if hasActivePreview, surface.surfaceID == activeLayerSurfaceID {
                     switch freeTransformActiveLayerPreviewStrategy(
                         hasActivePreview: hasActivePreview,
@@ -2718,28 +2740,48 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
                         plannedMode: currentTransformPlan?.mode
                     ) {
                     case .showOriginalLayer:
-                        return (surface.surfaceID, texture, surface.opacity)
+                        return (surface.surfaceID, surface.layerID, texture, surface.opacity, surface.blendMode, surface.clipTargetLayerID)
                     case .showBaseTexture:
                         guard let baseTexture = transformPreviewSession?.baseTexture else {
-                            return (surface.surfaceID, texture, surface.opacity)
+                            return (surface.surfaceID, surface.layerID, texture, surface.opacity, surface.blendMode, surface.clipTargetLayerID)
                         }
-                        return (surface.surfaceID, baseTexture, surface.opacity)
+                        return (surface.surfaceID, surface.layerID, baseTexture, surface.opacity, surface.blendMode, surface.clipTargetLayerID)
                     case .hideOriginalLayer:
                         return nil
                     }
                 }
-                return (surface.surfaceID, texture, surface.opacity)
+                return (surface.surfaceID, surface.layerID, texture, surface.opacity, surface.blendMode, surface.clipTargetLayerID)
+            }
+
+            func compositeInputs(_ entries: [VisibleLayerEntry]) -> [CanvasLayerCompositeInput] {
+                var inputs: [CanvasLayerCompositeInput] = []
+                inputs.reserveCapacity(entries.count)
+                for entry in entries {
+                    let clipMaskTexture: MTLTexture?
+                    if let clipTargetLayerID = entry.clipTargetLayerID {
+                        clipMaskTexture = visibleTextureByLayerID[clipTargetLayerID]
+                    } else {
+                        clipMaskTexture = nil
+                    }
+                    inputs.append(CanvasLayerCompositeInput(
+                        texture: entry.texture,
+                        opacity: entry.opacity,
+                        blendMode: entry.blendMode,
+                        clipMaskTexture: clipMaskTexture
+                    ))
+                }
+                return inputs
             }
 
             if hasPatternPlacementPreview,
                let activeLayerSurfaceID,
                let patternDraft = activePatternPlacementDraft,
                let patternTexture = activePatternPlacementTexture {
-                let lowerPrefix = Array(orderedVisibleLayers.prefix { $0.0 != activeLayerSurfaceID })
-                let activeLayerEntries = orderedVisibleLayers.filter { $0.0 == activeLayerSurfaceID }
+                let lowerPrefix = Array(orderedVisibleLayers.prefix { $0.surfaceID != activeLayerSurfaceID })
+                let activeLayerEntries = orderedVisibleLayers.filter { $0.surfaceID == activeLayerSurfaceID }
                 let lowerLayers = lowerPrefix + activeLayerEntries
                 canvasPresenter.encode(
-                    layerTextures: lowerLayers.map { ($0.1, $0.2) },
+                    layerInputs: compositeInputs(lowerLayers),
                     samplingMode: displaySamplingMode,
                     into: descriptor,
                     commandBuffer: commandBuffer
@@ -2757,23 +2799,23 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
                     opacity: activeLayerOpacity
                 )
 
-                let upperLayers = Array(orderedVisibleLayers.drop { $0.0 != activeLayerSurfaceID }.dropFirst())
+                let upperLayers = Array(orderedVisibleLayers.drop { $0.surfaceID != activeLayerSurfaceID }.dropFirst())
                 if !upperLayers.isEmpty {
                     descriptor.colorAttachments[0].loadAction = .load
                     descriptor.colorAttachments[0].storeAction = .store
                     canvasPresenter.encode(
-                        layerTextures: upperLayers.map { ($0.1, $0.2) },
+                        layerInputs: compositeInputs(upperLayers),
                         samplingMode: displaySamplingMode,
                         into: descriptor,
                         commandBuffer: commandBuffer
                     )
                 }
             } else if hasGradientPreview, let activeLayerSurfaceID {
-                let lowerPrefix = Array(orderedVisibleLayers.prefix { $0.0 != activeLayerSurfaceID })
-                let activeLayerEntries = orderedVisibleLayers.filter { $0.0 == activeLayerSurfaceID }
+                let lowerPrefix = Array(orderedVisibleLayers.prefix { $0.surfaceID != activeLayerSurfaceID })
+                let activeLayerEntries = orderedVisibleLayers.filter { $0.surfaceID == activeLayerSurfaceID }
                 let lowerLayers = lowerPrefix + activeLayerEntries
                 canvasPresenter.encode(
-                    layerTextures: lowerLayers.map { ($0.1, $0.2) },
+                    layerInputs: compositeInputs(lowerLayers),
                     samplingMode: displaySamplingMode,
                     into: descriptor,
                     commandBuffer: commandBuffer
@@ -2815,12 +2857,12 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
                     )
                 }
 
-                let upperLayers = Array(orderedVisibleLayers.drop { $0.0 != activeLayerSurfaceID }.dropFirst())
+                let upperLayers = Array(orderedVisibleLayers.drop { $0.surfaceID != activeLayerSurfaceID }.dropFirst())
                 if !upperLayers.isEmpty {
                     descriptor.colorAttachments[0].loadAction = .load
                     descriptor.colorAttachments[0].storeAction = .store
                     canvasPresenter.encode(
-                        layerTextures: upperLayers.map { ($0.1, $0.2) },
+                        layerInputs: compositeInputs(upperLayers),
                         samplingMode: displaySamplingMode,
                         into: descriptor,
                         commandBuffer: commandBuffer
@@ -2828,7 +2870,7 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
                 }
             } else {
                 canvasPresenter.encode(
-                    layerTextures: orderedVisibleLayers.map { ($0.1, $0.2) },
+                    layerInputs: compositeInputs(orderedVisibleLayers),
                     samplingMode: displaySamplingMode,
                     into: descriptor,
                     commandBuffer: commandBuffer

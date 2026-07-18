@@ -1,10 +1,13 @@
 import Foundation
 import Metal
+import simd
 
 final class EyedropperSampler {
     private struct SamplingLayer {
         var layer: LayerRecord
         var texture: MTLTexture
+        var clipMaskTexture: MTLTexture?
+        var effectiveOpacity: Float
     }
 
     private let serializer: LayerTextureSerializer
@@ -53,15 +56,28 @@ final class EyedropperSampler {
                 )
             }
         )
+        let clipSnapshots = try samplingLayers.map { samplingLayer -> LayerTextureSnapshot? in
+            guard let clipMaskTexture = samplingLayer.clipMaskTexture else { return nil }
+            return try serializer.snapshot(
+                texture: clipMaskTexture,
+                originX: originX,
+                originY: originY,
+                width: width,
+                height: height
+            )
+        }
 
         var compositedPixels = [LinearPremultipliedColor](
             repeating: .clear,
             count: width * height
         )
-        for (samplingLayer, snapshot) in zip(samplingLayers, snapshots) {
+        for (index, pair) in zip(samplingLayers, snapshots).enumerated() {
+            let (samplingLayer, snapshot) = pair
             composite(
                 snapshot: snapshot,
-                layerOpacity: samplingLayer.layer.opacity,
+                layerOpacity: samplingLayer.effectiveOpacity,
+                blendMode: samplingLayer.layer.blendMode,
+                clipMaskSnapshot: clipSnapshots[index],
                 into: &compositedPixels
             )
         }
@@ -91,12 +107,14 @@ final class EyedropperSampler {
         let layers: [LayerRecord]
         switch source {
         case .currentLayer:
-            layers = document.layers.filter { $0.id == document.activeLayerID }
+            layers = document.layers.filter { $0.id == document.activeLayerID && $0.isPaintLayer }
         case .allVisibleLayers, .displayedColor:
-            layers = document.layers.filter(\.isVisible)
+            layers = document.layers.filter {
+                $0.isPaintLayer && document.isLayerEffectivelyVisible($0.id)
+            }
         }
 
-        return layers.compactMap { layer in
+        return layers.compactMap { layer -> SamplingLayer? in
             guard let texture = samplingTexture(
                 for: layer.id,
                 source: source,
@@ -110,7 +128,27 @@ final class EyedropperSampler {
             ) else {
                 return nil
             }
-            return SamplingLayer(layer: layer, texture: texture)
+            let clipMaskTexture: MTLTexture? = layer.clipTargetLayerID.flatMap { clipLayerID -> MTLTexture? in
+                guard document.isLayerEffectivelyVisible(clipLayerID) else { return nil }
+                return samplingTexture(
+                    for: clipLayerID,
+                    source: source,
+                    originX: originX,
+                    originY: originY,
+                    width: width,
+                    height: height,
+                    layerSurfaceStore: layerSurfaceStore,
+                    contentTextureForLayer: contentTextureForLayer,
+                    displayTextureForLayer: displayTextureForLayer
+                )
+            }
+            if layer.clipTargetLayerID != nil, clipMaskTexture == nil { return nil }
+            return SamplingLayer(
+                layer: layer,
+                texture: texture,
+                clipMaskTexture: clipMaskTexture,
+                effectiveOpacity: document.effectiveLayerOpacity(layer.id)
+            )
         }
     }
 
@@ -152,6 +190,8 @@ final class EyedropperSampler {
     private func composite(
         snapshot: LayerTextureSnapshot,
         layerOpacity: Float,
+        blendMode: LayerBlendMode,
+        clipMaskSnapshot: LayerTextureSnapshot?,
         into output: inout [LinearPremultipliedColor]
     ) {
         let bytes = [UInt8](snapshot.pixelData)
@@ -159,17 +199,91 @@ final class EyedropperSampler {
             for x in 0..<snapshot.width {
                 let byteOffset = (y * snapshot.bytesPerRow) + (x * 4)
                 guard byteOffset + 3 < bytes.count else { continue }
+                let clipAlpha: Float
+                if let clipMaskSnapshot {
+                    let clipOffset = (y * clipMaskSnapshot.bytesPerRow) + (x * 4)
+                    clipAlpha = clipOffset + 3 < clipMaskSnapshot.pixelData.count
+                        ? Float(clipMaskSnapshot.pixelData[clipOffset + 3]) / 255
+                        : 0
+                } else {
+                    clipAlpha = 1
+                }
                 let layerColor = LinearPremultipliedColor(
                     bgraBlue: bytes[byteOffset],
                     green: bytes[byteOffset + 1],
                     red: bytes[byteOffset + 2],
                     alpha: bytes[byteOffset + 3]
-                ).applyingOpacity(layerOpacity)
+                ).applyingOpacity(layerOpacity * clipAlpha)
                 let outputIndex = (y * snapshot.width) + x
                 guard output.indices.contains(outputIndex) else { continue }
-                output[outputIndex] = layerColor.composited(over: output[outputIndex])
+                output[outputIndex] = composite(
+                    source: layerColor,
+                    backdrop: output[outputIndex],
+                    blendMode: blendMode
+                )
             }
         }
+    }
+
+    private func composite(
+        source: LinearPremultipliedColor,
+        backdrop: LinearPremultipliedColor,
+        blendMode: LayerBlendMode
+    ) -> LinearPremultipliedColor {
+        guard blendMode != .normal, source.alpha > 0, backdrop.alpha > 0 else {
+            return source.composited(over: backdrop)
+        }
+        let sourceRGB = SIMD3(source.red, source.green, source.blue) / source.alpha
+        let backdropRGB = SIMD3(backdrop.red, backdrop.green, backdrop.blue) / backdrop.alpha
+        let blended: SIMD3<Float>
+        switch blendMode {
+        case .normal:
+            blended = sourceRGB
+        case .multiply:
+            blended = backdropRGB * sourceRGB
+        case .screen:
+            blended = backdropRGB + sourceRGB - backdropRGB * sourceRGB
+        case .add:
+            blended = simd_min(SIMD3(repeating: 1), backdropRGB + sourceRGB)
+        case .overlay:
+            blended = SIMD3(
+                overlay(backdropRGB.x, sourceRGB.x),
+                overlay(backdropRGB.y, sourceRGB.y),
+                overlay(backdropRGB.z, sourceRGB.z)
+            )
+        case .softLight:
+            blended = SIMD3(
+                softLight(backdropRGB.x, sourceRGB.x),
+                softLight(backdropRGB.y, sourceRGB.y),
+                softLight(backdropRGB.z, sourceRGB.z)
+            )
+        case .darken:
+            blended = simd_min(backdropRGB, sourceRGB)
+        case .lighten:
+            blended = simd_max(backdropRGB, sourceRGB)
+        }
+        let outAlpha = source.alpha + backdrop.alpha * (1 - source.alpha)
+        let outRGB =
+            (1 - source.alpha) * SIMD3(backdrop.red, backdrop.green, backdrop.blue) +
+            (1 - backdrop.alpha) * SIMD3(source.red, source.green, source.blue) +
+            source.alpha * backdrop.alpha * blended
+        return LinearPremultipliedColor(red: outRGB.x, green: outRGB.y, blue: outRGB.z, alpha: outAlpha)
+    }
+
+    private func overlay(_ backdrop: Float, _ source: Float) -> Float {
+        backdrop <= 0.5
+            ? 2 * backdrop * source
+            : 1 - 2 * (1 - backdrop) * (1 - source)
+    }
+
+    private func softLight(_ backdrop: Float, _ source: Float) -> Float {
+        if source <= 0.5 {
+            return backdrop - (1 - 2 * source) * backdrop * (1 - backdrop)
+        }
+        let d = backdrop <= 0.25
+            ? ((16 * backdrop - 12) * backdrop + 4) * backdrop
+            : sqrt(backdrop)
+        return backdrop + (2 * source - 1) * (d - backdrop)
     }
 
     private func aggregate(

@@ -550,6 +550,11 @@ private func squareFilledPatternThumbnailImage(
 }
 
 struct RightInspectorView: View {
+    private struct LayerPanelEntry {
+        var layer: LayerRecord
+        var depth: Int
+    }
+
     private enum LibraryInspectorTab: String {
         case brush = "画笔库"
         case pattern = "图案库"
@@ -583,6 +588,8 @@ struct RightInspectorView: View {
     @State private var editingLayerName = ""
     @State private var showsLayerOpacityPopover = false
     @State private var layerDropInsertionIndex: Int?
+    @State private var collapsedLayerGroupIDs: Set<LayerID> = []
+    @State private var selectedLayerGroupID: LayerID?
     @FocusState private var focusedLayerNameFieldID: LayerID?
     @State private var isTipImageDropTarget = false
     @State private var isReferenceImageDropTarget = false
@@ -3188,13 +3195,66 @@ struct RightInspectorView: View {
 
     private var layersSection: some View {
         VStack(alignment: .leading, spacing: 10) {
+            if let activeLayer {
+                HStack(spacing: 8) {
+                    Text("混合")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(Color.white.opacity(0.62))
+
+                    Picker(
+                        "",
+                        selection: Binding(
+                            get: { activeLayer.blendMode },
+                            set: { viewModel.setLayerBlendMode(activeLayer.id, blendMode: $0) }
+                        )
+                    ) {
+                        ForEach(LayerBlendMode.allCases, id: \.self) { mode in
+                            Text(mode.displayName).tag(mode)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+                    .controlSize(.small)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                    Button {
+                        viewModel.toggleLayerClipping(activeLayer.id)
+                    } label: {
+                        Image(systemName: activeLayer.clipTargetLayerID == nil ? "arrow.down.right.and.arrow.up.left" : "arrow.down.right.and.arrow.up.left.circle.fill")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(activeLayer.clipTargetLayerID == nil ? Color.white.opacity(0.66) : Color.accentColor)
+                    }
+                    .buttonStyle(.plain)
+                    .help(activeLayer.clipTargetLayerID == nil ? "创建剪贴图层" : "解除剪贴图层")
+                }
+
+                LayerOpacitySlider(
+                    layer: activeLayer,
+                    onPreview: { newOpacity in
+                        viewModel.beginActiveLayerOpacityChange()
+                        viewModel.setActiveLayerOpacity(newOpacity)
+                    },
+                    onCommit: { newOpacity in
+                        viewModel.beginActiveLayerOpacityChange()
+                        viewModel.setActiveLayerOpacity(newOpacity)
+                        viewModel.endActiveLayerOpacityChange()
+                    }
+                )
+            }
+
+            Divider()
+
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 6) {
-                    layerDropInsertionStrip(at: 0)
+                    if !viewModel.workspace.document.layers.contains(where: \.isGroup) {
+                        layerDropInsertionStrip(at: 0)
+                    }
 
-                    ForEach(Array(displayLayers.enumerated()), id: \.element.id) { index, layer in
-                        layerRow(layer)
-                        layerDropInsertionStrip(at: index + 1)
+                    ForEach(Array(displayLayerEntries.enumerated()), id: \.element.layer.id) { index, entry in
+                        layerRow(entry.layer, depth: entry.depth)
+                        if !viewModel.workspace.document.layers.contains(where: \.isGroup) {
+                            layerDropInsertionStrip(at: index + 1)
+                        }
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .topLeading)
@@ -3203,30 +3263,35 @@ struct RightInspectorView: View {
 
             HStack(spacing: 8) {
                 layerActionButton(systemImage: "plus.square", tooltip: "新建图层") {
-                    viewModel.addLayer()
+                    if let selectedLayerGroupID {
+                        viewModel.addLayer(toGroup: selectedLayerGroupID)
+                    } else {
+                        viewModel.addLayer()
+                    }
+                }
+
+                layerActionButton(systemImage: "folder.badge.plus", tooltip: "新建图层组") {
+                    viewModel.addLayerGroup()
                 }
 
                 layerActionButton(systemImage: "doc.on.doc", tooltip: "复制图层") {
-                    viewModel.duplicateActiveLayer()
+                    if selectedLayerGroupID == nil {
+                        viewModel.duplicateActiveLayer()
+                    }
                 }
-
-                layerActionButton(systemImage: "trash", tooltip: "删除图层", tint: Color.red.opacity(0.95)) {
-                    viewModel.removeActiveLayer()
-                }
-
-                Spacer(minLength: 0)
 
                 layerActionButton(
-                    systemImage: "circle.lefthalf.filled",
-                    tooltip: activeLayerOpacityButtonTooltip
+                    systemImage: selectedLayerGroupID == nil ? "trash" : "folder.badge.minus",
+                    tooltip: selectedLayerGroupID == nil ? "删除图层" : "解散图层组",
+                    tint: Color.red.opacity(0.95)
                 ) {
-                    showsLayerOpacityPopover.toggle()
-                }
-                .popover(isPresented: $showsLayerOpacityPopover, arrowEdge: .bottom) {
-                    layerOpacityPopover
-                        .padding(14)
-                        .frame(width: 250)
-                        .background(Color(nsColor: .windowBackgroundColor))
+                    if let selectedLayerGroupID {
+                        self.selectedLayerGroupID = nil
+                        collapsedLayerGroupIDs.remove(selectedLayerGroupID)
+                        viewModel.ungroupLayerGroup(selectedLayerGroupID)
+                    } else {
+                        viewModel.removeActiveLayer()
+                    }
                 }
 
                 Spacer(minLength: 0)
@@ -3499,15 +3564,36 @@ struct RightInspectorView: View {
         }
     }
 
-    private func layerRow(_ layer: LayerRecord) -> some View {
-        let isActive = layer.id == viewModel.workspace.document.activeLayerID
+    private func layerRow(_ layer: LayerRecord, depth: Int) -> some View {
+        let isActive = layer.isPaintLayer && layer.id == viewModel.workspace.document.activeLayerID
+        let isSelectedGroup = layer.isGroup && selectedLayerGroupID == layer.id
         let isEditing = editingLayerID == layer.id
 
         return HStack(spacing: 7) {
-            layerThumbnailView(for: layer)
+            if layer.isGroup {
+                Button {
+                    if collapsedLayerGroupIDs.contains(layer.id) {
+                        collapsedLayerGroupIDs.remove(layer.id)
+                    } else {
+                        collapsedLayerGroupIDs.insert(layer.id)
+                    }
+                } label: {
+                    Image(systemName: collapsedLayerGroupIDs.contains(layer.id) ? "chevron.right" : "chevron.down")
+                        .font(.system(size: 9, weight: .bold))
+                        .frame(width: 12, height: 20)
+                }
+                .buttonStyle(.plain)
+
+                Image(systemName: "folder.fill")
+                    .font(.system(size: 16, weight: .medium))
+                    .foregroundStyle(Color.yellow.opacity(0.82))
+                    .frame(width: 28, height: 28)
+            } else {
+                layerThumbnailView(for: layer)
+            }
 
             Circle()
-                .fill(isActive ? Color.accentColor : Color.white.opacity(0.25))
+                .fill((isActive || isSelectedGroup) ? Color.accentColor : Color.white.opacity(0.25))
                 .frame(width: 6, height: 6)
 
             if isEditing {
@@ -3528,16 +3614,37 @@ struct RightInspectorView: View {
                     }
                 }
             } else {
-                Text(layer.name)
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(Color.white.opacity(0.92))
-                    .lineLimit(1)
-                    .onTapGesture(count: 2) {
-                        beginLayerRename(layer)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(layer.name)
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(Color.white.opacity(0.92))
+                        .lineLimit(1)
+                    if layer.isGroup {
+                        Text("\(viewModel.workspace.document.childLayers(of: layer.id).count) 个项目")
+                            .font(.system(size: 9, weight: .medium))
+                            .foregroundStyle(Color.white.opacity(0.42))
                     }
+                }
+                .onTapGesture(count: 2) {
+                    beginLayerRename(layer)
+                }
             }
 
             Spacer()
+
+            if layer.isPaintLayer, layer.isReference {
+                Image(systemName: "scope")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(Color.green.opacity(0.9))
+                    .help("填充参考图层")
+            }
+
+            if layer.isPaintLayer, layer.clipTargetLayerID != nil {
+                Image(systemName: "arrow.down.right.and.arrow.up.left")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(Color.accentColor)
+                    .help("剪贴图层")
+            }
 
             Button {
                 viewModel.setLayerVisibility(layer.id, isVisible: !layer.isVisible)
@@ -3550,20 +3657,22 @@ struct RightInspectorView: View {
             .buttonStyle(.plain)
             .help(layer.isVisible ? "隐藏图层" : "显示图层")
 
-            Button {
-                viewModel.toggleLayerTransparentPixelLock(layer.id)
-            } label: {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 4)
-                        .fill(layer.locksTransparentPixels ? Color.cyan.opacity(0.95) : Color.white.opacity(0.08))
-                    Text("α")
-                        .font(.system(size: 10, weight: .bold))
-                        .foregroundStyle(layer.locksTransparentPixels ? Color.black.opacity(0.88) : Color.white.opacity(0.72))
+            if layer.isPaintLayer {
+                Button {
+                    viewModel.toggleLayerTransparentPixelLock(layer.id)
+                } label: {
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 4)
+                            .fill(layer.locksTransparentPixels ? Color.cyan.opacity(0.95) : Color.white.opacity(0.08))
+                        Text("α")
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundStyle(layer.locksTransparentPixels ? Color.black.opacity(0.88) : Color.white.opacity(0.72))
+                    }
+                    .frame(width: 16, height: 16)
                 }
-                .frame(width: 16, height: 16)
+                .buttonStyle(.plain)
+                .help(layer.locksTransparentPixels ? "解除锁定透明像素" : "锁定透明像素")
             }
-            .buttonStyle(.plain)
-            .help(layer.locksTransparentPixels ? "解除锁定透明像素" : "锁定透明像素")
 
             Button {
                 viewModel.toggleLayerLock(layer.id)
@@ -3578,18 +3687,83 @@ struct RightInspectorView: View {
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 6)
+        .padding(.leading, CGFloat(depth) * 12)
         .background(
-            (isActive ? Color.accentColor.opacity(0.18) : Color.clear),
+            ((isActive || isSelectedGroup) ? Color.accentColor.opacity(0.18) : Color.clear),
             in: RoundedRectangle(cornerRadius: 7)
         )
         .contentShape(RoundedRectangle(cornerRadius: 7))
         .onTapGesture {
-            viewModel.selectLayer(layer.id)
+            if layer.isGroup {
+                selectedLayerGroupID = layer.id
+            } else {
+                selectedLayerGroupID = nil
+                viewModel.selectLayer(layer.id)
+            }
         }
         .onDrag {
             cancelLayerRename()
             draggedLayerID = layer.id
             return NSItemProvider(object: layer.id.rawValue.uuidString as NSString)
+        }
+        .contextMenu {
+            layerContextMenu(for: layer)
+        }
+    }
+
+    @ViewBuilder
+    private func layerContextMenu(for layer: LayerRecord) -> some View {
+        if layer.isGroup {
+            Button("在组内新建图层") {
+                selectedLayerGroupID = layer.id
+                viewModel.addLayer(toGroup: layer.id)
+            }
+            Button("重命名") { beginLayerRename(layer) }
+            Divider()
+            Button("解散图层组") {
+                selectedLayerGroupID = nil
+                collapsedLayerGroupIDs.remove(layer.id)
+                viewModel.ungroupLayerGroup(layer.id)
+            }
+        } else {
+            Button("复制图层") {
+                viewModel.selectLayer(layer.id)
+                viewModel.duplicateActiveLayer()
+            }
+            Button("重命名") { beginLayerRename(layer) }
+            Divider()
+            Button(layer.clipTargetLayerID == nil ? "创建剪贴图层" : "解除剪贴图层") {
+                viewModel.toggleLayerClipping(layer.id)
+            }
+            Button(layer.isReference ? "取消填充参考" : "设为填充参考") {
+                viewModel.toggleLayerReference(layer.id)
+            }
+
+            let groups = viewModel.workspace.document.layers.filter(\.isGroup)
+            if !groups.isEmpty {
+                Menu("移入图层组") {
+                    ForEach(groups, id: \.id) { group in
+                        Button(group.name) {
+                            viewModel.moveLayers(Set([layer.id]), toGroup: group.id)
+                        }
+                    }
+                }
+            }
+            if layer.parentID != nil {
+                Button("移出图层组") {
+                    viewModel.moveLayers(Set([layer.id]), toGroup: nil)
+                }
+            }
+
+            Divider()
+            Button("向下合并") {
+                viewModel.selectLayer(layer.id)
+                viewModel.mergeActiveLayerDown()
+            }
+            Button("删除图层", role: .destructive) {
+                viewModel.selectLayer(layer.id)
+                viewModel.removeActiveLayer()
+            }
         }
     }
 
@@ -3723,7 +3897,12 @@ struct RightInspectorView: View {
     }
 
     private func beginLayerRename(_ layer: LayerRecord) {
-        viewModel.selectLayer(layer.id)
+        if layer.isGroup {
+            selectedLayerGroupID = layer.id
+        } else {
+            selectedLayerGroupID = nil
+            viewModel.selectLayer(layer.id)
+        }
         editingLayerID = layer.id
         editingLayerName = layer.name
         focusedLayerNameFieldID = layer.id
@@ -5151,8 +5330,27 @@ struct RightInspectorView: View {
         }
     }
 
-    private var displayLayers: [LayerRecord] {
-        viewModel.workspace.document.layers.reversed()
+    private var displayLayerEntries: [LayerPanelEntry] {
+        let layers = viewModel.workspace.document.layers
+        var entries: [LayerPanelEntry] = []
+        var visited: Set<LayerID> = []
+
+        func append(_ layer: LayerRecord, depth: Int) {
+            guard visited.insert(layer.id).inserted else { return }
+            entries.append(LayerPanelEntry(layer: layer, depth: depth))
+            guard layer.isGroup, !collapsedLayerGroupIDs.contains(layer.id) else { return }
+            for child in layers.filter({ $0.parentID == layer.id }).reversed() {
+                append(child, depth: depth + 1)
+            }
+        }
+
+        for layer in layers.filter({ $0.parentID == nil }).reversed() {
+            append(layer, depth: 0)
+        }
+        for orphan in layers.reversed() where !visited.contains(orphan.id) {
+            append(orphan, depth: 0)
+        }
+        return entries
     }
 }
 

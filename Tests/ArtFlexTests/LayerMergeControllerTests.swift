@@ -50,6 +50,54 @@ struct LayerMergeControllerTests {
         #expect(sampled.green < 0.05)
         #expect(sampled.alpha > 0.99)
     }
+
+    @Test
+    func enhancedCompositorAppliesMultiplyAndClipping() throws {
+        guard let metalContext = MetalDeviceContext() else {
+            Issue.record("Metal unavailable")
+            return
+        }
+        let serializer = LayerTextureSerializer(metalContext: metalContext)
+        let presenter = try StageOneCanvasPresenter(device: metalContext.device)
+        let controller = LayerMergeController(metalContext: metalContext, canvasPresenter: presenter)
+        let store = StageOneLayerSurfaceStore()
+        guard let base = store.makeTexture(width: 2, height: 1, metal: metalContext),
+              let source = store.makeTexture(width: 2, height: 1, metal: metalContext) else {
+            Issue.record("Texture allocation failed")
+            return
+        }
+
+        let baseSnapshot = LayerTextureSnapshot(
+            width: 2,
+            height: 1,
+            bytesPerRow: 8,
+            pixelData: Data([255, 0, 0, 255, 0, 0, 0, 0])
+        )
+        try serializer.restore(snapshot: baseSnapshot, into: base)
+        try serializer.restore(
+            snapshot: opaqueColorSnapshot(width: 2, height: 1, red: 255, green: 0, blue: 0),
+            into: source
+        )
+        try controller.mergeVisible(
+            layers: [
+                CanvasLayerCompositeInput(texture: base, opacity: 1),
+                CanvasLayerCompositeInput(
+                    texture: source,
+                    opacity: 1,
+                    blendMode: .multiply,
+                    clipMaskTexture: base
+                )
+            ],
+            into: base
+        )
+
+        let clippedOpaque = try serializer.samplePixel(texture: base, x: 0, y: 0)
+        let clippedTransparent = try serializer.samplePixel(texture: base, x: 1, y: 0)
+        #expect(clippedOpaque.red < 0.05)
+        #expect(clippedOpaque.blue < 0.05)
+        #expect(clippedOpaque.alpha > 0.99)
+        #expect(clippedTransparent.alpha < 0.01)
+    }
 }
 
 private func opaqueColorSnapshot(

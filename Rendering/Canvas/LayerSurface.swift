@@ -14,6 +14,8 @@ struct LayerSurfaceRecord: Sendable, Equatable {
     let layerName: String
     let isVisible: Bool
     let opacity: Float
+    let blendMode: LayerBlendMode
+    let clipTargetLayerID: LayerID?
     let descriptor: MetalSurfaceDescriptor
 }
 

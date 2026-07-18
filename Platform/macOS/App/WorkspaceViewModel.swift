@@ -4556,14 +4556,34 @@ final class WorkspaceViewModel: ObservableObject {
 
         do {
             _ = flushBrushEditingBoundary(reason: "fillAtPoint.makePlan")
-            guard let fillPlan = try bootstrap.bucketFillEngine.makeFillPlan(
-                layerID: layerID,
-                at: point,
-                color: workspace.toolSession.selectedColor,
-                alphaLockEnabled: layerTransparentPixelLockEnabled(layerID),
-                selectionShape: workspace.selection.committedShape,
-                layerSurfaceStore: bootstrap.layerSurfaceStore
-            ) else {
+            guard let surfaceID = bootstrap.layerSurfaceStore.surfaceID(for: layerID),
+                  let destinationTexture = bootstrap.layerSurfaceStore.texture(for: surfaceID) else {
+                showStatus(.init(kind: .error, message: "无法访问当前图层"))
+                return
+            }
+            let referenceTexture = try makeReferenceCompositeTextureIfNeeded()
+            let fillPlan: BucketFillPlan?
+            if let referenceTexture {
+                fillPlan = try bootstrap.bucketFillEngine.makeReferencedFillPlan(
+                    layerID: layerID,
+                    destinationTexture: destinationTexture,
+                    referenceTexture: referenceTexture,
+                    at: point,
+                    color: workspace.toolSession.selectedColor,
+                    alphaLockEnabled: layerTransparentPixelLockEnabled(layerID),
+                    selectionShape: workspace.selection.committedShape
+                )
+            } else {
+                fillPlan = try bootstrap.bucketFillEngine.makeFillPlan(
+                    layerID: layerID,
+                    at: point,
+                    color: workspace.toolSession.selectedColor,
+                    alphaLockEnabled: layerTransparentPixelLockEnabled(layerID),
+                    selectionShape: workspace.selection.committedShape,
+                    layerSurfaceStore: bootstrap.layerSurfaceStore
+                )
+            }
+            guard let fillPlan else {
                 showStatus(.init(kind: .info, message: "填充无变化"))
                 return
             }
@@ -4594,26 +4614,46 @@ final class WorkspaceViewModel: ObservableObject {
         let capturedAlphaLock = layerTransparentPixelLockEnabled(layerID)
         let capturedSelection = workspace.selection.committedShape
         let capturedKnownTransparent = bootstrap.layerSurfaceStore.isKnownTransparent(layerID: layerID)
+        let referenceTexture: MTLTexture?
+        do {
+            referenceTexture = try makeReferenceCompositeTextureIfNeeded()
+        } catch {
+            showStatus(.init(kind: .error, message: error.localizedDescription))
+            return
+        }
         let engineBox = WorkspaceUncheckedBox(bootstrap.bucketFillEngine)
         let textureBox = WorkspaceUncheckedBox(texture)
+        let referenceTextureBox = referenceTexture.map(WorkspaceUncheckedBox.init)
 
         bucketFillRequestID &+= 1
         let requestID = bucketFillRequestID
         isBucketFillInProgress = true
-        showStatus(.init(kind: .info, message: "正在填充区域…"))
+        showStatus(.init(kind: .info, message: referenceTexture == nil ? "正在填充区域…" : "正在按参考图层填充区域…"))
 
         bucketFillTask = Task { [weak self] in
             let result = await Task.detached(priority: .userInitiated) {
                 Result {
-                    try engineBox.value.makeFillPlan(
-                        layerID: layerID,
-                        texture: textureBox.value,
-                        at: point,
-                        color: capturedColor,
-                        alphaLockEnabled: capturedAlphaLock,
-                        selectionShape: capturedSelection,
-                        isKnownTransparent: capturedKnownTransparent
-                    )
+                    if let referenceTextureBox {
+                        try engineBox.value.makeReferencedFillPlan(
+                            layerID: layerID,
+                            destinationTexture: textureBox.value,
+                            referenceTexture: referenceTextureBox.value,
+                            at: point,
+                            color: capturedColor,
+                            alphaLockEnabled: capturedAlphaLock,
+                            selectionShape: capturedSelection
+                        )
+                    } else {
+                        try engineBox.value.makeFillPlan(
+                            layerID: layerID,
+                            texture: textureBox.value,
+                            at: point,
+                            color: capturedColor,
+                            alphaLockEnabled: capturedAlphaLock,
+                            selectionShape: capturedSelection,
+                            isKnownTransparent: capturedKnownTransparent
+                        )
+                    }
                 }
             }.value
 
@@ -5226,6 +5266,47 @@ final class WorkspaceViewModel: ObservableObject {
         showStatus(.init(kind: .success, message: "已新增图层"))
     }
 
+    func addLayer(toGroup groupID: LayerID) {
+        guard workspace.document.layer(groupID)?.isGroup == true else { return }
+        checkpointHistoryIfPossible(topologyOperation: true)
+        var addedLayerID: LayerID?
+        bootstrap.workspaceStore.updateDocument { document in
+            let layer = document.addLayer()
+            addedLayerID = layer.id
+            _ = document.setParent(Set([layer.id]), groupID: groupID)
+        }
+        refresh()
+        if let addedLayerID {
+            bootstrap.layerSurfaceStore.markKnownTransparent(for: addedLayerID)
+            noteCanvasContentChanged(changedLayerIDs: [addedLayerID])
+        }
+        showStatus(.init(kind: .success, message: "已在图层组中新建图层"))
+    }
+
+    func addLayerGroup(containing layerIDs: Set<LayerID> = []) {
+        checkpointHistoryIfPossible(topologyOperation: true)
+        bootstrap.workspaceStore.updateDocument { document in
+            _ = document.addGroup(named: "图层组", containing: layerIDs)
+        }
+        refresh()
+        noteCanvasContentChanged(changedLayerIDs: [])
+        showStatus(.init(kind: .success, message: "已新增图层组"))
+    }
+
+    func ungroupLayerGroup(_ groupID: LayerID) {
+        guard workspace.document.layer(groupID)?.isGroup == true else { return }
+        checkpointHistoryIfPossible(topologyOperation: true)
+        var changed = false
+        bootstrap.workspaceStore.updateDocument { document in
+            changed = document.removeGroupKeepingChildren(groupID)
+        }
+        refresh()
+        if changed {
+            noteCanvasContentChanged(changedLayerIDs: [])
+            showStatus(.init(kind: .success, message: "已解散图层组"))
+        }
+    }
+
     func removeActiveLayer() {
         guard !isApplyingTransformCommit else {
             showStatus(.init(kind: .info, message: "正在应用变形，请稍候再删除图层"))
@@ -5306,11 +5387,14 @@ final class WorkspaceViewModel: ObservableObject {
         do {
             try bootstrap.layerMergeController.merge(
                 sourceTexture: sourceTexture,
-                sourceOpacity: context.source.opacity,
+                sourceOpacity: workspace.document.effectiveLayerOpacity(context.source.id),
                 sourceVisible: context.source.isVisible,
+                sourceBlendMode: context.source.blendMode,
+                sourceClipsDestination: context.source.clipTargetLayerID == context.destination.id,
                 into: destinationTexture,
-                destinationOpacity: context.destination.opacity,
-                destinationVisible: context.destination.isVisible
+                destinationOpacity: workspace.document.effectiveLayerOpacity(context.destination.id),
+                destinationVisible: context.destination.isVisible,
+                destinationBlendMode: context.destination.blendMode
             )
 
             bootstrap.workspaceStore.updateDocument { document in
@@ -5345,7 +5429,13 @@ final class WorkspaceViewModel: ObservableObject {
             return
         }
 
-        let textureEntries: [(texture: MTLTexture, opacity: Float, isVisible: Bool)] = context.visibleLayers.compactMap { layer in
+        var textureByLayerID: [LayerID: MTLTexture] = [:]
+        for layer in context.visibleLayers {
+            guard let surfaceID = bootstrap.layerSurfaceStore.surfaceID(for: layer.id),
+                  let texture = bootstrap.layerSurfaceStore.texture(for: surfaceID) else { continue }
+            textureByLayerID[layer.id] = texture
+        }
+        let textureEntries: [CanvasLayerCompositeInput] = context.visibleLayers.compactMap { layer -> CanvasLayerCompositeInput? in
             guard
                 let surfaceID = bootstrap.layerSurfaceStore.surfaceID(for: layer.id),
                 let texture = bootstrap.layerSurfaceStore.texture(for: surfaceID)
@@ -5353,7 +5443,12 @@ final class WorkspaceViewModel: ObservableObject {
                 return nil
             }
 
-            return (texture: texture, opacity: layer.opacity, isVisible: layer.isVisible)
+            return CanvasLayerCompositeInput(
+                texture: texture,
+                opacity: workspace.document.effectiveLayerOpacity(layer.id),
+                blendMode: layer.blendMode,
+                clipMaskTexture: layer.clipTargetLayerID.flatMap { textureByLayerID[$0] }
+            )
         }
 
         guard
@@ -5456,8 +5551,57 @@ final class WorkspaceViewModel: ObservableObject {
         refreshLightweight()
     }
 
+    func setLayerBlendMode(_ layerID: LayerID, blendMode: LayerBlendMode) {
+        guard workspace.document.layer(layerID)?.blendMode != blendMode else { return }
+        checkpointHistoryIfPossible(captureMode: .metadataOnly)
+        bootstrap.workspaceStore.updateDocument { document in
+            document.setLayerBlendMode(layerID, blendMode: blendMode)
+        }
+        refreshLightweight()
+        noteCanvasContentChanged(changedLayerIDs: [])
+    }
+
+    func toggleLayerClipping(_ layerID: LayerID) {
+        checkpointHistoryIfPossible(captureMode: .metadataOnly)
+        var changed = false
+        bootstrap.workspaceStore.updateDocument { document in
+            changed = document.toggleLayerClipping(layerID)
+        }
+        refreshLightweight()
+        guard changed else {
+            showStatus(.init(kind: .info, message: "当前图层下方没有可用的剪贴目标"))
+            return
+        }
+        noteCanvasContentChanged(changedLayerIDs: [])
+        let enabled = workspace.document.layer(layerID)?.clipTargetLayerID != nil
+        showStatus(.init(kind: .info, message: enabled ? "已创建剪贴图层" : "已解除剪贴图层"))
+    }
+
+    func toggleLayerReference(_ layerID: LayerID) {
+        checkpointHistoryIfPossible(captureMode: .metadataOnly)
+        bootstrap.workspaceStore.updateDocument { document in
+            document.toggleLayerReference(layerID)
+        }
+        refreshLightweight()
+        let enabled = workspace.document.layer(layerID)?.isReference == true
+        showStatus(.init(kind: .info, message: enabled ? "已设为填充参考图层" : "已取消填充参考图层"))
+    }
+
+    func moveLayers(_ layerIDs: Set<LayerID>, toGroup groupID: LayerID?) {
+        checkpointHistoryIfPossible(captureMode: .metadataOnly)
+        var changed = false
+        bootstrap.workspaceStore.updateDocument { document in
+            changed = document.setParent(layerIDs, groupID: groupID)
+        }
+        refreshLightweight()
+        if changed {
+            noteCanvasContentChanged(changedLayerIDs: [])
+            showStatus(.init(kind: .success, message: groupID == nil ? "已移出图层组" : "已移入图层组"))
+        }
+    }
+
     func setLayerVisibility(_ layerID: LayerID, isVisible: Bool) {
-        checkpointHistoryIfPossible()
+        checkpointHistoryIfPossible(captureMode: .metadataOnly)
         bootstrap.workspaceStore.updateDocument { document in
             document.setLayerVisibility(layerID, isVisible: isVisible)
         }
@@ -5466,7 +5610,7 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func toggleLayerLock(_ layerID: LayerID) {
-        checkpointHistoryIfPossible()
+        checkpointHistoryIfPossible(captureMode: .metadataOnly)
         bootstrap.workspaceStore.updateDocument { document in
             document.toggleLayerLock(layerID)
         }
@@ -5480,7 +5624,7 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func toggleLayerTransparentPixelLock(_ layerID: LayerID) {
-        checkpointHistoryIfPossible()
+        checkpointHistoryIfPossible(captureMode: .metadataOnly)
         bootstrap.workspaceStore.updateDocument { document in
             document.toggleLayerTransparentPixelLock(layerID)
         }
@@ -5532,7 +5676,9 @@ final class WorkspaceViewModel: ObservableObject {
             return
         }
         if isAdjustingLayerOpacity, !activeLayerOpacityChangeDidMutate {
-            checkpointHistoryIfPossible()
+            checkpointHistoryIfPossible(captureMode: .metadataOnly)
+        } else if !isAdjustingLayerOpacity {
+            checkpointHistoryIfPossible(captureMode: .metadataOnly)
         }
         bootstrap.workspaceStore.updateDocument { document in
             document.setLayerOpacity(activeLayerID, opacity: opacity)
@@ -5562,7 +5708,7 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func moveActiveLayerUp() {
-        checkpointHistoryIfPossible()
+        checkpointHistoryIfPossible(captureMode: .metadataOnly)
         var moved = false
         bootstrap.workspaceStore.updateDocument { document in
             moved = document.moveActiveLayerUp()
@@ -5580,7 +5726,7 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func moveActiveLayerDown() {
-        checkpointHistoryIfPossible()
+        checkpointHistoryIfPossible(captureMode: .metadataOnly)
         var moved = false
         bootstrap.workspaceStore.updateDocument { document in
             moved = document.moveActiveLayerDown()
@@ -5598,7 +5744,7 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func moveLayer(_ layerID: LayerID, toDisplayIndex displayIndex: Int) {
-        checkpointHistoryIfPossible()
+        checkpointHistoryIfPossible(captureMode: .metadataOnly)
         var moved = false
         bootstrap.workspaceStore.updateDocument { document in
             let targetDocumentIndex = max(0, min(document.layers.count - 1, (document.layers.count - 1) - displayIndex))
@@ -5612,7 +5758,7 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func moveLayer(_ layerID: LayerID, toDisplayInsertionIndex insertionIndex: Int) {
-        checkpointHistoryIfPossible()
+        checkpointHistoryIfPossible(captureMode: .metadataOnly)
         var moved = false
         bootstrap.workspaceStore.updateDocument { document in
             moved = document.moveLayer(layerID, toDisplayInsertionIndex: insertionIndex)
@@ -5630,7 +5776,7 @@ final class WorkspaceViewModel: ObservableObject {
             return
         }
 
-        checkpointHistoryIfPossible()
+        checkpointHistoryIfPossible(captureMode: .metadataOnly)
         var renamed = false
         bootstrap.workspaceStore.updateDocument { document in
             renamed = document.renameLayer(layerID, to: trimmedName)
@@ -9310,7 +9456,7 @@ final class WorkspaceViewModel: ObservableObject {
         if workspace.selection.committedShape != nil {
             deleteSelectionContents()
         } else {
-            removeActiveLayer()
+            showStatus(.init(kind: .info, message: "没有选区；请在图层面板中明确删除图层"))
         }
     }
 
@@ -10533,7 +10679,9 @@ final class WorkspaceViewModel: ObservableObject {
 
     func exportPNG(to fileURL: URL) throws {
         _ = flushBrushEditingBoundary(reason: "exportPNG")
+        let compositeTexture = try makeVisibleCompositeTexture()
         try bootstrap.exportController.exportPNG(
+            texture: compositeTexture,
             request: ExportRequest(fileURL: fileURL)
         )
     }
@@ -12467,15 +12615,56 @@ final class WorkspaceViewModel: ObservableObject {
             metal: bootstrap.metalContext
         )
 
-        let visibleLayers = state.document.layers.filter(\.isVisible)
-        guard let firstLayer = visibleLayers.first,
+        let visibleLayers = state.document.layers.filter {
+            $0.isPaintLayer && state.document.isLayerEffectivelyVisible($0.id)
+        }
+        return try makeCompositeTexture(
+            layers: visibleLayers,
+            document: state.document,
+            waitUntilCompleted: waitUntilCompleted
+        )
+    }
+
+    private func makeReferenceCompositeTextureIfNeeded() throws -> MTLTexture? {
+        let state = bootstrap.workspaceStore.state
+        let referenceLayers = state.document.layers.filter {
+            $0.isPaintLayer && $0.isReference && state.document.isLayerEffectivelyVisible($0.id)
+        }
+        guard !referenceLayers.isEmpty else { return nil }
+        bootstrap.layerSurfaceStore.prepareTextures(for: state.document, metal: bootstrap.metalContext)
+        return try makeCompositeTexture(
+            layers: referenceLayers,
+            document: state.document,
+            waitUntilCompleted: true
+        )
+    }
+
+    private func makeCompositeTexture(
+        layers: [LayerRecord],
+        document: ArtDocument,
+        waitUntilCompleted: Bool
+    ) throws -> MTLTexture {
+        guard let firstLayer = layers.first,
               let firstSurfaceID = bootstrap.layerSurfaceStore.surfaceID(for: firstLayer.id),
               let firstTexture = bootstrap.layerSurfaceStore.texture(for: firstSurfaceID)
         else {
             throw CocoaError(.fileReadCorruptFile)
         }
 
-        let textureEntries: [(texture: MTLTexture, opacity: Float)] = visibleLayers.compactMap { layer in
+        var visibleTextureByLayerID: [LayerID: MTLTexture] = [:]
+        let allVisiblePaintLayers = document.layers.filter {
+            $0.isPaintLayer && document.isLayerEffectivelyVisible($0.id)
+        }
+        for layer in allVisiblePaintLayers {
+            guard let surfaceID = bootstrap.layerSurfaceStore.surfaceID(for: layer.id),
+                  let texture = bootstrap.layerSurfaceStore.texture(for: surfaceID) else { continue }
+            visibleTextureByLayerID[layer.id] = texture
+        }
+
+        let renderableLayers = layers.filter { layer in
+            layer.clipTargetLayerID.map { visibleTextureByLayerID[$0] != nil } ?? true
+        }
+        let textureEntries: [CanvasLayerCompositeInput] = renderableLayers.compactMap { layer -> CanvasLayerCompositeInput? in
             guard
                 let surfaceID = bootstrap.layerSurfaceStore.surfaceID(for: layer.id),
                 let texture = bootstrap.layerSurfaceStore.texture(for: surfaceID)
@@ -12483,10 +12672,15 @@ final class WorkspaceViewModel: ObservableObject {
                 return nil
             }
 
-            return (texture: texture, opacity: layer.opacity)
+            return CanvasLayerCompositeInput(
+                texture: texture,
+                opacity: document.effectiveLayerOpacity(layer.id),
+                blendMode: layer.blendMode,
+                clipMaskTexture: layer.clipTargetLayerID.flatMap { visibleTextureByLayerID[$0] }
+            )
         }
 
-        guard textureEntries.count == visibleLayers.count else {
+        guard textureEntries.count == renderableLayers.count else {
             throw CocoaError(.fileReadCorruptFile)
         }
 
@@ -12517,7 +12711,7 @@ final class WorkspaceViewModel: ObservableObject {
             throw CocoaError(.fileWriteUnknown)
         }
         bootstrap.canvasPresenter.encode(
-            layerTextures: textureEntries,
+            layerInputs: textureEntries,
             into: renderPassDescriptor,
             commandBuffer: commandBuffer
         )

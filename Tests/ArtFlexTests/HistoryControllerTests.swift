@@ -509,7 +509,7 @@ struct HistoryControllerTests {
             break
         case .inPlaceChangedLayers:
             Issue.record("Single-layer document should not produce dirty history entries")
-        case .workspaceOnly:
+        case .workspaceOnly, .metadataOnly:
             Issue.record("Brush stroke should not produce workspace-only history entries")
         }
     }
@@ -576,7 +576,7 @@ struct HistoryControllerTests {
             Issue.record("Expected symmetric dirty current-entry capture in redo stack")
         case .inPlaceChangedLayers(_, let changedLayerIDs):
             #expect(Set(changedLayerIDs) == [secondLayerID])
-        case .workspaceOnly:
+        case .workspaceOnly, .metadataOnly:
             Issue.record("Brush stroke should not produce workspace-only history entries")
         }
     }
@@ -884,7 +884,7 @@ struct HistoryControllerTests {
             Issue.record("Expected symmetric dirty current-entry capture for eraser in redo stack")
         case .inPlaceChangedLayers(_, let changedLayerIDs):
             #expect(Set(changedLayerIDs) == [layerID])
-        case .workspaceOnly:
+        case .workspaceOnly, .metadataOnly:
             Issue.record("Eraser stroke should not produce workspace-only history entries")
         }
     }

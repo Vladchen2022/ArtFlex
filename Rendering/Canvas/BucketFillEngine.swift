@@ -321,6 +321,99 @@ final class BucketFillEngine: @unchecked Sendable {
         )
     }
 
+    func makeReferencedFillPlan(
+        layerID: LayerID,
+        destinationTexture: MTLTexture,
+        referenceTexture: MTLTexture,
+        at point: CanvasPoint,
+        color: RGBAColor,
+        alphaLockEnabled: Bool,
+        selectionShape: SelectionShape?
+    ) throws -> BucketFillPlan? {
+        guard destinationTexture.width == referenceTexture.width,
+              destinationTexture.height == referenceTexture.height else { return nil }
+
+        let markerColors = [
+            RGBAColor(red: 1, green: 0, blue: 1, alpha: 1),
+            RGBAColor(red: 0, green: 1, blue: 1, alpha: 1)
+        ]
+        var referencePlan: BucketFillPlan?
+        for markerColor in markerColors where referencePlan == nil {
+            referencePlan = try makeFillPlan(
+                layerID: layerID,
+                texture: referenceTexture,
+                at: point,
+                color: markerColor,
+                alphaLockEnabled: false,
+                selectionShape: selectionShape,
+                isKnownTransparent: false
+            )
+        }
+        guard let referencePlan, let referenceBefore = referencePlan.historySnapshot else { return nil }
+
+        let destinationBefore = try serializer.snapshot(
+            texture: destinationTexture,
+            originX: referencePlan.destinationX,
+            originY: referencePlan.destinationY,
+            width: referencePlan.restoreSnapshot.width,
+            height: referencePlan.restoreSnapshot.height
+        )
+        var destinationBytes = [UInt8](destinationBefore.pixelData)
+        let referenceBeforeBytes = [UInt8](referenceBefore.texture.pixelData)
+        let referenceAfterBytes = [UInt8](referencePlan.restoreSnapshot.pixelData)
+        let replacement = makePremultipliedBGRA(color: color)
+        var changedPixelCount = 0
+
+        for y in 0..<destinationBefore.height {
+            for x in 0..<destinationBefore.width {
+                let destinationOffset = y * destinationBefore.bytesPerRow + x * 4
+                let referenceBeforeOffset = y * referenceBefore.texture.bytesPerRow + x * 4
+                let referenceAfterOffset = y * referencePlan.restoreSnapshot.bytesPerRow + x * 4
+                let referenceChanged = (0..<4).contains { channel in
+                    referenceBeforeBytes[referenceBeforeOffset + channel] != referenceAfterBytes[referenceAfterOffset + channel]
+                }
+                guard referenceChanged else { continue }
+
+                let destinationAlpha = destinationBytes[destinationOffset + 3]
+                if alphaLockEnabled, destinationAlpha == 0 { continue }
+                let resolvedReplacement = alphaLockEnabled
+                    ? makePremultipliedBGRA(color: color, preservingAlpha: destinationAlpha)
+                    : replacement
+                let previous = PixelBGRA(
+                    blue: destinationBytes[destinationOffset],
+                    green: destinationBytes[destinationOffset + 1],
+                    red: destinationBytes[destinationOffset + 2],
+                    alpha: destinationAlpha
+                )
+                guard previous != resolvedReplacement else { continue }
+                destinationBytes[destinationOffset] = resolvedReplacement.blue
+                destinationBytes[destinationOffset + 1] = resolvedReplacement.green
+                destinationBytes[destinationOffset + 2] = resolvedReplacement.red
+                destinationBytes[destinationOffset + 3] = resolvedReplacement.alpha
+                changedPixelCount += 1
+            }
+        }
+        guard changedPixelCount > 0 else { return nil }
+
+        return BucketFillPlan(
+            layerID: layerID,
+            historySnapshot: LayerHistorySnapshot(
+                layerID: layerID,
+                texture: destinationBefore,
+                originX: referencePlan.destinationX,
+                originY: referencePlan.destinationY
+            ),
+            restoreSnapshot: LayerTextureSnapshot(
+                width: destinationBefore.width,
+                height: destinationBefore.height,
+                bytesPerRow: destinationBefore.bytesPerRow,
+                pixelData: Data(destinationBytes)
+            ),
+            destinationX: referencePlan.destinationX,
+            destinationY: referencePlan.destinationY
+        )
+    }
+
     func apply(
         _ plan: BucketFillPlan,
         layerSurfaceStore: StageOneLayerSurfaceStore

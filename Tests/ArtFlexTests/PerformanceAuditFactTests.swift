@@ -1362,6 +1362,8 @@ private func resolvedBrushCaptureMode(
         return .inPlaceChangedLayers([layerID])
     case .workspaceOnly:
         return .workspaceOnly
+    case .metadataOnly:
+        return .metadataOnly
     }
 }
 

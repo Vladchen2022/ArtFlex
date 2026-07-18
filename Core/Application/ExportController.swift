@@ -1,4 +1,5 @@
 import Foundation
+import Metal
 
 struct ExportRequest: Sendable, Equatable {
     var fileURL: URL
@@ -40,6 +41,10 @@ final class ExportController {
             throw ExportError.missingActiveLayer
         }
 
+        try pngExporter.export(texture: texture, to: request.fileURL)
+    }
+
+    func exportPNG(texture: MTLTexture, request: ExportRequest) throws {
         try pngExporter.export(texture: texture, to: request.fileURL)
     }
 }

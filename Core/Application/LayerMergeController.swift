@@ -17,28 +17,55 @@ final class LayerMergeController {
         sourceTexture: MTLTexture,
         sourceOpacity: Float,
         sourceVisible: Bool,
+        sourceBlendMode: LayerBlendMode = .normal,
+        sourceClipsDestination: Bool = false,
         into destinationTexture: MTLTexture,
         destinationOpacity: Float,
-        destinationVisible: Bool
+        destinationVisible: Bool,
+        destinationBlendMode: LayerBlendMode = .normal
     ) throws {
         try composite(
             layers: [
-                (texture: destinationTexture, opacity: destinationOpacity, isVisible: destinationVisible),
-                (texture: sourceTexture, opacity: sourceOpacity, isVisible: sourceVisible)
+                CanvasLayerCompositeInput(
+                    texture: destinationTexture,
+                    opacity: destinationVisible ? destinationOpacity : 0,
+                    blendMode: destinationBlendMode
+                ),
+                CanvasLayerCompositeInput(
+                    texture: sourceTexture,
+                    opacity: sourceVisible ? sourceOpacity : 0,
+                    blendMode: sourceBlendMode,
+                    clipMaskTexture: sourceClipsDestination ? destinationTexture : nil
+                )
             ],
             into: destinationTexture
         )
     }
 
     func mergeVisible(
-        layers: [(texture: MTLTexture, opacity: Float, isVisible: Bool)],
+        layers: [CanvasLayerCompositeInput],
         into targetTexture: MTLTexture
     ) throws {
         try composite(layers: layers, into: targetTexture)
     }
 
-    private func composite(
+    func mergeVisible(
         layers: [(texture: MTLTexture, opacity: Float, isVisible: Bool)],
+        into targetTexture: MTLTexture
+    ) throws {
+        try composite(
+            layers: layers.map {
+                CanvasLayerCompositeInput(
+                    texture: $0.texture,
+                    opacity: $0.isVisible ? $0.opacity : 0
+                )
+            },
+            into: targetTexture
+        )
+    }
+
+    private func composite(
+        layers: [CanvasLayerCompositeInput],
         into targetTexture: MTLTexture
     ) throws {
         guard let first = layers.first else {
@@ -53,11 +80,7 @@ final class LayerMergeController {
             throw CocoaError(.fileReadCorruptFile)
         }
 
-        let compositeInputs = layers.compactMap { layer -> (texture: MTLTexture, opacity: Float)? in
-            let effectiveOpacity = layer.isVisible ? layer.opacity : 0
-            guard effectiveOpacity > 0 else { return nil }
-            return (texture: layer.texture, opacity: effectiveOpacity)
-        }
+        let compositeInputs = layers.filter { $0.opacity > 0 }
 
         guard !compositeInputs.isEmpty else {
             try clear(texture: targetTexture)
@@ -95,7 +118,7 @@ final class LayerMergeController {
         }
 
         canvasPresenter.encode(
-            layerTextures: compositeInputs,
+            layerInputs: compositeInputs,
             into: renderPassDescriptor,
             commandBuffer: commandBuffer
         )

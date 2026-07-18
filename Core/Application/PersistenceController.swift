@@ -35,9 +35,9 @@ final class PersistenceController {
     func saveProject(to fileURL: URL) throws {
         let state = workspaceStore.state
         var snapshotLayers: [(layer: LayerRecord, texture: MTLTexture)] = []
-        snapshotLayers.reserveCapacity(state.document.layers.count)
+        snapshotLayers.reserveCapacity(state.document.paintLayers.count)
 
-        for layer in state.document.layers {
+        for layer in state.document.paintLayers {
             guard
                 let surfaceID = layerSurfaceStore.surfaceID(for: layer.id),
                 let texture = layerSurfaceStore.texture(for: surfaceID)
@@ -77,7 +77,8 @@ final class PersistenceController {
         decoder.dateDecodingStrategy = .iso8601
 
         let package = try decoder.decode(ProjectPackage.self, from: data)
-        let workspace = package.workspaceState
+        var workspace = package.workspaceState
+        workspace.document.normalizeLayerHierarchy()
 
         return OpenProjectResult(
             workspace: workspace,

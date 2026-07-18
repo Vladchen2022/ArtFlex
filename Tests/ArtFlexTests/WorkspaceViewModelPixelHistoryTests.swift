@@ -1080,6 +1080,35 @@ struct WorkspaceViewModelPixelHistoryTests {
 
     @Test
     @MainActor
+    func fillReferenceLayerDefinesConnectivityWithoutPaintingTheReference() throws {
+        let harness = try PixelHistoryHarness()
+        let targetLayerID = harness.viewModel.workspace.document.activeLayerID
+        let referenceLayerID = harness.addLayer()
+        try fillOpaqueRect(
+            in: harness,
+            layerID: referenceLayerID,
+            originX: 10,
+            originY: 10,
+            width: 12,
+            height: 12,
+            color: .init(red: 0.1, green: 0.3, blue: 0.9, alpha: 1)
+        )
+        harness.viewModel.toggleLayerReference(referenceLayerID)
+        harness.viewModel.selectLayer(targetLayerID)
+        harness.viewModel.setSelectedColor(.init(red: 0.9, green: 0.15, blue: 0.05, alpha: 1))
+
+        harness.viewModel.fillAtPoint(.init(x: 12, y: 12))
+
+        let filledPixel = try harness.color(atX: 12, y: 12, layerID: targetLayerID)
+        #expect(filledPixel.red > 0.8)
+        #expect(try harness.alpha(atX: 30, y: 30, layerID: targetLayerID) < 0.01)
+        let referencePixel = try harness.color(atX: 12, y: 12, layerID: referenceLayerID)
+        #expect(referencePixel.blue > 0.8)
+        #expect(referencePixel.red < 0.2)
+    }
+
+    @Test
+    @MainActor
     func fillAtPointOnLargeNonuniformLayerStoresOnlyDirtyRegion() throws {
         let harness = try PixelHistoryHarness(canvasSize: .init(width: 1024, height: 1024))
         let layerID = harness.viewModel.workspace.document.activeLayerID
@@ -1153,7 +1182,7 @@ struct WorkspaceViewModelPixelHistoryTests {
             Issue.record("Expected brush commit to use in-place dirty history")
         case .inPlaceChangedLayers(_, let changedLayerIDs):
             #expect(Set(changedLayerIDs) == [layerID])
-        case .workspaceOnly:
+        case .workspaceOnly, .metadataOnly:
             Issue.record("Expected brush commit to use pixel history")
         }
 #endif
@@ -1200,7 +1229,7 @@ struct WorkspaceViewModelPixelHistoryTests {
             Issue.record("Expected smudge commit to use in-place dirty history")
         case .inPlaceChangedLayers(_, let changedLayerIDs):
             #expect(Set(changedLayerIDs) == [layerID])
-        case .workspaceOnly:
+        case .workspaceOnly, .metadataOnly:
             Issue.record("Expected smudge commit to use pixel history")
         }
 #endif
@@ -1275,7 +1304,7 @@ struct WorkspaceViewModelPixelHistoryTests {
 
     @Test
     @MainActor
-    func deleteKeyWithoutSelectionDeletesActiveLayerAndSupportsUndo() throws {
+    func deleteKeyWithoutSelectionDoesNotDeleteActiveLayer() throws {
         let harness = try PixelHistoryHarness()
         let deletedLayerID = harness.viewModel.workspace.document.activeLayerID
         let initialLayerIDs = harness.viewModel.workspace.document.layers.map(\.id)
@@ -1291,11 +1320,9 @@ struct WorkspaceViewModelPixelHistoryTests {
         )
 
         #expect(handled)
-        #expect(harness.viewModel.workspace.document.layers.count == initialLayerIDs.count - 1)
-        #expect(harness.viewModel.workspace.document.layers.contains(where: { $0.id == deletedLayerID }) == false)
-        #expect(harness.viewModel.status?.message == "已删除当前图层")
-
-        harness.viewModel.undo()
+        #expect(harness.viewModel.workspace.document.layers.count == initialLayerIDs.count)
+        #expect(harness.viewModel.workspace.document.layers.contains(where: { $0.id == deletedLayerID }))
+        #expect(harness.viewModel.status?.message == "没有选区；请在图层面板中明确删除图层")
         #expect(harness.viewModel.workspace.document.layers.map(\.id) == initialLayerIDs)
         #expect(harness.viewModel.workspace.document.activeLayerID == deletedLayerID)
     }
@@ -2433,7 +2460,7 @@ struct WorkspaceViewModelPixelHistoryTests {
             Issue.record("Expected symmetric dirty current-entry capture for applyPixelOperation in redo stack")
         case .inPlaceChangedLayers(_, let changedLayerIDs):
             #expect(Set(changedLayerIDs) == [layerID])
-        case .workspaceOnly:
+        case .workspaceOnly, .metadataOnly:
             Issue.record("Expected pixel operation to use pixel history")
         }
     }

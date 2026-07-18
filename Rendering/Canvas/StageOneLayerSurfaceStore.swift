@@ -12,19 +12,26 @@ final class StageOneLayerSurfaceStore {
     private var contentStateByLayerID: [LayerID: LayerSurfaceContentState] = [:]
 
     func surfaceRecords(for document: ArtDocument) -> [LayerSurfaceRecord] {
-        document.layers.map { layer in
+        document.layers.compactMap { layer in
+            guard layer.isPaintLayer else { return nil }
+            let effectiveVisibility = document.isLayerEffectivelyVisible(layer.id)
+            let effectiveOpacity = document.effectiveLayerOpacity(layer.id)
             if let existing = surfacesByLayerID[layer.id] {
                 if existing.layerName == layer.name,
-                   existing.isVisible == layer.isVisible,
-                   existing.opacity == layer.opacity {
+                   existing.isVisible == effectiveVisibility,
+                   existing.opacity == effectiveOpacity,
+                   existing.blendMode == layer.blendMode,
+                   existing.clipTargetLayerID == layer.clipTargetLayerID {
                     return existing
                 }
                 let updated = LayerSurfaceRecord(
                     surfaceID: existing.surfaceID,
                     layerID: existing.layerID,
                     layerName: layer.name,
-                    isVisible: layer.isVisible,
-                    opacity: layer.opacity,
+                    isVisible: effectiveVisibility,
+                    opacity: effectiveOpacity,
+                    blendMode: layer.blendMode,
+                    clipTargetLayerID: layer.clipTargetLayerID,
                     descriptor: existing.descriptor
                 )
                 surfacesByLayerID[layer.id] = updated
@@ -35,8 +42,10 @@ final class StageOneLayerSurfaceStore {
                 surfaceID: LayerSurfaceID(),
                 layerID: layer.id,
                 layerName: layer.name,
-                isVisible: layer.isVisible,
-                opacity: layer.opacity,
+                isVisible: effectiveVisibility,
+                opacity: effectiveOpacity,
+                blendMode: layer.blendMode,
+                clipTargetLayerID: layer.clipTargetLayerID,
                 descriptor: .stageOneCanvas(
                     width: document.canvasSize.width,
                     height: document.canvasSize.height
@@ -64,7 +73,7 @@ final class StageOneLayerSurfaceStore {
             contentStateByLayerID[record.layerID] = .knownTransparent
         }
 
-        let validLayerIDs = Set(document.layers.map(\.id))
+        let validLayerIDs = Set(document.layers.filter(\.isPaintLayer).map(\.id))
         let removedLayerIDs = surfacesByLayerID.keys.filter { !validLayerIDs.contains($0) }
 
         for layerID in removedLayerIDs {

@@ -160,4 +160,36 @@ struct DocumentStateTests {
         #expect(document.layers.first(where: { $0.id == activeLayerID })?.locksTransparentPixels == true)
         #expect(duplicated?.locksTransparentPixels == true)
     }
+
+    @Test
+    func layerGroupControlsChildVisibilityLockAndOpacity() {
+        var document = ArtDocument.stageOneDefault()
+        let childID = document.activeLayerID
+        let group = document.addGroup(containing: Set([childID]))
+        document.setLayerOpacity(group.id, opacity: 0.5)
+        document.toggleLayerLock(group.id)
+
+        #expect(document.isLayerEffectivelyVisible(childID))
+        #expect(document.isLayerEffectivelyLocked(childID))
+        #expect(document.effectiveLayerOpacity(childID) == 0.5)
+
+        document.setLayerVisibility(group.id, isVisible: false)
+        #expect(!document.isLayerEffectivelyVisible(childID))
+        let didUngroup = document.removeGroupKeepingChildren(group.id)
+        #expect(didUngroup)
+        #expect(document.layer(childID)?.parentID == nil)
+    }
+
+    @Test
+    func clippingTargetsNearestLowerPaintLayerInTheSameGroup() {
+        var document = ArtDocument.stageOneDefault()
+        let lowerID = document.activeLayerID
+        let upper = document.addLayer(named: "Upper")
+        let group = document.addGroup(containing: Set([lowerID, upper.id]))
+
+        let didClip = document.toggleLayerClipping(upper.id)
+        #expect(didClip)
+        #expect(document.layer(upper.id)?.clipTargetLayerID == lowerID)
+        #expect(document.layer(upper.id)?.parentID == group.id)
+    }
 }

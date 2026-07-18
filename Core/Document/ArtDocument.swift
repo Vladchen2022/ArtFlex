@@ -127,11 +127,76 @@ struct ArtDocument: Codable, Sendable, Equatable {
         return [backgroundLayer, drawingLayer]
     }
 
+    var paintLayers: [LayerRecord] {
+        layers.filter(\.isPaintLayer)
+    }
+
+    func layer(_ layerID: LayerID) -> LayerRecord? {
+        layers.first(where: { $0.id == layerID })
+    }
+
+    func childLayers(of groupID: LayerID) -> [LayerRecord] {
+        layers.filter { $0.parentID == groupID }
+    }
+
+    func isLayerEffectivelyVisible(_ layerID: LayerID) -> Bool {
+        guard let layer = layer(layerID), layer.isVisible else { return false }
+        var visited: Set<LayerID> = [layerID]
+        var parentID = layer.parentID
+        while let resolvedParentID = parentID {
+            guard !visited.contains(resolvedParentID),
+                  let parent = self.layer(resolvedParentID),
+                  parent.isGroup,
+                  parent.isVisible else {
+                return false
+            }
+            visited.insert(resolvedParentID)
+            parentID = parent.parentID
+        }
+        return true
+    }
+
+    func isLayerEffectivelyLocked(_ layerID: LayerID) -> Bool {
+        guard let layer = layer(layerID) else { return true }
+        if layer.isLocked { return true }
+        var visited: Set<LayerID> = [layerID]
+        var parentID = layer.parentID
+        while let resolvedParentID = parentID {
+            guard !visited.contains(resolvedParentID),
+                  let parent = self.layer(resolvedParentID),
+                  parent.isGroup else {
+                return true
+            }
+            if parent.isLocked { return true }
+            visited.insert(resolvedParentID)
+            parentID = parent.parentID
+        }
+        return false
+    }
+
+    func effectiveLayerOpacity(_ layerID: LayerID) -> Float {
+        guard let layer = layer(layerID) else { return 0 }
+        var opacity = layer.opacity
+        var visited: Set<LayerID> = [layerID]
+        var parentID = layer.parentID
+        while let resolvedParentID = parentID {
+            guard !visited.contains(resolvedParentID),
+                  let parent = self.layer(resolvedParentID),
+                  parent.isGroup else { return 0 }
+            opacity *= parent.opacity
+            visited.insert(resolvedParentID)
+            parentID = parent.parentID
+        }
+        return min(max(opacity, 0), 1)
+    }
+
     mutating func addLayer(named name: String? = nil) -> LayerRecord {
         let newLayerIndex = layers.count + 1
+        let activeParentID = layer(activeLayerID)?.parentID
         let layer = LayerRecord(
             id: LayerID(),
             name: name ?? "图层 \(newLayerIndex)",
+            parentID: activeParentID,
             isVisible: true,
             isLocked: false,
             locksTransparentPixels: false,
@@ -142,19 +207,137 @@ struct ArtDocument: Codable, Sendable, Equatable {
         return layer
     }
 
+    mutating func addGroup(named name: String? = nil, containing layerIDs: Set<LayerID> = []) -> LayerRecord {
+        let group = LayerRecord(
+            id: LayerID(),
+            name: name ?? "图层组",
+            kind: .group,
+            isVisible: true,
+            isLocked: false,
+            locksTransparentPixels: false,
+            opacity: 1
+        )
+        layers.append(group)
+        let validChildIDs = Set(layers.filter { $0.isPaintLayer && layerIDs.contains($0.id) }.map(\.id))
+        for index in layers.indices where validChildIDs.contains(layers[index].id) {
+            layers[index].parentID = group.id
+        }
+        return group
+    }
+
+    @discardableResult
+    mutating func removeGroupKeepingChildren(_ groupID: LayerID) -> Bool {
+        guard let groupIndex = layers.firstIndex(where: { $0.id == groupID && $0.isGroup }) else {
+            return false
+        }
+        let parentID = layers[groupIndex].parentID
+        for index in layers.indices where layers[index].parentID == groupID {
+            layers[index].parentID = parentID
+        }
+        layers.remove(at: groupIndex)
+        return true
+    }
+
     mutating func removeActiveLayer() {
-        guard layers.count > 1 else { return }
+        guard paintLayers.count > 1 else { return }
         guard let activeIndex = layers.firstIndex(where: { $0.id == activeLayerID }) else { return }
 
+        let removedID = layers[activeIndex].id
         layers.remove(at: activeIndex)
+        for index in layers.indices where layers[index].clipTargetLayerID == removedID {
+            layers[index].clipTargetLayerID = nil
+        }
 
-        if let fallbackLayer = layers.last {
+        if let fallbackLayer = layers.last(where: \.isPaintLayer) {
             activeLayerID = fallbackLayer.id
         }
     }
 
+    @discardableResult
+    mutating func removeLayers(_ layerIDs: Set<LayerID>) -> Set<LayerID> {
+        guard !layerIDs.isEmpty else { return [] }
+        var removalIDs = layerIDs
+        let groupIDs = layers.filter { layerIDs.contains($0.id) && $0.isGroup }.map(\.id)
+        for groupID in groupIDs {
+            removalIDs.formUnion(descendantLayerIDs(of: groupID))
+        }
+
+        let remainingPaintCount = layers.filter { $0.isPaintLayer && !removalIDs.contains($0.id) }.count
+        guard remainingPaintCount >= 1 else { return [] }
+
+        layers.removeAll { removalIDs.contains($0.id) }
+        for index in layers.indices {
+            if layers[index].parentID.map(removalIDs.contains) == true {
+                layers[index].parentID = nil
+            }
+            if layers[index].clipTargetLayerID.map(removalIDs.contains) == true {
+                layers[index].clipTargetLayerID = nil
+            }
+        }
+        if removalIDs.contains(activeLayerID), let fallback = layers.last(where: \.isPaintLayer) {
+            activeLayerID = fallback.id
+        }
+        return removalIDs
+    }
+
+    func descendantLayerIDs(of groupID: LayerID) -> Set<LayerID> {
+        var result: Set<LayerID> = []
+        var frontier: [LayerID] = [groupID]
+        while let parent = frontier.popLast() {
+            let children = layers.filter { $0.parentID == parent }
+            for child in children where result.insert(child.id).inserted {
+                if child.isGroup { frontier.append(child.id) }
+            }
+        }
+        return result
+    }
+
+    mutating func normalizeLayerHierarchy() {
+        let validGroupIDs = Set(layers.filter(\.isGroup).map(\.id))
+        let validPaintIDs = Set(layers.filter(\.isPaintLayer).map(\.id))
+        for index in layers.indices {
+            if let parentID = layers[index].parentID, !validGroupIDs.contains(parentID) {
+                layers[index].parentID = nil
+            }
+            if let clipTargetLayerID = layers[index].clipTargetLayerID,
+               (!layers[index].isPaintLayer || !validPaintIDs.contains(clipTargetLayerID)) {
+                layers[index].clipTargetLayerID = nil
+            }
+        }
+
+        for index in layers.indices where layers[index].parentID != nil {
+            let layerID = layers[index].id
+            var visited: Set<LayerID> = [layerID]
+            var parentID = layers[index].parentID
+            var invalid = false
+            while let resolvedParentID = parentID {
+                guard visited.insert(resolvedParentID).inserted,
+                      let parent = layer(resolvedParentID), parent.isGroup else {
+                    invalid = true
+                    break
+                }
+                parentID = parent.parentID
+            }
+            if invalid { layers[index].parentID = nil }
+        }
+
+        for index in layers.indices where layers[index].clipTargetLayerID != nil {
+            guard let targetID = layers[index].clipTargetLayerID,
+                  let targetIndex = layers.firstIndex(where: { $0.id == targetID }),
+                  targetIndex < index,
+                  layers[targetIndex].parentID == layers[index].parentID else {
+                layers[index].clipTargetLayerID = nil
+                continue
+            }
+        }
+
+        if !validPaintIDs.contains(activeLayerID), let fallback = layers.last(where: \.isPaintLayer) {
+            activeLayerID = fallback.id
+        }
+    }
+
     mutating func setActiveLayer(_ layerID: LayerID) {
-        guard layers.contains(where: { $0.id == layerID }) else { return }
+        guard layers.contains(where: { $0.id == layerID && $0.isPaintLayer }) else { return }
         activeLayerID = layerID
     }
 
@@ -166,6 +349,47 @@ struct ArtDocument: Codable, Sendable, Equatable {
     mutating func setLayerOpacity(_ layerID: LayerID, opacity: Float) {
         guard let index = layers.firstIndex(where: { $0.id == layerID }) else { return }
         layers[index].opacity = min(max(opacity, 0), 1)
+    }
+
+    mutating func setLayerBlendMode(_ layerID: LayerID, blendMode: LayerBlendMode) {
+        guard let index = layers.firstIndex(where: { $0.id == layerID && $0.isPaintLayer }) else { return }
+        layers[index].blendMode = blendMode
+    }
+
+    mutating func toggleLayerReference(_ layerID: LayerID) {
+        guard let index = layers.firstIndex(where: { $0.id == layerID && $0.isPaintLayer }) else { return }
+        layers[index].isReference.toggle()
+    }
+
+    mutating func toggleLayerClipping(_ layerID: LayerID) -> Bool {
+        guard let index = layers.firstIndex(where: { $0.id == layerID && $0.isPaintLayer }) else { return false }
+        if layers[index].clipTargetLayerID != nil {
+            layers[index].clipTargetLayerID = nil
+            return true
+        }
+        let parentID = layers[index].parentID
+        let lowerPaintLayer = layers[..<index].last(where: { $0.isPaintLayer && $0.parentID == parentID })
+        guard let lowerPaintLayer else { return false }
+        layers[index].clipTargetLayerID = lowerPaintLayer.id
+        return true
+    }
+
+    @discardableResult
+    mutating func setParent(_ layerIDs: Set<LayerID>, groupID: LayerID?) -> Bool {
+        if let groupID {
+            guard let group = layer(groupID), group.isGroup else { return false }
+            guard !layerIDs.contains(groupID) else { return false }
+            for layerID in layerIDs {
+                guard !descendantLayerIDs(of: layerID).contains(groupID) else { return false }
+            }
+        }
+        var changed = false
+        for index in layers.indices where layerIDs.contains(layers[index].id) {
+            guard layers[index].parentID != groupID else { continue }
+            layers[index].parentID = groupID
+            changed = true
+        }
+        return changed
     }
 
     mutating func moveActiveLayerUp() -> Bool {
@@ -252,13 +476,18 @@ struct ArtDocument: Codable, Sendable, Equatable {
         }
 
         let source = layers[activeIndex]
+        guard source.isPaintLayer else { return nil }
         let duplicated = LayerRecord(
             id: LayerID(),
             name: name ?? "\(source.name) Copy",
+            parentID: source.parentID,
             isVisible: source.isVisible,
             isLocked: false,
             locksTransparentPixels: source.locksTransparentPixels,
-            opacity: source.opacity
+            opacity: source.opacity,
+            blendMode: source.blendMode,
+            clipTargetLayerID: source.clipTargetLayerID,
+            isReference: source.isReference
         )
 
         let insertIndex = activeIndex + 1
@@ -272,19 +501,21 @@ struct ArtDocument: Codable, Sendable, Equatable {
             return nil
         }
 
-        guard activeIndex > 0 else {
-            return nil
-        }
+        let source = layers[activeIndex]
+        guard source.isPaintLayer,
+              let destination = layers[..<activeIndex].last(where: {
+                  $0.isPaintLayer && $0.parentID == source.parentID
+              }) else { return nil }
 
         return MergeDownContext(
-            source: layers[activeIndex],
-            destination: layers[activeIndex - 1]
+            source: source,
+            destination: destination
         )
     }
 
     var mergeVisibleContext: MergeVisibleContext? {
         let visibleLayers = layers.enumerated().compactMap { index, layer -> (index: Int, layer: LayerRecord)? in
-            layer.isVisible ? (index, layer) : nil
+            layer.isPaintLayer && isLayerEffectivelyVisible(layer.id) ? (index, layer) : nil
         }
 
         guard visibleLayers.count >= 2, let target = visibleLayers.last?.layer else {
@@ -305,14 +536,22 @@ struct ArtDocument: Codable, Sendable, Equatable {
         guard
             let sourceIndex = layers.firstIndex(where: { $0.id == context.source.id }),
             let destinationIndex = layers.firstIndex(where: { $0.id == context.destination.id }),
-            sourceIndex == destinationIndex + 1
+            sourceIndex > destinationIndex,
+            layers[(destinationIndex + 1)..<sourceIndex].contains(where: {
+                $0.isPaintLayer && $0.parentID == context.source.parentID
+            }) == false
         else {
             return false
         }
 
         layers[destinationIndex].isVisible = mergedVisibility
         layers[destinationIndex].opacity = min(max(mergedOpacity, 0), 1)
+        layers[destinationIndex].blendMode = .normal
+        layers[destinationIndex].clipTargetLayerID = nil
         layers.remove(at: sourceIndex)
+        for index in layers.indices where layers[index].clipTargetLayerID == context.source.id {
+            layers[index].clipTargetLayerID = context.destination.id
+        }
         activeLayerID = context.destination.id
         return true
     }
@@ -340,6 +579,11 @@ struct ArtDocument: Codable, Sendable, Equatable {
 
         layers[targetIndex].isVisible = mergedVisibility
         layers[targetIndex].opacity = min(max(mergedOpacity, 0), 1)
+        layers[targetIndex].blendMode = .normal
+        layers[targetIndex].clipTargetLayerID = nil
+        for index in layers.indices where layers[index].clipTargetLayerID.map(visibleLayerIDs.contains) == true {
+            layers[index].clipTargetLayerID = context.target.id
+        }
         activeLayerID = context.target.id
         return true
     }

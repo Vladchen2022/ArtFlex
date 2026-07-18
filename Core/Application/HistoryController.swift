@@ -51,12 +51,18 @@ struct WorkspaceHistoryEntry: Sendable, Equatable {
         case full
         case inPlaceChangedLayers(topologySignature: TopologySignature, changedLayerIDs: [LayerID])
         case workspaceOnly(topologySignature: TopologySignature)
+        case metadataOnly(identitySignature: IdentitySignature)
     }
 
     struct TopologySignature: Sendable, Equatable {
         var canvasSize: CanvasSize
         var orderedLayerIDs: [LayerID]
         var layerCount: Int
+    }
+
+    struct IdentitySignature: Sendable, Equatable {
+        var canvasSize: CanvasSize
+        var layerIDs: Set<LayerID>
     }
 
     var workspace: WorkspaceState
@@ -69,6 +75,7 @@ enum HistoryCaptureMode {
     case full
     case inPlaceChangedLayers([LayerID])
     case workspaceOnly
+    case metadataOnly
 }
 
 private enum HistoryControllerError: LocalizedError {
@@ -135,12 +142,14 @@ final class HistoryController {
     var nextUndoRestoresWorkspaceOnly: Bool {
         guard let entry = undoStack.last else { return false }
         if case .workspaceOnly = entry.mode { return true }
+        if case .metadataOnly = entry.mode { return true }
         return false
     }
 
     var nextRedoRestoresWorkspaceOnly: Bool {
         guard let entry = redoStack.last else { return false }
         if case .workspaceOnly = entry.mode { return true }
+        if case .metadataOnly = entry.mode { return true }
         return false
     }
 
@@ -257,6 +266,8 @@ final class HistoryController {
         let resolvedCapture = resolveCaptureMode(captureMode, workspace: workspace)
         if case .workspaceOnly = resolvedCapture {
             // 文档级 UI 状态（例如透视辅助线）不需要触碰 Metal 图层。
+        } else if case .metadataOnly = resolvedCapture {
+            // 图层名称、顺序、可见性等元数据不需要复制任何画布纹理。
         } else {
             layerSurfaceStore.prepareTextures(for: workspace.document, metal: metalContext)
         }
@@ -265,7 +276,7 @@ final class HistoryController {
 
         switch resolvedCapture {
         case .full:
-            snapshotLayerIDs = Set(workspace.document.layers.map(\.id))
+            snapshotLayerIDs = Set(workspace.document.paintLayers.map(\.id))
             mode = .full
         case .inPlaceChangedLayers(let changedLayerIDs):
             snapshotLayerIDs = Set(changedLayerIDs)
@@ -276,12 +287,15 @@ final class HistoryController {
         case .workspaceOnly:
             snapshotLayerIDs = []
             mode = .workspaceOnly(topologySignature: topologySignature(for: workspace))
+        case .metadataOnly:
+            snapshotLayerIDs = []
+            mode = .metadataOnly(identitySignature: identitySignature(for: workspace))
         }
         let requiresFullCanvasSnapshots: Bool
         switch resolvedCapture {
         case .full:
             requiresFullCanvasSnapshots = true
-        case .inPlaceChangedLayers, .workspaceOnly:
+        case .inPlaceChangedLayers, .workspaceOnly, .metadataOnly:
             requiresFullCanvasSnapshots = false
         }
 
@@ -296,7 +310,7 @@ final class HistoryController {
             layerSnapshots = validatedSnapshots
         } else {
             var snapshotLayers: [(layer: LayerRecord, texture: MTLTexture)] = []
-            for layer in workspace.document.layers where snapshotLayerIDs.contains(layer.id) {
+            for layer in workspace.document.paintLayers where snapshotLayerIDs.contains(layer.id) {
                 guard
                     let surfaceID = layerSurfaceStore.surfaceID(for: layer.id),
                     let texture = layerSurfaceStore.texture(for: surfaceID)
@@ -429,6 +443,8 @@ final class HistoryController {
                 workspace: mergedWorkspace,
                 expectedTopologySignature: topologySignature
             )
+        case .metadataOnly(let identitySignature):
+            try restoreMetadataOnly(workspace: mergedWorkspace, expectedIdentitySignature: identitySignature)
         }
     }
 
@@ -448,6 +464,8 @@ final class HistoryController {
                 workspace: entry.workspace,
                 expectedTopologySignature: topologySignature
             )
+        case .metadataOnly(let identitySignature):
+            try restoreMetadataOnly(workspace: entry.workspace, expectedIdentitySignature: identitySignature)
         }
         resetHistory()
     }
@@ -461,6 +479,18 @@ final class HistoryController {
             throw HistoryControllerError.dirtyRestoreTopologyMismatch
         }
         workspaceStore.replaceState(workspace)
+    }
+
+    private func restoreMetadataOnly(
+        workspace: WorkspaceState,
+        expectedIdentitySignature: WorkspaceHistoryEntry.IdentitySignature
+    ) throws {
+        guard identitySignature(for: workspaceStore.state) == expectedIdentitySignature,
+              identitySignature(for: workspace) == expectedIdentitySignature else {
+            throw HistoryControllerError.dirtyRestoreTopologyMismatch
+        }
+        workspaceStore.replaceState(workspace)
+        layerSurfaceStore.prepareTextures(for: workspace.document, metal: metalContext)
     }
 
     private func restoreWithFullReset(
@@ -521,6 +551,11 @@ final class HistoryController {
                 return .full
             }
             return .workspaceOnly
+        case .metadataOnly(let expectedIdentitySignature):
+            guard identitySignature(for: workspaceStore.state) == expectedIdentitySignature else {
+                return .full
+            }
+            return .metadataOnly
         }
     }
 
@@ -729,6 +764,8 @@ final class HistoryController {
             return .inPlaceChangedLayers(uniqueLayerIDs)
         case .workspaceOnly:
             return .workspaceOnly
+        case .metadataOnly:
+            return .metadataOnly
         }
     }
 
@@ -737,6 +774,13 @@ final class HistoryController {
             canvasSize: workspace.document.canvasSize,
             orderedLayerIDs: workspace.document.layers.map(\.id),
             layerCount: workspace.document.layers.count
+        )
+    }
+
+    private func identitySignature(for workspace: WorkspaceState) -> WorkspaceHistoryEntry.IdentitySignature {
+        WorkspaceHistoryEntry.IdentitySignature(
+            canvasSize: workspace.document.canvasSize,
+            layerIDs: Set(workspace.document.layers.map(\.id))
         )
     }
 

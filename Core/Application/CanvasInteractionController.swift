@@ -17,12 +17,13 @@ final class CanvasInteractionController {
         skipLeadingStamp: Bool = false,
         paintVariationSeed: UInt32 = 0
     ) -> (layerID: LayerID, stroke: StrokeDescriptor)? {
+        let document = workspaceStore.state.document
         guard
             !samples.isEmpty,
-            let activeLayer = workspaceStore.state.document.layers.first(where: {
-                $0.id == workspaceStore.state.document.activeLayerID
+            let activeLayer = document.layers.first(where: {
+                $0.id == document.activeLayerID && $0.isPaintLayer
             }),
-            !activeLayer.isLocked
+            !document.isLayerEffectivelyLocked(activeLayer.id)
         else {
             return nil
         }
@@ -49,9 +50,10 @@ final class CanvasInteractionController {
     }
 
     func activeEditableLayerID() -> LayerID? {
-        guard let activeLayer = workspaceStore.state.document.layers.first(where: {
-            $0.id == workspaceStore.state.document.activeLayerID
-        }), !activeLayer.isLocked else {
+        let document = workspaceStore.state.document
+        guard let activeLayer = document.layers.first(where: {
+            $0.id == document.activeLayerID && $0.isPaintLayer
+        }), !document.isLayerEffectivelyLocked(activeLayer.id) else {
             return nil
         }
 
