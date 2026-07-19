@@ -249,7 +249,7 @@ struct PatternImportPipelineTests {
     }
 
     @Test
-    func largeImportedImagesAreDownscaledToMaximumDimension1000() throws {
+    func largeImportedImagesRetainA4096PixelWorkingCopy() throws {
         let tempRootURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("ArtFlexPatternImportTests-\(UUID().uuidString)", isDirectory: true)
         let redirectedFileManager = RedirectedPatternApplicationSupportFileManager(
@@ -262,8 +262,8 @@ struct PatternImportPipelineTests {
         }
 
         let sourceURL = tempRootURL.appendingPathComponent("large.png")
-        let width = 1400
-        let height = 700
+        let width = 5000
+        let height = 10
         let rgbaBytes = [UInt8](repeating: 255, count: width * height * 4)
         try writeTestPNG(to: sourceURL, width: width, height: height, rgbaBytes: rgbaBytes)
 
@@ -271,8 +271,8 @@ struct PatternImportPipelineTests {
             for: sourceURL,
             recipe: PatternImportRecipe(mode: .originalColor, contrast: 0, autoCropToContent: false)
         ))
-        #expect(preview.sourcePixelWidth == 1000)
-        #expect(preview.sourcePixelHeight == 500)
+        #expect(preview.sourcePixelWidth == 4096)
+        #expect(preview.sourcePixelHeight == 8)
 
         let result = try controller.importFiles(
             [sourceURL],
@@ -281,12 +281,12 @@ struct PatternImportPipelineTests {
         )
 
         let importedItem = try #require(result.importedItems.first)
-        #expect(importedItem.sourcePixelWidth == 1000)
-        #expect(importedItem.sourcePixelHeight == 500)
+        #expect(importedItem.sourcePixelWidth == 4096)
+        #expect(importedItem.sourcePixelHeight == 8)
 
         let renderImage = try #require(controller.loadRenderImage(for: importedItem))
-        #expect(renderImage.width == 1000)
-        #expect(renderImage.height == 500)
+        #expect(renderImage.width == 4096)
+        #expect(renderImage.height == 8)
     }
 
     @Test

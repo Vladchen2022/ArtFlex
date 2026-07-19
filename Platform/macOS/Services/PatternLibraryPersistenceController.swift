@@ -81,7 +81,10 @@ struct CroppedPatternImage {
 }
 
 final class PatternLibraryPersistenceController: @unchecked Sendable {
-    private static let maximumImportDimension = 1000
+    // The render asset is the painting source, not a thumbnail. A 1,000 px cap
+    // becomes visibly soft on modern canvases; keep a practical GPU-safe working
+    // copy and continue generating the small thumbnail separately.
+    private static let maximumImportDimension = 4096
     private let fileManager: FileManager
     private let rootDirectoryURL: URL?
 
@@ -346,6 +349,17 @@ final class PatternLibraryPersistenceController: @unchecked Sendable {
     ) -> PatternLibraryState {
         var sanitized = library
         sanitized.items = library.items.filter { item in
+            guard
+                let renderURL = resolveAssetURL(for: item.renderAssetLocation),
+                let thumbnailURL = resolveAssetURL(for: item.thumbnailLocation)
+            else {
+                return false
+            }
+
+            return fileManager.fileExists(atPath: renderURL.path)
+                && fileManager.fileExists(atPath: thumbnailURL.path)
+        }
+        sanitized.deletedItems = library.deletedItems.filter { item in
             guard
                 let renderURL = resolveAssetURL(for: item.renderAssetLocation),
                 let thumbnailURL = resolveAssetURL(for: item.thumbnailLocation)
@@ -789,8 +803,9 @@ final class PatternLibraryPersistenceController: @unchecked Sendable {
     private func purgeOrphanedManagedAssets(for library: PatternLibraryState) {
         guard let root = patternLibraryRootURL(createDirectories: false) else { return }
 
+        let retainedItems = library.items + library.deletedItems
         let referencedRelativePaths = Set(
-            library.items.flatMap { item -> [String] in
+            retainedItems.flatMap { item -> [String] in
                 var paths: [String] = []
                 if case .managedCopy(let relativePath) = item.renderAssetLocation {
                     paths.append(relativePath)

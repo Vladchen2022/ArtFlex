@@ -4,6 +4,73 @@ import Testing
 
 struct BrushLibraryStateTests {
     @Test
+    func resourceManagementSupportsFavoriteRenameDuplicateAndUndoDelete() throws {
+        let builtIn = BrushPreset(
+            id: "built-in",
+            name: "内建画笔",
+            brush: .stageOneDefault,
+            isBuiltIn: true,
+            slotIndex: 0
+        )
+        let custom = BrushPreset(
+            id: "custom",
+            name: "自定义画笔",
+            brush: .stageOneDefault,
+            isBuiltIn: false,
+            slotIndex: 4
+        )
+        var library = BrushLibraryState(
+            presets: [builtIn, custom],
+            selectedPresetID: custom.id
+        )
+
+        library.setFavorite(true, forPresetID: custom.id)
+        #expect(library.preset(id: custom.id)?.isFavorite == true)
+        let didRename = library.renamePreset(id: custom.id, to: "  常用线稿  ")
+        #expect(didRename)
+        #expect(library.preset(id: custom.id)?.name == "常用线稿")
+
+        let duplicateCandidate = library.duplicatePreset(id: custom.id)
+        let duplicate = try #require(duplicateCandidate)
+        #expect(duplicate.id != custom.id)
+        #expect(duplicate.isFavorite == false)
+        #expect(duplicate.slotIndex == 1)
+        let didDeleteDuplicate = library.deletePreset(id: duplicate.id)
+        #expect(didDeleteDuplicate)
+        #expect(library.deletedPresets.map(\.id) == [duplicate.id])
+        let didDeleteBuiltIn = library.deletePreset(id: builtIn.id)
+        #expect(didDeleteBuiltIn == false)
+
+        let restoredCandidate = library.restoreMostRecentlyDeletedPreset()
+        let restored = try #require(restoredCandidate)
+        #expect(restored.id == duplicate.id)
+        #expect(library.selectedPresetID == duplicate.id)
+        #expect(library.deletedPresets.isEmpty)
+    }
+
+    @Test
+    func legacyBrushLibraryJSONDefaultsNewManagementFields() throws {
+        let json = """
+        {
+          "presets": [{
+            "id": "legacy",
+            "name": "旧画笔",
+            "brush": \(String(decoding: try JSONEncoder().encode(BrushSettings.stageOneDefault), as: UTF8.self)),
+            "isBuiltIn": false,
+            "slotIndex": 0
+          }],
+          "selectedPresetID": "legacy",
+          "recentPresetIDs": []
+        }
+        """
+
+        let decoded = try JSONDecoder().decode(BrushLibraryState.self, from: Data(json.utf8))
+
+        #expect(decoded.preset(id: "legacy")?.isFavorite == false)
+        #expect(decoded.deletedPresets.isEmpty)
+    }
+
+    @Test
     func recentPresetUsageTracksLastFourAppliedBrushes() {
         let ids = (1...5).map { "preset-\($0)" }
         let presets = ids.enumerated().map { index, id in

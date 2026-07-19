@@ -4,6 +4,69 @@ import Testing
 
 struct PatternLibraryStateTests {
     @Test
+    func resourceManagementSupportsFavoriteRenameDuplicateAndUndoDelete() throws {
+        let original = PatternLibraryItem(
+            displayName: "格纹",
+            slotIndex: 0,
+            importRecipe: PatternImportRecipe(),
+            originalFilename: "grid.png",
+            sourcePixelWidth: 400,
+            sourcePixelHeight: 200,
+            renderAssetLocation: .managedCopy(relativePath: "render/grid.png"),
+            thumbnailLocation: .managedCopy(relativePath: "thumb/grid.png")
+        )
+        var library = PatternLibraryState(items: [original], selectedItemID: original.id)
+
+        library.setFavorite(true, forItemID: original.id)
+        #expect(library.item(id: original.id)?.isFavorite == true)
+        let didRename = library.renameItem(id: original.id, to: "  建筑格纹  ")
+        #expect(didRename)
+        #expect(library.item(id: original.id)?.displayName == "建筑格纹")
+
+        let duplicateCandidate = library.duplicateItem(id: original.id)
+        let duplicate = try #require(duplicateCandidate)
+        #expect(duplicate.id != original.id)
+        #expect(duplicate.isFavorite == false)
+        #expect(duplicate.renderAssetLocation == original.renderAssetLocation)
+        let didDelete = library.removeItem(id: duplicate.id)
+        #expect(didDelete)
+        #expect(library.deletedItems.map(\.id) == [duplicate.id])
+
+        let restoredCandidate = library.restoreMostRecentlyDeletedItem()
+        let restored = try #require(restoredCandidate)
+        #expect(restored.id == duplicate.id)
+        #expect(library.selectedItemID == duplicate.id)
+        #expect(library.deletedItems.isEmpty)
+    }
+
+    @Test
+    func legacyPatternLibraryJSONDefaultsNewManagementFields() throws {
+        let original = PatternLibraryItem(
+            displayName: "旧图案",
+            importRecipe: PatternImportRecipe(),
+            originalFilename: "legacy.png",
+            sourcePixelWidth: 64,
+            sourcePixelHeight: 64,
+            renderAssetLocation: .managedCopy(relativePath: "render/legacy.png"),
+            thumbnailLocation: .managedCopy(relativePath: "thumb/legacy.png")
+        )
+        let encoded = try JSONEncoder().encode(PatternLibraryState(items: [original]))
+        var object = try #require(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        object.removeValue(forKey: "deletedItems")
+        var items = try #require(object["items"] as? [[String: Any]])
+        items[0].removeValue(forKey: "isFavorite")
+        object["items"] = items
+
+        let decoded = try JSONDecoder().decode(
+            PatternLibraryState.self,
+            from: try JSONSerialization.data(withJSONObject: object)
+        )
+
+        #expect(decoded.items.first?.isFavorite == false)
+        #expect(decoded.deletedItems.isEmpty)
+    }
+
+    @Test
     func resolvedSlotMapRespectsRequestedSlotsAndBackfillsUnassignedItems() {
         let first = PatternLibraryItem(
             id: UUID(uuidString: "00000000-0000-0000-0000-000000000001")!,

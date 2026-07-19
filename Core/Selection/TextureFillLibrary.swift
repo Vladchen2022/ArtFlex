@@ -5,6 +5,7 @@ struct TextureFillLibraryItem: Identifiable, Codable, Sendable, Equatable {
     var displayName: String
     var slotIndex: Int?
     var colorTag: BrushColorTag?
+    var isFavorite: Bool
     var settings: TextureFillTipSettings
     var sourceBrush: BrushSettings?
 
@@ -13,6 +14,7 @@ struct TextureFillLibraryItem: Identifiable, Codable, Sendable, Equatable {
         displayName: String,
         slotIndex: Int? = nil,
         colorTag: BrushColorTag? = nil,
+        isFavorite: Bool = false,
         settings: TextureFillTipSettings,
         sourceBrush: BrushSettings?
     ) {
@@ -20,8 +22,30 @@ struct TextureFillLibraryItem: Identifiable, Codable, Sendable, Equatable {
         self.displayName = displayName
         self.slotIndex = slotIndex
         self.colorTag = colorTag
+        self.isFavorite = isFavorite
         self.settings = settings
         self.sourceBrush = sourceBrush
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case displayName
+        case slotIndex
+        case colorTag
+        case isFavorite
+        case settings
+        case sourceBrush
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        displayName = try container.decode(String.self, forKey: .displayName)
+        slotIndex = try container.decodeIfPresent(Int.self, forKey: .slotIndex)
+        colorTag = try container.decodeIfPresent(BrushColorTag.self, forKey: .colorTag)
+        isFavorite = try container.decodeIfPresent(Bool.self, forKey: .isFavorite) ?? false
+        settings = try container.decode(TextureFillTipSettings.self, forKey: .settings)
+        sourceBrush = try container.decodeIfPresent(BrushSettings.self, forKey: .sourceBrush)
     }
 }
 
@@ -29,15 +53,18 @@ struct TextureFillLibraryState: Codable, Sendable, Equatable {
     var items: [TextureFillLibraryItem]
     var selectedItemID: UUID?
     var recentItemIDs: [UUID]
+    var deletedItems: [TextureFillLibraryItem]
 
     init(
         items: [TextureFillLibraryItem] = [],
         selectedItemID: UUID? = nil,
-        recentItemIDs: [UUID] = []
+        recentItemIDs: [UUID] = [],
+        deletedItems: [TextureFillLibraryItem] = []
     ) {
         self.items = items
         self.selectedItemID = selectedItemID
         self.recentItemIDs = []
+        self.deletedItems = deletedItems
         self.recentItemIDs = sanitizedRecentItemIDs(recentItemIDs)
     }
 
@@ -45,6 +72,7 @@ struct TextureFillLibraryState: Codable, Sendable, Equatable {
         case items
         case selectedItemID
         case recentItemIDs
+        case deletedItems
     }
 
     init(from decoder: Decoder) throws {
@@ -52,7 +80,8 @@ struct TextureFillLibraryState: Codable, Sendable, Equatable {
         self.init(
             items: try container.decodeIfPresent([TextureFillLibraryItem].self, forKey: .items) ?? [],
             selectedItemID: try container.decodeIfPresent(UUID.self, forKey: .selectedItemID),
-            recentItemIDs: try container.decodeIfPresent([UUID].self, forKey: .recentItemIDs) ?? []
+            recentItemIDs: try container.decodeIfPresent([UUID].self, forKey: .recentItemIDs) ?? [],
+            deletedItems: try container.decodeIfPresent([TextureFillLibraryItem].self, forKey: .deletedItems) ?? []
         )
     }
 
@@ -134,6 +163,34 @@ struct TextureFillLibraryState: Codable, Sendable, Equatable {
         return item
     }
 
+    mutating func saveTextureAsNew(
+        settings: TextureFillTipSettings,
+        sourceBrush: BrushSettings?,
+        name: String? = nil
+    ) -> TextureFillLibraryItem {
+        let trimmedName = name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let resolvedName: String
+        if trimmedName.isEmpty {
+            var candidate = items.count + 1
+            while items.contains(where: { $0.displayName == "纹理 \(candidate)" }) {
+                candidate += 1
+            }
+            resolvedName = "纹理 \(candidate)"
+        } else {
+            resolvedName = trimmedName
+        }
+
+        let item = TextureFillLibraryItem(
+            displayName: resolvedName,
+            slotIndex: firstEmptySlotIndex(),
+            settings: settings,
+            sourceBrush: sourceBrush
+        )
+        items.append(item)
+        selectedItemID = item.id
+        return item
+    }
+
     mutating func selectItem(id: UUID?) {
         selectedItemID = id
     }
@@ -156,6 +213,43 @@ struct TextureFillLibraryState: Codable, Sendable, Equatable {
         items[index].colorTag = tag
     }
 
+    mutating func setFavorite(_ isFavorite: Bool, forItemID id: UUID) {
+        guard let index = items.firstIndex(where: { $0.id == id }) else { return }
+        items[index].isFavorite = isFavorite
+    }
+
+    mutating func renameItem(id: UUID, to name: String) -> Bool {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, let index = items.firstIndex(where: { $0.id == id }) else {
+            return false
+        }
+        items[index].displayName = trimmed
+        return true
+    }
+
+    mutating func duplicateItem(id: UUID) -> TextureFillLibraryItem? {
+        guard var duplicate = item(id: id) else { return nil }
+        duplicate.id = UUID()
+        duplicate.displayName += " 副本"
+        duplicate.slotIndex = firstEmptySlotIndex()
+        duplicate.isFavorite = false
+        items.append(duplicate)
+        selectedItemID = duplicate.id
+        return duplicate
+    }
+
+    mutating func replaceItem(
+        id: UUID,
+        settings: TextureFillTipSettings,
+        sourceBrush: BrushSettings?
+    ) -> TextureFillLibraryItem? {
+        guard let index = items.firstIndex(where: { $0.id == id }) else { return nil }
+        items[index].settings = settings
+        items[index].sourceBrush = sourceBrush
+        selectedItemID = id
+        return items[index]
+    }
+
     mutating func moveItem(id: UUID, toSlot targetSlot: Int) -> Bool {
         guard targetSlot >= 0,
               let movingIndex = items.firstIndex(where: { $0.id == id }) else {
@@ -176,13 +270,26 @@ struct TextureFillLibraryState: Codable, Sendable, Equatable {
     }
 
     mutating func removeItem(id: UUID) -> Bool {
-        guard items.contains(where: { $0.id == id }) else { return false }
-        items.removeAll { $0.id == id }
+        guard let index = items.firstIndex(where: { $0.id == id }) else { return false }
+        deletedItems.append(items.remove(at: index))
+        if deletedItems.count > 12 {
+            deletedItems.removeFirst(deletedItems.count - 12)
+        }
         recentItemIDs.removeAll { $0 == id }
         if selectedItemID == id {
             selectedItemID = items.first?.id
         }
         return true
+    }
+
+    mutating func restoreMostRecentlyDeletedItem() -> TextureFillLibraryItem? {
+        guard var restoredItem = deletedItems.popLast() else { return nil }
+        if let slotIndex = restoredItem.slotIndex, item(atSlot: slotIndex) != nil {
+            restoredItem.slotIndex = firstEmptySlotIndex()
+        }
+        items.append(restoredItem)
+        selectedItemID = restoredItem.id
+        return restoredItem
     }
 
     private func sanitizedRecentItemIDs(_ candidateIDs: [UUID]) -> [UUID] {

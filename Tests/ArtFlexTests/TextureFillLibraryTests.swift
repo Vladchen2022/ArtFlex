@@ -4,6 +4,47 @@ import Testing
 
 struct TextureFillLibraryTests {
     @Test
+    func resourceManagementSupportsFavoriteRenameDuplicateReplaceAndUndoDelete() throws {
+        var settings = TextureFillTipSettings.proceduralDefault
+        settings.coverage = 0.42
+        let original = TextureFillLibraryItem(
+            displayName: "颗粒纹理",
+            slotIndex: 0,
+            settings: settings,
+            sourceBrush: .stageOneDefault
+        )
+        var library = TextureFillLibraryState(items: [original], selectedItemID: original.id)
+
+        library.setFavorite(true, forItemID: original.id)
+        #expect(library.item(id: original.id)?.isFavorite == true)
+        let didRename = library.renameItem(id: original.id, to: "  粗颗粒  ")
+        #expect(didRename)
+        #expect(library.item(id: original.id)?.displayName == "粗颗粒")
+
+        let duplicateCandidate = library.duplicateItem(id: original.id)
+        let duplicate = try #require(duplicateCandidate)
+        #expect(duplicate.id != original.id)
+        #expect(duplicate.isFavorite == false)
+        settings.coverage = 0.81
+        let replacedCandidate = library.replaceItem(
+            id: duplicate.id,
+            settings: settings,
+            sourceBrush: .stageOneDefault
+        )
+        let replaced = try #require(replacedCandidate)
+        #expect(replaced.settings.coverage == 0.81)
+        let didDelete = library.removeItem(id: duplicate.id)
+        #expect(didDelete)
+        #expect(library.deletedItems.map(\.id) == [duplicate.id])
+
+        let restoredCandidate = library.restoreMostRecentlyDeletedItem()
+        let restored = try #require(restoredCandidate)
+        #expect(restored.id == duplicate.id)
+        #expect(restored.settings.coverage == 0.81)
+        #expect(library.selectedItemID == duplicate.id)
+    }
+
+    @Test
     func savingTextureCapturesDistinctSettingsAndAvoidsExactDuplicates() {
         var library = TextureFillLibraryState()
         var brush = BrushSettings.stageOneDefault

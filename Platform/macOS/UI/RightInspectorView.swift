@@ -572,6 +572,47 @@ struct RightInspectorView: View {
         case texture = "纹理库"
     }
 
+    private enum LibraryFilter: Equatable {
+        case all
+        case favorites
+        case color(BrushColorTag)
+    }
+
+    private enum LibraryRenameTarget: Identifiable {
+        case brush(String)
+        case pattern(UUID)
+        case texture(UUID)
+
+        var id: String {
+            switch self {
+            case .brush(let id): return "brush-\(id)"
+            case .pattern(let id): return "pattern-\(id.uuidString)"
+            case .texture(let id): return "texture-\(id.uuidString)"
+            }
+        }
+    }
+
+    private enum LibraryDeleteTarget: Identifiable {
+        case brush(String, String)
+        case pattern(UUID, String)
+        case texture(UUID, String)
+
+        var id: String {
+            switch self {
+            case .brush(let id, _): return "brush-\(id)"
+            case .pattern(let id, _): return "pattern-\(id.uuidString)"
+            case .texture(let id, _): return "texture-\(id.uuidString)"
+            }
+        }
+
+        var displayName: String {
+            switch self {
+            case .brush(_, let name), .pattern(_, let name), .texture(_, let name):
+                return name
+            }
+        }
+    }
+
     private enum ParameterInspectorTab: String {
         case brush = "工具参数"
         case colorAdjustment = "调色"
@@ -617,6 +658,11 @@ struct RightInspectorView: View {
     @State private var tipImageLibraryDropTargetID: BrushTipImageAssetID?
     @State private var showsCompoundBrushBuilder = false
     @State private var libraryInspectorTab: LibraryInspectorTab = .brush
+    @State private var librarySearchText = ""
+    @State private var libraryFilter: LibraryFilter = .all
+    @State private var libraryRenameTarget: LibraryRenameTarget?
+    @State private var libraryRenameText = ""
+    @State private var libraryDeleteTarget: LibraryDeleteTarget?
     @State private var parameterInspectorTab: ParameterInspectorTab = .brush
     @State private var lastUsedAdjustmentTab: ParameterInspectorTab = .colorAdjustment
     @State private var parameterInspectorAutoRestoreTab: ParameterInspectorTab?
@@ -757,6 +803,26 @@ struct RightInspectorView: View {
                     }
                 }
             )
+        }
+        .alert("重命名资源", isPresented: libraryRenameAlertBinding) {
+            TextField("名称", text: $libraryRenameText)
+            Button("取消", role: .cancel) {
+                libraryRenameTarget = nil
+            }
+            Button("重命名") {
+                commitLibraryRename()
+            }
+            .disabled(libraryRenameText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        }
+        .alert("删除资源？", isPresented: libraryDeleteAlertBinding) {
+            Button("取消", role: .cancel) {
+                libraryDeleteTarget = nil
+            }
+            Button("删除", role: .destructive) {
+                commitLibraryDelete()
+            }
+        } message: {
+            Text("“\(libraryDeleteTarget?.displayName ?? "")”会移入最近删除，可在当前库中撤销。")
         }
     }
 
@@ -2815,17 +2881,14 @@ struct RightInspectorView: View {
         GeometryReader { geometry in
             let columnCount = 4
             let spacing = 8.0
-            let recentSectionSpacing = 14.0
             let outerInset = 12.0
             let usableWidth = max(0.0, geometry.size.width - outerInset * 2)
             let slotWidth = max(40.0, floor((usableWidth - spacing * Double(columnCount - 1)) / Double(columnCount)))
             let contentWidth = (slotWidth * Double(columnCount)) + (spacing * Double(columnCount - 1))
             let horizontalInset = max(0.0, floor((usableWidth - contentWidth) * 0.5)) + outerInset
             let resolvedSlotMap = viewModel.workspace.brushLibrary.resolvedSlotMap()
-            let recentPresets = viewModel.workspace.brushLibrary.recentPresets(limit: columnCount)
             let occupiedSlotCount = max((resolvedSlotMap.values.max() ?? -1) + 1, 0)
-            let remainingHeight = max(0.0, geometry.size.height - slotWidth - recentSectionSpacing)
-            let minimumLibraryRows = max(1, Int(ceil((remainingHeight + spacing) / (slotWidth + spacing))))
+            let minimumLibraryRows = max(1, Int(ceil((geometry.size.height + spacing) / (slotWidth + spacing))))
             let visibleSlotCapacity = minimumLibraryRows * columnCount
             let rawSlotCount = max(occupiedSlotCount, visibleSlotCapacity)
             let totalSlotCount = max(
@@ -2836,18 +2899,28 @@ struct RightInspectorView: View {
 
             VStack(alignment: .leading, spacing: 0) {
                 ScrollView(.vertical, showsIndicators: true) {
-                    VStack(spacing: recentSectionSpacing) {
-                        LazyVGrid(columns: columns, spacing: spacing) {
-                            ForEach(0..<columnCount, id: \.self) { recentIndex in
-                                let preset = recentIndex < recentPresets.count ? recentPresets[recentIndex] : nil
-                                recentBrushLibrarySlotCell(preset: preset)
-                            }
+                    VStack(spacing: 8) {
+                        if !libraryFilterIsActive {
+                            Text("1–4 为固定快捷画笔")
+                                .font(.system(size: 8.5, weight: .medium))
+                                .foregroundStyle(Color.white.opacity(0.4))
+                                .frame(maxWidth: .infinity, alignment: .leading)
                         }
 
                         LazyVGrid(columns: columns, spacing: spacing) {
-                            ForEach(0..<totalSlotCount, id: \.self) { slotIndex in
-                                brushLibrarySlotCell(slotIndex: slotIndex)
+                            if libraryFilterIsActive {
+                                ForEach(filteredBrushPresets) { preset in
+                                    brushPresetCell(preset, slotIndex: nil, showsShortcutLabel: false)
+                                }
+                            } else {
+                                ForEach(0..<totalSlotCount, id: \.self) { slotIndex in
+                                    brushLibrarySlotCell(slotIndex: slotIndex)
+                                }
                             }
+                        }
+
+                        if libraryFilterIsActive && filteredBrushPresets.isEmpty {
+                            libraryEmptySearchResult
                         }
                     }
                     .padding(.horizontal, horizontalInset)
@@ -2881,6 +2954,9 @@ struct RightInspectorView: View {
                 libraryInspectorTabButton(.texture)
             }
 
+            libraryUtilityBar
+            librarySelectionSummary
+
             switch libraryInspectorTab {
             case .brush:
                 brushLibrarySection
@@ -2890,6 +2966,337 @@ struct RightInspectorView: View {
                 textureFillLibrarySection
             }
         }
+    }
+
+    private var libraryUtilityBar: some View {
+        HStack(spacing: 6) {
+            HStack(spacing: 5) {
+                Image(systemName: "magnifyingglass")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(Color.white.opacity(0.46))
+                TextField("搜索当前库", text: $librarySearchText)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 10.5, weight: .medium))
+                if !librarySearchText.isEmpty {
+                    Button {
+                        librarySearchText = ""
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.system(size: 10))
+                    }
+                    .buttonStyle(.plain)
+                    .help("清除搜索")
+                }
+            }
+            .padding(.horizontal, 8)
+            .frame(height: 26)
+            .background(RoundedRectangle(cornerRadius: 8).fill(Color.black.opacity(0.18)))
+            .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.white.opacity(0.07), lineWidth: 1))
+
+            Menu {
+                Button("全部资源") { libraryFilter = .all }
+                Button("只看收藏") { libraryFilter = .favorites }
+                Divider()
+                ForEach(BrushColorTag.allCases, id: \.self) { tag in
+                    Button("\(labelForBrushTag(tag))色色标") {
+                        libraryFilter = .color(tag)
+                    }
+                }
+            } label: {
+                Image(systemName: libraryFilter == .all ? "line.3.horizontal.decrease.circle" : "line.3.horizontal.decrease.circle.fill")
+                    .font(.system(size: 13, weight: .semibold))
+                    .frame(width: 24, height: 24)
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .help("筛选资源")
+
+            if canUndoCurrentLibraryDeletion {
+                Button(action: undoCurrentLibraryDeletion) {
+                    Image(systemName: "arrow.uturn.backward")
+                        .font(.system(size: 12, weight: .semibold))
+                        .frame(width: 24, height: 24)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.mini)
+                .help("恢复最近删除")
+            }
+
+            Button(action: addCurrentLibraryResource) {
+                Image(systemName: "plus")
+                    .font(.system(size: 12, weight: .bold))
+                    .frame(width: 24, height: 24)
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.mini)
+            .help(addCurrentLibraryResourceTitle)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    @ViewBuilder
+    private var librarySelectionSummary: some View {
+        switch libraryInspectorTab {
+        case .brush:
+            if let presetID = viewModel.workspace.brushLibrary.selectedPresetID,
+               let preset = viewModel.workspace.brushLibrary.preset(id: presetID) {
+                let isApplied = preset.brush == viewModel.workspace.toolSession.brush
+                librarySummaryCard(
+                    title: preset.name,
+                    detail: isApplied ? "当前画笔与预设一致" : "当前画笔已基于此预设修改",
+                    isModified: !isApplied,
+                    actions: {
+                        if !isApplied {
+                            if !preset.isBuiltIn {
+                                summaryActionButton("更新") {
+                                    viewModel.updateSelectedBrushPresetFromCurrent()
+                                }
+                            }
+                            summaryActionButton("另存") {
+                                viewModel.saveCurrentBrushPresetAsNew()
+                            }
+                            summaryActionButton("还原") {
+                                viewModel.applyBrushPreset(preset.id)
+                            }
+                        }
+                    }
+                )
+            }
+
+        case .pattern:
+            if let itemID = viewModel.workspace.patternLibrary.selectedItemID,
+               let item = viewModel.workspace.patternLibrary.item(id: itemID) {
+                let stateText: String = {
+                    if viewModel.patternPlacementPhase.isAdjusting { return "正在调整，确认后写入图层" }
+                    if viewModel.patternPlacementPhase.itemID == item.id { return "已准备放置到画布" }
+                    return "已选中，点击格子可重新准备放置"
+                }()
+                librarySummaryCard(
+                    title: item.displayName,
+                    detail: "\(item.sourcePixelWidth) × \(item.sourcePixelHeight) · \(stateText)",
+                    isModified: false,
+                    actions: { EmptyView() }
+                )
+            }
+
+        case .texture:
+            if let itemID = viewModel.workspace.textureFillLibrary.selectedItemID,
+               let item = viewModel.workspace.textureFillLibrary.item(id: itemID) {
+                let currentSourceBrush = viewModel.workspace.toolSession.textureFillBrushOverride
+                    ?? viewModel.workspace.toolSession.drawingBrush
+                let isApplied = item.settings == viewModel.workspace.toolSession.textureFillTip
+                    && item.sourceBrush == currentSourceBrush
+                librarySummaryCard(
+                    title: item.displayName,
+                    detail: "\(item.settings.arrangement.displayName) · 尺寸 \(Int((item.settings.materialScale * 100).rounded()))% · 覆盖 \(Int((item.settings.coverage * 100).rounded()))%\(isApplied ? "" : " · 已修改")",
+                    isModified: !isApplied,
+                    actions: {
+                        if !isApplied {
+                            summaryActionButton("更新") {
+                                viewModel.updateSelectedTextureFillPreset()
+                            }
+                            summaryActionButton("另存") {
+                                viewModel.saveCurrentTextureFillPresetAsNew()
+                            }
+                            summaryActionButton("还原") {
+                                viewModel.applyTextureFillLibraryItem(item.id)
+                            }
+                        }
+                    }
+                )
+            }
+        }
+    }
+
+    private func librarySummaryCard<Actions: View>(
+        title: String,
+        detail: String,
+        isModified: Bool,
+        @ViewBuilder actions: () -> Actions
+    ) -> some View {
+        HStack(spacing: 7) {
+            Circle()
+                .fill(isModified ? Color.orange : Color.accentColor)
+                .frame(width: 6, height: 6)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(title)
+                    .font(.system(size: 10.5, weight: .bold))
+                    .foregroundStyle(Color.white.opacity(0.9))
+                    .lineLimit(1)
+                Text(detail)
+                    .font(.system(size: 8.5, weight: .medium))
+                    .foregroundStyle(Color.white.opacity(0.5))
+                    .lineLimit(1)
+            }
+            Spacer(minLength: 4)
+            actions()
+        }
+        .padding(.horizontal, 8)
+        .frame(height: 34)
+        .background(RoundedRectangle(cornerRadius: 8).fill(Color.white.opacity(0.035)))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.white.opacity(0.06), lineWidth: 1))
+    }
+
+    private func summaryActionButton(_ title: String, action: @escaping () -> Void) -> some View {
+        Button(title, action: action)
+            .buttonStyle(.bordered)
+            .controlSize(.mini)
+            .font(.system(size: 8.5, weight: .semibold))
+    }
+
+    private var addCurrentLibraryResourceTitle: String {
+        switch libraryInspectorTab {
+        case .brush: return "把当前画笔另存为新画笔"
+        case .pattern: return "导入图案"
+        case .texture: return "把当前纹理另存为新纹理"
+        }
+    }
+
+    private func addCurrentLibraryResource() {
+        switch libraryInspectorTab {
+        case .brush:
+            viewModel.saveCurrentBrushPresetAsNew()
+        case .pattern:
+            viewModel.presentPatternImportSheet()
+        case .texture:
+            viewModel.saveCurrentTextureFillPresetAsNew()
+        }
+    }
+
+    private var canUndoCurrentLibraryDeletion: Bool {
+        switch libraryInspectorTab {
+        case .brush:
+            return !viewModel.workspace.brushLibrary.deletedPresets.isEmpty
+        case .pattern:
+            return !viewModel.workspace.patternLibrary.deletedItems.isEmpty
+        case .texture:
+            return !viewModel.workspace.textureFillLibrary.deletedItems.isEmpty
+        }
+    }
+
+    private func undoCurrentLibraryDeletion() {
+        switch libraryInspectorTab {
+        case .brush:
+            viewModel.restoreLastDeletedBrushPreset()
+        case .pattern:
+            viewModel.restoreLastDeletedPatternLibraryItem()
+        case .texture:
+            viewModel.restoreLastDeletedTextureFillLibraryItem()
+        }
+    }
+
+    private var libraryFilterIsActive: Bool {
+        !librarySearchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || libraryFilter != .all
+    }
+
+    private func matchesLibraryFilter(
+        name: String,
+        isFavorite: Bool,
+        colorTag: BrushColorTag?
+    ) -> Bool {
+        let query = librarySearchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !query.isEmpty,
+           name.localizedCaseInsensitiveContains(query) == false {
+            return false
+        }
+        switch libraryFilter {
+        case .all:
+            return true
+        case .favorites:
+            return isFavorite
+        case .color(let tag):
+            return colorTag == tag
+        }
+    }
+
+    private var filteredBrushPresets: [BrushPreset] {
+        viewModel.workspace.brushLibrary.presets
+            .filter { matchesLibraryFilter(name: $0.name, isFavorite: $0.isFavorite, colorTag: $0.colorTag) }
+            .sorted {
+                let left = viewModel.workspace.brushLibrary.resolvedSlotIndex(forPresetID: $0.id) ?? Int.max
+                let right = viewModel.workspace.brushLibrary.resolvedSlotIndex(forPresetID: $1.id) ?? Int.max
+                return left < right
+            }
+    }
+
+    private var filteredPatternItems: [PatternLibraryItem] {
+        let map = viewModel.workspace.patternLibrary.resolvedSlotMap()
+        return map.keys.sorted().compactMap { map[$0] }.filter {
+            matchesLibraryFilter(name: $0.displayName, isFavorite: $0.isFavorite, colorTag: $0.colorTag)
+        }
+    }
+
+    private var filteredTextureItems: [TextureFillLibraryItem] {
+        let map = viewModel.workspace.textureFillLibrary.resolvedSlotMap()
+        return map.keys.sorted().compactMap { map[$0] }.filter {
+            matchesLibraryFilter(name: $0.displayName, isFavorite: $0.isFavorite, colorTag: $0.colorTag)
+        }
+    }
+
+    private var libraryRenameAlertBinding: Binding<Bool> {
+        Binding(
+            get: { libraryRenameTarget != nil },
+            set: { if !$0 { libraryRenameTarget = nil } }
+        )
+    }
+
+    private var libraryDeleteAlertBinding: Binding<Bool> {
+        Binding(
+            get: { libraryDeleteTarget != nil },
+            set: { if !$0 { libraryDeleteTarget = nil } }
+        )
+    }
+
+    private func beginLibraryRename(_ target: LibraryRenameTarget, currentName: String) {
+        libraryRenameText = currentName
+        libraryRenameTarget = target
+    }
+
+    private func commitLibraryRename() {
+        guard let target = libraryRenameTarget else { return }
+        let name = libraryRenameText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else { return }
+        switch target {
+        case .brush(let id):
+            viewModel.renameBrushPreset(id, to: name)
+        case .pattern(let id):
+            viewModel.renamePatternLibraryItem(id, to: name)
+        case .texture(let id):
+            viewModel.renameTextureFillLibraryItem(id, to: name)
+        }
+        libraryRenameTarget = nil
+    }
+
+    private func commitLibraryDelete() {
+        guard let target = libraryDeleteTarget else { return }
+        switch target {
+        case .brush(let id, _):
+            viewModel.deleteBrushPreset(id)
+        case .pattern(let id, _):
+            viewModel.deletePatternLibraryItem(id)
+        case .texture(let id, _):
+            viewModel.deleteTextureFillLibraryItem(id)
+        }
+        libraryDeleteTarget = nil
+    }
+
+    private var libraryEmptySearchResult: some View {
+        VStack(spacing: 5) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 16, weight: .medium))
+            Text("没有匹配的资源")
+                .font(.system(size: 10, weight: .semibold))
+            Button("清除筛选") {
+                librarySearchText = ""
+                libraryFilter = .all
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.mini)
+        }
+        .foregroundStyle(Color.white.opacity(0.46))
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 24)
     }
 
     private func libraryInspectorTabButton(_ tab: LibraryInspectorTab) -> some View {
@@ -2930,31 +3337,31 @@ struct RightInspectorView: View {
         GeometryReader { geometry in
                 let columnCount = 4
                 let spacing = 8.0
-                let recentSectionSpacing = 14.0
                 let outerInset = 12.0
                 let usableWidth = max(0.0, geometry.size.width - outerInset * 2)
                 let slotWidth = max(40.0, floor((usableWidth - spacing * Double(columnCount - 1)) / Double(columnCount)))
                 let contentWidth = (slotWidth * Double(columnCount)) + (spacing * Double(columnCount - 1))
                 let horizontalInset = max(0.0, floor((usableWidth - contentWidth) * 0.5)) + outerInset
-                let recentItems = viewModel.workspace.patternLibrary.recentItems(limit: columnCount)
-                let remainingHeight = max(0.0, geometry.size.height - slotWidth - recentSectionSpacing)
-                let minimumLibraryRows = max(1, Int(ceil((remainingHeight + spacing) / (slotWidth + spacing))))
+                let minimumLibraryRows = max(1, Int(ceil((geometry.size.height + spacing) / (slotWidth + spacing))))
                 let totalSlotCount = viewModel.workspace.patternLibrary.slotCount(minRows: minimumLibraryRows, columns: columnCount)
                 let columns = Array(repeating: GridItem(.fixed(slotWidth), spacing: spacing), count: columnCount)
 
                 ScrollView(.vertical, showsIndicators: true) {
-                    VStack(spacing: recentSectionSpacing) {
+                    VStack(spacing: 8) {
                         LazyVGrid(columns: columns, spacing: spacing) {
-                            ForEach(0..<columnCount, id: \.self) { recentIndex in
-                                let item = recentIndex < recentItems.count ? recentItems[recentIndex] : nil
-                                recentPatternLibrarySlotCell(item: item)
+                            if libraryFilterIsActive {
+                                ForEach(filteredPatternItems) { item in
+                                    patternLibraryItemCell(item)
+                                }
+                            } else {
+                                ForEach(0..<totalSlotCount, id: \.self) { slotIndex in
+                                    patternLibrarySlotCell(slotIndex: slotIndex)
+                                }
                             }
                         }
 
-                        LazyVGrid(columns: columns, spacing: spacing) {
-                            ForEach(0..<totalSlotCount, id: \.self) { slotIndex in
-                                patternLibrarySlotCell(slotIndex: slotIndex)
-                            }
+                        if libraryFilterIsActive && filteredPatternItems.isEmpty {
+                            libraryEmptySearchResult
                         }
                     }
                     .padding(.horizontal, horizontalInset)
@@ -3007,8 +3414,11 @@ struct RightInspectorView: View {
 
     private func patternLibraryItemCell(_ item: PatternLibraryItem) -> some View {
         let isSelected = viewModel.workspace.patternLibrary.selectedItemID == item.id
-        let strokeColor: Color = isSelected ? Color.accentColor.opacity(0.9) : Color.white.opacity(0.06)
-        let strokeWidth: CGFloat = isSelected ? 1.5 : 1.0
+        let isActive = viewModel.patternPlacementPhase.itemID == item.id
+        let strokeColor: Color = isActive
+            ? Color.accentColor.opacity(0.9)
+            : (isSelected ? Color.white.opacity(0.30) : Color.white.opacity(0.06))
+        let strokeWidth: CGFloat = isActive || isSelected ? 1.5 : 1.0
         let thumbnailURL = viewModel.patternLibraryThumbnailURL(for: item)
         let usesCheckerboard = item.importRecipe.mode == .transparentMonochrome
 
@@ -3026,7 +3436,7 @@ struct RightInspectorView: View {
         ) {
             ZStack {
                 RoundedRectangle(cornerRadius: 10)
-                    .fill(isSelected ? Color.accentColor.opacity(0.18) : Color.white.opacity(0.03))
+                    .fill(isActive ? Color.accentColor.opacity(0.18) : (isSelected ? Color.white.opacity(0.07) : Color.white.opacity(0.03)))
                     .overlay {
                         RoundedRectangle(cornerRadius: 10)
                             .stroke(strokeColor, lineWidth: strokeWidth)
@@ -3045,13 +3455,40 @@ struct RightInspectorView: View {
                     brushColorTagCorner(tag)
                         .allowsHitTesting(false)
                 }
+
+
+                if item.isFavorite {
+                    Image(systemName: "star.fill")
+                        .font(.system(size: 8, weight: .bold))
+                        .foregroundStyle(Color.yellow)
+                        .padding(5)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+                        .allowsHitTesting(false)
+                }
             }
         }
         .aspectRatio(1, contentMode: .fit)
         .help(item.displayName)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(item.displayName)
+        .accessibilityValue(isActive ? "已准备放置" : (isSelected ? "已选中" : ""))
+        .accessibilityHint("激活后在画布拖动放置；右键管理图案")
+        .accessibilityAddTraits(.isButton)
+        .accessibilityAction {
+            viewModel.selectPatternLibraryItem(item.id)
+        }
         .contextMenu {
             Button("使用") {
                 viewModel.selectPatternLibraryItem(item.id)
+            }
+            Button(item.isFavorite ? "取消收藏" : "收藏") {
+                viewModel.setPatternLibraryItemFavorite(!item.isFavorite, forItemID: item.id)
+            }
+            Button("复制") {
+                viewModel.duplicatePatternLibraryItem(item.id)
+            }
+            Button("重命名") {
+                beginLibraryRename(.pattern(item.id), currentName: item.displayName)
             }
             Button("重建缩略图") {
                 viewModel.rebuildPatternLibraryThumbnail(item.id)
@@ -3083,8 +3520,8 @@ struct RightInspectorView: View {
                 viewModel.revealPatternLibraryItemInFinder(item.id)
             }
             Divider()
-            Button("删除") {
-                viewModel.deletePatternLibraryItem(item.id)
+            Button("删除", role: .destructive) {
+                libraryDeleteTarget = .pattern(item.id, item.displayName)
             }
         }
     }
@@ -3116,9 +3553,21 @@ struct RightInspectorView: View {
             let columns = Array(repeating: GridItem(.fixed(slotWidth), spacing: spacing), count: columnCount)
 
             ScrollView(.vertical, showsIndicators: true) {
-                LazyVGrid(columns: columns, spacing: spacing) {
-                    ForEach(0..<totalSlotCount, id: \.self) { slotIndex in
-                        textureFillLibrarySlotCell(slotIndex: slotIndex)
+                VStack(spacing: 8) {
+                    LazyVGrid(columns: columns, spacing: spacing) {
+                        if libraryFilterIsActive {
+                            ForEach(filteredTextureItems) { item in
+                                textureFillLibraryItemCell(item)
+                            }
+                        } else {
+                            ForEach(0..<totalSlotCount, id: \.self) { slotIndex in
+                                textureFillLibrarySlotCell(slotIndex: slotIndex)
+                            }
+                        }
+                    }
+
+                    if libraryFilterIsActive && filteredTextureItems.isEmpty {
+                        libraryEmptySearchResult
                     }
                 }
                 .padding(.horizontal, horizontalInset)
@@ -3149,7 +3598,15 @@ struct RightInspectorView: View {
 
     private func textureFillLibraryItemCell(_ item: TextureFillLibraryItem) -> some View {
         let isSelected = viewModel.workspace.textureFillLibrary.selectedItemID == item.id
-        let strokeColor: Color = isSelected ? Color.accentColor.opacity(0.9) : Color.white.opacity(0.06)
+        let currentSourceBrush = viewModel.workspace.toolSession.textureFillBrushOverride
+            ?? viewModel.workspace.toolSession.drawingBrush
+        let isApplied = isSelected
+            && item.settings == viewModel.workspace.toolSession.textureFillTip
+            && item.sourceBrush == currentSourceBrush
+        let isModified = isSelected && !isApplied
+        let strokeColor: Color = isApplied
+            ? Color.accentColor.opacity(0.9)
+            : (isModified ? Color.orange.opacity(0.9) : Color.white.opacity(0.06))
         let strokeWidth: CGFloat = isSelected ? 1.5 : 1.0
         let previewRequest = TextureFillPreviewRequest(
             brush: item.sourceBrush ?? .stageOneDefault,
@@ -3171,7 +3628,7 @@ struct RightInspectorView: View {
         ) {
             ZStack {
                 RoundedRectangle(cornerRadius: 10)
-                    .fill(isSelected ? Color.accentColor.opacity(0.18) : Color.white.opacity(0.03))
+                    .fill(isApplied ? Color.accentColor.opacity(0.18) : (isModified ? Color.orange.opacity(0.10) : Color.white.opacity(0.03)))
                     .overlay {
                         RoundedRectangle(cornerRadius: 10)
                             .stroke(strokeColor, lineWidth: strokeWidth)
@@ -3186,13 +3643,40 @@ struct RightInspectorView: View {
                     brushColorTagCorner(tag)
                         .allowsHitTesting(false)
                 }
+
+
+                if item.isFavorite {
+                    Image(systemName: "star.fill")
+                        .font(.system(size: 8, weight: .bold))
+                        .foregroundStyle(Color.yellow)
+                        .padding(5)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+                        .allowsHitTesting(false)
+                }
             }
         }
         .aspectRatio(1, contentMode: .fit)
         .help(item.displayName)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(item.displayName)
+        .accessibilityValue(isApplied ? "已应用" : (isModified ? "已修改" : ""))
+        .accessibilityHint("激活后应用纹理；右键管理纹理")
+        .accessibilityAddTraits(.isButton)
+        .accessibilityAction {
+            viewModel.applyTextureFillLibraryItem(item.id)
+        }
         .contextMenu {
             Button("应用") {
                 viewModel.applyTextureFillLibraryItem(item.id)
+            }
+            Button(item.isFavorite ? "取消收藏" : "收藏") {
+                viewModel.setTextureFillLibraryItemFavorite(!item.isFavorite, forItemID: item.id)
+            }
+            Button("复制") {
+                viewModel.duplicateTextureFillLibraryItem(item.id)
+            }
+            Button("重命名") {
+                beginLibraryRename(.texture(item.id), currentName: item.displayName)
             }
 
             Divider()
@@ -3221,8 +3705,8 @@ struct RightInspectorView: View {
 
             Divider()
 
-            Button("删除") {
-                viewModel.deleteTextureFillLibraryItem(item.id)
+            Button("删除", role: .destructive) {
+                libraryDeleteTarget = .texture(item.id, item.displayName)
             }
         }
     }
@@ -4922,7 +5406,11 @@ struct RightInspectorView: View {
         showsShortcutLabel: Bool
     ) -> some View {
         let isSelected = viewModel.workspace.brushLibrary.selectedPresetID == preset.id
-        let strokeColor: Color = isSelected ? Color.accentColor.opacity(0.9) : Color.white.opacity(0.06)
+        let isApplied = isSelected && preset.brush == viewModel.workspace.toolSession.brush
+        let isModified = isSelected && !isApplied
+        let strokeColor: Color = isApplied
+            ? Color.accentColor.opacity(0.9)
+            : (isModified ? Color.orange.opacity(0.9) : Color.white.opacity(0.06))
         let strokeWidth: CGFloat = isSelected ? 1.5 : 1.0
 
         return LongPressDraggableCell(
@@ -4939,7 +5427,7 @@ struct RightInspectorView: View {
         ) {
             ZStack {
                 RoundedRectangle(cornerRadius: 10)
-                    .fill(isSelected ? Color.accentColor.opacity(0.18) : Color.white.opacity(0.03))
+                    .fill(isApplied ? Color.accentColor.opacity(0.18) : (isModified ? Color.orange.opacity(0.10) : Color.white.opacity(0.03)))
                     .overlay {
                         RoundedRectangle(cornerRadius: 10)
                             .stroke(
@@ -4978,13 +5466,45 @@ struct RightInspectorView: View {
                     shortcutSlotLabel(for: slotIndex)
                         .allowsHitTesting(false)
                 }
+
+
+                if preset.isFavorite {
+                    Image(systemName: "star.fill")
+                        .font(.system(size: 8, weight: .bold))
+                        .foregroundStyle(Color.yellow)
+                        .padding(5)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+                        .allowsHitTesting(false)
+                }
             }
         }
         .aspectRatio(1, contentMode: .fit)
         .help(preset.name)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(preset.name)
+        .accessibilityValue(isApplied ? "已应用" : (isModified ? "已修改" : ""))
+        .accessibilityHint("激活后应用画笔；右键管理画笔")
+        .accessibilityAddTraits(.isButton)
+        .accessibilityAction {
+            viewModel.applyBrushPreset(preset.id)
+        }
         .contextMenu {
             Button("应用") {
                 viewModel.applyBrushPreset(preset.id)
+            }
+
+            Button(preset.isFavorite ? "取消收藏" : "收藏") {
+                viewModel.setBrushPresetFavorite(!preset.isFavorite, forPresetID: preset.id)
+            }
+
+            Button("复制") {
+                viewModel.duplicateBrushPreset(preset.id)
+            }
+
+            if !preset.isBuiltIn {
+                Button("重命名") {
+                    beginLibraryRename(.brush(preset.id), currentName: preset.name)
+                }
             }
 
             Divider()
@@ -5011,10 +5531,10 @@ struct RightInspectorView: View {
                 .disabled(preset.colorTag == nil)
             }
 
-            if !preset.isBuiltIn && isSelected {
+            if !preset.isBuiltIn {
                 Divider()
-                Button("删除") {
-                    viewModel.deleteBrushPreset(preset.id)
+                Button("删除", role: .destructive) {
+                    libraryDeleteTarget = .brush(preset.id, preset.name)
                 }
             }
         }
@@ -6154,6 +6674,7 @@ private struct NavigatorPreviewPanel: View {
                     onPatternPlacementBegan: { _, _ in },
                     onPatternPlacementChanged: { _ in },
                     onPatternPlacementEnded: { _ in },
+                    onApplyPatternPlacement: {},
                     onEnterGradientEditing: {},
                     onCancelCanvasTool: {},
                     onApplyGradientSession: {},

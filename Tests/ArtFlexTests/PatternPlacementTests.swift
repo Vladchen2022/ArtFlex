@@ -152,6 +152,8 @@ struct PatternPlacementTests {
         harness.viewModel.beginPatternPlacementDrag(at: .init(x: 12, y: 14))
         harness.viewModel.updatePatternPlacementDrag(to: .init(x: 28, y: 30))
         harness.viewModel.endPatternPlacementDrag(at: .init(x: 28, y: 30))
+        #expect(harness.viewModel.patternPlacementPhase.isAdjusting)
+        harness.viewModel.commitActivePatternPlacement()
         try await harness.waitForPatternPlacementCommitToFinish()
 
         #expect(harness.viewModel.patternPlacementPhase == .armed(itemID: itemID))
@@ -182,6 +184,8 @@ struct PatternPlacementTests {
         harness.viewModel.beginPatternPlacementDrag(at: .init(x: 12, y: 14), placeIntoNewLayer: true)
         harness.viewModel.updatePatternPlacementDrag(to: .init(x: 28, y: 30))
         harness.viewModel.endPatternPlacementDrag(at: .init(x: 28, y: 30))
+        #expect(harness.viewModel.patternPlacementPhase.isAdjusting)
+        harness.viewModel.commitActivePatternPlacement()
         try await harness.waitForPatternPlacementCommitToFinish()
 
         let placedLayerID = harness.viewModel.workspace.document.activeLayerID
@@ -221,6 +225,19 @@ struct PatternPlacementTests {
         #expect(harness.viewModel.canUndo == false)
         #expect(harness.viewModel.workspace.document.layers.count == originalLayerCount)
         #expect(try harness.alpha(atX: 13, y: 13, layerID: layerID) < 0.05)
+    }
+
+    @Test
+    func patternPlacementDestinationRectPreservesSourceAspectRatio() {
+        let rect = PatternPlacementDraft.destinationRect(
+            startCanvasPoint: .init(x: 10, y: 10),
+            currentCanvasPoint: .init(x: 50, y: 25),
+            preservingAspectRatio: 2
+        )
+
+        #expect(abs((rect.width / rect.height) - 2) < 0.000_001)
+        #expect(rect.minX == 10)
+        #expect(rect.minY == 10)
     }
 }
 

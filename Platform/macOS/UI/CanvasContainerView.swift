@@ -246,6 +246,10 @@ struct CanvasContainerView: View {
                             onCanvasInteraction?()
                             viewModel.endPatternPlacementDrag(at: point)
                         },
+                        onApplyPatternPlacement: {
+                            onCanvasInteraction?()
+                            viewModel.commitActivePatternPlacement()
+                        },
                         onEnterGradientEditing: {
                             onCanvasInteraction?()
                             viewModel.enterGradientEditingViaShift()
@@ -353,6 +357,16 @@ struct CanvasContainerView: View {
                         grid: grid,
                         activeInteractionMode: viewModel.activeFreeTransformInteractionMode,
                         selectedControlPointIndices: viewModel.selectedMeshWarpControlPointIndices,
+                        presentation: documentPresentation,
+                        canvasSize: viewModel.workspace.document.canvasSize
+                    )
+                    .allowsHitTesting(false)
+                }
+
+                if viewModel.patternPlacementPhase.isAdjusting,
+                   let draft = viewModel.patternPlacementPhase.draft {
+                    PatternPlacementHandlesOverlay(
+                        draft: draft,
                         presentation: documentPresentation,
                         canvasSize: viewModel.workspace.document.canvasSize
                     )
@@ -653,6 +667,22 @@ struct CanvasContainerView: View {
                         x: geometry.size.width / 2,
                         y: 28
                     )
+                }
+
+
+                if viewModel.patternPlacementPhase.isAdjusting,
+                   let draft = viewModel.patternPlacementPhase.draft {
+                    PatternPlacementHUD(
+                        opacity: draft.opacity,
+                        onRotateLeft: { viewModel.rotateActivePatternPlacement(by: -15) },
+                        onRotateRight: { viewModel.rotateActivePatternPlacement(by: 15) },
+                        onFlipHorizontal: viewModel.flipActivePatternPlacementHorizontally,
+                        onFlipVertical: viewModel.flipActivePatternPlacementVertically,
+                        onOpacityChanged: viewModel.setActivePatternPlacementOpacity,
+                        onApply: viewModel.commitActivePatternPlacement,
+                        onCancel: { viewModel.cancelPatternPlacement(keepSelection: true) }
+                    )
+                    .position(x: geometry.size.width / 2, y: 28)
                 }
 
                 if viewModel.workspace.toolSession.activeTool == .linearGradient,
@@ -3118,6 +3148,117 @@ private struct CanvasDocumentShadow: View {
                 x: presentation.documentOrigin.x + (presentation.documentDisplaySize.x / 2),
                 y: presentation.documentOrigin.y + (presentation.documentDisplaySize.y / 2)
             )
+    }
+}
+
+private struct PatternPlacementHUD: View {
+    let opacity: Float
+    let onRotateLeft: () -> Void
+    let onRotateRight: () -> Void
+    let onFlipHorizontal: () -> Void
+    let onFlipVertical: () -> Void
+    let onOpacityChanged: (Float) -> Void
+    let onApply: () -> Void
+    let onCancel: () -> Void
+
+    var body: some View {
+        HStack(spacing: 7) {
+            Label("图案放置", systemImage: "photo.on.rectangle.angled")
+                .font(.system(size: 11, weight: .bold))
+
+            Divider().frame(height: 18)
+
+            patternButton("向左旋转", systemImage: "rotate.left", action: onRotateLeft)
+            patternButton("向右旋转", systemImage: "rotate.right", action: onRotateRight)
+            patternButton("水平翻转", systemImage: "arrow.left.and.right.righttriangle.left.righttriangle.right", action: onFlipHorizontal)
+            patternButton("垂直翻转", systemImage: "arrow.up.and.down.righttriangle.up.righttriangle.down", action: onFlipVertical)
+
+            Text("透明")
+                .font(.system(size: 9.5, weight: .semibold))
+                .foregroundStyle(Color.white.opacity(0.72))
+            Slider(
+                value: Binding(
+                    get: { Double(opacity) },
+                    set: { onOpacityChanged(Float($0)) }
+                ),
+                in: 0.05...1
+            )
+            .frame(width: 72)
+
+            Button("应用", action: onApply)
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+                .keyboardShortcut(.return, modifiers: [])
+            Button("取消", action: onCancel)
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .keyboardShortcut(.cancelAction)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 7)
+        .background(
+            Capsule()
+                .fill(Color.black.opacity(0.76))
+                .overlay(Capsule().stroke(Color.white.opacity(0.12), lineWidth: 1))
+        )
+        .foregroundStyle(Color.white.opacity(0.94))
+    }
+
+    private func patternButton(
+        _ title: String,
+        systemImage: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Image(systemName: systemImage)
+                .font(.system(size: 11, weight: .semibold))
+                .frame(width: 20, height: 20)
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.mini)
+        .help(title)
+    }
+}
+
+private struct PatternPlacementHandlesOverlay: View {
+    let draft: PatternPlacementDraft
+    let presentation: CanvasPresentation
+    let canvasSize: CanvasSize
+
+    var body: some View {
+        let corners = draft.rotatedCorners.map(map)
+        ZStack(alignment: .topLeading) {
+            if corners.count == 4 {
+                Path { path in
+                    path.move(to: corners[0])
+                    path.addLines([corners[1], corners[2], corners[3], corners[0]])
+                }
+                .stroke(Color.black.opacity(0.65), lineWidth: 2)
+
+                Path { path in
+                    path.move(to: corners[0])
+                    path.addLines([corners[1], corners[2], corners[3], corners[0]])
+                }
+                .stroke(Color.white, style: StrokeStyle(lineWidth: 1.2, dash: [6, 4]))
+
+                ForEach(corners.indices, id: \.self) { index in
+                    Rectangle()
+                        .fill(Color.white)
+                        .frame(width: 9, height: 9)
+                        .overlay(Rectangle().stroke(Color.black.opacity(0.7), lineWidth: 1))
+                        .position(corners[index])
+                }
+            }
+        }
+    }
+
+    private func map(_ point: CanvasPoint) -> CGPoint {
+        let scaleX = presentation.documentDisplaySize.x / Double(max(canvasSize.width, 1))
+        let scaleY = presentation.documentDisplaySize.y / Double(max(canvasSize.height, 1))
+        return CGPoint(
+            x: presentation.documentOrigin.x + (point.x * scaleX),
+            y: presentation.documentOrigin.y + (point.y * scaleY)
+        )
     }
 }
 

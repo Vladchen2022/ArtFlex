@@ -2749,6 +2749,42 @@ final class WorkspaceViewModel: ObservableObject {
         showStatus(.init(kind: .success, message: "已保存纹理：\(savedItem.displayName)"))
     }
 
+    func saveCurrentTextureFillPresetAsNew() {
+        let state = bootstrap.workspaceStore.state
+        let settings = state.toolSession.textureFillTip
+        let sourceBrush = state.toolSession.textureFillBrushOverride
+            ?? state.toolSession.drawingBrush
+
+        var savedItem: TextureFillLibraryItem?
+        bootstrap.workspaceStore.updateTextureFillLibrary { library in
+            savedItem = library.saveTextureAsNew(
+                settings: settings,
+                sourceBrush: sourceBrush
+            )
+        }
+        guard let savedItem else { return }
+        persistTextureFillLibrary()
+        refreshLightweight()
+        showStatus(.init(kind: .success, message: "已另存纹理：\(savedItem.displayName)"))
+    }
+
+    func updateSelectedTextureFillPreset() {
+        let state = bootstrap.workspaceStore.state
+        guard let itemID = state.textureFillLibrary.selectedItemID else { return }
+        let settings = state.toolSession.textureFillTip
+        let sourceBrush = state.toolSession.textureFillBrushOverride
+            ?? state.toolSession.drawingBrush
+
+        var updated: TextureFillLibraryItem?
+        bootstrap.workspaceStore.updateTextureFillLibrary { library in
+            updated = library.replaceItem(id: itemID, settings: settings, sourceBrush: sourceBrush)
+        }
+        guard let updated else { return }
+        persistTextureFillLibrary()
+        refreshLightweight()
+        showStatus(.init(kind: .success, message: "已更新纹理：\(updated.displayName)"))
+    }
+
     func applyTextureFillLibraryItem(_ itemID: UUID) {
         guard let item = workspace.textureFillLibrary.item(id: itemID) else {
             showStatus(.init(kind: .info, message: "未找到纹理预设"))
@@ -2789,6 +2825,36 @@ final class WorkspaceViewModel: ObservableObject {
         refreshLightweight()
     }
 
+    func setTextureFillLibraryItemFavorite(_ isFavorite: Bool, forItemID itemID: UUID) {
+        bootstrap.workspaceStore.updateTextureFillLibrary { library in
+            library.setFavorite(isFavorite, forItemID: itemID)
+        }
+        persistTextureFillLibrary()
+        refreshLightweight()
+    }
+
+    func renameTextureFillLibraryItem(_ itemID: UUID, to name: String) {
+        var renamed = false
+        bootstrap.workspaceStore.updateTextureFillLibrary { library in
+            renamed = library.renameItem(id: itemID, to: name)
+        }
+        guard renamed else { return }
+        persistTextureFillLibrary()
+        refreshLightweight()
+        showStatus(.init(kind: .success, message: "已重命名纹理"))
+    }
+
+    func duplicateTextureFillLibraryItem(_ itemID: UUID) {
+        var duplicate: TextureFillLibraryItem?
+        bootstrap.workspaceStore.updateTextureFillLibrary { library in
+            duplicate = library.duplicateItem(id: itemID)
+        }
+        guard let duplicate else { return }
+        persistTextureFillLibrary()
+        refreshLightweight()
+        showStatus(.init(kind: .success, message: "已复制纹理：\(duplicate.displayName)"))
+    }
+
     func deleteTextureFillLibraryItem(_ itemID: UUID) {
         var didDelete = false
         bootstrap.workspaceStore.updateTextureFillLibrary { library in
@@ -2798,6 +2864,17 @@ final class WorkspaceViewModel: ObservableObject {
         persistTextureFillLibrary()
         refreshLightweight()
         showStatus(.init(kind: .success, message: "已删除纹理预设"))
+    }
+
+    func restoreLastDeletedTextureFillLibraryItem() {
+        var restored: TextureFillLibraryItem?
+        bootstrap.workspaceStore.updateTextureFillLibrary { library in
+            restored = library.restoreMostRecentlyDeletedItem()
+        }
+        guard let restored else { return }
+        persistTextureFillLibrary()
+        refreshLightweight()
+        showStatus(.init(kind: .success, message: "已恢复纹理：\(restored.displayName)"))
     }
 
     func moveTipImageLibraryItem(_ assetID: BrushTipImageAssetID, to targetIndex: Int) {
@@ -4005,6 +4082,72 @@ final class WorkspaceViewModel: ObservableObject {
         }
     }
 
+    func renameBrushPreset(_ presetID: String, to name: String) {
+        var renamed = false
+        bootstrap.workspaceStore.updateBrushLibrary { library in
+            renamed = library.renamePreset(id: presetID, to: name)
+        }
+        guard renamed else { return }
+        persistBrushLibrary()
+        refreshLightweight()
+        showStatus(.init(kind: .success, message: "已重命名画笔"))
+    }
+
+    func duplicateBrushPreset(_ presetID: String) {
+        var duplicate: BrushPreset?
+        bootstrap.workspaceStore.updateBrushLibrary { library in
+            duplicate = library.duplicatePreset(id: presetID)
+        }
+        guard let duplicate else { return }
+        persistBrushLibrary()
+        refresh()
+        showStatus(.init(kind: .success, message: "已复制画笔：\(duplicate.name)"))
+    }
+
+    func setBrushPresetFavorite(_ isFavorite: Bool, forPresetID presetID: String) {
+        bootstrap.workspaceStore.updateBrushLibrary { library in
+            library.setFavorite(isFavorite, forPresetID: presetID)
+        }
+        persistBrushLibrary()
+        refreshLightweight()
+    }
+
+    func updateSelectedBrushPresetFromCurrent() {
+        guard let presetID = workspace.brushLibrary.selectedPresetID,
+              let preset = workspace.brushLibrary.preset(id: presetID),
+              !preset.isBuiltIn else {
+            showStatus(.init(kind: .info, message: "内置画笔不能覆盖，请另存为新画笔"))
+            return
+        }
+        _ = saveNamedBrushPreset(
+            name: preset.name,
+            colorTag: preset.colorTag,
+            replacingPresetID: presetID,
+            allowsDuplicate: true
+        )
+    }
+
+    func saveCurrentBrushPresetAsNew() {
+        let customCount = workspace.brushLibrary.presets.filter { !$0.isBuiltIn }.count + 1
+        _ = saveNamedBrushPreset(
+            name: "笔刷 \(customCount)",
+            colorTag: nil,
+            replacingPresetID: nil,
+            allowsDuplicate: true
+        )
+    }
+
+    func restoreLastDeletedBrushPreset() {
+        var restored: BrushPreset?
+        bootstrap.workspaceStore.updateBrushLibrary { library in
+            restored = library.restoreMostRecentlyDeletedPreset()
+        }
+        guard let restored else { return }
+        persistBrushLibrary()
+        refresh()
+        showStatus(.init(kind: .success, message: "已恢复画笔：\(restored.name)"))
+    }
+
     func moveBrushPreset(_ presetID: String, toSlot targetSlotIndex: Int) {
         var moved = false
         bootstrap.workspaceStore.updateBrushLibrary { library in
@@ -4054,6 +4197,36 @@ final class WorkspaceViewModel: ObservableObject {
         refreshLightweight()
     }
 
+    func setPatternLibraryItemFavorite(_ isFavorite: Bool, forItemID itemID: UUID) {
+        bootstrap.workspaceStore.updatePatternLibrary { library in
+            library.setFavorite(isFavorite, forItemID: itemID)
+        }
+        persistPatternLibrary()
+        refreshLightweight()
+    }
+
+    func renamePatternLibraryItem(_ itemID: UUID, to name: String) {
+        var renamed = false
+        bootstrap.workspaceStore.updatePatternLibrary { library in
+            renamed = library.renameItem(id: itemID, to: name)
+        }
+        guard renamed else { return }
+        persistPatternLibrary()
+        refreshLightweight()
+        showStatus(.init(kind: .success, message: "已重命名图案"))
+    }
+
+    func duplicatePatternLibraryItem(_ itemID: UUID) {
+        var duplicate: PatternLibraryItem?
+        bootstrap.workspaceStore.updatePatternLibrary { library in
+            duplicate = library.duplicateItem(id: itemID)
+        }
+        guard let duplicate else { return }
+        persistPatternLibrary()
+        refreshLightweight()
+        showStatus(.init(kind: .success, message: "已复制图案：\(duplicate.displayName)"))
+    }
+
     func deletePatternLibraryItem(_ itemID: UUID) {
         let deletedItem = workspace.patternLibrary.item(id: itemID)
         var didDelete = false
@@ -4065,12 +4238,23 @@ final class WorkspaceViewModel: ObservableObject {
             if patternPlacementPhase.itemID == itemID {
                 patternPlacementPhase = .idle
             }
-            if let deletedItem {
-                bootstrap.patternLibraryPersistenceController.removeAssets(for: deletedItem)
-            }
             persistPatternLibrary()
             refreshLightweight()
+            if let deletedItem {
+                showStatus(.init(kind: .success, message: "已删除图案：\(deletedItem.displayName)，可撤销"))
+            }
         }
+    }
+
+    func restoreLastDeletedPatternLibraryItem() {
+        var restored: PatternLibraryItem?
+        bootstrap.workspaceStore.updatePatternLibrary { library in
+            restored = library.restoreMostRecentlyDeletedItem()
+        }
+        guard let restored else { return }
+        persistPatternLibrary()
+        refreshLightweight()
+        showStatus(.init(kind: .success, message: "已恢复图案：\(restored.displayName)"))
     }
 
     func revealPatternLibraryItemInFinder(_ itemID: UUID) {
@@ -4147,10 +4331,43 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func beginPatternPlacementDrag(at point: CanvasPoint, placeIntoNewLayer: Bool = false) {
-        guard let itemID = patternPlacementPhase.itemID,
-              workspace.patternLibrary.item(id: itemID) != nil else {
+        if case .adjusting(let draft) = patternPlacementPhase {
+            let rect = draft.destinationRect.standardized
+            let corners = [
+                CanvasPoint(x: rect.minX, y: rect.minY),
+                CanvasPoint(x: rect.maxX, y: rect.minY),
+                CanvasPoint(x: rect.maxX, y: rect.maxY),
+                CanvasPoint(x: rect.minX, y: rect.maxY)
+            ]
+            let hitRadius = max(12, min(rect.width, rect.height) * 0.08)
+            if let cornerIndex = corners.indices.min(by: {
+                Self.patternPlacementDistance(from: point, to: corners[$0])
+                    < Self.patternPlacementDistance(from: point, to: corners[$1])
+            }), Self.patternPlacementDistance(from: point, to: corners[cornerIndex]) <= hitRadius {
+                let oppositeAnchor = corners[(cornerIndex + 2) % 4]
+                patternPlacementPhase = .transforming(
+                    PatternPlacementTransformSession(
+                        originalDraft: draft,
+                        startCanvasPoint: point,
+                        currentDraft: draft,
+                        mode: .resize(oppositeAnchor: oppositeAnchor)
+                    )
+                )
+            } else if rect.contains(CGPoint(x: point.x, y: point.y)) {
+                patternPlacementPhase = .transforming(
+                    PatternPlacementTransformSession(
+                        originalDraft: draft,
+                        startCanvasPoint: point,
+                        currentDraft: draft,
+                        mode: .move
+                    )
+                )
+            }
             return
         }
+
+        guard case .armed(let itemID) = patternPlacementPhase,
+              workspace.patternLibrary.item(id: itemID) != nil else { return }
 
         if !placeIntoNewLayer,
            bootstrap.interactionController.activeEditableLayerID() == nil {
@@ -4160,10 +4377,12 @@ final class WorkspaceViewModel: ObservableObject {
 
         _ = flushBrushEditingBoundary(reason: "beginPatternPlacementDrag")
 
-        guard patternPlacementTexture(for: itemID) != nil else {
+        guard let sourceTexture = patternPlacementTexture(for: itemID) else {
             showStatus(.init(kind: .error, message: "无法加载图案素材"))
             return
         }
+
+        let aspectRatio = Double(sourceTexture.width) / Double(max(sourceTexture.height, 1))
 
         patternPlacementPhase = .dragging(
             PatternPlacementDraft(
@@ -4172,49 +4391,120 @@ final class WorkspaceViewModel: ObservableObject {
                 currentCanvasPoint: point,
                 destinationRect: PatternPlacementDraft.destinationRect(
                     startCanvasPoint: point,
-                    currentCanvasPoint: point
+                    currentCanvasPoint: point,
+                    preservingAspectRatio: aspectRatio
                 ),
-                placementModeAtDragStart: placeIntoNewLayer ? .newLayer : .currentLayer
+                placementModeAtDragStart: placeIntoNewLayer ? .newLayer : .currentLayer,
+                sourceAspectRatio: aspectRatio
             )
         )
     }
 
     func updatePatternPlacementDrag(to point: CanvasPoint) {
-        guard case .dragging(let draft) = patternPlacementPhase else { return }
-        patternPlacementPhase = .dragging(
-            PatternPlacementDraft(
-                itemID: draft.itemID,
-                startCanvasPoint: draft.startCanvasPoint,
-                currentCanvasPoint: point,
-                destinationRect: PatternPlacementDraft.destinationRect(
+        switch patternPlacementPhase {
+        case .dragging(let draft):
+            patternPlacementPhase = .dragging(
+                PatternPlacementDraft(
+                    itemID: draft.itemID,
                     startCanvasPoint: draft.startCanvasPoint,
-                    currentCanvasPoint: point
-                ),
-                placementModeAtDragStart: draft.placementModeAtDragStart
+                    currentCanvasPoint: point,
+                    destinationRect: PatternPlacementDraft.destinationRect(
+                        startCanvasPoint: draft.startCanvasPoint,
+                        currentCanvasPoint: point,
+                        preservingAspectRatio: draft.sourceAspectRatio
+                    ),
+                    placementModeAtDragStart: draft.placementModeAtDragStart,
+                    sourceAspectRatio: draft.sourceAspectRatio,
+                    flipHorizontally: point.x < draft.startCanvasPoint.x,
+                    flipVertically: point.y < draft.startCanvasPoint.y,
+                    rotationDegrees: draft.rotationDegrees,
+                    opacity: draft.opacity
+                )
             )
-        )
+
+        case .transforming(var session):
+            var updated = session.originalDraft
+            switch session.mode {
+            case .move:
+                let dx = point.x - session.startCanvasPoint.x
+                let dy = point.y - session.startCanvasPoint.y
+                updated.destinationRect = session.originalDraft.destinationRect.offsetBy(dx: dx, dy: dy)
+                updated.startCanvasPoint = CanvasPoint(
+                    x: session.originalDraft.startCanvasPoint.x + dx,
+                    y: session.originalDraft.startCanvasPoint.y + dy
+                )
+                updated.currentCanvasPoint = CanvasPoint(
+                    x: session.originalDraft.currentCanvasPoint.x + dx,
+                    y: session.originalDraft.currentCanvasPoint.y + dy
+                )
+
+            case .resize(let oppositeAnchor):
+                updated.startCanvasPoint = oppositeAnchor
+                updated.currentCanvasPoint = point
+                updated.destinationRect = PatternPlacementDraft.destinationRect(
+                    startCanvasPoint: oppositeAnchor,
+                    currentCanvasPoint: point,
+                    preservingAspectRatio: updated.sourceAspectRatio
+                )
+                updated.flipHorizontally = point.x < oppositeAnchor.x
+                updated.flipVertically = point.y < oppositeAnchor.y
+            }
+            session.currentDraft = updated
+            patternPlacementPhase = .transforming(session)
+
+        case .idle, .armed, .adjusting:
+            return
+        }
     }
 
     func endPatternPlacementDrag(at point: CanvasPoint) {
-        guard case .dragging(let draft) = patternPlacementPhase else { return }
-
-        let finalizedDraft = PatternPlacementDraft(
-            itemID: draft.itemID,
-            startCanvasPoint: draft.startCanvasPoint,
-            currentCanvasPoint: point,
-            destinationRect: PatternPlacementDraft.destinationRect(
-                startCanvasPoint: draft.startCanvasPoint,
-                currentCanvasPoint: point
-            ),
-            placementModeAtDragStart: draft.placementModeAtDragStart
-        )
+        updatePatternPlacementDrag(to: point)
+        guard let finalizedDraft = patternPlacementPhase.draft else { return }
 
         guard finalizedDraft.destinationRect.width >= 4, finalizedDraft.destinationRect.height >= 4 else {
             patternPlacementPhase = .armed(itemID: finalizedDraft.itemID)
             return
         }
 
-        commitPatternPlacement(finalizedDraft)
+        patternPlacementPhase = .adjusting(finalizedDraft)
+        showStatus(.init(kind: .info, message: "可移动或缩放图案，确认后再放入画面"))
+    }
+
+    func commitActivePatternPlacement() {
+        guard patternPlacementPhase.isAdjusting,
+              let draft = patternPlacementPhase.draft else { return }
+        commitPatternPlacement(draft)
+    }
+
+    func rotateActivePatternPlacement(by degrees: Double) {
+        guard var draft = patternPlacementPhase.draft else { return }
+        draft.rotationDegrees = (draft.rotationDegrees + degrees).truncatingRemainder(dividingBy: 360)
+        patternPlacementPhase = .adjusting(draft)
+    }
+
+    func flipActivePatternPlacementHorizontally() {
+        guard var draft = patternPlacementPhase.draft else { return }
+        draft.flipHorizontally.toggle()
+        patternPlacementPhase = .adjusting(draft)
+    }
+
+    func flipActivePatternPlacementVertically() {
+        guard var draft = patternPlacementPhase.draft else { return }
+        draft.flipVertically.toggle()
+        patternPlacementPhase = .adjusting(draft)
+    }
+
+    func setActivePatternPlacementOpacity(_ opacity: Float) {
+        guard var draft = patternPlacementPhase.draft else { return }
+        draft.opacity = min(max(opacity, 0.05), 1)
+        patternPlacementPhase = .adjusting(draft)
+    }
+
+    nonisolated private static func patternPlacementDistance(
+        from lhs: CanvasPoint,
+        to rhs: CanvasPoint
+    ) -> Double {
+        hypot(lhs.x - rhs.x, lhs.y - rhs.y)
     }
 
     func cancelPatternPlacement(keepSelection: Bool) {
@@ -4320,7 +4610,9 @@ final class WorkspaceViewModel: ObservableObject {
             canvasSize: workspace.document.canvasSize,
             destinationRect: draft.destinationRect,
             flipHorizontally: draft.flipsHorizontally,
-            opacity: 1
+            flipVertically: draft.flipVertically,
+            rotationDegrees: draft.rotationDegrees,
+            opacity: draft.opacity
         )
 
         isApplyingPatternPlacementCommit = true

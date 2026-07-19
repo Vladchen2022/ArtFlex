@@ -17,6 +17,46 @@ struct BrushPreset: Codable, Sendable, Equatable, Identifiable {
     var isBuiltIn: Bool
     var slotIndex: Int? = nil
     var colorTag: BrushColorTag? = nil
+    var isFavorite: Bool = false
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case name
+        case brush
+        case isBuiltIn
+        case slotIndex
+        case colorTag
+        case isFavorite
+    }
+
+    init(
+        id: String,
+        name: String,
+        brush: BrushSettings,
+        isBuiltIn: Bool,
+        slotIndex: Int? = nil,
+        colorTag: BrushColorTag? = nil,
+        isFavorite: Bool = false
+    ) {
+        self.id = id
+        self.name = name
+        self.brush = brush
+        self.isBuiltIn = isBuiltIn
+        self.slotIndex = slotIndex
+        self.colorTag = colorTag
+        self.isFavorite = isFavorite
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        name = try container.decode(String.self, forKey: .name)
+        brush = try container.decode(BrushSettings.self, forKey: .brush)
+        isBuiltIn = try container.decode(Bool.self, forKey: .isBuiltIn)
+        slotIndex = try container.decodeIfPresent(Int.self, forKey: .slotIndex)
+        colorTag = try container.decodeIfPresent(BrushColorTag.self, forKey: .colorTag)
+        isFavorite = try container.decodeIfPresent(Bool.self, forKey: .isFavorite) ?? false
+    }
 }
 
 enum BrushPresetSaveDisposition: Sendable, Equatable {
@@ -150,27 +190,32 @@ struct BrushLibraryState: Codable, Sendable, Equatable {
     var presets: [BrushPreset]
     var selectedPresetID: String?
     var recentPresetIDs: [String]
+    var deletedPresets: [BrushPreset]
 
     static let stageOneDefault = BrushLibraryState(
         presets: [],
         selectedPresetID: nil,
-        recentPresetIDs: []
+        recentPresetIDs: [],
+        deletedPresets: []
     )
 
     enum CodingKeys: String, CodingKey {
         case presets
         case selectedPresetID
         case recentPresetIDs
+        case deletedPresets
     }
 
     init(
         presets: [BrushPreset],
         selectedPresetID: String?,
-        recentPresetIDs: [String] = []
+        recentPresetIDs: [String] = [],
+        deletedPresets: [BrushPreset] = []
     ) {
         self.presets = presets
         self.selectedPresetID = selectedPresetID
         self.recentPresetIDs = []
+        self.deletedPresets = deletedPresets
         self.recentPresetIDs = sanitizedRecentPresetIDs(recentPresetIDs)
     }
 
@@ -179,11 +224,13 @@ struct BrushLibraryState: Codable, Sendable, Equatable {
         let presets = try container.decode([BrushPreset].self, forKey: .presets)
         let selectedPresetID = try container.decodeIfPresent(String.self, forKey: .selectedPresetID)
         let recentPresetIDs = try container.decodeIfPresent([String].self, forKey: .recentPresetIDs) ?? []
+        let deletedPresets = try container.decodeIfPresent([BrushPreset].self, forKey: .deletedPresets) ?? []
 
         self.init(
             presets: presets,
             selectedPresetID: selectedPresetID,
-            recentPresetIDs: recentPresetIDs
+            recentPresetIDs: recentPresetIDs,
+            deletedPresets: deletedPresets
         )
     }
 
@@ -192,6 +239,7 @@ struct BrushLibraryState: Codable, Sendable, Equatable {
         try container.encode(presets, forKey: .presets)
         try container.encode(selectedPresetID, forKey: .selectedPresetID)
         try container.encode(recentPresetIDs, forKey: .recentPresetIDs)
+        try container.encode(deletedPresets, forKey: .deletedPresets)
     }
 
     func preset(id: String) -> BrushPreset? {
@@ -291,16 +339,60 @@ struct BrushLibraryState: Codable, Sendable, Equatable {
     }
 
     mutating func deletePreset(id: String) -> Bool {
-        guard let index = presets.firstIndex(where: { $0.id == id }) else {
+        guard let index = presets.firstIndex(where: { $0.id == id && !$0.isBuiltIn }) else {
             return false
         }
 
-        presets.remove(at: index)
+        deletedPresets.append(presets.remove(at: index))
+        if deletedPresets.count > 12 {
+            deletedPresets.removeFirst(deletedPresets.count - 12)
+        }
         recentPresetIDs.removeAll { $0 == id }
         if selectedPresetID == id {
             selectedPresetID = presets.first?.id
         }
         return true
+    }
+
+    mutating func restoreMostRecentlyDeletedPreset() -> BrushPreset? {
+        guard var restoredPreset = deletedPresets.popLast() else { return nil }
+        if let slotIndex = restoredPreset.slotIndex, preset(atSlot: slotIndex) != nil {
+            restoredPreset.slotIndex = firstEmptySlotIndex()
+        }
+        presets.append(restoredPreset)
+        selectedPresetID = restoredPreset.id
+        return restoredPreset
+    }
+
+    mutating func renamePreset(id: String, to name: String) -> Bool {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              let index = presets.firstIndex(where: { $0.id == id && !$0.isBuiltIn }) else {
+            return false
+        }
+        presets[index].name = trimmed
+        return true
+    }
+
+    mutating func setFavorite(_ isFavorite: Bool, forPresetID id: String) {
+        guard let index = presets.firstIndex(where: { $0.id == id }) else { return }
+        presets[index].isFavorite = isFavorite
+    }
+
+    mutating func duplicatePreset(id: String) -> BrushPreset? {
+        guard var duplicate = preset(id: id) else { return nil }
+        duplicate = BrushPreset(
+            id: UUID().uuidString,
+            name: "\(duplicate.name) 副本",
+            brush: duplicate.brush,
+            isBuiltIn: false,
+            slotIndex: firstEmptySlotIndex(),
+            colorTag: duplicate.colorTag,
+            isFavorite: false
+        )
+        presets.append(duplicate)
+        selectedPresetID = duplicate.id
+        return duplicate
     }
 
     func resolvedSlotMap() -> [String: Int] {
@@ -382,7 +474,8 @@ struct BrushLibraryState: Codable, Sendable, Equatable {
         return BrushLibraryState(
             presets: filteredPresets,
             selectedPresetID: resolvedSelectedPresetID,
-            recentPresetIDs: recentPresetIDs
+            recentPresetIDs: recentPresetIDs,
+            deletedPresets: deletedPresets
         )
     }
 
@@ -411,7 +504,8 @@ struct BrushLibraryState: Codable, Sendable, Equatable {
         return BrushLibraryState(
             presets: filteredPresets,
             selectedPresetID: resolvedSelectedPresetID,
-            recentPresetIDs: recentPresetIDs
+            recentPresetIDs: recentPresetIDs,
+            deletedPresets: deletedPresets
         )
     }
 

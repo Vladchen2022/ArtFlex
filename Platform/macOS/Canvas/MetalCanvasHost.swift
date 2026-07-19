@@ -158,6 +158,7 @@ struct MetalCanvasHost: NSViewRepresentable {
     let onPatternPlacementBegan: (CanvasPoint, Bool) -> Void
     let onPatternPlacementChanged: (CanvasPoint) -> Void
     let onPatternPlacementEnded: (CanvasPoint) -> Void
+    let onApplyPatternPlacement: () -> Void
     let onEnterGradientEditing: () -> Void
     let onCancelCanvasTool: () -> Void
     let onApplyGradientSession: () -> Void
@@ -226,6 +227,7 @@ struct MetalCanvasHost: NSViewRepresentable {
             onPatternPlacementBegan: onPatternPlacementBegan,
             onPatternPlacementChanged: onPatternPlacementChanged,
             onPatternPlacementEnded: onPatternPlacementEnded,
+            onApplyPatternPlacement: onApplyPatternPlacement,
             onEnterGradientEditing: onEnterGradientEditing,
             onCancelCanvasTool: onCancelCanvasTool,
             onApplyGradientSession: onApplyGradientSession,
@@ -460,6 +462,7 @@ protocol StrokeCaptureDelegate: AnyObject {
     )
     func strokeCaptureView(_ view: StrokeCaptureMTKView, didChangePatternPlacementAt point: CanvasPoint)
     func strokeCaptureView(_ view: StrokeCaptureMTKView, didEndPatternPlacementAt point: CanvasPoint)
+    func strokeCaptureViewDidRequestApplyPatternPlacement(_ view: StrokeCaptureMTKView)
     func strokeCaptureViewDidRequestEnterGradientEditing(_ view: StrokeCaptureMTKView)
     func strokeCaptureViewDidRequestCanvasToolCancel(_ view: StrokeCaptureMTKView)
     func strokeCaptureViewDidRequestApplyGradientSession(_ view: StrokeCaptureMTKView)
@@ -1567,6 +1570,11 @@ final class StrokeCaptureMTKView: MTKView {
             return
         }
 
+        if (event.keyCode == 36 || event.keyCode == 76) && patternPlacementPhase.isAdjusting {
+            strokeDelegate?.strokeCaptureViewDidRequestApplyPatternPlacement(self)
+            return
+        }
+
         if (event.keyCode == 36 || event.keyCode == 76) &&
             activeTool == .sectorGradient {
             strokeDelegate?.strokeCaptureViewDidRequestApplyGradientSession(self)
@@ -2382,6 +2390,7 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
     private let onPatternPlacementBegan: (CanvasPoint, Bool) -> Void
     private let onPatternPlacementChanged: (CanvasPoint) -> Void
     private let onPatternPlacementEnded: (CanvasPoint) -> Void
+    private let onApplyPatternPlacement: () -> Void
     private let onEnterGradientEditing: () -> Void
     private let onCancelCanvasTool: () -> Void
     private let onApplyGradientSession: () -> Void
@@ -2498,6 +2507,7 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
         onPatternPlacementBegan: @escaping (CanvasPoint, Bool) -> Void,
         onPatternPlacementChanged: @escaping (CanvasPoint) -> Void,
         onPatternPlacementEnded: @escaping (CanvasPoint) -> Void,
+        onApplyPatternPlacement: @escaping () -> Void,
         onEnterGradientEditing: @escaping () -> Void,
         onCancelCanvasTool: @escaping () -> Void,
         onApplyGradientSession: @escaping () -> Void,
@@ -2589,6 +2599,7 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
         self.onPatternPlacementBegan = onPatternPlacementBegan
         self.onPatternPlacementChanged = onPatternPlacementChanged
         self.onPatternPlacementEnded = onPatternPlacementEnded
+        self.onApplyPatternPlacement = onApplyPatternPlacement
         self.onEnterGradientEditing = onEnterGradientEditing
         self.onCancelCanvasTool = onCancelCanvasTool
         self.onApplyGradientSession = onApplyGradientSession
@@ -2787,7 +2798,9 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
                     canvasSize: canvasSize,
                     destinationRect: patternDraft.destinationRect,
                     flipHorizontally: patternDraft.flipsHorizontally,
-                    opacity: activeLayerOpacity
+                    flipVertically: patternDraft.flipVertically,
+                    rotationDegrees: patternDraft.rotationDegrees,
+                    opacity: activeLayerOpacity * patternDraft.opacity
                 )
 
                 let upperLayers = Array(orderedVisibleLayers.drop { $0.surfaceID != activeLayerSurfaceID }.dropFirst())
@@ -3106,6 +3119,10 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
 
     func strokeCaptureView(_ view: StrokeCaptureMTKView, didEndPatternPlacementAt point: CanvasPoint) {
         onPatternPlacementEnded(point)
+    }
+
+    func strokeCaptureViewDidRequestApplyPatternPlacement(_ view: StrokeCaptureMTKView) {
+        onApplyPatternPlacement()
     }
 
     func strokeCaptureViewDidRequestEnterGradientEditing(_ view: StrokeCaptureMTKView) {

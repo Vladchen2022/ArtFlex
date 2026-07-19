@@ -140,6 +140,8 @@ final class PatternPlacementRenderer {
         canvasSize: CanvasSize,
         destinationRect: CGRect,
         flipHorizontally: Bool = false,
+        flipVertically: Bool = false,
+        rotationDegrees: Double = 0,
         opacity: Float = 1
     ) {
         let standardizedRect = destinationRect.standardized
@@ -147,7 +149,10 @@ final class PatternPlacementRenderer {
             return
         }
         guard let scissorRect = patternPlacementScissorRect(
-            destinationRect: standardizedRect,
+            destinationRect: patternPlacementRotatedBounds(
+                destinationRect: standardizedRect,
+                rotationDegrees: rotationDegrees
+            ),
             canvasSize: canvasSize,
             renderTargetWidth: renderTargetTexture.width,
             renderTargetHeight: renderTargetTexture.height
@@ -155,22 +160,29 @@ final class PatternPlacementRenderer {
             return
         }
 
-        let textureCoordinates = patternPlacementTextureCoordinates(flipHorizontally: flipHorizontally)
+        let textureCoordinates = patternPlacementTextureCoordinates(
+            flipHorizontally: flipHorizontally,
+            flipVertically: flipVertically
+        )
+        let positions = patternPlacementRotatedCorners(
+            destinationRect: standardizedRect,
+            rotationDegrees: rotationDegrees
+        )
         let vertices: [PatternPlacementVertex] = [
             .init(
-                position: SIMD2(Float(standardizedRect.minX), Float(standardizedRect.minY)),
+                position: positions.topLeft,
                 textureCoordinate: textureCoordinates.topLeft
             ),
             .init(
-                position: SIMD2(Float(standardizedRect.maxX), Float(standardizedRect.minY)),
+                position: positions.topRight,
                 textureCoordinate: textureCoordinates.topRight
             ),
             .init(
-                position: SIMD2(Float(standardizedRect.minX), Float(standardizedRect.maxY)),
+                position: positions.bottomLeft,
                 textureCoordinate: textureCoordinates.bottomLeft
             ),
             .init(
-                position: SIMD2(Float(standardizedRect.maxX), Float(standardizedRect.maxY)),
+                position: positions.bottomRight,
                 textureCoordinate: textureCoordinates.bottomRight
             )
         ]
@@ -257,20 +269,70 @@ struct PatternPlacementTextureCoordinates {
     var bottomRight: SIMD2<Float>
 }
 
-func patternPlacementTextureCoordinates(flipHorizontally: Bool) -> PatternPlacementTextureCoordinates {
-    if flipHorizontally {
-        return PatternPlacementTextureCoordinates(
-            topLeft: SIMD2(1, 0),
-            topRight: SIMD2(0, 0),
-            bottomLeft: SIMD2(1, 1),
-            bottomRight: SIMD2(0, 1)
+func patternPlacementTextureCoordinates(
+    flipHorizontally: Bool,
+    flipVertically: Bool = false
+) -> PatternPlacementTextureCoordinates {
+    let leftU: Float = flipHorizontally ? 1 : 0
+    let rightU: Float = flipHorizontally ? 0 : 1
+    let topV: Float = flipVertically ? 1 : 0
+    let bottomV: Float = flipVertically ? 0 : 1
+    return PatternPlacementTextureCoordinates(
+        topLeft: SIMD2(leftU, topV),
+        topRight: SIMD2(rightU, topV),
+        bottomLeft: SIMD2(leftU, bottomV),
+        bottomRight: SIMD2(rightU, bottomV)
+    )
+}
+
+private struct PatternPlacementRotatedCorners {
+    var topLeft: SIMD2<Float>
+    var topRight: SIMD2<Float>
+    var bottomLeft: SIMD2<Float>
+    var bottomRight: SIMD2<Float>
+}
+
+private func patternPlacementRotatedCorners(
+    destinationRect: CGRect,
+    rotationDegrees: Double
+) -> PatternPlacementRotatedCorners {
+    let rect = destinationRect.standardized
+    let centerX = rect.midX
+    let centerY = rect.midY
+    let radians = rotationDegrees * .pi / 180
+    let cosine = cos(radians)
+    let sine = sin(radians)
+
+    func rotated(_ x: Double, _ y: Double) -> SIMD2<Float> {
+        let dx = x - centerX
+        let dy = y - centerY
+        return SIMD2(
+            Float(centerX + (dx * cosine) - (dy * sine)),
+            Float(centerY + (dx * sine) + (dy * cosine))
         )
     }
 
-    return PatternPlacementTextureCoordinates(
-        topLeft: SIMD2(0, 0),
-        topRight: SIMD2(1, 0),
-        bottomLeft: SIMD2(0, 1),
-        bottomRight: SIMD2(1, 1)
+    return PatternPlacementRotatedCorners(
+        topLeft: rotated(rect.minX, rect.minY),
+        topRight: rotated(rect.maxX, rect.minY),
+        bottomLeft: rotated(rect.minX, rect.maxY),
+        bottomRight: rotated(rect.maxX, rect.maxY)
     )
+}
+
+private func patternPlacementRotatedBounds(
+    destinationRect: CGRect,
+    rotationDegrees: Double
+) -> CGRect {
+    let corners = patternPlacementRotatedCorners(
+        destinationRect: destinationRect,
+        rotationDegrees: rotationDegrees
+    )
+    let points = [corners.topLeft, corners.topRight, corners.bottomLeft, corners.bottomRight]
+    let xs = points.map { Double($0.x) }
+    let ys = points.map { Double($0.y) }
+    guard let minX = xs.min(), let maxX = xs.max(), let minY = ys.min(), let maxY = ys.max() else {
+        return destinationRect.standardized
+    }
+    return CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
 }
