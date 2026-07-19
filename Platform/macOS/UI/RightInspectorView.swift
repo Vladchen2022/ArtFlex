@@ -14,6 +14,7 @@ private let topInspectorControlIconSize: CGFloat = 11.5
 private let topInspectorPanelPadding: CGFloat = 12
 private let rightInspectorHorizontalPadding: CGFloat = 12
 private let rightInspectorColumnSpacing: CGFloat = 12
+private let rightInspectorPanelSpacing: CGFloat = 12
 private let inspectorPanelPadding: CGFloat = 12
 private let standardInspectorToolMinimumHeight: CGFloat = 200
 private let standardInspectorLayerMinimumHeight: CGFloat = 180
@@ -192,6 +193,23 @@ func rightInspectorUsesStructuredBlockReferenceWorkspace(activeTool: ToolKind) -
 
 func rightInspectorUsesTextureLibrary(activeTool: ToolKind) -> Bool {
     activeTool == .lassoFill || activeTool == .textureFill
+}
+
+func rightInspectorUsesCompactParameterLayout(
+    activeTool: ToolKind,
+    isBrushTab: Bool,
+    usesTextureFillControls: Bool
+) -> Bool {
+    guard isBrushTab else { return false }
+
+    switch activeTool {
+    case .brush, .eraser, .smudge, .straightLine, .brightnessAdjust, .eyedropper, .perspective, .textureFill:
+        return false
+    case .lassoFill:
+        return !usesTextureFillControls
+    default:
+        return true
+    }
 }
 
 func topInspectorPanelContentWidth(panelWidth: CGFloat) -> CGFloat {
@@ -724,27 +742,7 @@ struct RightInspectorView: View {
                                 radius: 12
                             )
 
-                            VSplitView {
-                                InspectorPanel(title: "", fillsAvailableHeight: true) {
-                                    parameterInspectorSection
-                                }
-                                .frame(
-                                    minHeight: standardInspectorToolMinimumHeight,
-                                    idealHeight: 390,
-                                    maxHeight: .infinity,
-                                    alignment: .top
-                                )
-
-                                InspectorPanel(title: "图层", fillsAvailableHeight: true) {
-                                    layersSection
-                                }
-                                .frame(
-                                    minHeight: standardInspectorLayerMinimumHeight,
-                                    idealHeight: 380,
-                                    maxHeight: .infinity,
-                                    alignment: .top
-                                )
-                            }
+                            standardParameterAndLayerPanels
                         }
                         .frame(width: columnWidth)
                         .frame(height: contentHeight, alignment: .top)
@@ -845,32 +843,102 @@ struct RightInspectorView: View {
 
     private var parameterInspectorSection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 8) {
-                parameterInspectorTabButton(.brush)
-                parameterInspectorTabButton(.colorAdjustment)
-                parameterInspectorTabButton(.curves)
-            }
+            parameterInspectorTabs
 
             if parameterInspectorTab == .brush && usesFullBrushParameterControls {
                 pinnedBrushCommonControls
             }
 
             ScrollView(.vertical, showsIndicators: true) {
-                Group {
-                    if parameterInspectorTab == .colorAdjustment {
-                        colorAdjustmentSection
-                    } else if parameterInspectorTab == .curves {
-                        curveAdjustmentSection
-                    } else {
-                        brushSection
-                    }
-                }
+                parameterInspectorContent
                 .padding(.trailing, 3)
                 .frame(maxWidth: .infinity, alignment: .topLeading)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    private var compactParameterInspectorSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            parameterInspectorTabs
+            parameterInspectorContent
+                .frame(maxWidth: .infinity, alignment: .topLeading)
+        }
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+    }
+
+    private var parameterInspectorTabs: some View {
+        HStack(spacing: 8) {
+            parameterInspectorTabButton(.brush)
+            parameterInspectorTabButton(.colorAdjustment)
+            parameterInspectorTabButton(.curves)
+        }
+    }
+
+    @ViewBuilder
+    private var parameterInspectorContent: some View {
+        if parameterInspectorTab == .colorAdjustment {
+            colorAdjustmentSection
+        } else if parameterInspectorTab == .curves {
+            curveAdjustmentSection
+        } else {
+            brushSection
+        }
+    }
+
+    @ViewBuilder
+    private var standardParameterAndLayerPanels: some View {
+        if usesCompactParameterInspectorLayout {
+            VStack(spacing: rightInspectorPanelSpacing) {
+                InspectorPanel(title: "") {
+                    compactParameterInspectorSection
+                }
+                .fixedSize(horizontal: false, vertical: true)
+
+                InspectorPanel(title: "图层", fillsAvailableHeight: true) {
+                    layersSection
+                }
+                .frame(
+                    minHeight: standardInspectorLayerMinimumHeight,
+                    maxHeight: .infinity,
+                    alignment: .top
+                )
+            }
+            .frame(maxHeight: .infinity, alignment: .top)
+        } else {
+            VSplitView {
+                InspectorPanel(title: "", fillsAvailableHeight: true) {
+                    parameterInspectorSection
+                }
+                .frame(
+                    minHeight: standardInspectorToolMinimumHeight,
+                    idealHeight: 390,
+                    maxHeight: .infinity,
+                    alignment: .top
+                )
+                .padding(.bottom, rightInspectorPanelSpacing / 2)
+
+                InspectorPanel(title: "图层", fillsAvailableHeight: true) {
+                    layersSection
+                }
+                .frame(
+                    minHeight: standardInspectorLayerMinimumHeight,
+                    idealHeight: 380,
+                    maxHeight: .infinity,
+                    alignment: .top
+                )
+                .padding(.top, rightInspectorPanelSpacing / 2)
+            }
+        }
+    }
+
+    private var usesCompactParameterInspectorLayout: Bool {
+        rightInspectorUsesCompactParameterLayout(
+            activeTool: viewModel.workspace.toolSession.activeTool,
+            isBrushTab: parameterInspectorTab == .brush,
+            usesTextureFillControls: isLassoFillToolActive && viewModel.lassoFillMode == .texture
+        )
     }
 
     private func parameterInspectorTabButton(_ tab: ParameterInspectorTab) -> some View {

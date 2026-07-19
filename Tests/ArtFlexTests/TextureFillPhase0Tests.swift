@@ -33,4 +33,33 @@ struct TextureFillPhase0Tests {
         #expect(!rightInspectorUsesTextureLibrary(activeTool: .eraser))
         #expect(!rightInspectorUsesTextureLibrary(activeTool: .blockReference))
     }
+
+    @Test
+    func shortToolParametersYieldSpaceToTheLayerPanel() {
+        #expect(rightInspectorUsesCompactParameterLayout(
+            activeTool: .lassoFill,
+            isBrushTab: true,
+            usesTextureFillControls: false
+        ))
+        #expect(rightInspectorUsesCompactParameterLayout(
+            activeTool: .linearGradient,
+            isBrushTab: true,
+            usesTextureFillControls: false
+        ))
+        #expect(!rightInspectorUsesCompactParameterLayout(
+            activeTool: .lassoFill,
+            isBrushTab: true,
+            usesTextureFillControls: true
+        ))
+        #expect(!rightInspectorUsesCompactParameterLayout(
+            activeTool: .brush,
+            isBrushTab: true,
+            usesTextureFillControls: false
+        ))
+        #expect(!rightInspectorUsesCompactParameterLayout(
+            activeTool: .linearGradient,
+            isBrushTab: false,
+            usesTextureFillControls: false
+        ))
+    }
 }
