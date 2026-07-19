@@ -3396,6 +3396,51 @@ struct RightInspectorView: View {
         VStack(alignment: .leading, spacing: topInspectorSectionSpacing) {
             tipDesignCanvas
 
+            if brushTipCanvasDisplayMode == .edit {
+                HStack(spacing: 8) {
+                    Text("笔头大小")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(Color.white.opacity(0.66))
+
+                    Button {
+                        tipEditorBrushSize = max(2, tipEditorBrushSize - 1)
+                    } label: {
+                        Image(systemName: "minus")
+                            .font(.system(size: 10, weight: .bold))
+                            .frame(width: 20, height: 20)
+                    }
+                    .buttonStyle(.borderless)
+                    .buttonTooltip("减小笔头 1 px")
+
+                    Slider(
+                        value: Binding(
+                            get: { Double(tipEditorBrushSize) },
+                            set: { tipEditorBrushSize = Float($0) }
+                        ),
+                        in: 2...128,
+                        step: 1
+                    )
+                    .accessibilityLabel("笔头大小")
+                    .accessibilityValue("\(Int(tipEditorBrushSize.rounded())) 像素")
+
+                    Button {
+                        tipEditorBrushSize = min(128, tipEditorBrushSize + 1)
+                    } label: {
+                        Image(systemName: "plus")
+                            .font(.system(size: 10, weight: .bold))
+                            .frame(width: 20, height: 20)
+                    }
+                    .buttonStyle(.borderless)
+                    .buttonTooltip("增大笔头 1 px")
+
+                    Text("\(Int(tipEditorBrushSize.rounded())) px")
+                        .font(.system(size: 11, weight: .semibold).monospacedDigit())
+                        .foregroundStyle(Color.white.opacity(0.88))
+                        .frame(width: 42, alignment: .trailing)
+                }
+                .frame(maxWidth: .infinity)
+            }
+
             HStack(spacing: topInspectorControlSpacing) {
                 compactToolButton(
                     systemImage: "checkmark",
@@ -4130,7 +4175,7 @@ struct RightInspectorView: View {
                 )
             }
         }
-        .frame(height: 168)
+        .frame(height: 132)
         .clipShape(RoundedRectangle(cornerRadius: 10))
         .overlay(
             RoundedRectangle(cornerRadius: 10)
