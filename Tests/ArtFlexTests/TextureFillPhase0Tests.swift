@@ -56,7 +56,7 @@ struct TextureFillPhase0Tests {
             isBrushTab: true,
             usesTextureFillControls: false
         ))
-        #expect(!rightInspectorUsesCompactParameterLayout(
+        #expect(rightInspectorUsesCompactParameterLayout(
             activeTool: .linearGradient,
             isBrushTab: false,
             usesTextureFillControls: false

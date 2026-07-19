@@ -200,7 +200,7 @@ func rightInspectorUsesCompactParameterLayout(
     isBrushTab: Bool,
     usesTextureFillControls: Bool
 ) -> Bool {
-    guard isBrushTab else { return false }
+    guard isBrushTab else { return true }
 
     switch activeTool {
     case .brush, .eraser, .smudge, .straightLine, .brightnessAdjust, .eyedropper, .perspective, .textureFill:
