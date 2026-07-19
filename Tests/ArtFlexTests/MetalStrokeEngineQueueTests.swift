@@ -183,17 +183,110 @@ struct MetalStrokeEngineQueueTests {
             return
         }
         let snapshot = try LayerTextureSerializer(metalContext: metalContext).snapshot(texture: texture)
+        var actualMinX = snapshot.width
+        var actualMinY = snapshot.height
+        var actualMaxX = -1
+        var actualMaxY = -1
         snapshot.pixelData.withUnsafeBytes { rawBuffer in
             let bytes = rawBuffer.bindMemory(to: UInt8.self)
             for y in 0..<snapshot.height {
                 for x in 0..<snapshot.width where bytes[(y * snapshot.bytesPerRow) + (x * 4) + 3] > 0 {
-                    #expect(x >= bounds.originX)
-                    #expect(y >= bounds.originY)
-                    #expect(x < bounds.originX + bounds.width)
-                    #expect(y < bounds.originY + bounds.height)
+                    actualMinX = min(actualMinX, x)
+                    actualMinY = min(actualMinY, y)
+                    actualMaxX = max(actualMaxX, x)
+                    actualMaxY = max(actualMaxY, y)
                 }
             }
         }
+        #expect(actualMaxX >= actualMinX)
+        #expect(actualMaxY >= actualMinY)
+        #expect(actualMinX >= bounds.originX)
+        #expect(actualMinY >= bounds.originY)
+        #expect(actualMaxX < bounds.originX + bounds.width)
+        #expect(actualMaxY < bounds.originY + bounds.height)
+    }
+
+    @Test
+    func commitJobBoundsContainLargeSizeJitterOutput() throws {
+        guard
+            let metalContext = MetalDeviceContext(),
+            let commandBuffer = metalContext.commandQueue.makeCommandBuffer()
+        else {
+            Issue.record("Metal unavailable")
+            return
+        }
+
+        let surfaceStore = StageOneLayerSurfaceStore()
+        var document = ArtDocument.stageOneDefault()
+        document.canvasSize = .init(width: 1024, height: 1024)
+        surfaceStore.prepareTextures(for: document, metal: metalContext)
+        let layerID = document.activeLayerID
+        let engine = try MetalStrokeEngine(
+            metalContext: metalContext,
+            layerSurfaceStore: surfaceStore
+        )
+        var brush = BrushSettings.stageOneDefault
+        brush.size = 300
+        brush.sizeJitterAmount = 1
+
+        engine.beginStrokeIfNeeded(
+            toolSession: ToolSessionState(activeTool: .brush, brush: brush, selectedColor: .black),
+            layerID: layerID
+        )
+        _ = engine.applyStroke(
+            StrokeDescriptor(
+                tool: .brush,
+                color: .black,
+                brush: brush,
+                points: [
+                    .init(x: 432, y: 539, pressure: 1),
+                    .init(x: 433, y: 539, pressure: 1)
+                ],
+                selectionShape: nil,
+                skipLeadingStamp: false
+            ),
+            to: layerID
+        )
+        engine.endStroke()
+        _ = engine.flushPendingStrokePackets(into: commandBuffer)
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+
+        var renderedBounds: BrushPixelBounds?
+        try engine.drainPendingBrushCommitJobs { job in
+            renderedBounds = job.renderedPixelBounds
+        }
+        let bounds = try #require(renderedBounds)
+
+        guard
+            let surfaceID = surfaceStore.surfaceID(for: layerID),
+            let texture = surfaceStore.texture(for: surfaceID)
+        else {
+            Issue.record("Texture unavailable")
+            return
+        }
+        let snapshot = try LayerTextureSerializer(metalContext: metalContext).snapshot(texture: texture)
+        var actualMinX = snapshot.width
+        var actualMinY = snapshot.height
+        var actualMaxX = -1
+        var actualMaxY = -1
+        snapshot.pixelData.withUnsafeBytes { rawBuffer in
+            let bytes = rawBuffer.bindMemory(to: UInt8.self)
+            for y in 0..<snapshot.height {
+                for x in 0..<snapshot.width where bytes[(y * snapshot.bytesPerRow) + (x * 4) + 3] > 0 {
+                    actualMinX = min(actualMinX, x)
+                    actualMinY = min(actualMinY, y)
+                    actualMaxX = max(actualMaxX, x)
+                    actualMaxY = max(actualMaxY, y)
+                }
+            }
+        }
+        #expect(actualMaxX >= actualMinX)
+        #expect(actualMaxY >= actualMinY)
+        #expect(actualMinX >= bounds.originX)
+        #expect(actualMinY >= bounds.originY)
+        #expect(actualMaxX < bounds.originX + bounds.width)
+        #expect(actualMaxY < bounds.originY + bounds.height)
     }
 
     @Test

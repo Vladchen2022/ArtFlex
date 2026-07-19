@@ -1157,6 +1157,7 @@ struct WorkspaceViewModelPixelHistoryTests {
         harness.viewModel.setBrushSize(72)
         harness.viewModel.setBrushScatterAmount(1)
         harness.viewModel.setBrushJitterAmount(1)
+        harness.viewModel.setBrushSizeJitterAmount(1)
         harness.viewModel.beginStrokeIfNeeded()
         harness.viewModel.applyStroke(samples: [
             .init(location: .init(x: 420, y: 430), pressure: 0.35),

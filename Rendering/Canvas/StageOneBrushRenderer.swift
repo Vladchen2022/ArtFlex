@@ -2300,7 +2300,7 @@ final class StageOneBrushRenderer {
         var maxY = -Double.greatestFiniteMagnitude
 
         for sample in samples {
-            let radius = opacityCapRadius(for: sample.point, stroke: stroke)
+            let radius = renderedRadius(for: sample, stroke: stroke)
             minX = min(minX, sample.point.x - radius)
             minY = min(minY, sample.point.y - radius)
             maxX = max(maxX, sample.point.x + radius)
@@ -3250,7 +3250,8 @@ final class StageOneBrushRenderer {
         )
     }
 
-    private func opacityCapRadius(for point: StrokePoint, stroke: StrokeDescriptor) -> Double {
+    private func renderedRadius(for sample: StampSample, stroke: StrokeDescriptor) -> Double {
+        let point = sample.point
         let effectivePressure = min(max(point.pressure, 0), 1)
         let sizePressure = max(effectivePressure, 0.01)
         let primarySizeResponse = min(max(stroke.brush.pressureSizeAmount, 0), 1)
@@ -3262,7 +3263,7 @@ final class StageOneBrushRenderer {
         let globalSizeFactor = stroke.brush.compoundBrush.enabled
             ? ((1 - globalSizeResponse) + (globalSizeResponse * curvedSizePressure))
             : 1
-        let sizeFactor = primarySizeFactor * globalSizeFactor
+        let sizeFactor = primarySizeFactor * globalSizeFactor * sample.sizeMultiplier
         return max(Double((stroke.brush.size * sizeFactor) / 2), 0.5)
     }
 
