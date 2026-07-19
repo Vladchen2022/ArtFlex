@@ -3941,11 +3941,12 @@ struct WorkspaceViewModelSafetyTests {
 
     @Test
     @MainActor
-    func bracketShortcutTargetsFocusedBrushTipEditorWithoutChangingMainBrushSize() throws {
+    func bracketShortcutTargetsVisibleBrushTipEditorWithoutRequiringCanvasFocus() throws {
         let harness = try BrushEditingBoundaryHarness()
         harness.viewModel.setBrushSize(42)
         harness.viewModel.setBrushTipEditorBrushSize(28)
-        harness.viewModel.setBrushTipCanvasFocused(true)
+        harness.viewModel.setBrushTipCanvasFocused(false)
+        harness.viewModel.setBrushTipEditorVisible(true)
 
         let increaseHandled = harness.viewModel.handleKeyDown(
             makeCanvasKeyEvent(
@@ -3961,7 +3962,7 @@ struct WorkspaceViewModelSafetyTests {
         #expect(harness.viewModel.brushTipEditorBrushSize == 33)
         #expect(harness.viewModel.workspace.toolSession.brush.size == 42)
 
-        harness.viewModel.setBrushTipCanvasFocused(false)
+        harness.viewModel.setBrushTipEditorVisible(false)
         let mainBrushHandled = harness.viewModel.handleKeyDown(
             makeCanvasKeyEvent(
                 type: .keyDown,

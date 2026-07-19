@@ -22,7 +22,7 @@ struct WindowKeyboardBridge: NSViewRepresentable {
             viewModel?.handleModifierFlagsChanged(event.modifierFlags) ?? false
         }
         self.shouldMonitorBrushSizeShortcut = { [weak viewModel] in
-            viewModel?.isBrushTipCanvasFocused ?? false
+            viewModel?.isBrushTipEditorVisible ?? false
         }
     }
 

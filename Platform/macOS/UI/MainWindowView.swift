@@ -32,7 +32,7 @@ struct MainWindowView: View {
                 keyUpHandler: handleKeyUp(_:),
                 flagsChangedHandler: handleModifierFlagsChanged(_:),
                 shouldMonitorBrushSizeShortcut: {
-                    activeKeyboardTarget.isBrushTipCanvasFocused
+                    activeKeyboardTarget.isBrushTipEditorVisible
                 }
             )
             .frame(width: 0, height: 0)

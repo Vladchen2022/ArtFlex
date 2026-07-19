@@ -1152,6 +1152,12 @@ struct RightInspectorView: View {
             Group {
                 if topInspectorTab == .tipShape {
                     tipShapeSection
+                        .onAppear {
+                            viewModel.setBrushTipEditorVisible(true)
+                        }
+                        .onDisappear {
+                            viewModel.setBrushTipEditorVisible(false)
+                        }
                 } else {
                     navigatorSection
                 }
