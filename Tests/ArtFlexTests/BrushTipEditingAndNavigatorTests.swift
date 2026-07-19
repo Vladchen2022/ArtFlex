@@ -5,6 +5,28 @@ import Testing
 
 struct BrushTipEditingAndNavigatorTests {
     @Test
+    @MainActor
+    func workspaceKeyboardBridgeDoesNotStealFocusFromBrushTipEditor() {
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 320, height: 240),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        let container = NSView(frame: window.contentView?.bounds ?? .zero)
+        let bridge = KeyboardBridgeView(frame: .zero)
+        let brushTipEditor = TestWorkspaceKeyboardFocusOwner(frame: .zero)
+        container.addSubview(bridge)
+        container.addSubview(brushTipEditor)
+        window.contentView = container
+
+        #expect(window.makeFirstResponder(brushTipEditor))
+        bridge.activateIfNeeded()
+
+        #expect(window.firstResponder === brushTipEditor)
+    }
+
+    @Test
     func brushSizeShortcutUsesTheSameProgressiveStepsAcrossEditors() {
         #expect(BrushSizeShortcut.step(for: 2) == 1)
         #expect(BrushSizeShortcut.step(for: 10) == 1)
@@ -119,4 +141,9 @@ struct BrushTipEditingAndNavigatorTests {
         )
         #expect(clipped.isEmpty)
     }
+}
+
+@MainActor
+private final class TestWorkspaceKeyboardFocusOwner: NSView, WorkspaceKeyboardFocusOwner {
+    override var acceptsFirstResponder: Bool { true }
 }

@@ -30,7 +30,10 @@ struct MainWindowView: View {
             WindowKeyboardBridge(
                 keyDownHandler: handleKeyDown(_:),
                 keyUpHandler: handleKeyUp(_:),
-                flagsChangedHandler: handleModifierFlagsChanged(_:)
+                flagsChangedHandler: handleModifierFlagsChanged(_:),
+                shouldMonitorBrushSizeShortcut: {
+                    activeKeyboardTarget.isBrushTipCanvasFocused
+                }
             )
             .frame(width: 0, height: 0)
         )

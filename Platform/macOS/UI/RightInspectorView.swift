@@ -589,7 +589,6 @@ struct RightInspectorView: View {
     @State private var showsBrushRandomControls = false
     @State private var showsPressureAdvancedControls = false
     @State private var tipPaintMode: TipPaintMode = .round
-    @State private var tipEditorBrushSize: Float = 28
     @State private var brushTipCanvasDisplayMode: BrushTipCanvasDisplayMode = .edit
     @State private var brushTipImportCandidate: BrushTipImportCandidate?
     @State private var presetShapeIndex = 0
@@ -3502,7 +3501,7 @@ struct RightInspectorView: View {
                 Button("方形画笔 (S)") { tipPaintMode = .square }
                 Button("橡皮擦 (E)") { tipPaintMode = .eraser }
             }
-            Section("画笔尺寸 · \(Int(tipEditorBrushSize.rounded())) px") {
+            Section("画笔尺寸 · \(Int(viewModel.brushTipEditorBrushSize.rounded())) px") {
                 Button("减小画笔 ([)") { adjustTipEditorBrushSize(by: -1) }
                 Button("增大画笔 (])") { adjustTipEditorBrushSize(by: 1) }
             }
@@ -3532,13 +3531,11 @@ struct RightInspectorView: View {
                 )
         }
         .menuStyle(.borderlessButton)
-        .buttonTooltip("笔尖编辑工具与变换 · \(Int(tipEditorBrushSize.rounded())) px · [ / ] 调整")
+        .buttonTooltip("笔尖编辑工具与变换 · \(Int(viewModel.brushTipEditorBrushSize.rounded())) px · [ / ] 调整")
     }
 
     private func adjustTipEditorBrushSize(by delta: Float) {
-        let direction: Float = delta == 0 ? 0 : (delta > 0 ? 1 : -1)
-        let step = BrushSizeShortcut.step(for: tipEditorBrushSize)
-        tipEditorBrushSize = min(max(2, tipEditorBrushSize + (direction * step)), 128)
+        viewModel.adjustBrushTipEditorBrushSize(by: delta)
     }
 
     private func effectivePrimaryTipSourceSemantic(for brush: BrushSettings) -> TipSourceSemantic {
@@ -4105,7 +4102,7 @@ struct RightInspectorView: View {
                             ),
                             fitImportedPreview: tipFitPreview,
                             paintMode: tipPaintMode,
-                            editorBrushSize: tipEditorBrushSize,
+                            editorBrushSize: viewModel.brushTipEditorBrushSize,
                             onRequestPaintModeShortcut: { mode in
                                 tipPaintMode = mode
                             },
@@ -7193,7 +7190,7 @@ private struct TipMaskCanvasView: NSViewRepresentable {
     }
 }
 
-private final class TipMaskEditorNSView: NSView {
+private final class TipMaskEditorNSView: NSView, WorkspaceKeyboardFocusOwner {
     weak var coordinator: TipMaskCanvasView.Coordinator?
 
     private var maskBytes = [UInt8](repeating: 0, count: tipMaskResolution * tipMaskResolution)
@@ -7241,7 +7238,11 @@ private final class TipMaskEditorNSView: NSView {
         editorBrushSize: Float
     ) {
         self.paintMode = paintMode
-        self.editorBrushSize = min(max(editorBrushSize, 2), 128)
+        let nextEditorBrushSize = min(max(editorBrushSize, 2), 128)
+        if self.editorBrushSize != nextEditorBrushSize {
+            self.editorBrushSize = nextEditorBrushSize
+            needsDisplay = true
+        }
 
         if syncToken != externalSyncToken {
             externalSyncToken = syncToken

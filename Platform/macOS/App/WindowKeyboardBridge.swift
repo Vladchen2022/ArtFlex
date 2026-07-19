@@ -1,10 +1,15 @@
 import AppKit
 import SwiftUI
 
+/// Marks an AppKit editor that must keep keyboard ownership while SwiftUI republishes workspace state.
+@MainActor
+protocol WorkspaceKeyboardFocusOwner: AnyObject {}
+
 struct WindowKeyboardBridge: NSViewRepresentable {
     private let keyDownEventHandler: (NSEvent) -> Bool
     private let keyUpEventHandler: (NSEvent) -> Bool
     private let flagsChangedEventHandler: (NSEvent) -> Bool
+    private let shouldMonitorBrushSizeShortcut: () -> Bool
 
     init(viewModel: WorkspaceViewModel) {
         self.keyDownEventHandler = { [weak viewModel] event in
@@ -16,16 +21,21 @@ struct WindowKeyboardBridge: NSViewRepresentable {
         self.flagsChangedEventHandler = { [weak viewModel] event in
             viewModel?.handleModifierFlagsChanged(event.modifierFlags) ?? false
         }
+        self.shouldMonitorBrushSizeShortcut = { [weak viewModel] in
+            viewModel?.isBrushTipCanvasFocused ?? false
+        }
     }
 
     init(
         keyDownHandler: @escaping (NSEvent) -> Bool,
         keyUpHandler: @escaping (NSEvent) -> Bool,
-        flagsChangedHandler: @escaping (NSEvent) -> Bool
+        flagsChangedHandler: @escaping (NSEvent) -> Bool,
+        shouldMonitorBrushSizeShortcut: @escaping () -> Bool = { false }
     ) {
         self.keyDownEventHandler = keyDownHandler
         self.keyUpEventHandler = keyUpHandler
         self.flagsChangedEventHandler = flagsChangedHandler
+        self.shouldMonitorBrushSizeShortcut = shouldMonitorBrushSizeShortcut
     }
 
     func makeNSView(context: Context) -> KeyboardBridgeView {
@@ -33,6 +43,7 @@ struct WindowKeyboardBridge: NSViewRepresentable {
         view.keyDownHandler = keyDownEventHandler
         view.keyUpHandler = keyUpEventHandler
         view.flagsChangedHandler = flagsChangedEventHandler
+        view.shouldMonitorBrushSizeShortcut = shouldMonitorBrushSizeShortcut
         return view
     }
 
@@ -40,6 +51,7 @@ struct WindowKeyboardBridge: NSViewRepresentable {
         nsView.keyDownHandler = keyDownEventHandler
         nsView.keyUpHandler = keyUpEventHandler
         nsView.flagsChangedHandler = flagsChangedEventHandler
+        nsView.shouldMonitorBrushSizeShortcut = shouldMonitorBrushSizeShortcut
         nsView.activateIfNeeded()
     }
 }
@@ -49,6 +61,7 @@ final class KeyboardBridgeView: NSView {
     var keyDownHandler: ((NSEvent) -> Bool)?
     var keyUpHandler: ((NSEvent) -> Bool)?
     var flagsChangedHandler: ((NSEvent) -> Bool)?
+    var shouldMonitorBrushSizeShortcut: (() -> Bool)?
     private var workspaceKeyDownMonitor: Any?
 
     override var acceptsFirstResponder: Bool { true }
@@ -116,6 +129,12 @@ final class KeyboardBridgeView: NSView {
                 return self.keyDownHandler?(event) == true ? nil : event
             }
 
+            if brushSizeShortcutDirection(for: event) != nil,
+               self.shouldMonitorBrushSizeShortcut?() == true {
+                guard self.shouldAllowWorkspaceShortcut(for: window.firstResponder) else { return event }
+                return self.keyDownHandler?(event) == true ? nil : event
+            }
+
             guard event.keyCode == 48, normalizedModifiers.isEmpty else { return event }
             guard self.shouldAllowWorkspaceShortcut(for: window.firstResponder) else { return event }
             return self.keyDownHandler?(event) == true ? nil : event
@@ -123,6 +142,9 @@ final class KeyboardBridgeView: NSView {
     }
 
     private func shouldPreserveCurrentFirstResponder(_ responder: Any?) -> Bool {
+        if responder is any WorkspaceKeyboardFocusOwner {
+            return true
+        }
         if let textView = responder as? NSTextView, textView.isEditable {
             return true
         }

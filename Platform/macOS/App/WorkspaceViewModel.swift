@@ -190,6 +190,7 @@ final class WorkspaceViewModel: ObservableObject {
     @Published private(set) var isFreeTransformDragging = false
     @Published private(set) var activeFreeTransformInteractionMode: FreeTransformInteractionMode?
     @Published private(set) var isBrushTipCanvasFocused = false
+    @Published private(set) var brushTipEditorBrushSize: Float = 28
     @Published private(set) var isColorBlocksPanelFocused = false
     @Published private(set) var brushTipDraftMaskData: Data?
     @Published private(set) var hasPendingBrushTipDraft = false
@@ -1760,6 +1761,16 @@ final class WorkspaceViewModel: ObservableObject {
         if focused {
             isColorBlocksPanelFocused = false
         }
+    }
+
+    func setBrushTipEditorBrushSize(_ size: Float) {
+        brushTipEditorBrushSize = min(max(size, 2), 128)
+    }
+
+    func adjustBrushTipEditorBrushSize(by delta: Float) {
+        let direction: Float = delta == 0 ? 0 : (delta > 0 ? 1 : -1)
+        let step = BrushSizeShortcut.step(for: brushTipEditorBrushSize)
+        setBrushTipEditorBrushSize(brushTipEditorBrushSize + (direction * step))
     }
 
     func setColorBlocksPanelFocused(_ focused: Bool) {
@@ -10270,7 +10281,11 @@ final class WorkspaceViewModel: ObservableObject {
         }
 
         if let direction = brushSizeShortcutDirection(for: event) {
-            adjustBrushSize(by: direction)
+            if isBrushTipCanvasFocused {
+                adjustBrushTipEditorBrushSize(by: direction)
+            } else {
+                adjustBrushSize(by: direction)
+            }
             return true
         }
 

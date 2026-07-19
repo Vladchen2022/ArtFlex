@@ -3938,6 +3938,44 @@ struct WorkspaceViewModelSafetyTests {
         harness.viewModel.fitCanvasToWindow()
         #expect(harness.viewModel.workspace.viewport == .stageOneDefault)
     }
+
+    @Test
+    @MainActor
+    func bracketShortcutTargetsFocusedBrushTipEditorWithoutChangingMainBrushSize() throws {
+        let harness = try BrushEditingBoundaryHarness()
+        harness.viewModel.setBrushSize(42)
+        harness.viewModel.setBrushTipEditorBrushSize(28)
+        harness.viewModel.setBrushTipCanvasFocused(true)
+
+        let increaseHandled = harness.viewModel.handleKeyDown(
+            makeCanvasKeyEvent(
+                type: .keyDown,
+                characters: "]",
+                charactersIgnoringModifiers: "]",
+                modifiers: [],
+                keyCode: 30
+            )
+        )
+
+        #expect(increaseHandled)
+        #expect(harness.viewModel.brushTipEditorBrushSize == 33)
+        #expect(harness.viewModel.workspace.toolSession.brush.size == 42)
+
+        harness.viewModel.setBrushTipCanvasFocused(false)
+        let mainBrushHandled = harness.viewModel.handleKeyDown(
+            makeCanvasKeyEvent(
+                type: .keyDown,
+                characters: "[",
+                charactersIgnoringModifiers: "[",
+                modifiers: [],
+                keyCode: 33
+            )
+        )
+
+        #expect(mainBrushHandled)
+        #expect(harness.viewModel.brushTipEditorBrushSize == 33)
+        #expect(harness.viewModel.workspace.toolSession.brush.size == 37)
+    }
 }
 
 @MainActor
