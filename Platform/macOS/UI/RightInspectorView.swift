@@ -6673,6 +6673,7 @@ private struct InspectorPanel<Content: View>: View {
                         .stroke(Color.white.opacity(0.06), lineWidth: 1)
                 )
         )
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
 }
 
