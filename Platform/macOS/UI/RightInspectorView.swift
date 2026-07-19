@@ -15,6 +15,8 @@ private let topInspectorPanelPadding: CGFloat = 12
 private let rightInspectorHorizontalPadding: CGFloat = 12
 private let rightInspectorColumnSpacing: CGFloat = 12
 private let inspectorPanelPadding: CGFloat = 12
+private let standardInspectorToolMinimumHeight: CGFloat = 200
+private let standardInspectorLayerMinimumHeight: CGFloat = 180
 
 private enum BrushParameterSliderScale {
     case linear
@@ -178,6 +180,10 @@ func rightInspectorColumnWidth(totalWidth: CGFloat) -> CGFloat {
         0,
         (totalWidth - (rightInspectorHorizontalPadding * 2) - rightInspectorColumnSpacing) / 2
     )
+}
+
+func rightInspectorContentHeight(totalHeight: CGFloat) -> CGFloat {
+    max(0, totalHeight - (rightInspectorHorizontalPadding * 2))
 }
 
 func rightInspectorUsesStructuredBlockReferenceWorkspace(activeTool: ToolKind) -> Bool {
@@ -682,8 +688,8 @@ struct RightInspectorView: View {
                     blockReferenceWorkspaceInspector(size: proxy.size)
                 } else {
                     let columnWidth = rightInspectorColumnWidth(totalWidth: proxy.size.width)
-                    ScrollView(.vertical, showsIndicators: true) {
-                        HStack(alignment: .top, spacing: rightInspectorColumnSpacing) {
+                    let contentHeight = rightInspectorContentHeight(totalHeight: proxy.size.height)
+                    HStack(alignment: .top, spacing: rightInspectorColumnSpacing) {
                         VStack(spacing: 12) {
                             InspectorPanel(title: "参考图") {
                                 referenceImageSection
@@ -702,7 +708,7 @@ struct RightInspectorView: View {
                             .frame(maxHeight: .infinity, alignment: .top)
                         }
                         .frame(width: columnWidth)
-                        .frame(maxHeight: .infinity, alignment: .top)
+                        .frame(height: contentHeight, alignment: .top)
 
                         VStack(spacing: 12) {
                             tipNavigatorPanel(width: columnWidth)
@@ -718,21 +724,32 @@ struct RightInspectorView: View {
                                 radius: 12
                             )
 
-                            InspectorPanel(title: "") {
-                                parameterInspectorSection
-                            }
+                            VSplitView {
+                                InspectorPanel(title: "", fillsAvailableHeight: true) {
+                                    parameterInspectorSection
+                                }
+                                .frame(
+                                    minHeight: standardInspectorToolMinimumHeight,
+                                    idealHeight: 390,
+                                    maxHeight: .infinity,
+                                    alignment: .top
+                                )
 
-                            InspectorPanel(title: "图层") {
-                                layersSection
+                                InspectorPanel(title: "图层", fillsAvailableHeight: true) {
+                                    layersSection
+                                }
+                                .frame(
+                                    minHeight: standardInspectorLayerMinimumHeight,
+                                    idealHeight: 380,
+                                    maxHeight: .infinity,
+                                    alignment: .top
+                                )
                             }
-                            .frame(maxHeight: .infinity, alignment: .top)
                         }
                         .frame(width: columnWidth)
-                        .frame(maxHeight: .infinity, alignment: .top)
+                        .frame(height: contentHeight, alignment: .top)
                     }
-                        .padding(rightInspectorHorizontalPadding)
-                        .frame(maxWidth: .infinity, minHeight: proxy.size.height, alignment: .top)
-                    }
+                    .padding(rightInspectorHorizontalPadding)
                     .frame(width: proxy.size.width, height: proxy.size.height, alignment: .top)
                 }
             }
@@ -834,16 +851,26 @@ struct RightInspectorView: View {
                 parameterInspectorTabButton(.curves)
             }
 
-            Group {
-                if parameterInspectorTab == .colorAdjustment {
-                    colorAdjustmentSection
-                } else if parameterInspectorTab == .curves {
-                    curveAdjustmentSection
-                } else {
-                    brushSection
-                }
+            if parameterInspectorTab == .brush && usesFullBrushParameterControls {
+                pinnedBrushCommonControls
             }
+
+            ScrollView(.vertical, showsIndicators: true) {
+                Group {
+                    if parameterInspectorTab == .colorAdjustment {
+                        colorAdjustmentSection
+                    } else if parameterInspectorTab == .curves {
+                        curveAdjustmentSection
+                    } else {
+                        brushSection
+                    }
+                }
+                .padding(.trailing, 3)
+                .frame(maxWidth: .infinity, alignment: .topLeading)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
     private func parameterInspectorTabButton(_ tab: ParameterInspectorTab) -> some View {
@@ -2135,6 +2162,72 @@ struct RightInspectorView: View {
         }
     }
 
+    private var pinnedBrushCommonControls: some View {
+        let brush = viewModel.workspace.toolSession.brush
+        let compoundEnabled = brush.compoundBrush.enabled
+
+        return VStack(alignment: .leading, spacing: 7) {
+            Text("常用")
+                .font(.system(size: 10.5, weight: .bold))
+                .foregroundStyle(Color.white.opacity(0.72))
+
+            BrushParameterSliderRow(
+                title: "间距",
+                value: Double(brush.spacingPercent),
+                range: 1...1_000,
+                scale: .logarithmic,
+                formatter: { "\(Int($0.rounded()))%" },
+                onPreview: { viewModel.setBrushSpacingPercent(Float($0)) },
+                onCommit: { viewModel.setBrushSpacingPercent(Float($0)) }
+            )
+
+            BrushParameterSliderRow(
+                title: "尺寸随机",
+                value: Double(brush.sizeJitterAmount * 100),
+                range: 0...100,
+                formatter: { "\(Int($0.rounded()))%" },
+                onPreview: { viewModel.setBrushSizeJitterAmount(Float($0 / 100)) },
+                onCommit: { viewModel.setBrushSizeJitterAmount(Float($0 / 100)) }
+            )
+
+            BrushParameterSliderRow(
+                title: compoundEnabled ? "整体尺寸" : "尺寸压感",
+                value: Double(viewModel.displayedPressureSizeAmount * 100),
+                range: 0...100,
+                formatter: { "\(Int($0.rounded()))%" },
+                onPreview: { viewModel.setPressureSizeAmount(Float($0 / 100)) },
+                onCommit: { viewModel.setPressureSizeAmount(Float($0 / 100)) }
+            )
+
+            BrushParameterSliderRow(
+                title: compoundEnabled ? "整体透明" : "不透明压感",
+                value: Double(viewModel.displayedPressureOpacityAmount * 100),
+                range: 0...100,
+                formatter: { "\(Int($0.rounded()))%" },
+                onPreview: { viewModel.setPressureOpacityAmount(Float($0 / 100)) },
+                onCommit: { viewModel.setPressureOpacityAmount(Float($0 / 100)) }
+            )
+
+            BrushParameterSliderRow(
+                title: "杂色",
+                value: Double(viewModel.displayedPaintJitterAmount * 100),
+                range: 0...100,
+                formatter: { "\(Int($0.rounded()))%" },
+                onPreview: { viewModel.setPaintJitterAmount(Float($0 / 100)) },
+                onCommit: { viewModel.setPaintJitterAmount(Float($0 / 100)) }
+            )
+        }
+        .padding(8)
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(Color.black.opacity(0.12))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(Color.white.opacity(0.07), lineWidth: 1)
+        )
+    }
+
     private var fullBrushParameterControls: some View {
         let brush = viewModel.workspace.toolSession.brush
         let compoundEnabled = brush.compoundBrush.enabled
@@ -2188,16 +2281,6 @@ struct RightInspectorView: View {
             brushParameterSectionHeader("笔尖排布")
 
             BrushParameterSliderRow(
-                title: "间距",
-                value: Double(brush.spacingPercent),
-                range: 1...1_000,
-                scale: .logarithmic,
-                formatter: { "\(Int($0.rounded()))%" },
-                onPreview: { viewModel.setBrushSpacingPercent(Float($0)) },
-                onCommit: { viewModel.setBrushSpacingPercent(Float($0)) }
-            )
-
-            BrushParameterSliderRow(
                 title: "位置散布",
                 value: Double(brush.scatterAmount * 50),
                 range: 0...250,
@@ -2229,24 +2312,15 @@ struct RightInspectorView: View {
                 .foregroundStyle(Color.white.opacity(0.78))
             }
 
-            brushDisclosureButton(
-                title: "随机变化",
-                isExpanded: showsBrushRandomControls
-            ) {
-                showsBrushRandomControls.toggle()
-            }
+            if brush.tipShape.hasVisibleRotation {
+                brushDisclosureButton(
+                    title: "角度随机",
+                    isExpanded: showsBrushRandomControls
+                ) {
+                    showsBrushRandomControls.toggle()
+                }
 
-            if showsBrushRandomControls {
-                BrushParameterSliderRow(
-                    title: "尺寸随机",
-                    value: Double(brush.sizeJitterAmount * 100),
-                    range: 0...100,
-                    formatter: { "\(Int($0.rounded()))%" },
-                    onPreview: { viewModel.setBrushSizeJitterAmount(Float($0 / 100)) },
-                    onCommit: { viewModel.setBrushSizeJitterAmount(Float($0 / 100)) }
-                )
-
-                if brush.tipShape.hasVisibleRotation {
+                if showsBrushRandomControls {
                     BrushParameterSliderRow(
                         title: "角度随机",
                         value: Double(brush.angleJitterAmount * 180),
@@ -2262,24 +2336,6 @@ struct RightInspectorView: View {
             brushParameterSectionHeader(
                 compoundEnabled ? "整体压力响应" : "压力响应",
                 detail: compoundEnabled ? "A/B 共用当前曲线，独立响应请进入组合编辑器" : nil
-            )
-
-            BrushParameterSliderRow(
-                title: compoundEnabled ? "整体尺寸" : "尺寸压感",
-                value: Double(viewModel.displayedPressureSizeAmount * 100),
-                range: 0...100,
-                formatter: { "\(Int($0.rounded()))%" },
-                onPreview: { viewModel.setPressureSizeAmount(Float($0 / 100)) },
-                onCommit: { viewModel.setPressureSizeAmount(Float($0 / 100)) }
-            )
-
-            BrushParameterSliderRow(
-                title: compoundEnabled ? "整体透明" : "不透明压感",
-                value: Double(viewModel.displayedPressureOpacityAmount * 100),
-                range: 0...100,
-                formatter: { "\(Int($0.rounded()))%" },
-                onPreview: { viewModel.setPressureOpacityAmount(Float($0 / 100)) },
-                onCommit: { viewModel.setPressureOpacityAmount(Float($0 / 100)) }
             )
 
             if !compoundEnabled {
@@ -2345,15 +2401,6 @@ struct RightInspectorView: View {
 
             brushSectionDivider
             brushParameterSectionHeader("颜料与叠加")
-
-            BrushParameterSliderRow(
-                title: "杂色",
-                value: Double(viewModel.displayedPaintJitterAmount * 100),
-                range: 0...100,
-                formatter: { "\(Int($0.rounded()))%" },
-                onPreview: { viewModel.setPaintJitterAmount(Float($0 / 100)) },
-                onCommit: { viewModel.setPaintJitterAmount(Float($0 / 100)) }
-            )
 
             Picker(
                 "叠加方式",

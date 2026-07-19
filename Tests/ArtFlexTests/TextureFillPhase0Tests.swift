@@ -6,8 +6,10 @@ struct TextureFillPhase0Tests {
     func inspectorColumnsStayEqualAtTheFixedSidebarWidth() {
         #expect(rightInspectorColumnWidth(totalWidth: 560) == 262)
         #expect(topInspectorPanelContentWidth(panelWidth: 262) == 238)
+        #expect(rightInspectorContentHeight(totalHeight: 1_000) == 976)
         #expect(rightInspectorColumnWidth(totalWidth: 20) == 0)
         #expect(topInspectorPanelContentWidth(panelWidth: 20) == 0)
+        #expect(rightInspectorContentHeight(totalHeight: 20) == 0)
     }
 
     @Test
