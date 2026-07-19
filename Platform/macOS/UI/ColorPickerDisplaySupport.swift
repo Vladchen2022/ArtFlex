@@ -1,6 +1,45 @@
 import CoreGraphics
 import Foundation
 
+enum ColorHueWheelGeometry {
+    static func hue(at location: CGPoint, center: CGPoint) -> Float {
+        let radians = atan2(location.y - center.y, location.x - center.x)
+        var degrees = Float(radians * 180 / .pi)
+        if degrees < 0 {
+            degrees += 360
+        }
+        return degrees
+    }
+
+    static func indicatorCenter(hue: Float, center: CGPoint, radius: CGFloat) -> CGPoint {
+        let wrappedHue = hue.truncatingRemainder(dividingBy: 360)
+        let normalizedHue = wrappedHue < 0 ? wrappedHue + 360 : wrappedHue
+        let radians = CGFloat(normalizedHue) * .pi / 180
+        return CGPoint(
+            x: center.x + cos(radians) * radius,
+            y: center.y + sin(radians) * radius
+        )
+    }
+
+    static func innerSquareSide(diameter: CGFloat, ringWidth: CGFloat, gap: CGFloat) -> CGFloat {
+        let availableInnerDiameter = max(0, diameter - (ringWidth + gap) * 2)
+        return availableInnerDiameter / sqrt(2)
+    }
+
+    static func containsRingPoint(
+        _ location: CGPoint,
+        center: CGPoint,
+        diameter: CGFloat,
+        ringWidth: CGFloat,
+        tolerance: CGFloat = 4
+    ) -> Bool {
+        let distance = hypot(location.x - center.x, location.y - center.y)
+        let outerRadius = diameter / 2 + tolerance
+        let innerRadius = max(0, diameter / 2 - ringWidth - tolerance)
+        return distance >= innerRadius && distance <= outerRadius
+    }
+}
+
 @MainActor
 final class ColorPickerDisplayImageCache {
     static let shared = ColorPickerDisplayImageCache()

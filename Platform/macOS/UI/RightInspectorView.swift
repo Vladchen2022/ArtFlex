@@ -6234,7 +6234,8 @@ private struct ColorSectionView: View {
                     grayscaleStageSection
                 }
             }
-            .frame(height: 196)
+            .aspectRatio(1, contentMode: .fit)
+            .frame(maxWidth: .infinity)
             .background(
                 RoundedRectangle(cornerRadius: 12)
                     .fill(Color.black.opacity(0.16))
@@ -6409,14 +6410,31 @@ private struct ColorSectionView: View {
 
     private var pickerStageSection: some View {
         GeometryReader { geo in
-            let inset = 5.0
-            let hueStripWidth = 14.0
-            let gap = 5.0
-            let availableHeight = max(80.0, geo.size.height - inset * 2)
-            let squareSize = max(80.0, min(availableHeight, geo.size.width - inset * 2 - hueStripWidth - gap))
-            let stripHeight = max(80.0, squareSize - 2.0)
+            let diameter = max(100.0, min(geo.size.width, geo.size.height))
+            let ringWidth = min(6.0, max(14.0 / 3.0, diameter * (0.0475 * 2.0 / 3.0)))
+            let squareSize = max(
+                52.0,
+                ColorHueWheelGeometry.innerSquareSide(
+                    diameter: diameter,
+                    ringWidth: ringWidth,
+                    gap: 4
+                )
+            )
 
-            HStack(spacing: gap) {
+            ZStack {
+                ColorHueRingPickerView(
+                    hue: proxy.colorPanel.pickerHue,
+                    ringWidth: ringWidth,
+                    onUpdateHue: { hue in
+                        var updated = proxy.colorPanel
+                        updated.pickerHue = ColorBlocksEngine.wrapHue(hue)
+                        proxy.colorPanel = updated
+                        proxy.selectedColor = ColorBlocksEngine.pickerColor(from: updated)
+                    },
+                    onDragEnded: { viewModel.setColorPickerHue($0) }
+                )
+                .frame(width: diameter, height: diameter)
+
                 ColorSVPickerView(
                     panel: proxy.colorPanel,
                     onUpdatePoint: { x, y in
@@ -6434,20 +6452,13 @@ private struct ColorSectionView: View {
                     }
                 )
                 .frame(width: squareSize, height: squareSize)
-
-                ColorHueStripView(
-                    hue: proxy.colorPanel.pickerHue,
-                    onUpdateHue: { hue in
-                        var updated = proxy.colorPanel
-                        updated.pickerHue = ColorBlocksEngine.wrapHue(hue)
-                        proxy.colorPanel = updated
-                        proxy.selectedColor = ColorBlocksEngine.pickerColor(from: updated)
-                    },
-                    onDragEnded: { viewModel.setColorPickerHue($0) }
+                .overlay(
+                    Rectangle()
+                        .stroke(Color.white.opacity(0.18), lineWidth: 1)
+                        .allowsHitTesting(false)
                 )
-                .frame(width: hueStripWidth, height: stripHeight)
             }
-            .frame(width: squareSize + gap + hueStripWidth, height: squareSize, alignment: .center)
+            .frame(width: diameter, height: diameter, alignment: .center)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
         }
         .padding(5)
@@ -7187,10 +7198,10 @@ final class ColorSVPickerNSView: NSView {
         let displayY = isDragging ? CGFloat(localY) : CGFloat(panel.pickerY)
         let cx = displayX * bounds.width
         let cy = displayY * bounds.height
-        let r: CGFloat = 6
+        let r: CGFloat = 2
         let circle = CGRect(x: cx - r, y: cy - r, width: r * 2, height: r * 2)
         ctx.setStrokeColor(NSColor.white.cgColor)
-        ctx.setLineWidth(2)
+        ctx.setLineWidth(0.75)
         ctx.strokeEllipse(in: circle)
         ctx.setShadow(offset: CGSize(width: 0, height: -1), blur: 2, color: NSColor.black.withAlphaComponent(0.35).cgColor)
     }

@@ -4,6 +4,45 @@ import Testing
 
 struct QuickColorPickerHUDTests {
     @Test
+    func hueWheelMapsCardinalDirectionsClockwise() {
+        let center = CGPoint(x: 50, y: 50)
+
+        #expect(abs(ColorHueWheelGeometry.hue(at: CGPoint(x: 100, y: 50), center: center) - 0) < 0.001)
+        #expect(abs(ColorHueWheelGeometry.hue(at: CGPoint(x: 50, y: 100), center: center) - 90) < 0.001)
+        #expect(abs(ColorHueWheelGeometry.hue(at: CGPoint(x: 0, y: 50), center: center) - 180) < 0.001)
+        #expect(abs(ColorHueWheelGeometry.hue(at: CGPoint(x: 50, y: 0), center: center) - 270) < 0.001)
+    }
+
+    @Test
+    func hueWheelIndicatorAndInnerSquareUseMatchingGeometry() {
+        let center = CGPoint(x: 90, y: 90)
+        let indicator = ColorHueWheelGeometry.indicatorCenter(hue: 90, center: center, radius: 80)
+        let squareSide = ColorHueWheelGeometry.innerSquareSide(diameter: 180, ringWidth: 18, gap: 4)
+
+        #expect(abs(indicator.x - 90) < 0.001)
+        #expect(abs(indicator.y - 170) < 0.001)
+        #expect(abs(squareSide * sqrt(2) - 136) < 0.001)
+    }
+
+    @Test
+    func hueWheelHitTestingAcceptsRingAndRejectsCenter() {
+        let center = CGPoint(x: 90, y: 90)
+
+        #expect(ColorHueWheelGeometry.containsRingPoint(
+            CGPoint(x: 170, y: 90),
+            center: center,
+            diameter: 180,
+            ringWidth: 18
+        ))
+        #expect(!ColorHueWheelGeometry.containsRingPoint(
+            center,
+            center: center,
+            diameter: 180,
+            ringWidth: 18
+        ))
+    }
+
+    @Test
     func steppedSliderGuardRejectsDegenerateRanges() {
         #expect(quickColorPickerCanUseSteppedSlider(range: 1...1, step: 1) == false)
         #expect(quickColorPickerCanUseSteppedSlider(range: 0...0, step: 0.01) == false)

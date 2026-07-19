@@ -35,19 +35,25 @@ struct QuickColorPickerHUD: View {
     @State private var previewPanel: ColorPanelState?
 
     private var hudSize: CGSize {
-        let baseHeight = (hudPadding * 2) + 18 + 8 + squareSize.height
+        let baseHeight = (hudPadding * 2) + 18 + 8 + pickerDiameter
         let selectionSliderHeight: CGFloat = state.recentBrushSelectionLimit > 0 ? 28 : 0
         let adjustmentSliderCount: CGFloat = state.recentBrushSelectionLimit > 0 ? 3 : 0
         let adjustmentSliderHeight: CGFloat = adjustmentSliderCount * 28
+        let sliderBackdropPaddingHeight: CGFloat = state.recentBrushSelectionLimit > 0
+            ? sliderBackdropVerticalPadding * 2
+            : 0
         return CGSize(
             width: 198,
-            height: baseHeight + selectionSliderHeight + adjustmentSliderHeight
+            height: baseHeight
+                + selectionSliderHeight
+                + adjustmentSliderHeight
+                + sliderBackdropPaddingHeight
         )
     }
-    private let squareSize = CGSize(width: 144, height: 144)
-    private let hueStripWidth: CGFloat = 16
+    private let pickerDiameter: CGFloat = 176
     private let hudPadding: CGFloat = 10
     private let viewportInset: CGFloat = 12
+    private let sliderBackdropVerticalPadding: CGFloat = 6
 
     var body: some View {
         let anchor = viewportPoint(for: state.anchorPoint)
@@ -70,19 +76,36 @@ struct QuickColorPickerHUD: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 
-            HStack(alignment: .top, spacing: 10) {
+            let ringWidth = min(
+                6.0,
+                max(14.0 / 3.0, pickerDiameter * (0.0475 * 2.0 / 3.0))
+            )
+            let squareSide = max(
+                52.0,
+                ColorHueWheelGeometry.innerSquareSide(
+                    diameter: pickerDiameter,
+                    ringWidth: ringWidth,
+                    gap: 4
+                )
+            )
+
+            ZStack {
+                ColorHueRingPickerView(
+                    hue: displayedPanel.pickerHue,
+                    ringWidth: ringWidth,
+                    onUpdateHue: updatePreviewHue,
+                    onDragEnded: updatePreviewHue
+                )
+                .frame(width: pickerDiameter, height: pickerDiameter)
+
                 QuickColorPickerSVSquare(
                     panel: displayedPanel,
                     onSetPoint: updatePreviewPoint
                 )
-                .frame(width: squareSize.width, height: squareSize.height)
-
-                QuickColorPickerHueStrip(
-                    hue: displayedPanel.pickerHue,
-                    onSetHue: updatePreviewHue
-                )
-                .frame(width: hueStripWidth, height: squareSize.height)
+                .frame(width: squareSide, height: squareSide)
             }
+            .frame(maxWidth: .infinity)
+            .frame(height: pickerDiameter)
 
             if state.recentBrushSelectionLimit > 0 {
                 VStack(alignment: .leading, spacing: 6) {
@@ -131,6 +154,18 @@ struct QuickColorPickerHUD: View {
                         onSetRecentBrushSaturation(Float(value))
                     }
                 }
+                .padding(.horizontal, 6)
+                .padding(.vertical, sliderBackdropVerticalPadding)
+                .background(
+                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                        .fill(Color.black.opacity(0.72))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                        .stroke(Color.white.opacity(0.16), lineWidth: 1)
+                        .allowsHitTesting(false)
+                )
+                .shadow(color: Color.black.opacity(0.28), radius: 2, x: 0, y: 1)
             }
         }
         .padding(hudPadding)
@@ -343,21 +378,21 @@ private struct QuickColorPickerSVSquare: View {
                         .resizable()
                         .interpolation(.high)
                         .scaledToFill()
-                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        .clipShape(Rectangle())
                 } else {
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    Rectangle()
                         .fill(Color.clear)
                 }
 
                 Circle()
-                    .strokeBorder(Color.white, lineWidth: 2)
+                    .strokeBorder(Color.white, lineWidth: 0.75)
                     .background(Circle().fill(Color.black.opacity(0.18)))
-                    .frame(width: 16, height: 16)
+                    .frame(width: 4, height: 4)
                     .position(
                         x: CGFloat(displayX) * geometry.size.width,
                         y: CGFloat(displayY) * geometry.size.height
                     )
-                    .shadow(color: .black.opacity(0.3), radius: 2, x: 0, y: 1)
+                    .shadow(color: .black.opacity(0.45), radius: 0.6, x: 0, y: 0.5)
             }
             .contentShape(Rectangle())
             .gesture(
@@ -415,75 +450,6 @@ private struct QuickColorPickerSVImageKey: Hashable, Sendable {
         saturation = Int(panel.pickerSaturation.rounded())
         lightingHue = Int(panel.lightingHue.rounded())
         lightingStrength = Int(panel.lightingStrength.rounded())
-    }
-}
-
-private struct QuickColorPickerHueStrip: View {
-    let hue: Float
-    let onSetHue: (Float) -> Void
-
-    @State private var localHue: Float = 0
-    @State private var isDragging = false
-
-    private var gradientStops: [Gradient.Stop] {
-        let stopCount = 25
-        return (0..<stopCount).map { index in
-            let t = Double(index) / Double(max(stopCount - 1, 1))
-            let hsv = HSVColor(h: Float(t * 360.0), s: 1, v: 1)
-            let rgb = ColorBlocksEngine.hsvToRgb(hsv)
-            return Gradient.Stop(
-                color: Color(
-                    red: Double(rgb.red),
-                    green: Double(rgb.green),
-                    blue: Double(rgb.blue),
-                    opacity: 1
-                ),
-                location: t
-            )
-        }
-    }
-
-    var body: some View {
-        let displayHue = isDragging ? localHue : hue
-
-        GeometryReader { geometry in
-            ZStack(alignment: .top) {
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .fill(
-                        LinearGradient(
-                            gradient: Gradient(stops: gradientStops),
-                            startPoint: .top,
-                            endPoint: .bottom
-                        )
-                    )
-
-                Capsule()
-                    .strokeBorder(Color.white, lineWidth: 2)
-                    .background(Capsule().fill(Color.black.opacity(0.18)))
-                    .frame(width: geometry.size.width + 6, height: 8)
-                    .position(
-                        x: geometry.size.width / 2,
-                        y: CGFloat(min(max(displayHue / 360, 0), 1)) * geometry.size.height
-                    )
-                    .shadow(color: .black.opacity(0.3), radius: 2, x: 0, y: 1)
-            }
-            .contentShape(Rectangle())
-            .gesture(
-                DragGesture(minimumDistance: 0)
-                    .onChanged { value in
-                        let normalizedY = min(max(value.location.y / geometry.size.height, 0), 1)
-                        let newHue = Float(normalizedY) * 360
-                        isDragging = true
-                        localHue = newHue
-                        onSetHue(newHue)
-                    }
-                    .onEnded { value in
-                        let normalizedY = min(max(value.location.y / geometry.size.height, 0), 1)
-                        onSetHue(Float(normalizedY) * 360)
-                        isDragging = false
-                    }
-            )
-        }
     }
 }
 
