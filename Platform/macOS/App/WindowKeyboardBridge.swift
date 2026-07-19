@@ -60,7 +60,7 @@ final class KeyboardBridgeView: NSView {
     }
 
     override func keyDown(with event: NSEvent) {
-        if let delta = brushSizeShortcutDelta(for: event) {
+        if let delta = brushSizeShortcutDirection(for: event) {
             activeStrokeCaptureView()?.previewAdjustBrushSize(by: delta)
         }
         if keyDownHandler?(event) == true {
@@ -140,17 +140,6 @@ final class KeyboardBridgeView: NSView {
         return true
     }
 
-    private func brushSizeShortcutDelta(for event: NSEvent) -> Float? {
-        switch event.charactersIgnoringModifiers {
-        case "[":
-            return -1
-        case "]":
-            return 1
-        default:
-            return nil
-        }
-    }
-
     private func activeStrokeCaptureView() -> StrokeCaptureMTKView? {
         guard let rootView = window?.contentView else {
             return nil
@@ -167,6 +156,30 @@ final class KeyboardBridgeView: NSView {
                 return strokeView
             }
         }
+        return nil
+    }
+}
+
+func brushSizeShortcutDirection(for event: NSEvent) -> Float? {
+    let modifiers = event.modifierFlags.intersection([.command, .control, .option, .shift])
+    guard modifiers.isEmpty else { return nil }
+
+    // ANSI physical positions keep the shortcut stable across input methods.
+    switch event.keyCode {
+    case 33:
+        return -1
+    case 30:
+        return 1
+    default:
+        break
+    }
+
+    switch event.charactersIgnoringModifiers {
+    case "[":
+        return -1
+    case "]":
+        return 1
+    default:
         return nil
     }
 }

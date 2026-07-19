@@ -2313,7 +2313,7 @@ final class StrokeCaptureMTKView: MTKView {
         guard isBrushLikeToolActive() else { return }
         let currentSize = isAdjustingBrushSizePreview ? displayBrushSize : brushSize
         let direction: Float = delta == 0 ? 0 : (delta > 0 ? 1 : -1)
-        let step = brushSizeShortcutStep(for: currentSize)
+        let step = BrushSizeShortcut.step(for: currentSize)
         displayBrushSize = max(1, currentSize + (direction * step))
         isAdjustingBrushSizePreview = true
         brushSizePreviewExpiresAtNs = DispatchTime.now().uptimeNanoseconds + UInt64(brushSizePreviewSettleDelay * 1_000_000_000)
@@ -2327,15 +2327,6 @@ final class StrokeCaptureMTKView: MTKView {
             brushStrokeLogger.debug("[brush-size] modelBrushSize=\(self.brushSize, privacy: .public)")
             brushStrokeLogger.debug("[brush-size] previewState=local")
         }
-    }
-
-    private func brushSizeShortcutStep(for size: Float) -> Float {
-        if size <= 10 { return 1 }
-        if size <= 50 { return 5 }
-        if size <= 100 { return 10 }
-        if size <= 200 { return 25 }
-        if size <= 300 { return 50 }
-        return 100
     }
 
 }

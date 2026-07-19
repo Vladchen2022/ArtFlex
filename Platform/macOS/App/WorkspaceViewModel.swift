@@ -1136,17 +1136,8 @@ final class WorkspaceViewModel: ObservableObject {
     func adjustBrushSize(by delta: Float) {
         let currentSize = workspace.toolSession.brush.size
         let direction: Float = delta == 0 ? 0 : (delta > 0 ? 1 : -1)
-        let step = brushSizeShortcutStep(for: currentSize)
+        let step = BrushSizeShortcut.step(for: currentSize)
         setBrushSize(currentSize + (direction * step))
-    }
-
-    private func brushSizeShortcutStep(for size: Float) -> Float {
-        if size <= 10 { return 1 }
-        if size <= 50 { return 5 }
-        if size <= 100 { return 10 }
-        if size <= 200 { return 25 }
-        if size <= 300 { return 50 }
-        return 100
     }
 
     func setBrushOpacity(_ opacity: Float) {
@@ -10278,13 +10269,8 @@ final class WorkspaceViewModel: ObservableObject {
             return true
         }
 
-        if event.charactersIgnoringModifiers == "[" {
-            adjustBrushSize(by: -1)
-            return true
-        }
-
-        if event.charactersIgnoringModifiers == "]" {
-            adjustBrushSize(by: 1)
+        if let direction = brushSizeShortcutDirection(for: event) {
+            adjustBrushSize(by: direction)
             return true
         }
 

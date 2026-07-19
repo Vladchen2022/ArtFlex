@@ -3396,51 +3396,6 @@ struct RightInspectorView: View {
         VStack(alignment: .leading, spacing: topInspectorSectionSpacing) {
             tipDesignCanvas
 
-            if brushTipCanvasDisplayMode == .edit {
-                HStack(spacing: 8) {
-                    Text("笔头大小")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(Color.white.opacity(0.66))
-
-                    Button {
-                        tipEditorBrushSize = max(2, tipEditorBrushSize - 1)
-                    } label: {
-                        Image(systemName: "minus")
-                            .font(.system(size: 10, weight: .bold))
-                            .frame(width: 20, height: 20)
-                    }
-                    .buttonStyle(.borderless)
-                    .buttonTooltip("减小笔头 1 px")
-
-                    Slider(
-                        value: Binding(
-                            get: { Double(tipEditorBrushSize) },
-                            set: { tipEditorBrushSize = Float($0) }
-                        ),
-                        in: 2...128,
-                        step: 1
-                    )
-                    .accessibilityLabel("笔头大小")
-                    .accessibilityValue("\(Int(tipEditorBrushSize.rounded())) 像素")
-
-                    Button {
-                        tipEditorBrushSize = min(128, tipEditorBrushSize + 1)
-                    } label: {
-                        Image(systemName: "plus")
-                            .font(.system(size: 10, weight: .bold))
-                            .frame(width: 20, height: 20)
-                    }
-                    .buttonStyle(.borderless)
-                    .buttonTooltip("增大笔头 1 px")
-
-                    Text("\(Int(tipEditorBrushSize.rounded())) px")
-                        .font(.system(size: 11, weight: .semibold).monospacedDigit())
-                        .foregroundStyle(Color.white.opacity(0.88))
-                        .frame(width: 42, alignment: .trailing)
-                }
-                .frame(maxWidth: .infinity)
-            }
-
             HStack(spacing: topInspectorControlSpacing) {
                 compactToolButton(
                     systemImage: "checkmark",
@@ -3548,8 +3503,8 @@ struct RightInspectorView: View {
                 Button("橡皮擦 (E)") { tipPaintMode = .eraser }
             }
             Section("画笔尺寸 · \(Int(tipEditorBrushSize.rounded())) px") {
-                Button("减小画笔") { tipEditorBrushSize = max(2, tipEditorBrushSize - 4) }
-                Button("增大画笔") { tipEditorBrushSize = min(128, tipEditorBrushSize + 4) }
+                Button("减小画笔 ([)") { adjustTipEditorBrushSize(by: -1) }
+                Button("增大画笔 (])") { adjustTipEditorBrushSize(by: 1) }
             }
             Section("变换") {
                 Button("顺时针旋转 90°") { rotateCustomTip() }
@@ -3577,7 +3532,13 @@ struct RightInspectorView: View {
                 )
         }
         .menuStyle(.borderlessButton)
-        .buttonTooltip("笔尖编辑工具与变换")
+        .buttonTooltip("笔尖编辑工具与变换 · \(Int(tipEditorBrushSize.rounded())) px · [ / ] 调整")
+    }
+
+    private func adjustTipEditorBrushSize(by delta: Float) {
+        let direction: Float = delta == 0 ? 0 : (delta > 0 ? 1 : -1)
+        let step = BrushSizeShortcut.step(for: tipEditorBrushSize)
+        tipEditorBrushSize = min(max(2, tipEditorBrushSize + (direction * step)), 128)
     }
 
     private func effectivePrimaryTipSourceSemantic(for brush: BrushSettings) -> TipSourceSemantic {
@@ -4148,6 +4109,9 @@ struct RightInspectorView: View {
                             onRequestPaintModeShortcut: { mode in
                                 tipPaintMode = mode
                             },
+                            onAdjustBrushSizeShortcut: { delta in
+                                adjustTipEditorBrushSize(by: delta)
+                            },
                             onFocusChanged: { isFocused in
                                 viewModel.setBrushTipCanvasFocused(isFocused)
                             },
@@ -4175,7 +4139,7 @@ struct RightInspectorView: View {
                 )
             }
         }
-        .frame(height: 132)
+        .frame(height: 168)
         .clipShape(RoundedRectangle(cornerRadius: 10))
         .overlay(
             RoundedRectangle(cornerRadius: 10)
@@ -7157,6 +7121,7 @@ private struct TipMaskCanvasView: NSViewRepresentable {
     let paintMode: TipPaintMode
     let editorBrushSize: Float
     let onRequestPaintModeShortcut: (TipPaintMode) -> Void
+    let onAdjustBrushSizeShortcut: (Float) -> Void
     let onFocusChanged: (Bool) -> Void
     let onImportImage: (NSImage) -> Void
     let onUndo: () -> Void
@@ -7166,6 +7131,7 @@ private struct TipMaskCanvasView: NSViewRepresentable {
     func makeCoordinator() -> Coordinator {
         Coordinator(
             onRequestPaintModeShortcut: onRequestPaintModeShortcut,
+            onAdjustBrushSizeShortcut: onAdjustBrushSizeShortcut,
             onFocusChanged: onFocusChanged,
             onImportImage: onImportImage,
             onUndo: onUndo,
@@ -7200,6 +7166,7 @@ private struct TipMaskCanvasView: NSViewRepresentable {
 
     final class Coordinator: NSObject {
         let onRequestPaintModeShortcut: (TipPaintMode) -> Void
+        let onAdjustBrushSizeShortcut: (Float) -> Void
         let onFocusChanged: (Bool) -> Void
         let onImportImage: (NSImage) -> Void
         let onUndo: () -> Void
@@ -7208,6 +7175,7 @@ private struct TipMaskCanvasView: NSViewRepresentable {
 
         init(
             onRequestPaintModeShortcut: @escaping (TipPaintMode) -> Void,
+            onAdjustBrushSizeShortcut: @escaping (Float) -> Void,
             onFocusChanged: @escaping (Bool) -> Void,
             onImportImage: @escaping (NSImage) -> Void,
             onUndo: @escaping () -> Void,
@@ -7215,6 +7183,7 @@ private struct TipMaskCanvasView: NSViewRepresentable {
             onUpdateMask: @escaping (Data) -> Void
         ) {
             self.onRequestPaintModeShortcut = onRequestPaintModeShortcut
+            self.onAdjustBrushSizeShortcut = onAdjustBrushSizeShortcut
             self.onFocusChanged = onFocusChanged
             self.onImportImage = onImportImage
             self.onUndo = onUndo
@@ -7472,8 +7441,11 @@ private final class TipMaskEditorNSView: NSView {
     }
 
     private func isShortcutContextActive(for event: NSEvent) -> Bool {
-        guard event.window === window else { return false }
-        if window?.firstResponder === self {
+        guard let window, NSApp.keyWindow === window else { return false }
+        if let eventWindow = event.window, eventWindow !== window {
+            return false
+        }
+        if window.firstResponder === self {
             return true
         }
         return shortcutContextArmed
@@ -7495,6 +7467,10 @@ private final class TipMaskEditorNSView: NSView {
                 return true
             }
             return false
+        }
+        if let direction = brushSizeShortcutDirection(for: event) {
+            coordinator?.onAdjustBrushSizeShortcut(direction)
+            return true
         }
         guard modifiers.isEmpty,
               let shortcut = event.charactersIgnoringModifiers?.lowercased()
