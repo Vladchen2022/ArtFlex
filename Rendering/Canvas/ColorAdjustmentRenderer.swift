@@ -19,9 +19,26 @@ private struct ColorAdjustmentPreviewUniforms {
     var vitalizationStrength: Float
     var vitalizationBandScale: Float
     var vitalizationColorTolerance: Float
-    var vitalizationDirectionDegrees: Float
+    var vitalizationDistortion: Float
     var effectMode: UInt32
     var vitalizationSeed: UInt32
+    var materialOptions: SIMD4<Float>
+    var materialSeed: SIMD4<Float>
+}
+
+private extension TextureFillArrangement {
+    var colorVitalizationShaderValue: Float {
+        switch self {
+        case .directional:
+            return 0
+        case .interwoven:
+            return 1
+        case .radial:
+            return 2
+        case .scattered:
+            return 3
+        }
+    }
 }
 
 enum ColorAdjustmentRendererInitializationError: LocalizedError {
@@ -48,6 +65,8 @@ final class ColorAdjustmentRenderer {
     private let device: MTLDevice
     private let previewPipelineState: MTLRenderPipelineState
     private let fallbackMaskTexture: MTLTexture
+    private var reusableMaterialTexture: MTLTexture?
+    private var reusableMaterialTextureSize = 0
 
     init(device: MTLDevice) throws {
         self.device = device
@@ -76,9 +95,11 @@ final class ColorAdjustmentRenderer {
             float vitalizationStrength;
             float vitalizationBandScale;
             float vitalizationColorTolerance;
-            float vitalizationDirectionDegrees;
+            float vitalizationDistortion;
             uint effectMode;
             uint vitalizationSeed;
+            float4 materialOptions;
+            float4 materialSeed;
         };
 
         constant float3 kRedAxis = float3(1.0, -0.5, -0.5);
@@ -273,67 +294,194 @@ final class ColorAdjustmentRenderer {
             return mix(mix(a, b, blend.x), mix(c, d, blend.x), blend.y);
         }
 
+        float2 rotateMaterialCoordinate(float2 point, float angle) {
+            float sine = sin(angle);
+            float cosine = cos(angle);
+            return float2(
+                (point.x * cosine) - (point.y * sine),
+                (point.x * sine) + (point.y * cosine)
+            );
+        }
+
+        float sampleVitalizationMaterial(
+            float2 pixel,
+            constant ColorAdjustmentPreviewUniforms &uniforms,
+            texture2d<float> materialTexture,
+            thread float &secondarySignal
+        ) {
+            float seed = float(uniforms.vitalizationSeed % 65521u) * 0.0137;
+            float scaleControl = mix(
+                0.48,
+                2.25,
+                pow(clamp(uniforms.vitalizationBandScale, 0.0, 1.0), 0.82)
+            );
+            float textureScale = clamp(uniforms.materialOptions.y, 0.25, 3.0);
+            float coverage = max(uniforms.materialOptions.z, 0.1);
+            float tileWorldSize = clamp(
+                min(float(uniforms.canvasSize.x), float(uniforms.canvasSize.y)) * 0.22,
+                56.0,
+                230.0
+            ) * textureScale * scaleControl;
+            float variation = max(uniforms.materialOptions.w, 0.0);
+            float distortion = clamp(uniforms.vitalizationDistortion, 0.0, 1.0);
+            float arrangement = uniforms.materialSeed.w;
+            float2 center = float2(uniforms.canvasSize) * 0.5;
+            float2 centered = pixel - center;
+            float angle = uniforms.materialSeed.z;
+            float2 oriented = rotateMaterialCoordinate(centered, angle);
+            float2 materialCoordinate = oriented / max(tileWorldSize, 1.0);
+
+            if (arrangement >= 1.5 && arrangement < 2.5) {
+                float radius = length(centered);
+                float radialAngle = atan2(centered.y, centered.x);
+                float arcScale = max(radius / max(tileWorldSize, 1.0), 0.35);
+                materialCoordinate = float2(
+                    (radialAngle / 6.283185307179586) * arcScale,
+                    radius / max(tileWorldSize, 1.0)
+                );
+            } else if (arrangement >= 2.5) {
+                float cellWorldSize = max(tileWorldSize * 0.72, 24.0);
+                float2 seededCellPosition =
+                    (oriented / cellWorldSize) + (uniforms.materialSeed.xy * 19.0);
+                float2 cell = floor(seededCellPosition);
+                float2 local = (fract(seededCellPosition) - 0.5) * cellWorldSize;
+                float cellAngle = (
+                    (hash21(cell + uniforms.materialSeed.xy * 97.0, seed + 53.0) * 2.0) - 1.0
+                ) * 3.141592653589793;
+                materialCoordinate =
+                    rotateMaterialCoordinate(local, cellAngle) / max(tileWorldSize, 1.0);
+                materialCoordinate += float2(
+                    hash21(cell + 17.0, seed + 59.0),
+                    hash21(cell + 31.0, seed + 61.0)
+                ) * 5.0;
+            }
+
+            float warpScale = 0.0035 / sqrt(max(textureScale * scaleControl, 0.1));
+            float2 coarsePosition = pixel * warpScale;
+            float2 coarseWarp = float2(
+                valueNoise(coarsePosition + float2(17.0, seed + 3.0), seed + 71.0),
+                valueNoise(coarsePosition + float2(seed + 5.0, 29.0), seed + 73.0)
+            ) - 0.5;
+            float2 curlWarp = float2(
+                valueNoise(
+                    (coarsePosition * 2.7) + float2(43.0, seed + 11.0),
+                    seed + 79.0
+                ),
+                valueNoise(
+                    (coarsePosition * 2.7) + float2(seed + 13.0, 47.0),
+                    seed + 83.0
+                )
+            ) - 0.5;
+            materialCoordinate += coarseWarp * distortion * (0.82 + (variation * 0.34));
+            materialCoordinate += curlWarp * distortion * 0.31;
+            materialCoordinate += uniforms.materialSeed.xy * 7.0;
+
+            constexpr sampler materialSampler(
+                coord::normalized,
+                address::mirrored_repeat,
+                filter::linear
+            );
+            float first = materialTexture.sample(materialSampler, materialCoordinate).r;
+            if (arrangement >= 0.5 && arrangement < 1.5) {
+                float2 crossCoordinate =
+                    rotateMaterialCoordinate(oriented, 1.570796326794897)
+                    / max(tileWorldSize, 1.0);
+                crossCoordinate += coarseWarp.yx * distortion * 0.68;
+                crossCoordinate += uniforms.materialSeed.yx * 5.0;
+                float cross = materialTexture.sample(materialSampler, crossCoordinate).r;
+                first = mix(first, cross, 0.46);
+            }
+
+            float2 rotatedCoordinate =
+                rotateMaterialCoordinate(materialCoordinate, 0.73)
+                * (1.31 + (variation * 0.08));
+            rotatedCoordinate += uniforms.materialSeed.yx * 3.0;
+            float second = materialTexture.sample(materialSampler, rotatedCoordinate).r;
+
+            float2 localOffset = float2(0.035, 0.027) / max(textureScale, 0.25);
+            float localMean = (
+                materialTexture.sample(materialSampler, materialCoordinate + localOffset).r
+                + materialTexture.sample(materialSampler, materialCoordinate - localOffset).r
+                + materialTexture.sample(
+                    materialSampler,
+                    materialCoordinate + float2(-localOffset.x, localOffset.y)
+                ).r
+                + materialTexture.sample(
+                    materialSampler,
+                    materialCoordinate + float2(localOffset.x, -localOffset.y)
+                ).r
+            ) * 0.25;
+            float broadNoise = valueNoise(
+                (pixel * 0.0075) + (uniforms.materialSeed.xy * 41.0),
+                seed + 89.0
+            );
+            float fineNoise = valueNoise(
+                (pixel * 0.021) + (uniforms.materialSeed.yx * 67.0),
+                seed + 97.0
+            );
+            float textureDetail = clamp((first - localMean) * 2.6, -1.0, 1.0);
+            float textureBody = ((first * 0.64) + (second * 0.36) - 0.5) * 2.0;
+            secondarySignal = clamp(
+                ((second - first) * 1.45)
+                    + ((fineNoise - 0.5) * 0.42)
+                    + ((coarseWarp.x - coarseWarp.y) * 0.34),
+                -1.0,
+                1.0
+            );
+            float coverageResponse = mix(0.72, 1.18, min(coverage, 1.0));
+            return clamp(
+                (
+                    (textureDetail * 0.58)
+                    + (textureBody * 0.30)
+                    + ((broadNoise - 0.5) * 0.34)
+                ) * coverageResponse,
+                -1.0,
+                1.0
+            );
+        }
+
         float3 applyColorVitalization(
             float3 color,
             float2 pixel,
             constant ColorAdjustmentPreviewUniforms &uniforms,
+            texture2d<float> materialTexture,
             thread float &similarity
         ) {
             float3 baseLab = linearSRGBToOKLab(color);
             float3 referenceLinear = srgbToLinear(uniforms.vitalizationReferenceColor.rgb);
             float3 referenceLab = linearSRGBToOKLab(referenceLinear);
             float tolerance = mix(
-                0.018,
-                0.18,
+                0.040,
+                0.24,
                 clamp(uniforms.vitalizationColorTolerance, 0.0, 1.0)
             );
             float distance = length(baseLab - referenceLab);
             similarity = 1.0 - smoothstep(tolerance * 0.58, tolerance, distance);
 
-            float angle = uniforms.vitalizationDirectionDegrees * 0.01745329252;
-            float2 direction = float2(cos(angle), sin(angle));
-            float2 normal = float2(-direction.y, direction.x);
-            float along = dot(pixel, direction);
-            float across = dot(pixel, normal);
-            float bandWidth = mix(
-                2.5,
-                28.0,
-                pow(clamp(uniforms.vitalizationBandScale, 0.0, 1.0), 0.82)
+            float secondarySignal = 0.0;
+            float textureSignal = sampleVitalizationMaterial(
+                pixel,
+                uniforms,
+                materialTexture,
+                secondarySignal
             );
             float seed = float(uniforms.vitalizationSeed % 65521u) * 0.0137;
-
-            float lane = valueNoise(float2(across / bandWidth, seed + 3.1), seed + 7.7);
-            float laneFine = valueNoise(
-                float2(across / max(bandWidth * 0.42, 1.0), seed + 13.9),
-                seed + 19.3
-            );
-            float drift = valueNoise(
-                float2(along / (bandWidth * 7.0), across / (bandWidth * 3.2))
-                    + float2(seed, seed * 0.37),
-                seed + 29.1
-            );
             float grain = valueNoise(
-                (pixel / max(bandWidth * 0.72, 1.0)) + float2(seed * 0.21, seed * 0.61),
-                seed + 41.7
-            );
-
+                (pixel * 0.043) + float2(seed * 0.21, seed * 0.61),
+                seed + 101.0
+            ) - 0.5;
             float tone = clamp(
-                ((lane - 0.5) * 1.34)
-                    + ((laneFine - 0.5) * 0.34)
-                    + ((drift - 0.5) * 0.42)
-                    + ((grain - 0.5) * 0.16),
+                textureSignal + (secondarySignal * 0.25) + (grain * 0.14),
                 -1.0,
                 1.0
             );
             float hueVariation = clamp(
-                ((laneFine - 0.5) * 1.25)
-                    - ((drift - 0.5) * 0.62)
-                    + ((grain - 0.5) * 0.28),
+                secondarySignal - (textureSignal * 0.24) + (grain * 0.22),
                 -1.0,
                 1.0
             );
             float chromaVariation = clamp(
-                ((lane - 0.5) * 0.72) + ((grain - 0.5) * 0.55),
+                (textureSignal * 0.52) + (secondarySignal * 0.36),
                 -1.0,
                 1.0
             );
@@ -346,9 +494,9 @@ final class ColorAdjustmentRenderer {
             float2 tangent = float2(-radial.y, radial.x);
 
             float3 variedLab = baseLab;
-            variedLab.x = clamp(variedLab.x + (tone * 0.095), 0.0, 1.0);
-            variedLab.yz += tangent * (hueVariation * 0.052);
-            variedLab.yz += radial * (chromaVariation * 0.032);
+            variedLab.x = clamp(variedLab.x + (tone * 0.105), 0.0, 1.0);
+            variedLab.yz += tangent * (hueVariation * 0.058);
+            variedLab.yz += radial * (chromaVariation * 0.035);
             return clamp(oklabToLinearSRGB(variedLab), 0.0, 1.0);
         }
 
@@ -387,6 +535,7 @@ final class ColorAdjustmentRenderer {
             VertexOut in [[stage_in]],
             texture2d<float, access::read> sourceTexture [[texture(0)]],
             texture2d<float, access::read> maskTexture [[texture(1)]],
+            texture2d<float> materialTexture [[texture(2)]],
             constant ColorAdjustmentPreviewUniforms &uniforms [[buffer(0)]]
         ) {
             uint2 gid = uint2(in.position.xy);
@@ -427,6 +576,7 @@ final class ColorAdjustmentRenderer {
                     baseColor,
                     float2(gid),
                     uniforms,
+                    materialTexture,
                     similarity
                 );
                 effectInfluence *= similarity * clamp(uniforms.vitalizationStrength, 0.0, 1.0);
@@ -496,6 +646,7 @@ final class ColorAdjustmentRenderer {
         effectMode: ColorAdjustmentEffectMode = .standard,
         vitalizationReferenceColor: RGBAColor? = nil,
         vitalizationSeed: UInt32 = 0,
+        vitalizationMaterial: ColorVitalizationMaterial? = nil,
         overlayOnly: Bool,
         effectRegion: MTLRegion?,
         commandQueue: MTLCommandQueue,
@@ -514,6 +665,7 @@ final class ColorAdjustmentRenderer {
             effectMode: effectMode,
             vitalizationReferenceColor: vitalizationReferenceColor,
             vitalizationSeed: vitalizationSeed,
+            vitalizationMaterial: vitalizationMaterial,
             overlayOnly: overlayOnly,
             effectRegion: effectRegion,
             commandBuffer: commandBuffer
@@ -533,6 +685,7 @@ final class ColorAdjustmentRenderer {
         effectMode: ColorAdjustmentEffectMode = .standard,
         vitalizationReferenceColor: RGBAColor? = nil,
         vitalizationSeed: UInt32 = 0,
+        vitalizationMaterial: ColorVitalizationMaterial? = nil,
         overlayOnly: Bool,
         effectRegion: MTLRegion?,
         commandBuffer: MTLCommandBuffer
@@ -570,6 +723,13 @@ final class ColorAdjustmentRenderer {
         ]
         let referenceColor = vitalizationReferenceColor
             ?? RGBAColor(red: 0, green: 0, blue: 0, alpha: 0)
+        let materialTexture = vitalizationMaterial.flatMap {
+            makeMaterialTexture(maskData: $0.maskData)
+        }
+        let materialSettings = vitalizationMaterial?.settings ?? .proceduralDefault
+        let seedLow = Float(vitalizationSeed & 0x0000_FFFF) / Float(0x0000_FFFF)
+        let seedHigh = Float((vitalizationSeed >> 16) & 0x0000_FFFF) / Float(0x0000_FFFF)
+        let materialAngle = (seedLow * 2 - 1) * Float.pi
         var uniforms = ColorAdjustmentPreviewUniforms(
             canvasSize: SIMD2(
                 UInt32(sourceTexture.width),
@@ -591,9 +751,21 @@ final class ColorAdjustmentRenderer {
             vitalizationStrength: parameters.vitalizationStrength,
             vitalizationBandScale: parameters.vitalizationBandScale,
             vitalizationColorTolerance: parameters.vitalizationColorTolerance,
-            vitalizationDirectionDegrees: parameters.vitalizationDirectionDegrees,
+            vitalizationDistortion: parameters.vitalizationDistortion,
             effectMode: effectMode == .vitalization ? 1 : 0,
-            vitalizationSeed: vitalizationSeed
+            vitalizationSeed: vitalizationSeed,
+            materialOptions: SIMD4(
+                materialTexture == nil ? 0 : 1,
+                min(max(materialSettings.materialScale, 0.25), 3),
+                TextureFillMaterialResponse.amplifiedCoverage(materialSettings.coverage),
+                TextureFillMaterialResponse.amplifiedVariation(materialSettings.variation)
+            ),
+            materialSeed: SIMD4(
+                seedLow,
+                seedHigh,
+                materialAngle,
+                materialSettings.arrangement.colorVitalizationShaderValue
+            )
         )
 
         encoder.setRenderPipelineState(previewPipelineState)
@@ -604,6 +776,7 @@ final class ColorAdjustmentRenderer {
         )
         encoder.setFragmentTexture(sourceTexture, index: 0)
         encoder.setFragmentTexture(maskTexture ?? fallbackMaskTexture, index: 1)
+        encoder.setFragmentTexture(materialTexture ?? fallbackMaskTexture, index: 2)
         encoder.setFragmentBytes(
             &uniforms,
             length: MemoryLayout<ColorAdjustmentPreviewUniforms>.stride,
@@ -621,5 +794,37 @@ final class ColorAdjustmentRenderer {
         }
         encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
         encoder.endEncoding()
+    }
+
+    private func makeMaterialTexture(maskData: Data) -> MTLTexture? {
+        guard !maskData.isEmpty else { return nil }
+        let resolution = Int(sqrt(Double(maskData.count)))
+        guard resolution > 0, resolution * resolution == maskData.count else { return nil }
+
+        if reusableMaterialTextureSize != resolution || reusableMaterialTexture == nil {
+            let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+                pixelFormat: .r8Unorm,
+                width: resolution,
+                height: resolution,
+                mipmapped: false
+            )
+            descriptor.usage = .shaderRead
+            descriptor.storageMode = .shared
+            guard let texture = device.makeTexture(descriptor: descriptor) else { return nil }
+            reusableMaterialTexture = texture
+            reusableMaterialTextureSize = resolution
+        }
+        guard let reusableMaterialTexture else { return nil }
+
+        maskData.withUnsafeBytes { rawBuffer in
+            guard let baseAddress = rawBuffer.baseAddress else { return }
+            reusableMaterialTexture.replace(
+                region: MTLRegionMake2D(0, 0, resolution, resolution),
+                mipmapLevel: 0,
+                withBytes: baseAddress,
+                bytesPerRow: resolution
+            )
+        }
+        return reusableMaterialTexture
     }
 }

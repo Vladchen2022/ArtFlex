@@ -267,7 +267,6 @@ final class WorkspaceViewModel: ObservableObject {
     @Published var recentBrushAdjustmentRedrawRevision: UInt64 = 0
     @Published private(set) var isWorkspaceChromeHidden = false
     @Published var colorAdjustmentOverlayState = ColorAdjustmentOverlayState.inactive
-    @Published var colorAdjustmentEffectMode: ColorAdjustmentEffectMode = .standard
     @Published var curveAdjustmentOverlayState = CurveAdjustmentOverlayState.inactive
     @Published var colorAdjustmentRedrawRevision: UInt64 = 0
     @Published private(set) var referenceImageSlots = WorkspaceViewModel.makeDefaultReferenceImageSlots()
@@ -2674,6 +2673,9 @@ final class WorkspaceViewModel: ObservableObject {
             session.textureFillBrushOverride = nil
         }
         refresh()
+        if workspace.toolSession.activeTool == .colorVitalization {
+            refreshColorVitalizationMaterialFromCurrentTexture()
+        }
         showStatus(.init(kind: .success, message: "已应用纹理填充素材"))
     }
 
@@ -2693,6 +2695,9 @@ final class WorkspaceViewModel: ObservableObject {
             session.textureFillBrushOverride = nil
         }
         refresh()
+        if workspace.toolSession.activeTool == .colorVitalization {
+            refreshColorVitalizationMaterialFromCurrentTexture()
+        }
         showStatus(.init(kind: .success, message: "已切回当前画笔纹理"))
     }
 
@@ -2701,6 +2706,7 @@ final class WorkspaceViewModel: ObservableObject {
             session.textureFillTip.arrangement = arrangement
         }
         refreshToolSessionOnly()
+        refreshColorVitalizationMaterialFromCurrentTexture()
     }
 
     func setTextureFillMaterialScale(_ scale: Float) {
@@ -2708,6 +2714,7 @@ final class WorkspaceViewModel: ObservableObject {
             session.textureFillTip.materialScale = min(max(scale, 0.25), 3)
         }
         refreshToolSessionOnly()
+        refreshColorVitalizationMaterialFromCurrentTexture()
     }
 
     func setTextureFillCoverage(_ coverage: Float) {
@@ -2715,6 +2722,7 @@ final class WorkspaceViewModel: ObservableObject {
             session.textureFillTip.coverage = min(max(coverage, 0.1), 1)
         }
         refreshToolSessionOnly()
+        refreshColorVitalizationMaterialFromCurrentTexture()
     }
 
     func setTextureFillVariation(_ variation: Float) {
@@ -2722,6 +2730,7 @@ final class WorkspaceViewModel: ObservableObject {
             session.textureFillTip.variation = min(max(variation, 0), 1)
         }
         refreshToolSessionOnly()
+        refreshColorVitalizationMaterialFromCurrentTexture()
     }
 
     func setTextureFillPaintJitterAmount(_ amount: Float) {
@@ -2792,7 +2801,10 @@ final class WorkspaceViewModel: ObservableObject {
             return
         }
 
-        if workspace.toolSession.activeTool != .textureFill {
+        let appliesToColorVitalization =
+            workspace.toolSession.activeTool == .colorVitalization
+        if workspace.toolSession.activeTool != .textureFill,
+           !appliesToColorVitalization {
             selectTool(.textureFill)
         }
         bootstrap.workspaceStore.updateToolSession { session in
@@ -2805,6 +2817,9 @@ final class WorkspaceViewModel: ObservableObject {
         }
         persistTextureFillLibrary()
         refreshLightweight()
+        if appliesToColorVitalization {
+            refreshColorVitalizationMaterialFromCurrentTexture()
+        }
         showStatus(.init(kind: .success, message: "已应用 \(item.displayName)"))
     }
 
@@ -3974,7 +3989,8 @@ final class WorkspaceViewModel: ObservableObject {
 
         let currentTool = workspace.toolSession.activeTool
 
-        if currentTool == .smudge || currentTool == .eraser || currentTool == .brightnessAdjust {
+        if currentTool == .smudge || currentTool == .eraser
+            || currentTool == .brightnessAdjust || currentTool == .colorVitalization {
             // Smudge/eraser/color-adjust: keep current tool active while updating its brush
             bootstrap.workspaceStore.updateToolSession { session in
                 session.brush = preset.brush
@@ -10815,6 +10831,10 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func applyStroke(samples: [CanvasStrokeSample]) {
+        if workspace.toolSession.activeTool == .colorVitalization {
+            applyColorAdjustmentStroke(samples: samples)
+            return
+        }
         if workspace.toolSession.activeTool == .brightnessAdjust {
             switch brightnessAdjustmentEditorMode {
             case .colorParameters:
@@ -10889,6 +10909,10 @@ final class WorkspaceViewModel: ObservableObject {
         ideationBranchActivityHandler?()
         strokePacketCount = 0
 
+        if workspace.toolSession.activeTool == .colorVitalization {
+            beginColorAdjustmentStrokeIfNeeded()
+            return
+        }
         if workspace.toolSession.activeTool == .brightnessAdjust {
             switch brightnessAdjustmentEditorMode {
             case .colorParameters:
@@ -10928,6 +10952,10 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func endStroke() {
+        if workspace.toolSession.activeTool == .colorVitalization {
+            endColorAdjustmentStroke()
+            return
+        }
         if workspace.toolSession.activeTool == .brightnessAdjust {
             switch brightnessAdjustmentEditorMode {
             case .colorParameters:

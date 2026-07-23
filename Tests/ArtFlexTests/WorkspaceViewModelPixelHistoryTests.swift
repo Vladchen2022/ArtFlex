@@ -632,7 +632,7 @@ struct WorkspaceViewModelPixelHistoryTests {
 
     @Test
     @MainActor
-    func colorVitalizationConfirmSupportsSingleStepUndoRedo() throws {
+    func colorVitalizationAutoCommitSupportsSingleStepUndoRedo() throws {
         let harness = try PixelHistoryHarness()
         let layerID = harness.viewModel.workspace.document.activeLayerID
         let samplePoints = [(22, 22), (26, 26), (30, 30), (34, 34), (38, 38)]
@@ -651,16 +651,14 @@ struct WorkspaceViewModelPixelHistoryTests {
         }
 
         harness.viewModel.setBrushSize(48)
-        harness.viewModel.selectTool(.brightnessAdjust)
-        harness.viewModel.setColorAdjustmentEffectMode(.vitalization)
+        harness.viewModel.selectTool(.colorVitalization)
         harness.viewModel.beginStrokeIfNeeded()
         harness.viewModel.applyStroke(samples: [
             .init(location: .init(x: 30, y: 30), pressure: 1)
         ])
         harness.viewModel.endStroke()
 
-        #expect(harness.viewModel.canConfirmColorAdjustmentSession)
-        #expect(harness.viewModel.confirmColorAdjustmentSession())
+        #expect(harness.viewModel.colorAdjustmentSession == nil)
         let committed = try samplePoints.map {
             try harness.color(atX: $0.0, y: $0.1, layerID: layerID)
         }

@@ -29,6 +29,7 @@ struct TextureFillPhase0Tests {
     func lassoFillToolGroupDrivesTheTextureLibraryWhileOtherToolsUseTheBrushLibrary() {
         #expect(rightInspectorUsesTextureLibrary(activeTool: .lassoFill))
         #expect(rightInspectorUsesTextureLibrary(activeTool: .textureFill))
+        #expect(rightInspectorUsesTextureLibrary(activeTool: .colorVitalization))
         #expect(!rightInspectorUsesTextureLibrary(activeTool: .brush))
         #expect(!rightInspectorUsesTextureLibrary(activeTool: .eraser))
         #expect(!rightInspectorUsesTextureLibrary(activeTool: .blockReference))

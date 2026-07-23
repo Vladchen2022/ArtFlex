@@ -212,6 +212,13 @@ struct TextureFillLibraryTests {
         #expect(viewModel.textureFillPreviewBrush.size == 91)
         #expect(viewModel.workspace.toolSession.textureFillTip.paintJitterAmount == 0.68)
 
+        viewModel.selectTool(.colorVitalization)
+        viewModel.applyTextureFillLibraryItem(item.id)
+
+        #expect(viewModel.workspace.toolSession.activeTool == .colorVitalization)
+        #expect(viewModel.workspace.toolSession.textureFillTip == item.settings)
+        #expect(viewModel.workspace.toolSession.textureFillBrushOverride == item.sourceBrush)
+
         var persisted = controller.loadLibrary()
         for _ in 0..<20 where persisted?.items.first?.id != item.id {
             try await Task.sleep(for: .milliseconds(50))

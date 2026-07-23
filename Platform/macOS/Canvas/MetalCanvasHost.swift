@@ -617,7 +617,8 @@ func preferredBrushCursorMode(
     if isEyedropperCursorActive {
         return .eyedropper
     }
-    if activeTool == .brush || activeTool == .eraser || activeTool == .smudge || activeTool == .brightnessAdjust ||
+    if activeTool == .brush || activeTool == .eraser || activeTool == .smudge
+        || activeTool == .brightnessAdjust || activeTool == .colorVitalization ||
         activeTool == .canvasCrop || activeTool == .canvasRotate || activeTool == .straightLine ||
         activeTool == .linearGradient || activeTool == .sectorGradient || activeTool == .polygonSelection || activeTool == .perspective || activeTool == .blockReference ||
         activeTool == .rectangleSelection || activeTool == .ellipseSelection || activeTool == .lassoSelection {
@@ -636,7 +637,9 @@ func shouldShowBrushOutlineIndicator(
     showsBrushOutlineDuringStroke: Bool,
     hasContinuousStrokeGrace: Bool
 ) -> Bool {
-    guard (activeTool == .brush || activeTool == .eraser || activeTool == .smudge || activeTool == .brightnessAdjust), hasHoverLocation else {
+    guard (activeTool == .brush || activeTool == .eraser || activeTool == .smudge
+        || activeTool == .brightnessAdjust || activeTool == .colorVitalization),
+        hasHoverLocation else {
         return false
     }
     if isAdjustingBrushSizePreview { return true }
@@ -651,7 +654,8 @@ func shouldShowBrushTipIndicator(
     activeTool: ToolKind,
     hasHoverLocation: Bool
 ) -> Bool {
-    guard activeTool == .brush || activeTool == .eraser || activeTool == .smudge || activeTool == .brightnessAdjust else {
+    guard activeTool == .brush || activeTool == .eraser || activeTool == .smudge
+        || activeTool == .brightnessAdjust || activeTool == .colorVitalization else {
         return false
     }
     return hasHoverLocation
@@ -1810,7 +1814,8 @@ final class StrokeCaptureMTKView: MTKView {
     }
 
     private func isBrushLikeToolActive() -> Bool {
-        activeTool == .brush || activeTool == .eraser || activeTool == .smudge || activeTool == .brightnessAdjust
+        activeTool == .brush || activeTool == .eraser || activeTool == .smudge
+            || activeTool == .brightnessAdjust || activeTool == .colorVitalization
     }
 
     private func isTabletLikeEvent(_ event: NSEvent) -> Bool {
@@ -2236,9 +2241,12 @@ final class StrokeCaptureMTKView: MTKView {
 
     private var allowsTemporaryEyedropperOverride: Bool {
         switch activeTool {
-        case .brush, .eraser, .smudge, .straightLine, .linearGradient, .sectorGradient, .brightnessAdjust:
+        case .brush, .eraser, .smudge, .straightLine, .linearGradient, .sectorGradient,
+             .brightnessAdjust, .colorVitalization:
             return true
-        case .eyedropper, .bucket, .polygonSelection, .lassoFill, .textureFill, .rectangleSelection, .ellipseSelection, .lassoSelection, .canvasRotate, .canvasCrop, .freeTransform, .perspective, .blockReference:
+        case .eyedropper, .bucket, .polygonSelection, .lassoFill, .textureFill,
+             .rectangleSelection, .ellipseSelection, .lassoSelection, .canvasRotate,
+             .canvasCrop, .freeTransform, .perspective, .blockReference:
             return false
         }
     }

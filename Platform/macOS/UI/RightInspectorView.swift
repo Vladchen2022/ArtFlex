@@ -192,7 +192,9 @@ func rightInspectorUsesStructuredBlockReferenceWorkspace(activeTool: ToolKind) -
 }
 
 func rightInspectorUsesTextureLibrary(activeTool: ToolKind) -> Bool {
-    activeTool == .lassoFill || activeTool == .textureFill
+    activeTool == .lassoFill
+        || activeTool == .textureFill
+        || activeTool == .colorVitalization
 }
 
 func rightInspectorUsesCompactParameterLayout(
@@ -203,7 +205,8 @@ func rightInspectorUsesCompactParameterLayout(
     guard isBrushTab else { return true }
 
     switch activeTool {
-    case .brush, .eraser, .smudge, .straightLine, .brightnessAdjust, .eyedropper, .perspective, .textureFill:
+    case .brush, .eraser, .smudge, .straightLine, .brightnessAdjust, .colorVitalization,
+         .eyedropper, .perspective, .textureFill:
         return false
     case .lassoFill:
         return !usesTextureFillControls
@@ -843,7 +846,9 @@ struct RightInspectorView: View {
 
     private var parameterInspectorSection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            parameterInspectorTabs
+            if viewModel.workspace.toolSession.activeTool != .colorVitalization {
+                parameterInspectorTabs
+            }
 
             if parameterInspectorTab == .brush && usesFullBrushParameterControls {
                 pinnedBrushCommonControls
@@ -861,7 +866,9 @@ struct RightInspectorView: View {
 
     private var compactParameterInspectorSection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            parameterInspectorTabs
+            if viewModel.workspace.toolSession.activeTool != .colorVitalization {
+                parameterInspectorTabs
+            }
             parameterInspectorContent
                 .frame(maxWidth: .infinity, alignment: .topLeading)
         }
@@ -878,7 +885,9 @@ struct RightInspectorView: View {
 
     @ViewBuilder
     private var parameterInspectorContent: some View {
-        if parameterInspectorTab == .colorAdjustment {
+        if viewModel.workspace.toolSession.activeTool == .colorVitalization {
+            colorVitalizationControls
+        } else if parameterInspectorTab == .colorAdjustment {
             colorAdjustmentSection
         } else if parameterInspectorTab == .curves {
             curveAdjustmentSection
@@ -971,7 +980,7 @@ struct RightInspectorView: View {
         oldTool: ToolKind,
         newTool: ToolKind
     ) {
-        if newTool == .textureFill {
+        if newTool == .textureFill || newTool == .colorVitalization {
             parameterInspectorTab = .brush
             parameterInspectorAutoRestoreTab = nil
             return
@@ -1517,7 +1526,9 @@ struct RightInspectorView: View {
 
     private var brushSection: some View {
         VStack(alignment: .leading, spacing: 8) {
-            if viewModel.workspace.toolSession.activeTool == .eyedropper {
+            if viewModel.workspace.toolSession.activeTool == .colorVitalization {
+                colorVitalizationControls
+            } else if viewModel.workspace.toolSession.activeTool == .eyedropper {
                 eyedropperParameterControls
             } else if viewModel.workspace.toolSession.activeTool == .perspective {
                 perspectiveParameterControls
@@ -2019,7 +2030,7 @@ struct RightInspectorView: View {
 
     private var usesFullBrushParameterControls: Bool {
         switch viewModel.workspace.toolSession.activeTool {
-        case .brush, .eraser, .smudge, .straightLine, .brightnessAdjust:
+        case .brush, .eraser, .smudge, .straightLine, .brightnessAdjust, .colorVitalization:
             return true
         default:
             return false
@@ -2625,165 +2636,81 @@ struct RightInspectorView: View {
         let canConfirm = viewModel.canConfirmColorAdjustmentSession
         let wrappedHue = ColorBlocksEngine.wrapHue(parameters.selectedHueDegrees)
         let strengthDisplayValue = parameters.hueStrength * 2
-        let effectMode = viewModel.colorAdjustmentEffectMode
 
         return VStack(alignment: .leading, spacing: 10) {
-            Picker(
-                "调整模式",
-                selection: Binding(
-                    get: { effectMode },
-                    set: { viewModel.setColorAdjustmentEffectMode($0) }
-                )
-            ) {
-                ForEach(ColorAdjustmentEffectMode.allCases, id: \.self) { mode in
-                    Text(mode.displayName).tag(mode)
-                }
-            }
-            .labelsHidden()
-            .pickerStyle(.segmented)
-            .disabled(!canAdjust)
-
-            if effectMode == .standard {
-                VStack(alignment: .leading, spacing: 6) {
-                    HStack(spacing: 8) {
-                        Text("色相")
-                            .font(.system(size: 11, weight: .semibold))
-                            .foregroundStyle(Color.white.opacity(0.84))
-
-                        Circle()
-                            .fill(colorAdjustmentHuePreviewColor(for: wrappedHue))
-                            .frame(width: 12, height: 12)
-                            .overlay(
-                                Circle()
-                                    .stroke(Color.white.opacity(0.35), lineWidth: 1)
-                            )
-
-                        Spacer(minLength: 8)
-
-                        Text("\(Int(wrappedHue.rounded()))°")
-                            .font(.system(size: 11, weight: .semibold).monospacedDigit())
-                            .foregroundStyle(Color.white.opacity(0.96))
-                    }
-
-                    ColorLightingHueBarView(
-                        hue: wrappedHue,
-                        onUpdateHue: { hue in
-                            viewModel.setColorAdjustmentSelectedHueDegrees(hue)
-                        },
-                        onDragEnded: { hue in
-                            viewModel.setColorAdjustmentSelectedHueDegrees(hue)
-                        }
-                    )
-                    .frame(height: 6)
-                    .disabled(!canAdjust)
-                    .opacity(canAdjust ? 1 : 0.42)
-                }
-
-                colorAdjustmentSlider(
-                    title: "强度",
-                    valueText: signedPercentText(strengthDisplayValue),
-                    value: Double(strengthDisplayValue),
-                    range: -1...1,
-                    isEnabled: canAdjust
-                ) { value in
-                    viewModel.setColorAdjustmentHueStrength(Float(value) * 0.5)
-                }
-
-                colorAdjustmentSlider(
-                    title: "亮度",
-                    valueText: signedPercentText(parameters.brightness),
-                    value: Double(parameters.brightness),
-                    range: -1...1,
-                    isEnabled: canAdjust
-                ) { value in
-                    viewModel.setColorAdjustmentBrightness(Float(value))
-                }
-
-                colorAdjustmentSlider(
-                    title: "对比",
-                    valueText: signedPercentText(parameters.contrast),
-                    value: Double(parameters.contrast),
-                    range: -1...1,
-                    isEnabled: canAdjust
-                ) { value in
-                    viewModel.setColorAdjustmentContrast(Float(value))
-                }
-
-                colorAdjustmentSlider(
-                    title: "纯度",
-                    valueText: signedPercentText(parameters.purity),
-                    value: Double(parameters.purity),
-                    range: -1...1,
-                    isEnabled: canAdjust
-                ) { value in
-                    viewModel.setColorAdjustmentPurity(Float(value))
-                }
-            } else {
+            VStack(alignment: .leading, spacing: 6) {
                 HStack(spacing: 8) {
-                    if let reference = viewModel.colorAdjustmentOverlayState.vitalizationReferenceColor {
-                        Circle()
-                            .fill(
-                                Color(
-                                    red: Double(reference.red),
-                                    green: Double(reference.green),
-                                    blue: Double(reference.blue),
-                                    opacity: Double(reference.alpha)
-                                )
-                            )
-                            .frame(width: 12, height: 12)
-                            .overlay(
-                                Circle()
-                                    .stroke(Color.white.opacity(0.5), lineWidth: 1)
-                            )
-                        Text("已锁定起笔颜色")
-                    } else {
-                        Image(systemName: "eyedropper")
-                        Text("在目标色块上落笔取样")
+                    Text("色相")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(Color.white.opacity(0.84))
+
+                    Circle()
+                        .fill(colorAdjustmentHuePreviewColor(for: wrappedHue))
+                        .frame(width: 12, height: 12)
+                        .overlay(
+                            Circle()
+                                .stroke(Color.white.opacity(0.35), lineWidth: 1)
+                        )
+
+                    Spacer(minLength: 8)
+
+                    Text("\(Int(wrappedHue.rounded()))°")
+                        .font(.system(size: 11, weight: .semibold).monospacedDigit())
+                        .foregroundStyle(Color.white.opacity(0.96))
+                }
+
+                ColorLightingHueBarView(
+                    hue: wrappedHue,
+                    onUpdateHue: { hue in
+                        viewModel.setColorAdjustmentSelectedHueDegrees(hue)
+                    },
+                    onDragEnded: { hue in
+                        viewModel.setColorAdjustmentSelectedHueDegrees(hue)
                     }
-                    Spacer(minLength: 0)
-                }
-                .font(.system(size: 10.5, weight: .medium))
-                .foregroundStyle(Color.white.opacity(0.72))
+                )
+                .frame(height: 6)
+                .disabled(!canAdjust)
+                .opacity(canAdjust ? 1 : 0.42)
+            }
 
-                colorAdjustmentSlider(
-                    title: "活化强度",
-                    valueText: percentText(parameters.vitalizationStrength),
-                    value: Double(parameters.vitalizationStrength),
-                    range: 0...1,
-                    isEnabled: canAdjust
-                ) { value in
-                    viewModel.setColorVitalizationStrength(Float(value))
-                }
+            colorAdjustmentSlider(
+                title: "强度",
+                valueText: signedPercentText(strengthDisplayValue),
+                value: Double(strengthDisplayValue),
+                range: -1...1,
+                isEnabled: canAdjust
+            ) { value in
+                viewModel.setColorAdjustmentHueStrength(Float(value) * 0.5)
+            }
 
-                colorAdjustmentSlider(
-                    title: "色带宽度",
-                    valueText: percentText(parameters.vitalizationBandScale),
-                    value: Double(parameters.vitalizationBandScale),
-                    range: 0...1,
-                    isEnabled: canAdjust
-                ) { value in
-                    viewModel.setColorVitalizationBandScale(Float(value))
-                }
+            colorAdjustmentSlider(
+                title: "亮度",
+                valueText: signedPercentText(parameters.brightness),
+                value: Double(parameters.brightness),
+                range: -1...1,
+                isEnabled: canAdjust
+            ) { value in
+                viewModel.setColorAdjustmentBrightness(Float(value))
+            }
 
-                colorAdjustmentSlider(
-                    title: "颜色容差",
-                    valueText: percentText(parameters.vitalizationColorTolerance),
-                    value: Double(parameters.vitalizationColorTolerance),
-                    range: 0...1,
-                    isEnabled: canAdjust
-                ) { value in
-                    viewModel.setColorVitalizationColorTolerance(Float(value))
-                }
+            colorAdjustmentSlider(
+                title: "对比",
+                valueText: signedPercentText(parameters.contrast),
+                value: Double(parameters.contrast),
+                range: -1...1,
+                isEnabled: canAdjust
+            ) { value in
+                viewModel.setColorAdjustmentContrast(Float(value))
+            }
 
-                colorAdjustmentSlider(
-                    title: "色带方向",
-                    valueText: "\(Int(parameters.vitalizationDirectionDegrees.rounded()))°",
-                    value: Double(parameters.vitalizationDirectionDegrees),
-                    range: 0...180,
-                    isEnabled: canAdjust
-                ) { value in
-                    viewModel.setColorVitalizationDirectionDegrees(Float(value))
-                }
+            colorAdjustmentSlider(
+                title: "纯度",
+                valueText: signedPercentText(parameters.purity),
+                value: Double(parameters.purity),
+                range: -1...1,
+                isEnabled: canAdjust
+            ) { value in
+                viewModel.setColorAdjustmentPurity(Float(value))
             }
 
             Divider()
@@ -2801,6 +2728,76 @@ struct RightInspectorView: View {
                     viewModel.setColorAdjustmentShowsOriginalPreview(isPressed)
                 }
             )
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var colorVitalizationControls: some View {
+        let parameters = viewModel.colorAdjustmentParameters
+        let canAdjust = viewModel.canEditColorAdjustmentParameters
+        let selectedTextureName = viewModel.workspace.textureFillLibrary.selectedItemID
+            .flatMap { viewModel.workspace.textureFillLibrary.item(id: $0)?.displayName }
+
+        return VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Image(systemName: "wand.and.rays")
+                    .foregroundStyle(Color.accentColor)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("颜色活化")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(Color.white.opacity(0.92))
+                    Text(selectedTextureName ?? textureFillTipSourceSummary)
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(Color.white.opacity(0.58))
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 0)
+            }
+
+            Text("在目标色块上涂抹；每次抬笔自动写入，Cmd-Z 可直接撤销。下方纹理库决定混色纹理。")
+                .font(.system(size: 10.5, weight: .medium))
+                .foregroundStyle(Color.white.opacity(0.64))
+                .fixedSize(horizontal: false, vertical: true)
+
+            colorAdjustmentSlider(
+                title: "活化强度",
+                valueText: percentText(parameters.vitalizationStrength),
+                value: Double(parameters.vitalizationStrength),
+                range: 0...1,
+                isEnabled: canAdjust
+            ) { value in
+                viewModel.setColorVitalizationStrength(Float(value))
+            }
+
+            colorAdjustmentSlider(
+                title: "纹理尺度",
+                valueText: percentText(parameters.vitalizationBandScale),
+                value: Double(parameters.vitalizationBandScale),
+                range: 0...1,
+                isEnabled: canAdjust
+            ) { value in
+                viewModel.setColorVitalizationBandScale(Float(value))
+            }
+
+            colorAdjustmentSlider(
+                title: "颜色容差",
+                valueText: percentText(parameters.vitalizationColorTolerance),
+                value: Double(parameters.vitalizationColorTolerance),
+                range: 0...1,
+                isEnabled: canAdjust
+            ) { value in
+                viewModel.setColorVitalizationColorTolerance(Float(value))
+            }
+
+            colorAdjustmentSlider(
+                title: "扭曲混合",
+                valueText: percentText(parameters.vitalizationDistortion),
+                value: Double(parameters.vitalizationDistortion),
+                range: 0...1,
+                isEnabled: canAdjust
+            ) { value in
+                viewModel.setColorVitalizationDistortion(Float(value))
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }

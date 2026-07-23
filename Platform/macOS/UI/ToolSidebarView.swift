@@ -22,24 +22,8 @@ struct ToolSidebarView: View {
     @State private var showsRecorderPopover = false
     @State private var recorderExportFPS = 12.0
 
-    private let groupEntries: [ToolSidebarEntry] = [
-        .group("brush"),
-        .group("eraser"),
-        .group("eyedropper"),
-        .group("bucket"),
-        .group("selection-l"),
-        .group("lasso-fill"),
-        .group("selection-m"),
-        .group("straight-line"),
-        .group("gradient-j"),
-        .group("smudge"),
-        .group("color-adjust"),
-        .group("canvas-rotate"),
-        .group("canvas-crop"),
-        .group("free-transform"),
-        .group("perspective"),
-        .group("block-reference")
-    ]
+    private let groupEntries: [ToolSidebarEntry] =
+        ToolSidebarGroup.orderedGroups.map { .group($0.id) }
 
     var body: some View {
         VStack(spacing: 0) {

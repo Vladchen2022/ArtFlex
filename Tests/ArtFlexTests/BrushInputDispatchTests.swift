@@ -90,6 +90,20 @@ struct BrushInputDispatchTests {
                 hasHoverLocation: true
             ) == true
         )
+
+        #expect(
+            preferredBrushCursorMode(
+                activeTool: .colorVitalization,
+                isEyedropperCursorActive: false,
+                hasHoverLocation: true
+            ) == .crosshair
+        )
+        #expect(
+            shouldShowBrushTipIndicator(
+                activeTool: .colorVitalization,
+                hasHoverLocation: true
+            ) == true
+        )
     }
 
     @Test
@@ -114,6 +128,30 @@ struct BrushInputDispatchTests {
         )
 
         #expect(shouldPrioritize == true)
+    }
+
+    @Test
+    func colorVitalizationDoesNotConsumeBrushShortcutLocally() {
+        let event = NSEvent.keyEvent(
+            with: .keyDown,
+            location: .zero,
+            modifierFlags: [],
+            timestamp: 0,
+            windowNumber: 0,
+            context: nil,
+            characters: "b",
+            charactersIgnoringModifiers: "b",
+            isARepeat: false,
+            keyCode: 11
+        )
+
+        let shouldPrioritize = shouldPrioritizeCanvasKeyHandlerBeforeToolShortcut(
+            activeTool: .colorVitalization,
+            event: try! #require(event),
+            modifiers: []
+        )
+
+        #expect(shouldPrioritize == false)
     }
 
     @Test

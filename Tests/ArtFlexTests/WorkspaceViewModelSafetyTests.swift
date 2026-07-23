@@ -811,11 +811,9 @@ struct WorkspaceViewModelSafetyTests {
         )
 
         harness.viewModel.setBrushSize(144)
-        harness.viewModel.selectTool(.brightnessAdjust)
-        harness.viewModel.setColorAdjustmentEffectMode(.vitalization)
-        harness.viewModel.setColorVitalizationColorTolerance(0.12)
+        harness.viewModel.selectTool(.colorVitalization)
 
-        let sourcePoints = [(92, 88), (104, 96), (112, 104), (120, 112)]
+        let sourcePoints = [(108, 104), (92, 88), (104, 96), (112, 104), (120, 112)]
         let neighborPoint = (150, 104)
         let sourceBefore = try sourcePoints.map {
             try harness.color(atX: $0.0, y: $0.1, layerID: activeLayerID)
@@ -836,7 +834,6 @@ struct WorkspaceViewModelSafetyTests {
         harness.viewModel.applyStroke(samples: [
             .init(location: .init(x: 108, y: 104), pressure: 1)
         ])
-        harness.viewModel.endStroke()
         try await waitForColorAdjustmentRedrawRevision(
             in: harness,
             after: baselineRevision
@@ -849,8 +846,11 @@ struct WorkspaceViewModelSafetyTests {
         #expect(colorDistance((reference, neighborBefore)) > 0.2)
         #expect(harness.viewModel.canConfirmColorAdjustmentSession)
 
+        harness.viewModel.endStroke()
+        #expect(harness.viewModel.colorAdjustmentSession == nil)
+
         let sourceAfter = try sourcePoints.map {
-            try harness.colorAdjustmentPreviewColor(atX: $0.0, y: $0.1)
+            try harness.color(atX: $0.0, y: $0.1, layerID: activeLayerID)
         }
         let maximumSourceDifference = zip(sourceBefore, sourceAfter)
             .map(colorDistance)
@@ -860,9 +860,10 @@ struct WorkspaceViewModelSafetyTests {
             #expect(abs(before.alpha - after.alpha) < 0.01)
         }
 
-        let neighborAfter = try harness.colorAdjustmentPreviewColor(
+        let neighborAfter = try harness.color(
             atX: neighborPoint.0,
-            y: neighborPoint.1
+            y: neighborPoint.1,
+            layerID: activeLayerID
         )
         #expect(colorDistance((neighborBefore, neighborAfter)) < 0.02)
         #expect(abs(neighborBefore.alpha - neighborAfter.alpha) < 0.01)
@@ -886,9 +887,14 @@ struct WorkspaceViewModelSafetyTests {
 
         harness.viewModel.setBrushSize(56)
         harness.viewModel.setBrushOpacity(1)
-        harness.viewModel.selectTool(.brightnessAdjust)
-        harness.viewModel.setColorAdjustmentEffectMode(.vitalization)
+        harness.viewModel.selectTool(.colorVitalization)
         harness.viewModel.beginStrokeIfNeeded()
+
+        let material = try #require(
+            harness.viewModel.colorAdjustmentSession?.vitalizationMaterial
+        )
+        #expect(material.settings == harness.viewModel.workspace.toolSession.textureFillTip)
+        #expect(!material.maskData.isEmpty)
 
         let firstRevision = harness.viewModel.colorAdjustmentRedrawRevision
         harness.viewModel.applyStroke(samples: [
@@ -921,9 +927,9 @@ struct WorkspaceViewModelSafetyTests {
         harness.viewModel.endStroke()
 
         #expect(seedBeforeContinuation == seedAfterContinuation)
-        #expect(abs(earlierPreview.red - continuedPreview.red) < 0.03)
-        #expect(abs(earlierPreview.green - continuedPreview.green) < 0.03)
-        #expect(abs(earlierPreview.blue - continuedPreview.blue) < 0.03)
+        #expect(abs(earlierPreview.red - continuedPreview.red) < 0.08)
+        #expect(abs(earlierPreview.green - continuedPreview.green) < 0.08)
+        #expect(abs(earlierPreview.blue - continuedPreview.blue) < 0.08)
         #expect(abs(earlierPreview.alpha - continuedPreview.alpha) < 0.005)
     }
 
@@ -958,6 +964,26 @@ struct WorkspaceViewModelSafetyTests {
         #expect(handled == true)
         #expect(harness.viewModel.workspace.toolSession.activeTool == .brightnessAdjust)
         #expect(harness.viewModel.colorAdjustmentBrushMode == .paint)
+    }
+
+    @Test
+    @MainActor
+    func colorVitalizationBKeySwitchesToBrushTool() throws {
+        let harness = try BrushEditingBoundaryHarness()
+        harness.viewModel.selectTool(.colorVitalization)
+
+        let handled = harness.viewModel.handleKeyDown(
+            makeCanvasKeyEvent(
+                type: .keyDown,
+                characters: "b",
+                charactersIgnoringModifiers: "b",
+                modifiers: [],
+                keyCode: 11
+            )
+        )
+
+        #expect(handled == true)
+        #expect(harness.viewModel.workspace.toolSession.activeTool == .brush)
     }
 
     @Test

@@ -10,14 +10,19 @@ private struct ColorAdjustmentRenderPlan {
 
 @MainActor
 extension WorkspaceViewModel {
+    var activeColorAdjustmentEffectMode: ColorAdjustmentEffectMode {
+        workspace.toolSession.activeTool == .colorVitalization ? .vitalization : .standard
+    }
+
     var colorAdjustmentParameters: ColorAdjustmentParameters {
         colorAdjustmentSession?.parameters ?? defaultColorAdjustmentParameters(
-            for: colorAdjustmentEffectMode
+            for: activeColorAdjustmentEffectMode
         )
     }
 
     var isColorAdjustmentToolActive: Bool {
         workspace.toolSession.activeTool == .brightnessAdjust
+            || workspace.toolSession.activeTool == .colorVitalization
     }
 
     var canEditColorAdjustmentParameters: Bool {
@@ -64,59 +69,10 @@ extension WorkspaceViewModel {
             return session.source.sourceKindForOverlay
         }
         guard canEditColorAdjustmentParameters else { return .none }
-        if colorAdjustmentEffectMode == .vitalization {
+        if activeColorAdjustmentEffectMode == .vitalization {
             return .paintedMask
         }
         return workspace.selection.committedShape == nil ? .wholeLayer : .selection
-    }
-
-    func setColorAdjustmentEffectMode(_ mode: ColorAdjustmentEffectMode) {
-        guard colorAdjustmentEffectMode != mode else { return }
-        colorAdjustmentEffectMode = mode
-
-        guard let activeContext = activeEditableAdjustmentLayerContext() else {
-            syncColorAdjustmentOverlayState()
-            return
-        }
-
-        let carriedParameters = colorAdjustmentSession?.parameters
-            ?? defaultColorAdjustmentParameters(for: mode)
-        var nextParameters = carriedParameters
-        if mode == .vitalization, nextParameters.vitalizationStrength <= 0.0001 {
-            nextParameters.vitalizationStrength = ColorAdjustmentParameters.vitalizationDefault.vitalizationStrength
-        }
-
-        if mode == .vitalization {
-            if var session = colorAdjustmentSession,
-               session.layerID == activeContext.layerID,
-               case .painted = session.source {
-                session.effectMode = mode
-                session.parameters = nextParameters
-                session.vitalizationReferenceColor = nil
-                session.vitalizationSeed = 0
-                colorAdjustmentSession = session
-            } else {
-                colorAdjustmentSession = makePaintedColorAdjustmentSession(
-                    layerID: activeContext.layerID,
-                    sourceTexture: activeContext.sourceTexture,
-                    parameters: nextParameters,
-                    effectMode: mode
-                )
-            }
-        } else if var session = colorAdjustmentSession,
-                  session.layerID == activeContext.layerID {
-            session.effectMode = mode
-            session.parameters = nextParameters
-            session.vitalizationReferenceColor = nil
-            session.vitalizationSeed = 0
-            colorAdjustmentSession = session
-        }
-
-        colorAdjustmentPreviewToken &+= 1
-        colorAdjustmentPreviewRenderInFlight = false
-        colorAdjustmentPreviewRenderNeedsResubmit = false
-        scheduleColorAdjustmentPreviewUpdate(force: true)
-        syncColorAdjustmentOverlayState()
     }
 
     func setColorAdjustmentSelectedHueDegrees(_ value: Float) {
@@ -167,22 +123,19 @@ extension WorkspaceViewModel {
         }
     }
 
-    func setColorVitalizationDirectionDegrees(_ value: Float) {
+    func setColorVitalizationDistortion(_ value: Float) {
         updateColorAdjustmentParameters { parameters in
-            parameters.vitalizationDirectionDegrees = min(max(value, 0), 180)
+            parameters.vitalizationDistortion = clampUnitColorAdjustmentValue(value)
         }
     }
 
     func resetColorAdjustmentParameters() {
         updateColorAdjustmentParameters { parameters in
-            switch colorAdjustmentEffectMode {
+            switch activeColorAdjustmentEffectMode {
             case .standard:
                 parameters = .neutral
             case .vitalization:
-                parameters.vitalizationStrength = 0
-                parameters.vitalizationBandScale = ColorAdjustmentParameters.vitalizationDefault.vitalizationBandScale
-                parameters.vitalizationColorTolerance = ColorAdjustmentParameters.vitalizationDefault.vitalizationColorTolerance
-                parameters.vitalizationDirectionDegrees = ColorAdjustmentParameters.vitalizationDefault.vitalizationDirectionDegrees
+                parameters = .vitalizationDefault
             }
         }
     }
@@ -276,6 +229,7 @@ extension WorkspaceViewModel {
             effectMode: session.effectMode,
             vitalizationReferenceColor: session.vitalizationReferenceColor,
             vitalizationSeed: session.vitalizationSeed,
+            vitalizationMaterial: session.vitalizationMaterial,
             overlayOnly: false,
             effectRegion: renderPlan.effectRegion,
             commandBuffer: commandBuffer
@@ -295,9 +249,12 @@ extension WorkspaceViewModel {
         }
         discardColorAdjustmentSession()
         finalizeCommittedSingleLayerMutation(layerID)
+        let appliedEffectName = session.effectMode.displayName
         presentWorkspaceStatus(
             kind: .success,
-            message: shouldClearCommittedSelectionAfterApply ? "已应用色彩调整，并取消选区" : "已应用色彩调整"
+            message: shouldClearCommittedSelectionAfterApply
+                ? "已应用\(appliedEffectName)，并取消选区"
+                : "已应用\(appliedEffectName)"
         )
         return true
     }
@@ -315,6 +272,11 @@ extension WorkspaceViewModel {
         guard session.hasPendingCommittedEffect else {
             discardColorAdjustmentSession()
             return true
+        }
+
+        if session.effectMode == .vitalization {
+            guard confirmColorAdjustmentSession() else { return false }
+            return reason.continuesTriggeringActionAfterResolution
         }
 
         switch confirmColorAdjustmentResolution(reason: reason) {
@@ -336,7 +298,7 @@ extension WorkspaceViewModel {
         let sourceTexture = activeContext.sourceTexture
 
         let carriedParameters = colorAdjustmentSession?.parameters
-            ?? defaultColorAdjustmentParameters(for: colorAdjustmentEffectMode)
+            ?? defaultColorAdjustmentParameters(for: activeColorAdjustmentEffectMode)
         let requiresPaintedMaskSession: Bool = {
             guard let session = colorAdjustmentSession, session.layerID == layerID else {
                 return true
@@ -355,7 +317,7 @@ extension WorkspaceViewModel {
                 layerID: layerID,
                 sourceTexture: sourceTexture,
                 parameters: carriedParameters,
-                effectMode: colorAdjustmentEffectMode
+                effectMode: activeColorAdjustmentEffectMode
             )
         }
 
@@ -447,6 +409,7 @@ extension WorkspaceViewModel {
         guard case .painted(var paintedState) = session.source else { return }
         guard let activeContext = activeEditableAdjustmentLayerContext() else { return }
         let sourceTexture = activeContext.sourceTexture
+        let shouldAutoConfirm = session.effectMode == .vitalization
 
         defer {
             session.source = .painted(paintedState)
@@ -454,6 +417,9 @@ extension WorkspaceViewModel {
             colorAdjustmentStrokePacketCount = 0
             scheduleColorAdjustmentPreviewUpdate(force: true)
             syncColorAdjustmentOverlayState()
+            if shouldAutoConfirm, session.hasPendingCommittedEffect {
+                _ = confirmColorAdjustmentSession()
+            }
         }
 
         guard paintedState.brushSamplingState != nil else { return }
@@ -627,8 +593,41 @@ extension WorkspaceViewModel {
             previewTexture: previewTexture,
             parameters: parameters,
             effectMode: effectMode,
+            vitalizationMaterial: effectMode == .vitalization
+                ? currentColorVitalizationMaterial()
+                : nil,
             brushMode: colorAdjustmentBrushMode
         )
+    }
+
+    func refreshColorVitalizationMaterialFromCurrentTexture() {
+        guard var session = colorAdjustmentSession, session.effectMode == .vitalization else {
+            return
+        }
+        session.vitalizationMaterial = currentColorVitalizationMaterial()
+        colorAdjustmentSession = session
+        colorAdjustmentPreviewToken &+= 1
+        colorAdjustmentPreviewRenderInFlight = false
+        colorAdjustmentPreviewRenderNeedsResubmit = false
+        scheduleColorAdjustmentPreviewUpdate(force: true)
+        syncColorAdjustmentOverlayState()
+    }
+
+    private func currentColorVitalizationMaterial() -> ColorVitalizationMaterial? {
+        let settings = workspace.toolSession.textureFillTip
+        let maskData: Data?
+        if settings.sourceSemantic == .importedImage {
+            maskData = settings.customTipMaskData
+        } else {
+            let brush = workspace.toolSession.textureFillBrushOverride
+                ?? workspace.toolSession.drawingBrush
+            maskData = StageOneBrushPreviewRasterizer.materialFieldAlphaBytes(
+                for: brush,
+                resolution: 384
+            ).map(Data.init)
+        }
+        guard let maskData, !maskData.isEmpty else { return nil }
+        return ColorVitalizationMaterial(maskData: maskData, settings: settings)
     }
 
     private func makeSelectionColorAdjustmentSession(
@@ -671,7 +670,7 @@ extension WorkspaceViewModel {
             ),
             previewTexture: previewTexture,
             parameters: parameters,
-            effectMode: colorAdjustmentEffectMode,
+            effectMode: activeColorAdjustmentEffectMode,
             brushMode: colorAdjustmentBrushMode
         )
     }
@@ -695,7 +694,7 @@ extension WorkspaceViewModel {
             ),
             previewTexture: previewTexture,
             parameters: parameters,
-            effectMode: colorAdjustmentEffectMode,
+            effectMode: activeColorAdjustmentEffectMode,
             brushMode: colorAdjustmentBrushMode
         )
     }
@@ -856,6 +855,7 @@ extension WorkspaceViewModel {
             effectMode: session.effectMode,
             vitalizationReferenceColor: session.vitalizationReferenceColor,
             vitalizationSeed: session.vitalizationSeed,
+            vitalizationMaterial: session.vitalizationMaterial,
             overlayOnly: session.parameters.isNeutral(for: session.effectMode)
                 || (session.effectMode == .vitalization && session.vitalizationReferenceColor == nil),
             effectRegion: renderPlan.effectRegion,
@@ -971,7 +971,7 @@ extension WorkspaceViewModel {
             vitalizationStrength: session.parameters.vitalizationStrength,
             vitalizationBandScale: session.parameters.vitalizationBandScale,
             vitalizationColorTolerance: session.parameters.vitalizationColorTolerance,
-            vitalizationDirectionDegrees: session.parameters.vitalizationDirectionDegrees,
+            vitalizationDistortion: session.parameters.vitalizationDistortion,
             vitalizationReferenceColor: session.vitalizationReferenceColor,
             showsOriginalPreview: session.showsOriginalPreview,
             effectiveBounds: session.source.effectiveBounds,
@@ -1047,9 +1047,8 @@ extension WorkspaceViewModel {
         normalized.vitalizationColorTolerance = clampUnitColorAdjustmentValue(
             normalized.vitalizationColorTolerance
         )
-        normalized.vitalizationDirectionDegrees = min(
-            max(normalized.vitalizationDirectionDegrees, 0),
-            180
+        normalized.vitalizationDistortion = clampUnitColorAdjustmentValue(
+            normalized.vitalizationDistortion
         )
         return normalized
     }
@@ -1085,8 +1084,8 @@ extension WorkspaceViewModel {
         }
 
         let parameters = colorAdjustmentSession?.parameters
-            ?? defaultColorAdjustmentParameters(for: colorAdjustmentEffectMode)
-        if colorAdjustmentEffectMode == .vitalization {
+            ?? defaultColorAdjustmentParameters(for: activeColorAdjustmentEffectMode)
+        if activeColorAdjustmentEffectMode == .vitalization {
             let nextSession = makePaintedColorAdjustmentSession(
                 layerID: layerID,
                 sourceTexture: sourceTexture,

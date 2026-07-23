@@ -10,7 +10,7 @@ struct ColorAdjustmentParameters: Equatable, Sendable {
     var vitalizationStrength: Float = 0
     var vitalizationBandScale: Float = 0.45
     var vitalizationColorTolerance: Float = 0.35
-    var vitalizationDirectionDegrees: Float = 32
+    var vitalizationDistortion: Float = 0.62
 
     static let neutral = Self()
     static let vitalizationDefault = Self(vitalizationStrength: 0.55)
@@ -136,6 +136,7 @@ struct ColorAdjustmentSession {
     var effectMode: ColorAdjustmentEffectMode = .standard
     var vitalizationReferenceColor: RGBAColor?
     var vitalizationSeed: UInt32 = 0
+    var vitalizationMaterial: ColorVitalizationMaterial?
     var brushMode: ColorAdjustmentBrushMode = .paint
     var showsOriginalPreview: Bool = false
 
@@ -163,6 +164,11 @@ struct ColorAdjustmentSession {
     }
 }
 
+struct ColorVitalizationMaterial: Equatable, Sendable {
+    var maskData: Data
+    var settings: TextureFillTipSettings
+}
+
 struct ColorAdjustmentOverlayState: Equatable {
     enum SourceKind: Equatable {
         case none
@@ -182,7 +188,7 @@ struct ColorAdjustmentOverlayState: Equatable {
     var vitalizationStrength: Float = 0
     var vitalizationBandScale: Float = 0.45
     var vitalizationColorTolerance: Float = 0.35
-    var vitalizationDirectionDegrees: Float = 32
+    var vitalizationDistortion: Float = 0.62
     var vitalizationReferenceColor: RGBAColor?
     var showsOriginalPreview: Bool = false
     var effectiveBounds: CanvasRect?

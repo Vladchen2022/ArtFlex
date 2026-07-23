@@ -108,6 +108,7 @@ enum ToolKind: String, Codable, Sendable {
     case eraser
     case smudge
     case brightnessAdjust
+    case colorVitalization
     case eyedropper
     case bucket
     case polygonSelection
@@ -183,6 +184,8 @@ extension ToolKind {
             return "hand.draw"
         case .brightnessAdjust:
             return "slider.horizontal.3"
+        case .colorVitalization:
+            return "wand.and.rays"
         case .canvasRotate:
             return "rotate.3d"
         case .canvasCrop:
@@ -228,6 +231,8 @@ extension ToolKind {
             return "涂抹"
         case .brightnessAdjust:
             return "色彩调整"
+        case .colorVitalization:
+            return "颜色活化"
         case .canvasRotate:
             return "画布旋转"
         case .canvasCrop:
@@ -265,6 +270,8 @@ extension ToolKind {
             return "T"
         case .brightnessAdjust:
             return "O"
+        case .colorVitalization:
+            return nil
         case .canvasRotate:
             return "R"
         case .canvasCrop:
@@ -307,6 +314,7 @@ struct ToolSidebarGroup: Identifiable, Equatable, Sendable {
         .init(id: "straight-line", tools: [.straightLine], shortcutKey: "U"),
         .init(id: "smudge", tools: [.smudge], shortcutKey: "T"),
         .init(id: "color-adjust", tools: [.brightnessAdjust], shortcutKey: "O"),
+        .init(id: "color-vitalization", tools: [.colorVitalization], shortcutKey: nil),
         .init(id: "canvas-rotate", tools: [.canvasRotate], shortcutKey: "R"),
         .init(id: "canvas-crop", tools: [.canvasCrop], shortcutKey: "C"),
         .init(id: "free-transform", tools: [.freeTransform], shortcutKey: "V"),
