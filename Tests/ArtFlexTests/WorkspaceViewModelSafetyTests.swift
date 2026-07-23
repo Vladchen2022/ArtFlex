@@ -785,6 +785,150 @@ struct WorkspaceViewModelSafetyTests {
 
     @Test
     @MainActor
+    func colorVitalizationSamplesFirstColorPreservesAlphaAndRejectsDifferentNeighborColor() async throws {
+        let harness = try BrushEditingBoundaryHarness()
+        let activeLayerID = harness.viewModel.workspace.document.activeLayerID
+        let sourceColor = RGBAColor(red: 0.48, green: 0.24, blue: 0.62, alpha: 0.72)
+        let neighborColor = RGBAColor(red: 0.12, green: 0.62, blue: 0.34, alpha: 0.72)
+
+        try fillOpaqueRect(
+            in: harness,
+            layerID: activeLayerID,
+            originX: 40,
+            originY: 48,
+            width: 90,
+            height: 120,
+            color: sourceColor
+        )
+        try fillOpaqueRect(
+            in: harness,
+            layerID: activeLayerID,
+            originX: 130,
+            originY: 48,
+            width: 90,
+            height: 120,
+            color: neighborColor
+        )
+
+        harness.viewModel.setBrushSize(144)
+        harness.viewModel.selectTool(.brightnessAdjust)
+        harness.viewModel.setColorAdjustmentEffectMode(.vitalization)
+        harness.viewModel.setColorVitalizationColorTolerance(0.12)
+
+        let sourcePoints = [(92, 88), (104, 96), (112, 104), (120, 112)]
+        let neighborPoint = (150, 104)
+        let sourceBefore = try sourcePoints.map {
+            try harness.color(atX: $0.0, y: $0.1, layerID: activeLayerID)
+        }
+        let sampledSourceBefore = try harness.color(
+            atX: 108,
+            y: 104,
+            layerID: activeLayerID
+        )
+        let neighborBefore = try harness.color(
+            atX: neighborPoint.0,
+            y: neighborPoint.1,
+            layerID: activeLayerID
+        )
+
+        let baselineRevision = harness.viewModel.colorAdjustmentRedrawRevision
+        harness.viewModel.beginStrokeIfNeeded()
+        harness.viewModel.applyStroke(samples: [
+            .init(location: .init(x: 108, y: 104), pressure: 1)
+        ])
+        harness.viewModel.endStroke()
+        try await waitForColorAdjustmentRedrawRevision(
+            in: harness,
+            after: baselineRevision
+        )
+
+        let reference = try #require(
+            harness.viewModel.colorAdjustmentOverlayState.vitalizationReferenceColor
+        )
+        #expect(colorDistance((reference, sampledSourceBefore)) < 0.14)
+        #expect(colorDistance((reference, neighborBefore)) > 0.2)
+        #expect(harness.viewModel.canConfirmColorAdjustmentSession)
+
+        let sourceAfter = try sourcePoints.map {
+            try harness.colorAdjustmentPreviewColor(atX: $0.0, y: $0.1)
+        }
+        let maximumSourceDifference = zip(sourceBefore, sourceAfter)
+            .map(colorDistance)
+            .max() ?? 0
+        #expect(maximumSourceDifference > 0.015)
+        for (before, after) in zip(sourceBefore, sourceAfter) {
+            #expect(abs(before.alpha - after.alpha) < 0.01)
+        }
+
+        let neighborAfter = try harness.colorAdjustmentPreviewColor(
+            atX: neighborPoint.0,
+            y: neighborPoint.1
+        )
+        #expect(colorDistance((neighborBefore, neighborAfter)) < 0.02)
+        #expect(abs(neighborBefore.alpha - neighborAfter.alpha) < 0.01)
+    }
+
+    @Test
+    @MainActor
+    func colorVitalizationKeepsEarlierMaterialStableAcrossContinuousStrokePackets() async throws {
+        let harness = try BrushEditingBoundaryHarness()
+        let activeLayerID = harness.viewModel.workspace.document.activeLayerID
+
+        try fillOpaqueRect(
+            in: harness,
+            layerID: activeLayerID,
+            originX: 40,
+            originY: 60,
+            width: 260,
+            height: 100,
+            color: .init(red: 0.53, green: 0.28, blue: 0.64, alpha: 1)
+        )
+
+        harness.viewModel.setBrushSize(56)
+        harness.viewModel.setBrushOpacity(1)
+        harness.viewModel.selectTool(.brightnessAdjust)
+        harness.viewModel.setColorAdjustmentEffectMode(.vitalization)
+        harness.viewModel.beginStrokeIfNeeded()
+
+        let firstRevision = harness.viewModel.colorAdjustmentRedrawRevision
+        harness.viewModel.applyStroke(samples: [
+            .init(location: .init(x: 90, y: 108), pressure: 1)
+        ])
+        try await waitForColorAdjustmentRedrawRevision(
+            in: harness,
+            after: firstRevision
+        )
+        let earlierPreview = try harness.colorAdjustmentPreviewColor(atX: 90, y: 108)
+        let seedBeforeContinuation = try #require(
+            harness.viewModel.colorAdjustmentSession?.vitalizationSeed
+        )
+
+        let continuationRevision = harness.viewModel.colorAdjustmentRedrawRevision
+        harness.viewModel.applyStroke(samples: [
+            .init(location: .init(x: 170, y: 108), pressure: 1)
+        ])
+        harness.viewModel.applyStroke(samples: [
+            .init(location: .init(x: 250, y: 108), pressure: 1)
+        ])
+        try await waitForColorAdjustmentRedrawRevision(
+            in: harness,
+            after: continuationRevision
+        )
+        let continuedPreview = try harness.colorAdjustmentPreviewColor(atX: 90, y: 108)
+        let seedAfterContinuation = try #require(
+            harness.viewModel.colorAdjustmentSession?.vitalizationSeed
+        )
+        harness.viewModel.endStroke()
+
+        #expect(seedBeforeContinuation == seedAfterContinuation)
+        #expect(abs(earlierPreview.red - continuedPreview.red) < 0.03)
+        #expect(abs(earlierPreview.green - continuedPreview.green) < 0.03)
+        #expect(abs(earlierPreview.blue - continuedPreview.blue) < 0.03)
+        #expect(abs(earlierPreview.alpha - continuedPreview.alpha) < 0.005)
+    }
+
+    @Test
+    @MainActor
     func colorAdjustmentToolEKeySwitchesToEraseMaskMode() throws {
         let harness = try BrushEditingBoundaryHarness()
 
@@ -4399,6 +4543,14 @@ private func maskRowMasses(_ maskData: Data, resolution: Int) -> [Double] {
         }
     }
     return rows
+}
+
+private func colorDistance(_ pair: (RGBAColor, RGBAColor)) -> Float {
+    let (lhs, rhs) = pair
+    let red = lhs.red - rhs.red
+    let green = lhs.green - rhs.green
+    let blue = lhs.blue - rhs.blue
+    return sqrt((red * red) + (green * green) + (blue * blue))
 }
 
 @MainActor

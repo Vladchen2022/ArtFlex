@@ -632,6 +632,77 @@ struct WorkspaceViewModelPixelHistoryTests {
 
     @Test
     @MainActor
+    func colorVitalizationConfirmSupportsSingleStepUndoRedo() throws {
+        let harness = try PixelHistoryHarness()
+        let layerID = harness.viewModel.workspace.document.activeLayerID
+        let samplePoints = [(22, 22), (26, 26), (30, 30), (34, 34), (38, 38)]
+
+        try fillOpaqueRect(
+            in: harness,
+            layerID: layerID,
+            originX: 10,
+            originY: 10,
+            width: 44,
+            height: 44,
+            color: .init(red: 0.46, green: 0.25, blue: 0.61, alpha: 0.64)
+        )
+        let original = try samplePoints.map {
+            try harness.color(atX: $0.0, y: $0.1, layerID: layerID)
+        }
+
+        harness.viewModel.setBrushSize(48)
+        harness.viewModel.selectTool(.brightnessAdjust)
+        harness.viewModel.setColorAdjustmentEffectMode(.vitalization)
+        harness.viewModel.beginStrokeIfNeeded()
+        harness.viewModel.applyStroke(samples: [
+            .init(location: .init(x: 30, y: 30), pressure: 1)
+        ])
+        harness.viewModel.endStroke()
+
+        #expect(harness.viewModel.canConfirmColorAdjustmentSession)
+        #expect(harness.viewModel.confirmColorAdjustmentSession())
+        let committed = try samplePoints.map {
+            try harness.color(atX: $0.0, y: $0.1, layerID: layerID)
+        }
+        let differences: [Float] = zip(original, committed).map { pair -> Float in
+            let (before, after) = pair
+            let red = before.red - after.red
+            let green = before.green - after.green
+            let blue = before.blue - after.blue
+            let squaredDistance: Float = (red * red) + (green * green) + (blue * blue)
+            return sqrt(squaredDistance)
+        }
+        let maximumDifference = differences.max() ?? 0
+        #expect(maximumDifference > 0.015)
+        for (before, after) in zip(original, committed) {
+            #expect(abs(before.alpha - after.alpha) < 0.01)
+        }
+
+        harness.viewModel.undo()
+        let undone = try samplePoints.map {
+            try harness.color(atX: $0.0, y: $0.1, layerID: layerID)
+        }
+        for (before, after) in zip(original, undone) {
+            #expect(abs(before.red - after.red) < 0.02)
+            #expect(abs(before.green - after.green) < 0.02)
+            #expect(abs(before.blue - after.blue) < 0.02)
+            #expect(abs(before.alpha - after.alpha) < 0.01)
+        }
+
+        harness.viewModel.redo()
+        let redone = try samplePoints.map {
+            try harness.color(atX: $0.0, y: $0.1, layerID: layerID)
+        }
+        for (before, after) in zip(committed, redone) {
+            #expect(abs(before.red - after.red) < 0.02)
+            #expect(abs(before.green - after.green) < 0.02)
+            #expect(abs(before.blue - after.blue) < 0.02)
+            #expect(abs(before.alpha - after.alpha) < 0.01)
+        }
+    }
+
+    @Test
+    @MainActor
     func colorAdjustmentSelectionConfirmSupportsUndoRedo() throws {
         let harness = try PixelHistoryHarness()
         let layerID = harness.viewModel.workspace.document.activeLayerID

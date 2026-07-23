@@ -267,6 +267,7 @@ final class WorkspaceViewModel: ObservableObject {
     @Published var recentBrushAdjustmentRedrawRevision: UInt64 = 0
     @Published private(set) var isWorkspaceChromeHidden = false
     @Published var colorAdjustmentOverlayState = ColorAdjustmentOverlayState.inactive
+    @Published var colorAdjustmentEffectMode: ColorAdjustmentEffectMode = .standard
     @Published var curveAdjustmentOverlayState = CurveAdjustmentOverlayState.inactive
     @Published var colorAdjustmentRedrawRevision: UInt64 = 0
     @Published private(set) var referenceImageSlots = WorkspaceViewModel.makeDefaultReferenceImageSlots()
@@ -10754,6 +10755,10 @@ final class WorkspaceViewModel: ObservableObject {
 
     var layerSurfaceStore: StageOneLayerSurfaceStore {
         bootstrap.layerSurfaceStore
+    }
+
+    var eyedropperSampler: EyedropperSampler {
+        bootstrap.eyedropperSampler
     }
 
     func checkpointSingleLayerHistoryIfPossible(

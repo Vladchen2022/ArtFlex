@@ -7,8 +7,13 @@ struct ColorAdjustmentParameters: Equatable, Sendable {
     var brightness: Float = 0
     var contrast: Float = 0
     var purity: Float = 0
+    var vitalizationStrength: Float = 0
+    var vitalizationBandScale: Float = 0.45
+    var vitalizationColorTolerance: Float = 0.35
+    var vitalizationDirectionDegrees: Float = 32
 
     static let neutral = Self()
+    static let vitalizationDefault = Self(vitalizationStrength: 0.55)
 
     var isNeutral: Bool {
         abs(selectedHueDegrees) < 0.0001
@@ -16,6 +21,29 @@ struct ColorAdjustmentParameters: Equatable, Sendable {
             && abs(brightness) < 0.0001
             && abs(contrast) < 0.0001
             && abs(purity) < 0.0001
+    }
+
+    func isNeutral(for mode: ColorAdjustmentEffectMode) -> Bool {
+        switch mode {
+        case .standard:
+            return isNeutral
+        case .vitalization:
+            return abs(vitalizationStrength) < 0.0001
+        }
+    }
+}
+
+enum ColorAdjustmentEffectMode: String, CaseIterable, Equatable, Sendable {
+    case standard
+    case vitalization
+
+    var displayName: String {
+        switch self {
+        case .standard:
+            return "色彩调整"
+        case .vitalization:
+            return "颜色活化"
+        }
     }
 }
 
@@ -105,20 +133,26 @@ struct ColorAdjustmentSession {
     var source: ColorAdjustmentSource
     var previewTexture: MTLTexture
     var parameters: ColorAdjustmentParameters = .neutral
+    var effectMode: ColorAdjustmentEffectMode = .standard
+    var vitalizationReferenceColor: RGBAColor?
+    var vitalizationSeed: UInt32 = 0
     var brushMode: ColorAdjustmentBrushMode = .paint
     var showsOriginalPreview: Bool = false
 
     var hasVisiblePreview: Bool {
         switch source {
         case .painted(let state):
-            return state.paintedBounds != nil || !parameters.isNeutral
+            return state.paintedBounds != nil || !parameters.isNeutral(for: effectMode)
         case .selection, .wholeLayer:
-            return !parameters.isNeutral
+            return !parameters.isNeutral(for: effectMode)
         }
     }
 
     var hasPendingCommittedEffect: Bool {
-        guard !parameters.isNeutral else { return false }
+        guard !parameters.isNeutral(for: effectMode) else { return false }
+        if effectMode == .vitalization, vitalizationReferenceColor == nil {
+            return false
+        }
 
         switch source {
         case .painted(let state):
@@ -144,6 +178,12 @@ struct ColorAdjustmentOverlayState: Equatable {
     var brightness: Float = 0
     var contrast: Float = 0
     var purity: Float = 0
+    var effectMode: ColorAdjustmentEffectMode = .standard
+    var vitalizationStrength: Float = 0
+    var vitalizationBandScale: Float = 0.45
+    var vitalizationColorTolerance: Float = 0.35
+    var vitalizationDirectionDegrees: Float = 32
+    var vitalizationReferenceColor: RGBAColor?
     var showsOriginalPreview: Bool = false
     var effectiveBounds: CanvasRect?
     var sourceKind: SourceKind = .none

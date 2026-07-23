@@ -10,11 +10,18 @@ private struct ColorAdjustmentPreviewUniforms {
     var canvasSize: SIMD2<UInt32>
     var overlayOnly: UInt32
     var maskReadMode: UInt32
+    var vitalizationReferenceColor: SIMD4<Float>
     var selectedHueDegrees: Float
     var hueStrength: Float
     var brightness: Float
     var contrast: Float
     var purity: Float
+    var vitalizationStrength: Float
+    var vitalizationBandScale: Float
+    var vitalizationColorTolerance: Float
+    var vitalizationDirectionDegrees: Float
+    var effectMode: UInt32
+    var vitalizationSeed: UInt32
 }
 
 enum ColorAdjustmentRendererInitializationError: LocalizedError {
@@ -60,11 +67,18 @@ final class ColorAdjustmentRenderer {
             uint2 canvasSize;
             uint overlayOnly;
             uint maskReadMode;
+            float4 vitalizationReferenceColor;
             float selectedHueDegrees;
             float hueStrength;
             float brightness;
             float contrast;
             float purity;
+            float vitalizationStrength;
+            float vitalizationBandScale;
+            float vitalizationColorTolerance;
+            float vitalizationDirectionDegrees;
+            uint effectMode;
+            uint vitalizationSeed;
         };
 
         constant float3 kRedAxis = float3(1.0, -0.5, -0.5);
@@ -199,6 +213,145 @@ final class ColorAdjustmentRenderer {
             return clamp(applyChromaDelta(color, chromaDelta), 0.0, 1.0);
         }
 
+        float srgbToLinearChannel(float value) {
+            value = clamp(value, 0.0, 1.0);
+            return value <= 0.04045
+                ? value / 12.92
+                : pow((value + 0.055) / 1.055, 2.4);
+        }
+
+        float3 srgbToLinear(float3 color) {
+            return float3(
+                srgbToLinearChannel(color.r),
+                srgbToLinearChannel(color.g),
+                srgbToLinearChannel(color.b)
+            );
+        }
+
+        float3 linearSRGBToOKLab(float3 color) {
+            float3 lms = float3(
+                dot(color, float3(0.4122214708, 0.5363325363, 0.0514459929)),
+                dot(color, float3(0.2119034982, 0.6806995451, 0.1073969566)),
+                dot(color, float3(0.0883024619, 0.2817188376, 0.6299787005))
+            );
+            float3 root = pow(max(lms, float3(0.0)), float3(1.0 / 3.0));
+            return float3(
+                dot(root, float3(0.2104542553, 0.7936177850, -0.0040720468)),
+                dot(root, float3(1.9779984951, -2.4285922050, 0.4505937099)),
+                dot(root, float3(0.0259040371, 0.7827717662, -0.8086757660))
+            );
+        }
+
+        float3 oklabToLinearSRGB(float3 lab) {
+            float3 root = float3(
+                lab.x + (0.3963377774 * lab.y) + (0.2158037573 * lab.z),
+                lab.x - (0.1055613458 * lab.y) - (0.0638541728 * lab.z),
+                lab.x - (0.0894841775 * lab.y) - (1.2914855480 * lab.z)
+            );
+            float3 lms = root * root * root;
+            return float3(
+                dot(lms, float3(4.0767416621, -3.3077115913, 0.2309699292)),
+                dot(lms, float3(-1.2684380046, 2.6097574011, -0.3413193965)),
+                dot(lms, float3(-0.0041960863, -0.7034186147, 1.7076147010))
+            );
+        }
+
+        float hash21(float2 value, float seed) {
+            float3 p = fract(float3(value.xyx) * float3(0.1031, 0.1030, 0.0973));
+            p += dot(p, p.yzx + 33.33 + seed);
+            return fract((p.x + p.y) * p.z);
+        }
+
+        float valueNoise(float2 point, float seed) {
+            float2 cell = floor(point);
+            float2 fraction = fract(point);
+            float2 blend = fraction * fraction * (3.0 - (2.0 * fraction));
+            float a = hash21(cell, seed);
+            float b = hash21(cell + float2(1.0, 0.0), seed);
+            float c = hash21(cell + float2(0.0, 1.0), seed);
+            float d = hash21(cell + float2(1.0, 1.0), seed);
+            return mix(mix(a, b, blend.x), mix(c, d, blend.x), blend.y);
+        }
+
+        float3 applyColorVitalization(
+            float3 color,
+            float2 pixel,
+            constant ColorAdjustmentPreviewUniforms &uniforms,
+            thread float &similarity
+        ) {
+            float3 baseLab = linearSRGBToOKLab(color);
+            float3 referenceLinear = srgbToLinear(uniforms.vitalizationReferenceColor.rgb);
+            float3 referenceLab = linearSRGBToOKLab(referenceLinear);
+            float tolerance = mix(
+                0.018,
+                0.18,
+                clamp(uniforms.vitalizationColorTolerance, 0.0, 1.0)
+            );
+            float distance = length(baseLab - referenceLab);
+            similarity = 1.0 - smoothstep(tolerance * 0.58, tolerance, distance);
+
+            float angle = uniforms.vitalizationDirectionDegrees * 0.01745329252;
+            float2 direction = float2(cos(angle), sin(angle));
+            float2 normal = float2(-direction.y, direction.x);
+            float along = dot(pixel, direction);
+            float across = dot(pixel, normal);
+            float bandWidth = mix(
+                2.5,
+                28.0,
+                pow(clamp(uniforms.vitalizationBandScale, 0.0, 1.0), 0.82)
+            );
+            float seed = float(uniforms.vitalizationSeed % 65521u) * 0.0137;
+
+            float lane = valueNoise(float2(across / bandWidth, seed + 3.1), seed + 7.7);
+            float laneFine = valueNoise(
+                float2(across / max(bandWidth * 0.42, 1.0), seed + 13.9),
+                seed + 19.3
+            );
+            float drift = valueNoise(
+                float2(along / (bandWidth * 7.0), across / (bandWidth * 3.2))
+                    + float2(seed, seed * 0.37),
+                seed + 29.1
+            );
+            float grain = valueNoise(
+                (pixel / max(bandWidth * 0.72, 1.0)) + float2(seed * 0.21, seed * 0.61),
+                seed + 41.7
+            );
+
+            float tone = clamp(
+                ((lane - 0.5) * 1.34)
+                    + ((laneFine - 0.5) * 0.34)
+                    + ((drift - 0.5) * 0.42)
+                    + ((grain - 0.5) * 0.16),
+                -1.0,
+                1.0
+            );
+            float hueVariation = clamp(
+                ((laneFine - 0.5) * 1.25)
+                    - ((drift - 0.5) * 0.62)
+                    + ((grain - 0.5) * 0.28),
+                -1.0,
+                1.0
+            );
+            float chromaVariation = clamp(
+                ((lane - 0.5) * 0.72) + ((grain - 0.5) * 0.55),
+                -1.0,
+                1.0
+            );
+
+            float2 chroma = baseLab.yz;
+            float chromaLength = length(chroma);
+            float2 radial = chromaLength > 1.0e-5
+                ? chroma / chromaLength
+                : normalize(float2(cos(seed), sin(seed)));
+            float2 tangent = float2(-radial.y, radial.x);
+
+            float3 variedLab = baseLab;
+            variedLab.x = clamp(variedLab.x + (tone * 0.095), 0.0, 1.0);
+            variedLab.yz += tangent * (hueVariation * 0.052);
+            variedLab.yz += radial * (chromaVariation * 0.032);
+            return clamp(oklabToLinearSRGB(variedLab), 0.0, 1.0);
+        }
+
         float3 applyColorAdjustments(
             float3 color,
             constant ColorAdjustmentPreviewUniforms &uniforms
@@ -266,9 +419,22 @@ final class ColorAdjustmentRenderer {
             }
 
             float3 baseColor = safeUnpremultiply(base);
-            float3 adjustedColor = applyColorAdjustments(baseColor, uniforms);
+            float3 adjustedColor;
+            float effectInfluence = influence;
+            if (uniforms.effectMode == 1) {
+                float similarity = 0.0;
+                adjustedColor = applyColorVitalization(
+                    baseColor,
+                    float2(gid),
+                    uniforms,
+                    similarity
+                );
+                effectInfluence *= similarity * clamp(uniforms.vitalizationStrength, 0.0, 1.0);
+            } else {
+                adjustedColor = applyColorAdjustments(baseColor, uniforms);
+            }
             float4 adjustedPremultiplied = float4(adjustedColor * base.a, base.a);
-            return mix(base, adjustedPremultiplied, influence);
+            return mix(base, adjustedPremultiplied, effectInfluence);
         }
         """
 
@@ -327,6 +493,9 @@ final class ColorAdjustmentRenderer {
         maskTexture: MTLTexture?,
         maskReadMode: ColorAdjustmentMaskReadMode,
         parameters: ColorAdjustmentParameters,
+        effectMode: ColorAdjustmentEffectMode = .standard,
+        vitalizationReferenceColor: RGBAColor? = nil,
+        vitalizationSeed: UInt32 = 0,
         overlayOnly: Bool,
         effectRegion: MTLRegion?,
         commandQueue: MTLCommandQueue,
@@ -342,6 +511,9 @@ final class ColorAdjustmentRenderer {
             maskTexture: maskTexture,
             maskReadMode: maskReadMode,
             parameters: parameters,
+            effectMode: effectMode,
+            vitalizationReferenceColor: vitalizationReferenceColor,
+            vitalizationSeed: vitalizationSeed,
             overlayOnly: overlayOnly,
             effectRegion: effectRegion,
             commandBuffer: commandBuffer
@@ -358,6 +530,9 @@ final class ColorAdjustmentRenderer {
         maskTexture: MTLTexture?,
         maskReadMode: ColorAdjustmentMaskReadMode,
         parameters: ColorAdjustmentParameters,
+        effectMode: ColorAdjustmentEffectMode = .standard,
+        vitalizationReferenceColor: RGBAColor? = nil,
+        vitalizationSeed: UInt32 = 0,
         overlayOnly: Bool,
         effectRegion: MTLRegion?,
         commandBuffer: MTLCommandBuffer
@@ -393,18 +568,32 @@ final class ColorAdjustmentRenderer {
             ColorAdjustmentVertex(position: SIMD2(-1, 1)),
             ColorAdjustmentVertex(position: SIMD2(1, 1))
         ]
+        let referenceColor = vitalizationReferenceColor
+            ?? RGBAColor(red: 0, green: 0, blue: 0, alpha: 0)
         var uniforms = ColorAdjustmentPreviewUniforms(
             canvasSize: SIMD2(
                 UInt32(sourceTexture.width),
                 UInt32(sourceTexture.height)
             ),
-            overlayOnly: overlayOnly || parameters.isNeutral ? 1 : 0,
+            overlayOnly: overlayOnly || parameters.isNeutral(for: effectMode) ? 1 : 0,
             maskReadMode: maskReadMode == .maskRed ? 0 : 1,
+            vitalizationReferenceColor: SIMD4(
+                referenceColor.red,
+                referenceColor.green,
+                referenceColor.blue,
+                referenceColor.alpha
+            ),
             selectedHueDegrees: parameters.selectedHueDegrees,
             hueStrength: parameters.hueStrength,
             brightness: parameters.brightness,
             contrast: parameters.contrast,
-            purity: parameters.purity
+            purity: parameters.purity,
+            vitalizationStrength: parameters.vitalizationStrength,
+            vitalizationBandScale: parameters.vitalizationBandScale,
+            vitalizationColorTolerance: parameters.vitalizationColorTolerance,
+            vitalizationDirectionDegrees: parameters.vitalizationDirectionDegrees,
+            effectMode: effectMode == .vitalization ? 1 : 0,
+            vitalizationSeed: vitalizationSeed
         )
 
         encoder.setRenderPipelineState(previewPipelineState)

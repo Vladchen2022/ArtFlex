@@ -2625,81 +2625,165 @@ struct RightInspectorView: View {
         let canConfirm = viewModel.canConfirmColorAdjustmentSession
         let wrappedHue = ColorBlocksEngine.wrapHue(parameters.selectedHueDegrees)
         let strengthDisplayValue = parameters.hueStrength * 2
+        let effectMode = viewModel.colorAdjustmentEffectMode
 
         return VStack(alignment: .leading, spacing: 10) {
-            VStack(alignment: .leading, spacing: 6) {
-                HStack(spacing: 8) {
-                    Text("色相")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(Color.white.opacity(0.84))
+            Picker(
+                "调整模式",
+                selection: Binding(
+                    get: { effectMode },
+                    set: { viewModel.setColorAdjustmentEffectMode($0) }
+                )
+            ) {
+                ForEach(ColorAdjustmentEffectMode.allCases, id: \.self) { mode in
+                    Text(mode.displayName).tag(mode)
+                }
+            }
+            .labelsHidden()
+            .pickerStyle(.segmented)
+            .disabled(!canAdjust)
 
-                    Circle()
-                        .fill(colorAdjustmentHuePreviewColor(for: wrappedHue))
-                        .frame(width: 12, height: 12)
-                        .overlay(
-                            Circle()
-                                .stroke(Color.white.opacity(0.35), lineWidth: 1)
-                        )
+            if effectMode == .standard {
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(spacing: 8) {
+                        Text("色相")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(Color.white.opacity(0.84))
 
-                    Spacer(minLength: 8)
+                        Circle()
+                            .fill(colorAdjustmentHuePreviewColor(for: wrappedHue))
+                            .frame(width: 12, height: 12)
+                            .overlay(
+                                Circle()
+                                    .stroke(Color.white.opacity(0.35), lineWidth: 1)
+                            )
 
-                    Text("\(Int(wrappedHue.rounded()))°")
-                        .font(.system(size: 11, weight: .semibold).monospacedDigit())
-                        .foregroundStyle(Color.white.opacity(0.96))
+                        Spacer(minLength: 8)
+
+                        Text("\(Int(wrappedHue.rounded()))°")
+                            .font(.system(size: 11, weight: .semibold).monospacedDigit())
+                            .foregroundStyle(Color.white.opacity(0.96))
+                    }
+
+                    ColorLightingHueBarView(
+                        hue: wrappedHue,
+                        onUpdateHue: { hue in
+                            viewModel.setColorAdjustmentSelectedHueDegrees(hue)
+                        },
+                        onDragEnded: { hue in
+                            viewModel.setColorAdjustmentSelectedHueDegrees(hue)
+                        }
+                    )
+                    .frame(height: 6)
+                    .disabled(!canAdjust)
+                    .opacity(canAdjust ? 1 : 0.42)
                 }
 
-                ColorLightingHueBarView(
-                    hue: wrappedHue,
-                    onUpdateHue: { hue in
-                        viewModel.setColorAdjustmentSelectedHueDegrees(hue)
-                    },
-                    onDragEnded: { hue in
-                        viewModel.setColorAdjustmentSelectedHueDegrees(hue)
+                colorAdjustmentSlider(
+                    title: "强度",
+                    valueText: signedPercentText(strengthDisplayValue),
+                    value: Double(strengthDisplayValue),
+                    range: -1...1,
+                    isEnabled: canAdjust
+                ) { value in
+                    viewModel.setColorAdjustmentHueStrength(Float(value) * 0.5)
+                }
+
+                colorAdjustmentSlider(
+                    title: "亮度",
+                    valueText: signedPercentText(parameters.brightness),
+                    value: Double(parameters.brightness),
+                    range: -1...1,
+                    isEnabled: canAdjust
+                ) { value in
+                    viewModel.setColorAdjustmentBrightness(Float(value))
+                }
+
+                colorAdjustmentSlider(
+                    title: "对比",
+                    valueText: signedPercentText(parameters.contrast),
+                    value: Double(parameters.contrast),
+                    range: -1...1,
+                    isEnabled: canAdjust
+                ) { value in
+                    viewModel.setColorAdjustmentContrast(Float(value))
+                }
+
+                colorAdjustmentSlider(
+                    title: "纯度",
+                    valueText: signedPercentText(parameters.purity),
+                    value: Double(parameters.purity),
+                    range: -1...1,
+                    isEnabled: canAdjust
+                ) { value in
+                    viewModel.setColorAdjustmentPurity(Float(value))
+                }
+            } else {
+                HStack(spacing: 8) {
+                    if let reference = viewModel.colorAdjustmentOverlayState.vitalizationReferenceColor {
+                        Circle()
+                            .fill(
+                                Color(
+                                    red: Double(reference.red),
+                                    green: Double(reference.green),
+                                    blue: Double(reference.blue),
+                                    opacity: Double(reference.alpha)
+                                )
+                            )
+                            .frame(width: 12, height: 12)
+                            .overlay(
+                                Circle()
+                                    .stroke(Color.white.opacity(0.5), lineWidth: 1)
+                            )
+                        Text("已锁定起笔颜色")
+                    } else {
+                        Image(systemName: "eyedropper")
+                        Text("在目标色块上落笔取样")
                     }
-                )
-                .frame(height: 6)
-                .disabled(!canAdjust)
-                .opacity(canAdjust ? 1 : 0.42)
-            }
+                    Spacer(minLength: 0)
+                }
+                .font(.system(size: 10.5, weight: .medium))
+                .foregroundStyle(Color.white.opacity(0.72))
 
-            colorAdjustmentSlider(
-                title: "强度",
-                valueText: signedPercentText(strengthDisplayValue),
-                value: Double(strengthDisplayValue),
-                range: -1...1,
-                isEnabled: canAdjust
-            ) { value in
-                viewModel.setColorAdjustmentHueStrength(Float(value) * 0.5)
-            }
+                colorAdjustmentSlider(
+                    title: "活化强度",
+                    valueText: percentText(parameters.vitalizationStrength),
+                    value: Double(parameters.vitalizationStrength),
+                    range: 0...1,
+                    isEnabled: canAdjust
+                ) { value in
+                    viewModel.setColorVitalizationStrength(Float(value))
+                }
 
-            colorAdjustmentSlider(
-                title: "亮度",
-                valueText: signedPercentText(parameters.brightness),
-                value: Double(parameters.brightness),
-                range: -1...1,
-                isEnabled: canAdjust
-            ) { value in
-                viewModel.setColorAdjustmentBrightness(Float(value))
-            }
+                colorAdjustmentSlider(
+                    title: "色带宽度",
+                    valueText: percentText(parameters.vitalizationBandScale),
+                    value: Double(parameters.vitalizationBandScale),
+                    range: 0...1,
+                    isEnabled: canAdjust
+                ) { value in
+                    viewModel.setColorVitalizationBandScale(Float(value))
+                }
 
-            colorAdjustmentSlider(
-                title: "对比",
-                valueText: signedPercentText(parameters.contrast),
-                value: Double(parameters.contrast),
-                range: -1...1,
-                isEnabled: canAdjust
-            ) { value in
-                viewModel.setColorAdjustmentContrast(Float(value))
-            }
+                colorAdjustmentSlider(
+                    title: "颜色容差",
+                    valueText: percentText(parameters.vitalizationColorTolerance),
+                    value: Double(parameters.vitalizationColorTolerance),
+                    range: 0...1,
+                    isEnabled: canAdjust
+                ) { value in
+                    viewModel.setColorVitalizationColorTolerance(Float(value))
+                }
 
-            colorAdjustmentSlider(
-                title: "纯度",
-                valueText: signedPercentText(parameters.purity),
-                value: Double(parameters.purity),
-                range: -1...1,
-                isEnabled: canAdjust
-            ) { value in
-                viewModel.setColorAdjustmentPurity(Float(value))
+                colorAdjustmentSlider(
+                    title: "色带方向",
+                    valueText: "\(Int(parameters.vitalizationDirectionDegrees.rounded()))°",
+                    value: Double(parameters.vitalizationDirectionDegrees),
+                    range: 0...180,
+                    isEnabled: canAdjust
+                ) { value in
+                    viewModel.setColorVitalizationDirectionDegrees(Float(value))
+                }
             }
 
             Divider()
@@ -2882,6 +2966,10 @@ struct RightInspectorView: View {
             return "+\(rounded)%"
         }
         return "\(rounded)%"
+    }
+
+    private func percentText(_ value: Float) -> String {
+        "\(Int((value * 100).rounded()))%"
     }
 
     private func colorAdjustmentHuePreviewColor(for hue: Float) -> Color {
