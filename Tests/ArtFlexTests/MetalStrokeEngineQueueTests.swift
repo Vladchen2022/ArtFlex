@@ -81,6 +81,51 @@ struct MetalStrokeEngineQueueTests {
     }
 
     @Test
+    func oneContinuousCompoundStrokeKeepsPaintBandsAcrossTurnsAndInputPackets() throws {
+        guard let metalContext = MetalDeviceContext() else {
+            Issue.record("Metal unavailable")
+            return
+        }
+        let renderer = try StageOneBrushRenderer(device: metalContext.device)
+        let points: [StrokePoint] = [
+            .init(x: 24, y: 20, pressure: 1),
+            .init(x: 168, y: 20, pressure: 1),
+            .init(x: 168, y: 50, pressure: 1),
+            .init(x: 24, y: 50, pressure: 1),
+            .init(x: 24, y: 80, pressure: 1),
+            .init(x: 168, y: 80, pressure: 1)
+        ]
+        let wholePacket = try renderContinuousCompoundPaintJitterSnapshot(
+            metalContext: metalContext,
+            renderer: renderer,
+            pointPackets: [points]
+        )
+        let livePackets = try renderContinuousCompoundPaintJitterSnapshot(
+            metalContext: metalContext,
+            renderer: renderer,
+            pointPackets: zip(points.dropLast(), points.dropFirst()).map { [$0, $1] }
+        )
+
+        #expect(alphaBytes(in: wholePacket) == alphaBytes(in: livePackets))
+        #expect(
+            maxByteDelta(wholePacket.pixelData, livePackets.pixelData) <= 1,
+            "A continuous stroke must not recolor earlier pixels when live input arrives in packets"
+        )
+
+        for row in [20, 50, 80] {
+            let colorRange = maximumCrossStrokeRGBRange(
+                in: livePackets,
+                x: 96,
+                yRange: (row - 9)...(row + 9)
+            )
+            #expect(
+                colorRange >= 10,
+                "Paint jitter must remain visible across the whole continuous stroke; row \(row) had RGB range \(colorRange)"
+            )
+        }
+    }
+
+    @Test
     func interactiveCommitDrainSchedulingRejectsFutileMainThreadWork() {
         #expect(shouldScheduleInteractiveBrushCommitDrain(
             queueDepth: 0,
@@ -1358,8 +1403,110 @@ private func renderPaintJitterSnapshot(
     return try serializer.snapshot(texture: texture)
 }
 
+private func renderContinuousCompoundPaintJitterSnapshot(
+    metalContext: MetalDeviceContext,
+    renderer: StageOneBrushRenderer,
+    pointPackets: [[StrokePoint]]
+) throws -> LayerTextureSnapshot {
+    let width = 192
+    let height = 104
+    let surfaceStore = StageOneLayerSurfaceStore()
+    let serializer = LayerTextureSerializer(metalContext: metalContext)
+    guard let texture = surfaceStore.makeTexture(width: width, height: height, metal: metalContext) else {
+        throw PaintJitterTestError.textureUnavailable
+    }
+    try serializer.restore(
+        snapshot: LayerTextureSnapshot(
+            width: width,
+            height: height,
+            bytesPerRow: width * 4,
+            pixelData: Data(repeating: 255, count: width * height * 4)
+        ),
+        into: texture
+    )
+    guard
+        let session = renderer.makeOpacityCapSession(
+            for: texture,
+            commandQueue: metalContext.commandQueue,
+            reusesCachedTextures: false
+        ),
+        let commandBuffer = metalContext.commandQueue.makeCommandBuffer()
+    else {
+        throw PaintJitterTestError.textureUnavailable
+    }
+
+    var brush = BrushSettings.stageOneDefault
+    brush.size = 24
+    brush.spacingPercent = 8
+    brush.opacity = 1
+    brush.buildMode = .buildUp
+    brush.compoundBrush.enabled = true
+    brush.compoundBrush.mode = .overlay
+    brush.compoundBrush.globalPaintJitterAmount = 1
+    brush.compoundBrush.globalPressureOpacityAmount = 0
+
+    var samplingState: BrushStrokeSamplingState?
+    for (index, points) in pointPackets.enumerated() {
+        _ = renderer.encodeOpacityCapStroke(
+            stroke: StrokeDescriptor(
+                tool: .brush,
+                color: .init(red: 0.78, green: 0.16, blue: 0.08, alpha: 1),
+                brush: brush,
+                points: points,
+                selectionShape: nil,
+                skipLeadingStamp: index > 0,
+                paintVariationSeed: 0x1234_5678
+            ),
+            session: session,
+            into: texture,
+            commandBuffer: commandBuffer,
+            samplingState: &samplingState
+        )
+    }
+
+    samplingState?.isFlushing = true
+    session.compoundSecondarySamplingState?.isFlushing = true
+    _ = renderer.encodeOpacityCapStroke(
+        stroke: StrokeDescriptor(
+            tool: .brush,
+            color: .init(red: 0.78, green: 0.16, blue: 0.08, alpha: 1),
+            brush: brush,
+            points: [],
+            selectionShape: nil,
+            skipLeadingStamp: true,
+            paintVariationSeed: 0x1234_5678
+        ),
+        session: session,
+        into: texture,
+        commandBuffer: commandBuffer,
+        samplingState: &samplingState
+    )
+
+    commandBuffer.commit()
+    commandBuffer.waitUntilCompleted()
+    return try serializer.snapshot(texture: texture)
+}
+
 private func alphaBytes(in snapshot: LayerTextureSnapshot) -> [UInt8] {
     stride(from: 3, to: snapshot.pixelData.count, by: 4).map { snapshot.pixelData[$0] }
+}
+
+private func maximumCrossStrokeRGBRange(
+    in snapshot: LayerTextureSnapshot,
+    x: Int,
+    yRange: ClosedRange<Int>
+) -> Int {
+    var minimum = [255, 255, 255]
+    var maximum = [0, 0, 0]
+    for y in yRange {
+        let offset = (y * snapshot.bytesPerRow) + (x * 4)
+        for channel in 0..<3 {
+            let value = Int(snapshot.pixelData[offset + channel])
+            minimum[channel] = min(minimum[channel], value)
+            maximum[channel] = max(maximum[channel], value)
+        }
+    }
+    return zip(minimum, maximum).map { $1 - $0 }.max() ?? 0
 }
 
 private enum PaintJitterTestError: Error {

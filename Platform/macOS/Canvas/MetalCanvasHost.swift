@@ -835,6 +835,7 @@ final class StrokeCaptureMTKView: MTKView {
     private var brushDebugRecords: [BrushInputDebugRecord] = []
     private let minimumTabletPressure: Float = 0.02
     private var trackingAreaRef: NSTrackingArea?
+    private let cursorIndicatorContrastLayer = CAShapeLayer()
     private let cursorIndicatorLayer = CAShapeLayer()
     private let cursorTipLayer = CAShapeLayer()
     private var hoverLocation: CGPoint?
@@ -843,7 +844,7 @@ final class StrokeCaptureMTKView: MTKView {
     private var continuousStrokeRenderGraceWorkItem: DispatchWorkItem?
     private var brushOutlineRevealWorkItem: DispatchWorkItem?
     private var brushSizePreviewSettleWorkItem: DispatchWorkItem?
-    private var displayBrushSize: Float = 24
+    private(set) var displayBrushSize: Float = 24
     private var isAdjustingBrushSizePreview = false
     private var brushSizePreviewExpiresAtNs: UInt64 = 0
     private var isBrushOutlineForcedVisible = false
@@ -910,17 +911,24 @@ final class StrokeCaptureMTKView: MTKView {
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
+        if cursorIndicatorContrastLayer.superlayer == nil {
+            cursorIndicatorContrastLayer.fillColor = NSColor.clear.cgColor
+            cursorIndicatorContrastLayer.strokeColor = NSColor.black.withAlphaComponent(0.88).cgColor
+            cursorIndicatorContrastLayer.lineWidth = 2
+            cursorIndicatorContrastLayer.actions = makeCursorIndicatorDisabledActions()
+            layer?.addSublayer(cursorIndicatorContrastLayer)
+        }
         if cursorIndicatorLayer.superlayer == nil {
             cursorIndicatorLayer.fillColor = NSColor.clear.cgColor
-            cursorIndicatorLayer.strokeColor = NSColor.black.withAlphaComponent(0.28).cgColor
+            cursorIndicatorLayer.strokeColor = NSColor.white.withAlphaComponent(0.96).cgColor
             cursorIndicatorLayer.lineWidth = 1
             cursorIndicatorLayer.actions = makeCursorIndicatorDisabledActions()
             layer?.addSublayer(cursorIndicatorLayer)
         }
         if cursorTipLayer.superlayer == nil {
-            cursorTipLayer.fillColor = NSColor.black.cgColor
-            cursorTipLayer.strokeColor = nil
-            cursorTipLayer.lineWidth = 0
+            cursorTipLayer.fillColor = NSColor.black.withAlphaComponent(0.92).cgColor
+            cursorTipLayer.strokeColor = NSColor.white.withAlphaComponent(0.96).cgColor
+            cursorTipLayer.lineWidth = 1
             cursorTipLayer.actions = makeCursorIndicatorDisabledActions()
             layer?.addSublayer(cursorTipLayer)
         }
@@ -1612,15 +1620,9 @@ final class StrokeCaptureMTKView: MTKView {
             return
         }
 
-        if event.charactersIgnoringModifiers == "[" {
-            previewAdjustBrushSize(by: -1)
-            strokeDelegate?.strokeCaptureView(self, didRequestBrushSizeAdjustment: -1)
-            return
-        }
-
-        if event.charactersIgnoringModifiers == "]" {
-            previewAdjustBrushSize(by: 1)
-            strokeDelegate?.strokeCaptureView(self, didRequestBrushSizeAdjustment: 1)
+        if let direction = brushSizeShortcutDirection(for: event) {
+            previewAdjustBrushSize(by: direction)
+            strokeDelegate?.strokeCaptureView(self, didRequestBrushSizeAdjustment: direction)
             return
         }
 
@@ -2150,6 +2152,7 @@ final class StrokeCaptureMTKView: MTKView {
         defer { CATransaction.commit() }
 
         guard let hoverLocation else {
+            cursorIndicatorContrastLayer.isHidden = true
             cursorIndicatorLayer.isHidden = true
             cursorTipLayer.isHidden = true
             if diagnosticsEnabled {
@@ -2166,6 +2169,7 @@ final class StrokeCaptureMTKView: MTKView {
         let screenScaleCompensation = 1 / max(CGFloat(viewportRenderScale), 0.01)
 
         cursorTipLayer.isHidden = !showBrushTip
+        cursorTipLayer.lineWidth = screenScaleCompensation
         let tipDiameter = 3 * screenScaleCompensation
         if showBrushTip {
             cursorTipLayer.path = CGPath(
@@ -2179,11 +2183,13 @@ final class StrokeCaptureMTKView: MTKView {
             )
         }
 
+        cursorIndicatorContrastLayer.isHidden = !showBrushOutline
         cursorIndicatorLayer.isHidden = !showBrushOutline
+        cursorIndicatorContrastLayer.lineWidth = 2 * screenScaleCompensation
         cursorIndicatorLayer.lineWidth = screenScaleCompensation
         if showBrushOutline {
             let diameter = max(CGFloat(displayBrushSize) * (bounds.width / CGFloat(max(canvasSize.width, 1))), 2)
-            cursorIndicatorLayer.path = CGPath(
+            let outlinePath = CGPath(
                 ellipseIn: CGRect(
                     x: hoverLocation.x - (diameter / 2),
                     y: hoverLocation.y - (diameter / 2),
@@ -2192,6 +2198,8 @@ final class StrokeCaptureMTKView: MTKView {
                 ),
                 transform: nil
             )
+            cursorIndicatorContrastLayer.path = outlinePath
+            cursorIndicatorLayer.path = outlinePath
         }
         if diagnosticsEnabled {
             let updateDurationMs = Double(DispatchTime.now().uptimeNanoseconds - updateStartNs) / 1_000_000

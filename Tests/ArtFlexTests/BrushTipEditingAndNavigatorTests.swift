@@ -69,6 +69,46 @@ struct BrushTipEditingAndNavigatorTests {
     }
 
     @Test
+    @MainActor
+    func mainCanvasAppliesPhysicalBrushSizeShortcutsWithoutTextInput() {
+        let view = StrokeCaptureMTKView(
+            frame: .init(x: 0, y: 0, width: 320, height: 240),
+            device: nil
+        )
+        view.brushSize = 24
+
+        let increase = NSEvent.keyEvent(
+            with: .keyDown,
+            location: .zero,
+            modifierFlags: [],
+            timestamp: ProcessInfo.processInfo.systemUptime,
+            windowNumber: 0,
+            context: nil,
+            characters: "",
+            charactersIgnoringModifiers: "",
+            isARepeat: false,
+            keyCode: 30
+        )!
+        view.keyDown(with: increase)
+        #expect(view.displayBrushSize == 29)
+
+        let decrease = NSEvent.keyEvent(
+            with: .keyDown,
+            location: .zero,
+            modifierFlags: [],
+            timestamp: ProcessInfo.processInfo.systemUptime,
+            windowNumber: 0,
+            context: nil,
+            characters: "",
+            charactersIgnoringModifiers: "",
+            isARepeat: false,
+            keyCode: 33
+        )!
+        view.keyDown(with: decrease)
+        #expect(view.displayBrushSize == 24)
+    }
+
+    @Test
     func brushTipDraftHistorySupportsBoundedUndoRedoAndBranching() {
         let baseline = BrushTipDraftSnapshot.procedural
         let first = BrushTipDraftSnapshot(
