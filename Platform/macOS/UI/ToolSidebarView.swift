@@ -14,6 +14,7 @@ private let snapshotCountBadgeTrailingPadding: CGFloat = 8
 private let snapshotCountBadgeReservedWidth: CGFloat = 28
 
 struct ToolSidebarView: View {
+    static let standardWidth: CGFloat = 152
     @ObservedObject var viewModel: WorkspaceViewModel
     @ObservedObject var hostViewModel: WorkspaceViewModel
     @State private var showsSnapshotPopover = false
@@ -65,7 +66,7 @@ struct ToolSidebarView: View {
         }
         .padding(.top, 10)
         .padding(.horizontal, 8)
-        .frame(width: 152)
+        .frame(width: Self.standardWidth)
         .frame(maxHeight: .infinity)
         .background(Color(red: 0.13, green: 0.13, blue: 0.14))
     }

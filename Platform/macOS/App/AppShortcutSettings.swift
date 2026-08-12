@@ -69,6 +69,23 @@ struct AppKeyboardShortcut: Codable, Equatable, Sendable {
 
 @MainActor
 final class AppShortcutSettingsStore: ObservableObject {
+    enum ShortcutCommand: Hashable, Sendable {
+        case quickColorPicker
+        case oilPaintLoad
+        case oilPaintWash
+        case toolGroup(String)
+    }
+
+    struct ShortcutConflict: Identifiable, Equatable, Sendable {
+        var first: ShortcutCommand
+        var second: ShortcutCommand
+        var shortcut: AppKeyboardShortcut
+
+        var id: String {
+            "\(String(describing: first))-\(String(describing: second))-\(shortcut.displayString)"
+        }
+    }
+
     private enum StorageKeys {
         static let quickColorPickerShortcut = "ArtFlex.Settings.Shortcuts.QuickColorPicker"
         static let oilPaintLoadShortcut = "ArtFlex.Settings.Shortcuts.OilPaintLoad"
@@ -146,14 +163,7 @@ final class AppShortcutSettingsStore: ObservableObject {
     func setShortcutKey(_ key: String, for group: ToolSidebarGroup) {
         let normalized = key.uppercased()
         guard normalized.isEmpty == false else { return }
-        var updated = toolGroupShortcuts
-        if let existingGroupID = updated.first(where: { $0.value == normalized })?.key,
-           existingGroupID != group.id {
-            let previous = updated[group.id]
-            updated[existingGroupID] = previous
-        }
-        updated[group.id] = normalized
-        toolGroupShortcuts = updated
+        toolGroupShortcuts[group.id] = normalized
         persist()
     }
 
@@ -167,6 +177,49 @@ final class AppShortcutSettingsStore: ObservableObject {
 
     func shortcutDisplayTitle(for group: ToolSidebarGroup) -> String {
         shortcutKey(for: group) ?? "未设置"
+    }
+
+    var shortcutConflicts: [ShortcutConflict] {
+        var assignments: [(ShortcutCommand, AppKeyboardShortcut)] = [
+            (.quickColorPicker, quickColorPickerShortcut),
+            (.oilPaintLoad, oilPaintLoadShortcut),
+            (.oilPaintWash, oilPaintWashShortcut)
+        ]
+        assignments += configurableToolGroups.compactMap { group in
+            guard let key = shortcutKey(for: group) else { return nil }
+            return (.toolGroup(group.id), AppKeyboardShortcut(key: key))
+        }
+
+        var conflicts: [ShortcutConflict] = []
+        for firstIndex in assignments.indices {
+            for secondIndex in assignments.indices where secondIndex > firstIndex {
+                let first = assignments[firstIndex]
+                let second = assignments[secondIndex]
+                guard Self.sameShortcut(first.1, second.1) else { continue }
+                conflicts.append(.init(first: first.0, second: second.0, shortcut: first.1))
+            }
+        }
+        return conflicts
+    }
+
+    func displayName(for command: ShortcutCommand) -> String {
+        switch command {
+        case .quickColorPicker:
+            return "HUD 拾色器"
+        case .oilPaintLoad:
+            return "仿真油画笔沾色"
+        case .oilPaintWash:
+            return "仿真油画笔洗笔"
+        case .toolGroup(let groupID):
+            guard let group = ToolSidebarGroup.orderedGroups.first(where: { $0.id == groupID }) else {
+                return "工具栏"
+            }
+            return group.tools.map(\.displayName).joined(separator: " / ")
+        }
+    }
+
+    private static func sameShortcut(_ lhs: AppKeyboardShortcut, _ rhs: AppKeyboardShortcut) -> Bool {
+        lhs.normalizedKey == rhs.normalizedKey && lhs.modifierFlags == rhs.modifierFlags
     }
 
     private static var defaultToolGroupShortcuts: [String: String] {

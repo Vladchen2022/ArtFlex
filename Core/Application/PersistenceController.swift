@@ -51,17 +51,20 @@ final class PersistenceController {
     private let serializer: LayerTextureSerializer
     private let archiveWriter: ProjectArchiveV2Writer
     private let archiveReader: ProjectArchiveV2Reader
+    private let canvasCapacityPolicy: CanvasCapacityPolicy
     let recoveryProjectURL: URL
 
     init(
         workspaceStore: WorkspaceStore,
         layerSurfaceStore: StageOneLayerSurfaceStore,
         serializer: LayerTextureSerializer,
+        canvasCapacityPolicy: CanvasCapacityPolicy = .standard,
         recoveryRootURL: URL? = nil
     ) {
         self.workspaceStore = workspaceStore
         self.layerSurfaceStore = layerSurfaceStore
         self.serializer = serializer
+        self.canvasCapacityPolicy = canvasCapacityPolicy
         self.archiveWriter = ProjectArchiveV2Writer()
         self.archiveReader = ProjectArchiveV2Reader()
         let rootURL = recoveryRootURL ?? Self.defaultRecoveryRootURL()
@@ -238,7 +241,7 @@ final class PersistenceController {
         let package = payload.package
         var workspace = package.workspaceState
         workspace.document.normalizeLayerHierarchy()
-        try Self.validateOpenedProject(
+        try validateOpenedProject(
             workspace: workspace,
             layerSnapshots: package.layerSnapshots
         )
@@ -287,7 +290,7 @@ final class PersistenceController {
         }
     }
 
-    private static func validateOpenedProject(
+    private func validateOpenedProject(
         workspace: WorkspaceState,
         layerSnapshots: [LayerHistorySnapshot]
     ) throws {
@@ -296,7 +299,7 @@ final class PersistenceController {
         guard canvasSize.width > 0, canvasSize.height > 0 else {
             throw PersistenceError.invalidProject("画布尺寸必须大于 0")
         }
-        let capacity = CanvasCapacityPolicy.standard.assess(canvasSize)
+        let capacity = canvasCapacityPolicy.assess(canvasSize)
         guard capacity.isSupported else {
             throw PersistenceError.invalidProject(
                 capacity.rejectionReason ?? "画布尺寸超出支持范围"

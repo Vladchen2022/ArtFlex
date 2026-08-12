@@ -6,53 +6,49 @@ struct ArtFlexApp: App {
     @NSApplicationDelegateAdaptor(ArtFlexApplicationDelegate.self)
     private var appDelegate
 
-    @StateObject private var viewModel: WorkspaceViewModel
+    @StateObject private var launchState: ArtFlexLaunchState
     @StateObject private var presentationState = AppPresentationState()
 
     init() {
-        do {
-            let bootstrap = try AppBootstrap()
-            let viewModel = WorkspaceViewModel(bootstrap: bootstrap)
-            bootstrap.drawingStatsController.milestoneHandler = { [weak viewModel] milestone in
-                viewModel?.showDrawingStatsMilestone(milestone)
-            }
-            _viewModel = StateObject(wrappedValue: viewModel)
-        } catch {
-            fatalError("Failed to initialize ArtFlex: \(error.localizedDescription)")
-        }
-    }
-
-    private var commandTargetViewModel: WorkspaceViewModel {
-        viewModel.ideationActiveBranchViewModel ?? viewModel
+        _launchState = StateObject(wrappedValue: ArtFlexLaunchState())
     }
 
     var body: some Scene {
         WindowGroup {
-            MainWindowView(
-                viewModel: viewModel,
-                presentationState: presentationState
-            )
-                .frame(minWidth: 1200, minHeight: 760)
-                .onAppear {
-                    appDelegate.viewModel = viewModel
-                }
+            if let viewModel = launchState.viewModel {
+                MainWindowView(
+                    viewModel: viewModel,
+                    presentationState: presentationState
+                )
+                    .frame(minWidth: 960, minHeight: 700)
+                    .onAppear {
+                        appDelegate.viewModel = viewModel
+                    }
+            } else {
+                ArtFlexLaunchFailureView(
+                    message: launchState.errorMessage ?? "ArtFlex 初始化失败"
+                )
+                .frame(minWidth: 520, minHeight: 300)
+            }
         }
         .commands {
-            CommandGroup(replacing: .appSettings) {
+            if let viewModel = launchState.viewModel {
+                let commandTargetViewModel = viewModel.ideationActiveBranchViewModel ?? viewModel
+                CommandGroup(replacing: .appSettings) {
                 Button("设置…") {
                     presentationState.presentSettingsSheet()
                 }
                 .keyboardShortcut(",", modifiers: [.command])
-            }
+                }
 
-            CommandGroup(replacing: .newItem) {
+                CommandGroup(replacing: .newItem) {
                 Button("新建文件") {
                     viewModel.presentNewCanvasSheet()
                 }
                 .keyboardShortcut("n")
-            }
+                }
 
-            CommandGroup(after: .newItem) {
+                CommandGroup(after: .newItem) {
                 Button("清除选区") {
                     commandTargetViewModel.clearSelection()
                 }
@@ -148,8 +144,54 @@ struct ArtFlexApp: App {
                 Button("缩小") {
                     commandTargetViewModel.zoomOut()
                 }
+                }
             }
         }
+    }
+}
+
+@MainActor
+private final class ArtFlexLaunchState: ObservableObject {
+    let viewModel: WorkspaceViewModel?
+    let errorMessage: String?
+
+    init() {
+        do {
+            let bootstrap = try AppBootstrap()
+            let viewModel = WorkspaceViewModel(bootstrap: bootstrap)
+            bootstrap.drawingStatsController.milestoneHandler = { [weak viewModel] milestone in
+                viewModel?.showDrawingStatsMilestone(milestone)
+            }
+            self.viewModel = viewModel
+            self.errorMessage = nil
+        } catch {
+            self.viewModel = nil
+            self.errorMessage = error.localizedDescription
+        }
+    }
+}
+
+private struct ArtFlexLaunchFailureView: View {
+    let message: String
+
+    var body: some View {
+        VStack(spacing: 18) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 40))
+                .foregroundStyle(.orange)
+            Text("ArtFlex 无法启动")
+                .font(.title2.weight(.semibold))
+            Text(message)
+                .multilineTextAlignment(.center)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: 420)
+                .textSelection(.enabled)
+            Button("退出") {
+                NSApp.terminate(nil)
+            }
+            .keyboardShortcut(.defaultAction)
+        }
+        .padding(36)
     }
 }
 

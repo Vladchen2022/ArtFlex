@@ -19,6 +19,28 @@ struct SettingsSheetView: View {
                         title: "快捷键",
                         subtitle: "可调整工具栏、HUD 拾色器和仿真油画笔快捷键。"
                     ) {
+                        if !settings.shortcutConflicts.isEmpty {
+                            VStack(alignment: .leading, spacing: 6) {
+                                Label("发现快捷键冲突", systemImage: "exclamationmark.triangle.fill")
+                                    .font(.system(size: 12, weight: .bold))
+                                ForEach(settings.shortcutConflicts) { conflict in
+                                    Text(
+                                        "\(conflict.shortcut.displayString)：" +
+                                        "\(settings.displayName(for: conflict.first)) 与 " +
+                                        settings.displayName(for: conflict.second)
+                                    )
+                                    .font(.system(size: 11, weight: .medium))
+                                }
+                            }
+                            .foregroundStyle(Color.orange)
+                            .padding(10)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(
+                                RoundedRectangle(cornerRadius: 9)
+                                    .fill(Color.orange.opacity(0.1))
+                            )
+                        }
+
                         HStack(alignment: .top, spacing: 14) {
                             shortcutCard(
                                 title: "工具栏快捷键",
@@ -145,7 +167,7 @@ struct SettingsSheetView: View {
                 .font(.system(size: 13, weight: .bold))
                 .foregroundStyle(Color.white.opacity(0.9))
 
-            Text("工具组快捷键会自动保持唯一；如果你把某一组改成别人正在使用的键，系统会自动交换这两个分配。")
+            Text("重复分配不会自动交换。发生冲突时会在上方明确提示，请手动修改其中一个快捷键。")
                 .font(.system(size: 12))
                 .foregroundStyle(Color.white.opacity(0.62))
                 .fixedSize(horizontal: false, vertical: true)

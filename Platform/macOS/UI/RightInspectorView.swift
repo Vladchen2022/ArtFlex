@@ -589,6 +589,7 @@ private func squareFilledPatternThumbnailImage(
 }
 
 struct RightInspectorView: View {
+    static let standardWidth: CGFloat = 560
     private struct LayerPanelEntry {
         var layer: LayerRecord
         var depth: Int
@@ -774,7 +775,7 @@ struct RightInspectorView: View {
                     .zIndex(3)
             }
         }
-        .frame(width: 560)
+        .frame(width: Self.standardWidth)
         .frame(maxHeight: .infinity)
         .background(Color(red: 0.12, green: 0.12, blue: 0.13))
         .onAppear {
@@ -3469,6 +3470,7 @@ struct RightInspectorView: View {
                     .padding(.vertical, 2)
                     .frame(maxWidth: .infinity, alignment: .top)
                 }
+                .environment(\.colorScheme, .dark)
                 .frame(maxWidth: .infinity, alignment: .top)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
@@ -3569,8 +3571,9 @@ struct RightInspectorView: View {
                     .font(.system(size: 12, weight: .bold))
                     .frame(width: 24, height: 24)
             }
-            .buttonStyle(.borderedProminent)
+            .buttonStyle(.bordered)
             .controlSize(.mini)
+            .environment(\.colorScheme, .dark)
             .help(addCurrentLibraryResourceTitle)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -3910,6 +3913,7 @@ struct RightInspectorView: View {
                     .padding(.vertical, 2)
                     .frame(maxWidth: .infinity, alignment: .top)
                 }
+                .environment(\.colorScheme, .dark)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -4116,6 +4120,7 @@ struct RightInspectorView: View {
                 .padding(.vertical, 2)
                 .frame(maxWidth: .infinity, alignment: .top)
             }
+            .environment(\.colorScheme, .dark)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -4329,6 +4334,7 @@ struct RightInspectorView: View {
                         .labelsHidden()
                         .pickerStyle(.menu)
                         .controlSize(.small)
+                        .environment(\.colorScheme, .dark)
                         .frame(maxWidth: .infinity, alignment: .leading)
 
                         Button {
@@ -4397,6 +4403,7 @@ struct RightInspectorView: View {
                             Button("隐藏全部") { viewModel.addMaskToActiveLayer(revealsAll: false) }
                         }
                         .controlSize(.small)
+                        .environment(\.colorScheme, .dark)
                     }
                     Spacer(minLength: 0)
                 }

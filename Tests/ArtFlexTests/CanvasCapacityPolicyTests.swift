@@ -54,4 +54,22 @@ struct CanvasCapacityPolicyTests {
         #expect(policy.assess(size).isSupported)
         #expect(size.width * 9 == size.height * 16)
     }
+
+    @Test func deviceAwarePolicyReservesHalfTheRecommendedWorkingSet() {
+        let policy = CanvasCapacityPolicy.standard(
+            recommendedMaxWorkingSetSize: 560_000_000
+        )
+
+        #expect(policy.maximumPixelCount == 10_000_000)
+        #expect(policy.assess(CanvasSize(width: 4_000, height: 2_500)).isSupported)
+        #expect(!policy.assess(CanvasSize(width: 4_001, height: 2_500)).isSupported)
+    }
+
+    @Test func deviceAwarePolicyNeverExceedsAbsoluteProductLimit() {
+        let policy = CanvasCapacityPolicy.standard(
+            recommendedMaxWorkingSetSize: UInt64.max
+        )
+
+        #expect(policy.maximumPixelCount == CanvasCapacityPolicy.standard.maximumPixelCount)
+    }
 }

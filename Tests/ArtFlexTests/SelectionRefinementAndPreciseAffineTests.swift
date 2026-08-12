@@ -89,6 +89,26 @@ struct SelectionRefinementAndPreciseAffineTests {
     }
 
     @Test
+    func roiMorphologyMatchesExpectedCanvasCoordinates() throws {
+        let rectangle = SelectionShape(
+            kind: .rectangle,
+            bounds: .init(origin: .init(x: 40, y: 50), size: .init(x: 2, y: 2)),
+            pathPoints: []
+        )
+        let expanded = try #require(
+            SelectionRefinement.expanded(
+                rectangle,
+                canvasSize: .init(width: 2_000, height: 2_000),
+                radiusPixels: 1
+            )
+        )
+
+        #expect(expanded.contains(.init(x: 39.5, y: 49.5)))
+        #expect(expanded.contains(.init(x: 42.5, y: 52.5)))
+        #expect(!expanded.contains(.init(x: 10.5, y: 10.5)))
+    }
+
+    @Test
     func preciseAffineRoundTripsPreviewWithIndependentPivot() throws {
         let bounds = CanvasRect(
             origin: .init(x: 20, y: 30),

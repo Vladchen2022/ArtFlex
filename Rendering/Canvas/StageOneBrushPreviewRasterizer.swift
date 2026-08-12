@@ -209,16 +209,19 @@ enum StageOneBrushPreviewRasterizer {
     nonisolated(unsafe) private static let cache: NSCache<NSString, CachedImageBox> = {
         let cache = NSCache<NSString, CachedImageBox>()
         cache.countLimit = 512
+        cache.totalCostLimit = 48 * 1_024 * 1_024
         return cache
     }()
     nonisolated(unsafe) private static let materialFieldCache: NSCache<NSString, CachedDataBox> = {
         let cache = NSCache<NSString, CachedDataBox>()
         cache.countLimit = 64
+        cache.totalCostLimit = 24 * 1_024 * 1_024
         return cache
     }()
     nonisolated(unsafe) private static let textureFillPreviewCache: NSCache<NSString, CachedImageBox> = {
         let cache = NSCache<NSString, CachedImageBox>()
         cache.countLimit = 64
+        cache.totalCostLimit = 24 * 1_024 * 1_024
         return cache
     }()
 
@@ -293,7 +296,11 @@ enum StageOneBrushPreviewRasterizer {
             return nil
         }
 
-        cache.setObject(CachedImageBox(image: image), forKey: cacheKey)
+        cache.setObject(
+            CachedImageBox(image: image),
+            forKey: cacheKey,
+            cost: image.bytesPerRow * image.height
+        )
         return image
     }
 
@@ -371,7 +378,11 @@ enum StageOneBrushPreviewRasterizer {
         guard let image = makeCGImage(from: texture) else {
             return nil
         }
-        cache.setObject(CachedImageBox(image: image), forKey: cacheKey)
+        cache.setObject(
+            CachedImageBox(image: image),
+            forKey: cacheKey,
+            cost: image.bytesPerRow * image.height
+        )
         return image
     }
 
@@ -616,7 +627,12 @@ enum StageOneBrushPreviewRasterizer {
             }
         }
 
-        materialFieldCache.setObject(CachedDataBox(data: Data(combined)), forKey: cacheKey)
+        let combinedData = Data(combined)
+        materialFieldCache.setObject(
+            CachedDataBox(data: combinedData),
+            forKey: cacheKey,
+            cost: combinedData.count
+        )
         return combined
     }
 
@@ -705,7 +721,11 @@ enum StageOneBrushPreviewRasterizer {
         guard commandBuffer.status == .completed, let image = makeCGImage(from: texture) else {
             return nil
         }
-        textureFillPreviewCache.setObject(CachedImageBox(image: image), forKey: cacheKey)
+        textureFillPreviewCache.setObject(
+            CachedImageBox(image: image),
+            forKey: cacheKey,
+            cost: image.bytesPerRow * image.height
+        )
         return image
     }
 
@@ -782,7 +802,11 @@ enum StageOneBrushPreviewRasterizer {
             return nil
         }
 
-        cache.setObject(CachedImageBox(image: image), forKey: cacheKey)
+        cache.setObject(
+            CachedImageBox(image: image),
+            forKey: cacheKey,
+            cost: image.bytesPerRow * image.height
+        )
         return image
     }
 

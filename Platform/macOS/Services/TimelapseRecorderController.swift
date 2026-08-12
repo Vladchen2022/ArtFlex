@@ -75,6 +75,7 @@ private struct RecorderLayerCaptureSource: @unchecked Sendable {
 private struct RecorderCaptureSource: @unchecked Sendable {
     let documentName: String
     let canvasSize: CanvasSize
+    let compositeTexture: RecorderTextureBox<MTLTexture>?
     let layers: [RecorderLayerCaptureSource]
 }
 
@@ -119,6 +120,11 @@ final class TimelapseRecorderController: ObservableObject {
     private var lastCaptureDate: Date?
     private var nextFrameIndex = 0
     private var currentDocumentFileURL: URL?
+
+    /// Installed by the workspace so recording consumes the same visible composite
+    /// as the canvas, export and eyedropper paths. The legacy layer fallback is kept
+    /// for isolated controller tests and bootstrap-time use.
+    var compositeTextureProvider: (() throws -> MTLTexture)?
 
     init(
         workspaceStore: WorkspaceStore,
@@ -366,6 +372,16 @@ final class TimelapseRecorderController: ObservableObject {
 
     private func makeCaptureSource(documentName: String) -> RecorderCaptureSource? {
         let workspace = workspaceStore.state
+        if let compositeTextureProvider,
+           let texture = try? compositeTextureProvider() {
+            return RecorderCaptureSource(
+                documentName: documentName,
+                canvasSize: workspace.document.canvasSize,
+                compositeTexture: RecorderTextureBox(texture),
+                layers: []
+            )
+        }
+
         let layers = workspace.document.layers.compactMap { layer -> RecorderLayerCaptureSource? in
             guard layer.isVisible, layer.opacity > 0 else { return nil }
             guard
@@ -385,6 +401,7 @@ final class TimelapseRecorderController: ObservableObject {
         return RecorderCaptureSource(
             documentName: documentName,
             canvasSize: workspace.document.canvasSize,
+            compositeTexture: nil,
             layers: layers
         )
     }
@@ -421,36 +438,39 @@ final class TimelapseRecorderController: ObservableObject {
         let height = source.canvasSize.height
         let bytesPerPixel = 4
         let bytesPerRow = width * bytesPerPixel
-        var mergedBytes = [UInt8](repeating: 0, count: bytesPerRow * height)
+        let mergedBytes: [UInt8]
+        if let compositeTexture = source.compositeTexture {
+            let snapshot = try serializer.snapshot(texture: compositeTexture.value)
+            mergedBytes = [UInt8](snapshot.pixelData)
+        } else {
+            var legacyMergedBytes = [UInt8](repeating: 0, count: bytesPerRow * height)
+            for layer in source.layers {
+                let snapshot = try serializer.snapshot(texture: layer.texture.value)
+                let layerBytes = [UInt8](snapshot.pixelData)
+                let effectiveOpacity = min(max(layer.opacity, 0), 1)
+                guard effectiveOpacity > 0 else { continue }
 
-        for layer in source.layers {
-            let snapshot = try serializer.snapshot(texture: layer.texture.value)
-            let layerBytes = [UInt8](snapshot.pixelData)
-            let effectiveOpacity = min(max(layer.opacity, 0), 1)
-            guard effectiveOpacity > 0 else { continue }
-
-            for offset in stride(from: 0, to: layerBytes.count, by: bytesPerPixel) {
-                let destination = LinearPremultipliedColor(
-                    bgraBlue: mergedBytes[offset],
-                    green: mergedBytes[offset + 1],
-                    red: mergedBytes[offset + 2],
-                    alpha: mergedBytes[offset + 3]
-                )
-
-                let sourceColor = LinearPremultipliedColor(
-                    bgraBlue: layerBytes[offset],
-                    green: layerBytes[offset + 1],
-                    red: layerBytes[offset + 2],
-                    alpha: layerBytes[offset + 3]
-                ).applyingOpacity(effectiveOpacity)
-
-                let merged = sourceColor.composited(over: destination)
-                let output = merged.bgra8PremultipliedBytes
-                mergedBytes[offset] = output.blue
-                mergedBytes[offset + 1] = output.green
-                mergedBytes[offset + 2] = output.red
-                mergedBytes[offset + 3] = output.alpha
+                for offset in stride(from: 0, to: layerBytes.count, by: bytesPerPixel) {
+                    let destination = LinearPremultipliedColor(
+                        bgraBlue: legacyMergedBytes[offset],
+                        green: legacyMergedBytes[offset + 1],
+                        red: legacyMergedBytes[offset + 2],
+                        alpha: legacyMergedBytes[offset + 3]
+                    )
+                    let sourceColor = LinearPremultipliedColor(
+                        bgraBlue: layerBytes[offset],
+                        green: layerBytes[offset + 1],
+                        red: layerBytes[offset + 2],
+                        alpha: layerBytes[offset + 3]
+                    ).applyingOpacity(effectiveOpacity)
+                    let output = sourceColor.composited(over: destination).bgra8PremultipliedBytes
+                    legacyMergedBytes[offset] = output.blue
+                    legacyMergedBytes[offset + 1] = output.green
+                    legacyMergedBytes[offset + 2] = output.red
+                    legacyMergedBytes[offset + 3] = output.alpha
+                }
             }
+            mergedBytes = legacyMergedBytes
         }
 
         var outputBytes = [UInt8](repeating: 0, count: bytesPerRow * height)

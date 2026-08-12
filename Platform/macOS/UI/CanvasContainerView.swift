@@ -1229,6 +1229,7 @@ private struct SelectionOverlayHost: View {
                 prefersVectorDisplay: true,
                 smoothsLassoPath: false
             )
+            .id(proxy.redrawRevision)
             SelectionOverlay(
                 selectionShape: inProgress,
                 presentation: presentation,
@@ -1238,6 +1239,7 @@ private struct SelectionOverlayHost: View {
                 prefersVectorDisplay: true,
                 smoothsLassoPath: true
             )
+            .id(proxy.redrawRevision)
         } else if !isApplying, !(isFreeTransform && isTransforming),
                   let shape = proxy.displayShape,
                   !proxy.hidesImplicitFreeTransformSelectionOverlay {
@@ -1252,6 +1254,7 @@ private struct SelectionOverlayHost: View {
                 prefersVectorDisplay: shape.kind != .mask || !shape.components.isEmpty,
                 smoothsLassoPath: proxy.inProgressShape?.kind == .lasso
             )
+            .id(proxy.redrawRevision)
         }
     }
 }
@@ -3136,14 +3139,15 @@ private func makeSelectionMaskImageSlice(
                 let alpha = source[index]
                 let shouldDraw: UInt8
                 if edgeOnly {
-                    if alpha == 0 {
+                    let edgeThreshold: UInt8 = 128
+                    if alpha < edgeThreshold {
                         shouldDraw = 0
                     } else {
                         let left = sourceX > 0 ? source[index - 1] : 0
                         let right = sourceX < width - 1 ? source[index + 1] : 0
                         let up = sourceY > 0 ? source[index - maskData.canvasWidth] : 0
                         let down = sourceY < height - 1 ? source[index + maskData.canvasWidth] : 0
-                        let isEdge = left == 0 || right == 0 || up == 0 || down == 0
+                        let isEdge = left < edgeThreshold || right < edgeThreshold || up < edgeThreshold || down < edgeThreshold
                         let isVisibleDash = !dashesEdge || ((sourceX + sourceY) % 12) < 6
                         shouldDraw = isEdge && isVisibleDash ? 255 : 0
                     }

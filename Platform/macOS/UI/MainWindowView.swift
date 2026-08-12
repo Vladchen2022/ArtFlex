@@ -142,48 +142,84 @@ private struct SnapshotCompareWorkspaceShell: View {
 }
 
 private struct StandardWorkspaceShell: View {
+    private static let minimumCanvasWidthWithDockedInspector: CGFloat = 900
+
     @ObservedObject var viewModel: WorkspaceViewModel
     let openSettings: () -> Void
+    @State private var showsCompactInspector = false
 
     var body: some View {
         let chromeHidden = viewModel.isWorkspaceChromeHidden
 
-        VStack(spacing: 0) {
-            if !chromeHidden {
-                MainToolbarView(
-                    hostViewModel: viewModel,
-                    editingViewModel: viewModel,
-                    openSettings: openSettings
-                )
-            }
-
-            HStack(spacing: 0) {
+        GeometryReader { proxy in
+            let dockedInspectorThreshold = ToolSidebarView.standardWidth
+                + RightInspectorView.standardWidth
+                + Self.minimumCanvasWidthWithDockedInspector
+            let showsInspector = !chromeHidden && proxy.size.width >= dockedInspectorThreshold
+            VStack(spacing: 0) {
                 if !chromeHidden {
-                    ToolSidebarView(viewModel: viewModel, hostViewModel: viewModel)
-                        .frame(maxHeight: .infinity, alignment: .top)
-                        .overlay(alignment: .trailing) {
-                            Divider()
-                                .overlay(Color.white.opacity(0.08))
-                        }
+                    MainToolbarView(
+                        hostViewModel: viewModel,
+                        editingViewModel: viewModel,
+                        openSettings: openSettings
+                    )
                 }
 
-                CanvasContainerView(viewModel: viewModel)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .clipped()
-                    .contentShape(Rectangle())
+                HStack(spacing: 0) {
+                    if !chromeHidden {
+                        ToolSidebarView(viewModel: viewModel, hostViewModel: viewModel)
+                            .frame(maxHeight: .infinity, alignment: .top)
+                            .overlay(alignment: .trailing) {
+                                Divider().overlay(Color.white.opacity(0.08))
+                            }
+                    }
+
+                    CanvasContainerView(viewModel: viewModel)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .clipped()
+                        .contentShape(Rectangle())
+
+                    if showsInspector {
+                        RightInspectorView(viewModel: viewModel)
+                            .frame(maxHeight: .infinity, alignment: .top)
+                            .overlay(alignment: .leading) {
+                                Divider().overlay(Color.white.opacity(0.08))
+                            }
+                    }
+                }
 
                 if !chromeHidden {
-                    RightInspectorView(viewModel: viewModel)
-                        .frame(maxHeight: .infinity, alignment: .top)
-                        .overlay(alignment: .leading) {
-                            Divider()
-                                .overlay(Color.white.opacity(0.08))
-                        }
+                    WorkspaceStatusBarChrome(status: viewModel.status)
                 }
             }
-
-            if !chromeHidden {
-                WorkspaceStatusBarChrome(status: viewModel.status)
+            .overlay(alignment: .topTrailing) {
+                if !chromeHidden && !showsInspector {
+                    Button {
+                        showsCompactInspector.toggle()
+                    } label: {
+                        Label("检查器", systemImage: "sidebar.right")
+                            .font(.system(size: 12, weight: .semibold))
+                            .padding(.horizontal, 10)
+                            .frame(height: 28)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+                    .padding(.top, 50)
+                    .padding(.trailing, 12)
+                    .popover(isPresented: $showsCompactInspector, arrowEdge: .top) {
+                        RightInspectorView(viewModel: viewModel)
+                            .frame(
+                                width: RightInspectorView.standardWidth,
+                                height: max(560, proxy.size.height - 90)
+                            )
+                    }
+                    .help("在窄窗口中打开右侧检查器")
+                }
+            }
+            .onChange(of: showsInspector) { _, isVisible in
+                if isVisible {
+                    showsCompactInspector = false
+                }
             }
         }
     }
@@ -271,19 +307,12 @@ private struct WorkspaceStatusBarChrome: View {
                     }
 
                 WorkspaceOperationStatusBar(status: status)
-                    .offset(x: centeredStatusBarX(in: proxy.size.width))
+                    .position(x: proxy.size.width * 0.5, y: 11)
             }
         }
         .frame(height: 22)
     }
 
-    private func centeredStatusBarX(in totalWidth: CGFloat) -> CGFloat {
-        let leftSidebarWidth: CGFloat = 142
-        let rightInspectorWidth: CGFloat = 560
-        let canvasRegionWidth = max(0, totalWidth - leftSidebarWidth - rightInspectorWidth)
-        let canvasRegionMinX = leftSidebarWidth
-        return canvasRegionMinX + max(0, (canvasRegionWidth - WorkspaceOperationStatusBar.width) * 0.5)
-    }
 }
 
 private struct WorkspaceOperationStatusBar: View {
@@ -325,13 +354,13 @@ private struct WorkspaceOperationStatusBar: View {
     private var messageColor: Color {
         switch status?.kind {
         case .success:
-            return Color.white.opacity(0.45)
+            return Color.green.opacity(0.9)
         case .error:
-            return Color.red.opacity(0.44)
+            return Color.red.opacity(0.95)
         case .info:
-            return Color.white.opacity(0.43)
+            return Color.white.opacity(0.82)
         case nil:
-            return Color.white.opacity(0.26)
+            return Color.white.opacity(0.5)
         }
     }
 }

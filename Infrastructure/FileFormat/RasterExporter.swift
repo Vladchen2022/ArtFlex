@@ -51,6 +51,22 @@ final class RasterExporter: Sendable {
         return result
     }
 
+    @discardableResult
+    func export(
+        snapshot: LayerTextureSnapshot,
+        options: RasterExportOptions,
+        sourceBounds: RasterExportPixelBounds,
+        to fileURL: URL
+    ) throws -> RasterExportResult {
+        let result = try encode(
+            snapshot: snapshot,
+            options: options,
+            sourceBounds: sourceBounds
+        )
+        try result.encodedData.write(to: fileURL, options: .atomic)
+        return result
+    }
+
     func encode(
         snapshot: LayerTextureSnapshot,
         options: RasterExportOptions
@@ -59,6 +75,24 @@ final class RasterExporter: Sendable {
         try validate(snapshot)
 
         let sourceBounds = try resolvedSourceBounds(snapshot: snapshot, scope: options.scope)
+        return try encode(snapshot: snapshot, options: options, sourceBounds: sourceBounds)
+    }
+
+    func encode(
+        snapshot: LayerTextureSnapshot,
+        options: RasterExportOptions,
+        sourceBounds: RasterExportPixelBounds
+    ) throws -> RasterExportResult {
+        try options.validate()
+        try validate(snapshot)
+        guard sourceBounds.originX >= 0,
+              sourceBounds.originY >= 0,
+              sourceBounds.width > 0,
+              sourceBounds.height > 0,
+              sourceBounds.originX + sourceBounds.width <= snapshot.width,
+              sourceBounds.originY + sourceBounds.height <= snapshot.height else {
+            throw RasterExportError.invalidSourcePixelData
+        }
         let outputDimensions = try options.outputDimensions(
             sourceWidth: sourceBounds.width,
             sourceHeight: sourceBounds.height
@@ -103,6 +137,14 @@ final class RasterExporter: Sendable {
             pixelHeight: outputDimensions.height,
             sourceBounds: sourceBounds
         )
+    }
+
+    func sourceBounds(
+        snapshot: LayerTextureSnapshot,
+        scope: RasterExportScope
+    ) throws -> RasterExportPixelBounds {
+        try validate(snapshot)
+        return try resolvedSourceBounds(snapshot: snapshot, scope: scope)
     }
 
     private func validate(_ snapshot: LayerTextureSnapshot) throws {

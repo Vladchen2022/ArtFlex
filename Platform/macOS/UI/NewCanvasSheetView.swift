@@ -30,8 +30,8 @@ private struct CanvasPresetDefinition: Identifiable, Equatable {
 }
 
 struct NewCanvasSheetView: View {
-    private static let capacityPolicy = CanvasCapacityPolicy.standard
-    private static let maxCanvasEdge = capacityPolicy.maximumEdge
+    private var capacityPolicy: CanvasCapacityPolicy { viewModel.canvasCapacityPolicy }
+    private static let maxCanvasEdge = CanvasCapacityPolicy.standard.maximumEdge
     private static let defaultResolution = 300
 
     @ObservedObject var viewModel: WorkspaceViewModel
@@ -276,7 +276,7 @@ struct NewCanvasSheetView: View {
             }
             .frame(height: 246)
 
-            let assessment = Self.capacityPolicy.assess(
+            let assessment = capacityPolicy.assess(
                 CanvasSize(width: currentWidth, height: currentHeight)
             )
             HStack(spacing: 7) {
@@ -327,7 +327,7 @@ struct NewCanvasSheetView: View {
             : CGSize(width: ratio.height, height: ratio.width)
         let widthRatio = max(Int(orientedRatio.width.rounded()), 1)
         let heightRatio = max(Int(orientedRatio.height.rounded()), 1)
-        let size = Self.capacityPolicy.maximumSupportedSize(
+        let size = capacityPolicy.maximumSupportedSize(
             aspectWidth: widthRatio,
             aspectHeight: heightRatio
         ) ?? CanvasSize(width: 2048, height: 2048)
@@ -393,7 +393,7 @@ struct NewCanvasSheetView: View {
     }
 
     private var isValidCanvasInput: Bool {
-        Self.capacityPolicy.assess(
+        capacityPolicy.assess(
             CanvasSize(width: currentWidth, height: currentHeight)
         ).isSupported
     }

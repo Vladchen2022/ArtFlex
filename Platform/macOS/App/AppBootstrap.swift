@@ -1,5 +1,16 @@
 import Foundation
 
+enum AppBootstrapError: LocalizedError {
+    case metalUnavailable
+
+    var errorDescription: String? {
+        switch self {
+        case .metalUnavailable:
+            return "当前设备无法创建 Metal 渲染环境，ArtFlex 不能安全启动。请检查系统图形支持后重试。"
+        }
+    }
+}
+
 final class AppSharedMetalServices {
     let canvasPresenter: StageOneCanvasPresenter
     let patternPlacementRenderer: PatternPlacementRenderer
@@ -84,6 +95,10 @@ struct AppBootstrap {
     let timelapseRecorder: TimelapseRecorderController
     let drawingStatsController: DrawingStatsController
 
+    var canvasCapacityPolicy: CanvasCapacityPolicy {
+        .standard(recommendedMaxWorkingSetSize: metalContext.device.recommendedMaxWorkingSetSize)
+    }
+
     @MainActor
     init(
         workspaceStore: WorkspaceStore = WorkspaceStore(),
@@ -98,7 +113,7 @@ struct AppBootstrap {
         persistenceRecoveryRootURL: URL? = nil
     ) throws {
         guard let metalContext else {
-            fatalError("Metal is required to launch ArtFlex.")
+            throw AppBootstrapError.metalUnavailable
         }
 
         let resolvedSharedMetalServices = try sharedMetalServices ?? AppSharedMetalServices(metalContext: metalContext)
@@ -142,6 +157,9 @@ struct AppBootstrap {
             workspaceStore: workspaceStore,
             layerSurfaceStore: layerSurfaceStore,
             serializer: textureSerializer,
+            canvasCapacityPolicy: .standard(
+                recommendedMaxWorkingSetSize: metalContext.device.recommendedMaxWorkingSetSize
+            ),
             recoveryRootURL: persistenceRecoveryRootURL
                 ?? testPersistenceRoot?.appendingPathComponent("Recovery", isDirectory: true)
         )

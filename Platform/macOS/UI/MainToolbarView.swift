@@ -19,6 +19,7 @@ struct MainToolbarView: View {
             toolbarTextButton("保存") {
                 hostViewModel.saveProject()
             }
+            .disabled(hostViewModel.isProjectSaving)
 
             if hostViewModel.hasRecoveryProject {
                 Menu {
@@ -150,6 +151,8 @@ struct MainToolbarView: View {
             return .green
         case .notYetSaved:
             return Color.white.opacity(0.45)
+        case .saving:
+            return .blue
         }
     }
 
@@ -161,6 +164,8 @@ struct MainToolbarView: View {
             return "已保存"
         case .notYetSaved:
             return "尚未保存为工程"
+        case .saving:
+            return "正在保存工程"
         }
     }
 

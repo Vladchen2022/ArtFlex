@@ -194,11 +194,23 @@ struct RasterExportSheet: View {
 
     private var outputSummary: String {
         do {
+            let sourceWidth: Int
+            let sourceHeight: Int
+            if scope == .visibleContent, let bounds = viewModel.rasterExportSourceBounds {
+                sourceWidth = bounds.width
+                sourceHeight = bounds.height
+            } else {
+                sourceWidth = viewModel.workspace.document.canvasSize.width
+                sourceHeight = viewModel.workspace.document.canvasSize.height
+            }
             let dimensions = try resolvedOptions.outputDimensions(
-                sourceWidth: viewModel.workspace.document.canvasSize.width,
-                sourceHeight: viewModel.workspace.document.canvasSize.height
+                sourceWidth: sourceWidth,
+                sourceHeight: sourceHeight
             )
-            return "输出 \(dimensions.width) × \(dimensions.height) px · \(Int(dpi.rounded())) DPI"
+            let suffix = scope == .visibleContent && viewModel.rasterExportSourceBounds == nil
+                ? " · 正在计算可见边界"
+                : ""
+            return "输出 \(dimensions.width) × \(dimensions.height) px · \(Int(dpi.rounded())) DPI\(suffix)"
         } catch {
             return error.localizedDescription
         }

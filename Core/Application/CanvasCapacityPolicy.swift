@@ -13,6 +13,34 @@ struct CanvasCapacityAssessment: Sendable, Equatable {
 /// while live paint surfaces are still full Metal textures, so both an edge and
 /// total-pixel limit are required.
 struct CanvasCapacityPolicy: Sendable, Equatable {
+    /// Keeps the absolute product limit while adapting the working-set budget
+    /// to the GPU that owns the full-size paint and preview textures.
+    static func standard(recommendedMaxWorkingSetSize: UInt64?) -> CanvasCapacityPolicy {
+        let absoluteMaximumPixels = 32_000_000
+        let bytesPerPixel = 28
+        guard let recommendedMaxWorkingSetSize, recommendedMaxWorkingSetSize > 0 else {
+            return CanvasCapacityPolicy(
+                maximumEdge: 8_192,
+                maximumPixelCount: absoluteMaximumPixels,
+                estimatedCoreBytesPerPixel: bytesPerPixel
+            )
+        }
+
+        // Keep half the recommended Metal budget available for the OS,
+        // history, in-flight work and non-canvas application resources.
+        let adaptivePixelBudget = Int(
+            min(
+                UInt64(absoluteMaximumPixels),
+                max(UInt64(8_000_000), recommendedMaxWorkingSetSize / 2 / UInt64(bytesPerPixel))
+            )
+        )
+        return CanvasCapacityPolicy(
+            maximumEdge: 8_192,
+            maximumPixelCount: adaptivePixelBudget,
+            estimatedCoreBytesPerPixel: bytesPerPixel
+        )
+    }
+
     static let standard = CanvasCapacityPolicy(
         maximumEdge: 8_192,
         maximumPixelCount: 32_000_000,

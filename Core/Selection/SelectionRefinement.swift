@@ -152,10 +152,23 @@ enum SelectionRefinement {
 
         let pixelCount = canvasSize.width.multipliedReportingOverflow(by: canvasSize.height)
         guard !pixelCount.overflow, pixelCount.partialValue > 0 else { return nil }
-        var source = [UInt8](repeating: 0, count: pixelCount.partialValue)
-        for y in 0..<canvasSize.height {
-            for x in 0..<canvasSize.width {
-                source[(y * canvasSize.width) + x] = resolvedAlphaByte(
+
+        let selectionBounds = selection.bounds.clamped(to: canvasSize)
+        let expansion = operation == .maximum ? radius : 0
+        let originX = max(0, Int(floor(selectionBounds.minX)) - expansion)
+        let originY = max(0, Int(floor(selectionBounds.minY)) - expansion)
+        let maxX = min(canvasSize.width, Int(ceil(selectionBounds.maxX)) + expansion)
+        let maxY = min(canvasSize.height, Int(ceil(selectionBounds.maxY)) + expansion)
+        let regionWidth = max(0, maxX - originX)
+        let regionHeight = max(0, maxY - originY)
+        guard regionWidth > 0, regionHeight > 0 else { return nil }
+
+        var source = [UInt8](repeating: 0, count: regionWidth * regionHeight)
+        for localY in 0..<regionHeight {
+            let y = originY + localY
+            for localX in 0..<regionWidth {
+                let x = originX + localX
+                source[(localY * regionWidth) + localX] = resolvedAlphaByte(
                     of: selection,
                     at: CanvasPoint(x: Double(x) + 0.5, y: Double(y) + 0.5)
                 )
@@ -163,23 +176,35 @@ enum SelectionRefinement {
         }
 
         var horizontal = [UInt8](repeating: 0, count: source.count)
-        for y in 0..<canvasSize.height {
-            let rowStart = y * canvasSize.width
-            let line = Array(source[rowStart..<(rowStart + canvasSize.width)])
+        for y in 0..<regionHeight {
+            let rowStart = y * regionWidth
+            let line = Array(source[rowStart..<(rowStart + regionWidth)])
             let filtered = slidingExtremum(line, radius: radius, operation: operation)
-            horizontal.replaceSubrange(rowStart..<(rowStart + canvasSize.width), with: filtered)
+            horizontal.replaceSubrange(rowStart..<(rowStart + regionWidth), with: filtered)
         }
 
-        var result = [UInt8](repeating: 0, count: source.count)
-        var column = [UInt8](repeating: 0, count: canvasSize.height)
-        for x in 0..<canvasSize.width {
-            for y in 0..<canvasSize.height {
-                column[y] = horizontal[(y * canvasSize.width) + x]
+        var regionResult = [UInt8](repeating: 0, count: source.count)
+        var column = [UInt8](repeating: 0, count: regionHeight)
+        for x in 0..<regionWidth {
+            for y in 0..<regionHeight {
+                column[y] = horizontal[(y * regionWidth) + x]
             }
             let filtered = slidingExtremum(column, radius: radius, operation: operation)
-            for y in 0..<canvasSize.height {
-                result[(y * canvasSize.width) + x] = filtered[y]
+            for y in 0..<regionHeight {
+                regionResult[(y * regionWidth) + x] = filtered[y]
             }
+        }
+
+        // Selection masks remain full-canvas for compatibility with the Metal
+        // mask pipeline, but all expensive morphology work is restricted to ROI.
+        var result = [UInt8](repeating: 0, count: pixelCount.partialValue)
+        for localY in 0..<regionHeight {
+            let destinationStart = ((originY + localY) * canvasSize.width) + originX
+            let sourceStart = localY * regionWidth
+            result.replaceSubrange(
+                destinationStart..<(destinationStart + regionWidth),
+                with: regionResult[sourceStart..<(sourceStart + regionWidth)]
+            )
         }
 
         let refined = SelectionShape.mask(

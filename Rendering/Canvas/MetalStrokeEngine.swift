@@ -861,7 +861,6 @@ final class MetalStrokeEngine: StrokeEngine {
         }
 
         commandBuffer.commit()
-        commandBuffer.waitUntilCompleted()
         recentBrushPreviewTexture = previewTexture
         recentBrushPreviewKey = previewKey
         return previewTexture
@@ -906,7 +905,6 @@ final class MetalStrokeEngine: StrokeEngine {
         }
 
         commandBuffer.commit()
-        commandBuffer.waitUntilCompleted()
         recentBrushPreviewBaseTexture = previewBaseTexture
         recentBrushPreviewBaseKey = baseKey
         return previewBaseTexture

@@ -2773,91 +2773,55 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
             let currentTransformPlan = currentTransformPreviewPlan()
             let previewEncodeStart = DispatchTime.now().uptimeNanoseconds
 
-            typealias VisibleLayerEntry = (
-                surfaceID: LayerSurfaceID,
-                layerID: LayerID,
-                texture: MTLTexture,
-                opacity: Float,
-                blendMode: LayerBlendMode,
-                clipTargetLayerID: LayerID?
-            )
-            var visibleTextureByLayerID: [LayerID: MTLTexture] = [:]
-            var enabledMaskTextureByLayerID: [LayerID: MTLTexture] = [:]
-            for layer in snapshot.renderSnapshot.document.layers where layer.mask?.isEnabled == true {
-                if let maskTexture = layerSurfaceStore.maskTexture(for: layer.id) {
-                    enabledMaskTextureByLayerID[layer.id] = maskTexture
-                }
-            }
+            var resolvedTextureByLayerID: [LayerID: MTLTexture] = [:]
             for surface in snapshot.layerSurfaces where surface.isVisible {
                 let texture = surface.surfaceID == activeLayerSurfaceID
                     ? (activeBrushDisplayTexture ?? layerSurfaceStore.texture(for: surface.surfaceID))
                     : layerSurfaceStore.texture(for: surface.surfaceID)
                 if let texture {
-                    visibleTextureByLayerID[surface.layerID] = texture
+                    resolvedTextureByLayerID[surface.layerID] = texture
                 }
             }
-            let orderedVisibleLayers = snapshot.layerSurfaces.compactMap { surface -> VisibleLayerEntry? in
-                let resolvedTexture: MTLTexture?
-                if surface.surfaceID == activeLayerSurfaceID, let activeBrushDisplayTexture {
-                    resolvedTexture = activeBrushDisplayTexture
-                } else {
-                    resolvedTexture = layerSurfaceStore.texture(for: surface.surfaceID)
-                }
-
-                guard surface.isVisible, let texture = resolvedTexture else {
-                    return nil
-                }
-
-                if let clipTargetLayerID = surface.clipTargetLayerID,
-                   visibleTextureByLayerID[clipTargetLayerID] == nil {
-                    return nil
-                }
-
-                if hasActivePreview, surface.surfaceID == activeLayerSurfaceID {
-                    switch freeTransformActiveLayerPreviewStrategy(
-                        hasActivePreview: hasActivePreview,
-                        sessionMode: transformPreviewSession?.mode,
-                        hasBaseTexture: transformPreviewSession?.baseTexture != nil,
-                        plannedMode: currentTransformPlan?.mode
-                    ) {
-                    case .showOriginalLayer:
-                        return (surface.surfaceID, surface.layerID, texture, surface.opacity, surface.blendMode, surface.clipTargetLayerID)
-                    case .showBaseTexture:
-                        guard let baseTexture = transformPreviewSession?.baseTexture else {
-                            return (surface.surfaceID, surface.layerID, texture, surface.opacity, surface.blendMode, surface.clipTargetLayerID)
-                        }
-                        return (surface.surfaceID, surface.layerID, baseTexture, surface.opacity, surface.blendMode, surface.clipTargetLayerID)
-                    case .hideOriginalLayer:
-                        return nil
+            if hasActivePreview,
+               let activeTexture = resolvedTextureByLayerID[activeLayerID] {
+                switch freeTransformActiveLayerPreviewStrategy(
+                    hasActivePreview: hasActivePreview,
+                    sessionMode: transformPreviewSession?.mode,
+                    hasBaseTexture: transformPreviewSession?.baseTexture != nil,
+                    plannedMode: currentTransformPlan?.mode
+                ) {
+                case .showOriginalLayer:
+                    resolvedTextureByLayerID[activeLayerID] = activeTexture
+                case .showBaseTexture:
+                    if let baseTexture = transformPreviewSession?.baseTexture {
+                        resolvedTextureByLayerID[activeLayerID] = baseTexture
                     }
+                case .hideOriginalLayer:
+                    resolvedTextureByLayerID[activeLayerID] = nil
                 }
-                return (surface.surfaceID, surface.layerID, texture, surface.opacity, surface.blendMode, surface.clipTargetLayerID)
             }
-
+            let canonicalEntries = (try? CanvasCompositeInputPlan.make(
+                document: snapshot.renderSnapshot.document,
+                allowsMissingTextures: true,
+                textureForLayer: { resolvedTextureByLayerID[$0] },
+                enabledMaskTextureForLayer: layerSurfaceStore.maskTexture(for:)
+            ).entries) ?? []
+            let canonicalInputByLayerID: [LayerID: CanvasLayerCompositeInput] = Dictionary(
+                uniqueKeysWithValues: canonicalEntries.map { ($0.layerID, $0.input) }
+            )
+            typealias VisibleLayerEntry = (
+                surfaceID: LayerSurfaceID,
+                layerID: LayerID,
+                input: CanvasLayerCompositeInput
+            )
+            let orderedVisibleLayers: [VisibleLayerEntry] = snapshot.layerSurfaces.compactMap { surface in
+                guard surface.isVisible, let input = canonicalInputByLayerID[surface.layerID] else {
+                    return nil
+                }
+                return (surface.surfaceID, surface.layerID, input)
+            }
             func compositeInputs(_ entries: [VisibleLayerEntry]) -> [CanvasLayerCompositeInput] {
-                var inputs: [CanvasLayerCompositeInput] = []
-                inputs.reserveCapacity(entries.count)
-                for entry in entries {
-                    let clipMaskTexture: MTLTexture?
-                    if let clipTargetLayerID = entry.clipTargetLayerID {
-                        clipMaskTexture = visibleTextureByLayerID[clipTargetLayerID]
-                    } else {
-                        clipMaskTexture = nil
-                    }
-                    inputs.append(CanvasLayerCompositeInput(
-                        texture: entry.texture,
-                        opacity: entry.opacity,
-                        blendMode: entry.blendMode,
-                        clipMaskTexture: clipMaskTexture,
-                        clipLayerMaskTexture: entry.clipTargetLayerID.flatMap { enabledMaskTextureByLayerID[$0] },
-                        layerMaskTexture: enabledMaskTextureByLayerID[entry.layerID],
-                        curveAdjustmentLUTs: snapshot.renderSnapshot.document.layers
-                            .first(where: { $0.id == entry.layerID })?
-                            .adjustment?
-                            .curveLUTs
-                    ))
-                }
-                return inputs
+                entries.map(\.input)
             }
 
             if hasPatternPlacementPreview,

@@ -5,6 +5,7 @@ struct VisibleHistoryPopover: View {
     @ObservedObject var viewModel: WorkspaceViewModel
     @Environment(\.dismiss) private var dismiss
     @State private var scrubPosition = 0.0
+    @State private var pendingScrubTask: Task<Void, Never>?
 
     private var timeline: VisibleHistoryTimeline { viewModel.visibleHistoryTimeline }
     private var previewCount: Int {
@@ -51,7 +52,7 @@ struct VisibleHistoryPopover: View {
                                 let target = min(max(Int(newValue.rounded()), 0), timeline.totalEntryCount)
                                 scrubPosition = Double(target)
                                 guard target != previewCount else { return }
-                                viewModel.previewVisibleHistory(toAppliedEntryCount: target)
+                                scheduleHistoryPreview(target)
                             }
                         ),
                         upperBound: max(timeline.totalEntryCount, 1)
@@ -97,10 +98,20 @@ struct VisibleHistoryPopover: View {
             scrubPosition = Double(previewCount)
         }
         .onDisappear {
+            pendingScrubTask?.cancel()
             viewModel.cancelVisibleHistoryPreview()
         }
         .onChange(of: previewCount) { _, newValue in
             scrubPosition = Double(newValue)
+        }
+    }
+
+    private func scheduleHistoryPreview(_ target: Int) {
+        pendingScrubTask?.cancel()
+        pendingScrubTask = Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(60))
+            guard !Task.isCancelled else { return }
+            viewModel.previewVisibleHistory(toAppliedEntryCount: target)
         }
     }
 

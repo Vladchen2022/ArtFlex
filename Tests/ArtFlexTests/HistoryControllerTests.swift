@@ -490,7 +490,7 @@ struct HistoryControllerTests {
 
     @Test
     @MainActor
-    func singleLayerBrushHistoryStillUsesFullEntries() throws {
+    func singleLayerBrushHistoryUsesDirtyEntry() throws {
         let harness = try BrushHistoryHarness(canvasSize: .init(width: 64, height: 64), startsWithSingleLayer: true)
         let layerID = harness.workspaceStore.state.document.activeLayerID
 
@@ -505,13 +505,18 @@ struct HistoryControllerTests {
 
         let latestMode = try #require(harness.history.debugUndoEntryModes.last)
         switch latestMode {
-        case .full:
-            break
         case .inPlaceChangedLayers:
-            Issue.record("Single-layer document should not produce dirty history entries")
+            break
+        case .full:
+            Issue.record("Single-layer brush history should retain its rendered-region delta")
         case .workspaceOnly, .metadataOnly:
             Issue.record("Brush stroke should not produce workspace-only history entries")
         }
+
+        #expect(try harness.history.undo())
+        #expect(try harness.alpha(atX: 16, y: 16, layerID: layerID) < 0.01)
+        #expect(try harness.history.redo())
+        #expect(try harness.alpha(atX: 16, y: 16, layerID: layerID) > 0.01)
     }
 
     @Test

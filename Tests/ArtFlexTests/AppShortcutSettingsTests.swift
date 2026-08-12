@@ -60,7 +60,7 @@ struct AppShortcutSettingsTests {
 
     @Test
     @MainActor
-    func toolGroupShortcutAssignmentsStayUniqueAndPersist() {
+    func duplicateToolGroupShortcutRemainsConflictedUntilUserResolvesIt() {
         let suiteName = "ArtFlexTests.AppShortcutSettings.ToolGroups.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
         defaults.removePersistentDomain(forName: suiteName)
@@ -69,17 +69,20 @@ struct AppShortcutSettingsTests {
         let brushGroup = ToolSidebarGroup.orderedGroups.first { $0.id == "brush" }!
         let eraserGroup = ToolSidebarGroup.orderedGroups.first { $0.id == "eraser" }!
 
-        let originalBrushShortcut = store.shortcutKey(for: brushGroup)
         let originalEraserShortcut = store.shortcutKey(for: eraserGroup)
 
         store.setShortcutKey(originalEraserShortcut!, for: brushGroup)
 
         #expect(store.shortcutKey(for: brushGroup) == originalEraserShortcut)
-        #expect(store.shortcutKey(for: eraserGroup) == originalBrushShortcut)
+        #expect(store.shortcutKey(for: eraserGroup) == originalEraserShortcut)
+        #expect(store.shortcutConflicts.contains { conflict in
+            [conflict.first, conflict.second].contains(.toolGroup(brushGroup.id)) &&
+                [conflict.first, conflict.second].contains(.toolGroup(eraserGroup.id))
+        })
 
         let restored = AppShortcutSettingsStore(userDefaults: defaults)
         #expect(restored.shortcutKey(for: brushGroup) == originalEraserShortcut)
-        #expect(restored.shortcutKey(for: eraserGroup) == originalBrushShortcut)
+        #expect(restored.shortcutKey(for: eraserGroup) == originalEraserShortcut)
     }
 
     @Test
@@ -135,5 +138,21 @@ struct AppShortcutSettingsTests {
         #expect(store.shortcutKey(for: cropGroup) == "C")
         #expect(store.shortcutKey(for: brushGroup) == "X")
         #expect(store.toolGroup(forShortcutKey: "C") == cropGroup)
+    }
+
+    @Test
+    @MainActor
+    func reportsConflictsAcrossGlobalAndToolShortcuts() {
+        let store = AppShortcutSettingsStore(
+            userDefaults: UserDefaults(suiteName: "ArtFlexTests.ShortcutConflicts.\(UUID().uuidString)")!
+        )
+        store.quickColorPickerShortcut = AppKeyboardShortcut(key: "B")
+
+        let conflicts = store.shortcutConflicts
+        #expect(conflicts.contains { conflict in
+            conflict.shortcut.displayString == "B" &&
+                [conflict.first, conflict.second].contains(.quickColorPicker) &&
+                [conflict.first, conflict.second].contains(.toolGroup("brush"))
+        })
     }
 }

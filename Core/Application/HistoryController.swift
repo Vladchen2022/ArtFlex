@@ -809,7 +809,7 @@ final class HistoryController {
             return .full
         case .inPlaceChangedLayers(let changedLayerIDs):
             let uniqueLayerIDs = Array(Set(changedLayerIDs))
-            guard uniqueLayerIDs.count == 1, workspace.document.layers.count > 1 else {
+            guard !uniqueLayerIDs.isEmpty else {
                 return .full
             }
             let validLayerIDs = Set(workspace.document.layers.map(\.id))
