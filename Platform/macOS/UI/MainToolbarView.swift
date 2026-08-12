@@ -4,6 +4,7 @@ struct MainToolbarView: View {
     @ObservedObject var hostViewModel: WorkspaceViewModel
     @ObservedObject var editingViewModel: WorkspaceViewModel
     let openSettings: () -> Void
+    @State private var isHistoryPresented = false
 
     var body: some View {
         HStack(spacing: 14) {
@@ -19,8 +20,43 @@ struct MainToolbarView: View {
                 hostViewModel.saveProject()
             }
 
+            if hostViewModel.hasRecoveryProject {
+                Menu {
+                    Button("恢复自动保存") {
+                        hostViewModel.recoverAutosavedProject()
+                    }
+                    Button("丢弃自动保存", role: .destructive) {
+                        hostViewModel.discardAutosavedProject()
+                    }
+                } label: {
+                    Text("恢复")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(Color.orange.opacity(0.95))
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+                .help("检测到上次未正式保存的自动恢复工程")
+            }
+
             toolbarTextButton("导出") {
-                hostViewModel.exportPNG()
+                hostViewModel.presentRasterExportSheet()
+            }
+
+            Button {
+                if !isHistoryPresented {
+                    editingViewModel.prepareVisibleHistoryPresentation()
+                }
+                isHistoryPresented.toggle()
+            } label: {
+                Image(systemName: "clock.arrow.circlepath")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(Color.white.opacity(0.86))
+                    .frame(width: 20, height: 18)
+            }
+            .buttonStyle(.plain)
+            .buttonTooltip("历史预览", help: "临时查看撤销与重做中的画布状态")
+            .popover(isPresented: $isHistoryPresented, arrowEdge: .top) {
+                VisibleHistoryPopover(viewModel: editingViewModel)
             }
 
             toolbarTextButton("设置") {
@@ -87,13 +123,14 @@ struct MainToolbarView: View {
                 .lineLimit(1)
 
             Circle()
-                .fill(hostViewModel.hasUnsavedChanges ? Color.red : Color.green)
+                .fill(saveIndicatorColor)
                 .frame(width: 10, height: 10)
                 .overlay(
                     Circle()
                         .stroke(Color.white.opacity(0.18), lineWidth: 1)
                 )
-                .help(hostViewModel.hasUnsavedChanges ? "有未保存内容" : "已保存")
+                .help(saveIndicatorDescription)
+                .accessibilityLabel(saveIndicatorDescription)
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
@@ -102,6 +139,28 @@ struct MainToolbarView: View {
             Rectangle()
                 .fill(Color.white.opacity(0.07))
                 .frame(height: 1)
+        }
+    }
+
+    private var saveIndicatorColor: Color {
+        switch hostViewModel.projectSaveIndicatorState {
+        case .unsaved:
+            return .red
+        case .saved:
+            return .green
+        case .notYetSaved:
+            return Color.white.opacity(0.45)
+        }
+    }
+
+    private var saveIndicatorDescription: String {
+        switch hostViewModel.projectSaveIndicatorState {
+        case .unsaved:
+            return "有未保存内容"
+        case .saved:
+            return "已保存"
+        case .notYetSaved:
+            return "尚未保存为工程"
         }
     }
 

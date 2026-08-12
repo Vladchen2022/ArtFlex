@@ -27,6 +27,142 @@ struct BrushTipEditingAndNavigatorTests {
     }
 
     @Test
+    @MainActor
+    func workspaceKeyboardBridgePreservesControlsAndLeavesTabNavigationToThem() {
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 320, height: 240),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        let container = NSView(frame: window.contentView?.bounds ?? .zero)
+        let bridge = KeyboardBridgeView(frame: .zero)
+        let slider = NSSlider(value: 0.5, minValue: 0, maxValue: 1, target: nil, action: nil)
+        container.addSubview(bridge)
+        container.addSubview(slider)
+        window.contentView = container
+
+        #expect(window.makeFirstResponder(slider))
+        bridge.activateIfNeeded()
+
+        #expect(window.firstResponder === slider)
+        #expect(bridge.shouldAllowWorkspaceChromeToggle(for: slider) == false)
+        #expect(bridge.shouldAllowWorkspaceChromeToggle(for: bridge))
+
+        bridge.recordWorkspacePointerInteraction(isCanvasInteraction: false)
+        #expect(bridge.shouldAllowWorkspaceChromeToggle(for: bridge) == false)
+
+        var handledTab = false
+        bridge.keyDownHandler = { _ in
+            handledTab = true
+            return true
+        }
+        let tab = NSEvent.keyEvent(
+            with: .keyDown,
+            location: .zero,
+            modifierFlags: [],
+            timestamp: ProcessInfo.processInfo.systemUptime,
+            windowNumber: window.windowNumber,
+            context: nil,
+            characters: "\t",
+            charactersIgnoringModifiers: "\t",
+            isARepeat: false,
+            keyCode: 48
+        )!
+        bridge.keyDown(with: tab)
+        #expect(handledTab == false)
+
+        let brushShortcut = NSEvent.keyEvent(
+            with: .keyDown,
+            location: .zero,
+            modifierFlags: [],
+            timestamp: ProcessInfo.processInfo.systemUptime,
+            windowNumber: 0,
+            context: nil,
+            characters: "b",
+            charactersIgnoringModifiers: "b",
+            isARepeat: false,
+            keyCode: 11
+        )!
+        #expect(bridge.shouldForwardWorkspaceShortcutFromControl(brushShortcut, responder: slider))
+    }
+
+    @Test
+    @MainActor
+    func installedWorkspaceKeyboardBridgePairsOnlyForwardedSliderSpaceKeyUp() {
+        let application = NSApplication.shared
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 320, height: 240),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        let otherWindow = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 160, height: 120),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        let container = NSView(frame: window.contentView?.bounds ?? .zero)
+        let bridge = KeyboardBridgeView(frame: .zero)
+        let slider = NSSlider(value: 0.5, minValue: 0, maxValue: 1, target: nil, action: nil)
+        container.addSubview(bridge)
+        container.addSubview(slider)
+        window.contentView = container
+        defer {
+            window.contentView = NSView()
+            window.orderOut(nil)
+            otherWindow.orderOut(nil)
+        }
+
+        var forwardedKeyDowns: [UInt16] = []
+        var forwardedKeyUps: [UInt16] = []
+        var isModalSpaceActive = false
+        bridge.keyDownHandler = { event in
+            forwardedKeyDowns.append(event.keyCode)
+            if event.keyCode == 49 {
+                isModalSpaceActive = true
+            }
+            return true
+        }
+        bridge.keyUpHandler = { event in
+            forwardedKeyUps.append(event.keyCode)
+            if event.keyCode == 49 {
+                isModalSpaceActive = false
+            }
+            return true
+        }
+
+        window.makeKeyAndOrderFront(nil)
+        #expect(window.makeFirstResponder(slider))
+
+        application.sendEvent(makeBridgeKeyEvent(type: .keyUp, character: " ", keyCode: 49, window: window))
+        #expect(forwardedKeyUps.isEmpty)
+
+        for (character, keyCode) in [("b", UInt16(11)), ("e", UInt16(14)), ("g", UInt16(5))] {
+            application.sendEvent(
+                makeBridgeKeyEvent(type: .keyDown, character: character, keyCode: keyCode, window: window)
+            )
+            application.sendEvent(
+                makeBridgeKeyEvent(type: .keyUp, character: character, keyCode: keyCode, window: window)
+            )
+        }
+        #expect(forwardedKeyDowns == [11, 14, 5])
+        #expect(forwardedKeyUps.isEmpty)
+
+        application.sendEvent(makeBridgeKeyEvent(type: .keyDown, character: " ", keyCode: 49, window: window))
+        #expect(isModalSpaceActive)
+        application.sendEvent(makeBridgeKeyEvent(type: .keyUp, character: " ", keyCode: 49, window: otherWindow))
+        #expect(isModalSpaceActive)
+        #expect(forwardedKeyUps.isEmpty)
+        application.sendEvent(makeBridgeKeyEvent(type: .keyUp, character: " ", keyCode: 49, window: window))
+
+        #expect(!isModalSpaceActive)
+        #expect(forwardedKeyDowns == [11, 14, 5, 49])
+        #expect(forwardedKeyUps == [49])
+    }
+
+    @Test
     func brushSizeShortcutUsesTheSameProgressiveStepsAcrossEditors() {
         #expect(BrushSizeShortcut.step(for: 2) == 1)
         #expect(BrushSizeShortcut.step(for: 10) == 1)
@@ -186,4 +322,25 @@ struct BrushTipEditingAndNavigatorTests {
 @MainActor
 private final class TestWorkspaceKeyboardFocusOwner: NSView, WorkspaceKeyboardFocusOwner {
     override var acceptsFirstResponder: Bool { true }
+}
+
+@MainActor
+private func makeBridgeKeyEvent(
+    type: NSEvent.EventType,
+    character: String,
+    keyCode: UInt16,
+    window: NSWindow
+) -> NSEvent {
+    NSEvent.keyEvent(
+        with: type,
+        location: .zero,
+        modifierFlags: [],
+        timestamp: ProcessInfo.processInfo.systemUptime,
+        windowNumber: window.windowNumber,
+        context: nil,
+        characters: character,
+        charactersIgnoringModifiers: character,
+        isARepeat: false,
+        keyCode: keyCode
+    )!
 }

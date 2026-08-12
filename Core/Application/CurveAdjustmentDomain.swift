@@ -171,6 +171,7 @@ enum CurveAdjustmentResolutionReason: Equatable, Sendable {
     case panelChange
     case layerChange
     case historyNavigation
+    case persistence
     case documentOpen
     case closeOrQuit
 

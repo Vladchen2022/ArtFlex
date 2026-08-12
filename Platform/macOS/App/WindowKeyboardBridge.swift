@@ -22,7 +22,7 @@ struct WindowKeyboardBridge: NSViewRepresentable {
             viewModel?.handleModifierFlagsChanged(event.modifierFlags) ?? false
         }
         self.shouldMonitorBrushSizeShortcut = { [weak viewModel] in
-            viewModel?.isBrushTipEditorVisible ?? false
+            viewModel?.isBrushTipCanvasFocused ?? false
         }
     }
 
@@ -63,16 +63,30 @@ final class KeyboardBridgeView: NSView {
     var flagsChangedHandler: ((NSEvent) -> Bool)?
     var shouldMonitorBrushSizeShortcut: (() -> Bool)?
     private var workspaceKeyDownMonitor: Any?
+    private var workspaceKeyUpMonitor: Any?
+    private var workspacePointerDownMonitor: Any?
+    private var forwardedModalSpaceWindowNumber: Int?
+    private var lastPointerInteractionWasCanvas = true
 
     override var acceptsFirstResponder: Bool { true }
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
+        guard window != nil else { return }
         installWorkspaceKeyDownMonitorIfNeeded()
+        installWorkspaceKeyUpMonitorIfNeeded()
+        installWorkspacePointerDownMonitorIfNeeded()
         activateIfNeeded()
     }
 
     override func keyDown(with event: NSEvent) {
+        let normalizedModifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        if event.keyCode == 48,
+           normalizedModifiers.isEmpty,
+           !shouldAllowWorkspaceChromeToggle(for: window?.firstResponder) {
+            window?.selectNextKeyView(nil)
+            return
+        }
         if let delta = brushSizeShortcutDirection(for: event) {
             activeStrokeCaptureView()?.previewAdjustBrushSize(by: delta)
         }
@@ -111,6 +125,15 @@ final class KeyboardBridgeView: NSView {
             NSEvent.removeMonitor(workspaceKeyDownMonitor)
             self.workspaceKeyDownMonitor = nil
         }
+        if newWindow == nil, let workspaceKeyUpMonitor {
+            NSEvent.removeMonitor(workspaceKeyUpMonitor)
+            self.workspaceKeyUpMonitor = nil
+            forwardedModalSpaceWindowNumber = nil
+        }
+        if newWindow == nil, let workspacePointerDownMonitor {
+            NSEvent.removeMonitor(workspacePointerDownMonitor)
+            self.workspacePointerDownMonitor = nil
+        }
         super.viewWillMove(toWindow: newWindow)
     }
 
@@ -118,7 +141,7 @@ final class KeyboardBridgeView: NSView {
         guard workspaceKeyDownMonitor == nil else { return }
         workspaceKeyDownMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self, let window = self.window else { return event }
-            guard NSApp.keyWindow === window else { return event }
+            guard event.windowNumber == window.windowNumber else { return event }
 
             let normalizedModifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
             if isForegroundColorFillShortcut(
@@ -135,13 +158,45 @@ final class KeyboardBridgeView: NSView {
                 return self.keyDownHandler?(event) == true ? nil : event
             }
 
+            if self.shouldForwardWorkspaceShortcutFromControl(
+                event,
+                responder: window.firstResponder
+            ) {
+                let handled = self.keyDownHandler?(event) == true
+                if handled, event.keyCode == 49 {
+                    self.forwardedModalSpaceWindowNumber = window.windowNumber
+                }
+                return handled ? nil : event
+            }
+
             guard event.keyCode == 48, normalizedModifiers.isEmpty else { return event }
-            guard self.shouldAllowWorkspaceShortcut(for: window.firstResponder) else { return event }
+            guard self.shouldAllowWorkspaceChromeToggle(for: window.firstResponder) else {
+                window.selectNextKeyView(nil)
+                return nil
+            }
             return self.keyDownHandler?(event) == true ? nil : event
         }
     }
 
-    private func shouldPreserveCurrentFirstResponder(_ responder: Any?) -> Bool {
+    private func installWorkspaceKeyUpMonitorIfNeeded() {
+        guard workspaceKeyUpMonitor == nil else { return }
+        workspaceKeyUpMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyUp) { [weak self] event in
+            guard
+                let self,
+                event.keyCode == 49,
+                let forwardedWindowNumber = self.forwardedModalSpaceWindowNumber,
+                event.windowNumber == forwardedWindowNumber,
+                self.window?.windowNumber == forwardedWindowNumber
+            else {
+                return event
+            }
+
+            self.forwardedModalSpaceWindowNumber = nil
+            return self.keyUpHandler?(event) == true ? nil : event
+        }
+    }
+
+    func shouldPreserveCurrentFirstResponder(_ responder: Any?) -> Bool {
         if responder is any WorkspaceKeyboardFocusOwner {
             return true
         }
@@ -151,7 +206,43 @@ final class KeyboardBridgeView: NSView {
         if let textField = responder as? NSTextField, textField.isEditable {
             return true
         }
+        if responder is NSControl {
+            return true
+        }
         return false
+    }
+
+    func shouldAllowWorkspaceChromeToggle(for responder: NSResponder?) -> Bool {
+        guard lastPointerInteractionWasCanvas else { return false }
+        guard let responder else { return true }
+        return responder === self || responder is StrokeCaptureMTKView
+    }
+
+    func recordWorkspacePointerInteraction(isCanvasInteraction: Bool) {
+        lastPointerInteractionWasCanvas = isCanvasInteraction
+    }
+
+    func shouldForwardWorkspaceShortcutFromControl(
+        _ event: NSEvent,
+        responder: NSResponder?
+    ) -> Bool {
+        guard responder is NSControl else { return false }
+        if let textView = responder as? NSTextView, textView.isEditable {
+            return false
+        }
+        if let textField = responder as? NSTextField, textField.isEditable {
+            return false
+        }
+        let commandModifiers = event.modifierFlags.intersection([.command, .control, .option])
+        guard commandModifiers.isEmpty else { return false }
+
+        if event.keyCode == 49, responder is NSSlider {
+            return true
+        }
+        guard let characters = event.charactersIgnoringModifiers, characters.count == 1 else {
+            return false
+        }
+        return characters.unicodeScalars.allSatisfy(CharacterSet.alphanumerics.contains)
     }
 
     private func shouldAllowWorkspaceShortcut(for responder: Any?) -> Bool {
@@ -160,6 +251,37 @@ final class KeyboardBridgeView: NSView {
             return false
         }
         return true
+    }
+
+    private func installWorkspacePointerDownMonitorIfNeeded() {
+        guard workspacePointerDownMonitor == nil else { return }
+        workspacePointerDownMonitor = NSEvent.addLocalMonitorForEvents(
+            matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]
+        ) { [weak self] event in
+            guard let self, let window = self.window, event.window === window else {
+                return event
+            }
+            self.recordWorkspacePointerInteraction(
+                isCanvasInteraction: self.isPointInsideVisibleCanvas(event.locationInWindow)
+            )
+            return event
+        }
+    }
+
+    private func isPointInsideVisibleCanvas(_ pointInWindow: NSPoint) -> Bool {
+        guard let rootView = window?.contentView else { return false }
+        return containsVisibleCanvas(at: pointInWindow, in: rootView)
+    }
+
+    private func containsVisibleCanvas(at pointInWindow: NSPoint, in view: NSView) -> Bool {
+        if let strokeView = view as? StrokeCaptureMTKView,
+           !strokeView.isHiddenOrHasHiddenAncestor,
+           strokeView.bounds.contains(strokeView.convert(pointInWindow, from: nil)) {
+            return true
+        }
+        return view.subviews.contains { subview in
+            containsVisibleCanvas(at: pointInWindow, in: subview)
+        }
     }
 
     private func activeStrokeCaptureView() -> StrokeCaptureMTKView? {

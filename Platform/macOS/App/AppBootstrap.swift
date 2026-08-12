@@ -18,6 +18,7 @@ final class AppSharedMetalServices {
     let bucketFillEngine: BucketFillEngine
     let layerMergeController: LayerMergeController
     let pixelClipboardController: PixelClipboardController
+    let layerMaskStrokeRenderer: LayerMaskStrokeRenderer
 
     init(metalContext: MetalDeviceContext) throws {
         self.canvasPresenter = try StageOneCanvasPresenter(device: metalContext.device)
@@ -41,6 +42,7 @@ final class AppSharedMetalServices {
             canvasPresenter: canvasPresenter
         )
         self.pixelClipboardController = PixelClipboardController()
+        self.layerMaskStrokeRenderer = try LayerMaskStrokeRenderer(device: metalContext.device)
     }
 }
 
@@ -66,8 +68,10 @@ struct AppBootstrap {
     let bucketFillEngine: BucketFillEngine
     let layerMergeController: LayerMergeController
     let pixelClipboardController: PixelClipboardController
+    let layerMaskStrokeRenderer: LayerMaskStrokeRenderer
     let textureSerializer: LayerTextureSerializer
     let pngExporter: PNGExporter
+    let rasterExporter: RasterExporter
     let exportController: ExportController
     let persistenceController: PersistenceController
     let historyController: HistoryController
@@ -90,7 +94,8 @@ struct AppBootstrap {
         textureFillLibraryPersistenceController: TextureFillLibraryPersistenceController? = nil,
         blockReferenceModuleLibraryPersistenceController: BlockReferenceModuleLibraryPersistenceController? = nil,
         sharedMetalServices: AppSharedMetalServices? = nil,
-        drawingStatsController: DrawingStatsController? = nil
+        drawingStatsController: DrawingStatsController? = nil,
+        persistenceRecoveryRootURL: URL? = nil
     ) throws {
         guard let metalContext else {
             fatalError("Metal is required to launch ArtFlex.")
@@ -120,20 +125,25 @@ struct AppBootstrap {
         self.textureSerializer = textureSerializer
         let pngExporter = resolvedSharedMetalServices.pngExporter
         self.pngExporter = pngExporter
+        self.rasterExporter = RasterExporter()
         self.smudgeEngine = resolvedSharedMetalServices.smudgeEngine
         self.eyedropperSampler = resolvedSharedMetalServices.eyedropperSampler
         self.bucketFillEngine = resolvedSharedMetalServices.bucketFillEngine
         self.layerMergeController = resolvedSharedMetalServices.layerMergeController
         self.pixelClipboardController = resolvedSharedMetalServices.pixelClipboardController
+        self.layerMaskStrokeRenderer = resolvedSharedMetalServices.layerMaskStrokeRenderer
         self.exportController = ExportController(
             workspaceStore: workspaceStore,
             layerSurfaceStore: layerSurfaceStore,
             pngExporter: pngExporter
         )
+        let testPersistenceRoot = Self.testPersistenceRootURL()
         self.persistenceController = PersistenceController(
             workspaceStore: workspaceStore,
             layerSurfaceStore: layerSurfaceStore,
-            serializer: textureSerializer
+            serializer: textureSerializer,
+            recoveryRootURL: persistenceRecoveryRootURL
+                ?? testPersistenceRoot?.appendingPathComponent("Recovery", isDirectory: true)
         )
         self.historyController = HistoryController(
             workspaceStore: workspaceStore,
@@ -142,7 +152,6 @@ struct AppBootstrap {
             metalContext: metalContext
         )
         self.filePanelService = FilePanelService()
-        let testPersistenceRoot = Self.testPersistenceRootURL()
         self.brushLibraryPersistenceController = brushLibraryPersistenceController ?? BrushLibraryPersistenceController(
             rootDirectoryURL: testPersistenceRoot
         )
@@ -164,7 +173,14 @@ struct AppBootstrap {
 
     private static func testPersistenceRootURL() -> URL? {
         let environment = ProcessInfo.processInfo.environment
-        guard environment["XCTestConfigurationFilePath"] != nil else {
+        let executablePath = CommandLine.arguments.first ?? ""
+        let isRunningTests = environment["XCTestConfigurationFilePath"] != nil
+            || Bundle.main.bundleURL.pathExtension.lowercased() == "xctest"
+            || executablePath.contains(".xctest/")
+            || executablePath.hasSuffix(".xctest")
+            || CommandLine.arguments.contains("--test-bundle-path")
+            || CommandLine.arguments.contains(where: { $0.contains(".xctest/") })
+        guard isRunningTests else {
             return nil
         }
         return FileManager.default.temporaryDirectory

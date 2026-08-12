@@ -73,8 +73,8 @@ struct BrushLiveSession {
     var liveEvents: [BrushLiveEvent] = []
     var pendingPacketCount = 0
     var currentStrokePackets: [StrokeDescriptor] = []
-    var brushSamplingState: BrushStrokeSamplingState?
-    var opacityCapSession: OpacityCapSessionResources?
+    var brushSamplingStates: [BrushStrokeStreamID: BrushStrokeSamplingState] = [:]
+    var opacityCapSessions: [BrushStrokeStreamID: OpacityCapSessionResources] = [:]
     var interactiveState: BrushInteractiveState = .idle
     var lastInputUptimeNs: UInt64 = 0
     var shouldRetainWorkingTexture: Bool = true

@@ -6,8 +6,24 @@ final class EyedropperSampler {
     private struct SamplingLayer {
         var layer: LayerRecord
         var texture: MTLTexture
+        var layerMaskTexture: MTLTexture?
         var clipMaskTexture: MTLTexture?
+        var clipLayerMaskTexture: MTLTexture?
         var effectiveOpacity: Float
+    }
+
+    private enum SamplingTextureRole {
+        case content
+        case layerMask
+        case clipContent
+        case clipLayerMask
+    }
+
+    private struct SamplingLayerSnapshots {
+        var content: LayerTextureSnapshot? = nil
+        var layerMask: LayerTextureSnapshot? = nil
+        var clipContent: LayerTextureSnapshot? = nil
+        var clipLayerMask: LayerTextureSnapshot? = nil
     }
 
     private let serializer: LayerTextureSerializer
@@ -45,39 +61,69 @@ final class EyedropperSampler {
             contentTextureForLayer: contentTextureForLayer,
             displayTextureForLayer: displayTextureForLayer
         )
-        let snapshots = try serializer.snapshotRegions(
-            samplingLayers.map { samplingLayer in
-                LayerTextureRegionSnapshotRequest(
-                    texture: samplingLayer.texture,
+        var snapshotRequests: [LayerTextureRegionSnapshotRequest] = []
+        var snapshotBindings: [(layerIndex: Int, role: SamplingTextureRole)] = []
+        for (layerIndex, samplingLayer) in samplingLayers.enumerated() {
+            let textures: [(MTLTexture?, SamplingTextureRole)] = [
+                (samplingLayer.texture, .content),
+                (samplingLayer.layerMaskTexture, .layerMask),
+                (samplingLayer.clipMaskTexture, .clipContent),
+                (samplingLayer.clipLayerMaskTexture, .clipLayerMask)
+            ]
+            for (texture, role) in textures {
+                guard let texture else { continue }
+                snapshotRequests.append(LayerTextureRegionSnapshotRequest(
+                    texture: texture,
                     originX: originX,
                     originY: originY,
                     width: width,
                     height: height
-                )
+                ))
+                snapshotBindings.append((layerIndex: layerIndex, role: role))
             }
+        }
+        let snapshots = try serializer.snapshotRegions(snapshotRequests)
+        var layerSnapshots = [SamplingLayerSnapshots](
+            repeating: SamplingLayerSnapshots(),
+            count: samplingLayers.count
         )
-        let clipSnapshots = try samplingLayers.map { samplingLayer -> LayerTextureSnapshot? in
-            guard let clipMaskTexture = samplingLayer.clipMaskTexture else { return nil }
-            return try serializer.snapshot(
-                texture: clipMaskTexture,
-                originX: originX,
-                originY: originY,
-                width: width,
-                height: height
-            )
+        for (binding, snapshot) in zip(snapshotBindings, snapshots) {
+            switch binding.role {
+            case .content:
+                layerSnapshots[binding.layerIndex].content = snapshot
+            case .layerMask:
+                layerSnapshots[binding.layerIndex].layerMask = snapshot
+            case .clipContent:
+                layerSnapshots[binding.layerIndex].clipContent = snapshot
+            case .clipLayerMask:
+                layerSnapshots[binding.layerIndex].clipLayerMask = snapshot
+            }
         }
 
         var compositedPixels = [LinearPremultipliedColor](
             repeating: .clear,
             count: width * height
         )
-        for (index, pair) in zip(samplingLayers, snapshots).enumerated() {
-            let (samplingLayer, snapshot) = pair
+        for (samplingLayer, snapshots) in zip(samplingLayers, layerSnapshots) {
+            if let curveAdjustmentLUTs = samplingLayer.layer.adjustment?.curveLUTs {
+                applyCurveAdjustment(
+                    luts: curveAdjustmentLUTs,
+                    effectOpacity: samplingLayer.effectiveOpacity,
+                    maskSnapshot: snapshots.layerMask,
+                    width: width,
+                    height: height,
+                    to: &compositedPixels
+                )
+                continue
+            }
+            guard let contentSnapshot = snapshots.content else { continue }
             composite(
-                snapshot: snapshot,
+                snapshot: contentSnapshot,
                 layerOpacity: samplingLayer.effectiveOpacity,
                 blendMode: samplingLayer.layer.blendMode,
-                clipMaskSnapshot: clipSnapshots[index],
+                layerMaskSnapshot: snapshots.layerMask,
+                clipMaskSnapshot: snapshots.clipContent,
+                clipLayerMaskSnapshot: snapshots.clipLayerMask,
                 into: &compositedPixels
             )
         }
@@ -146,10 +192,48 @@ final class EyedropperSampler {
             return SamplingLayer(
                 layer: layer,
                 texture: texture,
+                layerMaskTexture: enabledMaskTexture(
+                    for: layer.id,
+                    document: document,
+                    originX: originX,
+                    originY: originY,
+                    width: width,
+                    height: height,
+                    layerSurfaceStore: layerSurfaceStore
+                ),
                 clipMaskTexture: clipMaskTexture,
+                clipLayerMaskTexture: layer.clipTargetLayerID.flatMap {
+                    enabledMaskTexture(
+                        for: $0,
+                        document: document,
+                        originX: originX,
+                        originY: originY,
+                        width: width,
+                        height: height,
+                        layerSurfaceStore: layerSurfaceStore
+                    )
+                },
                 effectiveOpacity: document.effectiveLayerOpacity(layer.id)
             )
         }
+    }
+
+    private func enabledMaskTexture(
+        for layerID: LayerID,
+        document: ArtDocument,
+        originX: Int,
+        originY: Int,
+        width: Int,
+        height: Int,
+        layerSurfaceStore: StageOneLayerSurfaceStore
+    ) -> MTLTexture? {
+        guard document.layer(layerID)?.mask?.isEnabled == true,
+              let texture = layerSurfaceStore.maskTexture(for: layerID),
+              originX + width <= texture.width,
+              originY + height <= texture.height else {
+            return nil
+        }
+        return texture
     }
 
     private func samplingTexture(
@@ -191,7 +275,9 @@ final class EyedropperSampler {
         snapshot: LayerTextureSnapshot,
         layerOpacity: Float,
         blendMode: LayerBlendMode,
+        layerMaskSnapshot: LayerTextureSnapshot?,
         clipMaskSnapshot: LayerTextureSnapshot?,
+        clipLayerMaskSnapshot: LayerTextureSnapshot?,
         into output: inout [LinearPremultipliedColor]
     ) {
         let bytes = [UInt8](snapshot.pixelData)
@@ -199,21 +285,19 @@ final class EyedropperSampler {
             for x in 0..<snapshot.width {
                 let byteOffset = (y * snapshot.bytesPerRow) + (x * 4)
                 guard byteOffset + 3 < bytes.count else { continue }
-                let clipAlpha: Float
-                if let clipMaskSnapshot {
-                    let clipOffset = (y * clipMaskSnapshot.bytesPerRow) + (x * 4)
-                    clipAlpha = clipOffset + 3 < clipMaskSnapshot.pixelData.count
-                        ? Float(clipMaskSnapshot.pixelData[clipOffset + 3]) / 255
-                        : 0
-                } else {
-                    clipAlpha = 1
-                }
+                let layerMaskAlpha = layerMaskSnapshot.map { maskValue(in: $0, x: x, y: y) } ?? 1
+                let clipAlpha = clipMaskSnapshot.map { alphaValue(in: $0, x: x, y: y) } ?? 1
+                let clipLayerMaskAlpha = clipLayerMaskSnapshot.map {
+                    maskValue(in: $0, x: x, y: y)
+                } ?? 1
                 let layerColor = LinearPremultipliedColor(
                     bgraBlue: bytes[byteOffset],
                     green: bytes[byteOffset + 1],
                     red: bytes[byteOffset + 2],
                     alpha: bytes[byteOffset + 3]
-                ).applyingOpacity(layerOpacity * clipAlpha)
+                ).applyingOpacity(
+                    layerOpacity * layerMaskAlpha * clipAlpha * clipLayerMaskAlpha
+                )
                 let outputIndex = (y * snapshot.width) + x
                 guard output.indices.contains(outputIndex) else { continue }
                 output[outputIndex] = composite(
@@ -223,6 +307,79 @@ final class EyedropperSampler {
                 )
             }
         }
+    }
+
+    private func applyCurveAdjustment(
+        luts: CurveLUTs,
+        effectOpacity: Float,
+        maskSnapshot: LayerTextureSnapshot?,
+        width: Int,
+        height: Int,
+        to output: inout [LinearPremultipliedColor]
+    ) {
+        let opacity = min(max(effectOpacity, 0), 1)
+        for y in 0..<height {
+            for x in 0..<width {
+                let outputIndex = (y * width) + x
+                guard output.indices.contains(outputIndex) else { continue }
+                let mask = maskSnapshot.map { maskValue(in: $0, x: x, y: y) } ?? 1
+                let influence = min(max(mask, 0), 1) * opacity
+                let base = output[outputIndex]
+                guard influence > 0.0001, base.alpha > 0.0001 else { continue }
+
+                let inverseAlpha = 1 / base.alpha
+                let linearRed = min(max(base.red * inverseAlpha, 0), 1)
+                let linearGreen = min(max(base.green * inverseAlpha, 0), 1)
+                let linearBlue = min(max(base.blue * inverseAlpha, 0), 1)
+
+                var displayRed = LinearPremultipliedColor.linearChannelToSRGB(linearRed)
+                var displayGreen = LinearPremultipliedColor.linearChannelToSRGB(linearGreen)
+                var displayBlue = LinearPremultipliedColor.linearChannelToSRGB(linearBlue)
+                displayRed = sampleCurveLUT(luts.composite, at: displayRed)
+                displayGreen = sampleCurveLUT(luts.composite, at: displayGreen)
+                displayBlue = sampleCurveLUT(luts.composite, at: displayBlue)
+                displayRed = sampleCurveLUT(luts.red, at: displayRed)
+                displayGreen = sampleCurveLUT(luts.green, at: displayGreen)
+                displayBlue = sampleCurveLUT(luts.blue, at: displayBlue)
+
+                let adjustedRed = LinearPremultipliedColor.srgbChannelToLinear(displayRed) * base.alpha
+                let adjustedGreen = LinearPremultipliedColor.srgbChannelToLinear(displayGreen) * base.alpha
+                let adjustedBlue = LinearPremultipliedColor.srgbChannelToLinear(displayBlue) * base.alpha
+                output[outputIndex] = LinearPremultipliedColor(
+                    red: base.red + ((adjustedRed - base.red) * influence),
+                    green: base.green + ((adjustedGreen - base.green) * influence),
+                    blue: base.blue + ((adjustedBlue - base.blue) * influence),
+                    alpha: base.alpha
+                )
+            }
+        }
+    }
+
+    private func sampleCurveLUT(_ values: [Float], at value: Float) -> Float {
+        let scaled = min(max(value, 0), 1) * 255
+        let lowerIndex = Int(floor(scaled))
+        let upperIndex = min(lowerIndex + 1, 255)
+        let fraction = scaled - Float(lowerIndex)
+        let lower = preparedCurveLUTValue(values, at: lowerIndex)
+        let upper = preparedCurveLUTValue(values, at: upperIndex)
+        return lower + ((upper - lower) * fraction)
+    }
+
+    private func preparedCurveLUTValue(_ values: [Float], at index: Int) -> Float {
+        guard !values.isEmpty else { return Float(index) / 255 }
+        return min(max(values[min(index, values.count - 1)], 0), 1)
+    }
+
+    private func alphaValue(in snapshot: LayerTextureSnapshot, x: Int, y: Int) -> Float {
+        let offset = (y * snapshot.bytesPerRow) + (x * 4) + 3
+        guard offset >= 0, offset < snapshot.pixelData.count else { return 0 }
+        return Float(snapshot.pixelData[offset]) / 255
+    }
+
+    private func maskValue(in snapshot: LayerTextureSnapshot, x: Int, y: Int) -> Float {
+        let offset = (y * snapshot.bytesPerRow) + x
+        guard offset >= 0, offset < snapshot.pixelData.count else { return 0 }
+        return Float(snapshot.pixelData[offset]) / 255
     }
 
     private func composite(

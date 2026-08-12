@@ -1,14 +1,21 @@
 import Foundation
 import Metal
 
+enum LayerHistoryResourceKind: String, Codable, Sendable, Equatable {
+    case content
+    case mask
+}
+
 struct LayerHistorySnapshot: Codable, Sendable, Equatable {
     var layerID: LayerID
+    var resourceKind: LayerHistoryResourceKind
     var texture: LayerTextureSnapshot
     var originX: Int
     var originY: Int
 
     enum CodingKeys: String, CodingKey {
         case layerID
+        case resourceKind
         case texture
         case originX
         case originY
@@ -16,11 +23,13 @@ struct LayerHistorySnapshot: Codable, Sendable, Equatable {
 
     init(
         layerID: LayerID,
+        resourceKind: LayerHistoryResourceKind = .content,
         texture: LayerTextureSnapshot,
         originX: Int = 0,
         originY: Int = 0
     ) {
         self.layerID = layerID
+        self.resourceKind = resourceKind
         self.texture = texture
         self.originX = originX
         self.originY = originY
@@ -29,6 +38,7 @@ struct LayerHistorySnapshot: Codable, Sendable, Equatable {
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         layerID = try container.decode(LayerID.self, forKey: .layerID)
+        resourceKind = try container.decodeIfPresent(LayerHistoryResourceKind.self, forKey: .resourceKind) ?? .content
         texture = try container.decode(LayerTextureSnapshot.self, forKey: .texture)
         originX = try container.decodeIfPresent(Int.self, forKey: .originX) ?? 0
         originY = try container.decodeIfPresent(Int.self, forKey: .originY) ?? 0
@@ -69,6 +79,7 @@ struct WorkspaceHistoryEntry: Sendable, Equatable {
     var layerSnapshots: [LayerHistorySnapshot]
     var approxByteCount: Int
     var mode: Mode
+    var visibleMetadata: VisibleHistoryEntryMetadata
 }
 
 enum HistoryCaptureMode {
@@ -157,6 +168,15 @@ final class HistoryController {
         undoStack.last?.workspace
     }
 
+    /// User-facing history in the exact order supported by the real undo/redo stacks.
+    /// Redo is reversed because the last element is the next state restored by `redo()`.
+    var visibleTimeline: VisibleHistoryTimeline {
+        VisibleHistoryTimeline(
+            appliedEntries: undoStack.map(\.visibleMetadata),
+            redoEntries: redoStack.reversed().map(\.visibleMetadata)
+        )
+    }
+
     func captureCheckpoint(
         workspaceOverride: WorkspaceState? = nil,
         captureMode: HistoryCaptureMode = .full,
@@ -203,7 +223,7 @@ final class HistoryController {
             return false
         }
 
-        let current = try makeEntryWithAudit(
+        var current = try makeEntryWithAudit(
             captureMode: currentEntryCaptureMode(for: previous),
             auditContext: HistoryEligibilityAuditContext(
                 operationKind: "undo.currentEntryCapture",
@@ -212,6 +232,7 @@ final class HistoryController {
                 comparisonWorkspace: previous.workspace
             )
         )
+        current.visibleMetadata = previous.visibleMetadata
         try restore(entry: previous)
         _ = popLast(from: &undoStack, residentBytes: &undoResidentBytes)
         append(current, to: &redoStack, residentBytes: &redoResidentBytes)
@@ -223,7 +244,7 @@ final class HistoryController {
             return false
         }
 
-        let current = try makeEntryWithAudit(
+        var current = try makeEntryWithAudit(
             captureMode: currentEntryCaptureMode(for: next),
             auditContext: HistoryEligibilityAuditContext(
                 operationKind: "redo.currentEntryCapture",
@@ -232,6 +253,7 @@ final class HistoryController {
                 comparisonWorkspace: next.workspace
             )
         )
+        current.visibleMetadata = next.visibleMetadata
         try restore(entry: next)
         _ = popLast(from: &redoStack, residentBytes: &redoResidentBytes)
         append(current, to: &undoStack, residentBytes: &undoResidentBytes)
@@ -309,7 +331,7 @@ final class HistoryController {
            ) {
             layerSnapshots = validatedSnapshots
         } else {
-            var snapshotLayers: [(layer: LayerRecord, texture: MTLTexture)] = []
+            var snapshotLayers: [(layer: LayerRecord, resourceKind: LayerHistoryResourceKind, texture: MTLTexture)] = []
             for layer in workspace.document.paintLayers where snapshotLayerIDs.contains(layer.id) {
                 guard
                     let surfaceID = layerSurfaceStore.surfaceID(for: layer.id),
@@ -317,7 +339,10 @@ final class HistoryController {
                 else {
                     continue
                 }
-                snapshotLayers.append((layer: layer, texture: texture))
+                snapshotLayers.append((layer: layer, resourceKind: .content, texture: texture))
+                if layer.mask != nil, let maskTexture = layerSurfaceStore.maskTexture(for: layer.id) {
+                    snapshotLayers.append((layer: layer, resourceKind: .mask, texture: maskTexture))
+                }
             }
 
             let textureSnapshots = try serializer.snapshotBatch(
@@ -327,6 +352,7 @@ final class HistoryController {
             layerSnapshots = zip(snapshotLayers, textureSnapshots).map { item, textureSnapshot in
                 LayerHistorySnapshot(
                     layerID: item.layer.id,
+                    resourceKind: item.resourceKind,
                     texture: textureSnapshot
                 )
             }
@@ -340,7 +366,11 @@ final class HistoryController {
             workspace: workspace,
             layerSnapshots: layerSnapshots,
             approxByteCount: approxByteCount,
-            mode: mode
+            mode: mode,
+            visibleMetadata: VisibleHistoryEntryMetadata(
+                actionKey: "generic.checkpoint",
+                affectedLayerIDs: Array(snapshotLayerIDs)
+            )
         )
     }
 
@@ -354,11 +384,17 @@ final class HistoryController {
         let auditEnabled = PerformanceAuditStore.shared.isRecordingEnabled &&
             (durationMetricKey != nil || auditContext != nil)
         let startedAt = auditEnabled ? DispatchTime.now().uptimeNanoseconds : 0
-        let entry = try makeEntry(
+        var entry = try makeEntry(
             workspaceOverride: workspaceOverride,
             captureMode: captureMode,
             providedLayerSnapshots: providedLayerSnapshots
         )
+        if let auditContext {
+            entry.visibleMetadata = VisibleHistoryEntryMetadata(
+                actionKey: auditContext.operationKind,
+                affectedLayerIDs: auditContext.candidateChangedLayerIDs
+            )
+        }
         let ms = auditEnabled
             ? Double(DispatchTime.now().uptimeNanoseconds - startedAt) / 1_000_000
             : 0
@@ -386,17 +422,27 @@ final class HistoryController {
         snapshotLayerIDs: Set<LayerID>,
         requiresFullCanvasSnapshots: Bool
     ) -> [LayerHistorySnapshot]? {
-        guard snapshots.count == snapshotLayerIDs.count else { return nil }
+        let requiredKeys: Set<String> = Set(workspace.document.paintLayers.flatMap { layer -> [String] in
+            guard snapshotLayerIDs.contains(layer.id) else { return [] }
+            var keys = ["\(layer.id.rawValue.uuidString):content"]
+            if layer.mask != nil {
+                keys.append("\(layer.id.rawValue.uuidString):mask")
+            }
+            return keys
+        })
+        guard snapshots.count == requiredKeys.count else { return nil }
 
-        var snapshotsByLayerID: [LayerID: LayerHistorySnapshot] = [:]
-        snapshotsByLayerID.reserveCapacity(snapshots.count)
+        var snapshotsByKey: [String: LayerHistorySnapshot] = [:]
+        snapshotsByKey.reserveCapacity(snapshots.count)
 
         for snapshot in snapshots {
             guard snapshotLayerIDs.contains(snapshot.layerID) else { return nil }
-            guard snapshotsByLayerID[snapshot.layerID] == nil else { return nil }
+            let key = "\(snapshot.layerID.rawValue.uuidString):\(snapshot.resourceKind.rawValue)"
+            guard requiredKeys.contains(key), snapshotsByKey[key] == nil else { return nil }
+            let minimumBytesPerRow = snapshot.texture.width * (snapshot.resourceKind == .mask ? 1 : 4)
             guard snapshot.texture.width > 0,
                   snapshot.texture.height > 0,
-                  snapshot.texture.bytesPerRow >= snapshot.texture.width * 4,
+                  snapshot.texture.bytesPerRow >= minimumBytesPerRow,
                   snapshot.originX >= 0,
                   snapshot.originY >= 0,
                   snapshot.originX + snapshot.texture.width <= workspace.document.canvasSize.width,
@@ -407,18 +453,24 @@ final class HistoryController {
                snapshot.coversFullCanvas(workspace.document.canvasSize) == false {
                 return nil
             }
-            snapshotsByLayerID[snapshot.layerID] = snapshot
+            snapshotsByKey[key] = snapshot
         }
 
         var orderedSnapshots: [LayerHistorySnapshot] = []
         orderedSnapshots.reserveCapacity(snapshotLayerIDs.count)
         for layer in workspace.document.layers where snapshotLayerIDs.contains(layer.id) {
-            guard let provided = snapshotsByLayerID[layer.id] else {
+            let contentKey = "\(layer.id.rawValue.uuidString):content"
+            guard let provided = snapshotsByKey[contentKey] else {
                 return nil
             }
             orderedSnapshots.append(provided)
+            if layer.mask != nil {
+                let maskKey = "\(layer.id.rawValue.uuidString):mask"
+                guard let mask = snapshotsByKey[maskKey] else { return nil }
+                orderedSnapshots.append(mask)
+            }
         }
-        guard orderedSnapshots.count == snapshotLayerIDs.count else { return nil }
+        guard orderedSnapshots.count == requiredKeys.count else { return nil }
         return orderedSnapshots
     }
 
@@ -564,12 +616,15 @@ final class HistoryController {
         batchItems.reserveCapacity(layerSnapshots.count)
 
         for layerSnapshot in layerSnapshots {
-            guard
-                let surfaceID = layerSurfaceStore.surfaceID(for: layerSnapshot.layerID),
-                let texture = layerSurfaceStore.texture(for: surfaceID)
-            else {
-                continue
+            let texture: MTLTexture?
+            switch layerSnapshot.resourceKind {
+            case .content:
+                texture = layerSurfaceStore.surfaceID(for: layerSnapshot.layerID)
+                    .flatMap(layerSurfaceStore.texture(for:))
+            case .mask:
+                texture = layerSurfaceStore.maskTexture(for: layerSnapshot.layerID)
             }
+            guard let texture else { continue }
             batchItems.append((
                 snapshot: layerSnapshot.texture,
                 texture: texture,

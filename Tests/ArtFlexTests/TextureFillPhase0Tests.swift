@@ -52,8 +52,13 @@ struct TextureFillPhase0Tests {
             isBrushTab: true,
             usesTextureFillControls: true
         ))
-        #expect(!rightInspectorUsesCompactParameterLayout(
+        #expect(rightInspectorUsesCompactParameterLayout(
             activeTool: .brush,
+            isBrushTab: true,
+            usesTextureFillControls: false
+        ))
+        #expect(rightInspectorUsesCompactParameterLayout(
+            activeTool: .smudge,
             isBrushTab: true,
             usesTextureFillControls: false
         ))

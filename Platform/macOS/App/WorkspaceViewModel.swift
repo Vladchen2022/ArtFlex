@@ -54,6 +54,12 @@ struct PreparedAdjustmentLayerContext {
     let sourceTexture: MTLTexture
 }
 
+enum ProjectSaveIndicatorState: Equatable {
+    case unsaved
+    case saved
+    case notYetSaved
+}
+
 @MainActor
 final class WorkspaceViewModel: ObservableObject {
     struct TipImageLibraryReferenceSummary: Equatable {
@@ -150,8 +156,25 @@ final class WorkspaceViewModel: ObservableObject {
     @Published var isPixelGridEnabled = true
     @Published private(set) var canUndo = false
     @Published private(set) var canRedo = false
-    @Published private(set) var hasUnsavedChanges = false
+    @Published private(set) var visibleHistoryPreviewTargetCount: Int?
+    @Published private(set) var hasUnsavedChanges = false {
+        didSet {
+            if hasUnsavedChanges {
+                scheduleRecoveryAutosave()
+            } else {
+                recoveryAutosaveGeneration &+= 1
+                recoveryAutosaveTask?.cancel()
+                recoveryAutosaveTask = nil
+            }
+        }
+    }
+    private var visibleHistoryPreviewOriginCount: Int?
+    private var visibleHistoryPreviewOriginWasDirty = false
+    private var visibleHistoryPreviewOriginSelection: SelectionState?
+    @Published private(set) var hasRecoveryProject = false
     @Published var isNewCanvasSheetPresented = false
+    @Published var isRasterExportSheetPresented = false
+    @Published private(set) var isRasterExporting = false
     @Published private(set) var patternImportSheetState = PatternImportSheetState()
     @Published private(set) var patternImportPreviewAsset: PatternImportPreviewAsset?
     @Published private(set) var patternImportCurrentEraseMaskData: Data?
@@ -166,14 +189,18 @@ final class WorkspaceViewModel: ObservableObject {
     @Published private(set) var strokeResetToken = 0
     @Published private(set) var isGeneratorRegionSelectionArmed = false
     @Published private(set) var isGeneratorStrokeModeEnabled = false
+    @Published private(set) var activeMaskEditingLayerID: LayerID?
     @Published private(set) var straightLineState = StraightLineInteractionState()
     @Published private(set) var linearGradientState = LinearGradientInteractionState()
     @Published private(set) var sectorGradientState = SectorGradientInteractionState()
+    @Published private(set) var gradientSettings = GradientSettings.currentColorToTransparent(.black)
+    @Published private(set) var gradientFollowsSelectedColor = true
     @Published private(set) var polygonSelectionState = PolygonSelectionInteractionState()
     @Published private(set) var toolGroupSurfaceTools = ToolSidebarGroup.defaultSurfaceTools
     @Published private(set) var transformPreviewOffset = CanvasPoint(x: 0, y: 0)
     @Published private(set) var freeTransformPreview = FreeTransformPreview.identity
     @Published private(set) var freeTransformToolMode = FreeTransformToolMode.standard
+    @Published private(set) var preciseTransformLocksAspectRatio = true
     @Published private(set) var freeTransformMeshWarpGrid: MeshWarpGrid?
     @Published private(set) var selectedMeshWarpControlPointIndices: Set<Int> = []
     @Published private(set) var selectedPerspectiveAnchorID: UUID?
@@ -184,6 +211,8 @@ final class WorkspaceViewModel: ObservableObject {
     let blockReferenceCameraRenderState = BlockReferenceCameraRenderState()
     @Published private(set) var isApplyingGradientCommit = false
     @Published private(set) var isBucketFillInProgress = false
+    @Published private(set) var fillSettings = FillSettings.stageOneDefault
+    @Published private(set) var isRefiningSelection = false
     @Published private(set) var isSavingSnapshot = false
     @Published private(set) var isPreparingSnapshotCompare = false
     @Published private(set) var isLuminosityPreviewEnabled = false
@@ -217,6 +246,7 @@ final class WorkspaceViewModel: ObservableObject {
     private var brushTipDraftSnapshot: BrushTipDraftSnapshot?
     private var brushTipDraftHistory = BrushTipDraftHistory()
     private var statusDismissTask: Task<Void, Never>?
+    private var rasterExportTask: Task<Void, Never>?
     private var isAdjustingLayerOpacity = false
     private var activeLayerOpacityChangeDidMutate = false
     private var transformState = TransformInteractionState()
@@ -250,6 +280,8 @@ final class WorkspaceViewModel: ObservableObject {
     private var snapshotSaveTask: Task<Void, Never>?
     private var snapshotComparePreparationRequestID: UInt64 = 0
     private var snapshotComparePreparationTask: Task<Void, Never>?
+    private var adjustmentLayerCheckpointResetTask: Task<Void, Never>?
+    private var adjustmentLayerCheckpointLayerID: LayerID?
     private var lassoRefreshCounter = 0  // 套索拖动时的刷新节流计数器
     private var freeTransformUsesImplicitSelection = false
     private var implicitFreeTransformSelectionShape: SelectionShape?
@@ -276,6 +308,13 @@ final class WorkspaceViewModel: ObservableObject {
     @Published private(set) var referenceImageLoadingSlotIDs: Set<Int> = []
     @Published private(set) var isReferenceImageFloatingPanelPresented = false
     private var currentProjectURL: URL?
+
+    var projectSaveIndicatorState: ProjectSaveIndicatorState {
+        if hasUnsavedChanges {
+            return .unsaved
+        }
+        return currentProjectURL == nil ? .notYetSaved : .saved
+    }
     private var lastSyncedTimelapseDocumentContext: TimelapseDocumentContext?
     private var shouldResumeTimelapseAfterIdeation = false
     private var shouldResumeTimelapseAfterSnapshotCompare = false
@@ -283,6 +322,9 @@ final class WorkspaceViewModel: ObservableObject {
     private var frozenSnapshotPreviewPreparationTask: Task<Void, Never>?
     private var patternPlacementTextureCache: [UUID: MTLTexture] = [:]
     private var referenceImageUpgradeTasks: [Int: Task<Void, Never>] = [:]
+    private var recoveryAutosaveTask: Task<Void, Never>?
+    private var recoveryAutosaveWriteTask: Task<Void, Never>?
+    private var recoveryAutosaveGeneration: UInt64 = 0
     private var deferredGradientAction: DeferredGradientAction?
     private let selectionTraceLogger = Logger(subsystem: "ArtFlex", category: "SelectionTrace")
     private let brushStrokeLogger = Logger(subsystem: "ArtFlex", category: "BrushStroke")
@@ -301,6 +343,7 @@ final class WorkspaceViewModel: ObservableObject {
     private var documentChangeRevision: UInt64 = 0
     private var strokePacketCount = 0
     private var activePaintVariationSeed: UInt32 = 0
+    private var lastLayerMaskStrokeSample: CanvasStrokeSample?
     var colorAdjustmentSession: ColorAdjustmentSession?
     var curveAdjustmentSession: CurveAdjustmentSession?
     var brightnessAdjustmentEditorMode: BrightnessAdjustmentEditorMode = .colorParameters
@@ -332,6 +375,13 @@ final class WorkspaceViewModel: ObservableObject {
             selection.activeCombineMode = .replace
         }
         refresh(reason: "debugSetCommittedSelectionShapeForTests")
+    }
+
+    func debugPerformRecoveryAutosaveNowForTests() {
+        recoveryAutosaveTask?.cancel()
+        recoveryAutosaveTask = nil
+        recoveryAutosaveGeneration &+= 1
+        performRecoveryAutosave(generation: recoveryAutosaveGeneration)
     }
 #endif
 
@@ -392,6 +442,7 @@ final class WorkspaceViewModel: ObservableObject {
             )
         }
         self.workspace = state
+        self.gradientSettings = .currentColorToTransparent(state.toolSession.selectedColor)
         self.sceneSnapshot = WorkspaceViewModel.makeSceneSnapshot(
             workspace: state,
             bootstrap: bootstrap,
@@ -415,6 +466,10 @@ final class WorkspaceViewModel: ObservableObject {
         }
         if didSanitizePersistedPatternLibrary {
             persistPatternLibrary()
+        }
+        hasRecoveryProject = bootstrap.persistenceController.hasRecoveryProject
+        if hasRecoveryProject {
+            status = .init(kind: .info, message: "检测到自动恢复工程，可从顶部工具栏恢复")
         }
     }
 
@@ -469,6 +524,14 @@ final class WorkspaceViewModel: ObservableObject {
         let currentTool = workspace.toolSession.activeTool
         let shouldRevealBrushLibrary = normalizedTool == .brush
         if currentTool == normalizedTool {
+            if isGeneratorStrokeModeEnabled {
+                exitGeneratorMode(showFeedback: false)
+                if shouldRevealBrushLibrary {
+                    revealBrushLibraryPanel()
+                }
+                showToolSelectionStatus(for: normalizedTool)
+                return
+            }
             if patternPlacementPhase != .idle {
                 cancelPatternPlacement(keepSelection: true)
             }
@@ -519,9 +582,12 @@ final class WorkspaceViewModel: ObservableObject {
 
     func selectToolFromUI(_ tool: ToolKind, shortcutLabel: String? = nil) {
         let previousTool = workspace.toolSession.activeTool
-        selectTool(tool)
-        if workspace.toolSession.activeTool != previousTool || shortcutLabel != nil {
-            showToolSelectionStatus(for: tool, shortcutLabel: shortcutLabel)
+        let requestedTool = Self.normalizedAvailableTool(tool)
+        selectTool(requestedTool)
+        let selectedTool = workspace.toolSession.activeTool
+        if selectedTool == requestedTool,
+           selectedTool != previousTool || shortcutLabel != nil {
+            showToolSelectionStatus(for: requestedTool, shortcutLabel: shortcutLabel)
         }
     }
 
@@ -556,6 +622,10 @@ final class WorkspaceViewModel: ObservableObject {
         }
         if workspace.toolSession.activeTool != tool {
             resolveTransformSession(reason: .toolChange)
+        }
+        if tool != .brush, tool != .eraser {
+            activeMaskEditingLayerID = nil
+            lastLayerMaskStrokeSample = nil
         }
         if previousTool == .freeTransform, tool != .freeTransform, freeTransformUsesImplicitSelection {
             freeTransformUsesImplicitSelection = false
@@ -1153,49 +1223,49 @@ final class WorkspaceViewModel: ObservableObject {
         bootstrap.workspaceStore.updateToolSession { session in
             session.brush.buildMode = mode
         }
-        refresh()
+        refreshToolSessionOnly()
     }
 
     func setBrushSpacingPercent(_ percent: Float) {
         bootstrap.workspaceStore.updateToolSession { session in
             session.brush.spacingPercent = min(max(percent, 1), 1_000)
         }
-        refresh()
+        refreshToolSessionOnly()
     }
 
     func setBrushScatterAmount(_ amount: Float) {
         bootstrap.workspaceStore.updateToolSession { session in
             session.brush.scatterAmount = min(max(amount, 0), 5)
         }
-        refresh()
+        refreshToolSessionOnly()
     }
 
     func setBrushJitterAmount(_ amount: Float) {
         bootstrap.workspaceStore.updateToolSession { session in
             session.brush.jitterAmount = min(max(amount, 0), 1)
         }
-        refresh()
+        refreshToolSessionOnly()
     }
 
     func setBrushSizeJitterAmount(_ amount: Float) {
         bootstrap.workspaceStore.updateToolSession { session in
             session.brush.sizeJitterAmount = min(max(amount, 0), 1)
         }
-        refresh()
+        refreshToolSessionOnly()
     }
 
     func setBrushAngleJitterAmount(_ amount: Float) {
         bootstrap.workspaceStore.updateToolSession { session in
             session.brush.angleJitterAmount = min(max(amount, 0), 1)
         }
-        refresh()
+        refreshToolSessionOnly()
     }
 
     func setBrushColorJitterAmount(_ amount: Float) {
         bootstrap.workspaceStore.updateToolSession { session in
             session.brush.colorJitterAmount = min(max(amount, 0), 1)
         }
-        refresh()
+        refreshToolSessionOnly()
     }
 
     func setPaintJitterAmount(_ amount: Float) {
@@ -1206,8 +1276,77 @@ final class WorkspaceViewModel: ObservableObject {
             } else {
                 session.brush.paintJitterAmount = clamped
             }
+            if clamped <= 0.001 {
+                session.brush.oilPaint.isEnabled = false
+            }
         }
-        refresh()
+        refreshToolSessionOnly()
+    }
+
+    func setOilPaintEnabled(_ enabled: Bool) {
+        bootstrap.workspaceStore.updateToolSession { session in
+            session.brush.oilPaint.isEnabled = enabled && session.brush.effectivePaintJitterAmount > 0.001
+        }
+        refreshToolSessionOnly()
+    }
+
+    func setOilPaintNewColorLoad(_ amount: Float) {
+        bootstrap.workspaceStore.updateToolSession { session in
+            session.brush.oilPaint.newColorLoad = min(max(amount, 0), 1)
+        }
+        refreshToolSessionOnly()
+    }
+
+    func setOilPaintLightnessFollow(_ amount: Float) {
+        bootstrap.workspaceStore.updateToolSession { session in
+            session.brush.oilPaint.lightnessFollow = min(max(amount, 0), 1)
+        }
+        refreshToolSessionOnly()
+    }
+
+    func setOilPaintOutputMode(_ mode: OilPaintOutputMode) {
+        bootstrap.workspaceStore.updateToolSession { session in
+            session.oilPaintOutputMode = mode
+        }
+        refreshToolSessionOnly()
+    }
+
+    func setOilPaintPigmentBoundary(after componentIndex: Int, cumulativeWeight: Float) {
+        bootstrap.workspaceStore.updateToolSession { session in
+            session.oilPaintReservoir.setBoundary(
+                after: componentIndex,
+                cumulativeWeight: cumulativeWeight
+            )
+        }
+        refreshToolSessionOnly()
+    }
+
+    func loadSelectedColorIntoOilPaintBrush() {
+        var didLoad = false
+        bootstrap.workspaceStore.updateToolSession { session in
+            didLoad = session.loadSelectedColorIntoOilPaintReservoir()
+        }
+        refreshToolSessionOnly()
+        guard didLoad else {
+            showStatus(.init(kind: .info, message: "请先开启仿真油画笔并提高杂色"))
+            return
+        }
+        let percentage = Int((workspace.toolSession.brush.oilPaint.newColorLoad * 100).rounded())
+        showStatus(.init(kind: .success, message: "已按 \(percentage)% 装载当前颜色"))
+    }
+
+    func washOilPaintBrush() {
+        bootstrap.workspaceStore.updateToolSession { session in
+            session.washOilPaintReservoir()
+        }
+        refreshToolSessionOnly()
+        showStatus(.init(kind: .success, message: "已洗净笔头并载入当前颜色"))
+    }
+
+    var oilPaintPigmentPreviewComponents: [BrushPigmentComponent] {
+        workspace.toolSession.oilPaintReservoir.palette(
+            lightnessFollow: workspace.toolSession.brush.oilPaint.lightnessFollow
+        ).components
     }
 
     func setPaintContrastAmount(_ amount: Float) {
@@ -1219,7 +1358,7 @@ final class WorkspaceViewModel: ObservableObject {
                 session.brush.paintContrastAmount = clamped
             }
         }
-        refresh()
+        refreshToolSessionOnly()
     }
 
     func setBrushStampRotationDegrees(_ angleDegrees: Float) {
@@ -1230,28 +1369,28 @@ final class WorkspaceViewModel: ObservableObject {
             }
             session.brush.stampRotationDegrees = normalized
         }
-        refresh()
+        refreshToolSessionOnly()
     }
 
     func setBrushFollowsStrokeDirection(_ follows: Bool) {
         bootstrap.workspaceStore.updateToolSession { session in
             session.brush.followsStrokeDirection = follows
         }
-        refresh()
+        refreshToolSessionOnly()
     }
 
     func setPressureSensitivity(_ amount: Float) {
         bootstrap.workspaceStore.updateToolSession { session in
             session.brush.pressureSensitivity = min(max(amount, 0), 2)
         }
-        refresh()
+        refreshToolSessionOnly()
     }
 
     func setSizeLowerBound(_ amount: Float) {
         bootstrap.workspaceStore.updateToolSession { session in
             session.brush.sizeLowerBound = min(max(amount, 0), 1)
         }
-        refresh()
+        refreshToolSessionOnly()
     }
 
     func setPressureSizeAmount(_ amount: Float) {
@@ -1263,7 +1402,7 @@ final class WorkspaceViewModel: ObservableObject {
                 session.brush.pressureSizeAmount = clamped
             }
         }
-        refresh()
+        refreshToolSessionOnly()
     }
 
     func setPressureOpacityAmount(_ amount: Float) {
@@ -1275,28 +1414,28 @@ final class WorkspaceViewModel: ObservableObject {
                 session.brush.pressureOpacityAmount = clamped
             }
         }
-        refresh()
+        refreshToolSessionOnly()
     }
 
     func setBuildUpOpacityCompensationAmount(_ amount: Float) {
         bootstrap.workspaceStore.updateToolSession { session in
             session.brush.buildUpOpacityCompensationAmount = min(max(amount, 0), 1)
         }
-        refresh()
+        refreshToolSessionOnly()
     }
 
     func setCompoundPrimaryPressureSizeAmount(_ amount: Float) {
         bootstrap.workspaceStore.updateToolSession { session in
             session.brush.pressureSizeAmount = min(max(amount, 0), 1)
         }
-        refresh()
+        refreshToolSessionOnly()
     }
 
     func setCompoundPrimaryPressureOpacityAmount(_ amount: Float) {
         bootstrap.workspaceStore.updateToolSession { session in
             session.brush.pressureOpacityAmount = min(max(amount, 0), 1)
         }
-        refresh()
+        refreshToolSessionOnly()
     }
 
     var displayedPressureSizeAmount: Float {
@@ -1337,21 +1476,21 @@ final class WorkspaceViewModel: ObservableObject {
         bootstrap.workspaceStore.updateToolSession { session in
             session.brush.setSizePressureCurveState(state)
         }
-        refresh()
+        refreshToolSessionOnly()
     }
 
     func setOpacityPressureCurveState(_ state: CurveChannelState) {
         bootstrap.workspaceStore.updateToolSession { session in
             session.brush.setOpacityPressureCurveState(state)
         }
-        refresh()
+        refreshToolSessionOnly()
     }
 
     func setSizeCurveValues(low: Float, mid: Float, high: Float) {
         bootstrap.workspaceStore.updateToolSession { session in
             session.brush.setLegacySizeCurveValues(low: low, mid: mid, high: high)
         }
-        refresh()
+        refreshToolSessionOnly()
     }
 
     func setSizeCurveLow(_ value: Float) {
@@ -1373,7 +1512,7 @@ final class WorkspaceViewModel: ObservableObject {
         bootstrap.workspaceStore.updateToolSession { session in
             session.brush.setLegacyOpacityCurveValues(low: low, mid: mid, high: high)
         }
-        refresh()
+        refreshToolSessionOnly()
     }
 
     func setOpacityCurveLow(_ value: Float) {
@@ -1395,7 +1534,7 @@ final class WorkspaceViewModel: ObservableObject {
         bootstrap.workspaceStore.updateToolSession { session in
             session.brush.setOpacityPressureCurveState(preset.opacityCurveState)
         }
-        refresh()
+        refreshToolSessionOnly()
     }
 
     func resetOpacityCurveToDefault() {
@@ -1403,14 +1542,14 @@ final class WorkspaceViewModel: ObservableObject {
         bootstrap.workspaceStore.updateToolSession { session in
             session.brush.setOpacityPressureCurveState(defaults.resolvedOpacityPressureCurveState)
         }
-        refresh()
+        refreshToolSessionOnly()
     }
 
     func applySizeCurvePreset(_ preset: PressureCurvePreset) {
         bootstrap.workspaceStore.updateToolSession { session in
             session.brush.setSizePressureCurveState(preset.sizeCurveState)
         }
-        refresh()
+        refreshToolSessionOnly()
     }
 
     func resetSizeCurveToDefault() {
@@ -1418,7 +1557,7 @@ final class WorkspaceViewModel: ObservableObject {
         bootstrap.workspaceStore.updateToolSession { session in
             session.brush.setSizePressureCurveState(defaults.resolvedSizePressureCurveState)
         }
-        refresh()
+        refreshToolSessionOnly()
     }
 
     func setBrushTipShape(_ tipShape: BrushTipShape) {
@@ -1524,7 +1663,17 @@ final class WorkspaceViewModel: ObservableObject {
     @discardableResult
     func applyBrushTipDraft() -> Bool {
         guard hasPendingBrushTipDraft, let draft = brushTipDraftSnapshot else { return false }
+        if workspace.toolSession.activeTool != .brush {
+            selectTool(.brush)
+            guard bootstrap.workspaceStore.state.toolSession.activeTool == .brush else {
+                showStatus(.init(kind: .info, message: "请先结束当前编辑，再应用笔尖"))
+                return false
+            }
+        }
+        var disabledCompoundBrush = false
         bootstrap.workspaceStore.updateToolSession { session in
+            disabledCompoundBrush = session.brush.compoundBrush.enabled
+            session.brush.compoundBrush.enabled = false
             session.brush.tipShape = .customRound
             session.brush.customTipSourceSemantic = draft.sourceSemantic
             session.brush.customTipAssetID = draft.assetID
@@ -1537,6 +1686,10 @@ final class WorkspaceViewModel: ObservableObject {
         StageOneBrushPreviewRasterizer.resetCache()
         persistBrushLibrary()
         refreshToolSessionOnly()
+        let message = disabledCompoundBrush
+            ? "已应用新笔尖、关闭组合笔刷并切换到画笔"
+            : "已应用新笔尖并切换到画笔"
+        showStatus(.init(kind: .success, message: message))
         return true
     }
 
@@ -1544,14 +1697,14 @@ final class WorkspaceViewModel: ObservableObject {
         bootstrap.workspaceStore.updateToolSession { session in
             session.brush.compoundBrush.enabled = enabled
         }
-        refresh()
+        refreshToolSessionOnly()
     }
 
     func setCompoundBrushMode(_ mode: CompoundBrushMode) {
         bootstrap.workspaceStore.updateToolSession { session in
             session.brush.compoundBrush.mode = mode
         }
-        refresh()
+        refreshToolSessionOnly()
     }
 
     func restoreCompoundBrushEditingSnapshot(_ brush: BrushSettings) {
@@ -1559,7 +1712,7 @@ final class WorkspaceViewModel: ObservableObject {
             session.brush = brush
         }
         StageOneBrushPreviewRasterizer.resetCache()
-        refresh()
+        refreshToolSessionOnly()
     }
 
     func copyCompoundPrimaryTipToSecondary() {
@@ -1567,7 +1720,7 @@ final class WorkspaceViewModel: ObservableObject {
             session.brush.copyPrimaryTipToCompoundSecondary()
         }
         StageOneBrushPreviewRasterizer.resetCache()
-        refresh()
+        refreshToolSessionOnly()
     }
 
     func copyCompoundSecondaryTipToPrimary() {
@@ -1575,7 +1728,7 @@ final class WorkspaceViewModel: ObservableObject {
             session.brush.copyCompoundSecondaryTipToPrimary()
         }
         StageOneBrushPreviewRasterizer.resetCache()
-        refresh()
+        refreshToolSessionOnly()
     }
 
     func swapCompoundPrimaryAndSecondaryTips() {
@@ -1583,7 +1736,7 @@ final class WorkspaceViewModel: ObservableObject {
             session.brush.swapCompoundPrimaryAndSecondaryTips()
         }
         StageOneBrushPreviewRasterizer.resetCache()
-        refresh()
+        refreshToolSessionOnly()
     }
 
     func setCompoundSecondaryTipShape(_ tipShape: BrushTipShape) {
@@ -1596,21 +1749,21 @@ final class WorkspaceViewModel: ObservableObject {
                 session.brush.compoundBrush.secondary.customTipMaskData = nil
             }
         }
-        refresh()
+        refreshToolSessionOnly()
     }
 
     func setCompoundSecondaryTipSoftness(_ softness: Float) {
         bootstrap.workspaceStore.updateToolSession { session in
             session.brush.compoundBrush.secondary.softness = min(max(softness, 0), 1)
         }
-        refresh()
+        refreshToolSessionOnly()
     }
 
     func setCompoundSecondaryTipRoundness(_ roundness: Float) {
         bootstrap.workspaceStore.updateToolSession { session in
             session.brush.compoundBrush.secondary.roundness = min(max(roundness, 0.25), 1)
         }
-        refresh()
+        refreshToolSessionOnly()
     }
 
     func setCompoundSecondaryTipAngleDegrees(_ angle: Float) {
@@ -1621,14 +1774,14 @@ final class WorkspaceViewModel: ObservableObject {
             }
             session.brush.compoundBrush.secondary.angleDegrees = normalized
         }
-        refresh()
+        refreshToolSessionOnly()
     }
 
     func setCompoundSecondaryFollowsStrokeDirection(_ value: Bool) {
         bootstrap.workspaceStore.updateToolSession { session in
             session.brush.compoundBrush.secondary.followsStrokeDirection = value
         }
-        refresh()
+        refreshToolSessionOnly()
     }
 
     func updateCompoundSecondaryTipMask(_ data: Data?) {
@@ -1639,7 +1792,7 @@ final class WorkspaceViewModel: ObservableObject {
             session.brush.compoundBrush.secondary.importedSourceInfo = nil
             session.brush.compoundBrush.secondary.customTipMaskData = data
         }
-        refresh()
+        refreshToolSessionOnly()
     }
 
     func clearCompoundSecondaryTipMask() {
@@ -1650,7 +1803,7 @@ final class WorkspaceViewModel: ObservableObject {
         bootstrap.workspaceStore.updateToolSession { session in
             session.brush.compoundBrush.secondary.size = min(max(size, 1), 512)
         }
-        refresh()
+        refreshToolSessionOnly()
     }
 
     func setCompoundSecondaryUsesRelativeSize(_ usesRelativeSize: Bool) {
@@ -1664,42 +1817,42 @@ final class WorkspaceViewModel: ObservableObject {
                 session.brush.compoundBrush.secondary.size = min(max(resolvedCurrentSize, 1), 512)
             }
         }
-        refresh()
+        refreshToolSessionOnly()
     }
 
     func setCompoundSecondaryRelativeSizeRatio(_ ratio: Float) {
         bootstrap.workspaceStore.updateToolSession { session in
             session.brush.compoundBrush.secondary.relativeSizeRatio = min(max(ratio, 0.05), 4.0)
         }
-        refresh()
+        refreshToolSessionOnly()
     }
 
     func setCompoundSecondarySpacingPercent(_ percent: Float) {
         bootstrap.workspaceStore.updateToolSession { session in
             session.brush.compoundBrush.secondary.spacingPercent = min(max(percent, 1), 400)
         }
-        refresh()
+        refreshToolSessionOnly()
     }
 
     func setCompoundSecondaryPressureSizeAmount(_ amount: Float) {
         bootstrap.workspaceStore.updateToolSession { session in
             session.brush.compoundBrush.secondary.pressureSizeAmount = min(max(amount, 0), 1)
         }
-        refresh()
+        refreshToolSessionOnly()
     }
 
     func setCompoundSecondaryPressureOpacityAmount(_ amount: Float) {
         bootstrap.workspaceStore.updateToolSession { session in
             session.brush.compoundBrush.secondary.pressureOpacityAmount = min(max(amount, 0), 1)
         }
-        refresh()
+        refreshToolSessionOnly()
     }
 
     func setCompoundSecondaryTileRandomRotation(_ amount: Float) {
         bootstrap.workspaceStore.updateToolSession { session in
             session.brush.compoundBrush.secondary.tileRandomRotation = min(max(amount, 0), 1)
         }
-        refresh()
+        refreshToolSessionOnly()
     }
 
     func setCompoundSecondarySizeCurve(low: Float, mid: Float, high: Float) {
@@ -1708,7 +1861,7 @@ final class WorkspaceViewModel: ObservableObject {
             session.brush.compoundBrush.secondary.sizeCurveMid = min(max(mid, session.brush.compoundBrush.secondary.sizeCurveLow), 0.95)
             session.brush.compoundBrush.secondary.sizeCurveHigh = min(max(high, session.brush.compoundBrush.secondary.sizeCurveMid), 1)
         }
-        refresh()
+        refreshToolSessionOnly()
     }
 
     func setCompoundSecondaryOpacityCurve(low: Float, mid: Float, high: Float) {
@@ -1718,28 +1871,28 @@ final class WorkspaceViewModel: ObservableObject {
             session.brush.compoundBrush.secondary.opacityCurveHigh = min(max(high, session.brush.compoundBrush.secondary.opacityCurveMid), 1)
             session.brush.compoundBrush.secondary.opacityPressureCurve = nil
         }
-        refresh()
+        refreshToolSessionOnly()
     }
 
     func setCompoundPrimaryMixAtLowPressure(_ value: Float) {
         bootstrap.workspaceStore.updateToolSession { session in
             session.brush.compoundBrush.pressureMix.primaryAtLowPressure = min(max(value, 0), 1)
         }
-        refresh()
+        refreshToolSessionOnly()
     }
 
     func setCompoundPrimaryMixAtMidPressure(_ value: Float) {
         bootstrap.workspaceStore.updateToolSession { session in
             session.brush.compoundBrush.pressureMix.primaryAtMidPressure = min(max(value, 0), 1)
         }
-        refresh()
+        refreshToolSessionOnly()
     }
 
     func setCompoundPrimaryMixAtHighPressure(_ value: Float) {
         bootstrap.workspaceStore.updateToolSession { session in
             session.brush.compoundBrush.pressureMix.primaryAtHighPressure = min(max(value, 0), 1)
         }
-        refresh()
+        refreshToolSessionOnly()
     }
 
     func setCompoundPressureMix(_ settings: CompoundPressureMixSettings) {
@@ -1753,7 +1906,7 @@ final class WorkspaceViewModel: ObservableObject {
                 primaryAtHighPressure: high
             )
         }
-        refresh()
+        refreshToolSessionOnly()
     }
 
     func setBrushTipCanvasFocused(_ focused: Bool) {
@@ -2998,9 +3151,10 @@ final class WorkspaceViewModel: ObservableObject {
     func setGeneratorKind(_ kind: GeneratorKind) {
         bootstrap.strokeEngine.endStroke()
         strokeResetToken &+= 1
-        isGeneratorStrokeModeEnabled = true
+        let support = GeneratorFeatureSupport.support(for: kind)
+        isGeneratorStrokeModeEnabled = support.supports(.directStroke)
         isGeneratorRegionSelectionArmed = false
-        generatorStrokeSession = .init()
+        generatorStrokeSession = .init(kind: kind)
         bootstrap.workspaceStore.updateGenerator { generator in
             generator.kind = kind
         }
@@ -3008,7 +3162,27 @@ final class WorkspaceViewModel: ObservableObject {
             session.activeTool = .brush
         }
         refresh()
-        showStatus(.init(kind: .info, message: "已切换到\(kind.displayName)，可直接在画布绘制或使用区域生成"))
+        let message = support.supports(.directStroke)
+            ? "已切换到\(kind.displayName)，可直接绘制或使用区域生成"
+            : "已切换到\(kind.displayName)，请使用圈选区域生成"
+        showStatus(.init(kind: .info, message: message))
+    }
+
+    func exitGeneratorMode(showFeedback: Bool = true) {
+        guard isGeneratorStrokeModeEnabled || isGeneratorRegionSelectionArmed else { return }
+        _ = drainPendingBrushCommitsIfNeeded(resetLiveSession: true)
+        isGeneratorStrokeModeEnabled = false
+        isGeneratorRegionSelectionArmed = false
+        generatorStrokeSession = .init()
+        if workspace.toolSession.activeTool == .lassoSelection {
+            bootstrap.workspaceStore.updateToolSession { session in
+                session.activeTool = .brush
+            }
+        }
+        refreshLightweight()
+        if showFeedback {
+            showStatus(.init(kind: .info, message: "已退出生成器"))
+        }
     }
 
     func setGeneratorScale(_ scale: Float) {
@@ -3048,8 +3222,8 @@ final class WorkspaceViewModel: ObservableObject {
 
     func beginGeneratorRegionSelection() {
         isGeneratorRegionSelectionArmed = true
-        isGeneratorStrokeModeEnabled = true
-        generatorStrokeSession = .init()
+        isGeneratorStrokeModeEnabled = false
+        generatorStrokeSession = .init(kind: workspace.generator.kind)
         bootstrap.workspaceStore.updateToolSession { session in
             session.activeTool = .lassoSelection
         }
@@ -3060,7 +3234,7 @@ final class WorkspaceViewModel: ObservableObject {
     func setSelectedColor(_ color: RGBAColor) {
         ideationBranchActivityHandler?()
         bootstrap.workspaceStore.updateToolSession { session in
-            session.selectedColor = color
+            session.commitSelectedColor(color)
         }
         refreshLightweight()
     }
@@ -3133,6 +3307,7 @@ final class WorkspaceViewModel: ObservableObject {
         if nextSelectedSlotID == nil, isReferenceImageFloatingPanelPresented {
             closeReferenceImageFloatingPanel()
         }
+        noteProjectReferenceImagesChanged()
     }
 
     func clearSelectedReferenceImage() {
@@ -3187,6 +3362,10 @@ final class WorkspaceViewModel: ObservableObject {
         if selectAfterUpdate {
             selectReferenceImageSlot(slotID)
         }
+    }
+
+    private func noteProjectReferenceImagesChanged() {
+        hasUnsavedChanges = true
     }
 
     private func selectReferenceImageSlot(_ slotID: Int) {
@@ -3279,6 +3458,7 @@ final class WorkspaceViewModel: ObservableObject {
                 }
 
                 self.replaceReferenceImageSlotAsset(asset, at: slotID, selectAfterUpdate: true)
+                self.noteProjectReferenceImagesChanged()
                 self.showStatus(.init(kind: .success, message: "已载入\(fileName)"))
             }
         }
@@ -3310,6 +3490,7 @@ final class WorkspaceViewModel: ObservableObject {
                 }
 
                 self.replaceReferenceImageSlotAsset(asset, at: slotID, selectAfterUpdate: true)
+                self.noteProjectReferenceImagesChanged()
                 self.showStatus(.init(kind: .success, message: "已载入\(fileName)"))
             }
         }
@@ -3592,7 +3773,7 @@ final class WorkspaceViewModel: ObservableObject {
         let color = RGBAColor(red: value, green: value, blue: value, alpha: 1)
         rememberReferenceImagePreviousColor(before: color)
         bootstrap.workspaceStore.updateToolSession { session in
-            session.selectedColor = color
+            session.commitSelectedColor(color)
         }
         refreshColorPanelOnly(includeSelectedColor: true)
     }
@@ -3887,7 +4068,7 @@ final class WorkspaceViewModel: ObservableObject {
         guard palette.indices.contains(index) else { return }
         rememberReferenceImagePreviousColor(before: palette[index])
         bootstrap.workspaceStore.updateToolSession { session in
-            session.selectedColor = palette[index]
+            session.commitSelectedColor(palette[index])
         }
         refreshColorPanelOnly(includeSelectedColor: true)
     }
@@ -3910,7 +4091,7 @@ final class WorkspaceViewModel: ObservableObject {
             )
             rememberReferenceImagePreviousColor(before: sampledColor)
             bootstrap.workspaceStore.updateToolSession { session in
-                session.selectedColor = sampledColor
+                session.commitSelectedColor(sampledColor)
             }
             bootstrap.workspaceStore.updateColorPanel { panel in
                 ColorBlocksEngine.syncPicker(to: sampledColor, state: &panel)
@@ -3921,7 +4102,12 @@ final class WorkspaceViewModel: ObservableObject {
                 }
             }
             refreshColorPanelOnly(includeSelectedColor: true)
-            showStatus(.init(kind: .success, message: "已吸取颜色"))
+            let isOilPaintCandidate = workspace.toolSession.brush.oilPaint.isEnabled
+                && workspace.toolSession.brush.effectivePaintJitterAmount > 0.001
+            showStatus(.init(
+                kind: .success,
+                message: isOilPaintCandidate ? "已吸取颜色并设为待沾色" : "已吸取颜色"
+            ))
             if eyedropperSettings.returnsToPreviousTool,
                workspace.toolSession.activeTool == .eyedropper {
                 selectTool(previousToolBeforeEyedropper ?? .brush)
@@ -3989,20 +4175,14 @@ final class WorkspaceViewModel: ObservableObject {
 
         let currentTool = workspace.toolSession.activeTool
 
-        if currentTool == .smudge || currentTool == .eraser
-            || currentTool == .brightnessAdjust || currentTool == .colorVitalization {
-            // Smudge/eraser/color-adjust: keep current tool active while updating its brush
-            bootstrap.workspaceStore.updateToolSession { session in
-                session.brush = preset.brush
-            }
-        } else {
-            // Any other tool: switch to brush tool and assign
-            if currentTool != .brush {
-                selectTool(.brush)
-            }
-            bootstrap.workspaceStore.updateToolSession { session in
-                session.brush = preset.brush
-            }
+        let keepsCurrentTool = currentTool == .smudge || currentTool == .eraser
+            || currentTool == .brightnessAdjust || currentTool == .colorVitalization
+        if !keepsCurrentTool, currentTool != .brush {
+            selectTool(.brush)
+        }
+        bootstrap.workspaceStore.updateToolSession { session in
+            session.brush = preset.brush
+            session.washOilPaintReservoir()
         }
 
         bootstrap.workspaceStore.updateBrushLibrary { library in
@@ -5050,6 +5230,34 @@ final class WorkspaceViewModel: ObservableObject {
         importBrushLibrary(mode: .append)
     }
 
+    func setFillTolerance(_ tolerance: Float) {
+        fillSettings = FillSettings(
+            tolerance: tolerance,
+            isContiguous: fillSettings.isContiguous,
+            sampleSource: fillSettings.sampleSource
+        )
+    }
+
+    func setFillContiguous(_ isContiguous: Bool) {
+        fillSettings = FillSettings(
+            tolerance: fillSettings.tolerance,
+            isContiguous: isContiguous,
+            sampleSource: fillSettings.sampleSource
+        )
+    }
+
+    func setFillSampleSource(_ source: FillSampleSource) {
+        fillSettings = FillSettings(
+            tolerance: fillSettings.tolerance,
+            isContiguous: fillSettings.isContiguous,
+            sampleSource: source
+        )
+    }
+
+    func resetFillSettings() {
+        fillSettings = .stageOneDefault
+    }
+
     func fillAtPoint(_ point: CanvasPoint) {
         ideationBranchActivityHandler?()
         guard let layerID = bootstrap.interactionController.activeEditableLayerID() else {
@@ -5064,7 +5272,12 @@ final class WorkspaceViewModel: ObservableObject {
                 showStatus(.init(kind: .error, message: "无法访问当前图层"))
                 return
             }
-            let referenceTexture = try makeReferenceCompositeTextureIfNeeded()
+            let topology = try makeFillTopologyReference(for: fillSettings.sampleSource)
+            guard topology.isAvailable else {
+                showStatus(.init(kind: .info, message: "当前没有可见的填充参考图层"))
+                return
+            }
+            let referenceTexture = topology.texture
             let fillPlan: BucketFillPlan?
             if let referenceTexture {
                 fillPlan = try bootstrap.bucketFillEngine.makeReferencedFillPlan(
@@ -5074,7 +5287,8 @@ final class WorkspaceViewModel: ObservableObject {
                     at: point,
                     color: workspace.toolSession.selectedColor,
                     alphaLockEnabled: layerTransparentPixelLockEnabled(layerID),
-                    selectionShape: workspace.selection.committedShape
+                    selectionShape: workspace.selection.committedShape,
+                    settings: fillSettings
                 )
             } else {
                 fillPlan = try bootstrap.bucketFillEngine.makeFillPlan(
@@ -5083,7 +5297,8 @@ final class WorkspaceViewModel: ObservableObject {
                     color: workspace.toolSession.selectedColor,
                     alphaLockEnabled: layerTransparentPixelLockEnabled(layerID),
                     selectionShape: workspace.selection.committedShape,
-                    layerSurfaceStore: bootstrap.layerSurfaceStore
+                    layerSurfaceStore: bootstrap.layerSurfaceStore,
+                    settings: fillSettings
                 )
             }
             guard let fillPlan else {
@@ -5119,7 +5334,12 @@ final class WorkspaceViewModel: ObservableObject {
         let capturedKnownTransparent = bootstrap.layerSurfaceStore.isKnownTransparent(layerID: layerID)
         let referenceTexture: MTLTexture?
         do {
-            referenceTexture = try makeReferenceCompositeTextureIfNeeded()
+            let topology = try makeFillTopologyReference(for: fillSettings.sampleSource)
+            guard topology.isAvailable else {
+                showStatus(.init(kind: .info, message: "当前没有可见的填充参考图层"))
+                return
+            }
+            referenceTexture = topology.texture
         } catch {
             showStatus(.init(kind: .error, message: error.localizedDescription))
             return
@@ -5127,6 +5347,7 @@ final class WorkspaceViewModel: ObservableObject {
         let engineBox = WorkspaceUncheckedBox(bootstrap.bucketFillEngine)
         let textureBox = WorkspaceUncheckedBox(texture)
         let referenceTextureBox = referenceTexture.map(WorkspaceUncheckedBox.init)
+        let capturedFillSettings = fillSettings
 
         bucketFillRequestID &+= 1
         let requestID = bucketFillRequestID
@@ -5144,7 +5365,8 @@ final class WorkspaceViewModel: ObservableObject {
                             at: point,
                             color: capturedColor,
                             alphaLockEnabled: capturedAlphaLock,
-                            selectionShape: capturedSelection
+                            selectionShape: capturedSelection,
+                            settings: capturedFillSettings
                         )
                     } else {
                         try engineBox.value.makeFillPlan(
@@ -5154,7 +5376,8 @@ final class WorkspaceViewModel: ObservableObject {
                             color: capturedColor,
                             alphaLockEnabled: capturedAlphaLock,
                             selectionShape: capturedSelection,
-                            isKnownTransparent: capturedKnownTransparent
+                            isKnownTransparent: capturedKnownTransparent,
+                            settings: capturedFillSettings
                         )
                     }
                 }
@@ -5775,6 +5998,98 @@ final class WorkspaceViewModel: ObservableObject {
         showStatus(.init(kind: .success, message: "已新增图层"))
     }
 
+    func addCurveAdjustmentLayer() {
+        guard checkpointHistoryIfPossible(
+            operationKind: "layer.addCurveAdjustment",
+            topologyOperation: true,
+            captureMode: .full
+        ) else { return }
+        var addedLayerID: LayerID?
+        bootstrap.workspaceStore.updateDocument { document in
+            addedLayerID = document.addCurveAdjustmentLayer().id
+        }
+        refresh()
+        if let addedLayerID {
+            bootstrap.layerSurfaceStore.markKnownTransparent(for: addedLayerID)
+        }
+        noteCanvasContentChanged(changedLayerIDs: [])
+        showStatus(.init(kind: .success, message: "已新增非破坏式曲线调整层"))
+    }
+
+    var activeCurveAdjustmentLayerParameters: CurveAdjustmentParameters? {
+        guard let layer = workspace.document.layer(workspace.document.activeLayerID),
+              case .curves(let parameters)? = layer.adjustment else {
+            return nil
+        }
+        return parameters
+    }
+
+    func setActiveCurveAdjustmentLayerChannel(_ channel: CurveChannel) {
+        let layerID = workspace.document.activeLayerID
+        bootstrap.workspaceStore.updateDocument { document in
+            guard let index = document.layers.firstIndex(where: { $0.id == layerID }),
+                  case .curves(var parameters)? = document.layers[index].adjustment else { return }
+            parameters.selectedChannel = channel
+            document.layers[index].adjustment = .curves(parameters)
+        }
+        hasUnsavedChanges = true
+        refreshLightweight()
+    }
+
+    func updateActiveCurveAdjustmentLayer(
+        _ state: CurveChannelState,
+        channel: CurveChannel
+    ) {
+        let layerID = workspace.document.activeLayerID
+        guard workspace.document.layer(layerID)?.isAdjustmentLayer == true else { return }
+        beginAdjustmentLayerHistoryGestureIfNeeded(layerID: layerID)
+        bootstrap.workspaceStore.updateDocument { document in
+            guard let index = document.layers.firstIndex(where: { $0.id == layerID }),
+                  case .curves(var parameters)? = document.layers[index].adjustment else { return }
+            parameters.setState(state, for: channel)
+            document.layers[index].adjustment = .curves(parameters)
+        }
+        refresh(invalidatedLayerIDs: [layerID])
+        noteCanvasContentChanged(changedLayerIDs: [])
+    }
+
+    func resetActiveCurveAdjustmentLayer() {
+        let layerID = workspace.document.activeLayerID
+        guard let parameters = activeCurveAdjustmentLayerParameters,
+              !parameters.isNeutral else { return }
+        adjustmentLayerCheckpointResetTask?.cancel()
+        adjustmentLayerCheckpointLayerID = nil
+        guard checkpointHistoryIfPossible(
+            operationKind: "layer.curveAdjustment.reset",
+            candidateChangedLayerIDs: [layerID],
+            captureMode: .inPlaceChangedLayers([layerID])
+        ) else { return }
+        bootstrap.workspaceStore.updateDocument { document in
+            guard let index = document.layers.firstIndex(where: { $0.id == layerID }) else { return }
+            document.layers[index].adjustment = .curves(.neutral)
+        }
+        refresh(invalidatedLayerIDs: [layerID])
+        noteCanvasContentChanged(changedLayerIDs: [])
+    }
+
+    private func beginAdjustmentLayerHistoryGestureIfNeeded(layerID: LayerID) {
+        if adjustmentLayerCheckpointLayerID != layerID {
+            _ = checkpointHistoryIfPossible(
+                operationKind: "layer.curveAdjustment.edit",
+                candidateChangedLayerIDs: [layerID],
+                captureMode: .inPlaceChangedLayers([layerID])
+            )
+            adjustmentLayerCheckpointLayerID = layerID
+        }
+        adjustmentLayerCheckpointResetTask?.cancel()
+        adjustmentLayerCheckpointResetTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(650))
+            guard !Task.isCancelled else { return }
+            self?.adjustmentLayerCheckpointLayerID = nil
+            self?.adjustmentLayerCheckpointResetTask = nil
+        }
+    }
+
     func addLayer(toGroup groupID: LayerID) {
         guard workspace.document.layer(groupID)?.isGroup == true else { return }
         checkpointHistoryIfPossible(topologyOperation: true)
@@ -5857,6 +6172,11 @@ final class WorkspaceViewModel: ObservableObject {
                 to: duplicatedLayerID,
                 metal: bootstrap.metalContext
             )
+            bootstrap.layerSurfaceStore.copyMaskTexture(
+                from: sourceLayerID,
+                to: duplicatedLayerID,
+                metal: bootstrap.metalContext
+            )
             refresh()
             noteCanvasContentChanged()
             showStatus(.init(kind: .success, message: "已复制图层"))
@@ -5880,6 +6200,10 @@ final class WorkspaceViewModel: ObservableObject {
             showStatus(.init(kind: .info, message: "锁定图层无法合并"))
             return
         }
+        guard !context.destination.isAdjustmentLayer else {
+            showStatus(.init(kind: .info, message: "绘画图层不能直接向下合并到调整层；请先合并调整层"))
+            return
+        }
 
         guard
             let sourceSurfaceID = bootstrap.layerSurfaceStore.surfaceID(for: context.source.id),
@@ -5900,10 +6224,17 @@ final class WorkspaceViewModel: ObservableObject {
                 sourceVisible: context.source.isVisible,
                 sourceBlendMode: context.source.blendMode,
                 sourceClipsDestination: context.source.clipTargetLayerID == context.destination.id,
+                sourceMaskTexture: context.source.mask?.isEnabled == true
+                    ? bootstrap.layerSurfaceStore.maskTexture(for: context.source.id)
+                    : nil,
+                sourceCurveAdjustmentLUTs: context.source.adjustment?.curveLUTs,
                 into: destinationTexture,
                 destinationOpacity: workspace.document.effectiveLayerOpacity(context.destination.id),
                 destinationVisible: context.destination.isVisible,
-                destinationBlendMode: context.destination.blendMode
+                destinationBlendMode: context.destination.blendMode,
+                destinationMaskTexture: context.destination.mask?.isEnabled == true
+                    ? bootstrap.layerSurfaceStore.maskTexture(for: context.destination.id)
+                    : nil
             )
 
             bootstrap.workspaceStore.updateDocument { document in
@@ -5912,7 +6243,12 @@ final class WorkspaceViewModel: ObservableObject {
                     mergedVisibility: context.source.isVisible || context.destination.isVisible,
                     mergedOpacity: 1
                 )
+                if let destinationIndex = document.layers.firstIndex(where: { $0.id == context.destination.id }) {
+                    document.layers[destinationIndex].mask = nil
+                    document.layers[destinationIndex].adjustment = nil
+                }
             }
+            bootstrap.layerSurfaceStore.removeMaskTexture(for: context.destination.id)
 
             refresh()
             noteCanvasContentChanged()
@@ -5939,10 +6275,15 @@ final class WorkspaceViewModel: ObservableObject {
         }
 
         var textureByLayerID: [LayerID: MTLTexture] = [:]
+        var enabledMaskTextureByLayerID: [LayerID: MTLTexture] = [:]
         for layer in context.visibleLayers {
             guard let surfaceID = bootstrap.layerSurfaceStore.surfaceID(for: layer.id),
                   let texture = bootstrap.layerSurfaceStore.texture(for: surfaceID) else { continue }
             textureByLayerID[layer.id] = texture
+            if layer.mask?.isEnabled == true,
+               let maskTexture = bootstrap.layerSurfaceStore.maskTexture(for: layer.id) {
+                enabledMaskTextureByLayerID[layer.id] = maskTexture
+            }
         }
         let textureEntries: [CanvasLayerCompositeInput] = context.visibleLayers.compactMap { layer -> CanvasLayerCompositeInput? in
             guard
@@ -5956,7 +6297,10 @@ final class WorkspaceViewModel: ObservableObject {
                 texture: texture,
                 opacity: workspace.document.effectiveLayerOpacity(layer.id),
                 blendMode: layer.blendMode,
-                clipMaskTexture: layer.clipTargetLayerID.flatMap { textureByLayerID[$0] }
+                clipMaskTexture: layer.clipTargetLayerID.flatMap { textureByLayerID[$0] },
+                clipLayerMaskTexture: layer.clipTargetLayerID.flatMap { enabledMaskTextureByLayerID[$0] },
+                layerMaskTexture: enabledMaskTextureByLayerID[layer.id],
+                curveAdjustmentLUTs: layer.adjustment?.curveLUTs
             )
         }
 
@@ -5983,7 +6327,12 @@ final class WorkspaceViewModel: ObservableObject {
                     mergedVisibility: true,
                     mergedOpacity: 1
                 )
+                if let targetIndex = document.layers.firstIndex(where: { $0.id == context.target.id }) {
+                    document.layers[targetIndex].mask = nil
+                    document.layers[targetIndex].adjustment = nil
+                }
             }
+            bootstrap.layerSurfaceStore.removeMaskTexture(for: context.target.id)
 
             refresh()
             noteCanvasContentChanged()
@@ -6046,7 +6395,12 @@ final class WorkspaceViewModel: ObservableObject {
             return
         }
         _ = flushBrushEditingBoundary(reason: "selectLayer")
+        adjustmentLayerCheckpointResetTask?.cancel()
+        adjustmentLayerCheckpointResetTask = nil
+        adjustmentLayerCheckpointLayerID = nil
         if workspace.document.activeLayerID != layerID {
+            activeMaskEditingLayerID = nil
+            lastLayerMaskStrokeSample = nil
             guard resolveColorAdjustmentSessionIfNeeded(reason: .layerChange) else { return }
             guard resolveCurveAdjustmentSessionIfNeeded(reason: .layerChange) else { return }
             resolveTransformSession(reason: .layerChange)
@@ -6058,6 +6412,122 @@ final class WorkspaceViewModel: ObservableObject {
             document.setActiveLayer(layerID)
         }
         refreshLightweight()
+    }
+
+    func addMaskToActiveLayer(revealsAll: Bool = true) {
+        let layerID = workspace.document.activeLayerID
+        guard workspace.document.layer(layerID)?.isPaintLayer == true else {
+            showStatus(.init(kind: .info, message: "只有绘画图层可以添加蒙版"))
+            return
+        }
+        guard workspace.document.layer(layerID)?.mask == nil else {
+            beginEditingActiveLayerMask()
+            return
+        }
+        guard checkpointHistoryIfPossible(
+            operationKind: "layerMask.add",
+            candidateChangedLayerIDs: [layerID],
+            topologyOperation: true,
+            captureMode: .full
+        ) else { return }
+        bootstrap.workspaceStore.updateDocument { document in
+            guard let index = document.layers.firstIndex(where: { $0.id == layerID }) else { return }
+            document.layers[index].mask = LayerMaskDescriptor(isEnabled: true)
+        }
+        bootstrap.layerSurfaceStore.prepareTextures(for: bootstrap.workspaceStore.state.document, metal: bootstrap.metalContext)
+        bootstrap.layerSurfaceStore.fillMaskTexture(
+            for: layerID,
+            value: revealsAll ? 1 : 0,
+            metal: bootstrap.metalContext
+        )
+        activeMaskEditingLayerID = layerID
+        selectTool(.brush)
+        noteCanvasContentChanged(changedLayerIDs: [layerID])
+        refresh(invalidatedLayerIDs: [layerID])
+        showStatus(.init(kind: .success, message: revealsAll ? "已添加显示全部蒙版" : "已添加隐藏全部蒙版"))
+    }
+
+    func beginEditingActiveLayerMask() {
+        let layerID = workspace.document.activeLayerID
+        guard workspace.document.layer(layerID)?.mask != nil else {
+            showStatus(.init(kind: .info, message: "当前图层没有蒙版"))
+            return
+        }
+        activeMaskEditingLayerID = layerID
+        selectTool(.brush)
+        showStatus(.init(kind: .info, message: "正在编辑图层蒙版：白色显示，黑色隐藏，灰色部分显示；橡皮擦隐藏"))
+    }
+
+    func stopEditingLayerMask() {
+        activeMaskEditingLayerID = nil
+        lastLayerMaskStrokeSample = nil
+        showStatus(.init(kind: .info, message: "已返回图层内容编辑"))
+    }
+
+    func toggleActiveLayerMaskEnabled() {
+        let layerID = workspace.document.activeLayerID
+        guard let mask = workspace.document.layer(layerID)?.mask else { return }
+        guard checkpointHistoryIfPossible(
+            operationKind: "layerMask.toggle",
+            candidateChangedLayerIDs: [],
+            captureMode: .metadataOnly
+        ) else { return }
+        bootstrap.workspaceStore.updateDocument { document in
+            guard let index = document.layers.firstIndex(where: { $0.id == layerID }) else { return }
+            document.layers[index].mask?.isEnabled = !mask.isEnabled
+        }
+        noteCanvasContentChanged(changedLayerIDs: [])
+        refreshLightweight()
+    }
+
+    func invertActiveLayerMask() {
+        let layerID = workspace.document.activeLayerID
+        guard workspace.document.layer(layerID)?.mask != nil,
+              let texture = bootstrap.layerSurfaceStore.maskTexture(for: layerID) else { return }
+        guard checkpointHistoryIfPossible(
+            operationKind: "layerMask.invert",
+            candidateChangedLayerIDs: [layerID],
+            captureMode: .inPlaceChangedLayers([layerID])
+        ) else { return }
+        do {
+            let snapshot = try bootstrap.textureSerializer.snapshot(texture: texture)
+            let inverted = Data(snapshot.pixelData.map { 255 &- $0 })
+            try bootstrap.textureSerializer.restore(
+                snapshot: LayerTextureSnapshot(
+                    width: snapshot.width,
+                    height: snapshot.height,
+                    bytesPerRow: snapshot.bytesPerRow,
+                    pixelData: inverted
+                ),
+                into: texture
+            )
+            noteCanvasContentChanged(changedLayerIDs: [layerID])
+            refresh(invalidatedLayerIDs: [layerID])
+            showStatus(.init(kind: .success, message: "已反相图层蒙版"))
+        } catch {
+            showStatus(.init(kind: .error, message: error.localizedDescription))
+        }
+    }
+
+    func deleteActiveLayerMask() {
+        let layerID = workspace.document.activeLayerID
+        guard workspace.document.layer(layerID)?.mask != nil else { return }
+        guard checkpointHistoryIfPossible(
+            operationKind: "layerMask.delete",
+            candidateChangedLayerIDs: [layerID],
+            topologyOperation: true,
+            captureMode: .full
+        ) else { return }
+        bootstrap.workspaceStore.updateDocument { document in
+            guard let index = document.layers.firstIndex(where: { $0.id == layerID }) else { return }
+            document.layers[index].mask = nil
+        }
+        bootstrap.layerSurfaceStore.removeMaskTexture(for: layerID)
+        activeMaskEditingLayerID = nil
+        lastLayerMaskStrokeSample = nil
+        noteCanvasContentChanged(changedLayerIDs: [layerID])
+        refresh(invalidatedLayerIDs: [layerID])
+        showStatus(.init(kind: .success, message: "已删除图层蒙版"))
     }
 
     func setLayerBlendMode(_ layerID: LayerID, blendMode: LayerBlendMode) {
@@ -6304,13 +6774,16 @@ final class WorkspaceViewModel: ObservableObject {
         guard
             let layer = workspace.document.layers.first(where: { $0.id == layerID }),
             let surfaceID = bootstrap.layerSurfaceStore.surfaceID(for: layer.id),
-            let texture = bootstrap.layerSurfaceStore.texture(for: surfaceID),
+            let contentTexture = bootstrap.layerSurfaceStore.texture(for: surfaceID),
             let colorSpace = CGColorSpace(name: CGColorSpace.sRGB)
         else {
             return nil
         }
 
         do {
+            let texture = layer.mask?.isEnabled == true
+                ? try makeCompositeTexture(layers: [layer], document: workspace.document, waitUntilCompleted: true)
+                : contentTexture
             let snapshot = try bootstrap.textureSerializer.snapshot(texture: texture)
             let image = Self.snapshotImage(
                 from: snapshot,
@@ -6332,10 +6805,24 @@ final class WorkspaceViewModel: ObservableObject {
         }
 
         guard
+            let layer = workspace.document.layers.first(where: { $0.id == layerID }),
             let surfaceID = bootstrap.layerSurfaceStore.surfaceID(for: layerID),
-            let texture = bootstrap.layerSurfaceStore.texture(for: surfaceID)
+            let contentTexture = bootstrap.layerSurfaceStore.texture(for: surfaceID)
         else {
             return nil
+        }
+
+        let usesMaskedComposite = layer.mask?.isEnabled == true
+        let texture: MTLTexture
+        if usesMaskedComposite {
+            guard let composite = try? makeCompositeTexture(
+                layers: [layer],
+                document: workspace.document,
+                waitUntilCompleted: true
+            ) else { return nil }
+            texture = composite
+        } else {
+            texture = contentTexture
         }
 
         let capturedRevision = layerThumbnailRevision
@@ -6354,12 +6841,14 @@ final class WorkspaceViewModel: ObservableObject {
         guard !Task.isCancelled, capturedRevision == layerThumbnailRevision else {
             return nil
         }
-        guard
-            bootstrap.layerSurfaceStore.surfaceID(for: layerID) == surfaceID,
-            let currentTexture = bootstrap.layerSurfaceStore.texture(for: surfaceID),
-            ObjectIdentifier(currentTexture as AnyObject) == ObjectIdentifier(textureBox.value as AnyObject)
-        else {
-            return nil
+        if !usesMaskedComposite {
+            guard
+                bootstrap.layerSurfaceStore.surfaceID(for: layerID) == surfaceID,
+                let currentTexture = bootstrap.layerSurfaceStore.texture(for: surfaceID),
+                ObjectIdentifier(currentTexture as AnyObject) == ObjectIdentifier(textureBox.value as AnyObject)
+            else {
+                return nil
+            }
         }
 
         if let image {
@@ -6430,6 +6919,69 @@ final class WorkspaceViewModel: ObservableObject {
 
     var gradientPreviewColor: RGBAColor {
         resolvedFillToolColor(from: workspace.toolSession.selectedColor)
+    }
+
+    var displayedGradientSettings: GradientSettings {
+        guard gradientFollowsSelectedColor,
+              let first = gradientSettings.stops.first,
+              let last = gradientSettings.stops.last else {
+            return gradientSettings
+        }
+        let color = workspace.toolSession.selectedColor
+        return GradientSettings(stops: [
+            GradientStop(id: first.id, position: 0, color: color),
+            GradientStop(id: last.id, position: 1, color: color.withAlpha(0))
+        ])
+    }
+
+    var gradientRenderSettings: GradientSettings {
+        let opacity = fillToolOpacity
+        return GradientSettings(stops: displayedGradientSettings.stops.map { stop in
+            GradientStop(
+                id: stop.id,
+                position: stop.position,
+                color: stop.color.withAlpha(stop.color.alpha * opacity)
+            )
+        })
+    }
+
+    func resetGradientSettingsToCurrentColor() {
+        gradientFollowsSelectedColor = true
+        gradientSettings = .currentColorToTransparent(workspace.toolSession.selectedColor)
+        colorAdjustmentRedrawRevision &+= 1
+    }
+
+    func addGradientStop() {
+        materializeGradientSettingsForEditing()
+        let positions = gradientSettings.stops.map(\.position)
+        let candidatePositions = zip(positions, positions.dropFirst()).map { lower, upper in
+            (gap: upper - lower, position: (lower + upper) / 2)
+        }
+        let position = candidatePositions.max(by: { $0.gap < $1.gap })?.position ?? 0.5
+        let color = gradientSettings.color(at: position)
+        if gradientSettings.insertStop(at: position, color: color) {
+            colorAdjustmentRedrawRevision &+= 1
+        }
+    }
+
+    func updateGradientStop(id: UUID, position: Float? = nil, color: RGBAColor? = nil) {
+        materializeGradientSettingsForEditing()
+        if gradientSettings.updateStop(id: id, position: position, color: color) {
+            colorAdjustmentRedrawRevision &+= 1
+        }
+    }
+
+    func removeGradientStop(id: UUID) {
+        materializeGradientSettingsForEditing()
+        if gradientSettings.removeStop(id: id) {
+            colorAdjustmentRedrawRevision &+= 1
+        }
+    }
+
+    private func materializeGradientSettingsForEditing() {
+        guard gradientFollowsSelectedColor else { return }
+        gradientSettings = displayedGradientSettings
+        gradientFollowsSelectedColor = false
     }
 
     var textureFillPreviewBrush: BrushSettings {
@@ -7554,6 +8106,7 @@ final class WorkspaceViewModel: ObservableObject {
             let polygonShapes = input.polygonShapes
             let capturedPreferredShape = preferredShape
             let capturedCanvasSize = canvasSize
+            let capturedIsGeneratorArmed = isGeneratorRegionSelectionArmed
             selectionEpoch += 1
             let capturedEpoch = selectionEpoch
             cancelActiveRasterizationTask()
@@ -7577,6 +8130,10 @@ final class WorkspaceViewModel: ObservableObject {
                     selection.activeCombineMode = .replace
                 }
                 self.refreshLightweight()
+                if capturedIsGeneratorArmed {
+                    self.isGeneratorRegionSelectionArmed = false
+                    self.applyGeneratorToActiveLayer(clearSelectionAfterApply: true)
+                }
             }
             relayIdeationOperation(.commitSelection(end: end, modifiers: .init(flags: modifiers)))
             return
@@ -8254,6 +8811,7 @@ final class WorkspaceViewModel: ObservableObject {
     private func cancelActiveRasterizationTask() {
         activeRasterizationTask?.cancel()
         activeRasterizationTask = nil
+        isRefiningSelection = false
     }
 
     func handleSelectionMouseDown(at point: CanvasPoint, modifiers: NSEvent.ModifierFlags) -> SelectionMouseDownAction {
@@ -8463,6 +9021,132 @@ final class WorkspaceViewModel: ObservableObject {
         showStatus(.init(kind: .info, message: "已清除选区"))
     }
 
+    func selectAllCanvas() {
+        guard !isTransformingSelection else {
+            showStatus(.init(kind: .info, message: "请先应用或取消变形"))
+            return
+        }
+        let previousSelection = bootstrap.workspaceStore.state.selection.committedShape
+        guard let fullCanvas = SelectionRefinement.fullCanvasShape(
+            canvasSize: workspace.document.canvasSize
+        ), previousSelection != fullCanvas else {
+            return
+        }
+        checkpointSelectionChangeIfPossible(previousCommittedShape: previousSelection)
+        bootstrap.workspaceStore.updateSelection { selection in
+            selection.committedShape = fullCanvas
+            selection.inProgressShape = nil
+            selection.anchorPoint = nil
+            selection.activeKind = nil
+            selection.activeCombineMode = .replace
+        }
+        refreshLightweight()
+        showStatus(.init(kind: .success, message: "已全选画布"))
+    }
+
+    func invertSelection() {
+        refineSelection(.init(kind: .invert))
+    }
+
+    func expandSelection(radiusPixels: Int) {
+        refineSelection(.init(kind: .expand, radiusPixels: radiusPixels))
+    }
+
+    func contractSelection(radiusPixels: Int) {
+        refineSelection(.init(kind: .contract, radiusPixels: radiusPixels))
+    }
+
+    private func refineSelection(_ request: SelectionRefinementRequest) {
+        guard !isTransformingSelection else {
+            showStatus(.init(kind: .info, message: "请先应用或取消变形"))
+            return
+        }
+        if request.kind != .invert, request.radiusPixels < 1 {
+            showStatus(.init(kind: .info, message: "调整半径必须大于 0"))
+            return
+        }
+
+        let capturedSelection = bootstrap.workspaceStore.state.selection.committedShape
+        if request.kind != .invert, capturedSelection == nil {
+            showStatus(.init(kind: .info, message: "没有可调整的选区"))
+            return
+        }
+
+        _ = flushBrushEditingBoundary(reason: "refineSelection")
+        cancelActiveRasterizationTask()
+        selectionEpoch += 1
+        let capturedEpoch = selectionEpoch
+        let capturedCanvasSize = workspace.document.canvasSize
+        showStatus(.init(kind: .info, message: "正在调整选区…"))
+        isRefiningSelection = true
+
+        activeRasterizationTask = Task { [weak self] in
+            let result = await Task.detached(priority: .userInitiated) {
+                switch request.kind {
+                case .invert:
+                    return SelectionRefinement.inverted(
+                        capturedSelection,
+                        canvasSize: capturedCanvasSize
+                    )
+                case .expand:
+                    guard let capturedSelection else { return nil }
+                    return SelectionRefinement.expanded(
+                        capturedSelection,
+                        canvasSize: capturedCanvasSize,
+                        radiusPixels: request.radiusPixels
+                    )
+                case .contract:
+                    guard let capturedSelection else { return nil }
+                    return SelectionRefinement.contracted(
+                        capturedSelection,
+                        canvasSize: capturedCanvasSize,
+                        radiusPixels: request.radiusPixels
+                    )
+                case .feather:
+                    return nil
+                }
+            }.value
+
+            guard let self, !Task.isCancelled, self.selectionEpoch == capturedEpoch else { return }
+            self.activeRasterizationTask = nil
+            self.isRefiningSelection = false
+            guard self.bootstrap.workspaceStore.state.selection.committedShape == capturedSelection else { return }
+            guard let result else {
+                if request.kind == .contract, capturedSelection != nil {
+                    self.checkpointSelectionChangeIfPossible(previousCommittedShape: capturedSelection)
+                    self.bootstrap.workspaceStore.updateSelection { selection in
+                        selection = .empty
+                    }
+                    self.refreshLightweight()
+                    self.showStatus(.init(kind: .success, message: "选区已收缩为空"))
+                } else {
+                    self.showStatus(.init(kind: .info, message: "选区无变化"))
+                }
+                return
+            }
+
+            self.checkpointSelectionChangeIfPossible(previousCommittedShape: capturedSelection)
+            self.bootstrap.workspaceStore.updateSelection { selection in
+                selection.committedShape = result
+                selection.inProgressShape = nil
+                selection.anchorPoint = nil
+                selection.activeKind = nil
+                selection.activeCombineMode = .replace
+            }
+            self.refreshLightweight()
+            let actionName = switch request.kind {
+            case .invert: "反选"
+            case .expand: "扩展"
+            case .contract: "收缩"
+            case .feather: "羽化"
+            }
+            self.showStatus(.init(
+                kind: .success,
+                message: request.kind == .invert ? "已反选" : "已\(actionName)选区 \(request.radiusPixels) px"
+            ))
+        }
+    }
+
     func featherSelection(radiusPixels: Int) {
         guard !isTransformingSelection else {
             showStatus(.init(kind: .info, message: "请先应用或取消变形"))
@@ -8483,6 +9167,7 @@ final class WorkspaceViewModel: ObservableObject {
         let capturedEpoch = selectionEpoch
         let capturedCanvasSize = workspace.document.canvasSize
         showStatus(.init(kind: .info, message: "正在羽化选区…"))
+        isRefiningSelection = true
 
         activeRasterizationTask = Task { [weak self] in
             guard let self else { return }
@@ -8497,8 +9182,9 @@ final class WorkspaceViewModel: ObservableObject {
             }.value
 
             guard !Task.isCancelled, self.selectionEpoch == capturedEpoch else { return }
-            guard self.bootstrap.workspaceStore.state.selection.committedShape == capturedSelection else { return }
             self.activeRasterizationTask = nil
+            self.isRefiningSelection = false
+            guard self.bootstrap.workspaceStore.state.selection.committedShape == capturedSelection else { return }
 
             do {
                 let featheredSelection = try result.get()
@@ -9027,6 +9713,36 @@ final class WorkspaceViewModel: ObservableObject {
         freeTransformPreview = preview
         transformPreviewOffset = preview.translation
         transformPreviewRevision &+= 1
+    }
+
+    var preciseFreeTransformInput: PreciseAffineInput? {
+        guard workspace.toolSession.activeTool == .freeTransform,
+              freeTransformToolMode == .standard,
+              isTransformingSelection,
+              let bounds = effectiveTransformInteractionShape?.bounds else {
+            return nil
+        }
+        return PreciseAffineInput(
+            bounds: bounds,
+            preview: freeTransformPreview,
+            locksAspectRatio: preciseTransformLocksAspectRatio
+        )
+    }
+
+    func setPreciseFreeTransformInput(_ input: PreciseAffineInput) {
+        guard workspace.toolSession.activeTool == .freeTransform,
+              freeTransformToolMode == .standard,
+              isTransformingSelection,
+              let bounds = effectiveTransformInteractionShape?.bounds,
+              let preview = input.resolvedPreview(bounds: bounds) else {
+            showStatus(.init(kind: .info, message: "当前无法应用数值变形"))
+            return
+        }
+        preciseTransformLocksAspectRatio = input.locksAspectRatio
+        transformState.preview = preview
+        transformState.accumulatedOffset = preview.translation
+        setFreeTransformPreview(preview)
+        showStatus(.init(kind: .info, message: "已更新数值变形预览"))
     }
 
     private func setFreeTransformMeshWarpGrid(_ grid: MeshWarpGrid?) {
@@ -10070,14 +10786,8 @@ final class WorkspaceViewModel: ObservableObject {
             return
         }
 
-        checkpointHistoryIfPossible()
-
         do {
             let generator = workspace.generator
-            guard generator.kind == .automaticLines else {
-                showStatus(.init(kind: .info, message: "\(generator.kind.displayName) 还未接通真实生成逻辑"))
-                return
-            }
 
             let canvasSize = CanvasSize(width: texture.width, height: texture.height)
             let targetShape = workspace.selection.committedShape?.clamped(to: canvasSize)
@@ -10109,16 +10819,27 @@ final class WorkspaceViewModel: ObservableObject {
             var bytes = [UInt8](snapshot.pixelData)
             let selectedColor = workspace.toolSession.selectedColor
             let generatorColor = resolvedGeneratorColor(from: selectedColor)
-            applyAutomaticLineGenerator(
-                to: &bytes,
-                snapshotWidth: snapshot.width,
-                snapshotHeight: snapshot.height,
-                bytesPerRow: snapshot.bytesPerRow,
+            let summary = GeneratorRegionRasterizer.apply(
+                settings: generator,
+                color: generatorColor,
+                targetShape: targetShape,
                 originX: minX,
                 originY: minY,
-                targetShape: targetShape,
-                color: generatorColor,
-                settings: generator
+                width: snapshot.width,
+                height: snapshot.height,
+                bytesPerRow: snapshot.bytesPerRow,
+                bytes: &bytes
+            )
+
+            guard summary.touchedPixelCount > 0 else {
+                showStatus(.init(kind: .info, message: "生成区域内没有可绘制像素"))
+                return
+            }
+
+            checkpointHistoryIfPossible(
+                operationKind: "generator.\(generator.kind.rawValue)",
+                candidateChangedLayerIDs: [layerID],
+                captureMode: .inPlaceChangedLayers([layerID])
             )
 
             let updatedSnapshot = LayerTextureSnapshot(
@@ -10140,10 +10861,20 @@ final class WorkspaceViewModel: ObservableObject {
                     selection.committedShape = nil
                     selection.inProgressShape = nil
                 }
+                isGeneratorStrokeModeEnabled = false
+                isGeneratorRegionSelectionArmed = true
+                bootstrap.workspaceStore.updateToolSession { session in
+                    session.activeTool = .lassoSelection
+                }
             }
             refresh(invalidatedLayerIDs: [layerID])
             noteCanvasContentChanged(changedLayerIDs: [layerID])
-            showStatus(.init(kind: .success, message: "已应用\(generator.kind.displayName)生成器"))
+            showStatus(.init(
+                kind: .success,
+                message: clearSelectionAfterApply
+                    ? "已应用\(generator.kind.displayName)，可继续圈选下一区域"
+                    : "已应用\(generator.kind.displayName)生成器"
+            ))
         } catch {
             showStatus(.init(kind: .error, message: error.localizedDescription))
         }
@@ -10219,6 +10950,7 @@ final class WorkspaceViewModel: ObservableObject {
             pointC: pointC,
             transitionMidpoint: Float(geometry.transitionMidpoint),
             color: gradientPreviewColor,
+            settings: gradientRenderSettings,
             paintJitterAmount: displayedPaintJitterAmount,
             paintContrastAmount: displayedPaintContrastAmount,
             distortionAmount: workspace.toolSession.brush.jitterAmount,
@@ -10260,7 +10992,8 @@ final class WorkspaceViewModel: ObservableObject {
             ],
             selectionShape: workspace.selection.committedShape,
             alphaLockEnabled: layerTransparentPixelLockEnabled(layerID),
-            paintVariationSeed: paintVariationSeed ?? makePaintVariationSeed()
+            paintVariationSeed: paintVariationSeed ?? makePaintVariationSeed(),
+            pigmentPalette: resolvedToolSession.activeOilPaintPalette
         )
 
         bootstrap.strokeEngine.beginStrokeIfNeeded(
@@ -10329,6 +11062,7 @@ final class WorkspaceViewModel: ObservableObject {
             pathPoints: geometry.pathPoints,
             maxRadius: geometry.maxRadius,
             color: gradientPreviewColor,
+            settings: gradientRenderSettings,
             paintJitterAmount: displayedPaintJitterAmount,
             paintContrastAmount: displayedPaintContrastAmount,
             distortionAmount: workspace.toolSession.brush.jitterAmount,
@@ -10425,6 +11159,10 @@ final class WorkspaceViewModel: ObservableObject {
 
         if shortcutSettings.quickColorPickerShortcut.matchesKeyDown(event) {
             armQuickColorPickerShortcutIfNeeded()
+            return true
+        }
+
+        if handleOilPaintShortcut(event) {
             return true
         }
 
@@ -10599,7 +11337,7 @@ final class WorkspaceViewModel: ObservableObject {
         }
 
         if let direction = brushSizeShortcutDirection(for: event) {
-            if isBrushTipEditorVisible {
+            if isBrushTipCanvasFocused {
                 adjustBrushTipEditorBrushSize(by: direction)
             } else {
                 adjustBrushSize(by: direction)
@@ -10607,6 +11345,25 @@ final class WorkspaceViewModel: ObservableObject {
             return true
         }
 
+        return false
+    }
+
+    private func handleOilPaintShortcut(_ event: NSEvent) -> Bool {
+        let isBrushContext = workspace.toolSession.activeTool == .brush
+            || (workspace.toolSession.activeTool == .eyedropper && previousToolBeforeEyedropper == .brush)
+        guard isBrushContext,
+              workspace.toolSession.brush.oilPaint.isEnabled,
+              workspace.toolSession.brush.effectivePaintJitterAmount > 0.001 else {
+            return false
+        }
+        if shortcutSettings.oilPaintWashShortcut.matchesKeyDown(event) {
+            washOilPaintBrush()
+            return true
+        }
+        if shortcutSettings.oilPaintLoadShortcut.matchesKeyDown(event) {
+            loadSelectedColorIntoOilPaintBrush()
+            return true
+        }
         return false
     }
 
@@ -10669,7 +11426,7 @@ final class WorkspaceViewModel: ObservableObject {
         )
         canUndo = bootstrap.historyController.canUndo
         canRedo = bootstrap.historyController.canRedo
-        canMergeDown = state.document.activeMergeDownContext != nil
+        canMergeDown = state.document.activeMergeDownContext.map { !$0.destination.isAdjustmentLayer } ?? false
         canMergeVisible = state.document.mergeVisibleContext != nil
         syncSelectionOverlayProxy()
         scheduleWholeLayerInteractionBoundsRefreshIfNeeded(for: state)
@@ -10700,7 +11457,7 @@ final class WorkspaceViewModel: ObservableObject {
         )
         canUndo = bootstrap.historyController.canUndo
         canRedo = bootstrap.historyController.canRedo
-        canMergeDown = state.document.activeMergeDownContext != nil
+        canMergeDown = state.document.activeMergeDownContext.map { !$0.destination.isAdjustmentLayer } ?? false
         canMergeVisible = state.document.mergeVisibleContext != nil
         colorPanelProxy.colorPanel = state.colorPanel
         colorPanelProxy.selectedColor = state.toolSession.selectedColor
@@ -10831,6 +11588,9 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func applyStroke(samples: [CanvasStrokeSample]) {
+        if applyLayerMaskStrokeIfNeeded(samples: samples) {
+            return
+        }
         if workspace.toolSession.activeTool == .colorVitalization {
             applyColorAdjustmentStroke(samples: samples)
             return
@@ -10844,9 +11604,24 @@ final class WorkspaceViewModel: ObservableObject {
             }
             return
         }
+        dispatchCanvasStrokeSamples(
+            samples,
+            relayOriginalSamples: samples,
+            recordsPaintingActivity: true
+        )
+    }
+
+    private func dispatchCanvasStrokeSamples(
+        _ samples: [CanvasStrokeSample],
+        relayOriginalSamples: [CanvasStrokeSample]?,
+        recordsPaintingActivity: Bool
+    ) {
+        guard !samples.isEmpty else { return }
         let diagnosticsEnabled = RuntimeDiagnostics.brushHotPathLoggingEnabled
         let applyStartNs = diagnosticsEnabled ? DispatchTime.now().uptimeNanoseconds : 0
-        ideationBranchActivityHandler?()
+        if relayOriginalSamples != nil {
+            ideationBranchActivityHandler?()
+        }
         let packetIndex = strokePacketCount
         let skipLeadingStamp = packetIndex > 0
         _ = resolvedToolSessionForCanvasStrokes()
@@ -10868,7 +11643,7 @@ final class WorkspaceViewModel: ObservableObject {
         if isGeneratorStrokeModeEnabled,
            strokePayload.stroke.tool == .brush,
            applyGeneratorStroke(samples: samples, layerID: strokePayload.layerID, baseStroke: strokePayload.stroke) {
-            if !isApplyingMirroredIdeationOperation {
+            if recordsPaintingActivity, !isApplyingMirroredIdeationOperation {
                 drawingStatsController.recordPaintingActivity()
             }
             strokePacketCount += 1
@@ -10890,11 +11665,13 @@ final class WorkspaceViewModel: ObservableObject {
             let applyDurationMs = Double(DispatchTime.now().uptimeNanoseconds - applyStartNs) / 1_000_000
             brushStrokeLogger.debug("[brush-feel] applyStrokeMainThreadMs=\(applyDurationMs, privacy: .public)")
         }
-        if !isApplyingMirroredIdeationOperation {
+        if recordsPaintingActivity, !isApplyingMirroredIdeationOperation {
             drawingStatsController.recordPaintingActivity()
         }
         strokePacketCount += 1
-        relayIdeationOperation(.applyStroke(samples))
+        if let relayOriginalSamples {
+            relayIdeationOperation(.applyStroke(relayOriginalSamples))
+        }
     }
 
     func beginStrokeIfNeeded(paintVariationSeed seedOverride: UInt32? = nil) {
@@ -10908,6 +11685,19 @@ final class WorkspaceViewModel: ObservableObject {
         }
         ideationBranchActivityHandler?()
         strokePacketCount = 0
+
+        if let layerID = activeMaskEditingLayerID,
+           layerID == workspace.document.activeLayerID,
+           workspace.document.layer(layerID)?.mask != nil,
+           workspace.toolSession.activeTool == .brush || workspace.toolSession.activeTool == .eraser {
+            lastLayerMaskStrokeSample = nil
+            _ = checkpointHistoryIfPossible(
+                operationKind: "layerMask.stroke",
+                candidateChangedLayerIDs: [layerID],
+                captureMode: .inPlaceChangedLayers([layerID])
+            )
+            return
+        }
 
         if workspace.toolSession.activeTool == .colorVitalization {
             beginColorAdjustmentStrokeIfNeeded()
@@ -10923,6 +11713,14 @@ final class WorkspaceViewModel: ObservableObject {
             return
         }
 
+        let activeLayerID = workspace.document.activeLayerID
+        if let activeLayer = workspace.document.layer(activeLayerID),
+           activeLayer.isPaintLayer,
+           !workspace.document.isLayerEffectivelyVisible(activeLayerID) {
+            showStatus(.init(kind: .info, message: "当前图层不可见，请先显示图层再绘画"))
+            return
+        }
+
         guard let layerID = bootstrap.interactionController.activeEditableLayerID() else {
             return
         }
@@ -10932,8 +11730,8 @@ final class WorkspaceViewModel: ObservableObject {
         }
         if isGeneratorStrokeModeEnabled,
            workspace.toolSession.activeTool == .brush,
-           workspace.generator.kind != .automaticLines {
-            showStatus(.init(kind: .info, message: "\(workspace.generator.kind.displayName) 的直接绘制还未接通"))
+           !GeneratorFeatureSupport.support(for: workspace.generator.kind).supports(.directStroke) {
+            showStatus(.init(kind: .info, message: "\(workspace.generator.kind.displayName) 仅支持区域生成"))
             return
         }
 
@@ -10943,7 +11741,6 @@ final class WorkspaceViewModel: ObservableObject {
 
         let paintVariationSeed = seedOverride ?? makePaintVariationSeed()
         activePaintVariationSeed = paintVariationSeed
-
         bootstrap.strokeEngine.beginStrokeIfNeeded(
             toolSession: resolvedToolSessionForCanvasStrokes(),
             layerID: layerID
@@ -10952,6 +11749,16 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func endStroke() {
+        if let layerID = activeMaskEditingLayerID,
+           layerID == workspace.document.activeLayerID,
+           workspace.document.layer(layerID)?.mask != nil,
+           workspace.toolSession.activeTool == .brush || workspace.toolSession.activeTool == .eraser {
+            lastLayerMaskStrokeSample = nil
+            strokePacketCount = 0
+            noteCanvasContentChanged(changedLayerIDs: [layerID])
+            refresh(invalidatedLayerIDs: [layerID])
+            return
+        }
         if workspace.toolSession.activeTool == .colorVitalization {
             endColorAdjustmentStroke()
             return
@@ -10969,9 +11776,47 @@ final class WorkspaceViewModel: ObservableObject {
         bootstrap.strokeEngine.endStroke()
         strokePacketCount = 0
         activePaintVariationSeed = 0
-        generatorStrokeSession = .init()
+        generatorStrokeSession = .init(kind: workspace.generator.kind)
         noteCanvasContentChanged(changedLayerIDs: [workspace.document.activeLayerID])
         relayIdeationOperation(.endStroke)
+    }
+
+    private func applyLayerMaskStrokeIfNeeded(samples: [CanvasStrokeSample]) -> Bool {
+        guard let layerID = activeMaskEditingLayerID,
+              layerID == workspace.document.activeLayerID,
+              workspace.document.layer(layerID)?.mask != nil,
+              workspace.toolSession.activeTool == .brush || workspace.toolSession.activeTool == .eraser,
+              let maskTexture = bootstrap.layerSurfaceStore.maskTexture(for: layerID),
+              !samples.isEmpty else {
+            return false
+        }
+        var continuousSamples = samples
+        if let lastLayerMaskStrokeSample,
+           continuousSamples.first != lastLayerMaskStrokeSample {
+            continuousSamples.insert(lastLayerMaskStrokeSample, at: 0)
+        }
+        _ = bootstrap.layerMaskStrokeRenderer.render(
+            samples: continuousSamples,
+            brush: workspace.toolSession.brush,
+            targetValue: resolvedLayerMaskStrokeTargetValue(),
+            into: maskTexture,
+            commandQueue: bootstrap.metalContext.commandQueue
+        )
+        lastLayerMaskStrokeSample = samples.last
+        canvasContentRevision &+= 1
+        refreshLightweight(reason: "layerMask.strokePreview")
+        return true
+    }
+
+    private func resolvedLayerMaskStrokeTargetValue() -> Float {
+        guard workspace.toolSession.activeTool == .brush else { return 0 }
+        let color = workspace.toolSession.selectedColor
+        // 图层蒙版遵循绘图软件通用的灰度语义：白色显示、黑色隐藏，
+        // 中间灰度按感知亮度产生部分显示。橡皮擦始终写入黑色。
+        return min(max(
+            (color.red * 0.2126) + (color.green * 0.7152) + (color.blue * 0.0722),
+            0
+        ), 1)
     }
 
     private func makePaintVariationSeed() -> UInt32 {
@@ -11081,6 +11926,152 @@ final class WorkspaceViewModel: ObservableObject {
         performUndoLocally()
     }
 
+    var visibleHistoryTimeline: VisibleHistoryTimeline {
+        bootstrap.historyController.visibleTimeline
+    }
+
+    func prepareVisibleHistoryPresentation() {
+        _ = flushBrushEditingBoundary(reason: "openVisibleHistory")
+        guard visibleHistoryPreviewOriginCount == nil else { return }
+        let currentCount = visibleHistoryTimeline.currentAppliedEntryCount
+        visibleHistoryPreviewOriginCount = currentCount
+        visibleHistoryPreviewOriginWasDirty = hasUnsavedChanges
+        visibleHistoryPreviewOriginSelection = workspace.selection
+        visibleHistoryPreviewTargetCount = currentCount
+    }
+
+    func previewVisibleHistory(toAppliedEntryCount targetCount: Int) {
+        if visibleHistoryPreviewOriginCount == nil {
+            prepareVisibleHistoryPresentation()
+        }
+        guard let plan = visibleHistoryTimeline.navigationPlan(toAppliedEntryCount: targetCount) else {
+            showStatus(.init(kind: .info, message: "历史记录已经变化，请重新打开预览"))
+            return
+        }
+        if performVisibleHistoryNavigation(plan, marksDocumentDirty: false, showsCompletionStatus: false) {
+            visibleHistoryPreviewTargetCount = targetCount
+        }
+    }
+
+    func applyVisibleHistoryPreview() {
+        guard let originCount = visibleHistoryPreviewOriginCount else { return }
+        let targetCount = visibleHistoryTimeline.currentAppliedEntryCount
+        let changed = targetCount != originCount
+        visibleHistoryPreviewOriginCount = nil
+        visibleHistoryPreviewOriginSelection = nil
+        visibleHistoryPreviewTargetCount = nil
+        hasUnsavedChanges = changed ? true : visibleHistoryPreviewOriginWasDirty
+        showStatus(.init(
+            kind: .info,
+            message: changed ? "已应用预览中的历史状态" : "画布保持在原历史状态"
+        ))
+    }
+
+    func cancelVisibleHistoryPreview() {
+        guard let originCount = visibleHistoryPreviewOriginCount else { return }
+        if originCount != visibleHistoryTimeline.currentAppliedEntryCount,
+           let plan = visibleHistoryTimeline.navigationPlan(toAppliedEntryCount: originCount) {
+            _ = performVisibleHistoryNavigation(
+                plan,
+                marksDocumentDirty: false,
+                showsCompletionStatus: false
+            )
+        }
+        let wasDirty = visibleHistoryPreviewOriginWasDirty
+        if let originSelection = visibleHistoryPreviewOriginSelection {
+            bootstrap.workspaceStore.updateSelection { selection in
+                selection = originSelection
+            }
+            refreshLightweight(reason: "visibleHistoryPreview.restoreSelection")
+        }
+        visibleHistoryPreviewOriginCount = nil
+        visibleHistoryPreviewOriginSelection = nil
+        visibleHistoryPreviewTargetCount = nil
+        hasUnsavedChanges = wasDirty
+        showStatus(.init(kind: .info, message: "已退出历史预览，画布已恢复"))
+    }
+
+    func navigateVisibleHistory(to entryID: UUID) {
+        guard ideationSession == nil, snapshotCompareSession == nil else {
+            showStatus(.init(kind: .info, message: "当前模式下不可跳转编辑历史"))
+            return
+        }
+        guard let plan = visibleHistoryTimeline.navigationPlan(to: entryID) else {
+            showStatus(.init(kind: .info, message: "历史记录已经变化，请重新选择"))
+            return
+        }
+        _ = performVisibleHistoryNavigation(plan)
+    }
+
+    func navigateVisibleHistory(toAppliedEntryCount targetCount: Int) {
+        guard ideationSession == nil, snapshotCompareSession == nil else {
+            showStatus(.init(kind: .info, message: "当前模式下不可跳转编辑历史"))
+            return
+        }
+        guard let plan = visibleHistoryTimeline.navigationPlan(toAppliedEntryCount: targetCount) else {
+            showStatus(.init(kind: .info, message: "历史记录已经变化，请重新选择"))
+            return
+        }
+        _ = performVisibleHistoryNavigation(plan)
+    }
+
+    @discardableResult
+    private func performVisibleHistoryNavigation(
+        _ plan: VisibleHistoryNavigationPlan,
+        marksDocumentDirty: Bool = true,
+        showsCompletionStatus: Bool = true
+    ) -> Bool {
+        guard plan.totalStepCount > 0 else { return true }
+
+        _ = drainPendingBrushCommitsIfNeeded(resetLiveSession: true)
+        canvasCropState.cancel()
+        guard resolveColorAdjustmentSessionIfNeeded(reason: .historyNavigation) else { return false }
+        guard resolveCurveAdjustmentSessionIfNeeded(reason: .historyNavigation) else { return false }
+        if resolveTransformSession(reason: .historyNavigation) { return false }
+
+        do {
+            var restoredPixelContent = false
+            switch plan.direction {
+            case .undo:
+                for _ in 0..<plan.undoStepCount {
+                    restoredPixelContent = restoredPixelContent
+                        || !bootstrap.historyController.nextUndoRestoresWorkspaceOnly
+                    guard try bootstrap.historyController.undo() else { break }
+                }
+            case .redo:
+                for _ in 0..<plan.redoStepCount {
+                    restoredPixelContent = restoredPixelContent
+                        || !bootstrap.historyController.nextRedoRestoresWorkspaceOnly
+                    guard try bootstrap.historyController.redo() else { break }
+                }
+            case .none:
+                return true
+            }
+
+            if restoredPixelContent {
+                bootstrap.layerSurfaceStore.markContentUnknown(
+                    for: bootstrap.workspaceStore.state.document.layers.map(\.id)
+                )
+                refresh()
+                scheduleNavigatorPreviewRefresh()
+            } else {
+                refreshDocumentOverlayOnly()
+            }
+            canUndo = bootstrap.historyController.canUndo
+            canRedo = bootstrap.historyController.canRedo
+            if marksDocumentDirty {
+                hasUnsavedChanges = true
+            }
+            if showsCompletionStatus {
+                showStatus(.init(kind: .info, message: "已跳转到所选历史状态"))
+            }
+            return true
+        } catch {
+            showStatus(.init(kind: .error, message: error.localizedDescription))
+            return false
+        }
+    }
+
     private func performUndoLocally() {
         canvasCropState.cancel()
         guard resolveColorAdjustmentSessionIfNeeded(reason: .historyNavigation) else {
@@ -11114,7 +12105,7 @@ final class WorkspaceViewModel: ObservableObject {
             showStatus(
                 .init(
                     kind: .info,
-                    message: didUndo ? "Undo" : "Nothing to undo"
+                    message: didUndo ? "已撤销" : "没有可撤销的操作"
                 )
             )
         } catch {
@@ -11177,7 +12168,7 @@ final class WorkspaceViewModel: ObservableObject {
             showStatus(
                 .init(
                     kind: .info,
-                    message: didRedo ? "Redo" : "Nothing to redo"
+                    message: didRedo ? "已重做" : "没有可重做的操作"
                 )
             )
         } catch {
@@ -11198,6 +12189,78 @@ final class WorkspaceViewModel: ObservableObject {
             showStatus(.init(kind: .success, message: "已导出 PNG：\(url.lastPathComponent)"))
         } catch {
             showStatus(.init(kind: .error, message: error.localizedDescription))
+        }
+    }
+
+    func presentRasterExportSheet() {
+        guard canBeginDocumentPersistence(action: "导出") else { return }
+        isRasterExportSheetPresented = true
+    }
+
+    func dismissRasterExportSheet() {
+        guard !isRasterExporting else { return }
+        isRasterExportSheetPresented = false
+    }
+
+    func exportRaster(options: RasterExportOptions) {
+        guard !isRasterExporting else { return }
+        do {
+            try options.validate()
+        } catch {
+            showStatus(.init(kind: .error, message: error.localizedDescription))
+            return
+        }
+        guard let url = bootstrap.filePanelService.presentRasterExportPanel(
+            defaultName: workspace.document.metadata.name,
+            format: options.format
+        ) else {
+            showStatus(.init(kind: .info, message: "已取消导出"))
+            return
+        }
+
+        let exporter = bootstrap.rasterExporter
+        isRasterExporting = true
+        showStatus(.init(kind: .info, message: "正在导出…"))
+        rasterExportTask = Task { @MainActor [weak self] in
+            // Let SwiftUI publish the busy state before the synchronous Metal
+            // snapshot boundary. Everything after that boundary is a Sendable
+            // value and must not occupy the main actor.
+            await Task.yield()
+            guard let self else { return }
+
+            let snapshot: LayerTextureSnapshot
+            do {
+                _ = self.flushBrushEditingBoundary(reason: "exportRaster")
+                snapshot = try self.makeVisibleCompositeSnapshot()
+            } catch {
+                self.rasterExportTask = nil
+                self.isRasterExporting = false
+                self.showStatus(.init(kind: .error, message: error.localizedDescription))
+                return
+            }
+
+            let exportResult = await Task.detached(priority: .userInitiated) {
+                Result {
+                    try exporter.export(
+                        snapshot: snapshot,
+                        options: options,
+                        to: url
+                    )
+                }
+            }.value
+
+            self.rasterExportTask = nil
+            self.isRasterExporting = false
+            do {
+                let result = try exportResult.get()
+                self.isRasterExportSheetPresented = false
+                self.showStatus(.init(
+                    kind: .success,
+                    message: "已导出 \(options.format.rawValue.uppercased())：\(result.pixelWidth)×\(result.pixelHeight)"
+                ))
+            } catch {
+                self.showStatus(.init(kind: .error, message: error.localizedDescription))
+            }
         }
     }
 
@@ -11235,6 +12298,7 @@ final class WorkspaceViewModel: ObservableObject {
             let snapshot = try makeVisibleCompositeSnapshot()
             let savedSnapshot = makeSavedCanvasSnapshot(from: snapshot, includesPreviewImage: false)
             savedSnapshots.append(savedSnapshot)
+            hasUnsavedChanges = true
             showStatus(.init(kind: .success, message: "已保存快照（\(savedSnapshots.count)/\(Self.maxSavedSnapshotCount)）"))
         } catch {
             showStatus(.init(kind: .error, message: error.localizedDescription))
@@ -11287,6 +12351,7 @@ final class WorkspaceViewModel: ObservableObject {
                     )
                     guard self.savedSnapshots.count < Self.maxSavedSnapshotCount else { return }
                     self.savedSnapshots.append(savedSnapshot)
+                    self.hasUnsavedChanges = true
                     self.showStatus(
                         .init(
                             kind: .success,
@@ -11432,6 +12497,7 @@ final class WorkspaceViewModel: ObservableObject {
         }
 
         savedSnapshots.removeAll()
+        hasUnsavedChanges = true
         cancelSnapshotPreviewPreparationTasks()
         if snapshotCompareSession != nil {
             snapshotCompareSession = nil
@@ -11445,6 +12511,7 @@ final class WorkspaceViewModel: ObservableObject {
             return
         }
         savedSnapshots.remove(at: index)
+        hasUnsavedChanges = true
         cancelSavedSnapshotPreviewPreparationTask(for: id)
         snapshotCompareSession?.removeSnapshot(id)
 
@@ -11666,12 +12733,9 @@ final class WorkspaceViewModel: ObservableObject {
 
     @discardableResult
     func saveProject() -> Bool {
-        if straightLineState.phase == .pending,
-           !commitPendingStraightLine() {
+        guard canBeginDocumentPersistence(action: "保存工程") else {
             return false
         }
-        _ = flushBrushEditingBoundary(reason: "saveProject")
-        pauseDrawingStatsTracking()
         let documentName = workspace.document.metadata.name
         let url: URL
         if let existingURL = currentProjectURL {
@@ -11684,77 +12748,430 @@ final class WorkspaceViewModel: ObservableObject {
             url = selectedURL
         }
 
+        guard resolveColorAdjustmentSessionIfNeeded(reason: .persistence) else {
+            return false
+        }
+        guard resolveCurveAdjustmentSessionIfNeeded(reason: .persistence) else {
+            return false
+        }
+        if straightLineState.phase == .pending,
+           !commitPendingStraightLine() {
+            return false
+        }
+        _ = flushBrushEditingBoundary(reason: "saveProject")
+        guard
+            straightLineState.phase != .pending,
+            !bootstrap.strokeEngine.hasPendingBrushWork,
+            !bootstrap.strokeEngine.hasPendingBrushCommitJobs
+        else {
+            showStatus(.init(kind: .error, message: "仍有笔触尚未完成，工程未保存"))
+            return false
+        }
+        pauseDrawingStatsTracking()
+        let previousDocumentName = bootstrap.workspaceStore.state.document.metadata.name
+        let savedDocumentName = Self.projectDisplayName(for: url)
+        if savedDocumentName != previousDocumentName {
+            bootstrap.workspaceStore.updateDocument { document in
+                document.metadata.name = savedDocumentName
+            }
+        }
+
         do {
-            try bootstrap.persistenceController.saveProject(to: url)
+            try bootstrap.persistenceController.saveProject(
+                to: url,
+                referenceImages: try projectReferenceImagePayloads(),
+                savedSnapshots: persistentSavedSnapshotPayloads()
+            )
             currentProjectURL = url
             hasUnsavedChanges = false
+            try? bootstrap.persistenceController.discardRecoveryProject()
+            hasRecoveryProject = false
+            refreshDocumentOverlayOnly()
             persistBrushLibrary()
             syncTimelapseDocumentContext()
             syncDrawingStatsDocumentContext()
             showStatus(.init(kind: .success, message: "已保存工程：\(url.lastPathComponent)"))
             return true
         } catch {
+            if savedDocumentName != previousDocumentName {
+                bootstrap.workspaceStore.updateDocument { document in
+                    document.metadata.name = previousDocumentName
+                }
+            }
             showStatus(.init(kind: .error, message: error.localizedDescription))
             return false
         }
     }
 
     func openProject() {
-        _ = drainPendingBrushCommitsIfNeeded(resetLiveSession: true)
-        pauseDrawingStatsTracking()
-        guard resolveColorAdjustmentSessionIfNeeded(reason: .documentOpen) else { return }
-        guard resolveCurveAdjustmentSessionIfNeeded(reason: .documentOpen) else { return }
-        resolveTransformSession(reason: .documentOpen)
-        timelapseRecorder.stopRecording()
+        guard canBeginDocumentPersistence(action: "打开工程") else {
+            return
+        }
         guard let url = bootstrap.filePanelService.presentProjectOpenPanel() else {
             showStatus(.init(kind: .info, message: "已取消打开工程"))
             return
         }
 
+        openProject(from: url, isRecovery: false)
+    }
+
+    func recoverAutosavedProject() {
+        guard bootstrap.persistenceController.hasRecoveryProject else {
+            hasRecoveryProject = false
+            showStatus(.init(kind: .info, message: "没有可恢复的自动保存工程"))
+            return
+        }
+        openProject(
+            from: bootstrap.persistenceController.recoveryProjectURL,
+            isRecovery: true
+        )
+    }
+
+    func discardAutosavedProject() {
+        recoveryAutosaveGeneration &+= 1
+        recoveryAutosaveTask?.cancel()
+        recoveryAutosaveTask = nil
         do {
-            resetSnapshotToolState(resumeTimelapseIfNeeded: false)
-            perspectiveGuideMatchState = .init()
+            try bootstrap.persistenceController.discardRecoveryProject()
+            hasRecoveryProject = false
+            showStatus(.init(kind: .info, message: "已丢弃自动恢复工程"))
+        } catch {
+            showStatus(.init(kind: .error, message: error.localizedDescription))
+        }
+    }
+
+    func openProject(from url: URL, isRecovery: Bool) {
+        guard canBeginDocumentPersistence(action: isRecovery ? "恢复工程" : "打开工程") else {
+            return
+        }
+        do {
             let result = try bootstrap.persistenceController.openProject(from: url)
             let existingWorkspace = bootstrap.workspaceStore.state
-            let openedWorkspace = Self.workspaceForOpenedProject(
+            var openedWorkspace = Self.workspaceForOpenedProject(
                 result.workspace,
                 currentWorkspace: existingWorkspace
             )
+            if !isRecovery {
+                openedWorkspace.document.metadata.name = Self.projectDisplayName(for: url)
+            }
+            let stagedLayerTextures = try stageOpenedProjectTextures(
+                result.layerSnapshots,
+                canvasSize: openedWorkspace.document.canvasSize
+            )
+
+            switch confirmUnsavedChangesIfNeeded(
+                messageText: "当前画布有未保存内容",
+                informativeText: "打开其他工程前，要先保存当前内容吗？"
+            ) {
+            case .save:
+                guard saveProject() else { return }
+            case .discard:
+                break
+            case .cancel:
+                showStatus(.init(kind: .info, message: "已取消打开工程"))
+                return
+            }
+
+            _ = drainPendingBrushCommitsIfNeeded(resetLiveSession: true)
+            pauseDrawingStatsTracking()
+            cancelColorAdjustmentSessionIfNeeded(showFeedback: false)
+            cancelCurveAdjustmentIfNeeded(showFeedback: false)
+            resolveTransformSession(reason: .documentOpen)
+            resetTransientDocumentInteractionsForReplacement()
+            timelapseRecorder.stopRecording()
+            resetSnapshotToolState(resumeTimelapseIfNeeded: false)
+            perspectiveGuideMatchState = .init()
             bootstrap.workspaceStore.replaceState(openedWorkspace)
             _ = synchronizeTipImageLibraryFromWorkspace(persistIfChanged: false)
             Self.normalizeLegacySelectionIfNeeded(in: bootstrap.workspaceStore)
             bootstrap.layerSurfaceStore.reset()
-            bootstrap.layerSurfaceStore.prepareTextures(
-                for: bootstrap.workspaceStore.state.document,
-                metal: bootstrap.metalContext
+            _ = bootstrap.layerSurfaceStore.surfaceRecords(
+                for: bootstrap.workspaceStore.state.document
             )
 
-            for layerSnapshot in result.layerSnapshots {
-                guard
-                    let surfaceID = bootstrap.layerSurfaceStore.surfaceID(for: layerSnapshot.layerID),
-                    let texture = bootstrap.layerSurfaceStore.texture(for: surfaceID)
-                else {
-                    continue
+            for stagedLayer in stagedLayerTextures {
+                switch stagedLayer.resourceKind {
+                case .content:
+                    guard let surfaceID = bootstrap.layerSurfaceStore.surfaceID(for: stagedLayer.layerID) else {
+                        throw PersistenceError.invalidProject("无法恢复图层 \(stagedLayer.layerID.rawValue.uuidString)")
+                    }
+                    bootstrap.layerSurfaceStore.swapTexture(for: surfaceID, with: stagedLayer.texture)
+                case .mask:
+                    bootstrap.layerSurfaceStore.setMaskTexture(stagedLayer.texture, for: stagedLayer.layerID)
                 }
-
-                try bootstrap.textureSerializer.restore(snapshot: layerSnapshot.texture, into: texture)
-                bootstrap.layerSurfaceStore.markContentUnknown(for: layerSnapshot.layerID)
             }
             bootstrap.textureSerializer.purgeStagingTextures(
                 exceeding: bootstrap.workspaceStore.state.document.canvasSize
             )
 
             bootstrap.historyController.resetHistory()
-            currentProjectURL = url
-            hasUnsavedChanges = false
+            restoreProjectReferenceImages(result.referenceImages)
+            restorePersistentSavedSnapshots(result.savedSnapshots)
+            currentProjectURL = isRecovery || result.storageFormat == .legacyJSON ? nil : url
+            hasUnsavedChanges = isRecovery
             persistBrushLibrary()
             syncTimelapseDocumentContext()
             syncDrawingStatsDocumentContext()
-            showStatus(.init(kind: .success, message: "已打开工程：\(url.lastPathComponent)"))
+            showStatus(.init(
+                kind: .success,
+                message: isRecovery
+                    ? "已恢复自动保存工程，请另存为正式工程"
+                    : result.storageFormat == .legacyJSON
+                        ? "已打开旧版工程，保存时请另存为 .artflex：\(url.lastPathComponent)"
+                        : "已打开工程：\(url.lastPathComponent)"
+            ))
             refresh()
         } catch {
             showStatus(.init(kind: .error, message: error.localizedDescription))
         }
+    }
+
+    private func stageOpenedProjectTextures(
+        _ snapshots: [LayerHistorySnapshot],
+        canvasSize: CanvasSize
+    ) throws -> [(layerID: LayerID, resourceKind: LayerHistoryResourceKind, texture: MTLTexture)] {
+        try snapshots.map { layerSnapshot in
+            guard let texture = bootstrap.layerSurfaceStore.makeTexture(
+                width: canvasSize.width,
+                height: canvasSize.height,
+                pixelFormat: layerSnapshot.resourceKind == .mask ? .r8Unorm : .bgra8Unorm_srgb,
+                metal: bootstrap.metalContext
+            ) else {
+                throw PersistenceError.invalidProject("无法为图层准备纹理")
+            }
+            try bootstrap.textureSerializer.restore(
+                snapshot: layerSnapshot.texture,
+                into: texture
+            )
+            return (layerSnapshot.layerID, layerSnapshot.resourceKind, texture)
+        }
+    }
+
+    private func projectReferenceImagePayloads() throws -> [ProjectReferenceImagePayload] {
+        try referenceImageSlots.compactMap { slot in
+            guard
+                slot.id != luminosityReferenceSlotID,
+                let asset = slot.asset,
+                let encodedImageData = asset.encodedImageData
+            else {
+                return nil
+            }
+            return try ProjectReferenceImagePayload(
+                slotIndex: slot.id,
+                displayName: asset.fileName,
+                originalFilename: asset.fileName,
+                typeIdentifier: asset.typeIdentifier,
+                pixelWidth: asset.width,
+                pixelHeight: asset.height,
+                encodedImageData: encodedImageData
+            )
+        }
+    }
+
+    private func persistentSavedSnapshotPayloads() -> [PersistentCanvasSnapshotPayload] {
+        let canvasSize = workspace.document.canvasSize
+        return savedSnapshots.prefix(Self.maxSavedSnapshotCount).map { savedSnapshot in
+            PersistentCanvasSnapshotPayload(
+                descriptor: PersistentCanvasSnapshotDescriptor(
+                    id: savedSnapshot.id,
+                    displayName: savedSnapshot.displayName,
+                    createdAt: savedSnapshot.createdAt,
+                    canvasSize: canvasSize,
+                    pixelResourceID: CanvasPixelResourceID()
+                ),
+                pixels: savedSnapshot.snapshot
+            )
+        }
+    }
+
+    private func restorePersistentSavedSnapshots(
+        _ payloads: [PersistentCanvasSnapshotPayload]
+    ) {
+        cancelPendingSnapshotSave()
+        cancelPendingSnapshotComparePreparation(resumeTimelapseIfNeeded: false)
+        cancelSnapshotPreviewPreparationTasks()
+        snapshotCompareSession = nil
+        savedSnapshots = payloads
+            .prefix(Self.maxSavedSnapshotCount)
+            .map { payload in
+                CanvasSavedSnapshot(
+                    id: payload.descriptor.id,
+                    displayName: payload.descriptor.displayName,
+                    createdAt: payload.descriptor.createdAt,
+                    snapshot: payload.pixels,
+                    thumbnailImage: Self.snapshotImage(
+                        from: payload.pixels,
+                        maxDimension: Self.savedSnapshotThumbnailDimension
+                    )
+                )
+            }
+    }
+
+    private func restoreProjectReferenceImages(_ payloads: [ProjectReferenceImagePayload]) {
+        referenceImageUpgradeTasks.values.forEach { $0.cancel() }
+        referenceImageUpgradeTasks.removeAll()
+        luminosityCaptureTask?.cancel()
+        luminosityCaptureTask = nil
+        isCanvasLuminosityReferenceActive = false
+        luminosityReferenceSlotID = nil
+        referenceImageLoadingSlotIDs.removeAll()
+        referenceImageSlots = Self.makeDefaultReferenceImageSlots()
+        selectedReferenceImageSlotID = nil
+        referenceImagePreviewColor = nil
+
+        for payload in payloads.sorted(by: {
+            $0.descriptor.slotIndex < $1.descriptor.slotIndex
+        }) {
+            let slotID = payload.descriptor.slotIndex
+            guard referenceImageSlots.indices.contains(slotID) else { continue }
+            guard let asset = ReferenceImageAsset.decode(
+                from: payload.encodedImageData,
+                fileName: payload.descriptor.originalFilename,
+                maxDimension: 768
+            ) else {
+                continue
+            }
+            replaceReferenceImageSlotAsset(asset, at: slotID)
+            if selectedReferenceImageSlotID == nil {
+                selectedReferenceImageSlotID = slotID
+            }
+        }
+    }
+
+    private func scheduleRecoveryAutosave(delay: Duration = .seconds(30)) {
+        recoveryAutosaveGeneration &+= 1
+        let generation = recoveryAutosaveGeneration
+        recoveryAutosaveTask?.cancel()
+        recoveryAutosaveTask = Task { [weak self] in
+            do {
+                try await Task.sleep(for: delay)
+            } catch {
+                return
+            }
+            guard
+                let self,
+                self.hasUnsavedChanges,
+                self.recoveryAutosaveGeneration == generation
+            else { return }
+            self.recoveryAutosaveTask = nil
+            self.performRecoveryAutosave(generation: generation)
+        }
+    }
+
+    private func performRecoveryAutosave(generation: UInt64) {
+        guard hasUnsavedChanges else { return }
+        guard recoveryAutosaveWriteTask == nil else {
+            scheduleRecoveryAutosave(delay: .seconds(15))
+            return
+        }
+        guard
+            !isApplyingPatternPlacementCommit,
+            !isApplyingGradientCommit,
+            !isApplyingTransformCommit,
+            !isBucketFillInProgress,
+            !isTransformingSelection,
+            patternPlacementPhase.draft == nil,
+            linearGradientState.phase == .idle,
+            sectorGradientState.phase == .idle,
+            straightLineState.phase != .pending,
+            colorAdjustmentSession == nil,
+            curveAdjustmentSession == nil,
+            !bootstrap.strokeEngine.hasPendingBrushWork,
+            !bootstrap.strokeEngine.hasPendingBrushCommitJobs
+        else {
+            scheduleRecoveryAutosave(delay: .seconds(15))
+            return
+        }
+
+        do {
+            // GPU-backed layer snapshots are frozen synchronously at this safe edit boundary.
+            // The returned payload is value-only and can be compressed/written off MainActor.
+            let payload = try bootstrap.persistenceController.captureProjectPayload(
+                referenceImages: try projectReferenceImagePayloads(),
+                savedSnapshots: persistentSavedSnapshotPayloads()
+            )
+            let stagingURL = try bootstrap.persistenceController.makeRecoveryStagingURL()
+            let persistenceBox = WorkspaceUncheckedBox(bootstrap.persistenceController)
+
+            recoveryAutosaveWriteTask = Task { [weak self] in
+                let result = await Task.detached(priority: .utility) {
+                    Result {
+                        try persistenceBox.value.writeCapturedProject(payload, to: stagingURL)
+                    }
+                }.value
+
+                guard let self else {
+                    persistenceBox.value.discardRecoveryStagingProject(at: stagingURL)
+                    return
+                }
+                self.recoveryAutosaveWriteTask = nil
+
+                guard
+                    self.hasUnsavedChanges,
+                    self.recoveryAutosaveGeneration == generation
+                else {
+                    persistenceBox.value.discardRecoveryStagingProject(at: stagingURL)
+                    return
+                }
+
+                do {
+                    try result.get()
+                    try persistenceBox.value.installRecoveryProject(from: stagingURL)
+                    self.hasRecoveryProject = true
+                } catch {
+                    persistenceBox.value.discardRecoveryStagingProject(at: stagingURL)
+                    self.scheduleRecoveryAutosave(delay: .seconds(30))
+                }
+            }
+        } catch {
+            scheduleRecoveryAutosave(delay: .seconds(30))
+        }
+    }
+
+    private func canBeginDocumentPersistence(action: String) -> Bool {
+        guard
+            !isApplyingPatternPlacementCommit,
+            !isApplyingGradientCommit,
+            !isApplyingTransformCommit,
+            !isBucketFillInProgress
+        else {
+            showStatus(.init(kind: .info, message: "正在完成画布操作，请稍后再\(action)"))
+            return false
+        }
+        guard !isTransformingSelection else {
+            showStatus(.init(kind: .info, message: "请先确认或取消自由变形，再\(action)"))
+            return false
+        }
+        guard patternPlacementPhase.draft == nil else {
+            showStatus(.init(kind: .info, message: "请先确认或取消图案放置，再\(action)"))
+            return false
+        }
+        guard linearGradientState.phase == .idle, sectorGradientState.phase == .idle else {
+            showStatus(.init(kind: .info, message: "请先应用或取消渐变，再\(action)"))
+            return false
+        }
+        guard canvasCropState.bounds == nil else {
+            showStatus(.init(kind: .info, message: "请先应用或取消画布裁剪，再\(action)"))
+            return false
+        }
+        return true
+    }
+
+    private func resetTransientDocumentInteractionsForReplacement() {
+        patternPlacementPhase = .idle
+        straightLineState = .init()
+        linearGradientState = .init()
+        sectorGradientState = .init()
+        polygonSelectionState = .init()
+        deferredGradientAction = nil
+        canvasCropState.cancel()
+        textureFillGestureState = nil
+        activeLassoRawPoints = []
+        activeLassoBounds = nil
+        lassoSamplingDebugPoints = []
+        isGeneratorRegionSelectionArmed = false
+        isGeneratorStrokeModeEnabled = false
+        generatorStrokeSession = .init()
     }
 
     func createNewCanvas(
@@ -11789,6 +13206,14 @@ final class WorkspaceViewModel: ObservableObject {
         resolutionDPI: Int,
         decisionOverride: NewCanvasCreationDecision?
     ) {
+        let capacity = CanvasCapacityPolicy.standard.assess(canvasSize)
+        guard capacity.isSupported else {
+            showStatus(.init(
+                kind: .error,
+                message: capacity.rejectionReason ?? "当前画布尺寸超出安全上限"
+            ))
+            return
+        }
         pauseDrawingStatsTracking()
         guard resolveColorAdjustmentSessionIfNeeded(reason: .documentOpen) else { return }
         guard resolveCurveAdjustmentSessionIfNeeded(reason: .documentOpen) else { return }
@@ -11813,6 +13238,7 @@ final class WorkspaceViewModel: ObservableObject {
         var resetToolSession = workspace.toolSession
         resetToolSession.brush.size = ToolSessionState.stageOneDefault.brush.size
         resetToolSession.brush.opacity = BrushSettings.stageOneDefault.opacity
+        resetToolSession.washOilPaintReservoir()
         let document = ArtDocument(
             metadata: DocumentMetadata(
                 name: name,
@@ -12356,7 +13782,10 @@ final class WorkspaceViewModel: ObservableObject {
         messageText: String,
         informativeText: String
     ) -> UnsavedChangesDecision {
-        guard hasUnsavedChanges else {
+        let hasPendingAdjustment =
+            colorAdjustmentSession?.hasPendingCommittedEffect == true ||
+            curveAdjustmentSession?.hasPendingCommittedEffect == true
+        guard hasUnsavedChanges || hasPendingAdjustment || straightLineState.phase == .pending else {
             return .discard
         }
 
@@ -12376,6 +13805,15 @@ final class WorkspaceViewModel: ObservableObject {
         default:
             return .cancel
         }
+    }
+
+    nonisolated static func projectDisplayName(for url: URL) -> String {
+        var name = url.deletingPathExtension().lastPathComponent
+        if name.lowercased().hasSuffix(".artflex") {
+            name.removeLast(".artflex".count)
+        }
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? "未命名" : trimmed
     }
 
     private static func normalizeDisabledToolsIfNeeded(in store: WorkspaceStore) {
@@ -12684,7 +14122,7 @@ final class WorkspaceViewModel: ObservableObject {
         includesPreviewImage: Bool
     ) -> CanvasSavedSnapshot {
         CanvasSavedSnapshot(
-            id: UUID(),
+            displayName: "快照 \(savedSnapshots.count + 1)",
             snapshot: snapshot,
             thumbnailImage: Self.snapshotImage(from: snapshot, maxDimension: Self.savedSnapshotThumbnailDimension),
             previewImage: includesPreviewImage
@@ -13163,6 +14601,22 @@ final class WorkspaceViewModel: ObservableObject {
         )
     }
 
+    private func makeFillTopologyReference(
+        for source: FillSampleSource
+    ) throws -> (texture: MTLTexture?, isAvailable: Bool) {
+        switch source {
+        case .automatic:
+            return (try makeReferenceCompositeTextureIfNeeded(), true)
+        case .currentLayer:
+            return (nil, true)
+        case .allVisibleLayers:
+            return (try makeVisibleCompositeTexture(), true)
+        case .markedReferenceLayers:
+            let texture = try makeReferenceCompositeTextureIfNeeded()
+            return (texture, texture != nil)
+        }
+    }
+
     private func makeCompositeTexture(
         layers: [LayerRecord],
         document: ArtDocument,
@@ -13176,6 +14630,7 @@ final class WorkspaceViewModel: ObservableObject {
         }
 
         var visibleTextureByLayerID: [LayerID: MTLTexture] = [:]
+        var enabledMaskTextureByLayerID: [LayerID: MTLTexture] = [:]
         let allVisiblePaintLayers = document.layers.filter {
             $0.isPaintLayer && document.isLayerEffectivelyVisible($0.id)
         }
@@ -13183,6 +14638,10 @@ final class WorkspaceViewModel: ObservableObject {
             guard let surfaceID = bootstrap.layerSurfaceStore.surfaceID(for: layer.id),
                   let texture = bootstrap.layerSurfaceStore.texture(for: surfaceID) else { continue }
             visibleTextureByLayerID[layer.id] = texture
+            if layer.mask?.isEnabled == true,
+               let maskTexture = bootstrap.layerSurfaceStore.maskTexture(for: layer.id) {
+                enabledMaskTextureByLayerID[layer.id] = maskTexture
+            }
         }
 
         let renderableLayers = layers.filter { layer in
@@ -13200,7 +14659,10 @@ final class WorkspaceViewModel: ObservableObject {
                 texture: texture,
                 opacity: document.effectiveLayerOpacity(layer.id),
                 blendMode: layer.blendMode,
-                clipMaskTexture: layer.clipTargetLayerID.flatMap { visibleTextureByLayerID[$0] }
+                clipMaskTexture: layer.clipTargetLayerID.flatMap { visibleTextureByLayerID[$0] },
+                clipLayerMaskTexture: layer.clipTargetLayerID.flatMap { enabledMaskTextureByLayerID[$0] },
+                layerMaskTexture: enabledMaskTextureByLayerID[layer.id],
+                curveAdjustmentLUTs: layer.adjustment?.curveLUTs
             )
         }
 
@@ -13793,10 +15255,6 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     private func resolvedGeneratorColor(from color: RGBAColor) -> RGBAColor {
-        let luminance = (0.2126 * color.red) + (0.7152 * color.green) + (0.0722 * color.blue)
-        if color.alpha < 0.05 || luminance > 0.94 {
-            return .black
-        }
         return color
     }
 
@@ -15015,14 +16473,16 @@ final class WorkspaceViewModel: ObservableObject {
     ) -> Bool {
         switch workspace.generator.kind {
         case .automaticLines:
+            var generatorBaseStroke = baseStroke
+            generatorBaseStroke.color = baseStroke.color.withAlpha(
+                baseStroke.color.alpha * min(max(workspace.generator.opacity, 0.05), 1)
+            )
             let transformedStroke = makeAutomaticLineStroke(
-                from: baseStroke,
+                from: generatorBaseStroke,
                 settings: workspace.generator,
                 session: &generatorStrokeSession
             )
-            guard transformedStroke.points.count >= 2 else {
-                return true
-            }
+            guard !transformedStroke.points.isEmpty else { return true }
             bootstrap.strokeEngine.applyStroke(transformedStroke, to: layerID)
 
             if let branchStroke = makeAutomaticLineBranchStroke(
@@ -15040,9 +16500,167 @@ final class WorkspaceViewModel: ObservableObject {
                 bootstrap.strokeEngine.applyStroke(companionStroke, to: layerID)
             }
             return true
-        default:
-            return false
+        case .driftDraw:
+            var generatorBaseStroke = baseStroke
+            generatorBaseStroke.color = baseStroke.color.withAlpha(
+                baseStroke.color.alpha * min(max(workspace.generator.opacity, 0.05), 1)
+            )
+            let transformedStroke = makeDriftDrawStroke(
+                from: generatorBaseStroke,
+                settings: workspace.generator,
+                session: &generatorStrokeSession
+            )
+            guard !transformedStroke.points.isEmpty else { return true }
+            bootstrap.strokeEngine.applyStroke(transformedStroke, to: layerID)
+            return true
+        case .elasticWhip, .tremorTrace, .angularBreaks:
+            var generatorBaseStroke = baseStroke
+            generatorBaseStroke.color = baseStroke.color.withAlpha(
+                baseStroke.color.alpha * min(max(workspace.generator.opacity, 0.05), 1)
+            )
+            let transformedStroke = makeLineGeneratorVariantStroke(
+                from: generatorBaseStroke,
+                kind: workspace.generator.kind,
+                settings: workspace.generator,
+                session: &generatorStrokeSession
+            )
+            guard !transformedStroke.points.isEmpty else { return true }
+            bootstrap.strokeEngine.applyStroke(transformedStroke, to: layerID)
+            return true
         }
+    }
+
+    private func makeLineGeneratorVariantStroke(
+        from stroke: StrokeDescriptor,
+        kind: GeneratorKind,
+        settings: GeneratorSettings,
+        session: inout GeneratorStrokeSessionState
+    ) -> StrokeDescriptor {
+        guard let first = stroke.points.first else { return stroke }
+
+        var random = session.random
+        var previousBase = session.lastBasePoint ?? first
+        var previousOutput = session.lastOutputPoint ?? first
+        var phase = session.fractureImpulse
+        var angularState = session.angularVelocity
+        let brushSize = Double(max(stroke.brush.size, 1))
+        var output: [StrokePoint] = []
+        output.reserveCapacity(stroke.points.count)
+
+        for point in stroke.points {
+            let dx = point.x - previousBase.x
+            let dy = point.y - previousBase.y
+            let distance = hypot(dx, dy)
+            guard distance > 0.0001 else {
+                output.append(previousOutput)
+                previousBase = point
+                continue
+            }
+            let angle = atan2(dy, dx)
+            let normalX = -sin(angle)
+            let normalY = cos(angle)
+            let resolved: StrokePoint
+
+            switch kind {
+            case .elasticWhip:
+                let response = 0.16 + Double(settings.density) * 0.34
+                phase += distance / max(brushSize * (1.2 + Double(settings.branch) * 2.8), 1)
+                angularState = (angularState * 0.82) + (angle - angularState) * 0.18
+                let wave = sin(phase) * brushSize * (0.2 + Double(settings.drift) * 2.1)
+                resolved = StrokePoint(
+                    x: previousOutput.x + (point.x - previousOutput.x) * response + normalX * wave,
+                    y: previousOutput.y + (point.y - previousOutput.y) * response + normalY * wave,
+                    pressure: point.pressure
+                )
+            case .tremorTrace:
+                phase += distance / max(brushSize * 0.22, 0.8)
+                let amplitude = brushSize * (0.08 + Double(settings.drift) * 0.82)
+                let tremor = (sin(phase * 2.7) * 0.68 + sin(phase * 5.3) * 0.23)
+                    * amplitude
+                    + random.double(in: -0.18...0.18) * amplitude
+                resolved = StrokePoint(
+                    x: point.x + normalX * tremor,
+                    y: point.y + normalY * tremor,
+                    pressure: point.pressure
+                )
+            case .angularBreaks:
+                let turnProbability = 0.04 + Double(settings.branch) * 0.22
+                if random.double(in: 0...1) < turnProbability {
+                    angularState += random.double(in: -1...1) * (.pi / 2)
+                } else {
+                    let snap = .pi / (3 + Double(Int(settings.density * 3)))
+                    angularState = (angle / snap).rounded() * snap
+                }
+                resolved = StrokePoint(
+                    x: previousOutput.x + cos(angularState) * distance,
+                    y: previousOutput.y + sin(angularState) * distance,
+                    pressure: point.pressure
+                )
+            case .automaticLines, .driftDraw:
+                resolved = point
+            }
+
+            output.append(resolved)
+            previousBase = point
+            previousOutput = resolved
+        }
+
+        session.random = random
+        session.lastBasePoint = previousBase
+        session.lastOutputPoint = previousOutput
+        session.fractureImpulse = phase
+        session.angularVelocity = angularState
+
+        var result = stroke
+        result.points = kind == .angularBreaks ? output : smoothStrokePoints(output)
+        return result
+    }
+
+    private func makeDriftDrawStroke(
+        from stroke: StrokeDescriptor,
+        settings: GeneratorSettings,
+        session: inout GeneratorStrokeSessionState
+    ) -> StrokeDescriptor {
+        guard !stroke.points.isEmpty else { return stroke }
+
+        var random = session.random
+        var previous = session.lastBasePoint ?? stroke.points[0]
+        var driftOffset = session.driftOffset
+        var driftVelocity = session.angularVelocity
+        var phase = session.fractureImpulse
+        let brushSize = Double(max(stroke.brush.size, 1))
+        let amplitude = brushSize * (0.16 + Double(settings.drift) * 2.8)
+        let response = 0.08 + Double(settings.density) * 0.18
+
+        let points = stroke.points.map { point -> StrokePoint in
+            let dx = point.x - previous.x
+            let dy = point.y - previous.y
+            let distance = max(hypot(dx, dy), 0.0001)
+            let normalX = -dy / distance
+            let normalY = dx / distance
+            phase += distance / max(brushSize * (2.5 - Double(settings.branch)), 1)
+            driftVelocity += random.double(in: -1...1) * response
+            driftVelocity *= 0.84
+            driftOffset = (driftOffset * 0.88) + driftVelocity * amplitude
+            let wave = sin(phase) * amplitude * (0.35 + Double(settings.branch) * 0.8)
+            previous = point
+            return StrokePoint(
+                x: point.x + normalX * (driftOffset + wave),
+                y: point.y + normalY * (driftOffset + wave),
+                pressure: point.pressure
+            )
+        }
+
+        session.random = random
+        session.lastBasePoint = previous
+        session.lastOutputPoint = points.last
+        session.driftOffset = driftOffset
+        session.angularVelocity = driftVelocity
+        session.fractureImpulse = phase
+
+        var result = stroke
+        result.points = smoothStrokePoints(points)
+        return result
     }
 
     private func makeAutomaticLineStroke(
@@ -15139,7 +16757,10 @@ final class WorkspaceViewModel: ObservableObject {
             points: smoothStrokePoints(transformedPoints),
             selectionShape: stroke.selectionShape,
             alphaLockEnabled: stroke.alphaLockEnabled,
-            paintVariationSeed: stroke.paintVariationSeed
+            skipLeadingStamp: stroke.skipLeadingStamp,
+            paintVariationSeed: stroke.paintVariationSeed,
+            pigmentPalette: stroke.pigmentPalette,
+            brushStreamID: stroke.brushStreamID
         )
     }
 
@@ -15197,7 +16818,8 @@ final class WorkspaceViewModel: ObservableObject {
             points: smoothStrokePoints(points),
             selectionShape: stroke.selectionShape,
             alphaLockEnabled: stroke.alphaLockEnabled,
-            paintVariationSeed: derivedPaintVariationSeed(stroke.paintVariationSeed, salt: 0xB12A_4C4D)
+            paintVariationSeed: derivedPaintVariationSeed(stroke.paintVariationSeed, salt: 0xB12A_4C4D),
+            pigmentPalette: stroke.pigmentPalette
         )
     }
 
@@ -15224,7 +16846,9 @@ final class WorkspaceViewModel: ObservableObject {
         let output: [StrokeDescriptor] = (0..<extraStrokeCount).map { index in
             let lateralSign = index.isMultiple(of: 2) ? 1.0 : -1.0
             let fanAngle = random.double(in: 0.45...1.85) * lateralSign
-            let lateralOffset = brushSize * random.double(in: 4.0...15.0) * (0.18 + driftPower * 1.8) * lateralSign
+            // 伴随线仍应围绕手势活动；原上限可偏离十几个笔宽，
+            // 会令单步历史脏区膨胀并提前触发内存淘汰。
+            let lateralOffset = brushSize * random.double(in: 1.2...4.5) * (0.16 + driftPower * 0.72) * lateralSign
             let forwardLag = brushSize * random.double(in: 0.8...3.4) * (0.12 + driftPower * 0.9)
             let points: [StrokePoint] = stroke.points.enumerated().map { pointIndex, point in
                 let previous = pointIndex > 0 ? stroke.points[pointIndex - 1] : point
@@ -15256,7 +16880,8 @@ final class WorkspaceViewModel: ObservableObject {
                 paintVariationSeed: derivedPaintVariationSeed(
                     stroke.paintVariationSeed,
                     salt: UInt32(index + 1) &* 0x45D9_F3B
-                )
+                ),
+                pigmentPalette: stroke.pigmentPalette
             )
         }
 
@@ -15602,7 +17227,7 @@ final class WorkspaceViewModel: ObservableObject {
         let color = ColorBlocksEngine.pickerColor(from: bootstrap.workspaceStore.state.colorPanel)
         rememberReferenceImagePreviousColor(before: color)
         bootstrap.workspaceStore.updateToolSession { session in
-            session.selectedColor = color
+            session.commitSelectedColor(color)
         }
         refreshColorPanelOnly(includeSelectedColor: true)
     }
@@ -15666,7 +17291,7 @@ final class WorkspaceViewModel: ObservableObject {
 
         rememberReferenceImagePreviousColor(before: color)
         bootstrap.workspaceStore.updateToolSession { session in
-            session.selectedColor = color
+            session.commitSelectedColor(color)
         }
         bootstrap.workspaceStore.updateColorPanel { panel in
             guard panel.mode == .picker else { return }
@@ -15826,6 +17451,7 @@ final class WorkspaceViewModel: ObservableObject {
         updated.colorPanel = state.colorPanel
         if includeSelectedColor {
             updated.toolSession.selectedColor = state.toolSession.selectedColor
+            updated.toolSession.oilPaintReservoir = state.toolSession.oilPaintReservoir
         }
         workspace = updated
         colorPanelProxy.colorPanel = state.colorPanel
@@ -15980,7 +17606,17 @@ private struct GeneratorStrokeSessionState {
     var angularVelocity: Double = 0
     var fractureImpulse: Double = 0
     var fractureCountdown: Int = 0
-    var random = GeneratorRandom()
+    var random: GeneratorRandom
+
+    init(kind: GeneratorKind = .automaticLines) {
+        random = GeneratorRandom(seed: Self.seed(for: kind))
+    }
+
+    private static func seed(for kind: GeneratorKind) -> UInt64 {
+        kind.rawValue.utf8.reduce(0xA076_1D64_78BD_642F) { partial, byte in
+            (partial ^ UInt64(byte)) &* 0xE703_7ED1_A0B4_28DB
+        }
+    }
 }
 
 private struct DeferredGradientDrag {
@@ -16242,10 +17878,11 @@ struct PolygonSelectionInteractionState: Sendable {
 }
 
 private struct GeneratorRandom {
-    private var state: UInt64 = {
-        let now = UInt64(Date().timeIntervalSinceReferenceDate.bitPattern)
-        return now ^ 0x9E3779B97F4A7C15
-    }()
+    private var state: UInt64
+
+    init(seed: UInt64 = 0x9E37_79B9_7F4A_7C15) {
+        state = seed
+    }
 
     mutating func float(in range: ClosedRange<Float>) -> Float {
         let unit = Float(nextUnit())

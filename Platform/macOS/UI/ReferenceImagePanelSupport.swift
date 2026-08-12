@@ -28,6 +28,8 @@ final class ReferenceImageAsset: @unchecked Sendable {
     let cgImage: CGImage
     let sourceURL: URL?
     let decodedMaxDimension: Int
+    let encodedImageData: Data?
+    let typeIdentifier: String?
 
     init(
         fileName: String,
@@ -36,7 +38,9 @@ final class ReferenceImageAsset: @unchecked Sendable {
         rgbaPixels: Data,
         cgImage: CGImage,
         sourceURL: URL? = nil,
-        decodedMaxDimension: Int = 0
+        decodedMaxDimension: Int = 0,
+        encodedImageData: Data? = nil,
+        typeIdentifier: String? = nil
     ) {
         self.fileName = fileName
         self.width = width
@@ -45,6 +49,8 @@ final class ReferenceImageAsset: @unchecked Sendable {
         self.cgImage = cgImage
         self.sourceURL = sourceURL
         self.decodedMaxDimension = decodedMaxDimension
+        self.encodedImageData = encodedImageData
+        self.typeIdentifier = typeIdentifier
     }
 
     func sampledColor(normalizedX: Double, normalizedY: Double) -> RGBAColor? {
@@ -85,7 +91,10 @@ final class ReferenceImageAsset: @unchecked Sendable {
     }
 
     static func decode(from url: URL, maxDimension: Int = 4096) -> ReferenceImageAsset? {
-        guard let imageSource = CGImageSourceCreateWithURL(url as CFURL, nil) else {
+        guard
+            let encodedImageData = try? Data(contentsOf: url, options: [.mappedIfSafe]),
+            let imageSource = CGImageSourceCreateWithData(encodedImageData as CFData, nil)
+        else {
             return nil
         }
 
@@ -93,7 +102,8 @@ final class ReferenceImageAsset: @unchecked Sendable {
             from: imageSource,
             fileName: url.lastPathComponent,
             sourceURL: url,
-            maxDimension: maxDimension
+            maxDimension: maxDimension,
+            encodedImageData: encodedImageData
         )
     }
 
@@ -110,7 +120,8 @@ final class ReferenceImageAsset: @unchecked Sendable {
             from: imageSource,
             fileName: fileName,
             sourceURL: nil,
-            maxDimension: maxDimension
+            maxDimension: maxDimension,
+            encodedImageData: imageData
         )
     }
 
@@ -118,7 +129,8 @@ final class ReferenceImageAsset: @unchecked Sendable {
         from imageSource: CGImageSource,
         fileName: String,
         sourceURL: URL?,
-        maxDimension: Int
+        maxDimension: Int,
+        encodedImageData: Data
     ) -> ReferenceImageAsset? {
 
         let thumbnailOptions: [CFString: Any] = [
@@ -176,7 +188,9 @@ final class ReferenceImageAsset: @unchecked Sendable {
             rgbaPixels: rgbaPixels,
             cgImage: previewImage,
             sourceURL: sourceURL,
-            decodedMaxDimension: maxDimension
+            decodedMaxDimension: maxDimension,
+            encodedImageData: encodedImageData,
+            typeIdentifier: CGImageSourceGetType(imageSource) as String?
         )
     }
 

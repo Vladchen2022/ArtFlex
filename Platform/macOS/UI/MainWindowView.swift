@@ -32,13 +32,16 @@ struct MainWindowView: View {
                 keyUpHandler: handleKeyUp(_:),
                 flagsChangedHandler: handleModifierFlagsChanged(_:),
                 shouldMonitorBrushSizeShortcut: {
-                    activeKeyboardTarget.isBrushTipEditorVisible
+                    activeKeyboardTarget.isBrushTipCanvasFocused
                 }
             )
             .frame(width: 0, height: 0)
         )
         .sheet(isPresented: $viewModel.isNewCanvasSheetPresented) {
             NewCanvasSheetView(viewModel: viewModel)
+        }
+        .sheet(isPresented: $viewModel.isRasterExportSheetPresented) {
+            RasterExportSheet(viewModel: viewModel)
         }
         .sheet(
             isPresented: Binding(

@@ -131,6 +131,10 @@ struct ArtDocument: Codable, Sendable, Equatable {
         layers.filter(\.isPaintLayer)
     }
 
+    var drawablePaintLayers: [LayerRecord] {
+        layers.filter { $0.isPaintLayer && !$0.isAdjustmentLayer }
+    }
+
     func layer(_ layerID: LayerID) -> LayerRecord? {
         layers.first(where: { $0.id == layerID })
     }
@@ -207,6 +211,27 @@ struct ArtDocument: Codable, Sendable, Equatable {
         return layer
     }
 
+    mutating func addCurveAdjustmentLayer(named name: String = "曲线调整") -> LayerRecord {
+        let activeParentID = layer(activeLayerID)?.parentID
+        let layer = LayerRecord(
+            id: LayerID(),
+            name: name,
+            parentID: activeParentID,
+            isVisible: true,
+            isLocked: false,
+            locksTransparentPixels: false,
+            opacity: 1,
+            adjustment: .curves(.neutral)
+        )
+        if let activeIndex = layers.firstIndex(where: { $0.id == activeLayerID }) {
+            layers.insert(layer, at: activeIndex + 1)
+        } else {
+            layers.append(layer)
+        }
+        activeLayerID = layer.id
+        return layer
+    }
+
     mutating func addGroup(named name: String? = nil, containing layerIDs: Set<LayerID> = []) -> LayerRecord {
         let group = LayerRecord(
             id: LayerID(),
@@ -242,6 +267,10 @@ struct ArtDocument: Codable, Sendable, Equatable {
         guard paintLayers.count > 1 else { return }
         guard let activeIndex = layers.firstIndex(where: { $0.id == activeLayerID }) else { return }
 
+        if !layers[activeIndex].isAdjustmentLayer, drawablePaintLayers.count <= 1 {
+            return
+        }
+
         let removedID = layers[activeIndex].id
         layers.remove(at: activeIndex)
         for index in layers.indices where layers[index].clipTargetLayerID == removedID {
@@ -262,7 +291,9 @@ struct ArtDocument: Codable, Sendable, Equatable {
             removalIDs.formUnion(descendantLayerIDs(of: groupID))
         }
 
-        let remainingPaintCount = layers.filter { $0.isPaintLayer && !removalIDs.contains($0.id) }.count
+        let remainingPaintCount = layers.filter {
+            $0.isPaintLayer && !$0.isAdjustmentLayer && !removalIDs.contains($0.id)
+        }.count
         guard remainingPaintCount >= 1 else { return [] }
 
         layers.removeAll { removalIDs.contains($0.id) }
@@ -300,7 +331,7 @@ struct ArtDocument: Codable, Sendable, Equatable {
                 layers[index].parentID = nil
             }
             if let clipTargetLayerID = layers[index].clipTargetLayerID,
-               (!layers[index].isPaintLayer || !validPaintIDs.contains(clipTargetLayerID)) {
+               (!layers[index].isPaintLayer || layers[index].isAdjustmentLayer || !validPaintIDs.contains(clipTargetLayerID)) {
                 layers[index].clipTargetLayerID = nil
             }
         }
@@ -352,17 +383,23 @@ struct ArtDocument: Codable, Sendable, Equatable {
     }
 
     mutating func setLayerBlendMode(_ layerID: LayerID, blendMode: LayerBlendMode) {
-        guard let index = layers.firstIndex(where: { $0.id == layerID && $0.isPaintLayer }) else { return }
+        guard let index = layers.firstIndex(where: {
+            $0.id == layerID && $0.isPaintLayer && !$0.isAdjustmentLayer
+        }) else { return }
         layers[index].blendMode = blendMode
     }
 
     mutating func toggleLayerReference(_ layerID: LayerID) {
-        guard let index = layers.firstIndex(where: { $0.id == layerID && $0.isPaintLayer }) else { return }
+        guard let index = layers.firstIndex(where: {
+            $0.id == layerID && $0.isPaintLayer && !$0.isAdjustmentLayer
+        }) else { return }
         layers[index].isReference.toggle()
     }
 
     mutating func toggleLayerClipping(_ layerID: LayerID) -> Bool {
-        guard let index = layers.firstIndex(where: { $0.id == layerID && $0.isPaintLayer }) else { return false }
+        guard let index = layers.firstIndex(where: {
+            $0.id == layerID && $0.isPaintLayer && !$0.isAdjustmentLayer
+        }) else { return false }
         if layers[index].clipTargetLayerID != nil {
             layers[index].clipTargetLayerID = nil
             return true
@@ -487,7 +524,9 @@ struct ArtDocument: Codable, Sendable, Equatable {
             opacity: source.opacity,
             blendMode: source.blendMode,
             clipTargetLayerID: source.clipTargetLayerID,
-            isReference: source.isReference
+            isReference: source.isReference,
+            mask: source.mask,
+            adjustment: source.adjustment
         )
 
         let insertIndex = activeIndex + 1

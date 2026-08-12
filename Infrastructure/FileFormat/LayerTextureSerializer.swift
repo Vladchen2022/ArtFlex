@@ -189,9 +189,10 @@ private final class LayerSerializerStagingPool {
 }
 
 final class LayerTextureSerializer {
+    private static let tiledTransferThresholdBytes = 64 * 1024 * 1024
+    private static let transferTileLength = 1_024
     private let metalContext: MetalDeviceContext
     private let stagingPool: LayerSerializerStagingPool
-    private let bytesPerPixel = 4
 
     init(
         metalContext: MetalDeviceContext,
@@ -211,6 +212,7 @@ final class LayerTextureSerializer {
         width: Int,
         height: Int
     ) -> Data {
+        let bytesPerPixel = Self.bytesPerPixel(for: texture.pixelFormat)
         let bytesPerRow = width * bytesPerPixel
         var pixelData = Data(count: bytesPerRow * height)
         pixelData.withUnsafeMutableBytes { rawBuffer in
@@ -232,6 +234,7 @@ final class LayerTextureSerializer {
         width: Int,
         height: Int
     ) -> LayerTextureSnapshot {
+        let bytesPerPixel = Self.bytesPerPixel(for: texture.pixelFormat)
         let bytesPerRow = width * bytesPerPixel
         return LayerTextureSnapshot(
             width: width,
@@ -247,6 +250,17 @@ final class LayerTextureSerializer {
         )
     }
 
+    private static func bytesPerPixel(for pixelFormat: MTLPixelFormat) -> Int {
+        switch pixelFormat {
+        case .r8Unorm:
+            return 1
+        case .bgra8Unorm, .bgra8Unorm_srgb:
+            return 4
+        default:
+            return 4
+        }
+    }
+
     func snapshot(texture: MTLTexture) throws -> LayerTextureSnapshot {
         try snapshot(
             texture: texture,
@@ -259,6 +273,11 @@ final class LayerTextureSerializer {
 
     func snapshotBatch(textures: [MTLTexture]) throws -> [LayerTextureSnapshot] {
         guard !textures.isEmpty else { return [] }
+        if textures.contains(where: { Self.requiresTiledTransfer($0) }) {
+            // Avoid retaining one full-size shared staging texture per layer.
+            // Large canvases are intentionally serialized one tiled resource at a time.
+            return try textures.map { try snapshot(texture: $0) }
+        }
         let auditEnabled = PerformanceAuditStore.shared.isRecordingEnabled
         let startedAt = auditEnabled ? DispatchTime.now().uptimeNanoseconds : 0
         defer {
@@ -384,6 +403,21 @@ final class LayerTextureSerializer {
         if texture.storageMode == .shared {
             return makeSnapshot(
                 from: texture,
+                originX: originX,
+                originY: originY,
+                width: width,
+                height: height
+            )
+        }
+
+
+        if Self.requiresTiledTransfer(
+            width: width,
+            height: height,
+            pixelFormat: texture.pixelFormat
+        ) {
+            return try tiledSnapshot(
+                texture: texture,
                 originX: originX,
                 originY: originY,
                 width: width,
@@ -584,6 +618,21 @@ final class LayerTextureSerializer {
             throw CocoaError(.fileReadCorruptFile)
         }
 
+
+        if Self.requiresTiledTransfer(
+            width: snapshot.width,
+            height: snapshot.height,
+            pixelFormat: texture.pixelFormat
+        ) {
+            try tiledRestore(
+                snapshot: snapshot,
+                into: texture,
+                destinationX: destinationX,
+                destinationY: destinationY
+            )
+            return
+        }
+
         let region = MTLRegionMake2D(0, 0, snapshot.width, snapshot.height)
         guard
             let stagingTexture = stagingPool.checkout(
@@ -636,6 +685,23 @@ final class LayerTextureSerializer {
         _ items: [(snapshot: LayerTextureSnapshot, texture: MTLTexture, destinationX: Int, destinationY: Int)]
     ) throws {
         guard !items.isEmpty else { return }
+        if items.contains(where: {
+            Self.requiresTiledTransfer(
+                width: $0.snapshot.width,
+                height: $0.snapshot.height,
+                pixelFormat: $0.texture.pixelFormat
+            )
+        }) {
+            for item in items {
+                try restore(
+                    snapshot: item.snapshot,
+                    into: item.texture,
+                    destinationX: item.destinationX,
+                    destinationY: item.destinationY
+                )
+            }
+            return
+        }
         let auditEnabled = PerformanceAuditStore.shared.isRecordingEnabled
         let startedAt = auditEnabled ? DispatchTime.now().uptimeNanoseconds : 0
         defer {
@@ -815,5 +881,168 @@ final class LayerTextureSerializer {
 
     func stagingPoolDebugSnapshot() -> LayerSerializerStagingPoolSnapshot {
         stagingPool.debugSnapshot()
+    }
+
+    private static func requiresTiledTransfer(_ texture: MTLTexture) -> Bool {
+        requiresTiledTransfer(
+            width: texture.width,
+            height: texture.height,
+            pixelFormat: texture.pixelFormat
+        )
+    }
+
+    private static func requiresTiledTransfer(
+        width: Int,
+        height: Int,
+        pixelFormat: MTLPixelFormat
+    ) -> Bool {
+        let bytesPerPixel = bytesPerPixel(for: pixelFormat)
+        let (pixelCount, pixelOverflow) = width.multipliedReportingOverflow(by: height)
+        let (byteCount, byteOverflow) = pixelCount.multipliedReportingOverflow(by: bytesPerPixel)
+        return pixelOverflow || byteOverflow || byteCount > tiledTransferThresholdBytes
+    }
+
+    private func tiledSnapshot(
+        texture: MTLTexture,
+        originX: Int,
+        originY: Int,
+        width: Int,
+        height: Int
+    ) throws -> LayerTextureSnapshot {
+        let bytesPerPixel = Self.bytesPerPixel(for: texture.pixelFormat)
+        let bytesPerRow = width * bytesPerPixel
+        var pixelData = Data(count: bytesPerRow * height)
+        guard let grid = TileGrid(
+            canvasSize: CanvasSize(width: width, height: height),
+            tileLength: Self.transferTileLength
+        ) else {
+            throw CocoaError(.fileReadCorruptFile)
+        }
+
+        for intersection in grid.intersections(with: grid.canvasBounds) {
+            let tile = intersection.canvasRegion
+            guard let stagingTexture = stagingPool.checkout(
+                width: tile.width,
+                height: tile.height,
+                pixelFormat: texture.pixelFormat
+            ) else {
+                throw CocoaError(.fileWriteUnknown)
+            }
+            defer { stagingPool.checkin(stagingTexture) }
+
+            guard let commandBuffer = metalContext.commandQueue.makeCommandBuffer(),
+                  let blitEncoder = commandBuffer.makeBlitCommandEncoder() else {
+                throw CocoaError(.fileWriteUnknown)
+            }
+            blitEncoder.copy(
+                from: texture,
+                sourceSlice: 0,
+                sourceLevel: 0,
+                sourceOrigin: MTLOrigin(
+                    x: originX + tile.originX,
+                    y: originY + tile.originY,
+                    z: 0
+                ),
+                sourceSize: MTLSize(width: tile.width, height: tile.height, depth: 1),
+                to: stagingTexture,
+                destinationSlice: 0,
+                destinationLevel: 0,
+                destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
+            )
+            blitEncoder.endEncoding()
+            commandBuffer.commit()
+            commandBuffer.waitUntilCompleted()
+            guard commandBuffer.status == .completed else {
+                throw commandBuffer.error ?? CocoaError(.fileReadUnknown)
+            }
+
+            pixelData.withUnsafeMutableBytes { rawBuffer in
+                guard let baseAddress = rawBuffer.baseAddress else { return }
+                let destination = baseAddress.advanced(
+                    by: (tile.originY * bytesPerRow) + (tile.originX * bytesPerPixel)
+                )
+                stagingTexture.getBytes(
+                    destination,
+                    bytesPerRow: bytesPerRow,
+                    from: MTLRegionMake2D(0, 0, tile.width, tile.height),
+                    mipmapLevel: 0
+                )
+            }
+        }
+
+        return LayerTextureSnapshot(
+            width: width,
+            height: height,
+            bytesPerRow: bytesPerRow,
+            pixelData: pixelData
+        )
+    }
+
+    private func tiledRestore(
+        snapshot: LayerTextureSnapshot,
+        into texture: MTLTexture,
+        destinationX: Int,
+        destinationY: Int
+    ) throws {
+        let bytesPerPixel = Self.bytesPerPixel(for: texture.pixelFormat)
+        guard snapshot.bytesPerRow >= snapshot.width * bytesPerPixel,
+              snapshot.pixelData.count >= snapshot.bytesPerRow * snapshot.height,
+              let grid = TileGrid(
+                canvasSize: CanvasSize(width: snapshot.width, height: snapshot.height),
+                tileLength: Self.transferTileLength
+              ) else {
+            throw CocoaError(.fileReadCorruptFile)
+        }
+
+        for intersection in grid.intersections(with: grid.canvasBounds) {
+            let tile = intersection.canvasRegion
+            guard let stagingTexture = stagingPool.checkout(
+                width: tile.width,
+                height: tile.height,
+                pixelFormat: texture.pixelFormat
+            ) else {
+                throw CocoaError(.fileReadCorruptFile)
+            }
+            defer { stagingPool.checkin(stagingTexture) }
+
+            snapshot.pixelData.withUnsafeBytes { rawBuffer in
+                guard let baseAddress = rawBuffer.baseAddress else { return }
+                let source = baseAddress.advanced(
+                    by: (tile.originY * snapshot.bytesPerRow) + (tile.originX * bytesPerPixel)
+                )
+                stagingTexture.replace(
+                    region: MTLRegionMake2D(0, 0, tile.width, tile.height),
+                    mipmapLevel: 0,
+                    withBytes: source,
+                    bytesPerRow: snapshot.bytesPerRow
+                )
+            }
+
+            guard let commandBuffer = metalContext.commandQueue.makeCommandBuffer(),
+                  let blitEncoder = commandBuffer.makeBlitCommandEncoder() else {
+                throw CocoaError(.fileReadCorruptFile)
+            }
+            blitEncoder.copy(
+                from: stagingTexture,
+                sourceSlice: 0,
+                sourceLevel: 0,
+                sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
+                sourceSize: MTLSize(width: tile.width, height: tile.height, depth: 1),
+                to: texture,
+                destinationSlice: 0,
+                destinationLevel: 0,
+                destinationOrigin: MTLOrigin(
+                    x: destinationX + tile.originX,
+                    y: destinationY + tile.originY,
+                    z: 0
+                )
+            )
+            blitEncoder.endEncoding()
+            commandBuffer.commit()
+            commandBuffer.waitUntilCompleted()
+            guard commandBuffer.status == .completed else {
+                throw commandBuffer.error ?? CocoaError(.fileReadCorruptFile)
+            }
+        }
     }
 }

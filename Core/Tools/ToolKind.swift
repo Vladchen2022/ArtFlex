@@ -818,6 +818,7 @@ struct BrushSettings: Codable, Sendable, Equatable {
     var colorJitterAmount: Float
     var paintJitterAmount: Float
     var paintContrastAmount: Float
+    var oilPaint: OilPaintBrushSettings
     var stampRotationDegrees: Float
     var followsStrokeDirection: Bool
     var customTipSourceSemantic: TipSourceSemantic
@@ -856,6 +857,7 @@ struct BrushSettings: Codable, Sendable, Equatable {
         colorJitterAmount: 0,
         paintJitterAmount: 0,
         paintContrastAmount: 0,
+        oilPaint: .disabled,
         stampRotationDegrees: 0,
         followsStrokeDirection: false,
         customTipSourceSemantic: .procedural,
@@ -895,6 +897,7 @@ struct BrushSettings: Codable, Sendable, Equatable {
         case colorJitterAmount
         case paintJitterAmount
         case paintContrastAmount
+        case oilPaint
         case stampRotationDegrees
         case followsStrokeDirection
         case customTipSourceSemantic
@@ -934,6 +937,7 @@ struct BrushSettings: Codable, Sendable, Equatable {
         colorJitterAmount: Float = 0,
         paintJitterAmount: Float = 0,
         paintContrastAmount: Float = 0,
+        oilPaint: OilPaintBrushSettings = .disabled,
         stampRotationDegrees: Float,
         followsStrokeDirection: Bool,
         customTipSourceSemantic: TipSourceSemantic = .procedural,
@@ -971,6 +975,7 @@ struct BrushSettings: Codable, Sendable, Equatable {
         self.colorJitterAmount = colorJitterAmount
         self.paintJitterAmount = paintJitterAmount
         self.paintContrastAmount = paintContrastAmount
+        self.oilPaint = oilPaint
         self.stampRotationDegrees = stampRotationDegrees
         self.followsStrokeDirection = followsStrokeDirection
         self.customTipSourceSemantic = customTipSourceSemantic
@@ -1013,6 +1018,7 @@ struct BrushSettings: Codable, Sendable, Equatable {
         colorJitterAmount = try container.decodeIfPresent(Float.self, forKey: .colorJitterAmount) ?? defaults.colorJitterAmount
         paintJitterAmount = try container.decodeIfPresent(Float.self, forKey: .paintJitterAmount) ?? defaults.paintJitterAmount
         paintContrastAmount = try container.decodeIfPresent(Float.self, forKey: .paintContrastAmount) ?? defaults.paintContrastAmount
+        oilPaint = try container.decodeIfPresent(OilPaintBrushSettings.self, forKey: .oilPaint) ?? defaults.oilPaint
         stampRotationDegrees = try container.decodeIfPresent(Float.self, forKey: .stampRotationDegrees) ?? defaults.stampRotationDegrees
         followsStrokeDirection = try container.decodeIfPresent(Bool.self, forKey: .followsStrokeDirection) ?? defaults.followsStrokeDirection
         customTipSourceSemantic = try container.decodeIfPresent(TipSourceSemantic.self, forKey: .customTipSourceSemantic) ?? defaults.customTipSourceSemantic
@@ -1056,6 +1062,7 @@ struct BrushSettings: Codable, Sendable, Equatable {
         try container.encode(colorJitterAmount, forKey: .colorJitterAmount)
         try container.encode(paintJitterAmount, forKey: .paintJitterAmount)
         try container.encode(paintContrastAmount, forKey: .paintContrastAmount)
+        try container.encode(oilPaint, forKey: .oilPaint)
         try container.encode(stampRotationDegrees, forKey: .stampRotationDegrees)
         try container.encode(followsStrokeDirection, forKey: .followsStrokeDirection)
         try container.encode(customTipSourceSemantic, forKey: .customTipSourceSemantic)
@@ -1527,6 +1534,8 @@ struct ToolSessionState: Codable, Sendable, Equatable {
     var textureFillTip: TextureFillTipSettings
     var textureFillBrushOverride: BrushSettings?
     var eyedropper: EyedropperSettings
+    var oilPaintReservoir: OilPaintPigmentReservoirState
+    var oilPaintOutputMode: OilPaintOutputMode
 
     private var isSynchronizingBrushSlots = false
 
@@ -1540,7 +1549,9 @@ struct ToolSessionState: Codable, Sendable, Equatable {
         smudgeBrushUsesIndependentSettings: Bool = false,
         textureFillTip: TextureFillTipSettings = .proceduralDefault,
         textureFillBrushOverride: BrushSettings? = nil,
-        eyedropper: EyedropperSettings = .stageOneDefault
+        eyedropper: EyedropperSettings = .stageOneDefault,
+        oilPaintReservoir: OilPaintPigmentReservoirState? = nil,
+        oilPaintOutputMode: OilPaintOutputMode = .reservoir
     ) {
         self.activeTool = activeTool
         self.brush = brush
@@ -1552,6 +1563,8 @@ struct ToolSessionState: Codable, Sendable, Equatable {
         self.textureFillTip = textureFillTip
         self.textureFillBrushOverride = textureFillBrushOverride
         self.eyedropper = eyedropper
+        self.oilPaintReservoir = oilPaintReservoir ?? OilPaintPigmentReservoirState(cleanColor: selectedColor)
+        self.oilPaintOutputMode = oilPaintOutputMode
         synchronizeOnInitialization()
     }
 
@@ -1605,6 +1618,37 @@ struct ToolSessionState: Codable, Sendable, Equatable {
         try container.encode(textureFillTip, forKey: .textureFillTip)
         try container.encodeIfPresent(textureFillBrushOverride, forKey: .textureFillBrushOverride)
         try container.encode(eyedropper, forKey: .eyedropper)
+    }
+
+    mutating func commitSelectedColor(_ color: RGBAColor) {
+        selectedColor = color
+        guard brush.oilPaint.isEnabled, brush.effectivePaintJitterAmount > 0.001 else {
+            oilPaintReservoir.wash(with: color)
+            return
+        }
+    }
+
+    @discardableResult
+    mutating func loadSelectedColorIntoOilPaintReservoir() -> Bool {
+        guard brush.oilPaint.isEnabled, brush.effectivePaintJitterAmount > 0.001 else {
+            return false
+        }
+        oilPaintReservoir.load(selectedColor, amount: brush.oilPaint.newColorLoad)
+        return true
+    }
+
+    mutating func washOilPaintReservoir() {
+        oilPaintReservoir.wash(with: selectedColor)
+    }
+
+    var activeOilPaintPalette: BrushPigmentPalette {
+        guard activeTool == .brush,
+              brush.oilPaint.isEnabled,
+              oilPaintOutputMode == .reservoir,
+              brush.effectivePaintJitterAmount > 0.001 else {
+            return .empty
+        }
+        return oilPaintReservoir.palette(lightnessFollow: brush.oilPaint.lightnessFollow)
     }
 
     static let stageOneDefault: ToolSessionState = {

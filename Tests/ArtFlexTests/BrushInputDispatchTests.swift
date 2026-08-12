@@ -296,5 +296,9 @@ struct BrushInputDispatchTests {
             selectionShape: nil,
             at: .init(x: 20, y: 20)
         ))
+        #expect(shouldOfferSelectionRefinementContextMenu(
+            selectionShape: selection,
+            at: .init(x: 20, y: 20)
+        ))
     }
 }

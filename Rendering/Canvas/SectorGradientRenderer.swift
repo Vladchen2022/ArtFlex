@@ -18,6 +18,22 @@ private struct SectorGradientUniforms {
     var usesAlphaLock: Float
 }
 
+private struct SectorGradientGPUStop {
+    var positionAndPadding: SIMD4<Float>
+    var color: SIMD4<Float>
+}
+
+private final class SectorGradientVertexBufferLease: @unchecked Sendable {
+    let buffer: MTLBuffer
+    let capacity: Int
+    var isInUse = false
+
+    init(buffer: MTLBuffer, capacity: Int) {
+        self.buffer = buffer
+        self.capacity = capacity
+    }
+}
+
 enum SectorGradientMaskQuality {
     case preview
     case commit
@@ -78,8 +94,8 @@ final class SectorGradientRenderer {
     private var cachedSelectionMaskShape: SelectionShape?
     private var cachedSelectionMaskCanvasSize: CanvasSize?
     private var cachedSelectionMaskTexture: MTLTexture?
-    private var reusableVertexBuffer: MTLBuffer?
-    private var reusableVertexBufferLength = 0
+    private let vertexBufferLeaseLock = NSLock()
+    private var vertexBufferLeases: [SectorGradientVertexBufferLease] = []
 
     init(device: MTLDevice) {
         self.device = device
@@ -101,6 +117,11 @@ final class SectorGradientRenderer {
             float distortionAmount;
             float usesSelectionMask;
             float usesAlphaLock;
+        };
+
+        struct GradientGPUStop {
+            float4 positionAndPadding;
+            float4 color;
         };
 
         struct VertexOut {
@@ -210,9 +231,35 @@ final class SectorGradientRenderer {
             return mix(wheelSrgb, srgbColor, baseCoverage);
         }
 
+        float4 gradientColorAt(
+            float position,
+            const device GradientGPUStop *stops,
+            uint stopCount
+        ) {
+            if (stopCount == 0) return float4(0.0);
+            float t = clamp(position, 0.0, 1.0);
+            GradientGPUStop lower = stops[0];
+            for (uint index = 1; index < stopCount; ++index) {
+                GradientGPUStop upper = stops[index];
+                float upperPosition = upper.positionAndPadding.x;
+                if (t < upperPosition) {
+                    float lowerPosition = lower.positionAndPadding.x;
+                    float span = upperPosition - lowerPosition;
+                    float amount = span > 0.000001
+                        ? smoothstep(0.0, 1.0, clamp((t - lowerPosition) / span, 0.0, 1.0))
+                        : 1.0;
+                    return mix(lower.color, upper.color, amount);
+                }
+                lower = upper;
+            }
+            return lower.color;
+        }
+
         fragment float4 sectorGradientFragmentShader(
             VertexOut in [[stage_in]],
             constant SectorGradientUniforms &uniforms [[buffer(1)]],
+            const device GradientGPUStop *gradientStops [[buffer(2)]],
+            constant uint &gradientStopCount [[buffer(3)]],
             texture2d<float> selectionMask [[texture(0)]],
             texture2d<float> alphaLockTexture [[texture(1)]]
         ) {
@@ -239,13 +286,13 @@ final class SectorGradientRenderer {
 
             float radius = length(in.canvasPosition - uniforms.center);
             float t = clamp(radius / max(uniforms.maxRadius, 0.0001), 0.0, 1.0);
-            float easedAlpha = 1.0 - smoothstep(0.0, 1.0, t);
-            float alpha = easedAlpha * uniforms.color.a * maskAlpha;
+            float4 gradientColor = gradientColorAt(t, gradientStops, gradientStopCount);
+            float alpha = gradientColor.a * maskAlpha;
             float2 distortedPos = noiseDistort(in.canvasPosition, uniforms.distortionAmount);
             float angle = atan2(distortedPos.y - uniforms.center.y, distortedPos.x - uniforms.center.x);
             float angleNormalized = (angle / 6.283185307179586) + 0.5;
             float3 jitteredColor = radialPaintJitteredSrgbColor(
-                uniforms.color.rgb,
+                gradientColor.rgb,
                 angleNormalized,
                 uniforms.paintJitterAmount,
                 uniforms.paintContrastAmount
@@ -353,6 +400,7 @@ final class SectorGradientRenderer {
         pathPoints: [CanvasPoint],
         maxRadius: Double,
         color: RGBAColor,
+        settings: GradientSettings? = nil,
         paintJitterAmount: Float = 0,
         paintContrastAmount: Float = 0,
         distortionAmount: Float = 0,
@@ -372,8 +420,14 @@ final class SectorGradientRenderer {
         let vertices = vertexPositions.map {
             SectorGradientVertex(position: SIMD2(Float($0.x), Float($0.y)))
         }
-        guard let vertexBuffer = makeVertexBuffer(vertices: vertices) else {
+        guard let vertexBufferLease = leaseVertexBuffer(vertices: vertices) else {
             return
+        }
+        var shouldReleaseVertexBufferImmediately = true
+        defer {
+            if shouldReleaseVertexBufferImmediately {
+                releaseVertexBuffer(vertexBufferLease)
+            }
         }
 
         let selectionMaskTexture = makeSelectionMaskTexture(
@@ -392,40 +446,83 @@ final class SectorGradientRenderer {
             usesSelectionMask: selectionShape == nil ? 0 : 1,
             usesAlphaLock: alphaLockTexture == nil ? 0 : 1
         )
+        let resolvedSettings = settings ?? .currentColorToTransparent(color)
+        let gradientStops = resolvedSettings.stops.map { stop in
+            SectorGradientGPUStop(
+                positionAndPadding: SIMD4(stop.position, 0, 0, 0),
+                color: SIMD4(stop.color.red, stop.color.green, stop.color.blue, stop.color.alpha)
+            )
+        }
+        var gradientStopCount = UInt32(gradientStops.count)
 
         guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor) else {
             return
         }
 
         encoder.setRenderPipelineState(alphaLockTexture == nil ? pipelineState : alphaLockPipelineState)
-        encoder.setVertexBuffer(vertexBuffer, offset: 0, index: 0)
+        encoder.setVertexBuffer(vertexBufferLease.buffer, offset: 0, index: 0)
         encoder.setVertexBytes(&uniforms, length: MemoryLayout<SectorGradientUniforms>.stride, index: 1)
         encoder.setFragmentBytes(&uniforms, length: MemoryLayout<SectorGradientUniforms>.stride, index: 1)
+        gradientStops.withUnsafeBufferPointer { buffer in
+            guard let baseAddress = buffer.baseAddress else { return }
+            encoder.setFragmentBytes(
+                baseAddress,
+                length: MemoryLayout<SectorGradientGPUStop>.stride * buffer.count,
+                index: 2
+            )
+        }
+        encoder.setFragmentBytes(&gradientStopCount, length: MemoryLayout<UInt32>.stride, index: 3)
         encoder.setFragmentTexture(selectionMaskTexture, index: 0)
         encoder.setFragmentTexture(alphaLockTexture ?? fallbackAlphaLockTexture, index: 1)
         encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: vertices.count)
         encoder.endEncoding()
+        commandBuffer.addCompletedHandler { [weak self] _ in
+            self?.releaseVertexBuffer(vertexBufferLease)
+        }
+        shouldReleaseVertexBufferImmediately = false
     }
 
-    private func makeVertexBuffer(vertices: [SectorGradientVertex]) -> MTLBuffer? {
+    private func leaseVertexBuffer(
+        vertices: [SectorGradientVertex]
+    ) -> SectorGradientVertexBufferLease? {
         let length = MemoryLayout<SectorGradientVertex>.stride * vertices.count
         guard length > 0 else { return nil }
 
-        if reusableVertexBuffer == nil || reusableVertexBufferLength < length {
+        vertexBufferLeaseLock.lock()
+        let lease: SectorGradientVertexBufferLease?
+        if let reusable = vertexBufferLeases
+            .filter({ !$0.isInUse && $0.capacity >= length })
+            .min(by: { $0.capacity < $1.capacity }) {
+            reusable.isInUse = true
+            lease = reusable
+        } else {
             let capacity = max(length, 16 * 1024)
-            reusableVertexBuffer = device.makeBuffer(length: capacity, options: .storageModeShared)
-            reusableVertexBufferLength = capacity
+            if let buffer = device.makeBuffer(length: capacity, options: .storageModeShared) {
+                let created = SectorGradientVertexBufferLease(buffer: buffer, capacity: capacity)
+                created.isInUse = true
+                vertexBufferLeases.append(created)
+                lease = created
+            } else {
+                lease = nil
+            }
         }
+        vertexBufferLeaseLock.unlock()
 
-        guard let reusableVertexBuffer else { return nil }
+        guard let lease else { return nil }
         vertices.withUnsafeBytes { rawBuffer in
             guard let sourceBaseAddress = rawBuffer.baseAddress else { return }
-            reusableVertexBuffer.contents().copyMemory(
+            lease.buffer.contents().copyMemory(
                 from: sourceBaseAddress,
                 byteCount: rawBuffer.count
             )
         }
-        return reusableVertexBuffer
+        return lease
+    }
+
+    private func releaseVertexBuffer(_ lease: SectorGradientVertexBufferLease) {
+        vertexBufferLeaseLock.lock()
+        lease.isInUse = false
+        vertexBufferLeaseLock.unlock()
     }
 
     private func makeSelectionMaskTexture(

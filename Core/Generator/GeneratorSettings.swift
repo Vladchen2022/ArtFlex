@@ -2,26 +2,23 @@ import Foundation
 
 enum GeneratorKind: String, Codable, Sendable, Equatable, CaseIterable {
     case automaticLines
-    case inkBlots
-    case fragmentField
-    case brushStack
-    case colorClusters
     case driftDraw
+    case elasticWhip
+    case tremorTrace
+    case angularBreaks
 
     var displayName: String {
         switch self {
         case .automaticLines:
             return "自动线条"
-        case .inkBlots:
-            return "墨迹块"
-        case .fragmentField:
-            return "碎片场"
-        case .brushStack:
-            return "刷毛堆叠"
-        case .colorClusters:
-            return "色团组合"
         case .driftDraw:
             return "偏离手绘"
+        case .elasticWhip:
+            return "弹性甩线"
+        case .tremorTrace:
+            return "颤动游线"
+        case .angularBreaks:
+            return "折向线"
         }
     }
 }
@@ -91,7 +88,7 @@ struct GeneratorSettings: Codable, Sendable, Equatable {
         }
 
         switch rawValue {
-        case "checker", "diagonalStripes", "radialBurst":
+        case "checker", "diagonalStripes", "radialBurst", "inkBlots", "fragmentField", "brushStack", "colorClusters":
             return .automaticLines
         default:
             return .automaticLines

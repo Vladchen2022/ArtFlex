@@ -20,6 +20,7 @@ struct ToolSidebarView: View {
     @State private var suppressSnapshotPrimaryAction = false
     @State private var showsDrawingStatsPopover = false
     @State private var showsRecorderPopover = false
+    @State private var showsGeneratorPopover = false
     @State private var recorderExportFPS = 12.0
 
     private let groupEntries: [ToolSidebarEntry] =
@@ -54,6 +55,7 @@ struct ToolSidebarView: View {
             }
 
             VStack(spacing: sidebarUtilityButtonSpacing) {
+                generatorButton
                 snapshotButton
                 ideationButton
                 drawingStatsButton
@@ -66,6 +68,49 @@ struct ToolSidebarView: View {
         .frame(width: 152)
         .frame(maxHeight: .infinity)
         .background(Color(red: 0.13, green: 0.13, blue: 0.14))
+    }
+
+    private var generatorButton: some View {
+        Button {
+            showsSnapshotPopover = false
+            showsDrawingStatsPopover = false
+            showsRecorderPopover = false
+            showsGeneratorPopover.toggle()
+        } label: {
+            HStack(spacing: sidebarButtonContentSpacing) {
+                Image(systemName: "point.3.connected.trianglepath.dotted")
+                    .font(.system(size: sidebarButtonIconFontSize, weight: .semibold))
+                    .frame(width: sidebarButtonLeadingIconWidth)
+                Text("生成器")
+                    .font(.system(size: sidebarButtonLabelFontSize, weight: .semibold))
+                    .lineLimit(1)
+                Spacer(minLength: sidebarButtonTrailingGap)
+                Circle()
+                    .fill(
+                        hostViewModel.isGeneratorStrokeModeEnabled || hostViewModel.isGeneratorRegionSelectionArmed
+                            ? Color.green
+                            : Color.white.opacity(0.25)
+                    )
+                    .frame(width: 8, height: 8)
+            }
+            .foregroundStyle(Color.white.opacity(0.9))
+            .padding(.horizontal, sidebarButtonHorizontalPadding)
+            .frame(width: sidebarButtonWidth, height: sidebarButtonHeight)
+            .background(
+                RoundedRectangle(cornerRadius: sidebarButtonCornerRadius)
+                    .fill(
+                        hostViewModel.isGeneratorStrokeModeEnabled || hostViewModel.isGeneratorRegionSelectionArmed
+                            ? Color.accentColor.opacity(0.22)
+                            : Color.white.opacity(0.08)
+                    )
+            )
+        }
+        .buttonStyle(.plain)
+        .help("创意生成器")
+        .popover(isPresented: $showsGeneratorPopover, arrowEdge: .leading) {
+            GeneratorParameterPanel(viewModel: viewModel)
+        }
+        .disabled(hostViewModel.ideationSession != nil || hostViewModel.snapshotCompareSession != nil)
     }
 
     private var snapshotButton: some View {

@@ -4,24 +4,30 @@ import UniformTypeIdentifiers
 
 @MainActor
 final class FilePanelService {
+    private static let artFlexProjectType: UTType = UTType(
+        tag: "artflex",
+        tagClass: .filenameExtension,
+        conformingTo: .package
+    ) ?? UTType(exportedAs: "com.vladchen.artflex.project-package", conformingTo: .package)
+
     func presentProjectSavePanel(defaultName: String) -> URL? {
         let panel = NSSavePanel()
-        panel.allowedContentTypes = [.json]
+        panel.allowedContentTypes = [Self.artFlexProjectType]
         panel.canCreateDirectories = true
-        panel.nameFieldStringValue = "\(defaultName).artflex.json"
-        panel.title = "Save Project"
-        panel.prompt = "Save"
+        panel.nameFieldStringValue = "\(defaultName).artflex"
+        panel.title = "保存 ArtFlex 工程"
+        panel.prompt = "保存"
         return panel.runModal() == .OK ? panel.url : nil
     }
 
     func presentProjectOpenPanel() -> URL? {
         let panel = NSOpenPanel()
-        panel.allowedContentTypes = [.json]
-        panel.canChooseDirectories = false
+        panel.allowedContentTypes = [Self.artFlexProjectType, .json]
+        panel.canChooseDirectories = true
         panel.canChooseFiles = true
         panel.allowsMultipleSelection = false
-        panel.title = "Open Project"
-        panel.prompt = "Open"
+        panel.title = "打开 ArtFlex 工程"
+        panel.prompt = "打开"
         return panel.runModal() == .OK ? panel.url : nil
     }
 
@@ -33,6 +39,28 @@ final class FilePanelService {
         panel.title = "Export PNG"
         panel.prompt = "Export"
 
+        return panel.runModal() == .OK ? panel.url : nil
+    }
+
+    func presentRasterExportPanel(
+        defaultName: String,
+        format: RasterExportFormat
+    ) -> URL? {
+        let contentType: UTType
+        switch format {
+        case .png:
+            contentType = .png
+        case .jpeg:
+            contentType = .jpeg
+        case .tiff:
+            contentType = .tiff
+        }
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [contentType]
+        panel.canCreateDirectories = true
+        panel.nameFieldStringValue = "\(defaultName).\(format.fileExtension)"
+        panel.title = "导出 \(format.rawValue.uppercased())"
+        panel.prompt = "导出"
         return panel.runModal() == .OK ? panel.url : nil
     }
 

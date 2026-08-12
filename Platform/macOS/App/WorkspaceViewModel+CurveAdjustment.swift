@@ -832,6 +832,8 @@ extension WorkspaceViewModel {
             return "切换图层前，要先确认当前曲线调整效果，还是放弃这次调整？"
         case .historyNavigation:
             return "继续撤销或重做前，要先确认当前曲线调整效果，还是放弃这次调整？"
+        case .persistence:
+            return "保存工程前，要先确认当前曲线调整效果，还是放弃这次调整？"
         case .documentOpen:
             return "继续打开或新建画布前，要先确认当前曲线调整效果，还是放弃这次调整？"
         case .closeOrQuit:

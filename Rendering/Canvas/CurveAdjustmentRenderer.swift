@@ -9,6 +9,7 @@ private struct CurveAdjustmentPreviewUniforms {
     var canvasSize: SIMD2<UInt32>
     var maskReadMode: UInt32
     var overlayOnly: UInt32
+    var effectOpacity: Float
     var padding: UInt32 = 0
 }
 
@@ -56,6 +57,7 @@ final class CurveAdjustmentRenderer {
             uint2 canvasSize;
             uint maskReadMode;
             uint overlayOnly;
+            float effectOpacity;
             uint padding;
         };
 
@@ -135,7 +137,7 @@ final class CurveAdjustmentRenderer {
             float influence = uniforms.maskReadMode == 0
                 ? maskTexture.read(gid).r
                 : base.a;
-            influence = clamp(influence, 0.0, 1.0);
+            influence = clamp(influence, 0.0, 1.0) * clamp(uniforms.effectOpacity, 0.0, 1.0);
 
             if (influence <= 0.0001) {
                 return base;
@@ -226,6 +228,7 @@ final class CurveAdjustmentRenderer {
         luts: CurveLUTs,
         overlayOnly: Bool,
         effectRegion: MTLRegion?,
+        effectOpacity: Float = 1,
         commandQueue: MTLCommandQueue,
         completion: (() -> Void)? = nil
     ) {
@@ -242,6 +245,7 @@ final class CurveAdjustmentRenderer {
             luts: luts,
             overlayOnly: overlayOnly,
             effectRegion: effectRegion,
+            effectOpacity: effectOpacity,
             commandBuffer: commandBuffer
         )
 
@@ -262,6 +266,7 @@ final class CurveAdjustmentRenderer {
         luts: CurveLUTs,
         overlayOnly: Bool,
         effectRegion: MTLRegion?,
+        effectOpacity: Float = 1,
         commandBuffer: MTLCommandBuffer
     ) {
         guard let blitEncoder = commandBuffer.makeBlitCommandEncoder() else { return }
@@ -306,7 +311,8 @@ final class CurveAdjustmentRenderer {
                 UInt32(sourceTexture.height)
             ),
             maskReadMode: maskReadMode == .maskRed ? 0 : 1,
-            overlayOnly: overlayOnly ? 1 : 0
+            overlayOnly: overlayOnly ? 1 : 0,
+            effectOpacity: effectOpacity
         )
 
         encoder.setVertexBytes(

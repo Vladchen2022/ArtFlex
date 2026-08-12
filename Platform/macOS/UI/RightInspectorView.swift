@@ -205,9 +205,10 @@ func rightInspectorUsesCompactParameterLayout(
     guard isBrushTab else { return true }
 
     switch activeTool {
-    case .brush, .eraser, .smudge, .straightLine, .brightnessAdjust, .colorVitalization,
-         .eyedropper, .perspective, .textureFill:
+    case .brightnessAdjust, .colorVitalization, .eyedropper, .perspective, .textureFill:
         return false
+    case .brush, .eraser, .smudge, .straightLine:
+        return true
     case .lassoFill:
         return !usesTextureFillControls
     default:
@@ -684,6 +685,7 @@ struct RightInspectorView: View {
     @State private var draggedTipImageLibraryAssetID: BrushTipImageAssetID?
     @State private var tipImageLibraryDropTargetID: BrushTipImageAssetID?
     @State private var showsCompoundBrushBuilder = false
+    @State private var showsBrushAdvancedSettings = false
     @State private var libraryInspectorTab: LibraryInspectorTab = .brush
     @State private var librarySearchText = ""
     @State private var libraryFilter: LibraryFilter = .all
@@ -700,6 +702,7 @@ struct RightInspectorView: View {
     @State private var textureFillPreviewCoverage: Float?
     @State private var textureFillPreviewVariation: Float?
     @State private var textureFillPreviewPaintJitterAmount: Float?
+    @State private var activeOilPaintBoundaryIndex: Int?
     var body: some View {
         ZStack {
             GeometryReader { proxy in
@@ -764,6 +767,12 @@ struct RightInspectorView: View {
                 .transition(.move(edge: .trailing).combined(with: .opacity))
                 .zIndex(2)
             }
+
+            if showsBrushAdvancedSettings {
+                brushAdvancedSettingsOverlay
+                    .transition(.move(edge: .trailing).combined(with: .opacity))
+                    .zIndex(3)
+            }
         }
         .frame(width: 560)
         .frame(maxHeight: .infinity)
@@ -786,6 +795,7 @@ struct RightInspectorView: View {
         }
         .onChange(of: viewModel.workspace.toolSession.activeTool) { oldTool, newTool in
             guard oldTool != newTool else { return }
+            showsBrushAdvancedSettings = false
             if oldTool == .textureFill || newTool == .textureFill {
                 textureFillPreviewMaterialScale = nil
                 textureFillPreviewCoverage = nil
@@ -868,6 +878,9 @@ struct RightInspectorView: View {
         VStack(alignment: .leading, spacing: 10) {
             if viewModel.workspace.toolSession.activeTool != .colorVitalization {
                 parameterInspectorTabs
+            }
+            if parameterInspectorTab == .brush && usesFullBrushParameterControls {
+                pinnedBrushCommonControls
             }
             parameterInspectorContent
                 .frame(maxWidth: .infinity, alignment: .topLeading)
@@ -1532,13 +1545,14 @@ struct RightInspectorView: View {
                 eyedropperParameterControls
             } else if viewModel.workspace.toolSession.activeTool == .perspective {
                 perspectiveParameterControls
+            } else if viewModel.workspace.toolSession.activeTool == .bucket {
+                bucketFillParameterControls
             } else if isLassoFillToolActive {
                 lassoFillParameterControls
             } else if usesFillParameterControls {
                 fillParameterControls
             } else if usesFullBrushParameterControls {
                 fullBrushParameterControls
-                brushAdvancedActions
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -2236,9 +2250,79 @@ struct RightInspectorView: View {
 
     private var fillParameterControls: some View {
         VStack(alignment: .leading, spacing: 8) {
+            GradientStopsEditor(
+                settings: viewModel.displayedGradientSettings,
+                followsCurrentColor: viewModel.gradientFollowsSelectedColor,
+                onAdd: viewModel.addGradientStop,
+                onUpdate: viewModel.updateGradientStop,
+                onRemove: viewModel.removeGradientStop,
+                onReset: viewModel.resetGradientSettingsToCurrentColor
+            )
             brushJitterSlider
             paintJitterSlider
         }
+    }
+
+    private var bucketFillParameterControls: some View {
+        let settings = viewModel.fillSettings
+        return VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("油漆桶")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(Color.white.opacity(0.92))
+                Spacer()
+                Button("重置") { viewModel.resetFillSettings() }
+                    .buttonStyle(.borderless)
+                    .controlSize(.mini)
+            }
+
+            BrushParameterSliderRow(
+                title: "容差",
+                value: Double(settings.tolerance * 100),
+                range: 0...100,
+                formatter: { "\(Int($0.rounded()))%" },
+                onPreview: { viewModel.setFillTolerance(Float($0 / 100)) },
+                onCommit: { viewModel.setFillTolerance(Float($0 / 100)) }
+            )
+
+            Toggle(
+                "仅填充相邻区域",
+                isOn: Binding(
+                    get: { settings.isContiguous },
+                    set: viewModel.setFillContiguous
+                )
+            )
+            .toggleStyle(.switch)
+            .controlSize(.mini)
+            .font(.system(size: 10.5, weight: .semibold))
+            .foregroundStyle(Color.white.opacity(0.8))
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("采样范围")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(Color.white.opacity(0.68))
+                Picker(
+                    "采样范围",
+                    selection: Binding(
+                        get: { settings.sampleSource },
+                        set: viewModel.setFillSampleSource
+                    )
+                ) {
+                    Text("自动").tag(FillSampleSource.automatic)
+                    Text("当前层").tag(FillSampleSource.currentLayer)
+                    Text("可见层").tag(FillSampleSource.allVisibleLayers)
+                    Text("参考层").tag(FillSampleSource.markedReferenceLayers)
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+                .controlSize(.small)
+            }
+
+            Text(settings.isContiguous ? "从落点向相邻像素扩散" : "替换采样范围内所有相近颜色")
+                .font(.system(size: 9.5, weight: .medium))
+                .foregroundStyle(Color.white.opacity(0.48))
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private var pinnedBrushCommonControls: some View {
@@ -2295,6 +2379,10 @@ struct RightInspectorView: View {
                 onPreview: { viewModel.setPaintJitterAmount(Float($0 / 100)) },
                 onCommit: { viewModel.setPaintJitterAmount(Float($0 / 100)) }
             )
+
+            if viewModel.workspace.toolSession.activeTool == .brush {
+                oilPaintControls(brush: brush)
+            }
         }
         .padding(8)
         .background(
@@ -2307,24 +2395,193 @@ struct RightInspectorView: View {
         )
     }
 
+    @ViewBuilder
+    private func oilPaintControls(brush: BrushSettings) -> some View {
+        let isAvailable = viewModel.displayedPaintJitterAmount > 0.001
+        let isEnabled = brush.oilPaint.isEnabled && isAvailable
+
+        VStack(alignment: .leading, spacing: 7) {
+            HStack(spacing: 7) {
+                Toggle(
+                    "仿真油画笔",
+                    isOn: Binding(
+                        get: { isEnabled },
+                        set: { viewModel.setOilPaintEnabled($0) }
+                    )
+                )
+                .toggleStyle(.switch)
+                .controlSize(.mini)
+                .font(.system(size: 10.5, weight: .semibold))
+                .foregroundStyle(Color.white.opacity(isAvailable ? 0.86 : 0.42))
+                .disabled(!isAvailable)
+                .buttonTooltip("保留笔头中的旧颜色，让后来选择的颜色逐步混入")
+            }
+
+            if !isAvailable {
+                Text("需先提高“杂色”")
+                    .font(.system(size: 9.5, weight: .medium))
+                    .foregroundStyle(Color.white.opacity(0.42))
+            } else if isEnabled {
+                BrushParameterSliderRow(
+                    title: "新色装载",
+                    value: Double(brush.oilPaint.newColorLoad * 100),
+                    range: 0...100,
+                    formatter: { "\(Int($0.rounded()))%" },
+                    onPreview: { viewModel.setOilPaintNewColorLoad(Float($0 / 100)) },
+                    onCommit: { viewModel.setOilPaintNewColorLoad(Float($0 / 100)) }
+                )
+
+                BrushParameterSliderRow(
+                    title: "明度跟随",
+                    value: Double(brush.oilPaint.lightnessFollow * 100),
+                    range: 0...100,
+                    formatter: { "\(Int($0.rounded()))%" },
+                    onPreview: { viewModel.setOilPaintLightnessFollow(Float($0 / 100)) },
+                    onCommit: { viewModel.setOilPaintLightnessFollow(Float($0 / 100)) }
+                )
+
+                Picker(
+                    "出笔颜色",
+                    selection: Binding(
+                        get: { viewModel.workspace.toolSession.oilPaintOutputMode },
+                        set: { viewModel.setOilPaintOutputMode($0) }
+                    )
+                ) {
+                    Text("笔头含色").tag(OilPaintOutputMode.reservoir)
+                    Text("当前色直绘").tag(OilPaintOutputMode.currentColor)
+                }
+                .pickerStyle(.segmented)
+                .controlSize(.mini)
+                .buttonTooltip("当前色直绘不会清除笔头中已经装载的颜色")
+
+                HStack(spacing: 6) {
+                    Spacer(minLength: 0)
+
+                    Button("沾色 \(viewModel.shortcutSettings.oilPaintLoadShortcut.displayString)") {
+                        viewModel.loadSelectedColorIntoOilPaintBrush()
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.mini)
+                    .buttonTooltip("按新色装载比例，把当前选中的颜色加入笔头")
+
+                    Button("洗笔 \(viewModel.shortcutSettings.oilPaintWashShortcut.displayString)") {
+                        viewModel.washOilPaintBrush()
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.mini)
+                    .buttonTooltip("清除旧颜色，只保留当前颜色")
+                }
+
+                HStack(spacing: 7) {
+                    Text("笔头含色")
+                        .font(.system(size: 9.5, weight: .semibold))
+                        .foregroundStyle(Color.white.opacity(0.58))
+                        .frame(width: 58, alignment: .leading)
+                    oilPaintPigmentPreview
+                }
+
+                Text("模拟笔头残留；不读取画布上的湿色")
+                    .font(.system(size: 8.5, weight: .medium))
+                    .foregroundStyle(Color.white.opacity(0.42))
+            }
+        }
+        .padding(.top, 2)
+    }
+
+    private var oilPaintPigmentPreview: some View {
+        let components = viewModel.oilPaintPigmentPreviewComponents
+
+        return GeometryReader { geometry in
+            ZStack(alignment: .leading) {
+                HStack(spacing: 0) {
+                    ForEach(Array(components.enumerated()), id: \.offset) { _, component in
+                        Rectangle()
+                            .fill(
+                                Color(
+                                    red: Double(component.color.red),
+                                    green: Double(component.color.green),
+                                    blue: Double(component.color.blue),
+                                    opacity: Double(component.color.alpha)
+                                )
+                            )
+                            .frame(width: max(geometry.size.width * CGFloat(component.weight), 1))
+                            .help("\(Int((component.weight * 100).rounded()))%")
+                    }
+                }
+                .clipShape(Capsule())
+
+                ForEach(Array(components.indices.dropLast()), id: \.self) { index in
+                    let cumulativeWeight = components[...index].reduce(Float.zero) { $0 + $1.weight }
+                    Capsule()
+                        .fill(Color.white.opacity(0.96))
+                        .shadow(color: Color.black.opacity(0.55), radius: 1, x: 0, y: 0.5)
+                        .frame(width: 3, height: 14)
+                        .position(
+                            x: geometry.size.width * CGFloat(cumulativeWeight),
+                            y: geometry.size.height * 0.5
+                        )
+                        .allowsHitTesting(false)
+                }
+            }
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { value in
+                        guard geometry.size.width > 0, components.count > 1 else { return }
+                        let location = min(max(value.location.x, 0), geometry.size.width)
+                        if activeOilPaintBoundaryIndex == nil {
+                            let boundaries = components.indices.dropLast().map { index in
+                                components[...index].reduce(Float.zero) { $0 + $1.weight }
+                            }
+                            activeOilPaintBoundaryIndex = boundaries.enumerated().min { lhs, rhs in
+                                abs(CGFloat(lhs.element) * geometry.size.width - location)
+                                    < abs(CGFloat(rhs.element) * geometry.size.width - location)
+                            }?.offset
+                        }
+                        guard let activeOilPaintBoundaryIndex else { return }
+                        viewModel.setOilPaintPigmentBoundary(
+                            after: activeOilPaintBoundaryIndex,
+                            cumulativeWeight: Float(location / geometry.size.width)
+                        )
+                    }
+                    .onEnded { _ in
+                        activeOilPaintBoundaryIndex = nil
+                    }
+            )
+        }
+        .frame(height: 16)
+        .overlay(
+            Capsule()
+                .stroke(Color.white.opacity(0.2), lineWidth: 1)
+        )
+        .accessibilityLabel("笔头残留颜色")
+    }
+
     private var fullBrushParameterControls: some View {
         let brush = viewModel.workspace.toolSession.brush
         let compoundEnabled = brush.compoundBrush.enabled
-        let rawRotation = Double(brush.stampRotationDegrees)
-        let signedRotation = rawRotation > 180 ? rawRotation - 360 : rawRotation
 
-        return VStack(alignment: .leading, spacing: 9) {
+        return HStack(spacing: 8) {
             HStack(spacing: 8) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("组合笔刷")
-                        .font(.system(size: 10.5, weight: .bold))
-                        .foregroundStyle(Color.white.opacity(0.9))
-                    Text(compoundEnabled ? "已启用 · A/B 参数在编辑器中修改" : "将两个笔尖组合为一条笔触")
-                        .font(.system(size: 8.5, weight: .medium))
-                        .foregroundStyle(Color.white.opacity(0.5))
-                        .lineLimit(2)
+                Text("组合笔刷")
+                    .font(.system(size: 10.5, weight: .bold))
+                    .foregroundStyle(Color.white.opacity(0.9))
+
+                Spacer(minLength: 0)
+
+                if compoundEnabled {
+                    Button {
+                        showsCompoundBrushBuilder = true
+                    } label: {
+                        Image(systemName: "pencil")
+                            .font(.system(size: 9, weight: .bold))
+                            .frame(width: 20, height: 20)
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.mini)
+                    .buttonTooltip("编辑组合笔刷 A/B")
                 }
-                Spacer(minLength: 4)
+
                 Toggle(
                     "",
                     isOn: Binding(
@@ -2336,15 +2593,9 @@ struct RightInspectorView: View {
                 .toggleStyle(.switch)
                 .controlSize(.mini)
                 .buttonTooltip("启用或停用组合笔刷")
-                if compoundEnabled {
-                    Button("编辑 A/B") {
-                        showsCompoundBrushBuilder = true
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.mini)
-                }
             }
-            .padding(8)
+            .padding(.horizontal, 8)
+            .frame(maxWidth: .infinity, minHeight: 40)
             .background(
                 RoundedRectangle(cornerRadius: 8)
                     .fill(compoundEnabled ? Color.accentColor.opacity(0.09) : Color.white.opacity(0.035))
@@ -2357,57 +2608,91 @@ struct RightInspectorView: View {
                     )
             )
 
-            brushParameterSectionHeader("笔尖排布")
-
-            BrushParameterSliderRow(
-                title: "位置散布",
-                value: Double(brush.scatterAmount * 50),
-                range: 0...250,
-                formatter: { "\(Int($0.rounded()))%" },
-                onPreview: { viewModel.setBrushScatterAmount(Float($0 / 50)) },
-                onCommit: { viewModel.setBrushScatterAmount(Float($0 / 50)) }
-            )
-
-            if brush.tipShape.hasVisibleRotation {
-                BrushParameterSliderRow(
-                    title: "笔尖角度",
-                    value: signedRotation,
-                    range: -180...180,
-                    formatter: { "\(Int($0.rounded()))°" },
-                    onPreview: { viewModel.setBrushStampRotationDegrees(Float($0)) },
-                    onCommit: { viewModel.setBrushStampRotationDegrees(Float($0)) }
-                )
-
-                Toggle(
-                    "跟随笔迹方向",
-                    isOn: Binding(
-                        get: { brush.followsStrokeDirection },
-                        set: { viewModel.setBrushFollowsStrokeDirection($0) }
-                    )
-                )
-                .toggleStyle(.switch)
-                .controlSize(.mini)
-                .font(.system(size: 10.5, weight: .semibold))
-                .foregroundStyle(Color.white.opacity(0.78))
-            }
-
-            if brush.tipShape.hasVisibleRotation {
-                brushDisclosureButton(
-                    title: "角度随机",
-                    isExpanded: showsBrushRandomControls
-                ) {
-                    showsBrushRandomControls.toggle()
+            Button {
+                withAnimation(.easeOut(duration: 0.16)) {
+                    showsBrushAdvancedSettings = true
                 }
+            } label: {
+                HStack(spacing: 0) {
+                    Text("高级笔刷设置")
+                        .font(.system(size: 10.5, weight: .semibold))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.8)
+                }
+                .padding(.horizontal, 8)
+                .frame(maxWidth: .infinity, minHeight: 40, alignment: .center)
+                .background(
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(Color.white.opacity(0.035))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8)
+                        .stroke(Color.white.opacity(0.07), lineWidth: 1)
+                )
+            }
+            .buttonStyle(.plain)
+            .buttonTooltip("打开不常用的高级笔刷参数")
+        }
+    }
 
-                if showsBrushRandomControls {
+    private var brushAdvancedParameterControls: some View {
+        let brush = viewModel.workspace.toolSession.brush
+        let compoundEnabled = brush.compoundBrush.enabled
+        let rawRotation = Double(brush.stampRotationDegrees)
+        let signedRotation = rawRotation > 180 ? rawRotation - 360 : rawRotation
+
+        return VStack(alignment: .leading, spacing: 9) {
+            if !compoundEnabled {
+                brushParameterSectionHeader("笔尖排布")
+
+                BrushParameterSliderRow(
+                    title: "位置散布",
+                    value: Double(brush.scatterAmount * 50),
+                    range: 0...250,
+                    formatter: { "\(Int($0.rounded()))%" },
+                    onPreview: { viewModel.setBrushScatterAmount(Float($0 / 50)) },
+                    onCommit: { viewModel.setBrushScatterAmount(Float($0 / 50)) }
+                )
+
+                if brush.tipShape.hasVisibleRotation {
                     BrushParameterSliderRow(
-                        title: "角度随机",
-                        value: Double(brush.angleJitterAmount * 180),
-                        range: 0...180,
+                        title: "笔尖角度",
+                        value: signedRotation,
+                        range: -180...180,
                         formatter: { "\(Int($0.rounded()))°" },
-                        onPreview: { viewModel.setBrushAngleJitterAmount(Float($0 / 180)) },
-                        onCommit: { viewModel.setBrushAngleJitterAmount(Float($0 / 180)) }
+                        onPreview: { viewModel.setBrushStampRotationDegrees(Float($0)) },
+                        onCommit: { viewModel.setBrushStampRotationDegrees(Float($0)) }
                     )
+
+                    Toggle(
+                        "跟随笔迹方向",
+                        isOn: Binding(
+                            get: { brush.followsStrokeDirection },
+                            set: { viewModel.setBrushFollowsStrokeDirection($0) }
+                        )
+                    )
+                    .toggleStyle(.switch)
+                    .controlSize(.mini)
+                    .font(.system(size: 10.5, weight: .semibold))
+                    .foregroundStyle(Color.white.opacity(0.78))
+
+                    brushDisclosureButton(
+                        title: "角度随机",
+                        isExpanded: showsBrushRandomControls
+                    ) {
+                        showsBrushRandomControls.toggle()
+                    }
+
+                    if showsBrushRandomControls {
+                        BrushParameterSliderRow(
+                            title: "角度随机",
+                            value: Double(brush.angleJitterAmount * 180),
+                            range: 0...180,
+                            formatter: { "\(Int($0.rounded()))°" },
+                            onPreview: { viewModel.setBrushAngleJitterAmount(Float($0 / 180)) },
+                            onCommit: { viewModel.setBrushAngleJitterAmount(Float($0 / 180)) }
+                        )
+                    }
                 }
             }
 
@@ -2553,6 +2838,63 @@ struct RightInspectorView: View {
             .buttonStyle(.bordered)
             .controlSize(.small)
         }
+    }
+
+    private var brushAdvancedSettingsOverlay: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 10) {
+                Button {
+                    withAnimation(.easeOut(duration: 0.16)) {
+                        showsBrushAdvancedSettings = false
+                    }
+                } label: {
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 11, weight: .bold))
+                        .frame(width: 28, height: 28)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .buttonTooltip("返回右侧面板")
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("高级笔刷设置")
+                        .font(.system(size: 14, weight: .bold))
+                        .foregroundStyle(Color.white.opacity(0.96))
+                    Text("低频参数移至此处，主界面优先留给图层")
+                        .font(.system(size: 9.5, weight: .medium))
+                        .foregroundStyle(Color.white.opacity(0.48))
+                }
+
+                Spacer(minLength: 0)
+
+                Text(viewModel.workspace.toolSession.brush.compoundBrush.enabled ? "组合笔刷" : "普通笔刷")
+                    .font(.system(size: 9.5, weight: .semibold))
+                    .foregroundStyle(Color.white.opacity(0.62))
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 5)
+                    .background(
+                        Capsule()
+                            .fill(Color.white.opacity(0.07))
+                    )
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
+
+            Divider()
+                .overlay(Color.white.opacity(0.08))
+
+            ScrollView(.vertical, showsIndicators: true) {
+                VStack(alignment: .leading, spacing: 12) {
+                    brushAdvancedParameterControls
+                    brushAdvancedActions
+                }
+                .padding(16)
+                .frame(maxWidth: 372, alignment: .topLeading)
+                .frame(maxWidth: .infinity, alignment: .top)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .background(Color(red: 0.12, green: 0.12, blue: 0.13))
     }
 
     private var brushSectionDivider: some View {
@@ -3967,36 +4309,38 @@ struct RightInspectorView: View {
     private var layersSection: some View {
         VStack(alignment: .leading, spacing: 10) {
             if let activeLayer {
-                HStack(spacing: 8) {
-                    Text("混合")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(Color.white.opacity(0.62))
-
-                    Picker(
-                        "",
-                        selection: Binding(
-                            get: { activeLayer.blendMode },
-                            set: { viewModel.setLayerBlendMode(activeLayer.id, blendMode: $0) }
-                        )
-                    ) {
-                        ForEach(LayerBlendMode.allCases, id: \.self) { mode in
-                            Text(mode.displayName).tag(mode)
-                        }
-                    }
-                    .labelsHidden()
-                    .pickerStyle(.menu)
-                    .controlSize(.small)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-
-                    Button {
-                        viewModel.toggleLayerClipping(activeLayer.id)
-                    } label: {
-                        Image(systemName: activeLayer.clipTargetLayerID == nil ? "arrow.down.right.and.arrow.up.left" : "arrow.down.right.and.arrow.up.left.circle.fill")
+                if !activeLayer.isAdjustmentLayer {
+                    HStack(spacing: 8) {
+                        Text("混合")
                             .font(.system(size: 11, weight: .semibold))
-                            .foregroundStyle(activeLayer.clipTargetLayerID == nil ? Color.white.opacity(0.66) : Color.accentColor)
+                            .foregroundStyle(Color.white.opacity(0.62))
+
+                        Picker(
+                            "",
+                            selection: Binding(
+                                get: { activeLayer.blendMode },
+                                set: { viewModel.setLayerBlendMode(activeLayer.id, blendMode: $0) }
+                            )
+                        ) {
+                            ForEach(LayerBlendMode.allCases, id: \.self) { mode in
+                                Text(mode.displayName).tag(mode)
+                            }
+                        }
+                        .labelsHidden()
+                        .pickerStyle(.menu)
+                        .controlSize(.small)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+
+                        Button {
+                            viewModel.toggleLayerClipping(activeLayer.id)
+                        } label: {
+                            Image(systemName: activeLayer.clipTargetLayerID == nil ? "arrow.down.right.and.arrow.up.left" : "arrow.down.right.and.arrow.up.left.circle.fill")
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundStyle(activeLayer.clipTargetLayerID == nil ? Color.white.opacity(0.66) : Color.accentColor)
+                        }
+                        .buttonStyle(.plain)
+                        .buttonTooltip(activeLayer.clipTargetLayerID == nil ? "创建剪贴图层" : "解除剪贴图层")
                     }
-                    .buttonStyle(.plain)
-                    .buttonTooltip(activeLayer.clipTargetLayerID == nil ? "创建剪贴图层" : "解除剪贴图层")
                 }
 
                 LayerOpacitySlider(
@@ -4011,6 +4355,51 @@ struct RightInspectorView: View {
                         viewModel.endActiveLayerOpacityChange()
                     }
                 )
+
+                if activeLayer.isAdjustmentLayer {
+                    activeCurveAdjustmentLayerEditor
+                }
+
+                HStack(spacing: 8) {
+                    if let mask = activeLayer.mask {
+                        Button(viewModel.activeMaskEditingLayerID == activeLayer.id ? "编辑蒙版中" : "编辑蒙版") {
+                            if viewModel.activeMaskEditingLayerID == activeLayer.id {
+                                viewModel.stopEditingLayerMask()
+                            } else {
+                                viewModel.beginEditingActiveLayerMask()
+                            }
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+
+                        Button(mask.isEnabled ? "停用" : "启用") {
+                            viewModel.toggleActiveLayerMaskEnabled()
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+
+                        Button("反相") {
+                            viewModel.invertActiveLayerMask()
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+
+                        Button(role: .destructive) {
+                            viewModel.deleteActiveLayerMask()
+                        } label: {
+                            Image(systemName: "trash")
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                    } else {
+                        Menu("添加蒙版") {
+                            Button("显示全部") { viewModel.addMaskToActiveLayer(revealsAll: true) }
+                            Button("隐藏全部") { viewModel.addMaskToActiveLayer(revealsAll: false) }
+                        }
+                        .controlSize(.small)
+                    }
+                    Spacer(minLength: 0)
+                }
             }
 
             Divider()
@@ -4039,6 +4428,10 @@ struct RightInspectorView: View {
                     } else {
                         viewModel.addLayer()
                     }
+                }
+
+                layerActionButton(systemImage: "slider.horizontal.3", tooltip: "新建曲线调整层") {
+                    viewModel.addCurveAdjustmentLayer()
                 }
 
                 layerActionButton(systemImage: "folder.badge.plus", tooltip: "新建图层组") {
@@ -4079,6 +4472,58 @@ struct RightInspectorView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    @ViewBuilder
+    private var activeCurveAdjustmentLayerEditor: some View {
+        if let parameters = viewModel.activeCurveAdjustmentLayerParameters {
+            let channel = parameters.selectedChannel
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Label("曲线调整层", systemImage: "point.topleft.down.to.point.bottomright.curvepath")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundStyle(Color.white.opacity(0.88))
+                    Spacer()
+                    Button("重置") {
+                        viewModel.resetActiveCurveAdjustmentLayer()
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.mini)
+                    .disabled(parameters.isNeutral)
+                }
+
+                CurveEditorView(
+                    state: parameters.state(for: channel),
+                    isEnabled: true
+                ) { state in
+                    viewModel.updateActiveCurveAdjustmentLayer(state, channel: channel)
+                }
+                .frame(maxWidth: .infinity)
+                .aspectRatio(1.7, contentMode: .fit)
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+
+                HStack(spacing: 5) {
+                    ForEach(CurveChannel.allCases, id: \.self) { candidate in
+                        Button(candidate.displayName) {
+                            viewModel.setActiveCurveAdjustmentLayerChannel(candidate)
+                        }
+                        .buttonStyle(.plain)
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundStyle(Color.white.opacity(candidate == channel ? 0.96 : 0.62))
+                        .frame(maxWidth: .infinity, minHeight: 23)
+                        .background(
+                            RoundedRectangle(cornerRadius: 6)
+                                .fill(candidate == channel ? Color.accentColor.opacity(0.3) : Color.white.opacity(0.05))
+                        )
+                    }
+                }
+            }
+            .padding(9)
+            .background(
+                RoundedRectangle(cornerRadius: 9)
+                    .fill(Color.indigo.opacity(0.12))
+            )
+        }
     }
 
     private var tipShapeSection: some View {
@@ -4412,6 +4857,15 @@ struct RightInspectorView: View {
                     .font(.system(size: 16, weight: .medium))
                     .foregroundStyle(Color.yellow.opacity(0.82))
                     .frame(width: 28, height: 28)
+            } else if layer.isAdjustmentLayer {
+                RoundedRectangle(cornerRadius: 6)
+                    .fill(Color.indigo.opacity(0.3))
+                    .overlay {
+                        Image(systemName: "point.topleft.down.to.point.bottomright.curvepath")
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundStyle(Color.white.opacity(0.9))
+                    }
+                    .frame(width: 28, height: 28)
             } else {
                 layerThumbnailView(for: layer)
             }
@@ -4456,18 +4910,32 @@ struct RightInspectorView: View {
 
             Spacer()
 
-            if layer.isPaintLayer, layer.isReference {
+            if layer.isPaintLayer, !layer.isAdjustmentLayer, layer.isReference {
                 Image(systemName: "scope")
                     .font(.system(size: 10, weight: .semibold))
                     .foregroundStyle(Color.green.opacity(0.9))
                     .help("填充参考图层")
             }
 
-            if layer.isPaintLayer, layer.clipTargetLayerID != nil {
+            if layer.isPaintLayer, !layer.isAdjustmentLayer, layer.clipTargetLayerID != nil {
                 Image(systemName: "arrow.down.right.and.arrow.up.left")
                     .font(.system(size: 9, weight: .semibold))
                     .foregroundStyle(Color.accentColor)
                     .help("剪贴图层")
+            }
+
+            if layer.isPaintLayer, let mask = layer.mask {
+                Image(systemName: mask.isEnabled ? "circle.lefthalf.filled" : "circle.dashed")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(viewModel.activeMaskEditingLayerID == layer.id ? Color.accentColor : Color.white.opacity(0.68))
+                    .help(mask.isEnabled ? "图层蒙版" : "图层蒙版已停用")
+            }
+
+            if layer.isAdjustmentLayer {
+                Image(systemName: "slider.horizontal.3")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(Color.indigo.opacity(0.95))
+                    .help("非破坏式曲线调整层")
             }
 
             Button {
@@ -4481,7 +4949,7 @@ struct RightInspectorView: View {
             .buttonStyle(.plain)
             .buttonTooltip(layer.isVisible ? "隐藏图层" : "显示图层")
 
-            if layer.isPaintLayer {
+            if layer.isPaintLayer, !layer.isAdjustmentLayer {
                 Button {
                     viewModel.toggleLayerTransparentPixelLock(layer.id)
                 } label: {
@@ -4556,11 +5024,43 @@ struct RightInspectorView: View {
             }
             Button("重命名") { beginLayerRename(layer) }
             Divider()
-            Button(layer.clipTargetLayerID == nil ? "创建剪贴图层" : "解除剪贴图层") {
-                viewModel.toggleLayerClipping(layer.id)
+            if !layer.isAdjustmentLayer {
+                Button(layer.clipTargetLayerID == nil ? "创建剪贴图层" : "解除剪贴图层") {
+                    viewModel.toggleLayerClipping(layer.id)
+                }
+                Button(layer.isReference ? "取消填充参考" : "设为填充参考") {
+                    viewModel.toggleLayerReference(layer.id)
+                }
             }
-            Button(layer.isReference ? "取消填充参考" : "设为填充参考") {
-                viewModel.toggleLayerReference(layer.id)
+
+            if layer.mask == nil {
+                Menu("添加图层蒙版") {
+                    Button("显示全部") {
+                        viewModel.selectLayer(layer.id)
+                        viewModel.addMaskToActiveLayer(revealsAll: true)
+                    }
+                    Button("隐藏全部") {
+                        viewModel.selectLayer(layer.id)
+                        viewModel.addMaskToActiveLayer(revealsAll: false)
+                    }
+                }
+            } else {
+                Button("编辑图层蒙版") {
+                    viewModel.selectLayer(layer.id)
+                    viewModel.beginEditingActiveLayerMask()
+                }
+                Button(layer.mask?.isEnabled == true ? "停用图层蒙版" : "启用图层蒙版") {
+                    viewModel.selectLayer(layer.id)
+                    viewModel.toggleActiveLayerMaskEnabled()
+                }
+                Button("反相图层蒙版") {
+                    viewModel.selectLayer(layer.id)
+                    viewModel.invertActiveLayerMask()
+                }
+                Button("删除图层蒙版", role: .destructive) {
+                    viewModel.selectLayer(layer.id)
+                    viewModel.deleteActiveLayerMask()
+                }
             }
 
             let groups = viewModel.workspace.document.layers.filter(\.isGroup)
@@ -6840,6 +7340,7 @@ private struct NavigatorPreviewPanel: View {
                     sectorGradientPreview: nil,
                     patternPlacementPhase: .idle,
                     gradientPreviewColor: .white,
+                    gradientSettings: .currentColorToTransparent(.white),
                     gradientPaintJitterAmount: 0,
                     gradientPaintContrastAmount: 0,
                     gradientDistortionAmount: 0,
@@ -6891,7 +7392,7 @@ private struct NavigatorPreviewPanel: View {
                     onCancelCanvasTool: {},
                     onApplyGradientSession: {},
                     onClearSelection: {},
-                    onRequestSelectionFeather: {},
+                    onRequestSelectionRefinement: { _ in },
                     onApplyTransform: {},
                     onCancelTransform: {},
                     isLuminosityPreviewEnabled: false,

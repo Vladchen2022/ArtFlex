@@ -1,221 +1,332 @@
-# ArtFlex 新线程接手文档
+# ArtFlex 工作交接
 
-最后更新：2026-07-16
+> 更新时间：2026-07-23
+> 仓库：`/Users/victorcloux/Desktop/ArtFlex`
+> 远端：`https://github.com/Vladchen2022/ArtFlex.git`
+> 当前分支：`codex/brush-inspector-layer-split`
+> 当前代码提交：`6994c74 feat: unify circular color pickers`
 
-当前仓库：`Vladchen2022/ArtFlex`
+本文用于新的 Codex 对话快速接手。它记录当前事实、稳定约束、代码入口和已知风险；更高优先级的工程规则在根目录 `AGENTS.md`，接手时必须同时完整阅读。
 
-当前分支：`codex/generative-gesture-experiment`
-
-已推送基线：`1dd5e30 Add block reference modeling workspace`
-
-## 1. 新线程先做什么
-
-只需先读本文件，然后执行：
+## 1. 新线程先做这些
 
 ```bash
 cd /Users/victorcloux/Desktop/ArtFlex
+cat AGENTS.md
+cat HANDOFF.md
 git status -sb
-git log -3 --oneline --decorate
+git log --oneline --decorate -12
+pgrep -fl '/ArtFlex.app/Contents/MacOS/ArtFlex' || true
 ```
 
-不要按旧文档或早期 MVP 状态猜测项目。`CURRENT_STATUS.md`、`DECISIONS.md` 和 `README.md` 的主体仍有参考价值，但更新时间停留在 2026-05-23；如有冲突，以本文件、当前代码和测试为准。
+然后再根据用户的新任务检查相关代码。不要仅凭本文件直接改实现；本文件是索引，不代替源码。
 
-用户的固定工作要求：
+本文件写入前，代码工作树是干净的，当前分支与远端同名分支一致。若用户尚未提交这份交接文档，新线程里唯一预期的未提交变更应是 `HANDOFF.md`；任何其他变更都要先确认来源，不得覆盖。
 
-- 使用中文，直接给结论。
-- 实现前遵守根目录 `AGENTS.md` 的 reuse-first 决策流程。
-- 交互、渲染、几何或坐标问题连续修补两次仍失败时，停止打补丁，转为 reference-first。
-- 所有软件改动完成后必须构建并自动替换现有 ArtFlex；关闭旧进程，只保留一个最新版窗口供用户测试。
-- 用户要求“界面测试”时，必须实际操作 ArtFlex 窗口，后台单元测试不能替代界面验收。
-- 不要修改或覆盖用户真实画笔库：`~/Library/Application Support/ArtFlex/brush-library.json`。
-- 工作区可能包含用户改动；提交前必须检查范围，不能无差别覆盖或回退。
+## 2. 项目是什么
 
-## 2. 项目定位与架构约束
+ArtFlex 是 macOS 绘画创作软件，是旧版 BrushCanvas 的 Metal-first 重构。目标不是复制旧 CPU 画布，而是保留已经验证过的桌面绘画工作流，同时重做渲染、图层、工具、文档、撤销和取样链路。
 
-ArtFlex 是旧版 `BrushCanvas` 的 macOS Metal-first 重构版绘画软件。保留旧产品工作流，但不能迁移旧 CPU 画布架构。
+产品主结构已经确定：
 
-必须保持：
+- 顶部工具栏；
+- 左侧竖向工具栏；
+- 中央 Metal 画布；
+- 右侧双列面板：参考图 / 颜色 / 资源库，以及笔尖 / 导航器 / 工具参数 / 图层；
+- 体块参考工具进入专用 3D 工作区，但视觉语言尽量沿用常规右侧面板。
 
-- 顶部工具栏、左侧工具栏、中央 Metal 画布、右侧 inspector、图层面板和笔尖设计区。
-- 显示、编辑、采样、导出尽量共享标准化画布数据。
-- `RGBA8 + premultiplied alpha + sRGB`；GPU surface/drawable 为 `bgra8Unorm_srgb`。
-- 3D 体块参考是画布外置 UI/文档场景，不写入像素图层；冻结绘画时作为可调透明、鼠标穿透的参考叠层。
-- 业务和文档逻辑不要进一步绑死 SwiftUI/AppKit；Metal 渲染与上层状态保持分离。
-- 不做无边界的 `WorkspaceViewModel` 或 `RightInspectorView` 全文件重构，按子系统小步拆分。
+架构硬规则见 `AGENTS.md`，尤其不要破坏这些边界：
 
-## 3. 当前产品状态
+- 显示、编辑、取样和导出应共享标准化画布数据；
+- 颜色格式、预乘 alpha、sRGB / linear 规则不能靠临时补偿维持；
+- 不回到整图 CGContext 合成或巨型 CanvasState；
+- 核心业务状态尽量不耦合 SwiftUI / AppKit；
+- 先复用仓库现有实现和 Apple 官方 API，再考虑自建基础设施；
+- 困难的交互、几何、坐标或渲染 bug 连续两次修补无效后，停止打补丁，进入 reference-first 调查。
 
-当前已经不是 MVP。主工程至少包含：
+## 3. 与用户协作的固定规则
 
-- 多图层、撤销/重做、图层锁定/透明像素锁定/合并。
-- 画笔、橡皮、吸管、油漆桶、涂抹、直线和渐变。
-- 套索/矩形/椭圆等选区、羽化、填充、删除和画布外起选。
-- 自由变形与网格变形、多点控制。
-- 画布平移/缩放/旋转/裁剪、水平观察翻转。
-- 色彩调整、曲线、参考图、导航器、快照、方案试探、录像。
-- 画笔库、笔尖图片库、自定义/组合笔尖和真实压力曲线。
-- 纹理填充已合并到套索填充工作流，支持多种排列和实时预览。
-- 外部图片拖入画布成为新图层；图片可拖入参考图槽位。
-- 透视工具和当前主线“体块参考”。
-- 工程保存/打开、PNG 导出；工程文档可持久化 3D 体块场景。
+这些不是偏好，是后续工作的执行约束：
 
-组合蜡笔/压力纹理画笔经历过多轮调整。没有新的硬证据时，不要再次大改公共笔刷采样或全局间距逻辑；此前公共路径错误曾导致所有画笔断线和界面卡顿。
+1. 用户说“先讨论”“先出方案”“先别写代码”时，禁止改代码。
+2. 非平凡修改前，先给简短决策摘要：
+   - 仓库里能复用什么；
+   - Apple / 标准方案是否可用；
+   - 最终选择与取舍。
+3. 大改必须可回退。开始前确认干净基线、当前分支和提交；不要覆盖用户未提交内容，不要使用 `git reset --hard` 或擅自回滚。
+4. 完成任何会改变软件行为或界面的代码更新后，必须：
+   - 跑与风险相称的自动测试；
+   - Release 构建；
+   - 替换 `.build/ArtFlex.app`；
+   - 关闭全部旧版、预览版或重复实例；
+   - 只打开一个最新应用。
+5. 用户明确要求在软件界面上测试。不能只跑后台单元测试就声称交互可用；必须在前台实际操作关键路径，并如实说明覆盖了什么。
+6. 重启应用前保护未保存画布。必要时先保存带时间戳恢复文件，重启后重新载入。
+7. 不要自动提交或推送。只有用户明确要求时才执行 Git commit / push。
+8. 截图反馈优先当成真实验收结果。若代码判断与截图冲突，先核对运行的是哪个应用进程和哪个构建，不要假设用户看错。
+9. 用户要求中文、直接、基于证据。无法确认的内容明确写“未确认”，不要用高确定性语气包装推断。
 
-## 4. 体块参考：当前最重要的完成状态
+## 4. 当前 Git、构建和运行状态
 
-入口：左侧“透视”下面的“体块参考”。激活时右侧两列 inspector 被一个宽 3D 面板替换，标签为：
+- 分支：`codex/brush-inspector-layer-split`
+- HEAD：`6994c74`
+- 跟踪：`origin/codex/brush-inspector-layer-split`
+- 远端已包含 `6994c74`
+- `main` 仍停在较早的 `4733514`；当前工作成果在功能分支上，禁止误切 `main` 后继续开发或强行重置。
+- 当前本地应用：`/Users/victorcloux/Desktop/ArtFlex/.build/ArtFlex.app`
+- 写本文时只有一个 ArtFlex 进程，路径指向上述应用包。
+- 应用二进制时间：2026-07-19 21:32。
 
-- 建模
-- 变换
-- 参考
-- 相机
-- 场景
+最近验证记录：
 
-### 4.1 建模与模块
+- 最近一次完整测试记录：604 项通过。该数字来自最近功能验收，不是本次纯文档任务重新运行的结果。
+- 最近一次针对圆形 HUD 拾色器的定向测试：`QuickColorPickerHUDTests` 6 项通过。
+- 最近一次相关更新已完成 Release 构建、签名、替换应用并单实例启动。
 
-已经实现：
+现存编译告警，不是本轮引入：
 
-- 方块、圆柱、圆锥、球体；圆形截面采用 8 边低模。
-- 类 SketchUp 两阶段建模：在工作面拖出二维基面，再拖拉高度。
-- 拉基面和高度时显示实时尺寸。
-- 参数面板可精确修改尺寸、位置、旋转；数值框支持水平拖动调整，Shift 精细调整。
-- “表面直接建模”：鼠标触及现有实体表面时，直接把该表面作为临时工作面。
-- 表面起建使用视觉偏移/预览处理，避免共面闪烁。
-- 内置模块：站姿人体、坐姿人体、可摆姿人体、楼梯、门框、房间盒、桌体。
-- 固定站/坐人体不可拆分、不可布尔，只能整体移动旋转。
-- 可摆姿人体包含骨盆和父子关节，画布可选关节并显示符合自由度的旋转环；膝关节为单向铰链，骨盆/躯干支持水平旋转。
+- `Rendering/Canvas/StageOneBrushRenderer.swift`：`@Sendable` 闭包捕获 completion 的并发告警；
+- `Platform/macOS/Services/TimelapseRecorderController.swift`：AVAssetWriter / exportError 的 Swift 并发告警。
 
-### 4.2 变换与组织
+不要把告警误报成新回归；但若任务涉及这两个模块，应单独处理。
 
-已经实现：
+## 5. 当前产品能力与近期状态
 
-- 画布 gizmo：X/Y/Z 轴移动、旋转环、缩放。
-- 世界/局部/工作面坐标切换；局部 gizmo 会随物体旋转。
-- Blender 风格快捷键：`G` 移动、`R` 旋转、`S` 缩放；接轴键约束；重复轴键切换局部轴，例如 `G X X`、`R Z Z`。
-- gizmo 拖动后数值输入框自动获取输入，可直接键入数字并回车。
-- 统一缩放、活动对象/选择中心/工作面/自定枢轴。
-- 几何镜像、线性阵列、环形阵列；阵列轴和枢轴可选。
-- `Ctrl+G` 编组、`Ctrl+Shift+G` 解组；组选中和变换会作用于整个组。
-- 隐藏、显示全部、锁定、隔离、复制、删除。
-- 撤销/重做体块文档操作。
+### 5.1 画布、工具、文档
 
-最近修复：
+当前项目已具备多图层绘画、画笔、橡皮、吸管、油漆桶、涂抹、选区、套索填充、变形、透视辅助、撤销重做、工程保存打开和导出等主流程。底层是 Metal 画布；不要引入旧项目的 CPU 整图重绘思路。
 
-- 线性/环形阵列现在显示明确完成提示和副本数量。
-- 体块工具激活时，Cmd+Z/Cmd+Shift+Z 会把面板提示同步为“已撤销/已重做上一项操作”，不再残留旧提示。
+大笔刷撤销残留已在 `1a83667` 修复：撤销脏区会计入尺寸随机导致的最大足迹。修改笔刷足迹、抖动或撤销边界时必须保留这条性质。
 
-### 4.3 工作面、捕捉和结构参考
+网格变形已从“只能拖 16 个点”向 Photoshop 式交互演进：保留四角锚点，同时允许从网格内部拖动像素。入口主要在 `Core/Application/TransformInteractionState.swift` 和画布交互层。
 
-已经实现：
+### 5.2 右侧检查器布局
 
-- 从实体面拾取斜工作面，网格会随工作面方向变化。
-- 恢复默认地面、保存/调用/偏移工作面。
-- 网格、顶点、中点、面中心捕捉。
-- 拉伸高度可吸附到其他体块端点高度。
-- 测量距离和 X/Y/Z 分量。
-- 持久辅助轴。
-- 剖切、反向剖切。
-- 实体显示和线框显示；Metal 深度测试处理实体遮挡，弱化/隐藏远端被遮挡结构。
-- 近裁剪会裁切穿越 near plane 的面，不使用背面剔除，避免特定角度缺面。
-- 布尔结果会过滤共面内部细分线，只保留有结构意义的特征边。
+当前右列采用“内容自适应工具参数 + 图层补足剩余高度”：
 
-### 4.4 布尔
+- 画笔常用参数保持可见，`杂色`滑块必须始终暴露，且其产品语义不得改成普通随机噪声；
+- 低频参数折叠，减少工具参数对图层空间的挤压；
+- 调色、曲线以及参数较少的工具面板按内容收缩，不保留大块空白；
+- 图层面板自动取得剩余高度；
+- 相邻面板必须保留一致间距；
+- 小窗口下圆角和裁切必须完整，不能被内部滚动容器截平。
 
-已经实现：
+相关提交：`8c8171d`、`8584289`、`37b1939`、`08ad55d`。
 
-- 合并、活动对象减去另一对象、相交。
-- 基础体和连续布尔结果都可再次参与布尔。
-- 圆柱减方块等非方体组合已经测试。
-- 空结果有保护，不会破坏源对象。
-- 固定人体模块禁止布尔。
+### 5.3 图层面板
 
-布尔几何使用 `Euclid 0.8.18`，依赖固定在 `Package.swift`/`Package.resolved`。不要轻易替换为自制 CSG。
+图层工作流已在 `9bf5112` 集中改造，包含绘画软件所需的常见操作入口和更清晰的层级控制。继续修改时先读现有实现和测试，不要另建一套平行的图层状态。
 
-### 4.5 相机、三点透视与场景
+图层面板的产品优先级高：它应尽量显示更多图层，并由工具参数面板让出不需要的高度。
 
-已经实现：
+### 5.4 笔尖形状设计与导航器
 
-- 中键环绕、Shift+中键平移、滚轮缩放；方向按 Blender 习惯调整。
-- 透视/正交、水平/俯仰/距离/视场角、重置和标准视图。
-- 5 个相机视角槽，可保存、调用、锁定、删除。
-- 场景快照。
-- 3D 相机 → 三点透视：辅助线来自真实体块特殊边缘/消失方向，并会随相机变化。
-- 三点透视 → 3D 相机：可反解并恢复相机。
-- 透视辅助可明确清除，不应遗留无意义的全屏线。
-- “冻结并绘画”：离开 3D 编辑，保留可调透明度参考叠层；画笔可以在其上正常绘制且叠层不截获鼠标。
+两个面板的外框和画布尺寸已经对齐，切换时不应跳动。笔尖小画布不再依赖额外尺寸滑块；编辑器显示时，笔头大小使用与主画布一致的大小快捷键路由。
 
-### 4.6 文档持久化
+相关提交：`144cc2a`、`64c57e9`、`5ccd416`、`071da19`。
+相关测试：`Tests/ArtFlexTests/BrushTipEditingAndNavigatorTests.swift`。
 
-`ArtDocument` 包含可选 `blockReferenceScene`。保存同一个 ArtFlex 工程时，体块、相机、工作面、辅助线、剖切、快照等与画布一起保存；旧工程缺少该字段时仍可解码。
+纯图标按钮已有统一 hover 名称提示，入口为 `Platform/macOS/UI/ButtonTooltipModifier.swift`。
 
-## 5. 体块参考关键文件
+### 5.5 画笔库、图案库、纹理库
 
-状态和几何：
+三类资源库共用一致的面板语言，但数据和行为分开：
+
+- 画笔库：预设、搜索 / 筛选、快捷槽、保存 / 更新等；
+- 图案库：图案资源和放置工作流；
+- 纹理库：持久保存套索纹理填充配置，不显示画笔库第一排的 4 个历史格；
+- 激活套索填充工具时自动切到纹理库，离开后恢复画笔库；
+- 纹理填充的 `杂色`参数随纹理预设一同持久化。
+
+资源库最近一轮改造在 `6894f60`，持久化控制器分别位于 `Platform/macOS/Services/`。不要把三类资产混成一个不可区分的数组。
+
+### 5.6 组合笔刷
+
+组合笔刷由 A 外形笔尖和 B 纹理笔尖构成，已有独立编辑器、真实笔迹预览、来源切换、分组参数和诊断。最近两轮主要提交：
+
+- `5e81ab3 Improve compound brush editor preview workflow`
+- `d308cf6 Improve compound brush editing workflow`
+
+关键文件：
+
+- `Platform/macOS/UI/CompoundBrushBuilderSheet.swift`
+- `Platform/macOS/UI/CompoundBrushEditorComponents.swift`
+- `Platform/macOS/UI/CompoundBrushSaveSheet.swift`
+- `Core/Tools/CompoundBrushDiagnostics.swift`
+- `Tests/ArtFlexTests/CompoundBrushEditingTests.swift`
+
+继续改造前，必须用真实创建流程验证：选择 A / B、调节参数、查看轻中重压预览、保存到画笔库、在主画布绘制。
+
+### 5.7 颜色拾取器
+
+当前侧栏颜色面板和 `Shift+Z` HUD 已统一为圆形拾色器：
+
+- 外圈为窄色相环；
+- 中央为更大的饱和度 / 明度方形区域；
+- 色相环与方形区域的指示器为小尺寸；
+- 复用同一组件，不维护两份色彩映射逻辑；
+- HUD 仍保留原有最近颜色和参数滑块；
+- HUD 滑块文字位于深色半透明容器上，以保证白色画布上的可读性；
+- SV 位图异步、可取消生成，避免拖动卡顿。
+
+最新提交：`6994c74 feat: unify circular color pickers`。
+
+关键文件：
+
+- `Platform/macOS/UI/ColorHueRingPickerView.swift`
+- `Platform/macOS/UI/ColorPickerDisplaySupport.swift`
+- `Platform/macOS/UI/QuickColorPickerHUD.swift`
+- `Platform/macOS/UI/RightInspectorView.swift`
+- `Platform/macOS/UI/CanvasContainerView.swift`
+- `Tests/ArtFlexTests/QuickColorPickerHUDTests.swift`
+
+已知验证限制：`Shift+Z` 是瞬时 HUD，自动化按键释放后面板会立即消失。之前已在前台验证触发与可读性，但如果继续改 HUD，仍应人工按住快捷键检查拖动、滑块文字和释放关闭，不要只依赖截图自动化。
+
+### 5.8 透视工具与体块参考
+
+两者职责不同：
+
+- 透视工具：匹配现有图片的消失点 / 视平线，并继续拉辅助透视线；不包含建模。
+- 体块参考：3D 建模、相机、工作面、参考图、视角槽、体块库和场景对象。
+
+透视匹配和体块参考匹配代码均已存在，但体块参考的“从二维标线反解相机和工作面”曾被用户明确指出误差过大。当前只能视为近似工具，不能宣称高精度透视标定已经解决。涉及这一部分时，应重新检查几何模型和坐标映射，不要继续小修补。
+
+体块参考右侧面板已重构为常规面板语言：
+
+- 左列上方参考图，下方工具与参数；
+- 右列上方视角槽，中部体块库，下方场景对象；
+- 3D 状态隐藏无用导航器；
+- 场景对象操作区贴近面板下缘；
+- 面板随窗口填满高度，保留边框、间距和圆角。
+
+自定义体块库现有能力：
+
+- 新建类目；
+- 选中部分体块、设置模块基准点并保存到内置或自定义类别；
+- 场景对象和模块支持右键编辑；
+- 可替换原模块、另存为新模块或放弃修改；
+- 可删除已保存模块；
+- 每个模块基准点属于自身局部坐标，移动一个模块不得带动另一个模块的基准点。
+
+内置模块已包含：
+
+- 基础体：方块、圆柱、圆锥、球体、四边方台、四边方锥、半圆体、圆环体、中空圆筒等；
+- 人物与建筑模块；
+- 交通工具：小轿车、SUV、小型卡车、中大型卡车、自行车、摩托车，轮径已经按常见真实尺寸重新校正。
+
+关键文件：
 
 - `Core/Application/BlockReferenceState.swift`
 - `Core/Application/BlockReferenceAdvancedState.swift`
 - `Core/Application/BlockReferenceGeometry.swift`
 - `Core/Application/BlockReferenceAdvancedGeometry.swift`
-- `Core/Application/BlockReferenceBooleanGeometry.swift`
-- `Core/Document/ArtDocument.swift`
-
-应用接线：
-
-- `Platform/macOS/App/WorkspaceViewModel+BlockReference.swift`
-- `Platform/macOS/App/WorkspaceViewModel+BlockReferenceAdvanced.swift`
-- `Platform/macOS/App/WorkspaceViewModel.swift`
-- `Platform/macOS/App/WindowKeyboardBridge.swift`
-
-UI 与渲染：
-
+- `Core/Application/BlockReferenceModuleLibrary.swift`
+- `Core/Application/BlockReferencePerspectiveMatch.swift`
+- `Platform/macOS/App/WorkspaceViewModel+BlockReference*.swift`
 - `Platform/macOS/UI/BlockReferenceParameterPanel.swift`
 - `Platform/macOS/UI/BlockReferenceOverlay.swift`
 - `Platform/macOS/UI/BlockReferenceMetalSolidView.swift`
-- `Platform/macOS/Canvas/BlockReferenceCameraRenderState.swift`
-- `Platform/macOS/Canvas/MetalCanvasHost.swift`
-- `Platform/macOS/UI/RightInspectorView.swift`
-- `Platform/macOS/UI/CanvasContainerView.swift`
-
-测试：
-
+- `Platform/macOS/Services/BlockReferenceModuleLibraryPersistenceController.swift`
 - `Tests/ArtFlexTests/BlockReferenceStateTests.swift`
-- `Tests/ArtFlexTests/WorkspaceViewModelSafetyTests.swift`
-- `Tests/ArtFlexTests/ProjectPackageTests.swift`
+- `Tests/ArtFlexTests/BlockReferenceModuleLibraryTests.swift`
 
-## 6. 最近一次完整验收
+3D 区域回归敏感点：
 
-2026-07-16 在真实 ArtFlex 窗口完成了 10 个实际项目，而不是只跑后台测试：
+- 摇移 / 环绕必须流畅；
+- “实体”100% 不透明时不能仍显示为线框或透视；
+- 模块部件连接应合理；
+- 基准点必须随自己的模块变换；
+- 多模块不能共享基准点状态；
+- 右键菜单要在画布对象和场景列表两处实际工作。
 
-1. 墙体与表面附着圆柱：两阶段建模、尺寸、表面直接建模。
-2. 简化室内场景：房间盒/门框/桌体、精确参数、世界/局部 gizmo。
-3. 建筑布尔组合：合并/减去/相交、空结果保护、撤销、显示模式。
-4. 斜屋面：复合旋转、斜工作面、网格、保存/偏移/恢复工作面、辅助轴。
-5. 重复柱列和环形构图：统一缩放、枢轴、镜像、线性/环形阵列、编组。
-6. 人体姿势：站姿/坐姿/可摆姿、骨盆/躯干/膝关节、整体移动。
-7. 室内相机和三点透视：视角槽、真实边缘透视线、双向转换、清除。
-8. 测量/捕捉/剖切：尺寸、捕捉、测量、正反剖切、遮挡。
-9. 场景组织：隐藏、锁定、全选过滤、编组移动、撤销/重做。
-10. 工程持久化与冻结绘画：保存、重启打开、3D 场景/相机/快照恢复、冻结后绘画。
+## 6. 关键代码地图
 
-全部最终通过。首轮发现的阵列提示和撤销提示问题已经修复并再次在 UI 中通过。
+### 应用状态与画布
 
-自动测试基线：
+- `Platform/macOS/App/WorkspaceViewModel.swift`
+- `Platform/macOS/UI/CanvasContainerView.swift`
+- `Rendering/Canvas/`
+- `Core/Application/`
 
-- `swift test`：533 tests / 43 suites，通过。
-- Release 构建通过。
-- 代码签名验证通过。
+### 右侧检查器
 
-## 7. 构建、替换和界面测试
+- `Platform/macOS/UI/RightInspectorView.swift`
+- `Platform/macOS/UI/ButtonTooltipModifier.swift`
 
-常用自动测试：
+### 图层与撤销
+
+- `Core/Layer/LayerRecord.swift`
+- `Core/Application/LayerMergeController.swift`
+- `Rendering/Canvas/VisibleDeltaRenderer.swift`
+- `Tests/ArtFlexTests/WorkspaceViewModelPixelHistoryTests.swift`
+- `Tests/ArtFlexTests/LayerMergeControllerTests.swift`
+
+### 画笔与笔尖
+
+- `Core/Tools/BrushPreset.swift`
+- `Core/Tools/BrushTipEditing.swift`
+- `Infrastructure/FileFormat/BrushTipImageAssetSystem.swift`
+- `Tests/ArtFlexTests/BrushTipShapeTests.swift`
+
+### 图案与纹理填充
+
+- `Core/Patterns/PatternLibraryDomain.swift`
+- `Core/Selection/TextureFillLibrary.swift`
+- `Core/Selection/TextureFillProceduralField.swift`
+- `Platform/macOS/Services/PatternLibraryPersistenceController.swift`
+- `Platform/macOS/Services/TextureFillLibraryPersistenceController.swift`
+
+### 透视辅助
+
+- `Core/Application/PerspectiveGuideState.swift`
+- `Core/Application/PerspectiveGuideMatchState.swift`
+- `Platform/macOS/App/WorkspaceViewModel+PerspectiveGuideMatch.swift`
+- `Platform/macOS/UI/PerspectiveGuideMatchOverlay.swift`
+
+## 7. 最近提交顺序
+
+从新到旧的关键节点：
+
+```text
+6994c74 feat: unify circular color pickers
+08ad55d fix: collapse adjustment inspector panels
+37b1939 fix: preserve inspector corners when resized
+8584289 fix: balance compact inspector panels
+8c8171d feat: balance brush controls and layer space
+1a83667 fix: include size jitter in brush undo bounds
+6894f60 feat: evolve resource libraries and pattern placement
+071da19 Route brush tip sizing while editor is visible
+9bf5112 Overhaul painting layer workflow
+f993d87 Improve brush parameter controls
+d308cf6 Improve compound brush editing workflow
+5e81ab3 Improve compound brush editor preview workflow
+0bcfc76 Anchor scene object controls to panel bottom
+c78540f Optimize block reference performance
+009f005 Correct transportation module wheel dimensions
+1313a38 Add low-poly transportation reference modules
+1dc9197 Add low-poly primitive reference modules
+0ef34c9 Fix module-local base point ownership
+```
+
+如需回退某轮功能，优先用这些提交做比较或创建新分支，不要破坏当前分支历史。
+
+## 8. 构建、替换和验证
+
+常规自动验证：
 
 ```bash
 swift test
-swift test --filter BlockReferenceStateTests
-swift test --filter WorkspaceViewModelSafetyTests
 ```
 
-构建并自动替换当前软件：
+定向示例：
+
+```bash
+swift test --filter QuickColorPickerHUDTests
+swift test --filter BrushTipEditingAndNavigatorTests
+swift test --filter BlockReferenceModuleLibraryTests
+```
+
+发布替换步骤：
 
 ```bash
 swift build -c release
@@ -223,57 +334,62 @@ cp .build/release/ArtFlex .build/ArtFlex.app/Contents/MacOS/ArtFlex
 codesign --force --deep --sign - .build/ArtFlex.app
 pkill -x ArtFlex 2>/dev/null || true
 open -n .build/ArtFlex.app
-pgrep -x ArtFlex | wc -l   # 必须为 1
 ```
 
-这是强制发布步骤，不是可选验证：每次完成软件更新后，必须主动替换应用包、退出所有旧版与隔离预览进程，并只启动一个 `.build/ArtFlex.app`。如果当前文档未保存，先保存到用户指定位置；无法取得位置时保存带时间戳的恢复副本，再重启并重新载入该副本。不得把“请用户自行重启”作为交付结果。
+启动后必须确认：
 
-当前用于测试的 bundle：
+```bash
+pgrep -fl '/ArtFlex.app/Contents/MacOS/ArtFlex'
+```
 
-- `/Users/victorcloux/Desktop/ArtFlex/.build/ArtFlex.app`
-- bundle identifier：`com.vladchen.artflex.debug`
+只能有一个目标应用实例。若存在其他 ArtFlex、隔离预览或旧构建，先识别路径，再关闭。
 
-界面验收使用 `computer-use` 技能控制 ArtFlex。重启/清场可用终端命令，但功能结果必须在软件界面观察和操作。
+前台 UI 验证应覆盖本次改动的真实用户路径，而不是只看应用能启动。例如：
 
-## 8. 当前 Git 状态与提交策略
+- 面板调整：缩放窗口、切换多种工具 / 标签、检查间距、圆角、滚动和图层高度；
+- 笔刷更新：实际画线、调压感 / 杂色、撤销重做；
+- 资源库更新：新增、搜索、加载、保存、删除、重启后持久化；
+- 3D 更新：添加多个模块、移动 / 旋转、检查各自基准点、线框 / 实体、摇移 / 环绕；
+- HUD 更新：在白色和深色画布上按住 `Shift+Z`，实际拖动色环、SV 区和滑块。
 
-体块参考完整功能已提交并推送：
+## 9. 数据保护与测试资产
 
-- commit：`1dd5e30`
-- branch：`codex/generative-gesture-experiment`
-- remote：`https://github.com/Vladchen2022/ArtFlex.git`
+之前为前台 UI 测试保存过恢复文件：
 
-本文件更新后，正常情况下工作区只会多出 `HANDOFF.md` 的未提交修改。新线程开始时仍必须实际运行 `git status -sb`，不要只相信这句话。
+`/Users/victorcloux/Downloads/ArtFlex-Recovery-20260719-2115.artflex.json`
 
-提交前：
+这是用户目录中的恢复资产，不是仓库测试夹具，不要移动、覆盖或提交。测试持久化资源库时也不要随意清空用户现有画笔、图案、纹理或自定义体块数据。
 
-- `git diff --check`
-- 明确检查暂存范围。
-- 不提交 `.build`、临时测试工程、截图或用户数据。
-- 用户要求推送时推送当前分支；不要擅自重写历史。
+## 10. 当前风险与未解决事项
 
-## 9. 已知风险与不要误判的现象
+1. 体块参考的二维透视反解仍是近似方案，用户曾明确否定其精度。置信度：高。
+2. 3D 面板和模块系统迭代多、状态复杂，变换、基准点、实体显示和右键菜单容易互相回归。置信度：高。
+3. 当前功能分支明显领先 `main`。误切分支或以 `main` 为基线会丢失大量已验收工作。置信度：高。
+4. Swift 并发告警仍存在；当前未证实会造成用户可见错误，但未来 Swift 工具链升级可能把它们升级为失败。置信度：中。
+5. 最近完整测试通过数是历史记录，不代表任何新改动自动安全。每个任务仍需重新选择测试范围。置信度：高。
+6. 瞬时 HUD 的自动 UI 验证能力有限；人工前台检查仍不可省略。置信度：高。
 
-- 当前没有已知阻断性的体块参考回归；这是基于 10 个 UI 项目和 533 项测试的高置信度结论，不代表复杂 CSG 永远不会出现数值边界问题。
-- Release 构建仍有既存 Swift 并发警告：`TimelapseRecorderController` 的 `AVAssetWriter` 捕获，以及 `StageOneBrushRenderer` completion 的 Sendable 警告；与体块参考无关，不能谎报成零警告。
-- `WorkspaceViewModel.swift` 仍然很大，但体块参考主要逻辑已拆到两个扩展文件。不要为了“代码漂亮”无任务地重构。
-- Metal 实体渲染的深度、near clipping、背面处理曾出现穿模和缺面；如果再次出现，先做可复现相机/几何案例并读 `BlockReferenceMetalSolidView.swift` 和对应测试，不要靠调整颜色或随意开关 culling 掩盖。
-- 局部坐标测试必须在旋转数值真正回车提交后进行；之前曾因输入未提交被误判为局部轴失效。
-- 体块参考目标是绘画结构和透视辅助，不是 Blender 替代品。优先操作效率、低模结构、捕捉和相机，不做材质、纹理、光影或精细网格编辑。
+## 11. 新任务的处理方式
 
-## 10. 下一步
+接到新需求后按这个顺序：
 
-当前没有遗留的明确开发任务。等待用户在新线程指定下一项功能或缺陷。
+1. 判断用户是在要求讨论、诊断还是直接实现；
+2. 用 `rg` 找到现有实现、状态源和测试；
+3. 阅读相关代码后给复用 / 官方方案 / 决策摘要；
+4. 明确最小修改范围和回归点；
+5. 建立可回退基线；
+6. 实现最小正确变更；
+7. 自动测试；
+8. Release 构建并替换唯一应用；
+9. 在前台软件界面操作验证；
+10. 汇报实际结果、未覆盖部分和风险；
+11. 仅在用户明确要求时提交并推送。
 
-接到体块参考后续需求时：
+不要从旧对话的最后一个功能自动续做。新线程中以用户最新要求为目标，本文件只提供正确背景。
 
-1. 先在现有 Release 软件中复现。
-2. 优先复用当前状态、几何、gizmo、历史和 Metal solid renderer。
-3. 先补可重复自动测试，再构建替换应用。
-4. 最后用实际 ArtFlex 窗口做针对性场景验收。
+## 12. 建议使用的技能
 
-适用技能：
-
-- 软件界面操作与验收：`computer-use`
-- 需要保存下一轮上下文：`handoff`
-- 用户要求提交并推送：`github:yeet`
+- `computer-use:computer-use`：需要在 ArtFlex 前台实际操作和验收时使用；
+- `handoff`：下一次交接或上下文压缩时更新本文；
+- `github:yeet`：只有用户明确要求提交、推送或开 PR 时使用；
+- `browser:control-in-app-browser` 或网页检索：只在需要官方规范、成熟实现或最新外部事实时使用。

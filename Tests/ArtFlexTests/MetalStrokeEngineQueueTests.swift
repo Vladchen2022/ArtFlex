@@ -81,6 +81,49 @@ struct MetalStrokeEngineQueueTests {
     }
 
     @Test
+    func oilPaintPaletteProducesDeterministicMultiPigmentBandsPerStroke() throws {
+        guard let metalContext = MetalDeviceContext() else {
+            Issue.record("Metal unavailable")
+            return
+        }
+        let renderer = try StageOneBrushRenderer(device: metalContext.device)
+        let palette = BrushPigmentPalette(components: [
+            .init(color: .init(red: 0.92, green: 0.08, blue: 0.04, alpha: 1), weight: 0.55),
+            .init(color: .init(red: 0.98, green: 0.82, blue: 0.04, alpha: 1), weight: 0.45)
+        ])
+
+        let first = try renderPaintJitterSnapshot(
+            metalContext: metalContext,
+            renderer: renderer,
+            seed: 0x1357_2468,
+            amount: 1,
+            buildMode: .buildUp,
+            pigmentPalette: palette
+        )
+        let replay = try renderPaintJitterSnapshot(
+            metalContext: metalContext,
+            renderer: renderer,
+            seed: 0x1357_2468,
+            amount: 1,
+            buildMode: .buildUp,
+            pigmentPalette: palette
+        )
+        let redistributed = try renderPaintJitterSnapshot(
+            metalContext: metalContext,
+            renderer: renderer,
+            seed: 0x2468_1357,
+            amount: 1,
+            buildMode: .buildUp,
+            pigmentPalette: palette
+        )
+
+        #expect(first.pixelData == replay.pixelData)
+        #expect(first.pixelData != redistributed.pixelData)
+        #expect(alphaBytes(in: first) == alphaBytes(in: redistributed))
+        #expect(containsRedAndYellowPaint(in: first))
+    }
+
+    @Test
     func oneContinuousCompoundStrokeKeepsPaintBandsAcrossTurnsAndInputPackets() throws {
         guard let metalContext = MetalDeviceContext() else {
             Issue.record("Metal unavailable")
@@ -1335,7 +1378,8 @@ private func renderPaintJitterSnapshot(
     renderer: StageOneBrushRenderer,
     seed: UInt32,
     amount: Float,
-    buildMode: BrushBuildMode
+    buildMode: BrushBuildMode,
+    pigmentPalette: BrushPigmentPalette = .empty
 ) throws -> LayerTextureSnapshot {
     let surfaceStore = StageOneLayerSurfaceStore()
     let serializer = LayerTextureSerializer(metalContext: metalContext)
@@ -1372,7 +1416,8 @@ private func renderPaintJitterSnapshot(
             .init(x: 164, y: 48, pressure: 1)
         ],
         selectionShape: nil,
-        paintVariationSeed: seed
+        paintVariationSeed: seed,
+        pigmentPalette: pigmentPalette
     )
     var samplingState: BrushStrokeSamplingState?
     if buildMode == .opacityCap {
@@ -1489,6 +1534,21 @@ private func renderContinuousCompoundPaintJitterSnapshot(
 
 private func alphaBytes(in snapshot: LayerTextureSnapshot) -> [UInt8] {
     stride(from: 3, to: snapshot.pixelData.count, by: 4).map { snapshot.pixelData[$0] }
+}
+
+private func containsRedAndYellowPaint(in snapshot: LayerTextureSnapshot) -> Bool {
+    var containsRed = false
+    var containsYellow = false
+    for offset in stride(from: 0, to: snapshot.pixelData.count, by: 4) {
+        guard snapshot.pixelData[offset + 3] > 32 else { continue }
+        let blue = Int(snapshot.pixelData[offset])
+        let green = Int(snapshot.pixelData[offset + 1])
+        let red = Int(snapshot.pixelData[offset + 2])
+        containsRed = containsRed || (red > 110 && green < 95 && blue < 90)
+        containsYellow = containsYellow || (red > 110 && green > 100 && blue < 100)
+        if containsRed && containsYellow { return true }
+    }
+    return false
 }
 
 private func maximumCrossStrokeRGBRange(

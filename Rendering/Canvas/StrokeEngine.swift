@@ -1,6 +1,16 @@
 import Foundation
 @preconcurrency import Metal
 
+struct BrushStrokeStreamID: RawRepresentable, Codable, Hashable, Sendable, Equatable {
+    var rawValue: UInt8
+
+    init(rawValue: UInt8) {
+        self.rawValue = rawValue
+    }
+
+    static let primary = BrushStrokeStreamID(rawValue: 0)
+}
+
 struct StrokePoint: Sendable, Equatable {
     var x: Double
     var y: Double
@@ -16,6 +26,9 @@ struct StrokeDescriptor: Sendable, Equatable {
     var alphaLockEnabled: Bool = false
     var skipLeadingStamp: Bool = false
     var paintVariationSeed: UInt32 = 0
+    /// Frozen brush-reservoir colors for deterministic oil-paint replay.
+    var pigmentPalette: BrushPigmentPalette = .empty
+    var brushStreamID: BrushStrokeStreamID = .primary
 }
 
 struct BrushFlushMetrics: Sendable, Equatable {

@@ -2571,6 +2571,191 @@ struct WorkspaceViewModelPixelHistoryTests {
         )
     }
 
+    @Test
+    @MainActor
+    func advancedBucketFillUsesToleranceAndGlobalMatchingWithUndo() throws {
+        let harness = try PixelHistoryHarness()
+        let layerID = harness.viewModel.workspace.document.activeLayerID
+        try fillOpaqueRect(
+            in: harness, layerID: layerID,
+            originX: 4, originY: 4, width: 12, height: 12,
+            color: .init(red: 0.40, green: 0.40, blue: 0.40, alpha: 1)
+        )
+        try fillOpaqueRect(
+            in: harness, layerID: layerID,
+            originX: 20, originY: 4, width: 12, height: 12,
+            color: .init(red: 0.42, green: 0.42, blue: 0.42, alpha: 1)
+        )
+        harness.viewModel.setSelectedColor(.init(red: 1, green: 0, blue: 0, alpha: 1))
+        harness.viewModel.setFillTolerance(0.04)
+        harness.viewModel.setFillContiguous(false)
+        harness.viewModel.fillAtPoint(.init(x: 8, y: 8))
+
+        #expect(try harness.color(atX: 8, y: 8, layerID: layerID).red > 0.9)
+        #expect(try harness.color(atX: 24, y: 8, layerID: layerID).red > 0.9)
+
+        harness.viewModel.undo()
+        #expect(try harness.color(atX: 8, y: 8, layerID: layerID).red < 0.5)
+        #expect(try harness.color(atX: 24, y: 8, layerID: layerID).red < 0.5)
+    }
+
+    @Test
+    @MainActor
+    func selectionRefinementAndPreciseTransformHaveRuntimeEntryPoints() async throws {
+        let harness = try PixelHistoryHarness()
+        harness.makeRectangleSelection(minX: 16, minY: 16, maxX: 32, maxY: 32)
+        harness.viewModel.expandSelection(radiusPixels: 4)
+        try await waitForCondition { !harness.viewModel.isRefiningSelection }
+        let expanded = try #require(harness.viewModel.workspace.selection.committedShape)
+        #expect(expanded.contains(.init(x: 13, y: 24)))
+
+        harness.viewModel.selectTool(.freeTransform)
+        var precise = try #require(harness.viewModel.preciseFreeTransformInput)
+        precise.centerX += 5
+        precise.rotationDegrees = 15
+        harness.viewModel.setPreciseFreeTransformInput(precise)
+        #expect(abs(harness.viewModel.freeTransformPreview.translation.x - 5) < 0.001)
+        #expect(abs(harness.viewModel.freeTransformPreview.rotationRadians - (.pi / 12)) < 0.001)
+    }
+
+    @Test
+    @MainActor
+    func multicolorGradientRendersMiddleStopAndSupportsUndo() async throws {
+        let harness = try PixelHistoryHarness()
+        let layerID = harness.addLayer()
+        let initialStops = harness.viewModel.displayedGradientSettings.stops
+        harness.viewModel.updateGradientStop(
+            id: initialStops[0].id,
+            position: 0,
+            color: .init(red: 1, green: 0, blue: 0, alpha: 1)
+        )
+        harness.viewModel.updateGradientStop(
+            id: initialStops[1].id,
+            position: 1,
+            color: .init(red: 0, green: 0, blue: 1, alpha: 1)
+        )
+        harness.viewModel.addGradientStop()
+        let middle = try #require(
+            harness.viewModel.displayedGradientSettings.stops.first { stop in
+                stop.id != initialStops[0].id && stop.id != initialStops[1].id
+            }
+        )
+        harness.viewModel.updateGradientStop(
+            id: middle.id,
+            position: 0.5,
+            color: .init(red: 0, green: 1, blue: 0, alpha: 1)
+        )
+
+        harness.viewModel.selectLayer(layerID)
+        harness.viewModel.selectTool(.linearGradient)
+        harness.viewModel.beginGradientDrag(at: .init(x: 8, y: 24))
+        harness.viewModel.updateGradientDrag(to: .init(x: 56, y: 24))
+        harness.viewModel.endGradientDrag(at: .init(x: 56, y: 24))
+        harness.viewModel.applyActiveGradientSession()
+        try await harness.waitForGradientCommitToFinish()
+
+        let midpoint = try harness.color(atX: 32, y: 24, layerID: layerID)
+        #expect(midpoint.green > midpoint.red)
+        #expect(midpoint.green > midpoint.blue)
+        harness.viewModel.undo()
+        #expect(try harness.alpha(atX: 32, y: 24, layerID: layerID) < 0.01)
+    }
+
+    @Test
+    @MainActor
+    func generatorDirectStrokeAcceptsSinglePointInputPackets() throws {
+        let harness = try PixelHistoryHarness()
+        let layerID = harness.viewModel.workspace.document.activeLayerID
+        harness.viewModel.setGeneratorKind(.automaticLines)
+        harness.viewModel.setGeneratorDrift(0)
+        harness.viewModel.setGeneratorDensity(0)
+        harness.viewModel.setGeneratorBranch(0)
+        let historyCountBeforeStroke = harness.viewModel.visibleHistoryTimeline.currentAppliedEntryCount
+        harness.viewModel.beginStrokeIfNeeded(paintVariationSeed: 42)
+        for x in stride(from: 12, through: 52, by: 4) {
+            harness.viewModel.applyStroke(samples: [
+                .init(location: .init(x: Double(x), y: 32), pressure: 1)
+            ])
+        }
+        harness.viewModel.endStroke()
+        _ = harness.viewModel.flushBrushEditingBoundary(reason: "generator-direct-test")
+
+        #expect(
+            harness.viewModel.visibleHistoryTimeline.currentAppliedEntryCount
+                == historyCountBeforeStroke + 1
+        )
+
+        let snapshot = try harness.snapshot(layerID: layerID)
+        #expect(snapshot.pixelData.enumerated().contains { index, byte in
+            index % 4 == 3 && byte > 0
+        })
+    }
+
+    @Test
+    @MainActor
+    func visibleHistoryPreviewCancelsBackToOriginalPixels() throws {
+        let harness = try PixelHistoryHarness()
+        let layerID = harness.viewModel.workspace.document.activeLayerID
+        try harness.drawBrushStroke(
+            on: layerID,
+            points: [.init(location: .init(x: 16, y: 24), pressure: 1)]
+        )
+        try harness.drawBrushStroke(
+            on: layerID,
+            points: [.init(location: .init(x: 48, y: 24), pressure: 1)]
+        )
+        harness.viewModel.prepareVisibleHistoryPresentation()
+        harness.viewModel.cancelVisibleHistoryPreview()
+        let paintOnlyHistoryCount = harness.viewModel.visibleHistoryTimeline.currentAppliedEntryCount
+        harness.makeRectangleSelection(minX: 10, minY: 10, maxX: 54, maxY: 42)
+        let originSelection = try #require(harness.viewModel.workspace.selection.committedShape)
+        harness.viewModel.prepareVisibleHistoryPresentation()
+        let originCount = harness.viewModel.visibleHistoryTimeline.currentAppliedEntryCount
+        #expect(originCount >= 2)
+        #expect(try harness.alpha(atX: 48, y: 24, layerID: layerID) > 0)
+
+        harness.viewModel.previewVisibleHistory(toAppliedEntryCount: paintOnlyHistoryCount - 1)
+        #expect(try harness.alpha(atX: 48, y: 24, layerID: layerID) < 0.01)
+        #expect(harness.viewModel.visibleHistoryPreviewTargetCount == paintOnlyHistoryCount - 1)
+
+        harness.viewModel.cancelVisibleHistoryPreview()
+        #expect(try harness.alpha(atX: 48, y: 24, layerID: layerID) > 0)
+        #expect(harness.viewModel.visibleHistoryTimeline.currentAppliedEntryCount == originCount)
+        #expect(harness.viewModel.visibleHistoryPreviewTargetCount == nil)
+        #expect(harness.viewModel.workspace.selection.committedShape == originSelection)
+    }
+
+    @Test
+    @MainActor
+    func generatorRegionModeRearmsAfterSuccessfulGeneration() async throws {
+        let harness = try PixelHistoryHarness()
+        harness.viewModel.setGeneratorKind(.elasticWhip)
+        harness.viewModel.beginGeneratorRegionSelection()
+        #expect(harness.viewModel.isGeneratorRegionSelectionArmed)
+        #expect(harness.viewModel.workspace.toolSession.activeTool == .lassoSelection)
+
+        let regionPoints: [CanvasPoint] = [
+            .init(x: 10, y: 10),
+            .init(x: 54, y: 10),
+            .init(x: 54, y: 54),
+            .init(x: 10, y: 54),
+            .init(x: 10, y: 10),
+        ]
+        harness.viewModel.beginSelection(kind: .lasso, at: regionPoints[0])
+        for point in regionPoints.dropFirst().dropLast() {
+            harness.viewModel.updateSelection(to: point)
+        }
+        harness.viewModel.commitSelection(at: regionPoints.last!)
+        try await waitForCondition {
+            harness.viewModel.isGeneratorRegionSelectionArmed
+                && harness.viewModel.workspace.toolSession.activeTool == .lassoSelection
+                && harness.viewModel.workspace.selection.committedShape == nil
+        }
+
+        #expect(!harness.viewModel.isGeneratorStrokeModeEnabled)
+        #expect(harness.viewModel.isGeneratorRegionSelectionArmed)
+    }
+
 }
 
 @MainActor

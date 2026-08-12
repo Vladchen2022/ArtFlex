@@ -114,6 +114,7 @@ struct MetalCanvasHost: NSViewRepresentable {
     let sectorGradientPreview: SectorGradientPreview?
     let patternPlacementPhase: PatternPlacementPhase
     let gradientPreviewColor: RGBAColor
+    let gradientSettings: GradientSettings
     let gradientPaintJitterAmount: Float
     let gradientPaintContrastAmount: Float
     let gradientDistortionAmount: Float
@@ -163,7 +164,7 @@ struct MetalCanvasHost: NSViewRepresentable {
     let onCancelCanvasTool: () -> Void
     let onApplyGradientSession: () -> Void
     let onClearSelection: () -> Void
-    let onRequestSelectionFeather: () -> Void
+    let onRequestSelectionRefinement: (SelectionRefinementKind) -> Void
     let onApplyTransform: () -> Void
     let onCancelTransform: () -> Void
     let isLuminosityPreviewEnabled: Bool
@@ -184,6 +185,7 @@ struct MetalCanvasHost: NSViewRepresentable {
             sectorGradientPreview: sectorGradientPreview,
             patternPlacementPhase: patternPlacementPhase,
             gradientPreviewColor: gradientPreviewColor,
+            gradientSettings: gradientSettings,
             gradientPaintJitterAmount: gradientPaintJitterAmount,
             gradientPaintContrastAmount: gradientPaintContrastAmount,
             gradientDistortionAmount: gradientDistortionAmount,
@@ -254,7 +256,7 @@ struct MetalCanvasHost: NSViewRepresentable {
         view.keyUpEventHandler = onKeyUp
         view.modifierFlagsChangedEventHandler = onModifierFlagsChanged
         view.contextMenuSelectionShape = isTransformingSelection ? nil : sceneSnapshot.selectionShape
-        view.selectionFeatherRequestHandler = onRequestSelectionFeather
+        view.selectionRefinementRequestHandler = onRequestSelectionRefinement
         view.wantsLayer = true
         view.viewportRenderScale = viewportRenderScale
         view.displaySamplingMode = displaySamplingMode
@@ -293,6 +295,7 @@ struct MetalCanvasHost: NSViewRepresentable {
         context.coordinator.sectorGradientPreview = sectorGradientPreview
         context.coordinator.patternPlacementPhase = patternPlacementPhase
         context.coordinator.gradientPreviewColor = gradientPreviewColor
+        context.coordinator.gradientSettings = gradientSettings
         context.coordinator.gradientPaintJitterAmount = gradientPaintJitterAmount
         context.coordinator.gradientPaintContrastAmount = gradientPaintContrastAmount
         context.coordinator.gradientDistortionAmount = gradientDistortionAmount
@@ -302,7 +305,7 @@ struct MetalCanvasHost: NSViewRepresentable {
         context.coordinator.isLuminosityPreviewEnabled = isLuminosityPreviewEnabled
         if let view = nsView as? StrokeCaptureMTKView {
             view.contextMenuSelectionShape = isTransformingSelection ? nil : sceneSnapshot.selectionShape
-            view.selectionFeatherRequestHandler = onRequestSelectionFeather
+            view.selectionRefinementRequestHandler = onRequestSelectionRefinement
             let previousCanvasSize = view.canvasSize
             let previousViewportRotation = view.viewportRotationDegrees
             let previousPanMode = view.isPanModeActive
@@ -336,6 +339,7 @@ struct MetalCanvasHost: NSViewRepresentable {
                 previousLinearGradientPreview != linearGradientPreview ||
                 previousSectorGradientPreview != sectorGradientPreview ||
                 previousGradientPreviewColor != gradientPreviewColor ||
+                context.coordinator.previousGradientSettings != gradientSettings ||
                 previousGradientPaintJitterAmount != gradientPaintJitterAmount ||
                 previousGradientPaintContrastAmount != gradientPaintContrastAmount ||
                 previousGradientDistortionAmount != gradientDistortionAmount ||
@@ -385,6 +389,7 @@ struct MetalCanvasHost: NSViewRepresentable {
             context.coordinator.previousLinearGradientPreview = linearGradientPreview
             context.coordinator.previousSectorGradientPreview = sectorGradientPreview
             context.coordinator.previousGradientPreviewColor = gradientPreviewColor
+            context.coordinator.previousGradientSettings = gradientSettings
             context.coordinator.previousGradientPaintJitterAmount = gradientPaintJitterAmount
             context.coordinator.previousGradientPaintContrastAmount = gradientPaintContrastAmount
             context.coordinator.previousGradientDistortionAmount = gradientDistortionAmount
@@ -661,11 +666,18 @@ func shouldShowBrushTipIndicator(
     return hasHoverLocation
 }
 
-func shouldOfferSelectionFeatherContextMenu(
+func shouldOfferSelectionRefinementContextMenu(
     selectionShape: SelectionShape?,
     at point: CanvasPoint
 ) -> Bool {
     selectionShape?.contains(point) == true
+}
+
+func shouldOfferSelectionFeatherContextMenu(
+    selectionShape: SelectionShape?,
+    at point: CanvasPoint
+) -> Bool {
+    shouldOfferSelectionRefinementContextMenu(selectionShape: selectionShape, at: point)
 }
 
 private let canvasRotationCenterDeadZonePoints = 24.0
@@ -763,7 +775,7 @@ final class StrokeCaptureMTKView: MTKView {
     var keyUpEventHandler: ((NSEvent) -> Bool)?
     var modifierFlagsChangedEventHandler: ((NSEvent.ModifierFlags) -> Bool)?
     var contextMenuSelectionShape: SelectionShape?
-    var selectionFeatherRequestHandler: (() -> Void)?
+    var selectionRefinementRequestHandler: ((SelectionRefinementKind) -> Void)?
     var canvasSize: CanvasSize = .stageOneDefault
     var activeTool: ToolKind = .brush {
         didSet {
@@ -877,7 +889,7 @@ final class StrokeCaptureMTKView: MTKView {
     override func menu(for event: NSEvent) -> NSMenu? {
         guard !isPanModeActive else { return nil }
         let point = sample(from: event).location
-        guard shouldOfferSelectionFeatherContextMenu(
+        guard shouldOfferSelectionRefinementContextMenu(
             selectionShape: contextMenuSelectionShape,
             at: point
         ) else {
@@ -885,6 +897,31 @@ final class StrokeCaptureMTKView: MTKView {
         }
 
         let menu = NSMenu(title: "选区")
+        let invertItem = NSMenuItem(
+            title: "反选",
+            action: #selector(requestSelectionInvert(_:)),
+            keyEquivalent: ""
+        )
+        invertItem.target = self
+        menu.addItem(invertItem)
+        menu.addItem(.separator())
+
+        let expandItem = NSMenuItem(
+            title: "扩展选区…",
+            action: #selector(requestSelectionExpand(_:)),
+            keyEquivalent: ""
+        )
+        expandItem.target = self
+        menu.addItem(expandItem)
+
+        let contractItem = NSMenuItem(
+            title: "收缩选区…",
+            action: #selector(requestSelectionContract(_:)),
+            keyEquivalent: ""
+        )
+        contractItem.target = self
+        menu.addItem(contractItem)
+
         let featherItem = NSMenuItem(
             title: "羽化选区…",
             action: #selector(requestSelectionFeather(_:)),
@@ -895,9 +932,24 @@ final class StrokeCaptureMTKView: MTKView {
         return menu
     }
 
+    @objc private func requestSelectionInvert(_ sender: NSMenuItem) {
+        _ = sender
+        selectionRefinementRequestHandler?(.invert)
+    }
+
+    @objc private func requestSelectionExpand(_ sender: NSMenuItem) {
+        _ = sender
+        selectionRefinementRequestHandler?(.expand)
+    }
+
+    @objc private func requestSelectionContract(_ sender: NSMenuItem) {
+        _ = sender
+        selectionRefinementRequestHandler?(.contract)
+    }
+
     @objc private func requestSelectionFeather(_ sender: NSMenuItem) {
         _ = sender
-        selectionFeatherRequestHandler?()
+        selectionRefinementRequestHandler?(.feather)
     }
 
     private let debugDisableMouseCoalescingDuringStroke = true
@@ -2439,6 +2491,7 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
     var sectorGradientPreview: SectorGradientPreview?
     var patternPlacementPhase: PatternPlacementPhase = .idle
     var gradientPreviewColor: RGBAColor = .black
+    var gradientSettings = GradientSettings.currentColorToTransparent(.black)
     var gradientPaintJitterAmount: Float = 0
     var gradientPaintContrastAmount: Float = 0
     var gradientDistortionAmount: Float = 0
@@ -2447,6 +2500,7 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
     var previousLinearGradientPreview: LinearGradientPreview?
     var previousSectorGradientPreview: SectorGradientPreview?
     var previousGradientPreviewColor: RGBAColor = .black
+    var previousGradientSettings = GradientSettings.currentColorToTransparent(.black)
     var previousGradientPaintJitterAmount: Float = 0
     var previousGradientPaintContrastAmount: Float = 0
     var previousGradientDistortionAmount: Float = 0
@@ -2480,6 +2534,7 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
         sectorGradientPreview: SectorGradientPreview?,
         patternPlacementPhase: PatternPlacementPhase,
         gradientPreviewColor: RGBAColor,
+        gradientSettings: GradientSettings,
         gradientPaintJitterAmount: Float,
         gradientPaintContrastAmount: Float,
         gradientDistortionAmount: Float,
@@ -2566,6 +2621,7 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
         self.sectorGradientPreview = sectorGradientPreview
         self.patternPlacementPhase = patternPlacementPhase
         self.gradientPreviewColor = gradientPreviewColor
+        self.gradientSettings = gradientSettings
         self.gradientPaintJitterAmount = gradientPaintJitterAmount
         self.gradientPaintContrastAmount = gradientPaintContrastAmount
         self.gradientDistortionAmount = gradientDistortionAmount
@@ -2574,6 +2630,7 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
         self.previousLinearGradientPreview = linearGradientPreview
         self.previousSectorGradientPreview = sectorGradientPreview
         self.previousGradientPreviewColor = gradientPreviewColor
+        self.previousGradientSettings = gradientSettings
         self.previousGradientPaintJitterAmount = gradientPaintJitterAmount
         self.previousGradientPaintContrastAmount = gradientPaintContrastAmount
         self.previousGradientDistortionAmount = gradientDistortionAmount
@@ -2725,6 +2782,12 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
                 clipTargetLayerID: LayerID?
             )
             var visibleTextureByLayerID: [LayerID: MTLTexture] = [:]
+            var enabledMaskTextureByLayerID: [LayerID: MTLTexture] = [:]
+            for layer in snapshot.renderSnapshot.document.layers where layer.mask?.isEnabled == true {
+                if let maskTexture = layerSurfaceStore.maskTexture(for: layer.id) {
+                    enabledMaskTextureByLayerID[layer.id] = maskTexture
+                }
+            }
             for surface in snapshot.layerSurfaces where surface.isVisible {
                 let texture = surface.surfaceID == activeLayerSurfaceID
                     ? (activeBrushDisplayTexture ?? layerSurfaceStore.texture(for: surface.surfaceID))
@@ -2785,7 +2848,13 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
                         texture: entry.texture,
                         opacity: entry.opacity,
                         blendMode: entry.blendMode,
-                        clipMaskTexture: clipMaskTexture
+                        clipMaskTexture: clipMaskTexture,
+                        clipLayerMaskTexture: entry.clipTargetLayerID.flatMap { enabledMaskTextureByLayerID[$0] },
+                        layerMaskTexture: enabledMaskTextureByLayerID[entry.layerID],
+                        curveAdjustmentLUTs: snapshot.renderSnapshot.document.layers
+                            .first(where: { $0.id == entry.layerID })?
+                            .adjustment?
+                            .curveLUTs
                     ))
                 }
                 return inputs
@@ -2853,6 +2922,7 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
                         pointC: geometry.pointC,
                         transitionMidpoint: Float(geometry.transitionMidpoint),
                         color: gradientPreviewColor,
+                        settings: gradientSettings,
                         paintJitterAmount: gradientPaintJitterAmount,
                         paintContrastAmount: gradientPaintContrastAmount,
                         distortionAmount: gradientDistortionAmount,
@@ -2868,6 +2938,7 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
                         pathPoints: geometry.pathPoints,
                         maxRadius: geometry.maxRadius,
                         color: gradientPreviewColor,
+                        settings: gradientSettings,
                         paintJitterAmount: gradientPaintJitterAmount,
                         paintContrastAmount: gradientPaintContrastAmount,
                         distortionAmount: gradientDistortionAmount,

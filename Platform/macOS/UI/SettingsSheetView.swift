@@ -13,54 +13,91 @@ struct SettingsSheetView: View {
         VStack(alignment: .leading, spacing: 0) {
             header
 
-            VStack(alignment: .leading, spacing: 18) {
-                settingsSection(
-                    title: "快捷键",
-                    subtitle: "当前先开放左侧工具栏已有快捷键和 HUD 拾色器快捷键，后续可继续扩展。"
-                ) {
-                    HStack(alignment: .top, spacing: 14) {
-                        shortcutCard(
-                            title: "工具栏快捷键",
-                            description: "左侧工具栏当前已有的快捷键都可以在这里改。Shift + 该键仍然用于轮换组内工具。"
-                        ) {
-                            LazyVGrid(columns: toolShortcutColumns, alignment: .leading, spacing: 10) {
-                                ForEach(settings.configurableToolGroups, id: \.id) { group in
-                                    ToolShortcutEditorRow(
-                                        title: groupShortcutTitle(group),
-                                        shortcutKey: settings.shortcutDisplayTitle(for: group)
-                                    ) { key in
-                                        settings.setShortcutKey(key, for: group)
+            ScrollView(.vertical) {
+                VStack(alignment: .leading, spacing: 18) {
+                    settingsSection(
+                        title: "快捷键",
+                        subtitle: "可调整工具栏、HUD 拾色器和仿真油画笔快捷键。"
+                    ) {
+                        HStack(alignment: .top, spacing: 14) {
+                            shortcutCard(
+                                title: "工具栏快捷键",
+                                description: "左侧工具栏当前已有的快捷键都可以在这里改。Shift + 该键仍然用于轮换组内工具。"
+                            ) {
+                                LazyVGrid(columns: toolShortcutColumns, alignment: .leading, spacing: 10) {
+                                    ForEach(settings.configurableToolGroups, id: \.id) { group in
+                                        ToolShortcutEditorRow(
+                                            title: groupShortcutTitle(group),
+                                            shortcutKey: settings.shortcutDisplayTitle(for: group)
+                                        ) { key in
+                                            settings.setShortcutKey(key, for: group)
+                                        }
                                     }
                                 }
                             }
-                        }
-                        .frame(maxWidth: .infinity, alignment: .topLeading)
+                            .frame(maxWidth: .infinity, alignment: .topLeading)
 
-                        VStack(alignment: .leading, spacing: 12) {
-                            shortcutCard(
-                                title: "HUD 拾色器",
-                                description: "按住快捷键弹出 HUD 拾色器，松开主按键或必需修饰键后确认颜色。"
-                            ) {
-                                ShortcutEditorRow(
-                                    shortcut: Binding(
-                                        get: { settings.quickColorPickerShortcut },
-                                        set: {
-                                            settings.quickColorPickerShortcut = $0
-                                            settings.persist()
-                                        }
+                            VStack(alignment: .leading, spacing: 12) {
+                                shortcutCard(
+                                    title: "HUD 拾色器",
+                                    description: "按住快捷键弹出 HUD 拾色器，松开主按键或必需修饰键后确认颜色。"
+                                ) {
+                                    ShortcutEditorRow(
+                                        shortcut: Binding(
+                                            get: { settings.quickColorPickerShortcut },
+                                            set: {
+                                                settings.quickColorPickerShortcut = $0
+                                                settings.persist()
+                                            }
+                                        )
                                     )
-                                )
-                            }
+                                }
 
-                            shortcutHintCard
+                                shortcutCard(
+                                    title: "仿真油画笔",
+                                    description: "沾色把当前候选色加入笔头；洗笔清除旧色，只保留当前候选色。"
+                                ) {
+                                    VStack(alignment: .leading, spacing: 10) {
+                                        Text("沾色")
+                                            .font(.system(size: 11, weight: .semibold))
+                                            .foregroundStyle(Color.white.opacity(0.72))
+                                        ShortcutEditorRow(
+                                            shortcut: Binding(
+                                                get: { settings.oilPaintLoadShortcut },
+                                                set: {
+                                                    settings.oilPaintLoadShortcut = $0
+                                                    settings.persist()
+                                                }
+                                            )
+                                        )
+
+                                        Divider().overlay(Color.white.opacity(0.08))
+
+                                        Text("洗笔")
+                                            .font(.system(size: 11, weight: .semibold))
+                                            .foregroundStyle(Color.white.opacity(0.72))
+                                        ShortcutEditorRow(
+                                            shortcut: Binding(
+                                                get: { settings.oilPaintWashShortcut },
+                                                set: {
+                                                    settings.oilPaintWashShortcut = $0
+                                                    settings.persist()
+                                                }
+                                            )
+                                        )
+                                    }
+                                }
+
+                                shortcutHintCard
+                            }
+                            .frame(width: 264, alignment: .topLeading)
                         }
-                        .frame(width: 264, alignment: .topLeading)
                     }
                 }
+                .padding(.horizontal, 20)
+                .padding(.top, 18)
+                .padding(.bottom, 20)
             }
-            .padding(.horizontal, 20)
-            .padding(.top, 18)
-            .padding(.bottom, 20)
         }
         .frame(width: 920, height: 620, alignment: .topLeading)
         .background(Color(red: 0.12, green: 0.12, blue: 0.13))

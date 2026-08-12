@@ -30,7 +30,8 @@ private struct CanvasPresetDefinition: Identifiable, Equatable {
 }
 
 struct NewCanvasSheetView: View {
-    private static let maxCanvasEdge = 3000
+    private static let capacityPolicy = CanvasCapacityPolicy.standard
+    private static let maxCanvasEdge = capacityPolicy.maximumEdge
     private static let defaultResolution = 300
 
     @ObservedObject var viewModel: WorkspaceViewModel
@@ -273,7 +274,22 @@ struct NewCanvasSheetView: View {
                     maxSize: CGSize(width: 220, height: 220)
                 )
             }
-            .frame(height: 280)
+            .frame(height: 246)
+
+            let assessment = Self.capacityPolicy.assess(
+                CanvasSize(width: currentWidth, height: currentHeight)
+            )
+            HStack(spacing: 7) {
+                Image(systemName: assessment.isSupported ? "square.grid.3x3.fill" : "exclamationmark.triangle.fill")
+                Text(
+                    assessment.isSupported
+                        ? "分块传输 \(assessment.transferTileCount) 块 · 预计核心工作集 \(ByteCountFormatter.string(fromByteCount: Int64(assessment.estimatedCoreWorkingSetBytes), countStyle: .memory))"
+                        : (assessment.rejectionReason ?? "当前尺寸不可用")
+                )
+            }
+            .font(.system(size: 10.5, weight: .medium))
+            .foregroundStyle(assessment.isSupported ? Color.white.opacity(0.58) : Color.orange)
+            .fixedSize(horizontal: false, vertical: true)
         }
     }
 
@@ -311,11 +327,12 @@ struct NewCanvasSheetView: View {
             : CGSize(width: ratio.height, height: ratio.width)
         let widthRatio = max(Int(orientedRatio.width.rounded()), 1)
         let heightRatio = max(Int(orientedRatio.height.rounded()), 1)
-        let scale = Double(Self.maxCanvasEdge) / Double(max(widthRatio, heightRatio))
-        let width = max(1, Int((Double(widthRatio) * scale).rounded()))
-        let height = max(1, Int((Double(heightRatio) * scale).rounded()))
-        widthText = "\(width)"
-        heightText = "\(height)"
+        let size = Self.capacityPolicy.maximumSupportedSize(
+            aspectWidth: widthRatio,
+            aspectHeight: heightRatio
+        ) ?? CanvasSize(width: 2048, height: 2048)
+        widthText = "\(size.width)"
+        heightText = "\(size.height)"
         resolutionText = "\(currentResolution == 0 ? Self.defaultResolution : currentResolution)"
     }
 
@@ -376,7 +393,9 @@ struct NewCanvasSheetView: View {
     }
 
     private var isValidCanvasInput: Bool {
-        currentWidth > 0 && currentHeight > 0 && currentWidth <= Self.maxCanvasEdge && currentHeight <= Self.maxCanvasEdge
+        Self.capacityPolicy.assess(
+            CanvasSize(width: currentWidth, height: currentHeight)
+        ).isSupported
     }
 
     private func numericOnly(_ text: String) -> String {

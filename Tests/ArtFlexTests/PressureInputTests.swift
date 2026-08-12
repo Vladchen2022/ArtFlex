@@ -21,6 +21,22 @@ struct PressureInputTests {
     }
 
     @Test
+    func hiddenActiveLayerCannotReceiveInvisibleBrushPixels() {
+        let store = WorkspaceStore()
+        let activeLayerID = store.state.document.activeLayerID
+        store.updateDocument { document in
+            document.setLayerVisibility(activeLayerID, isVisible: false)
+        }
+        let controller = CanvasInteractionController(workspaceStore: store)
+
+        let descriptor = controller.makeStrokeDescriptor(samples: [
+            CanvasStrokeSample(location: CanvasPoint(x: 10, y: 20), pressure: 1)
+        ])
+
+        #expect(descriptor == nil)
+    }
+
+    @Test
     func opacityPressureCurveUsesBrushControlPoints() {
         let curved = BrushSettings.resolvedOpacityCurvePressure(
             pressure: 0.5,

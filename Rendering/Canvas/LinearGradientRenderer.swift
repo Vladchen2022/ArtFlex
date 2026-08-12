@@ -19,6 +19,11 @@ private struct LinearGradientUniforms {
     var usesAlphaLock: Float
 }
 
+private struct GradientGPUStop {
+    var positionAndPadding: SIMD4<Float>
+    var color: SIMD4<Float>
+}
+
 final class LinearGradientRenderer {
     private let device: MTLDevice
     private let pipelineState: MTLRenderPipelineState
@@ -50,6 +55,11 @@ final class LinearGradientRenderer {
             float distortionAmount;
             float usesSelectionMask;
             float usesAlphaLock;
+        };
+
+        struct GradientGPUStop {
+            float4 positionAndPadding;
+            float4 color;
         };
 
         struct VertexOut {
@@ -159,9 +169,35 @@ final class LinearGradientRenderer {
             return mix(wheelSrgb, srgbColor, baseCoverage);
         }
 
+        float4 gradientColorAt(
+            float position,
+            const device GradientGPUStop *stops,
+            uint stopCount
+        ) {
+            if (stopCount == 0) return float4(0.0);
+            float t = clamp(position, 0.0, 1.0);
+            GradientGPUStop lower = stops[0];
+            for (uint index = 1; index < stopCount; ++index) {
+                GradientGPUStop upper = stops[index];
+                float upperPosition = upper.positionAndPadding.x;
+                if (t < upperPosition) {
+                    float lowerPosition = lower.positionAndPadding.x;
+                    float span = upperPosition - lowerPosition;
+                    float amount = span > 0.000001
+                        ? smoothstep(0.0, 1.0, clamp((t - lowerPosition) / span, 0.0, 1.0))
+                        : 1.0;
+                    return mix(lower.color, upper.color, amount);
+                }
+                lower = upper;
+            }
+            return lower.color;
+        }
+
         fragment float4 linearGradientFragmentShader(
             VertexOut in [[stage_in]],
             constant LinearGradientUniforms &uniforms [[buffer(1)]],
+            const device GradientGPUStop *gradientStops [[buffer(2)]],
+            constant uint &gradientStopCount [[buffer(3)]],
             texture2d<float> selectionMask [[texture(0)]],
             texture2d<float> alphaLockTexture [[texture(1)]]
         ) {
@@ -188,8 +224,8 @@ final class LinearGradientRenderer {
                     return float4(0.0);
                 }
             }
-            float easedAlpha = 1.0 - smoothstep(0.0, 1.0, remappedT);
-            float alpha = easedAlpha * uniforms.color.a * maskAlpha;
+            float4 gradientColor = gradientColorAt(remappedT, gradientStops, gradientStopCount);
+            float alpha = gradientColor.a * maskAlpha;
             float2 axisDirection = axis / axisLength;
             float2 perpendicularDirection = float2(-axisDirection.y, axisDirection.x);
             float2 distortedPos = noiseDistort(in.canvasPosition, uniforms.distortionAmount);
@@ -198,7 +234,7 @@ final class LinearGradientRenderer {
             float canvasDiag = length(uniforms.canvasSize);
             float stripeCoord = clamp(across / canvasDiag + 0.5, 0.0, 1.0);
             float3 jitteredColor = linearPaintJitteredSrgbColor(
-                uniforms.color.rgb,
+                gradientColor.rgb,
                 stripeCoord,
                 uniforms.paintJitterAmount,
                 uniforms.paintContrastAmount
@@ -304,6 +340,7 @@ final class LinearGradientRenderer {
         pointC: CanvasPoint,
         transitionMidpoint: Float = 0.5,
         color: RGBAColor,
+        settings: GradientSettings? = nil,
         paintJitterAmount: Float = 0,
         paintContrastAmount: Float = 0,
         distortionAmount: Float = 0,
@@ -332,6 +369,14 @@ final class LinearGradientRenderer {
             usesSelectionMask: selectionShape == nil ? 0 : 1,
             usesAlphaLock: alphaLockTexture == nil ? 0 : 1
         )
+        let resolvedSettings = settings ?? .currentColorToTransparent(color)
+        var gradientStops = resolvedSettings.stops.map { stop in
+            GradientGPUStop(
+                positionAndPadding: SIMD4(stop.position, 0, 0, 0),
+                color: SIMD4(stop.color.red, stop.color.green, stop.color.blue, stop.color.alpha)
+            )
+        }
+        var gradientStopCount = UInt32(gradientStops.count)
 
         guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor) else {
             return
@@ -341,6 +386,15 @@ final class LinearGradientRenderer {
         encoder.setVertexBytes(vertices, length: MemoryLayout<LinearGradientVertex>.stride * vertices.count, index: 0)
         encoder.setVertexBytes(&uniforms, length: MemoryLayout<LinearGradientUniforms>.stride, index: 1)
         encoder.setFragmentBytes(&uniforms, length: MemoryLayout<LinearGradientUniforms>.stride, index: 1)
+        gradientStops.withUnsafeBufferPointer { buffer in
+            guard let baseAddress = buffer.baseAddress else { return }
+            encoder.setFragmentBytes(
+                baseAddress,
+                length: MemoryLayout<GradientGPUStop>.stride * buffer.count,
+                index: 2
+            )
+        }
+        encoder.setFragmentBytes(&gradientStopCount, length: MemoryLayout<UInt32>.stride, index: 3)
         encoder.setFragmentTexture(selectionMaskTexture, index: 0)
         encoder.setFragmentTexture(alphaLockTexture ?? fallbackAlphaLockTexture, index: 1)
         encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: vertices.count)
@@ -354,6 +408,7 @@ final class LinearGradientRenderer {
         pointC: CanvasPoint,
         transitionMidpoint: Float = 0.5,
         color: RGBAColor,
+        settings: GradientSettings? = nil,
         paintJitterAmount: Float = 0,
         paintContrastAmount: Float = 0,
         distortionAmount: Float = 0,
@@ -378,6 +433,7 @@ final class LinearGradientRenderer {
             pointC: pointC,
             transitionMidpoint: transitionMidpoint,
             color: color,
+            settings: settings,
             paintJitterAmount: paintJitterAmount,
             paintContrastAmount: paintContrastAmount,
             distortionAmount: distortionAmount,

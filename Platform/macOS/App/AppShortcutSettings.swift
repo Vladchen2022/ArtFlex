@@ -17,6 +17,9 @@ struct AppKeyboardShortcut: Codable, Equatable, Sendable {
         usesControl: false
     )
 
+    static let defaultOilPaintLoad = AppKeyboardShortcut(key: "D")
+    static let defaultOilPaintWash = AppKeyboardShortcut(key: "D", usesShift: true)
+
     var normalizedKey: String {
         key.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
     }
@@ -68,6 +71,8 @@ struct AppKeyboardShortcut: Codable, Equatable, Sendable {
 final class AppShortcutSettingsStore: ObservableObject {
     private enum StorageKeys {
         static let quickColorPickerShortcut = "ArtFlex.Settings.Shortcuts.QuickColorPicker"
+        static let oilPaintLoadShortcut = "ArtFlex.Settings.Shortcuts.OilPaintLoad"
+        static let oilPaintWashShortcut = "ArtFlex.Settings.Shortcuts.OilPaintWash"
         static let toolGroupShortcuts = "ArtFlex.Settings.Shortcuts.ToolGroups"
     }
 
@@ -76,6 +81,8 @@ final class AppShortcutSettingsStore: ObservableObject {
         (0...9).map(String.init)
 
     @Published var quickColorPickerShortcut: AppKeyboardShortcut
+    @Published var oilPaintLoadShortcut: AppKeyboardShortcut
+    @Published var oilPaintWashShortcut: AppKeyboardShortcut
     @Published private var toolGroupShortcuts: [String: String]
 
     private let userDefaults: UserDefaults
@@ -88,6 +95,20 @@ final class AppShortcutSettingsStore: ObservableObject {
             quickColorPickerShortcut = decoded
         } else {
             quickColorPickerShortcut = .defaultQuickColorPicker
+        }
+        if let data = userDefaults.data(forKey: StorageKeys.oilPaintLoadShortcut),
+           let decoded = try? JSONDecoder().decode(AppKeyboardShortcut.self, from: data),
+           decoded.normalizedKey.isEmpty == false {
+            oilPaintLoadShortcut = decoded
+        } else {
+            oilPaintLoadShortcut = .defaultOilPaintLoad
+        }
+        if let data = userDefaults.data(forKey: StorageKeys.oilPaintWashShortcut),
+           let decoded = try? JSONDecoder().decode(AppKeyboardShortcut.self, from: data),
+           decoded.normalizedKey.isEmpty == false {
+            oilPaintWashShortcut = decoded
+        } else {
+            oilPaintWashShortcut = .defaultOilPaintWash
         }
         if let data = userDefaults.data(forKey: StorageKeys.toolGroupShortcuts),
            let decoded = try? JSONDecoder().decode([String: String].self, from: data) {
@@ -106,6 +127,10 @@ final class AppShortcutSettingsStore: ObservableObject {
     func persist() {
         guard let data = try? JSONEncoder().encode(quickColorPickerShortcut) else { return }
         userDefaults.set(data, forKey: StorageKeys.quickColorPickerShortcut)
+        guard let oilPaintLoadData = try? JSONEncoder().encode(oilPaintLoadShortcut) else { return }
+        userDefaults.set(oilPaintLoadData, forKey: StorageKeys.oilPaintLoadShortcut)
+        guard let oilPaintWashData = try? JSONEncoder().encode(oilPaintWashShortcut) else { return }
+        userDefaults.set(oilPaintWashData, forKey: StorageKeys.oilPaintWashShortcut)
         guard let toolGroupData = try? JSONEncoder().encode(toolGroupShortcuts) else { return }
         userDefaults.set(toolGroupData, forKey: StorageKeys.toolGroupShortcuts)
     }

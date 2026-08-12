@@ -4,9 +4,27 @@ import Foundation
 
 struct CanvasSavedSnapshot: Identifiable {
     let id: UUID
+    let displayName: String
+    let createdAt: Date
     let snapshot: LayerTextureSnapshot
     var thumbnailImage: CGImage?
     var previewImage: CGImage?
+
+    init(
+        id: UUID = UUID(),
+        displayName: String,
+        createdAt: Date = Date(),
+        snapshot: LayerTextureSnapshot,
+        thumbnailImage: CGImage? = nil,
+        previewImage: CGImage? = nil
+    ) {
+        self.id = id
+        self.displayName = displayName
+        self.createdAt = createdAt
+        self.snapshot = snapshot
+        self.thumbnailImage = thumbnailImage
+        self.previewImage = previewImage
+    }
 }
 
 enum SnapshotCompareSlot: Int, CaseIterable, Identifiable {

@@ -10,6 +10,7 @@ final class StageOneLayerSurfaceStore {
     private var surfacesByLayerID: [LayerID: LayerSurfaceRecord] = [:]
     private var texturesBySurfaceID: [LayerSurfaceID: MTLTexture] = [:]
     private var contentStateByLayerID: [LayerID: LayerSurfaceContentState] = [:]
+    private var maskTexturesByLayerID: [LayerID: MTLTexture] = [:]
 
     func surfaceRecords(for document: ArtDocument) -> [LayerSurfaceRecord] {
         document.layers.compactMap { layer in
@@ -73,6 +74,21 @@ final class StageOneLayerSurfaceStore {
             contentStateByLayerID[record.layerID] = .knownTransparent
         }
 
+        for layer in document.paintLayers where layer.mask != nil && maskTexturesByLayerID[layer.id] == nil {
+            guard let texture = makeTexture(
+                width: document.canvasSize.width,
+                height: document.canvasSize.height,
+                pixelFormat: .r8Unorm,
+                usage: [.shaderRead, .shaderWrite, .renderTarget],
+                storageMode: .private,
+                metal: metal
+            ) else {
+                continue
+            }
+            clearTexture(texture, value: 1, metal: metal)
+            maskTexturesByLayerID[layer.id] = texture
+        }
+
         let validLayerIDs = Set(document.layers.filter(\.isPaintLayer).map(\.id))
         let removedLayerIDs = surfacesByLayerID.keys.filter { !validLayerIDs.contains($0) }
 
@@ -82,6 +98,14 @@ final class StageOneLayerSurfaceStore {
             }
             surfacesByLayerID.removeValue(forKey: layerID)
             contentStateByLayerID.removeValue(forKey: layerID)
+            maskTexturesByLayerID.removeValue(forKey: layerID)
+        }
+
+        let unmaskedLayerIDs = maskTexturesByLayerID.keys.filter { layerID in
+            document.layers.first(where: { $0.id == layerID })?.mask == nil
+        }
+        for layerID in unmaskedLayerIDs {
+            maskTexturesByLayerID.removeValue(forKey: layerID)
         }
 
     }
@@ -104,6 +128,23 @@ final class StageOneLayerSurfaceStore {
         surfacesByLayerID[layerID]?.surfaceID
     }
 
+    func maskTexture(for layerID: LayerID) -> MTLTexture? {
+        maskTexturesByLayerID[layerID]
+    }
+
+    func setMaskTexture(_ texture: MTLTexture?, for layerID: LayerID) {
+        maskTexturesByLayerID[layerID] = texture
+    }
+
+    func removeMaskTexture(for layerID: LayerID) {
+        maskTexturesByLayerID.removeValue(forKey: layerID)
+    }
+
+    func fillMaskTexture(for layerID: LayerID, value: Float, metal: MetalDeviceContext) {
+        guard let texture = maskTexturesByLayerID[layerID] else { return }
+        clearTexture(texture, value: Double(min(max(value, 0), 1)), metal: metal)
+    }
+
     func copyTexture(from sourceLayerID: LayerID, to destinationLayerID: LayerID, metal: MetalDeviceContext) {
         guard
             let sourceSurfaceID = surfaceID(for: sourceLayerID),
@@ -121,6 +162,19 @@ final class StageOneLayerSurfaceStore {
             waitUntilCompleted: true
         )
         contentStateByLayerID[destinationLayerID] = contentStateByLayerID[sourceLayerID] ?? .unknown
+    }
+
+    func copyMaskTexture(from sourceLayerID: LayerID, to destinationLayerID: LayerID, metal: MetalDeviceContext) {
+        guard let sourceTexture = maskTexturesByLayerID[sourceLayerID],
+              let destinationTexture = maskTexturesByLayerID[destinationLayerID] else {
+            return
+        }
+        copyTexture(
+            from: sourceTexture,
+            to: destinationTexture,
+            metal: metal,
+            waitUntilCompleted: true
+        )
     }
 
     func copyTexture(
@@ -279,6 +333,7 @@ final class StageOneLayerSurfaceStore {
         surfacesByLayerID.removeAll()
         texturesBySurfaceID.removeAll()
         contentStateByLayerID.removeAll()
+        maskTexturesByLayerID.removeAll()
     }
 
     func isKnownTransparent(layerID: LayerID) -> Bool {
@@ -333,6 +388,14 @@ final class StageOneLayerSurfaceStore {
         _ texture: MTLTexture,
         metal: MetalDeviceContext
     ) {
+        clearTexture(texture, value: 0, metal: metal)
+    }
+
+    private func clearTexture(
+        _ texture: MTLTexture,
+        value: Double,
+        metal: MetalDeviceContext
+    ) {
         guard
             let commandBuffer = metal.commandQueue.makeCommandBuffer()
         else {
@@ -344,10 +407,10 @@ final class StageOneLayerSurfaceStore {
         descriptor.colorAttachments[0].loadAction = .clear
         descriptor.colorAttachments[0].storeAction = .store
         descriptor.colorAttachments[0].clearColor = MTLClearColor(
-            red: 0,
-            green: 0,
-            blue: 0,
-            alpha: 0
+            red: value,
+            green: value,
+            blue: value,
+            alpha: value
         )
 
         guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: descriptor) else {

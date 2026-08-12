@@ -12,6 +12,13 @@ private struct BrushUniforms {
     var radius: Float
     var opacity: Float
     var color: SIMD4<Float>
+    var pigmentColor0: SIMD4<Float>
+    var pigmentColor1: SIMD4<Float>
+    var pigmentColor2: SIMD4<Float>
+    var pigmentColor3: SIMD4<Float>
+    var pigmentWeights: SIMD4<Float>
+    var pigmentCount: UInt32
+    var pigmentPadding: SIMD3<UInt32> = .zero
     var colorJitterAmount: Float
     var paintJitterAmount: Float
     var paintContrastAmount: Float
@@ -47,6 +54,44 @@ private struct BrushUniforms {
     var compoundSecondaryTileRandomRotation: Float
     var compoundArcLengthAtCenter: Float
     var compoundStrokeTangent: SIMD2<Float>
+}
+
+private struct PigmentUniformValues {
+    var color0: SIMD4<Float>
+    var color1: SIMD4<Float>
+    var color2: SIMD4<Float>
+    var color3: SIMD4<Float>
+    var weights: SIMD4<Float>
+    var count: UInt32
+}
+
+private func pigmentUniformValues(for stroke: StrokeDescriptor) -> PigmentUniformValues {
+    let fallback = SIMD4(
+        stroke.color.red,
+        stroke.color.green,
+        stroke.color.blue,
+        stroke.color.alpha
+    )
+    var colors = [fallback, fallback, fallback, fallback]
+    var weights = SIMD4<Float>.zero
+    let components = stroke.pigmentPalette.components.prefix(BrushPigmentPalette.maximumComponentCount)
+    for (index, component) in components.enumerated() {
+        colors[index] = SIMD4(
+            component.color.red,
+            component.color.green,
+            component.color.blue,
+            component.color.alpha
+        )
+        weights[index] = component.weight
+    }
+    return PigmentUniformValues(
+        color0: colors[0],
+        color1: colors[1],
+        color2: colors[2],
+        color3: colors[3],
+        weights: weights,
+        count: UInt32(components.count)
+    )
 }
 
 private struct SmudgeGatherInput {
@@ -225,6 +270,13 @@ final class StageOneBrushRenderer {
             float radius;
             float opacity;
             float4 color;
+            float4 pigmentColor0;
+            float4 pigmentColor1;
+            float4 pigmentColor2;
+            float4 pigmentColor3;
+            float4 pigmentWeights;
+            uint pigmentCount;
+            uint3 pigmentPadding;
             float colorJitterAmount;
             float paintJitterAmount;
             float paintContrastAmount;
@@ -719,14 +771,53 @@ final class StageOneBrushRenderer {
             return hsvToRgb(hsv);
         }
 
-        float3 paintBristleSrgbColor(
+        float3 paintPigmentBaseSrgbColor(
+            float3 fallbackSrgb,
+            int laneIndex,
+            uint variationSeed,
+            float4 pigmentColor0,
+            float4 pigmentColor1,
+            float4 pigmentColor2,
+            float4 pigmentColor3,
+            float4 pigmentWeights,
+            uint pigmentCount
+        ) {
+            if (pigmentCount == 0) {
+                return fallbackSrgb;
+            }
+            if (pigmentCount == 1) {
+                return pigmentColor0.rgb;
+            }
+            float choice = paintRandom(variationSeed, laneIndex, 0x2C1B3C6Du);
+            float cumulative = pigmentWeights.x;
+            if (choice < cumulative || pigmentCount == 1) {
+                return pigmentColor0.rgb;
+            }
+            cumulative += pigmentWeights.y;
+            if (choice < cumulative || pigmentCount == 2) {
+                return pigmentColor1.rgb;
+            }
+            cumulative += pigmentWeights.z;
+            if (choice < cumulative || pigmentCount == 3) {
+                return pigmentColor2.rgb;
+            }
+            return pigmentColor3.rgb;
+        }
+
+        float3 paintBristleSrgbColorWithPigments(
             float3 baseSrgb,
             float crossStrokeCoordinate,
             float longitudinal,
             float diameterPixels,
             float jitterAmount,
             float contrastAmount,
-            uint variationSeed
+            uint variationSeed,
+            float4 pigmentColor0,
+            float4 pigmentColor1,
+            float4 pigmentColor2,
+            float4 pigmentColor3,
+            float4 pigmentWeights,
+            uint pigmentCount
         ) {
             float amount = clamp(jitterAmount, 0.0, 1.0);
             float clampedContrast = clamp(contrastAmount, 0.0, 1.0);
@@ -763,8 +854,30 @@ final class StageOneBrushRenderer {
             int laneIndex = int(floor(lanePosition));
             float laneFraction = fract(lanePosition);
 
-            float3 currentColor = paintLaneSrgbColor(
+            float3 currentBaseColor = paintPigmentBaseSrgbColor(
                 baseSrgb,
+                laneIndex,
+                variationSeed,
+                pigmentColor0,
+                pigmentColor1,
+                pigmentColor2,
+                pigmentColor3,
+                pigmentWeights,
+                pigmentCount
+            );
+            float3 nextBaseColor = paintPigmentBaseSrgbColor(
+                baseSrgb,
+                laneIndex + 1,
+                variationSeed,
+                pigmentColor0,
+                pigmentColor1,
+                pigmentColor2,
+                pigmentColor3,
+                pigmentWeights,
+                pigmentCount
+            );
+            float3 currentColor = paintLaneSrgbColor(
+                currentBaseColor,
                 laneIndex,
                 longitudinal,
                 amount,
@@ -772,7 +885,7 @@ final class StageOneBrushRenderer {
                 variationSeed
             );
             float3 nextColor = paintLaneSrgbColor(
-                baseSrgb,
+                nextBaseColor,
                 laneIndex + 1,
                 longitudinal,
                 amount,
@@ -791,6 +904,33 @@ final class StageOneBrushRenderer {
             return hsvToRgb(mixedHsv);
         }
 
+        float3 paintBristleSrgbColor(
+            float3 baseSrgb,
+            float crossStrokeCoordinate,
+            float longitudinal,
+            float diameterPixels,
+            float jitterAmount,
+            float contrastAmount,
+            uint variationSeed
+        ) {
+            float4 base = float4(baseSrgb, 1.0);
+            return paintBristleSrgbColorWithPigments(
+                baseSrgb,
+                crossStrokeCoordinate,
+                longitudinal,
+                diameterPixels,
+                jitterAmount,
+                contrastAmount,
+                variationSeed,
+                base,
+                base,
+                base,
+                base,
+                float4(1.0, 0.0, 0.0, 0.0),
+                0
+            );
+        }
+
         float3 paintJitteredSrgbColor(
             float3 srgbColor,
             float2 localPoint,
@@ -805,14 +945,20 @@ final class StageOneBrushRenderer {
             );
             float diameterPixels = max(uniforms.radius * 2.0, 1.0);
             float longitudinal = (uniforms.stampSeed / diameterPixels) + (rotatedPoint.y * 0.5);
-            return paintBristleSrgbColor(
+            return paintBristleSrgbColorWithPigments(
                 srgbColor,
                 (rotatedPoint.x + 1.0) * 0.5,
                 longitudinal,
                 diameterPixels,
                 uniforms.paintJitterAmount,
                 uniforms.paintContrastAmount,
-                uniforms.paintVariationSeed
+                uniforms.paintVariationSeed,
+                uniforms.pigmentColor0,
+                uniforms.pigmentColor1,
+                uniforms.pigmentColor2,
+                uniforms.pigmentColor3,
+                uniforms.pigmentWeights,
+                uniforms.pigmentCount
             );
         }
 
@@ -2016,7 +2162,8 @@ final class StageOneBrushRenderer {
             selectionShape: stroke.selectionShape,
             alphaLockEnabled: stroke.alphaLockEnabled,
             skipLeadingStamp: stroke.skipLeadingStamp,
-            paintVariationSeed: stroke.paintVariationSeed
+            paintVariationSeed: stroke.paintVariationSeed,
+            pigmentPalette: stroke.pigmentPalette
         )
     }
 
@@ -2677,6 +2824,7 @@ final class StageOneBrushRenderer {
         }
 
         let resolvedOpacity = min(max(includeBrushOpacity ? stroke.brush.opacity : 1, 0), 1)
+        let pigments = pigmentUniformValues(for: stroke)
 
         return BrushUniforms(
             center: SIMD2(Float(point.x), Float(point.y)),
@@ -2688,6 +2836,12 @@ final class StageOneBrushRenderer {
                 stroke.color.blue,
                 stroke.color.alpha
             ),
+            pigmentColor0: pigments.color0,
+            pigmentColor1: pigments.color1,
+            pigmentColor2: pigments.color2,
+            pigmentColor3: pigments.color3,
+            pigmentWeights: pigments.weights,
+            pigmentCount: pigments.count,
             colorJitterAmount: stroke.brush.colorJitterAmount,
             paintJitterAmount: stroke.brush.effectivePaintJitterAmount,
             paintContrastAmount: stroke.brush.effectivePaintContrastAmount,

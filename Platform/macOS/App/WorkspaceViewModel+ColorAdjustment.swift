@@ -265,6 +265,16 @@ extension WorkspaceViewModel {
     }
 
     @discardableResult
+    func cancelColorAdjustmentSessionIfNeeded(showFeedback: Bool = true) -> Bool {
+        guard colorAdjustmentSession != nil else { return true }
+        discardColorAdjustmentSession()
+        if showFeedback {
+            presentWorkspaceStatus(kind: .info, message: "已放弃当前色彩调整")
+        }
+        return true
+    }
+
+    @discardableResult
     func resolveColorAdjustmentSessionIfNeeded(
         reason: ColorAdjustmentResolutionReason
     ) -> Bool {
@@ -579,7 +589,6 @@ extension WorkspaceViewModel {
         }
 
         clearTexture(maskTexture)
-        copyTextureContents(from: sourceTexture, to: previewTexture)
         return ColorAdjustmentSession(
             layerID: layerID,
             source: .painted(
@@ -929,6 +938,8 @@ extension WorkspaceViewModel {
             return "切换图层前，要先确认当前色彩调整效果，还是放弃这次调整？"
         case .historyNavigation:
             return "继续撤销或重做前，要先确认当前色彩调整效果，还是放弃这次调整？"
+        case .persistence:
+            return "保存工程前，要先确认当前色彩调整效果，还是放弃这次调整？"
         case .documentOpen:
             return "继续打开或新建画布前，要先确认当前色彩调整效果，还是放弃这次调整？"
         case .closeOrQuit:

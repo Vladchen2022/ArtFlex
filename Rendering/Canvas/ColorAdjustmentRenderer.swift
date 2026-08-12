@@ -67,6 +67,7 @@ final class ColorAdjustmentRenderer {
     private let fallbackMaskTexture: MTLTexture
     private var reusableMaterialTexture: MTLTexture?
     private var reusableMaterialTextureSize = 0
+    private var reusableMaterialMaskData: Data?
 
     init(device: MTLDevice) throws {
         self.device = device
@@ -813,17 +814,21 @@ final class ColorAdjustmentRenderer {
             guard let texture = device.makeTexture(descriptor: descriptor) else { return nil }
             reusableMaterialTexture = texture
             reusableMaterialTextureSize = resolution
+            reusableMaterialMaskData = nil
         }
         guard let reusableMaterialTexture else { return nil }
 
-        maskData.withUnsafeBytes { rawBuffer in
-            guard let baseAddress = rawBuffer.baseAddress else { return }
-            reusableMaterialTexture.replace(
-                region: MTLRegionMake2D(0, 0, resolution, resolution),
-                mipmapLevel: 0,
-                withBytes: baseAddress,
-                bytesPerRow: resolution
-            )
+        if reusableMaterialMaskData != maskData {
+            maskData.withUnsafeBytes { rawBuffer in
+                guard let baseAddress = rawBuffer.baseAddress else { return }
+                reusableMaterialTexture.replace(
+                    region: MTLRegionMake2D(0, 0, resolution, resolution),
+                    mipmapLevel: 0,
+                    withBytes: baseAddress,
+                    bytesPerRow: resolution
+                )
+            }
+            reusableMaterialMaskData = maskData
         }
         return reusableMaterialTexture
     }

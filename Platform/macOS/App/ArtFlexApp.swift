@@ -131,8 +131,8 @@ struct ArtFlexApp: App {
                 }
                 .keyboardShortcut("s")
 
-                Button("导出 PNG") {
-                    viewModel.exportPNG()
+                Button("导出图像") {
+                    viewModel.presentRasterExportSheet()
                 }
                 .keyboardShortcut("e")
 

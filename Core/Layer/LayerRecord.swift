@@ -29,6 +29,14 @@ enum LayerBlendMode: String, Codable, CaseIterable, Sendable, Equatable {
     }
 }
 
+struct LayerMaskDescriptor: Codable, Sendable, Equatable {
+    var isEnabled: Bool
+
+    init(isEnabled: Bool = true) {
+        self.isEnabled = isEnabled
+    }
+}
+
 struct LayerID: Hashable, Codable, Sendable {
     let rawValue: UUID
 
@@ -49,6 +57,8 @@ struct LayerRecord: Codable, Sendable, Equatable {
     var blendMode: LayerBlendMode
     var clipTargetLayerID: LayerID?
     var isReference: Bool
+    var mask: LayerMaskDescriptor?
+    var adjustment: CanvasAdjustmentDescriptor?
 
     private enum CodingKeys: String, CodingKey {
         case id
@@ -62,6 +72,8 @@ struct LayerRecord: Codable, Sendable, Equatable {
         case blendMode
         case clipTargetLayerID
         case isReference
+        case mask
+        case adjustment
     }
 
     init(
@@ -75,7 +87,9 @@ struct LayerRecord: Codable, Sendable, Equatable {
         opacity: Float,
         blendMode: LayerBlendMode = .normal,
         clipTargetLayerID: LayerID? = nil,
-        isReference: Bool = false
+        isReference: Bool = false,
+        mask: LayerMaskDescriptor? = nil,
+        adjustment: CanvasAdjustmentDescriptor? = nil
     ) {
         self.id = id
         self.name = name
@@ -88,6 +102,8 @@ struct LayerRecord: Codable, Sendable, Equatable {
         self.blendMode = blendMode
         self.clipTargetLayerID = clipTargetLayerID
         self.isReference = isReference
+        self.mask = mask
+        self.adjustment = adjustment
     }
 
     init(from decoder: Decoder) throws {
@@ -103,11 +119,15 @@ struct LayerRecord: Codable, Sendable, Equatable {
         blendMode = try container.decodeIfPresent(LayerBlendMode.self, forKey: .blendMode) ?? .normal
         clipTargetLayerID = try container.decodeIfPresent(LayerID.self, forKey: .clipTargetLayerID)
         isReference = try container.decodeIfPresent(Bool.self, forKey: .isReference) ?? false
+        mask = try container.decodeIfPresent(LayerMaskDescriptor.self, forKey: .mask)
+        adjustment = try container.decodeIfPresent(CanvasAdjustmentDescriptor.self, forKey: .adjustment)
     }
 
     var isPaintLayer: Bool { kind == .paint }
 
     var isGroup: Bool { kind == .group }
+
+    var isAdjustmentLayer: Bool { kind == .paint && adjustment != nil }
 
     static let defaultBackgroundLayerName = "背景"
 

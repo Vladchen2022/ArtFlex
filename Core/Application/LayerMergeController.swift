@@ -19,23 +19,30 @@ final class LayerMergeController {
         sourceVisible: Bool,
         sourceBlendMode: LayerBlendMode = .normal,
         sourceClipsDestination: Bool = false,
+        sourceMaskTexture: MTLTexture? = nil,
+        sourceCurveAdjustmentLUTs: CurveLUTs? = nil,
         into destinationTexture: MTLTexture,
         destinationOpacity: Float,
         destinationVisible: Bool,
-        destinationBlendMode: LayerBlendMode = .normal
+        destinationBlendMode: LayerBlendMode = .normal,
+        destinationMaskTexture: MTLTexture? = nil
     ) throws {
         try composite(
             layers: [
                 CanvasLayerCompositeInput(
                     texture: destinationTexture,
                     opacity: destinationVisible ? destinationOpacity : 0,
-                    blendMode: destinationBlendMode
+                    blendMode: destinationBlendMode,
+                    layerMaskTexture: destinationMaskTexture
                 ),
                 CanvasLayerCompositeInput(
                     texture: sourceTexture,
                     opacity: sourceVisible ? sourceOpacity : 0,
                     blendMode: sourceBlendMode,
-                    clipMaskTexture: sourceClipsDestination ? destinationTexture : nil
+                    clipMaskTexture: sourceClipsDestination ? destinationTexture : nil,
+                    clipLayerMaskTexture: sourceClipsDestination ? destinationMaskTexture : nil,
+                    layerMaskTexture: sourceMaskTexture,
+                    curveAdjustmentLUTs: sourceCurveAdjustmentLUTs
                 )
             ],
             into: destinationTexture

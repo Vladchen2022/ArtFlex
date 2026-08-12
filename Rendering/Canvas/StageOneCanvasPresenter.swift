@@ -41,14 +41,21 @@ struct CanvasLayerCompositeInput {
     var texture: MTLTexture
     var opacity: Float
     var blendMode: LayerBlendMode = .normal
+    /// The clipped target's paint content. Target opacity intentionally remains
+    /// outside clipping geometry to preserve the existing layer-opacity semantics.
     var clipMaskTexture: MTLTexture? = nil
+    /// The clipped target's enabled R8 layer mask, when one exists.
+    var clipLayerMaskTexture: MTLTexture? = nil
+    var layerMaskTexture: MTLTexture? = nil
+    var curveAdjustmentLUTs: CurveLUTs? = nil
 }
 
 private struct CanvasBlendUniforms {
     var layerOpacity: Float
     var blendMode: UInt32
     var usesClipMask: UInt32
-    var _padding: UInt32 = 0
+    var usesClipLayerMask: UInt32
+    var usesLayerMask: UInt32
 }
 
 private final class CanvasCompositeTexturePair: @unchecked Sendable {
@@ -69,12 +76,14 @@ final class StageOneCanvasPresenter: @unchecked Sendable {
     private let checkerboardPipelineState: MTLRenderPipelineState
     private let linearSamplerState: MTLSamplerState
     private let nearestSamplerState: MTLSamplerState
+    private let curveAdjustmentRenderer: CurveAdjustmentRenderer
     private let canvasVertexBuffer: MTLBuffer
     private let compositePoolLock = NSLock()
     private var compositeTexturePool: [CanvasCompositeTexturePair] = []
 
     init(device: MTLDevice) throws {
         self.device = device
+        self.curveAdjustmentRenderer = try CurveAdjustmentRenderer(device: device)
         let source = """
         #include <metal_stdlib>
         using namespace metal;
@@ -126,7 +135,8 @@ final class StageOneCanvasPresenter: @unchecked Sendable {
             float layerOpacity;
             uint blendMode;
             uint usesClipMask;
-            uint padding;
+            uint usesClipLayerMask;
+            uint usesLayerMask;
         };
 
         float3 canvasSoftLight(float3 backdrop, float3 source) {
@@ -158,6 +168,8 @@ final class StageOneCanvasPresenter: @unchecked Sendable {
             texture2d<float> sourceTexture [[texture(0)]],
             texture2d<float> backdropTexture [[texture(1)]],
             texture2d<float> clipMaskTexture [[texture(2)]],
+            texture2d<float> layerMaskTexture [[texture(3)]],
+            texture2d<float> clipLayerMaskTexture [[texture(4)]],
             sampler layerSampler [[sampler(0)]],
             constant CanvasBlendUniforms &uniforms [[buffer(0)]]
         ) {
@@ -166,7 +178,13 @@ final class StageOneCanvasPresenter: @unchecked Sendable {
             float clipAlpha = uniforms.usesClipMask != 0
                 ? clipMaskTexture.sample(layerSampler, in.texCoord).a
                 : 1.0;
+            if (uniforms.usesClipLayerMask != 0) {
+                clipAlpha *= clipLayerMaskTexture.sample(layerSampler, in.texCoord).r;
+            }
             float opacity = clamp(uniforms.layerOpacity, 0.0, 1.0) * clipAlpha;
+            if (uniforms.usesLayerMask != 0) {
+                opacity *= layerMaskTexture.sample(layerSampler, in.texCoord).r;
+            }
             float4 source = float4(sourceSample.rgb * opacity, sourceSample.a * opacity);
             float sourceAlpha = source.a;
             float backdropAlpha = backdrop.a;
@@ -322,7 +340,11 @@ final class StageOneCanvasPresenter: @unchecked Sendable {
         let visibleInputs = layerInputs.filter { $0.opacity > 0 }
         guard !visibleInputs.isEmpty else { return }
 
-        if visibleInputs.allSatisfy({ $0.blendMode == .normal && $0.clipMaskTexture == nil }) {
+        if visibleInputs.allSatisfy({
+            $0.blendMode == .normal && $0.clipMaskTexture == nil && $0.clipLayerMaskTexture == nil
+                && $0.layerMaskTexture == nil
+                && $0.curveAdjustmentLUTs == nil
+        }) {
             encode(
                 layerTextures: visibleInputs.map { ($0.texture, $0.opacity) },
                 samplingMode: samplingMode,
@@ -353,6 +375,21 @@ final class StageOneCanvasPresenter: @unchecked Sendable {
         let sampler = samplingMode == .nearest ? nearestSamplerState : linearSamplerState
 
         for input in visibleInputs {
+            if let curveAdjustmentLUTs = input.curveAdjustmentLUTs {
+                curveAdjustmentRenderer.encodePreview(
+                    sourceTexture: backdrop,
+                    previewTexture: output,
+                    maskTexture: input.layerMaskTexture,
+                    maskReadMode: .maskRed,
+                    luts: curveAdjustmentLUTs,
+                    overlayOnly: false,
+                    effectRegion: nil,
+                    effectOpacity: input.opacity,
+                    commandBuffer: commandBuffer
+                )
+                swap(&backdrop, &output)
+                continue
+            }
             let pass = MTLRenderPassDescriptor()
             pass.colorAttachments[0].texture = output
             pass.colorAttachments[0].loadAction = .dontCare
@@ -364,10 +401,14 @@ final class StageOneCanvasPresenter: @unchecked Sendable {
             encoder.setFragmentTexture(input.texture, index: 0)
             encoder.setFragmentTexture(backdrop, index: 1)
             encoder.setFragmentTexture(input.clipMaskTexture ?? input.texture, index: 2)
+            encoder.setFragmentTexture(input.layerMaskTexture ?? input.texture, index: 3)
+            encoder.setFragmentTexture(input.clipLayerMaskTexture ?? input.texture, index: 4)
             var uniforms = CanvasBlendUniforms(
                 layerOpacity: input.opacity,
                 blendMode: blendModeIndex(input.blendMode),
-                usesClipMask: input.clipMaskTexture == nil ? 0 : 1
+                usesClipMask: input.clipMaskTexture == nil ? 0 : 1,
+                usesClipLayerMask: input.clipLayerMaskTexture == nil ? 0 : 1,
+                usesLayerMask: input.layerMaskTexture == nil ? 0 : 1
             )
             encoder.setFragmentBytes(&uniforms, length: MemoryLayout<CanvasBlendUniforms>.stride, index: 0)
             encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)

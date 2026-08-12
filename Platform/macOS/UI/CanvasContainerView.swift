@@ -12,8 +12,8 @@ struct CanvasContainerView: View {
     @ObservedObject var viewModel: WorkspaceViewModel
     var onCanvasInteraction: (() -> Void)? = nil
     @State private var panStartOffset: CanvasPoint?
-    @State private var isFeatherSelectionDialogPresented = false
-    @State private var featherSelectionRadiusPixels = 16
+    @State private var selectionRefinementDialogKind: SelectionRefinementKind?
+    @State private var selectionRefinementRadiusPixels = 16
     @State private var isCanvasImageDropTarget = false
     private static let showsSelectionDebugOverlay = false
 
@@ -65,6 +65,7 @@ struct CanvasContainerView: View {
                         sectorGradientPreview: viewModel.sectorGradientState.preview,
                         patternPlacementPhase: viewModel.patternPlacementPhase,
                         gradientPreviewColor: viewModel.gradientPreviewColor,
+                        gradientSettings: viewModel.gradientRenderSettings,
                         gradientPaintJitterAmount: viewModel.displayedPaintJitterAmount,
                         gradientPaintContrastAmount: viewModel.displayedPaintContrastAmount,
                         gradientDistortionAmount: viewModel.workspace.toolSession.brush.jitterAmount,
@@ -266,8 +267,13 @@ struct CanvasContainerView: View {
                                 viewModel.clearSelection()
                             }
                         },
-                        onRequestSelectionFeather: {
-                            isFeatherSelectionDialogPresented = true
+                        onRequestSelectionRefinement: { kind in
+                            switch kind {
+                            case .invert:
+                                viewModel.invertSelection()
+                            case .expand, .contract, .feather:
+                                selectionRefinementDialogKind = kind
+                            }
                         },
                         onApplyTransform: {
                             onCanvasInteraction?()
@@ -655,7 +661,9 @@ struct CanvasContainerView: View {
                         isApplying: viewModel.isApplyingTransformCommit,
                         toolMode: viewModel.freeTransformToolMode,
                         selectedMeshPointCount: viewModel.selectedMeshWarpControlPointIndices.count,
+                        preciseInput: viewModel.preciseFreeTransformInput,
                         onToolModeChanged: viewModel.setFreeTransformToolMode,
+                        onPreciseInputChanged: viewModel.setPreciseFreeTransformInput,
                         onApply: {
                             viewModel.applySelectionTransform()
                         },
@@ -668,7 +676,6 @@ struct CanvasContainerView: View {
                         y: 28
                     )
                 }
-
 
                 if viewModel.patternPlacementPhase.isAdjusting,
                    let draft = viewModel.patternPlacementPhase.draft {
@@ -866,19 +873,65 @@ struct CanvasContainerView: View {
             } // CanvasViewportHost
         }
         .clipped()
-        .alert("羽化选区", isPresented: $isFeatherSelectionDialogPresented) {
+        .alert(selectionRefinementDialogTitle, isPresented: selectionRefinementDialogIsPresented) {
             TextField(
                 "半径（像素）",
-                value: $featherSelectionRadiusPixels,
+                value: $selectionRefinementRadiusPixels,
                 format: .number
             )
-            Button("取消", role: .cancel) {}
+            Button("取消", role: .cancel) {
+                selectionRefinementDialogKind = nil
+            }
             Button("应用") {
-                featherSelectionRadiusPixels = min(max(featherSelectionRadiusPixels, 1), 512)
-                viewModel.featherSelection(radiusPixels: featherSelectionRadiusPixels)
+                let kind = selectionRefinementDialogKind
+                selectionRefinementRadiusPixels = min(max(selectionRefinementRadiusPixels, 1), 512)
+                selectionRefinementDialogKind = nil
+                switch kind {
+                case .expand:
+                    viewModel.expandSelection(radiusPixels: selectionRefinementRadiusPixels)
+                case .contract:
+                    viewModel.contractSelection(radiusPixels: selectionRefinementRadiusPixels)
+                case .feather:
+                    viewModel.featherSelection(radiusPixels: selectionRefinementRadiusPixels)
+                case .invert, .none:
+                    break
+                }
             }
         } message: {
-            Text("输入 1–512 px。羽化会柔化选区边缘，并可通过撤销恢复。")
+            Text(selectionRefinementDialogMessage)
+        }
+    }
+
+    private var selectionRefinementDialogIsPresented: Binding<Bool> {
+        Binding(
+            get: { selectionRefinementDialogKind != nil },
+            set: { isPresented in
+                if !isPresented {
+                    selectionRefinementDialogKind = nil
+                }
+            }
+        )
+    }
+
+    private var selectionRefinementDialogTitle: String {
+        switch selectionRefinementDialogKind {
+        case .expand: "扩展选区"
+        case .contract: "收缩选区"
+        case .feather: "羽化选区"
+        case .invert, .none: "调整选区"
+        }
+    }
+
+    private var selectionRefinementDialogMessage: String {
+        switch selectionRefinementDialogKind {
+        case .expand:
+            "输入 1–512 px。确认后选区边界向外扩展。"
+        case .contract:
+            "输入 1–512 px。确认后选区边界向内收缩。"
+        case .feather:
+            "输入 1–512 px。确认后选区边缘会变得柔和。"
+        case .invert, .none:
+            "输入调整像素值。"
         }
     }
 
@@ -1999,9 +2052,13 @@ private struct FreeTransformHUD: View {
     let isApplying: Bool
     let toolMode: FreeTransformToolMode
     let selectedMeshPointCount: Int
+    let preciseInput: PreciseAffineInput?
     let onToolModeChanged: (FreeTransformToolMode) -> Void
+    let onPreciseInputChanged: (PreciseAffineInput) -> Void
     let onApply: () -> Void
     let onCancel: () -> Void
+
+    @State private var showsPrecisePanel = false
 
     var body: some View {
         HStack(spacing: 10) {
@@ -2025,6 +2082,21 @@ private struct FreeTransformHUD: View {
                     .font(.system(size: 10.5, weight: .medium))
                     .foregroundStyle(Color.white.opacity(0.72))
                     .help("按住 Shift 点击可追加或移除四角锚点；拖动格内区域可局部变形")
+            }
+
+            if toolMode == .standard, let preciseInput, !isApplying {
+                Button("数值") {
+                    showsPrecisePanel.toggle()
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .popover(isPresented: $showsPrecisePanel, arrowEdge: .top) {
+                    PreciseTransformPanel(
+                        input: preciseInput,
+                        onUpdate: onPreciseInputChanged
+                    )
+                }
+                .buttonTooltip("输入中心、尺寸、旋转和翻转")
             }
 
             Button(action: onApply) {
@@ -2722,6 +2794,7 @@ private struct SelectionOverlay: View {
                 presentation: presentation,
                 canvasSize: canvasSize,
                 edgeOnly: true,
+                dashesEdge: false,
                 tint: .black.opacity(0.88)
             )
             .offset(x: documentFrame.origin.x, y: documentFrame.origin.y)
@@ -2731,6 +2804,7 @@ private struct SelectionOverlay: View {
                 presentation: presentation,
                 canvasSize: canvasSize,
                 edgeOnly: true,
+                dashesEdge: true,
                 tint: .white
             )
             .offset(x: documentFrame.origin.x, y: documentFrame.origin.y)
@@ -2987,6 +3061,7 @@ private struct SelectionMaskImageView: View {
     let presentation: CanvasPresentation
     let canvasSize: CanvasSize
     let edgeOnly: Bool
+    var dashesEdge: Bool = false
     let tint: Color
 
     var body: some View {
@@ -2994,7 +3069,8 @@ private struct SelectionMaskImageView: View {
             if let slice = makeSelectionMaskImageSlice(
                 shape: selectionShape,
                 canvasSize: canvasSize,
-                edgeOnly: edgeOnly
+                edgeOnly: edgeOnly,
+                dashesEdge: dashesEdge
             ) {
                 Image(decorative: slice.cgImage, scale: 1)
                     .resizable()
@@ -3024,7 +3100,8 @@ private struct SelectionMaskImageSlice {
 private func makeSelectionMaskImageSlice(
     shape: SelectionShape,
     canvasSize: CanvasSize,
-    edgeOnly: Bool
+    edgeOnly: Bool,
+    dashesEdge: Bool = false
 ) -> SelectionMaskImageSlice? {
     guard let maskData = shape.maskData else { return nil }
     let width = min(maskData.canvasWidth, canvasSize.width)
@@ -3066,16 +3143,21 @@ private func makeSelectionMaskImageSlice(
                         let right = sourceX < width - 1 ? source[index + 1] : 0
                         let up = sourceY > 0 ? source[index - maskData.canvasWidth] : 0
                         let down = sourceY < height - 1 ? source[index + maskData.canvasWidth] : 0
-                        shouldDraw = (left == 0 || right == 0 || up == 0 || down == 0) ? 255 : 0
+                        let isEdge = left == 0 || right == 0 || up == 0 || down == 0
+                        let isVisibleDash = !dashesEdge || ((sourceX + sourceY) % 12) < 6
+                        shouldDraw = isEdge && isVisibleDash ? 255 : 0
                     }
                 } else {
                     shouldDraw = alpha
                 }
 
                 let rgbaIndex = ((y * croppedWidth) + x) * 4
-                rgba[rgbaIndex] = 255
-                rgba[rgbaIndex + 1] = 255
-                rgba[rgbaIndex + 2] = 255
+                // CGImage 声明为 premultipliedLast，RGB 必须先乘 alpha。
+                // 羽化选区包含中间 alpha；写死 255 会生成非法预乘像素，
+                // AppKit/SwiftUI 可能把整个遮罩或边界渲染为空。
+                rgba[rgbaIndex] = shouldDraw
+                rgba[rgbaIndex + 1] = shouldDraw
+                rgba[rgbaIndex + 2] = shouldDraw
                 rgba[rgbaIndex + 3] = shouldDraw
             }
         }

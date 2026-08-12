@@ -6,6 +6,34 @@ import Testing
 struct SavedSnapshotSessionTests {
     @Test
     @MainActor
+    func defaultBootstrapUsesTemporaryPersistenceRootUnderSwiftTestingCLI() throws {
+        guard let metalContext = MetalDeviceContext() else {
+            Issue.record("Metal unavailable")
+            return
+        }
+        let bootstrap = try AppBootstrap(
+            workspaceStore: WorkspaceStore(),
+            metalContext: metalContext,
+            layerSurfaceStore: StageOneLayerSurfaceStore()
+        )
+        let recoveryURL = bootstrap.persistenceController.recoveryProjectURL
+        let isolatedTestRoot = recoveryURL
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        defer {
+            if isolatedTestRoot.lastPathComponent.hasPrefix("ArtFlexTests-") {
+                try? FileManager.default.removeItem(at: isolatedTestRoot)
+            }
+        }
+
+        #expect(isolatedTestRoot.lastPathComponent.hasPrefix("ArtFlexTests-"))
+        #expect(!recoveryURL.path.hasPrefix(NSHomeDirectory() + "/Library/Application Support/"))
+    }
+
+    @Test
+    @MainActor
     func requestedSnapshotSaveRunsAsynchronouslyAndIgnoresRepeatedClicks() async throws {
         let harness = try SavedSnapshotHarness()
 
@@ -197,12 +225,78 @@ struct SavedSnapshotSessionTests {
         harness.viewModel.cancelSnapshotCompare()
         #expect(harness.viewModel.timelapseRecorder.isRecording)
     }
+
+    @Test
+    @MainActor
+    func recoveryAutosavePersistsSavedSnapshotsThroughBackgroundArchiveWrite() async throws {
+        let harness = try SavedSnapshotHarness(canvasSize: .init(width: 16, height: 12))
+        defer {
+            try? FileManager.default.removeItem(at: harness.recoveryRootURL)
+        }
+
+        harness.viewModel.handleSnapshotSavePrimaryAction()
+        let savedSnapshot = try #require(harness.viewModel.savedSnapshots.first)
+        harness.viewModel.debugPerformRecoveryAutosaveNowForTests()
+
+        for _ in 0..<300 where !harness.viewModel.hasRecoveryProject {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+
+        #expect(harness.viewModel.hasRecoveryProject)
+        let result = try harness.bootstrap.persistenceController.openProject(
+            from: harness.bootstrap.persistenceController.recoveryProjectURL
+        )
+        #expect(result.savedSnapshots.count == 1)
+        #expect(result.savedSnapshots.first?.descriptor.id == savedSnapshot.id)
+        #expect(result.savedSnapshots.first?.pixels == savedSnapshot.snapshot)
+    }
+
+    @Test
+    @MainActor
+    func concurrentRecoveryAutosavesUseIsolatedInjectedLocations() async throws {
+        let first = try SavedSnapshotHarness(canvasSize: .init(width: 12, height: 10))
+        let second = try SavedSnapshotHarness(canvasSize: .init(width: 14, height: 8))
+        defer {
+            try? FileManager.default.removeItem(at: first.recoveryRootURL)
+            try? FileManager.default.removeItem(at: second.recoveryRootURL)
+        }
+
+        #expect(
+            first.bootstrap.persistenceController.recoveryProjectURL
+                != second.bootstrap.persistenceController.recoveryProjectURL
+        )
+        first.viewModel.handleSnapshotSavePrimaryAction()
+        second.viewModel.handleSnapshotSavePrimaryAction()
+        let firstID = try #require(first.viewModel.savedSnapshots.first?.id)
+        let secondID = try #require(second.viewModel.savedSnapshots.first?.id)
+
+        first.viewModel.debugPerformRecoveryAutosaveNowForTests()
+        second.viewModel.debugPerformRecoveryAutosaveNowForTests()
+        for _ in 0..<300 where
+            !first.viewModel.hasRecoveryProject || !second.viewModel.hasRecoveryProject {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+
+        #expect(first.viewModel.hasRecoveryProject)
+        #expect(second.viewModel.hasRecoveryProject)
+        let firstResult = try first.bootstrap.persistenceController.openProject(
+            from: first.bootstrap.persistenceController.recoveryProjectURL
+        )
+        let secondResult = try second.bootstrap.persistenceController.openProject(
+            from: second.bootstrap.persistenceController.recoveryProjectURL
+        )
+        #expect(firstResult.savedSnapshots.first?.descriptor.id == firstID)
+        #expect(secondResult.savedSnapshots.first?.descriptor.id == secondID)
+        #expect(firstResult.workspace.document.canvasSize == .init(width: 12, height: 10))
+        #expect(secondResult.workspace.document.canvasSize == .init(width: 14, height: 8))
+    }
 }
 
 @MainActor
 private struct SavedSnapshotHarness {
     let bootstrap: AppBootstrap
     let viewModel: WorkspaceViewModel
+    let recoveryRootURL: URL
 
     init(canvasSize: CanvasSize = .init(width: 64, height: 64)) throws {
         guard let metalContext = MetalDeviceContext() else {
@@ -212,14 +306,21 @@ private struct SavedSnapshotHarness {
         workspaceStore.updateDocument { document in
             document.canvasSize = canvasSize
         }
+        let recoveryRootURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "ArtFlex-SavedSnapshotRecovery-\(UUID().uuidString)",
+                isDirectory: true
+            )
         let bootstrap = try AppBootstrap(
             workspaceStore: workspaceStore,
             metalContext: metalContext,
-            layerSurfaceStore: StageOneLayerSurfaceStore()
+            layerSurfaceStore: StageOneLayerSurfaceStore(),
+            persistenceRecoveryRootURL: recoveryRootURL
         )
         let viewModel = WorkspaceViewModel(bootstrap: bootstrap, installsZoomKeyboardMonitor: false)
         self.bootstrap = bootstrap
         self.viewModel = viewModel
+        self.recoveryRootURL = recoveryRootURL
     }
 
     func samplePixel(

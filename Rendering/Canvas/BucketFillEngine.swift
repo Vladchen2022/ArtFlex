@@ -23,7 +23,8 @@ final class BucketFillEngine: @unchecked Sendable {
         color: RGBAColor,
         alphaLockEnabled: Bool,
         selectionShape: SelectionShape?,
-        layerSurfaceStore: StageOneLayerSurfaceStore
+        layerSurfaceStore: StageOneLayerSurfaceStore,
+        settings: FillSettings = .stageOneDefault
     ) throws {
         guard let plan = try makeFillPlan(
             layerID: layerID,
@@ -31,7 +32,8 @@ final class BucketFillEngine: @unchecked Sendable {
             color: color,
             alphaLockEnabled: alphaLockEnabled,
             selectionShape: selectionShape,
-            layerSurfaceStore: layerSurfaceStore
+            layerSurfaceStore: layerSurfaceStore,
+            settings: settings
         ) else {
             return
         }
@@ -44,7 +46,8 @@ final class BucketFillEngine: @unchecked Sendable {
         color: RGBAColor,
         alphaLockEnabled: Bool,
         selectionShape: SelectionShape?,
-        layerSurfaceStore: StageOneLayerSurfaceStore
+        layerSurfaceStore: StageOneLayerSurfaceStore,
+        settings: FillSettings = .stageOneDefault
     ) throws -> BucketFillPlan? {
         guard
             let surfaceID = layerSurfaceStore.surfaceID(for: layerID),
@@ -60,7 +63,8 @@ final class BucketFillEngine: @unchecked Sendable {
             color: color,
             alphaLockEnabled: alphaLockEnabled,
             selectionShape: selectionShape,
-            isKnownTransparent: layerSurfaceStore.isKnownTransparent(layerID: layerID)
+            isKnownTransparent: layerSurfaceStore.isKnownTransparent(layerID: layerID),
+            settings: settings
         )
     }
 
@@ -71,7 +75,8 @@ final class BucketFillEngine: @unchecked Sendable {
         color: RGBAColor,
         alphaLockEnabled: Bool,
         selectionShape: SelectionShape?,
-        isKnownTransparent: Bool
+        isKnownTransparent: Bool,
+        settings: FillSettings = .stageOneDefault
     ) throws -> BucketFillPlan? {
 
         let width = texture.width
@@ -119,7 +124,8 @@ final class BucketFillEngine: @unchecked Sendable {
             )
         }
 
-        if boundedSelection == nil,
+        if settings.isContiguous,
+           boundedSelection == nil,
            processingWidth * processingHeight > tileLength * tileLength {
             return try makeTiledFillPlan(
                 layerID: layerID,
@@ -127,7 +133,8 @@ final class BucketFillEngine: @unchecked Sendable {
                 startX: startX,
                 startY: startY,
                 color: color,
-                alphaLockEnabled: alphaLockEnabled
+                alphaLockEnabled: alphaLockEnabled,
+                tolerance: settings.normalizedTolerance
             )
         }
 
@@ -173,6 +180,21 @@ final class BucketFillEngine: @unchecked Sendable {
             return nil
         }
 
+        if !settings.isContiguous {
+            return makeGlobalFillPlan(
+                layerID: layerID,
+                snapshot: snapshot,
+                processingOriginX: processingOriginX,
+                processingOriginY: processingOriginY,
+                target: target,
+                replacement: replacement,
+                color: color,
+                alphaLockEnabled: alphaLockEnabled,
+                tolerance: settings.normalizedTolerance,
+                selectionMaskBytes: selectionMaskBytes
+            )
+        }
+
         if selectionMaskBytes == nil,
            snapshotIsUniform(snapshot, matching: target) {
             return BucketFillPlan(
@@ -194,6 +216,7 @@ final class BucketFillEngine: @unchecked Sendable {
         }
 
         var bytes = [UInt8](snapshot.pixelData)
+        var visited = [UInt8](repeating: 0, count: processingWidth * processingHeight)
         var queue: [(x: Int, y: Int)] = [(localStartX, localStartY)]
         queue.reserveCapacity(min(processingWidth * processingHeight, 4096))
         var dirtyMinX = processingWidth
@@ -206,16 +229,25 @@ final class BucketFillEngine: @unchecked Sendable {
                 return false
             }
             let pixelID = (localY * processingWidth) + localX
+            if visited[pixelID] != 0 {
+                return false
+            }
             if let selectionMaskBytes,
                selectionMaskBytes[pixelID] == 0 {
                 return false
             }
 
             let index = (localY * snapshot.bytesPerRow) + (localX * bytesPerPixel)
-            return bytes[index] == target.blue &&
-                bytes[index + 1] == target.green &&
-                bytes[index + 2] == target.red &&
-                bytes[index + 3] == target.alpha
+            return pixelsMatch(
+                PixelBGRA(
+                    blue: bytes[index],
+                    green: bytes[index + 1],
+                    red: bytes[index + 2],
+                    alpha: bytes[index + 3]
+                ),
+                target,
+                tolerance: settings.normalizedTolerance
+            )
         }
 
         func enqueueNeighborSegments(localY: Int, from minX: Int, through maxX: Int) {
@@ -248,10 +280,20 @@ final class BucketFillEngine: @unchecked Sendable {
             for localX in leftX...rightX {
                 let index = (seed.y * snapshot.bytesPerRow) + (localX * bytesPerPixel)
                 let pixelID = (seed.y * processingWidth) + localX
+                visited[pixelID] = 1
                 let coverage = selectionMaskBytes?[pixelID] ?? 255
+                let previous = PixelBGRA(
+                    blue: bytes[index],
+                    green: bytes[index + 1],
+                    red: bytes[index + 2],
+                    alpha: bytes[index + 3]
+                )
+                let pixelReplacement = alphaLockEnabled
+                    ? makePremultipliedBGRA(color: color, preservingAlpha: previous.alpha)
+                    : replacement
                 let coveredReplacement = coverage == 255
-                    ? replacement
-                    : blendedPixel(from: target, to: replacement, coverage: coverage)
+                    ? pixelReplacement
+                    : blendedPixel(from: previous, to: pixelReplacement, coverage: coverage)
                 bytes[index] = coveredReplacement.blue
                 bytes[index + 1] = coveredReplacement.green
                 bytes[index + 2] = coveredReplacement.red
@@ -321,6 +363,93 @@ final class BucketFillEngine: @unchecked Sendable {
         )
     }
 
+    private func makeGlobalFillPlan(
+        layerID: LayerID,
+        snapshot: LayerTextureSnapshot,
+        processingOriginX: Int,
+        processingOriginY: Int,
+        target: PixelBGRA,
+        replacement: PixelBGRA,
+        color: RGBAColor,
+        alphaLockEnabled: Bool,
+        tolerance: Float,
+        selectionMaskBytes: [UInt8]?
+    ) -> BucketFillPlan? {
+        let width = snapshot.width
+        let height = snapshot.height
+        var bytes = [UInt8](snapshot.pixelData)
+        var dirtyMinX = width
+        var dirtyMinY = height
+        var dirtyMaxX = -1
+        var dirtyMaxY = -1
+
+        for y in 0..<height {
+            for x in 0..<width {
+                let pixelID = (y * width) + x
+                let coverage = selectionMaskBytes?[pixelID] ?? 255
+                guard coverage > 0 else { continue }
+                let offset = (y * snapshot.bytesPerRow) + (x * 4)
+                let previous = PixelBGRA(
+                    blue: bytes[offset],
+                    green: bytes[offset + 1],
+                    red: bytes[offset + 2],
+                    alpha: bytes[offset + 3]
+                )
+                guard pixelsMatch(previous, target, tolerance: tolerance) else { continue }
+                if alphaLockEnabled, previous.alpha == 0 { continue }
+                let pixelReplacement = alphaLockEnabled
+                    ? makePremultipliedBGRA(color: color, preservingAlpha: previous.alpha)
+                    : replacement
+                let resolved = coverage == 255
+                    ? pixelReplacement
+                    : blendedPixel(from: previous, to: pixelReplacement, coverage: coverage)
+                guard resolved != previous else { continue }
+                bytes[offset] = resolved.blue
+                bytes[offset + 1] = resolved.green
+                bytes[offset + 2] = resolved.red
+                bytes[offset + 3] = resolved.alpha
+                dirtyMinX = min(dirtyMinX, x)
+                dirtyMinY = min(dirtyMinY, y)
+                dirtyMaxX = max(dirtyMaxX, x)
+                dirtyMaxY = max(dirtyMaxY, y)
+            }
+        }
+
+        guard dirtyMaxX >= dirtyMinX, dirtyMaxY >= dirtyMinY else { return nil }
+        let dirtyWidth = dirtyMaxX - dirtyMinX + 1
+        let dirtyHeight = dirtyMaxY - dirtyMinY + 1
+        let changedSnapshot = LayerTextureSnapshot(
+            width: width,
+            height: height,
+            bytesPerRow: snapshot.bytesPerRow,
+            pixelData: Data(bytes)
+        )
+        return BucketFillPlan(
+            layerID: layerID,
+            historySnapshot: LayerHistorySnapshot(
+                layerID: layerID,
+                texture: croppedSnapshot(
+                    from: snapshot,
+                    originX: dirtyMinX,
+                    originY: dirtyMinY,
+                    width: dirtyWidth,
+                    height: dirtyHeight
+                ),
+                originX: processingOriginX + dirtyMinX,
+                originY: processingOriginY + dirtyMinY
+            ),
+            restoreSnapshot: croppedSnapshot(
+                from: changedSnapshot,
+                originX: dirtyMinX,
+                originY: dirtyMinY,
+                width: dirtyWidth,
+                height: dirtyHeight
+            ),
+            destinationX: processingOriginX + dirtyMinX,
+            destinationY: processingOriginY + dirtyMinY
+        )
+    }
+
     func makeReferencedFillPlan(
         layerID: LayerID,
         destinationTexture: MTLTexture,
@@ -328,7 +457,8 @@ final class BucketFillEngine: @unchecked Sendable {
         at point: CanvasPoint,
         color: RGBAColor,
         alphaLockEnabled: Bool,
-        selectionShape: SelectionShape?
+        selectionShape: SelectionShape?,
+        settings: FillSettings = .stageOneDefault
     ) throws -> BucketFillPlan? {
         guard destinationTexture.width == referenceTexture.width,
               destinationTexture.height == referenceTexture.height else { return nil }
@@ -346,7 +476,8 @@ final class BucketFillEngine: @unchecked Sendable {
                 color: markerColor,
                 alphaLockEnabled: false,
                 selectionShape: selectionShape,
-                isKnownTransparent: false
+                isKnownTransparent: false,
+                settings: settings
             )
         }
         guard let referencePlan, let referenceBefore = referencePlan.historySnapshot else { return nil }
@@ -470,12 +601,14 @@ final class BucketFillEngine: @unchecked Sendable {
         startX: Int,
         startY: Int,
         color: RGBAColor,
-        alphaLockEnabled: Bool
+        alphaLockEnabled: Bool,
+        tolerance: Float
     ) throws -> BucketFillPlan? {
         let width = texture.width
         let height = texture.height
         let bytesPerPixel = 4
         var tiles: [BucketFillTileKey: BucketFillTile] = [:]
+        var visited = [UInt8](repeating: 0, count: width * height)
 
         func keyForTileContaining(canvasX: Int, canvasY: Int) -> BucketFillTileKey {
             BucketFillTileKey(x: canvasX / tileLength, y: canvasY / tileLength)
@@ -541,12 +674,20 @@ final class BucketFillEngine: @unchecked Sendable {
             guard canvasX >= 0, canvasX < width, canvasY >= 0, canvasY < height else {
                 return false
             }
+            let visitedIndex = (canvasY * width) + canvasX
+            guard visited[visitedIndex] == 0 else { return false }
             let (tile, localX, localY) = try tileAndLocalPoint(canvasX: canvasX, canvasY: canvasY)
             let index = (localY * tile.bytesPerRow) + (localX * bytesPerPixel)
-            return tile.bytes[index] == target.blue &&
-                tile.bytes[index + 1] == target.green &&
-                tile.bytes[index + 2] == target.red &&
-                tile.bytes[index + 3] == target.alpha
+            return pixelsMatch(
+                PixelBGRA(
+                    blue: tile.bytes[index],
+                    green: tile.bytes[index + 1],
+                    red: tile.bytes[index + 2],
+                    alpha: tile.bytes[index + 3]
+                ),
+                target,
+                tolerance: tolerance
+            )
         }
 
         var queue: [(x: Int, y: Int)] = [(startX, startY)]
@@ -580,10 +721,17 @@ final class BucketFillEngine: @unchecked Sendable {
                 for canvasX in x...segmentEndX {
                     let localX = canvasX - tile.originX
                     let index = (localY * tile.bytesPerRow) + (localX * bytesPerPixel)
-                    tile.bytes[index] = replacement.blue
-                    tile.bytes[index + 1] = replacement.green
-                    tile.bytes[index + 2] = replacement.red
-                    tile.bytes[index + 3] = replacement.alpha
+                    visited[(canvasY * width) + canvasX] = 1
+                    let pixelReplacement = alphaLockEnabled
+                        ? makePremultipliedBGRA(
+                            color: color,
+                            preservingAlpha: tile.bytes[index + 3]
+                        )
+                        : replacement
+                    tile.bytes[index] = pixelReplacement.blue
+                    tile.bytes[index + 1] = pixelReplacement.green
+                    tile.bytes[index + 2] = pixelReplacement.red
+                    tile.bytes[index + 3] = pixelReplacement.alpha
                 }
                 x = segmentEndX + 1
             }
@@ -778,6 +926,28 @@ final class BucketFillEngine: @unchecked Sendable {
             green: UInt8(clamping: Int((color.green * alphaScale * 255).rounded())),
             red: UInt8(clamping: Int((color.red * alphaScale * 255).rounded())),
             alpha: alpha
+        )
+    }
+
+    private func pixelsMatch(
+        _ lhs: PixelBGRA,
+        _ rhs: PixelBGRA,
+        tolerance: Float
+    ) -> Bool {
+        FillColorDistance.matches(
+            PremultipliedSRGBAPixel(
+                bgraBlue: lhs.blue,
+                green: lhs.green,
+                red: lhs.red,
+                alpha: lhs.alpha
+            ),
+            PremultipliedSRGBAPixel(
+                bgraBlue: rhs.blue,
+                green: rhs.green,
+                red: rhs.red,
+                alpha: rhs.alpha
+            ),
+            tolerance: tolerance
         )
     }
 

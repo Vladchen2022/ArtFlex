@@ -191,6 +191,166 @@ struct EyedropperSamplerTests {
     }
 
     @Test
+    func currentLayerSamplingAppliesEnabledLayerMask() throws {
+        let layer = LayerRecord(
+            id: LayerID(),
+            name: "Masked",
+            isVisible: true,
+            isLocked: false,
+            locksTransparentPixels: false,
+            opacity: 1,
+            mask: .init(isEnabled: true)
+        )
+        let document = makeDocument(
+            canvasSize: .init(width: 2, height: 1),
+            layers: [layer],
+            activeLayerID: layer.id
+        )
+        let harness = try EyedropperTestHarness(document: document)
+        try harness.restore(
+            snapshot: solidSnapshot(width: 2, height: 1, red: 255, alpha: 255),
+            to: layer.id
+        )
+        try harness.restoreMask(
+            snapshot: makeMaskSnapshot(width: 2, height: 1, bytes: [0, 255]),
+            to: layer.id
+        )
+
+        var sampleSettings = settings(sampleSize: .point, statistic: .average)
+        sampleSettings.source = .currentLayer
+        sampleSettings.preservesTransparency = true
+        let maskedOut = try harness.sample(at: .init(x: 0, y: 0), settings: sampleSettings)
+        let maskedIn = try harness.sample(at: .init(x: 1, y: 0), settings: sampleSettings)
+
+        #expect(maskedOut.alpha < 0.01)
+        #expect(maskedIn.red > 0.99)
+        #expect(maskedIn.green < 0.01)
+        #expect(maskedIn.blue < 0.01)
+        #expect(maskedIn.alpha > 0.99)
+    }
+
+    @Test
+    func clippedLayerSamplingUsesTargetLayerMask() throws {
+        let target = LayerRecord(
+            id: LayerID(),
+            name: "Target",
+            isVisible: true,
+            isLocked: false,
+            locksTransparentPixels: false,
+            opacity: 1,
+            mask: .init(isEnabled: true)
+        )
+        let clipped = LayerRecord(
+            id: LayerID(),
+            name: "Clipped",
+            isVisible: true,
+            isLocked: false,
+            locksTransparentPixels: false,
+            opacity: 1,
+            clipTargetLayerID: target.id
+        )
+        let document = makeDocument(
+            canvasSize: .init(width: 2, height: 1),
+            layers: [target, clipped],
+            activeLayerID: clipped.id
+        )
+        let harness = try EyedropperTestHarness(document: document)
+        try harness.restore(
+            snapshot: solidSnapshot(width: 2, height: 1, blue: 255, alpha: 255),
+            to: target.id
+        )
+        try harness.restore(
+            snapshot: solidSnapshot(width: 2, height: 1, red: 255, alpha: 255),
+            to: clipped.id
+        )
+        try harness.restoreMask(
+            snapshot: makeMaskSnapshot(width: 2, height: 1, bytes: [0, 255]),
+            to: target.id
+        )
+
+        var sampleSettings = settings(sampleSize: .point, statistic: .average)
+        sampleSettings.preservesTransparency = true
+        let maskedOut = try harness.sample(at: .init(x: 0, y: 0), settings: sampleSettings)
+        let maskedIn = try harness.sample(at: .init(x: 1, y: 0), settings: sampleSettings)
+
+        #expect(maskedOut.alpha < 0.01)
+        #expect(maskedIn.red > 0.99)
+        #expect(maskedIn.blue < 0.01)
+        #expect(maskedIn.alpha > 0.99)
+    }
+
+    @Test
+    func visibleSamplingAppliesCurveAdjustmentInDocumentOrder() throws {
+        let bottom = LayerRecord(
+            id: LayerID(),
+            name: "Bottom",
+            isVisible: true,
+            isLocked: false,
+            locksTransparentPixels: false,
+            opacity: 1
+        )
+        var parameters = CurveAdjustmentParameters.neutral
+        parameters.redCurve = CurveChannelState(points: [
+            .init(x: 0, y: 1),
+            .init(x: 1, y: 1)
+        ])
+        let adjustment = LayerRecord(
+            id: LayerID(),
+            name: "Adjustment",
+            isVisible: true,
+            isLocked: false,
+            locksTransparentPixels: false,
+            opacity: 1,
+            adjustment: .curves(parameters)
+        )
+        let top = LayerRecord(
+            id: LayerID(),
+            name: "Top",
+            isVisible: true,
+            isLocked: false,
+            locksTransparentPixels: false,
+            opacity: 1
+        )
+        let document = makeDocument(
+            canvasSize: .init(width: 2, height: 1),
+            layers: [bottom, adjustment, top],
+            activeLayerID: top.id
+        )
+        let harness = try EyedropperTestHarness(document: document)
+        try harness.restore(
+            snapshot: solidSnapshot(width: 2, height: 1, alpha: 255),
+            to: bottom.id
+        )
+        try harness.restore(
+            snapshot: makeSnapshot(
+                width: 2,
+                height: 1,
+                bytes: [0, 0, 0, 0, 0, 255, 0, 255]
+            ),
+            to: top.id
+        )
+
+        for source in [EyedropperSampleSource.allVisibleLayers, .displayedColor] {
+            var sampleSettings = settings(sampleSize: .point, statistic: .average)
+            sampleSettings.source = source
+            sampleSettings.preservesTransparency = true
+            let adjustedBottom = try harness.sample(
+                at: .init(x: 0, y: 0),
+                settings: sampleSettings
+            )
+            let unadjustedTop = try harness.sample(
+                at: .init(x: 1, y: 0),
+                settings: sampleSettings
+            )
+
+            #expect(adjustedBottom.red > 0.99)
+            #expect(adjustedBottom.green < 0.01)
+            #expect(unadjustedTop.red < 0.01)
+            #expect(unadjustedTop.green > 0.99)
+        }
+    }
+
+    @Test
     func averageAtCanvasEdgeUsesOnlyValidPixels() throws {
         let harness = try EyedropperTestHarness(canvasSize: .init(width: 3, height: 3))
         try harness.restore(
@@ -256,6 +416,13 @@ private final class EyedropperTestHarness {
             let surfaceID = layerSurfaceStore.surfaceID(for: layerID),
             let texture = layerSurfaceStore.texture(for: surfaceID)
         else {
+            throw EyedropperTestError.textureUnavailable
+        }
+        try serializer.restore(snapshot: snapshot, into: texture)
+    }
+
+    func restoreMask(snapshot: LayerTextureSnapshot, to layerID: LayerID) throws {
+        guard let texture = layerSurfaceStore.maskTexture(for: layerID) else {
             throw EyedropperTestError.textureUnavailable
         }
         try serializer.restore(snapshot: snapshot, into: texture)
@@ -350,6 +517,15 @@ private func makeSnapshot(width: Int, height: Int, bytes: [UInt8]) -> LayerTextu
         width: width,
         height: height,
         bytesPerRow: width * 4,
+        pixelData: Data(bytes)
+    )
+}
+
+private func makeMaskSnapshot(width: Int, height: Int, bytes: [UInt8]) -> LayerTextureSnapshot {
+    LayerTextureSnapshot(
+        width: width,
+        height: height,
+        bytesPerRow: width,
         pixelData: Data(bytes)
     )
 }

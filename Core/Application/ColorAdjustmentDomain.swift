@@ -57,6 +57,7 @@ enum ColorAdjustmentResolutionReason: Equatable, Sendable {
     case panelChange
     case layerChange
     case historyNavigation
+    case persistence
     case documentOpen
     case closeOrQuit
 
@@ -64,7 +65,7 @@ enum ColorAdjustmentResolutionReason: Equatable, Sendable {
         switch self {
         case .historyNavigation:
             return true
-        case .toolChange, .panelChange, .layerChange, .documentOpen, .closeOrQuit:
+        case .toolChange, .panelChange, .layerChange, .persistence, .documentOpen, .closeOrQuit:
             return true
         }
     }

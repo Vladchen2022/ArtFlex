@@ -284,27 +284,31 @@ final class MetalStrokeEngine: StrokeEngine {
             switch event {
             case .begin(let layerID, _):
                 guard session.layerID == layerID else { continue }
-                session.brushSamplingState = nil
+                session.brushSamplingStates.removeAll(keepingCapacity: true)
                 session.currentStrokePackets = []
-                session.opacityCapSession = nil
+                session.opacityCapSessions.removeAll(keepingCapacity: true)
 
             case .packet(let stroke, let layerID, _):
                 guard session.layerID == layerID else { continue }
-                if requiresStrokeMaskSession(stroke), session.opacityCapSession == nil {
-                    session.opacityCapSession = brushRenderer.makeOpacityCapSession(
+                let streamID = stroke.brushStreamID
+                if requiresStrokeMaskSession(stroke), session.opacityCapSessions[streamID] == nil,
+                   let opacityCapSession = brushRenderer.makeOpacityCapSession(
                         for: session.workingTexture,
-                        commandQueue: metalContext.commandQueue
-                    )
+                        commandQueue: metalContext.commandQueue,
+                        reusesCachedTextures: streamID == .primary
+                   ) {
+                    session.opacityCapSessions[streamID] = opacityCapSession
                 }
 
-                if requiresStrokeMaskSession(stroke), let opacityCapSession = session.opacityCapSession {
+                var streamSamplingState = session.brushSamplingStates[streamID]
+                if requiresStrokeMaskSession(stroke), let opacityCapSession = session.opacityCapSessions[streamID] {
                     _ = brushRenderer.encodeOpacityCapStroke(
                         stroke: stroke,
                         session: opacityCapSession,
                         into: session.workingTexture,
                         commandBuffer: commandBuffer,
                         alphaLockTexture: stroke.alphaLockEnabled ? liveAlphaLockTexture : nil,
-                        samplingState: &session.brushSamplingState
+                        samplingState: &streamSamplingState
                     )
                 } else {
                     _ = brushRenderer.encodeStroke(
@@ -313,8 +317,13 @@ final class MetalStrokeEngine: StrokeEngine {
                         commandQueue: metalContext.commandQueue,
                         commandBuffer: commandBuffer,
                         alphaLockTexture: stroke.alphaLockEnabled ? liveAlphaLockTexture : nil,
-                        samplingState: &session.brushSamplingState
+                        samplingState: &streamSamplingState
                     )
+                }
+                if let streamSamplingState {
+                    session.brushSamplingStates[streamID] = streamSamplingState
+                } else {
+                    session.brushSamplingStates.removeValue(forKey: streamID)
                 }
 
                 session.currentStrokePackets.append(stroke)
@@ -335,48 +344,63 @@ final class MetalStrokeEngine: StrokeEngine {
 
             case .end(let layerID, _):
                 guard session.layerID == layerID else { continue }
-                guard let lastStroke = session.currentStrokePackets.last else {
-                    session.brushSamplingState = nil
-                    session.opacityCapSession = nil
+                guard !session.currentStrokePackets.isEmpty else {
+                    session.brushSamplingStates.removeAll(keepingCapacity: true)
+                    session.opacityCapSessions.removeAll(keepingCapacity: true)
                     session.strokeBeganAtUptimeNs = nil
                     continue
                 }
 
-                var flushSamplingState = session.brushSamplingState
-                flushSamplingState?.isFlushing = true
-                let flushStroke = StrokeDescriptor(
-                    tool: lastStroke.tool,
-                    color: lastStroke.color,
-                    brush: lastStroke.brush,
-                    points: [],
-                    selectionShape: lastStroke.selectionShape,
-                    alphaLockEnabled: lastStroke.alphaLockEnabled,
-                    skipLeadingStamp: true,
-                    paintVariationSeed: lastStroke.paintVariationSeed
-                )
+                let orderedStreamIDs = session.currentStrokePackets.reduce(into: [BrushStrokeStreamID]()) { result, stroke in
+                    guard !result.contains(stroke.brushStreamID) else { return }
+                    result.append(stroke.brushStreamID)
+                }
+                var renderedPixelBounds: BrushPixelBounds?
+                for streamID in orderedStreamIDs {
+                    guard let lastStroke = session.currentStrokePackets.last(where: {
+                        $0.brushStreamID == streamID
+                    }) else { continue }
+                    var flushSamplingState = session.brushSamplingStates[streamID]
+                    flushSamplingState?.isFlushing = true
+                    var flushStroke = StrokeDescriptor(
+                        tool: lastStroke.tool,
+                        color: lastStroke.color,
+                        brush: lastStroke.brush,
+                        points: [],
+                        selectionShape: lastStroke.selectionShape,
+                        alphaLockEnabled: lastStroke.alphaLockEnabled,
+                        skipLeadingStamp: true,
+                        paintVariationSeed: lastStroke.paintVariationSeed,
+                        pigmentPalette: lastStroke.pigmentPalette
+                    )
+                    flushStroke.brushStreamID = streamID
 
-                if requiresStrokeMaskSession(lastStroke), let opacityCapSession = session.opacityCapSession {
-                    _ = brushRenderer.encodeOpacityCapStroke(
-                        stroke: flushStroke,
-                        session: opacityCapSession,
-                        into: session.workingTexture,
-                        commandBuffer: commandBuffer,
-                        alphaLockTexture: lastStroke.alphaLockEnabled ? liveAlphaLockTexture : nil,
-                        samplingState: &flushSamplingState
-                    )
-                } else {
-                    _ = brushRenderer.encodeStroke(
-                        stroke: flushStroke,
-                        into: session.workingTexture,
-                        commandQueue: metalContext.commandQueue,
-                        commandBuffer: commandBuffer,
-                        alphaLockTexture: lastStroke.alphaLockEnabled ? liveAlphaLockTexture : nil,
-                        samplingState: &flushSamplingState
-                    )
+                    if requiresStrokeMaskSession(lastStroke), let opacityCapSession = session.opacityCapSessions[streamID] {
+                        _ = brushRenderer.encodeOpacityCapStroke(
+                            stroke: flushStroke,
+                            session: opacityCapSession,
+                            into: session.workingTexture,
+                            commandBuffer: commandBuffer,
+                            alphaLockTexture: lastStroke.alphaLockEnabled ? liveAlphaLockTexture : nil,
+                            samplingState: &flushSamplingState
+                        )
+                    } else {
+                        _ = brushRenderer.encodeStroke(
+                            stroke: flushStroke,
+                            into: session.workingTexture,
+                            commandQueue: metalContext.commandQueue,
+                            commandBuffer: commandBuffer,
+                            alphaLockTexture: lastStroke.alphaLockEnabled ? liveAlphaLockTexture : nil,
+                            samplingState: &flushSamplingState
+                        )
+                    }
+                    if let bounds = flushSamplingState?.renderedPixelBounds {
+                        renderedPixelBounds = renderedPixelBounds.map { $0.union(bounds) } ?? bounds
+                    }
                 }
 
-                session.brushSamplingState = nil
-                session.opacityCapSession = nil
+                session.brushSamplingStates.removeAll(keepingCapacity: true)
+                session.opacityCapSessions.removeAll(keepingCapacity: true)
                 session.displayRevision &+= 1
                 nextCommitRevision &+= 1
                 commitQueue.enqueue(
@@ -385,7 +409,7 @@ final class MetalStrokeEngine: StrokeEngine {
                         packets: session.currentStrokePackets,
                         needsTailFlush: true,
                         commitRevision: nextCommitRevision,
-                        renderedPixelBounds: flushSamplingState?.renderedPixelBounds
+                        renderedPixelBounds: renderedPixelBounds
                     )
                 )
                 if auditEnabled {
@@ -899,8 +923,8 @@ final class MetalStrokeEngine: StrokeEngine {
         colorTint: RGBAColor? = nil,
         colorTintAmount: Float = 0
     ) {
-        var samplingState: BrushStrokeSamplingState?
-        var opacityCapSession: OpacityCapSessionResources?
+        var samplingStates: [BrushStrokeStreamID: BrushStrokeSamplingState] = [:]
+        var opacityCapSessions: [BrushStrokeStreamID: OpacityCapSessionResources] = [:]
         let usesAlphaLock = job.packets.contains(where: \.alphaLockEnabled)
         let alphaLockTexture = usesAlphaLock ? makeAlphaLockTextureCopy(from: texture) : nil
 
@@ -914,21 +938,25 @@ final class MetalStrokeEngine: StrokeEngine {
                 colorTint: colorTint,
                 colorTintAmount: colorTintAmount
             )
-            if requiresStrokeMaskSession(adjustedPacket), opacityCapSession == nil {
-                opacityCapSession = brushRenderer.makeOpacityCapSession(
+            let streamID = adjustedPacket.brushStreamID
+            if requiresStrokeMaskSession(adjustedPacket), opacityCapSessions[streamID] == nil,
+               let opacityCapSession = brushRenderer.makeOpacityCapSession(
                     for: texture,
-                    commandQueue: metalContext.commandQueue
-                )
+                    commandQueue: metalContext.commandQueue,
+                    reusesCachedTextures: streamID == .primary
+               ) {
+                opacityCapSessions[streamID] = opacityCapSession
             }
 
-            if requiresStrokeMaskSession(adjustedPacket), let opacityCapSession {
+            var streamSamplingState = samplingStates[streamID]
+            if requiresStrokeMaskSession(adjustedPacket), let opacityCapSession = opacityCapSessions[streamID] {
                 _ = brushRenderer.encodeOpacityCapStroke(
                     stroke: adjustedPacket,
                     session: opacityCapSession,
                     into: texture,
                     commandBuffer: commandBuffer,
                     alphaLockTexture: adjustedPacket.alphaLockEnabled ? alphaLockTexture : nil,
-                    samplingState: &samplingState
+                    samplingState: &streamSamplingState
                 )
             } else {
                 _ = brushRenderer.encodeStroke(
@@ -937,52 +965,68 @@ final class MetalStrokeEngine: StrokeEngine {
                     commandQueue: metalContext.commandQueue,
                     commandBuffer: commandBuffer,
                     alphaLockTexture: adjustedPacket.alphaLockEnabled ? alphaLockTexture : nil,
-                    samplingState: &samplingState
+                    samplingState: &streamSamplingState
                 )
+            }
+            if let streamSamplingState {
+                samplingStates[streamID] = streamSamplingState
+            } else {
+                samplingStates.removeValue(forKey: streamID)
             }
         }
 
-        if job.needsTailFlush, let lastStroke = job.packets.last {
-            let adjustedLastStroke = adjustedStroke(
-                lastStroke,
-                opacityMultiplier: opacityMultiplier,
-                brightnessAdjustment: brightnessAdjustment,
-                saturationAdjustment: saturationAdjustment,
-                colorOverride: colorOverride,
-                colorTint: colorTint,
-                colorTintAmount: colorTintAmount
-            )
-            var flushSamplingState = samplingState
-            flushSamplingState?.isFlushing = true
-            let flushStroke = StrokeDescriptor(
-                tool: adjustedLastStroke.tool,
-                color: adjustedLastStroke.color,
-                brush: adjustedLastStroke.brush,
-                points: [],
-                selectionShape: adjustedLastStroke.selectionShape,
-                alphaLockEnabled: adjustedLastStroke.alphaLockEnabled,
-                skipLeadingStamp: true,
-                paintVariationSeed: adjustedLastStroke.paintVariationSeed
-            )
+        if job.needsTailFlush {
+            let orderedStreamIDs = job.packets.reduce(into: [BrushStrokeStreamID]()) { result, stroke in
+                guard !result.contains(stroke.brushStreamID) else { return }
+                result.append(stroke.brushStreamID)
+            }
+            for streamID in orderedStreamIDs {
+                guard let lastStroke = job.packets.last(where: {
+                    $0.brushStreamID == streamID
+                }) else { continue }
+                let adjustedLastStroke = adjustedStroke(
+                    lastStroke,
+                    opacityMultiplier: opacityMultiplier,
+                    brightnessAdjustment: brightnessAdjustment,
+                    saturationAdjustment: saturationAdjustment,
+                    colorOverride: colorOverride,
+                    colorTint: colorTint,
+                    colorTintAmount: colorTintAmount
+                )
+                var flushSamplingState = samplingStates[streamID]
+                flushSamplingState?.isFlushing = true
+                var flushStroke = StrokeDescriptor(
+                    tool: adjustedLastStroke.tool,
+                    color: adjustedLastStroke.color,
+                    brush: adjustedLastStroke.brush,
+                    points: [],
+                    selectionShape: adjustedLastStroke.selectionShape,
+                    alphaLockEnabled: adjustedLastStroke.alphaLockEnabled,
+                    skipLeadingStamp: true,
+                    paintVariationSeed: adjustedLastStroke.paintVariationSeed,
+                    pigmentPalette: adjustedLastStroke.pigmentPalette
+                )
+                flushStroke.brushStreamID = streamID
 
-            if requiresStrokeMaskSession(adjustedLastStroke), let opacityCapSession {
-                _ = brushRenderer.encodeOpacityCapStroke(
-                    stroke: flushStroke,
-                    session: opacityCapSession,
-                    into: texture,
-                    commandBuffer: commandBuffer,
-                    alphaLockTexture: adjustedLastStroke.alphaLockEnabled ? alphaLockTexture : nil,
-                    samplingState: &flushSamplingState
-                )
-            } else {
-                _ = brushRenderer.encodeStroke(
-                    stroke: flushStroke,
-                    into: texture,
-                    commandQueue: metalContext.commandQueue,
-                    commandBuffer: commandBuffer,
-                    alphaLockTexture: adjustedLastStroke.alphaLockEnabled ? alphaLockTexture : nil,
-                    samplingState: &flushSamplingState
-                )
+                if requiresStrokeMaskSession(adjustedLastStroke), let opacityCapSession = opacityCapSessions[streamID] {
+                    _ = brushRenderer.encodeOpacityCapStroke(
+                        stroke: flushStroke,
+                        session: opacityCapSession,
+                        into: texture,
+                        commandBuffer: commandBuffer,
+                        alphaLockTexture: adjustedLastStroke.alphaLockEnabled ? alphaLockTexture : nil,
+                        samplingState: &flushSamplingState
+                    )
+                } else {
+                    _ = brushRenderer.encodeStroke(
+                        stroke: flushStroke,
+                        into: texture,
+                        commandQueue: metalContext.commandQueue,
+                        commandBuffer: commandBuffer,
+                        alphaLockTexture: adjustedLastStroke.alphaLockEnabled ? alphaLockTexture : nil,
+                        samplingState: &flushSamplingState
+                    )
+                }
             }
         }
     }
@@ -1013,6 +1057,28 @@ final class MetalStrokeEngine: StrokeEngine {
             brightnessAdjustment: brightnessAdjustment,
             saturationAdjustment: saturationAdjustment
         )
+        if !stroke.pigmentPalette.components.isEmpty {
+            adjustedStroke.pigmentPalette = BrushPigmentPalette(
+                components: stroke.pigmentPalette.components.map { component in
+                    var componentColor = component.color
+                    if let colorOverride {
+                        componentColor = colorOverride.withAlpha(component.color.alpha)
+                    } else if let colorTint, colorTintAmount > 0 {
+                        componentColor = blendedColor(
+                            from: component.color,
+                            toward: colorTint,
+                            amount: colorTintAmount
+                        )
+                    }
+                    componentColor = applyRecentBrushColorAdjustments(
+                        to: componentColor,
+                        brightnessAdjustment: brightnessAdjustment,
+                        saturationAdjustment: saturationAdjustment
+                    )
+                    return BrushPigmentComponent(color: componentColor, weight: component.weight)
+                }
+            )
+        }
         return adjustedStroke
     }
 

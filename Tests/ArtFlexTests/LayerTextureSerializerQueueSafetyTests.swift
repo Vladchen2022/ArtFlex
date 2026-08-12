@@ -246,6 +246,48 @@ struct LayerTextureSerializerQueueSafetyTests {
     }
 
     @Test
+    func persistenceRejectsTruncatedLayerPixelDataBeforeRestore() throws {
+        guard let metalContext = MetalDeviceContext() else {
+            Issue.record("Metal unavailable")
+            return
+        }
+
+        let workspace = makeAuditWorkspaceState(canvasSize: .init(width: 8, height: 8))
+        let layerID = workspace.document.activeLayerID
+        let package = ProjectPackage.fromWorkspace(
+            workspace,
+            layerSnapshots: [
+                LayerHistorySnapshot(
+                    layerID: layerID,
+                    texture: LayerTextureSnapshot(
+                        width: 8,
+                        height: 8,
+                        bytesPerRow: 32,
+                        pixelData: Data(repeating: 0, count: 31)
+                    )
+                )
+            ]
+        )
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let fileURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+            .appendingPathExtension("artflex.json")
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+        try encoder.encode(package).write(to: fileURL, options: .atomic)
+
+        let controller = PersistenceController(
+            workspaceStore: WorkspaceStore(state: workspace),
+            layerSurfaceStore: StageOneLayerSurfaceStore(),
+            serializer: LayerTextureSerializer(metalContext: metalContext)
+        )
+
+        #expect(throws: PersistenceError.self) {
+            try controller.openProject(from: fileURL)
+        }
+    }
+
+    @Test
     func eyedropperSamplerReadsImmediatelyRestoredPixelsOnSharedSerializerQueue() throws {
         guard let metalContext = MetalDeviceContext() else {
             Issue.record("Metal unavailable")

@@ -166,6 +166,60 @@ struct WorkspaceViewModelSafetyTests {
     }
 
     @Test
+    func projectDisplayNameRemovesCompoundProjectExtension() {
+        #expect(
+            WorkspaceViewModel.projectDisplayName(
+                for: URL(fileURLWithPath: "/tmp/人物草图.artflex.json")
+            ) == "人物草图"
+        )
+        #expect(
+            WorkspaceViewModel.projectDisplayName(
+                for: URL(fileURLWithPath: "/tmp/普通工程.json")
+            ) == "普通工程"
+        )
+    }
+
+    @Test
+    @MainActor
+    func projectSaveIndicatorDistinguishesUntitledFromUnsaved() throws {
+        let harness = try BrushEditingBoundaryHarness()
+        #expect(harness.viewModel.projectSaveIndicatorState == .notYetSaved)
+
+        harness.viewModel.createNewCanvasDiscardingUnsavedChanges(
+            name: "新画布",
+            canvasSize: .init(width: 64, height: 64),
+            resolutionDPI: 300
+        )
+
+        #expect(harness.viewModel.projectSaveIndicatorState == .unsaved)
+    }
+
+    @Test
+    @MainActor
+    func openingLegacyProjectRequiresSaveAsWhileV2PackageKeepsItsSaveURL() throws {
+        let harness = try BrushEditingBoundaryHarness(canvasSize: .init(width: 8, height: 8))
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ArtFlex-LegacySaveAs-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+
+        let legacyURL = root.appendingPathComponent("Legacy.artflex.json")
+        let packageURL = root.appendingPathComponent("Package.artflex", isDirectory: true)
+        try harness.bootstrap.persistenceController.saveProject(to: legacyURL)
+        try harness.bootstrap.persistenceController.saveProject(to: packageURL)
+
+        harness.viewModel.openProject(from: legacyURL, isRecovery: false)
+
+        #expect(!harness.viewModel.hasUnsavedChanges)
+        #expect(harness.viewModel.projectSaveIndicatorState == .notYetSaved)
+
+        harness.viewModel.openProject(from: packageURL, isRecovery: false)
+
+        #expect(!harness.viewModel.hasUnsavedChanges)
+        #expect(harness.viewModel.projectSaveIndicatorState == .saved)
+    }
+
+    @Test
     @MainActor
     func initialWorkspaceStartsWithOpaqueWhiteBackgroundLayer() throws {
         let harness = try BrushEditingBoundaryHarness()
@@ -572,6 +626,27 @@ struct WorkspaceViewModelSafetyTests {
         #expect(harness.viewModel.layerThumbnailRevision == initialRevision)
         #expect(harness.viewModel.workspace.toolSession.activeTool == .eraser)
         #expect(harness.viewModel.workspace.document.layers.first(where: { $0.id == layerID })?.name == "Renamed")
+    }
+
+    @Test
+    @MainActor
+    func brushParameterEditingDoesNotInvalidateCanvasOrPixelThumbnails() throws {
+        let harness = try BrushEditingBoundaryHarness()
+        let initialThumbnailRevision = harness.viewModel.layerThumbnailRevision
+        let initialCanvasRevision = harness.viewModel.canvasContentRevision
+
+        harness.viewModel.setBrushSpacingPercent(37)
+        harness.viewModel.setBrushScatterAmount(0.4)
+        harness.viewModel.setBrushJitterAmount(0.25)
+        harness.viewModel.setPressureSensitivity(1.4)
+        harness.viewModel.setCompoundBrushEnabled(true)
+        harness.viewModel.setCompoundSecondarySize(42)
+        harness.viewModel.setCompoundPrimaryMixAtMidPressure(0.35)
+
+        #expect(harness.viewModel.layerThumbnailRevision == initialThumbnailRevision)
+        #expect(harness.viewModel.canvasContentRevision == initialCanvasRevision)
+        #expect(harness.viewModel.workspace.toolSession.brush.spacingPercent == 37)
+        #expect(harness.viewModel.workspace.toolSession.brush.compoundBrush.secondary.size == 42)
     }
 
     @Test
@@ -2025,11 +2100,12 @@ struct WorkspaceViewModelSafetyTests {
         harness.viewModel.setColorAdjustmentBrightness(0.5)
         harness.viewModel.debugColorAdjustmentResolutionDecisionOverride = .cancel
 
-        harness.viewModel.selectTool(.brush)
+        harness.viewModel.selectToolFromUI(.brush, shortcutLabel: "B")
 
         #expect(harness.viewModel.workspace.toolSession.activeTool == .brightnessAdjust)
         #expect(harness.viewModel.colorAdjustmentSession != nil)
         #expect(harness.viewModel.colorAdjustmentOverlayState.isActive)
+        #expect(harness.viewModel.status?.message != "选择了画笔")
     }
 
     @Test
@@ -3823,6 +3899,106 @@ struct WorkspaceViewModelSafetyTests {
 
     @Test
     @MainActor
+    func canvasColorPickBecomesOilPaintCandidateWithoutLoadingUntilRequested() throws {
+        let harness = try BrushEditingBoundaryHarness()
+        let activeLayerID = harness.viewModel.workspace.document.activeLayerID
+        let sampleX = 96
+        let sampleY = 96
+        let paintedRed = RGBAColor(red: 0.88, green: 0.12, blue: 0.04, alpha: 1)
+        let reservoirBlue = RGBAColor(red: 0.04, green: 0.16, blue: 0.86, alpha: 1)
+
+        harness.viewModel.setSelectedColor(paintedRed)
+        try enqueueRecentBrushAdjustmentStroke(
+            in: harness,
+            point: .init(location: .init(x: Double(sampleX), y: Double(sampleY)), pressure: 1)
+        )
+        #expect(harness.viewModel.brushDisplayTexture(for: activeLayerID) != nil)
+
+        harness.viewModel.setSelectedColor(reservoirBlue)
+        harness.viewModel.setPaintJitterAmount(0.8)
+        harness.viewModel.setOilPaintEnabled(true)
+        harness.viewModel.washOilPaintBrush()
+        #expect(harness.viewModel.workspace.toolSession.oilPaintReservoir.components == [
+            .init(color: reservoirBlue, weight: 1)
+        ])
+
+        harness.viewModel.sampleColor(at: .init(x: Double(sampleX), y: Double(sampleY)))
+
+        let sampledColor = harness.viewModel.workspace.toolSession.selectedColor
+        #expect(sampledColor.red > 0.6)
+        #expect(sampledColor.green < 0.35)
+        #expect(harness.viewModel.workspace.toolSession.oilPaintReservoir.components == [
+            .init(color: reservoirBlue, weight: 1)
+        ])
+        #expect(harness.viewModel.status?.message == "已吸取颜色并设为待沾色")
+
+        harness.viewModel.loadSelectedColorIntoOilPaintBrush()
+        #expect(harness.viewModel.workspace.toolSession.oilPaintReservoir.components.count == 2)
+        #expect(harness.viewModel.workspace.toolSession.oilPaintReservoir.components.contains {
+            $0.color.red > 0.6 && $0.color.green < 0.35
+        })
+    }
+
+    @Test
+    @MainActor
+    func oilPaintShortcutsLoadAndWashFromBrushOrEyedropperContext() throws {
+        let harness = try BrushEditingBoundaryHarness()
+        let red = RGBAColor(red: 0.9, green: 0.08, blue: 0.04, alpha: 1)
+        let blue = RGBAColor(red: 0.05, green: 0.12, blue: 0.9, alpha: 1)
+        let green = RGBAColor(red: 0.04, green: 0.82, blue: 0.18, alpha: 1)
+        harness.viewModel.shortcutSettings.oilPaintLoadShortcut = .defaultOilPaintLoad
+        harness.viewModel.shortcutSettings.oilPaintWashShortcut = .defaultOilPaintWash
+        harness.viewModel.setSelectedColor(red)
+        harness.viewModel.setPaintJitterAmount(0.8)
+        harness.viewModel.setOilPaintEnabled(true)
+        harness.viewModel.washOilPaintBrush()
+
+        harness.viewModel.setSelectedColor(blue)
+        let loadHandled = harness.viewModel.handleKeyDown(
+            makeCanvasKeyEvent(
+                type: .keyDown,
+                characters: "d",
+                charactersIgnoringModifiers: "d",
+                modifiers: [],
+                keyCode: 2
+            )
+        )
+        #expect(loadHandled)
+        #expect(harness.viewModel.workspace.toolSession.oilPaintReservoir.components.count == 2)
+
+        harness.viewModel.selectTool(.eyedropper)
+        harness.viewModel.setSelectedColor(green)
+        let eyedropperLoadHandled = harness.viewModel.handleKeyDown(
+            makeCanvasKeyEvent(
+                type: .keyDown,
+                characters: "d",
+                charactersIgnoringModifiers: "d",
+                modifiers: [],
+                keyCode: 2
+            )
+        )
+        #expect(eyedropperLoadHandled)
+        #expect(harness.viewModel.workspace.toolSession.oilPaintReservoir.components.contains {
+            $0.color == green
+        })
+
+        let washHandled = harness.viewModel.handleKeyDown(
+            makeCanvasKeyEvent(
+                type: .keyDown,
+                characters: "D",
+                charactersIgnoringModifiers: "d",
+                modifiers: [.shift],
+                keyCode: 2
+            )
+        )
+        #expect(washHandled)
+        #expect(harness.viewModel.workspace.toolSession.oilPaintReservoir.components == [
+            .init(color: green, weight: 1)
+        ])
+    }
+
+    @Test
+    @MainActor
     func selectingColorBlockUpdatesReferenceImagePreviousColorMemory() throws {
         let harness = try BrushEditingBoundaryHarness()
         let originalColor = harness.viewModel.workspace.toolSession.selectedColor
@@ -4005,6 +4181,37 @@ struct WorkspaceViewModelSafetyTests {
 
     @Test
     @MainActor
+    func applyingBrushTipDraftActivatesBrushAndPaintsWithCommittedTip() throws {
+        let harness = try BrushEditingBoundaryHarness()
+        let draftMask = makeVerticalTipMask(side: 16)
+
+        harness.viewModel.setCompoundBrushEnabled(true)
+        harness.viewModel.selectTool(.eraser)
+        harness.viewModel.updateBrushTipDraft(draftMask)
+
+        #expect(harness.viewModel.applyBrushTipDraft())
+        #expect(harness.viewModel.workspace.toolSession.activeTool == .brush)
+        #expect(harness.viewModel.workspace.toolSession.brush.customTipMaskData == draftMask)
+        #expect(harness.viewModel.workspace.toolSession.drawingBrush.customTipMaskData == draftMask)
+        #expect(!harness.viewModel.workspace.toolSession.brush.compoundBrush.enabled)
+
+        harness.viewModel.setBrushSize(90)
+        try drawSingleMainCanvasStamp(in: harness.viewModel, at: .init(x: 180, y: 180))
+
+        let bounds = try #require(
+            try activeDisplayOpaqueBounds(
+                in: harness.viewModel,
+                minX: 110,
+                minY: 110,
+                maxX: 250,
+                maxY: 250
+            )
+        )
+        #expect(bounds.height > bounds.width * 2)
+    }
+
+    @Test
+    @MainActor
     func pendingBrushTipDraftDoesNotAutoCommitWhenMainCanvasStrokeBegins() throws {
         let harness = try BrushEditingBoundaryHarness()
         let previousStrokeResetToken = harness.viewModel.strokeResetToken
@@ -4111,7 +4318,7 @@ struct WorkspaceViewModelSafetyTests {
 
     @Test
     @MainActor
-    func bracketShortcutTargetsVisibleBrushTipEditorWithoutRequiringCanvasFocus() throws {
+    func bracketShortcutTargetsTheFocusedCanvasWhenBrushTipEditorIsVisible() throws {
         let harness = try BrushEditingBoundaryHarness()
         harness.viewModel.setBrushSize(42)
         harness.viewModel.setBrushTipEditorBrushSize(28)
@@ -4129,11 +4336,11 @@ struct WorkspaceViewModelSafetyTests {
         )
 
         #expect(increaseHandled)
-        #expect(harness.viewModel.brushTipEditorBrushSize == 33)
-        #expect(harness.viewModel.workspace.toolSession.brush.size == 42)
+        #expect(harness.viewModel.brushTipEditorBrushSize == 28)
+        #expect(harness.viewModel.workspace.toolSession.brush.size == 47)
 
-        harness.viewModel.setBrushTipEditorVisible(false)
-        let mainBrushHandled = harness.viewModel.handleKeyDown(
+        harness.viewModel.setBrushTipCanvasFocused(true)
+        let editorBrushHandled = harness.viewModel.handleKeyDown(
             makeCanvasKeyEvent(
                 type: .keyDown,
                 characters: "[",
@@ -4143,9 +4350,21 @@ struct WorkspaceViewModelSafetyTests {
             )
         )
 
-        #expect(mainBrushHandled)
-        #expect(harness.viewModel.brushTipEditorBrushSize == 33)
-        #expect(harness.viewModel.workspace.toolSession.brush.size == 37)
+        #expect(editorBrushHandled)
+        #expect(harness.viewModel.brushTipEditorBrushSize == 23)
+        #expect(harness.viewModel.workspace.toolSession.brush.size == 47)
+    }
+
+    @Test
+    @MainActor
+    func beginningAStrokeOnHiddenLayerExplainsWhyPaintingIsBlocked() throws {
+        let harness = try BrushEditingBoundaryHarness()
+        let layerID = harness.viewModel.workspace.document.activeLayerID
+        harness.viewModel.setLayerVisibility(layerID, isVisible: false)
+
+        harness.viewModel.beginStrokeIfNeeded()
+
+        #expect(harness.viewModel.status?.message == "当前图层不可见，请先显示图层再绘画")
     }
 }
 

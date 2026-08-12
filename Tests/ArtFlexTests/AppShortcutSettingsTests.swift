@@ -15,6 +15,12 @@ struct AppShortcutSettingsTests {
     }
 
     @Test
+    func defaultOilPaintShortcutsUseDAndShiftD() {
+        #expect(AppKeyboardShortcut.defaultOilPaintLoad.displayString == "D")
+        #expect(AppKeyboardShortcut.defaultOilPaintWash.displayString == "Shift+D")
+    }
+
+    @Test
     @MainActor
     func shortcutSettingsStorePersistsQuickColorPickerShortcut() {
         let suiteName = "ArtFlexTests.AppShortcutSettings.\(UUID().uuidString)"
@@ -33,6 +39,23 @@ struct AppShortcutSettingsTests {
 
         let restored = AppShortcutSettingsStore(userDefaults: defaults)
         #expect(restored.quickColorPickerShortcut == store.quickColorPickerShortcut)
+    }
+
+    @Test
+    @MainActor
+    func shortcutSettingsStorePersistsOilPaintShortcuts() {
+        let suiteName = "ArtFlexTests.AppShortcutSettings.OilPaint.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defaults.removePersistentDomain(forName: suiteName)
+
+        let store = AppShortcutSettingsStore(userDefaults: defaults)
+        store.oilPaintLoadShortcut = AppKeyboardShortcut(key: "L", usesOption: true)
+        store.oilPaintWashShortcut = AppKeyboardShortcut(key: "W", usesControl: true)
+        store.persist()
+
+        let restored = AppShortcutSettingsStore(userDefaults: defaults)
+        #expect(restored.oilPaintLoadShortcut == store.oilPaintLoadShortcut)
+        #expect(restored.oilPaintWashShortcut == store.oilPaintWashShortcut)
     }
 
     @Test

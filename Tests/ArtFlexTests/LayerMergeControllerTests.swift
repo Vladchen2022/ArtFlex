@@ -62,7 +62,13 @@ struct LayerMergeControllerTests {
         let controller = LayerMergeController(metalContext: metalContext, canvasPresenter: presenter)
         let store = StageOneLayerSurfaceStore()
         guard let base = store.makeTexture(width: 2, height: 1, metal: metalContext),
-              let source = store.makeTexture(width: 2, height: 1, metal: metalContext) else {
+              let source = store.makeTexture(width: 2, height: 1, metal: metalContext),
+              let targetMask = store.makeTexture(
+                width: 2,
+                height: 1,
+                pixelFormat: .r8Unorm,
+                metal: metalContext
+              ) else {
             Issue.record("Texture allocation failed")
             return
         }
@@ -97,6 +103,93 @@ struct LayerMergeControllerTests {
         #expect(clippedOpaque.blue < 0.05)
         #expect(clippedOpaque.alpha > 0.99)
         #expect(clippedTransparent.alpha < 0.01)
+
+        try serializer.restore(
+            snapshot: opaqueColorSnapshot(width: 2, height: 1, red: 0, green: 0, blue: 255),
+            into: base
+        )
+        try serializer.restore(
+            snapshot: LayerTextureSnapshot(
+                width: 2,
+                height: 1,
+                bytesPerRow: 2,
+                pixelData: Data([0, 255])
+            ),
+            into: targetMask
+        )
+        try controller.mergeVisible(
+            layers: [
+                CanvasLayerCompositeInput(
+                    texture: base,
+                    opacity: 1,
+                    layerMaskTexture: targetMask
+                ),
+                CanvasLayerCompositeInput(
+                    texture: source,
+                    opacity: 1,
+                    clipMaskTexture: base,
+                    clipLayerMaskTexture: targetMask
+                )
+            ],
+            into: base
+        )
+
+        let maskedOut = try serializer.samplePixel(texture: base, x: 0, y: 0)
+        let maskedIn = try serializer.samplePixel(texture: base, x: 1, y: 0)
+        #expect(maskedOut.alpha < 0.01)
+        #expect(maskedIn.red > 0.99)
+        #expect(maskedIn.blue < 0.01)
+        #expect(maskedIn.alpha > 0.99)
+    }
+
+    @Test
+    func curveAdjustmentInputChangesAccumulatedBackdropWithoutPaintingPixels() throws {
+        guard let metalContext = MetalDeviceContext() else {
+            Issue.record("Metal unavailable")
+            return
+        }
+        let serializer = LayerTextureSerializer(metalContext: metalContext)
+        let presenter = try StageOneCanvasPresenter(device: metalContext.device)
+        let controller = LayerMergeController(metalContext: metalContext, canvasPresenter: presenter)
+        let store = StageOneLayerSurfaceStore()
+        guard let base = store.makeTexture(width: 2, height: 2, metal: metalContext),
+              let adjustmentPlaceholder = store.makeTexture(width: 2, height: 2, metal: metalContext) else {
+            Issue.record("Texture allocation failed")
+            return
+        }
+
+        try serializer.restore(
+            snapshot: opaqueColorSnapshot(width: 2, height: 2, red: 64, green: 64, blue: 64),
+            into: base
+        )
+        try serializer.restore(
+            snapshot: opaqueColorSnapshot(width: 2, height: 2, red: 0, green: 0, blue: 0),
+            into: adjustmentPlaceholder
+        )
+
+        var parameters = CurveAdjustmentParameters.neutral
+        parameters.rgbCurve = CurveChannelState(points: [
+            .init(x: 0, y: 0),
+            .init(x: 0.5, y: 0.85),
+            .init(x: 1, y: 1)
+        ])
+        try controller.mergeVisible(
+            layers: [
+                CanvasLayerCompositeInput(texture: base, opacity: 1),
+                CanvasLayerCompositeInput(
+                    texture: adjustmentPlaceholder,
+                    opacity: 1,
+                    curveAdjustmentLUTs: CurveLUTBuilder.buildAll(from: parameters)
+                )
+            ],
+            into: base
+        )
+
+        let adjusted = try serializer.samplePixel(texture: base, x: 0, y: 0)
+        #expect(adjusted.red > 0.45)
+        #expect(adjusted.green > 0.45)
+        #expect(adjusted.blue > 0.45)
+        #expect(adjusted.alpha > 0.99)
     }
 }
 
