@@ -220,6 +220,8 @@ final class WorkspaceViewModel: ObservableObject {
     @Published private(set) var isApplyingGradientCommit = false
     @Published private(set) var isBucketFillInProgress = false
     @Published private(set) var fillSettings = FillSettings.stageOneDefault
+    @Published private(set) var smartSelectionSettings = SmartSelectionSettings.stageOneDefault
+    @Published private(set) var smartSelectionDisplayMode: SmartSelectionDisplayMode = .tint
     @Published private(set) var isRefiningSelection = false
     @Published private(set) var isSavingSnapshot = false
     @Published private(set) var isPreparingSnapshotCompare = false
@@ -279,6 +281,7 @@ final class WorkspaceViewModel: ObservableObject {
     private var layerThumbnailCache: [LayerID: CGImage] = [:]
     private var generatorStrokeSession = GeneratorStrokeSessionState()
     private var activeLassoRawPoints: [CanvasPoint] = []
+    private var activeLassoPreviewPoints: [CanvasPoint] = []
     private var activeLassoBounds: CanvasRect?
     private var textureFillGestureState: TextureFillGestureState?
     private var textureFillSeedSequence: UInt64 = 0
@@ -655,6 +658,7 @@ final class WorkspaceViewModel: ObservableObject {
         isGeneratorStrokeModeEnabled = false
         generatorStrokeSession = .init()
         activeLassoRawPoints = []
+        activeLassoPreviewPoints = []
         lassoSamplingDebugPoints = []
         samePathCommittedDebugShape = nil
         samePathPreviewDebugShape = nil
@@ -5278,6 +5282,58 @@ final class WorkspaceViewModel: ObservableObject {
         fillSettings = .stageOneDefault
     }
 
+    func setSmartSelectionTolerance(_ tolerance: Float) {
+        smartSelectionSettings = SmartSelectionSettings(tolerance: tolerance)
+    }
+
+    func resetSmartSelectionSettings() {
+        smartSelectionSettings = .stageOneDefault
+    }
+
+    @discardableResult
+    private func toggleSmartSelectionDisplayModeIfPossible(_ event: NSEvent) -> Bool {
+        guard workspace.toolSession.activeTool == .smartSelection else { return false }
+        let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        guard modifiers.isEmpty,
+              event.keyCode == 36 || event.keyCode == 76,
+              workspace.selection.inProgressShape == nil,
+              !isRefiningSelection,
+              workspace.selection.committedShape?.kind == .mask else {
+            return false
+        }
+        smartSelectionDisplayMode = smartSelectionDisplayMode == .tint ? .marchingAnts : .tint
+        syncSelectionOverlayProxy()
+        showStatus(.init(
+            kind: .info,
+            message: smartSelectionDisplayMode == .tint
+                ? "智能选区显示为半透明覆盖"
+                : "智能选区显示为蚂蚁线",
+            shortcutLabel: "Enter"
+        ))
+        return true
+    }
+
+    @discardableResult
+    private func applySmartSelectionThresholdShortcut(_ event: NSEvent) -> Bool {
+        guard workspace.toolSession.activeTool == .smartSelection else { return false }
+        let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        guard modifiers.isEmpty,
+              let characters = event.charactersIgnoringModifiers,
+              characters.count == 1,
+              let digit = Int(characters),
+              (0...9).contains(digit) else {
+            return false
+        }
+        let percent = digit == 0 ? 100 : digit * 10
+        setSmartSelectionTolerance(Float(percent) / 100)
+        showStatus(.init(
+            kind: .info,
+            message: "智能选区识别阈值已设为 \(percent)%",
+            shortcutLabel: characters
+        ))
+        return true
+    }
+
     func fillAtPoint(_ point: CanvasPoint) {
         ideationBranchActivityHandler?()
         guard let layerID = bootstrap.interactionController.activeEditableLayerID() else {
@@ -6938,6 +6994,7 @@ final class WorkspaceViewModel: ObservableObject {
         }
         if kind == .lasso {
             activeLassoRawPoints = [start]
+            activeLassoPreviewPoints = [start]
             activeLassoBounds = CanvasRect(origin: start, size: .init(x: 0, y: 0))
             lassoSamplingDebugPoints = [start]
             lassoRefreshCounter = 0
@@ -6945,6 +7002,7 @@ final class WorkspaceViewModel: ObservableObject {
             samePathPreviewDebugShape = nil
         } else {
             activeLassoRawPoints = []
+            activeLassoPreviewPoints = []
             activeLassoBounds = nil
             lassoSamplingDebugPoints = []
             lassoRefreshCounter = 0
@@ -7944,18 +8002,13 @@ final class WorkspaceViewModel: ObservableObject {
             if currentKind == .lasso {
                 if activeLassoRawPoints.isEmpty {
                     activeLassoRawPoints = [currentStart]
+                    activeLassoPreviewPoints = [currentStart]
                     activeLassoBounds = CanvasRect(origin: currentStart, size: .init(x: 0, y: 0))
                 }
-                if Self.runSamplingTruthTest {
-                    if activeLassoRawPoints.last != point {
-                        activeLassoRawPoints.append(point)
-                        activeLassoBounds = expandedBounds(activeLassoBounds, including: point)
-                    }
-                } else {
-                    if activeLassoRawPoints.last != point {
-                        activeLassoRawPoints.append(point)
-                        activeLassoBounds = expandedBounds(activeLassoBounds, including: point)
-                    }
+                if activeLassoRawPoints.last != point {
+                    activeLassoRawPoints.append(point)
+                    activeLassoBounds = expandedBounds(activeLassoBounds, including: point)
+                    appendActiveLassoPreviewPointIfNeeded(point)
                 }
                 // lassoSamplingDebugPoints 只在 debug overlay 开启时才需要每帧更新
                 // 否则每帧把整个点数组赋给 @Published 属性会触发额外重绘
@@ -7980,7 +8033,9 @@ final class WorkspaceViewModel: ObservableObject {
                 kind: currentKind,
                 start: currentStart,
                 currentPoint: point,
-                existingPoints: currentKind == .lasso ? activeLassoRawPoints : selection.inProgressShape?.pathPoints,
+                existingPoints: currentKind == .lasso
+                    ? activeLassoPreviewPath(endingAt: point)
+                    : selection.inProgressShape?.pathPoints,
                 modifiers: modifiers,
                 combineMode: selection.activeCombineMode,
                 precomputedBounds: currentKind == .lasso ? activeLassoBounds : nil
@@ -8005,8 +8060,46 @@ final class WorkspaceViewModel: ObservableObject {
             return
         }
 
+        let storeSelection = bootstrap.workspaceStore.state.selection
+        let currentKind = storeSelection.activeKind ?? .rectangle
+        guard currentKind == .lasso else {
+            updateSelection(to: points[points.count - 1], modifiers: modifiers)
+            return
+        }
+
+        ideationBranchActivityHandler?()
+        let currentStart = storeSelection.anchorPoint ?? points[0]
+        if activeLassoRawPoints.isEmpty {
+            activeLassoRawPoints = [currentStart]
+            activeLassoPreviewPoints = [currentStart]
+            activeLassoBounds = CanvasRect(origin: currentStart, size: .init(x: 0, y: 0))
+        }
+        for point in points where activeLassoRawPoints.last != point {
+            activeLassoRawPoints.append(point)
+            activeLassoBounds = expandedBounds(activeLassoBounds, including: point)
+            appendActiveLassoPreviewPointIfNeeded(point)
+        }
+        guard let currentPoint = activeLassoRawPoints.last else { return }
+        var nextPreviewShape: SelectionShape?
+        bootstrap.workspaceStore.updateSelection { selection in
+            let previewShape = selectionPreviewShape(
+                kind: .lasso,
+                start: currentStart,
+                currentPoint: currentPoint,
+                existingPoints: activeLassoPreviewPath(endingAt: currentPoint),
+                modifiers: modifiers,
+                combineMode: selection.activeCombineMode,
+                precomputedBounds: activeLassoBounds
+            )
+            selection.inProgressShape = previewShape
+            nextPreviewShape = previewShape
+        }
+        if RuntimeDiagnostics.selectionTraceLoggingEnabled {
+            samePathPreviewDebugShape = nextPreviewShape
+        }
+        refreshSelectionOverlayOnly()
         for point in points {
-            updateSelection(to: point, modifiers: modifiers)
+            relayIdeationOperation(.updateSelection(point: point, modifiers: .init(flags: modifiers)))
         }
     }
 
@@ -8056,6 +8149,7 @@ final class WorkspaceViewModel: ObservableObject {
             samePathPreviewDebugShape = previewShape
             samePathCommittedDebugShape = committedShape
             activeLassoRawPoints = []
+            activeLassoPreviewPoints = []
             activeLassoBounds = nil
             refresh()
             return
@@ -8077,6 +8171,7 @@ final class WorkspaceViewModel: ObservableObject {
         )
         guard !input.polygonShapes.isEmpty else {
             activeLassoRawPoints = []
+            activeLassoPreviewPoints = []
             activeLassoBounds = nil
             bootstrap.workspaceStore.updateSelection { selection in
                 if combineMode == .replace {
@@ -8091,6 +8186,18 @@ final class WorkspaceViewModel: ObservableObject {
             showStatus(.init(kind: .info, message: "选区太小"))
             return
         }
+        if workspace.toolSession.activeTool == .smartSelection,
+           let preferredShape = input.preferredDisplayShape {
+            commitSmartSelection(
+                preferredShape: preferredShape,
+                combineMode: combineMode,
+                previousCommittedShape: previousCommittedShape,
+                canvasSize: canvasSize,
+                end: end,
+                modifiers: modifiers
+            )
+            return
+        }
         if workspace.toolSession.activeTool == .lassoFill,
            let preferredShape = input.preferredDisplayShape {
             let operation: SelectionPixelOperation = combineMode == .subtract
@@ -8101,6 +8208,7 @@ final class WorkspaceViewModel: ObservableObject {
             // Clear selection BEFORE creating the history checkpoint so undo
             // restores to a state without a leftover selection outline.
             activeLassoRawPoints = []
+            activeLassoPreviewPoints = []
             activeLassoBounds = nil
             lassoSamplingDebugPoints = []
             samePathPreviewDebugShape = nil
@@ -8155,6 +8263,7 @@ final class WorkspaceViewModel: ObservableObject {
                 selection.activeCombineMode = .replace
             }
             activeLassoRawPoints = []
+            activeLassoPreviewPoints = []
             activeLassoBounds = nil
             lassoSamplingDebugPoints = []
             samePathPreviewDebugShape = nil
@@ -8231,6 +8340,7 @@ final class WorkspaceViewModel: ObservableObject {
                 selection.activeCombineMode = capturedCombineMode
             }
             activeLassoRawPoints = []
+            activeLassoPreviewPoints = []
             activeLassoBounds = nil
             lassoSamplingDebugPoints = []
             samePathPreviewDebugShape = nil
@@ -8307,6 +8417,7 @@ final class WorkspaceViewModel: ObservableObject {
             selection.activeCombineMode = combineMode
         }
         activeLassoRawPoints = []
+        activeLassoPreviewPoints = []
         lassoSamplingDebugPoints = []
         samePathPreviewDebugShape = nil
         samePathCommittedDebugShape = nil
@@ -8874,9 +8985,323 @@ final class WorkspaceViewModel: ObservableObject {
         isRefiningSelection = false
     }
 
+    private func commitSmartSelection(
+        preferredShape: SelectionShape,
+        combineMode: SelectionCombineMode,
+        previousCommittedShape: SelectionShape?,
+        canvasSize: CanvasSize,
+        end: CanvasPoint,
+        modifiers: NSEvent.ModifierFlags
+    ) {
+        let historyBaseShape = previousCommittedShape?.clamped(to: canvasSize)
+        let capturedBaseShape = combineMode == .replace
+            ? nil
+            : (pendingCombineBaseShape ?? previousCommittedShape)?.clamped(to: canvasSize)
+        let displayedBaseShape = combineMode == .replace ? historyBaseShape : capturedBaseShape
+        pendingCombineBaseShape = nil
+        let clampedBounds = preferredShape.bounds.clamped(to: canvasSize)
+        let originX = max(Int(floor(clampedBounds.minX)) - 2, 0)
+        let originY = max(Int(floor(clampedBounds.minY)) - 2, 0)
+        let maxX = min(Int(ceil(clampedBounds.maxX)) + 2, canvasSize.width)
+        let maxY = min(Int(ceil(clampedBounds.maxY)) + 2, canvasSize.height)
+        let width = maxX - originX
+        let height = maxY - originY
+        guard width > 0, height > 0, preferredShape.pathPoints.count >= 3 else {
+            showStatus(.init(kind: .info, message: "智能选区范围太小"))
+            return
+        }
+
+        activeLassoRawPoints = []
+        activeLassoPreviewPoints = []
+        activeLassoBounds = nil
+        lassoSamplingDebugPoints = []
+        samePathPreviewDebugShape = nil
+        samePathCommittedDebugShape = nil
+        bootstrap.workspaceStore.updateSelection { selection in
+            selection.committedShape = displayedBaseShape
+            selection.inProgressShape = preferredShape
+            selection.anchorPoint = nil
+            selection.activeKind = nil
+            selection.activeCombineMode = combineMode
+        }
+        refreshLightweight()
+
+        do {
+            _ = flushBrushEditingBoundary(reason: "smartSelection")
+            bootstrap.layerSurfaceStore.prepareTextures(
+                for: workspace.document,
+                metal: bootstrap.metalContext
+            )
+            let regionRequest = bootstrap.eyedropperSampler.makeVisibleRegionRequest(
+                document: workspace.document,
+                originX: originX,
+                originY: originY,
+                width: width,
+                height: height,
+                source: .displayedColor,
+                layerSurfaceStore: bootstrap.layerSurfaceStore,
+                contentTextureForLayer: { [weak self] layerID in
+                    self?.bootstrap.strokeEngine.displayTexture(for: layerID)
+                },
+                displayTextureForLayer: { [weak self] layerID in
+                    self?.brushDisplayTexture(for: layerID)
+                }
+            )
+            let samplerBox = WorkspaceUncheckedBox(bootstrap.eyedropperSampler)
+            let lassoPoints = preferredShape.pathPoints
+            let settings = smartSelectionSettings
+            let capturedCanvasRevision = canvasContentRevision
+            let capturedBaseMaskBytes = combineMode == .replace
+                ? []
+                : selectionMaskBytes(for: capturedBaseShape, canvasSize: canvasSize)
+            let candidateAlphaBytes = Self.smartSelectionCandidateBytes(
+                combineMode: combineMode,
+                baseMaskBytes: capturedBaseMaskBytes,
+                canvasSize: canvasSize,
+                originX: originX,
+                originY: originY,
+                width: width,
+                height: height
+            )
+
+            selectionEpoch += 1
+            let capturedEpoch = selectionEpoch
+            cancelActiveRasterizationTask()
+            isRefiningSelection = true
+            showStatus(.init(kind: .info, message: "正在识别相近色块…"))
+
+            activeRasterizationTask = Task { [weak self] in
+                let result = await Task.detached(priority: .userInitiated) {
+                    Result {
+                        let snapshot = try samplerBox.value.snapshotVisibleRegion(regionRequest)
+                        let raster = SmartSelectionRaster(
+                            originX: originX,
+                            originY: originY,
+                            width: snapshot.width,
+                            height: snapshot.height,
+                            bytesPerRow: snapshot.bytesPerRow,
+                            premultipliedBGRABytes: snapshot.pixelData
+                        )
+                        guard let segmented = SmartSelectionSegmenter.segment(
+                            raster: raster,
+                            lassoPoints: lassoPoints,
+                            settings: settings,
+                            candidateAlphaBytes: candidateAlphaBytes
+                        ) else {
+                            return Optional<SelectionShape>.none
+                        }
+                        let incomingShape = Self.fullCanvasSmartSelectionShape(
+                            segmented,
+                            canvasSize: canvasSize,
+                            lassoPoints: lassoPoints
+                        )
+                        return Self.combinedSmartSelectionShape(
+                            incomingShape: incomingShape,
+                            canvasSize: canvasSize,
+                            mode: combineMode,
+                            baseShape: capturedBaseShape,
+                            baseMaskBytes: capturedBaseMaskBytes
+                        )
+                    }
+                }.value
+
+                guard let self, self.selectionEpoch == capturedEpoch else { return }
+                self.activeRasterizationTask = nil
+                self.isRefiningSelection = false
+                guard !Task.isCancelled else { return }
+                guard self.canvasContentRevision == capturedCanvasRevision else {
+                    self.bootstrap.workspaceStore.updateSelection { selection in
+                        selection.committedShape = combineMode == .replace ? historyBaseShape : capturedBaseShape
+                        selection.inProgressShape = nil
+                        selection.anchorPoint = nil
+                        selection.activeKind = nil
+                        selection.activeCombineMode = .replace
+                    }
+                    self.refreshLightweight()
+                    self.showStatus(.init(kind: .info, message: "画布已变化，已取消过期识别结果"))
+                    return
+                }
+
+                do {
+                    let resolvedShape = try result.get()
+                    let nextShape = resolvedShape ?? (combineMode == .replace ? nil : capturedBaseShape)
+                    if nextShape != historyBaseShape {
+                        self.checkpointSelectionChangeIfPossible(previousCommittedShape: historyBaseShape)
+                    }
+                    self.bootstrap.workspaceStore.updateSelection { selection in
+                        selection.committedShape = nextShape
+                        selection.inProgressShape = nil
+                        selection.anchorPoint = nil
+                        selection.activeKind = nil
+                        selection.activeCombineMode = .replace
+                    }
+                    self.smartSelectionDisplayMode = .tint
+                    self.refreshLightweight()
+                    if nextShape == nil {
+                        self.showStatus(.init(kind: .info, message: "圈选范围内没有识别到相近色块"))
+                    } else {
+                        self.recordDrawingActivityIfNeeded()
+                        let actionName: String = switch combineMode {
+                        case .replace: "已创建智能选区"
+                        case .add: "已增选识别色块"
+                        case .subtract: "已减选识别色块"
+                        }
+                        self.showStatus(.init(kind: .success, message: actionName))
+                    }
+                } catch {
+                    self.bootstrap.workspaceStore.updateSelection { selection in
+                        selection.committedShape = combineMode == .replace ? historyBaseShape : capturedBaseShape
+                        selection.inProgressShape = nil
+                        selection.anchorPoint = nil
+                        selection.activeKind = nil
+                        selection.activeCombineMode = .replace
+                    }
+                    self.refreshLightweight()
+                    self.showStatus(.init(kind: .error, message: error.localizedDescription))
+                }
+            }
+            relayIdeationOperation(.commitSelection(end: end, modifiers: .init(flags: modifiers)))
+        } catch {
+            isRefiningSelection = false
+            bootstrap.workspaceStore.updateSelection { selection in
+                selection.committedShape = combineMode == .replace ? historyBaseShape : capturedBaseShape
+                selection.inProgressShape = nil
+                selection.anchorPoint = nil
+                selection.activeKind = nil
+                selection.activeCombineMode = .replace
+            }
+            refreshLightweight()
+            showStatus(.init(kind: .error, message: error.localizedDescription))
+        }
+    }
+
+    nonisolated private static func fullCanvasSmartSelectionShape(
+        _ segmented: SmartSelectionSegmentationResult,
+        canvasSize: CanvasSize,
+        lassoPoints: [CanvasPoint]
+    ) -> SelectionShape {
+        var canvasBytes = [UInt8](repeating: 0, count: canvasSize.width * canvasSize.height)
+        guard
+            segmented.width > 0,
+            segmented.height > 0,
+            segmented.alphaBytes.count == segmented.width * segmented.height
+        else {
+            return SelectionShape.mask(
+                canvasWidth: canvasSize.width,
+                canvasHeight: canvasSize.height,
+                alphaBytes: canvasBytes
+            )
+        }
+        for localY in 0..<segmented.height {
+            let sourceStart = localY * segmented.width
+            let destinationStart = ((segmented.originY + localY) * canvasSize.width) + segmented.originX
+            canvasBytes.replaceSubrange(
+                destinationStart..<(destinationStart + segmented.width),
+                with: segmented.alphaBytes[sourceStart..<(sourceStart + segmented.width)]
+            )
+        }
+        let maskData = SelectionMaskData(
+            canvasWidth: canvasSize.width,
+            canvasHeight: canvasSize.height,
+            alphaBytes: Data(canvasBytes)
+        )
+        return SelectionShape(
+            kind: .mask,
+            bounds: segmented.selectedBounds.clamped(to: canvasSize),
+            pathPoints: lassoPoints,
+            maskData: maskData
+        )
+    }
+
+    nonisolated private static func combinedSmartSelectionShape(
+        incomingShape: SelectionShape,
+        canvasSize: CanvasSize,
+        mode: SelectionCombineMode,
+        baseShape: SelectionShape?,
+        baseMaskBytes: [UInt8]
+    ) -> SelectionShape? {
+        guard !incomingShape.isEmpty, let incomingMaskData = incomingShape.maskData else {
+            return mode == .replace ? nil : baseShape
+        }
+        guard mode != .replace else { return incomingShape }
+
+        guard baseMaskBytes.count == canvasSize.width * canvasSize.height else {
+            return baseShape
+        }
+        var mergedBytes = baseMaskBytes
+        incomingMaskData.withAlphaBytes { incomingBytes in
+            let count = min(mergedBytes.count, incomingBytes.count)
+            for index in 0..<count {
+                let incoming = incomingBytes[index]
+                guard incoming > 0 else { continue }
+                switch mode {
+                case .replace:
+                    mergedBytes[index] = incoming
+                case .add:
+                    mergedBytes[index] = max(mergedBytes[index], incoming)
+                case .subtract:
+                    let kept = (Int(mergedBytes[index]) * (255 - Int(incoming))) / 255
+                    mergedBytes[index] = UInt8(clamping: kept)
+                }
+            }
+        }
+        let combined = SelectionShape.mask(
+            canvasWidth: canvasSize.width,
+            canvasHeight: canvasSize.height,
+            alphaBytes: mergedBytes
+        )
+        return combined.isEmpty ? nil : combined
+    }
+
+    nonisolated private static func smartSelectionCandidateBytes(
+        combineMode: SelectionCombineMode,
+        baseMaskBytes: [UInt8],
+        canvasSize: CanvasSize,
+        originX: Int,
+        originY: Int,
+        width: Int,
+        height: Int
+    ) -> [UInt8]? {
+        guard combineMode != .replace,
+              baseMaskBytes.count == canvasSize.width * canvasSize.height else {
+            return nil
+        }
+        var candidates = [UInt8](repeating: 0, count: width * height)
+        for localY in 0..<height {
+            let canvasY = originY + localY
+            guard canvasY >= 0, canvasY < canvasSize.height else { continue }
+            for localX in 0..<width {
+                let canvasX = originX + localX
+                guard canvasX >= 0, canvasX < canvasSize.width else { continue }
+                let baseAlpha = baseMaskBytes[(canvasY * canvasSize.width) + canvasX]
+                candidates[(localY * width) + localX] = switch combineMode {
+                case .replace:
+                    255
+                case .add:
+                    255 - baseAlpha
+                case .subtract:
+                    baseAlpha
+                }
+            }
+        }
+        return candidates
+    }
+
     func handleSelectionMouseDown(at point: CanvasPoint, modifiers: NSEvent.ModifierFlags) -> SelectionMouseDownAction {
         let normalized = modifiers.intersection(.deviceIndependentFlagsMask)
         let hasModifier = normalized.contains(.shift) || normalized.contains(.option)
+
+        if workspace.toolSession.activeTool == .smartSelection {
+            cancelActiveRasterizationTask()
+            selectionEpoch += 1
+            selectionMoveBaseShape = nil
+            selectionMoveAccumulatedDelta = CanvasPoint(x: 0, y: 0)
+            selectionMovePreviewOffset = CanvasPoint(x: 0, y: 0)
+            pendingCombineBaseShape = bootstrap.workspaceStore.state.selection.committedShape
+            pendingCombineMode = selectionCombineMode(for: .lasso, modifiers: normalized)
+            beginSelection(kind: .lasso, at: point, modifiers: modifiers)
+            return .beginDrawing
+        }
 
         if workspace.toolSession.activeTool == .polygonSelection {
             if polygonSelectionState.phase == .building {
@@ -8906,6 +9331,7 @@ final class WorkspaceViewModel: ObservableObject {
             pendingCombineMode = selectionCombineMode(for: .lasso, modifiers: normalized)
             pendingCombineBaseShape = nil
             activeLassoRawPoints = []
+            activeLassoPreviewPoints = []
             lassoSamplingDebugPoints = []
             samePathPreviewDebugShape = nil
             samePathCommittedDebugShape = nil
@@ -8928,6 +9354,7 @@ final class WorkspaceViewModel: ObservableObject {
             pendingCombineMode = nil
             pendingCombineBaseShape = nil
             activeLassoRawPoints = []
+            activeLassoPreviewPoints = []
             activeLassoBounds = nil
             lassoSamplingDebugPoints = []
             samePathPreviewDebugShape = nil
@@ -8972,6 +9399,7 @@ final class WorkspaceViewModel: ObservableObject {
                 pendingCombineMode = nil
                 pendingCombineBaseShape = nil
                 activeLassoRawPoints = []
+                activeLassoPreviewPoints = []
                 lassoSamplingDebugPoints = []
                 samePathPreviewDebugShape = nil
                 samePathCommittedDebugShape = nil
@@ -9007,7 +9435,7 @@ final class WorkspaceViewModel: ObservableObject {
     private func selectionKindForActiveTool() -> SelectionShapeKind {
         switch workspace.toolSession.activeTool {
         case .ellipseSelection: return .ellipse
-        case .lassoSelection, .lassoFill, .textureFill: return .lasso
+        case .lassoSelection, .smartSelection, .lassoFill, .textureFill: return .lasso
         default: return .rectangle
         }
     }
@@ -9070,6 +9498,7 @@ final class WorkspaceViewModel: ObservableObject {
             checkpointHistoryIfPossible()
         }
         activeLassoRawPoints = []
+        activeLassoPreviewPoints = []
         lassoSamplingDebugPoints = []
         samePathPreviewDebugShape = nil
         samePathCommittedDebugShape = nil
@@ -9803,6 +10232,26 @@ final class WorkspaceViewModel: ObservableObject {
         transformState.accumulatedOffset = preview.translation
         setFreeTransformPreview(preview)
         showStatus(.init(kind: .info, message: "已更新数值变形预览"))
+    }
+
+    func flipFreeTransformHorizontally() {
+        guard var input = preciseFreeTransformInput else {
+            showStatus(.init(kind: .info, message: "当前无法水平翻转"))
+            return
+        }
+        input.flipHorizontally()
+        setPreciseFreeTransformInput(input)
+        showStatus(.init(kind: .info, message: "已水平翻转变形预览"))
+    }
+
+    func flipFreeTransformVertically() {
+        guard var input = preciseFreeTransformInput else {
+            showStatus(.init(kind: .info, message: "当前无法垂直翻转"))
+            return
+        }
+        input.flipVertically()
+        setPreciseFreeTransformInput(input)
+        showStatus(.init(kind: .info, message: "已垂直翻转变形预览"))
     }
 
     private func setFreeTransformMeshWarpGrid(_ grid: MeshWarpGrid?) {
@@ -11180,6 +11629,14 @@ final class WorkspaceViewModel: ObservableObject {
     func handleKeyDown(_ event: NSEvent) -> Bool {
         let normalizedModifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
 
+        if toggleSmartSelectionDisplayModeIfPossible(event) {
+            return true
+        }
+
+        if applySmartSelectionThresholdShortcut(event) {
+            return true
+        }
+
         if workspace.toolSession.activeTool == .perspective,
            normalizedModifiers.isEmpty {
             if event.keyCode == 51 || event.keyCode == 117 {
@@ -11654,6 +12111,7 @@ final class WorkspaceViewModel: ObservableObject {
         pendingCombineMode = nil
         pendingCombineBaseShape = nil
         activeLassoRawPoints = []
+        activeLassoPreviewPoints = []
         activeLassoBounds = nil
         lassoSamplingDebugPoints = []
         samePathPreviewDebugShape = nil
@@ -13407,6 +13865,7 @@ final class WorkspaceViewModel: ObservableObject {
         canvasCropState.cancel()
         textureFillGestureState = nil
         activeLassoRawPoints = []
+        activeLassoPreviewPoints = []
         activeLassoBounds = nil
         lassoSamplingDebugPoints = []
         isGeneratorRegionSelectionArmed = false
@@ -15912,6 +16371,27 @@ final class WorkspaceViewModel: ObservableObject {
         )
     }
 
+    private func appendActiveLassoPreviewPointIfNeeded(_ point: CanvasPoint) {
+        let displayScale = currentCanvasViewportTransform?.actualDisplayScale ?? 1
+        let minimumCanvasDistance = max(2 / max(displayScale, 0.000_001), 0.75)
+        guard let lastPoint = activeLassoPreviewPoints.last else {
+            activeLassoPreviewPoints = [point]
+            return
+        }
+        if distanceBetween(lastPoint, point) >= minimumCanvasDistance {
+            activeLassoPreviewPoints.append(point)
+        }
+    }
+
+    private func activeLassoPreviewPath(endingAt point: CanvasPoint) -> [CanvasPoint] {
+        guard activeLassoPreviewPoints.last != point else {
+            return activeLassoPreviewPoints
+        }
+        var previewPoints = activeLassoPreviewPoints
+        previewPoints.append(point)
+        return previewPoints
+    }
+
     private func expandedBounds(_ current: CanvasRect?, including point: CanvasPoint) -> CanvasRect {
         guard let current else {
             return CanvasRect(origin: point, size: .init(x: 0, y: 0))
@@ -17770,6 +18250,7 @@ final class WorkspaceViewModel: ObservableObject {
         @Published var isApplyingTransformCommit: Bool = false
         @Published var isTransformingSelection: Bool = false
         @Published var activeTool: ToolKind = .brush
+        @Published var smartSelectionDisplayMode: SmartSelectionDisplayMode = .tint
         @Published var transformPreviewOffset: CanvasPoint = .init(x: 0, y: 0)
         @Published var selectionMovePreviewOffset: CanvasPoint = .init(x: 0, y: 0)
         @Published var hidesImplicitFreeTransformSelectionOverlay: Bool = false
@@ -17811,6 +18292,7 @@ final class WorkspaceViewModel: ObservableObject {
         selectionOverlayProxy.isApplyingTransformCommit = isApplyingTransformCommit
         selectionOverlayProxy.isTransformingSelection = isTransformingSelection
         selectionOverlayProxy.activeTool = state.toolSession.activeTool
+        selectionOverlayProxy.smartSelectionDisplayMode = smartSelectionDisplayMode
         selectionOverlayProxy.transformPreviewOffset = transformPreviewOffset
         selectionOverlayProxy.selectionMovePreviewOffset = selectionMovePreviewOffset
         selectionOverlayProxy.hidesImplicitFreeTransformSelectionOverlay = hidesImplicitFreeTransformSelectionOverlay

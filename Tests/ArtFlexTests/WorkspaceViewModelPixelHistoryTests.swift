@@ -2620,6 +2620,56 @@ struct WorkspaceViewModelPixelHistoryTests {
 
     @Test
     @MainActor
+    func freeTransformFlipButtonsMirrorSelectedPixelsAndUndoRestoresThem() async throws {
+        let harness = try PixelHistoryHarness(canvasSize: .init(width: 64, height: 64))
+        let layerID = harness.viewModel.workspace.document.activeLayerID
+        try fillOpaqueRect(
+            in: harness,
+            layerID: layerID,
+            originX: 16,
+            originY: 16,
+            width: 16,
+            height: 16,
+            color: .init(red: 1, green: 0, blue: 0, alpha: 1)
+        )
+        try fillOpaqueRect(
+            in: harness,
+            layerID: layerID,
+            originX: 32,
+            originY: 32,
+            width: 16,
+            height: 16,
+            color: .init(red: 0, green: 0, blue: 1, alpha: 1)
+        )
+        harness.makeRectangleSelection(minX: 16, minY: 16, maxX: 48, maxY: 48)
+        harness.viewModel.selectTool(.freeTransform)
+
+        harness.viewModel.flipFreeTransformHorizontally()
+        #expect(harness.viewModel.freeTransformPreview.scaleX < 0)
+        #expect(harness.viewModel.freeTransformPreview.scaleY > 0)
+        harness.viewModel.flipFreeTransformVertically()
+        #expect(harness.viewModel.freeTransformPreview.scaleX < 0)
+        #expect(harness.viewModel.freeTransformPreview.scaleY < 0)
+
+        harness.viewModel.applySelectionTransform()
+        try await harness.waitForTransformCommitToFinish()
+
+        let mirroredTopLeft = try harness.color(atX: 20, y: 20, layerID: layerID)
+        let mirroredBottomRight = try harness.color(atX: 44, y: 44, layerID: layerID)
+        #expect(mirroredTopLeft.blue > 0.9)
+        #expect(mirroredTopLeft.red < 0.1)
+        #expect(mirroredBottomRight.red > 0.9)
+        #expect(mirroredBottomRight.blue < 0.1)
+
+        harness.viewModel.undo()
+        let restoredTopLeft = try harness.color(atX: 20, y: 20, layerID: layerID)
+        let restoredBottomRight = try harness.color(atX: 44, y: 44, layerID: layerID)
+        #expect(restoredTopLeft.red > 0.9)
+        #expect(restoredBottomRight.blue > 0.9)
+    }
+
+    @Test
+    @MainActor
     func multicolorGradientRendersMiddleStopAndSupportsUndo() async throws {
         let harness = try PixelHistoryHarness()
         let layerID = harness.addLayer()

@@ -9,6 +9,9 @@ struct LinearPremultipliedColor: Sendable, Equatable {
     static let clear = LinearPremultipliedColor(red: 0, green: 0, blue: 0, alpha: 0)
     static let white = LinearPremultipliedColor(red: 1, green: 1, blue: 1, alpha: 1)
     static let black = LinearPremultipliedColor(red: 0, green: 0, blue: 0, alpha: 1)
+    private static let srgbByteToLinearTable: [Float] = (0...255).map {
+        srgbChannelToLinear(Float($0) / 255)
+    }
 
     init(red: Float, green: Float, blue: Float, alpha: Float) {
         self.red = red
@@ -28,11 +31,15 @@ struct LinearPremultipliedColor: Sendable, Equatable {
 
     init(bgraBlue: UInt8, green: UInt8, red: UInt8, alpha: UInt8) {
         self.init(
-            red: Self.srgbChannelToLinear(Float(red) / 255),
-            green: Self.srgbChannelToLinear(Float(green) / 255),
-            blue: Self.srgbChannelToLinear(Float(bgraBlue) / 255),
+            red: Self.srgbByteToLinearTable[Int(red)],
+            green: Self.srgbByteToLinearTable[Int(green)],
+            blue: Self.srgbByteToLinearTable[Int(bgraBlue)],
             alpha: Float(alpha) / 255
         )
+    }
+
+    static func linearChannel(forSRGBByte value: UInt8) -> Float {
+        srgbByteToLinearTable[Int(value)]
     }
 
     func applyingOpacity(_ opacity: Float) -> LinearPremultipliedColor {

@@ -140,7 +140,7 @@ struct CanvasContainerView: View {
                                 switch viewModel.workspace.toolSession.activeTool {
                                 case .ellipseSelection:
                                     .ellipse
-                                case .lassoSelection, .lassoFill:
+                                case .lassoSelection, .smartSelection, .lassoFill:
                                     .lasso
                                 default:
                                     .rectangle
@@ -664,6 +664,8 @@ struct CanvasContainerView: View {
                         preciseInput: viewModel.preciseFreeTransformInput,
                         onToolModeChanged: viewModel.setFreeTransformToolMode,
                         onPreciseInputChanged: viewModel.setPreciseFreeTransformInput,
+                        onFlipHorizontal: viewModel.flipFreeTransformHorizontally,
+                        onFlipVertical: viewModel.flipFreeTransformVertically,
                         onApply: {
                             viewModel.applySelectionTransform()
                         },
@@ -1213,6 +1215,8 @@ private struct SelectionOverlayHost: View {
         let isTransforming = proxy.isTransformingSelection
         let isFreeTransform = proxy.activeTool == .freeTransform
         let isApplying = proxy.isApplyingTransformCommit
+        let usesSmartSelectionTint = proxy.activeTool == .smartSelection
+            && proxy.smartSelectionDisplayMode == .tint
 
         if proxy.isHiddenForTransientAdjustment || proxy.activeTool == .canvasCrop {
             EmptyView()
@@ -1225,8 +1229,9 @@ private struct SelectionOverlayHost: View {
                 presentation: presentation,
                 canvasSize: canvasSize,
                 showsDimMask: false,
+                showsSelectionTint: usesSmartSelectionTint,
                 previewOffset: .init(x: 0, y: 0),
-                prefersVectorDisplay: true,
+                prefersVectorDisplay: proxy.activeTool != .smartSelection,
                 smoothsLassoPath: false
             )
             .id(proxy.redrawRevision)
@@ -1235,6 +1240,7 @@ private struct SelectionOverlayHost: View {
                 presentation: presentation,
                 canvasSize: canvasSize,
                 showsDimMask: false,
+                showsSelectionTint: false,
                 previewOffset: .init(x: 0, y: 0),
                 prefersVectorDisplay: true,
                 smoothsLassoPath: true
@@ -1248,10 +1254,12 @@ private struct SelectionOverlayHost: View {
                 presentation: presentation,
                 canvasSize: canvasSize,
                 showsDimMask: false,
+                showsSelectionTint: usesSmartSelectionTint && shape.kind == .mask,
                 previewOffset: isTransforming
                     ? proxy.transformPreviewOffset
                     : proxy.selectionMovePreviewOffset,
-                prefersVectorDisplay: shape.kind != .mask || !shape.components.isEmpty,
+                prefersVectorDisplay: proxy.activeTool != .smartSelection
+                    && (shape.kind != .mask || !shape.components.isEmpty),
                 smoothsLassoPath: proxy.inProgressShape?.kind == .lasso
             )
             .id(proxy.redrawRevision)
@@ -1626,7 +1634,7 @@ private final class OutsideCanvasSelectionEventView: NSView {
     }
 
     private func selectionCanvasPoints(from event: NSEvent) -> [CanvasPoint] {
-        guard activeTool == .lassoSelection || activeTool == .lassoFill || activeTool == .textureFill else {
+        guard activeTool == .lassoSelection || activeTool == .smartSelection || activeTool == .lassoFill || activeTool == .textureFill else {
             return [canvasPoint(for: event)]
         }
 
@@ -2058,6 +2066,8 @@ private struct FreeTransformHUD: View {
     let preciseInput: PreciseAffineInput?
     let onToolModeChanged: (FreeTransformToolMode) -> Void
     let onPreciseInputChanged: (PreciseAffineInput) -> Void
+    let onFlipHorizontal: () -> Void
+    let onFlipVertical: () -> Void
     let onApply: () -> Void
     let onCancel: () -> Void
 
@@ -2100,6 +2110,19 @@ private struct FreeTransformHUD: View {
                     )
                 }
                 .buttonTooltip("输入中心、尺寸、旋转和翻转")
+
+                flipButton(
+                    title: "水平翻转",
+                    systemImage: "arrow.left.and.right",
+                    isActive: preciseInput.isHorizontallyFlipped,
+                    action: onFlipHorizontal
+                )
+                flipButton(
+                    title: "垂直翻转",
+                    systemImage: "arrow.up.and.down",
+                    isActive: preciseInput.isVerticallyFlipped,
+                    action: onFlipVertical
+                )
             }
 
             Button(action: onApply) {
@@ -2161,6 +2184,27 @@ private struct FreeTransformHUD: View {
         }
         .buttonStyle(.plain)
         .disabled(isApplying)
+    }
+
+    private func flipButton(
+        title: String,
+        systemImage: String,
+        isActive: Bool,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Image(systemName: systemImage)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(Color.white.opacity(isActive ? 1 : 0.78))
+                .frame(width: 24, height: 22)
+                .background(
+                    RoundedRectangle(cornerRadius: 6)
+                        .fill(isActive ? Color.accentColor.opacity(0.72) : Color.white.opacity(0.1))
+                )
+        }
+        .buttonStyle(.plain)
+        .disabled(isApplying)
+        .buttonTooltip(title)
     }
 }
 
@@ -2613,6 +2657,7 @@ private struct SelectionOverlay: View {
     let presentation: CanvasPresentation
     let canvasSize: CanvasSize
     let showsDimMask: Bool
+    let showsSelectionTint: Bool
     let previewOffset: CanvasPoint
     let prefersVectorDisplay: Bool
     let smoothsLassoPath: Bool
@@ -2792,25 +2837,37 @@ private struct SelectionOverlay: View {
                     )
             }
 
-            SelectionMaskImageView(
-                selectionShape: shape,
-                presentation: presentation,
-                canvasSize: canvasSize,
-                edgeOnly: true,
-                dashesEdge: false,
-                tint: .black.opacity(0.88)
-            )
-            .offset(x: documentFrame.origin.x, y: documentFrame.origin.y)
+            if showsSelectionTint {
+                SelectionMaskImageView(
+                    selectionShape: shape,
+                    presentation: presentation,
+                    canvasSize: canvasSize,
+                    edgeOnly: false,
+                    tint: Color(red: 0.12, green: 0.55, blue: 1)
+                )
+                .opacity(0.3)
+                .offset(x: documentFrame.origin.x, y: documentFrame.origin.y)
+            } else {
+                SelectionMaskImageView(
+                    selectionShape: shape,
+                    presentation: presentation,
+                    canvasSize: canvasSize,
+                    edgeOnly: true,
+                    dashesEdge: false,
+                    tint: .black.opacity(0.88)
+                )
+                .offset(x: documentFrame.origin.x, y: documentFrame.origin.y)
 
-            SelectionMaskImageView(
-                selectionShape: shape,
-                presentation: presentation,
-                canvasSize: canvasSize,
-                edgeOnly: true,
-                dashesEdge: true,
-                tint: .white
-            )
-            .offset(x: documentFrame.origin.x, y: documentFrame.origin.y)
+                SelectionMaskImageView(
+                    selectionShape: shape,
+                    presentation: presentation,
+                    canvasSize: canvasSize,
+                    edgeOnly: true,
+                    dashesEdge: true,
+                    tint: .white
+                )
+                .offset(x: documentFrame.origin.x, y: documentFrame.origin.y)
+            }
         }
         .allowsHitTesting(false)
     }

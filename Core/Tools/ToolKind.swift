@@ -120,6 +120,7 @@ enum ToolKind: String, Codable, Sendable {
     case rectangleSelection
     case ellipseSelection
     case lassoSelection
+    case smartSelection
     case canvasRotate
     case canvasCrop
     case freeTransform
@@ -145,7 +146,7 @@ extension ToolKind {
     var supportsOutsideCanvasSelectionStart: Bool {
         switch self {
         case .polygonSelection, .lassoFill, .textureFill,
-             .rectangleSelection, .ellipseSelection, .lassoSelection:
+             .rectangleSelection, .ellipseSelection, .lassoSelection, .smartSelection:
             return true
         default:
             return false
@@ -164,6 +165,8 @@ extension ToolKind {
             return "paintbrush.pointed"
         case .lassoSelection:
             return "lasso"
+        case .smartSelection:
+            return "wand.and.stars.inverse"
         case .polygonSelection:
             return "point.3.connected.trianglepath.dotted"
         case .lassoFill:
@@ -211,6 +214,8 @@ extension ToolKind {
             return "油漆桶"
         case .lassoSelection:
             return "套索选区"
+        case .smartSelection:
+            return "智能选区"
         case .polygonSelection:
             return "几何选区"
         case .lassoFill:
@@ -256,7 +261,7 @@ extension ToolKind {
             return nil
         case .bucket:
             return "G"
-        case .lassoSelection, .polygonSelection:
+        case .lassoSelection, .smartSelection, .polygonSelection:
             return "L"
         case .lassoFill, .textureFill:
             return "K"
@@ -308,7 +313,7 @@ struct ToolSidebarGroup: Identifiable, Equatable, Sendable {
         .init(id: "eraser", tools: [.eraser], shortcutKey: "E"),
         .init(id: "eyedropper", tools: [.eyedropper], shortcutKey: nil),
         .init(id: "bucket", tools: [.bucket, .linearGradient, .sectorGradient], shortcutKey: "G"),
-        .init(id: "selection-l", tools: [.lassoSelection, .polygonSelection], shortcutKey: "L"),
+        .init(id: "selection-l", tools: [.lassoSelection, .smartSelection, .polygonSelection], shortcutKey: "L"),
         .init(id: "lasso-fill", tools: [.lassoFill, .textureFill], shortcutKey: "K"),
         .init(id: "selection-m", tools: [.rectangleSelection, .ellipseSelection], shortcutKey: "M"),
         .init(id: "straight-line", tools: [.straightLine], shortcutKey: "U"),

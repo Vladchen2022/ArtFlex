@@ -994,7 +994,7 @@ struct RightInspectorView: View {
         oldTool: ToolKind,
         newTool: ToolKind
     ) {
-        if newTool == .textureFill || newTool == .colorVitalization {
+        if newTool == .textureFill || newTool == .colorVitalization || newTool == .smartSelection {
             parameterInspectorTab = .brush
             parameterInspectorAutoRestoreTab = nil
             return
@@ -1023,7 +1023,7 @@ struct RightInspectorView: View {
 
     private func usesColorAdjustmentParameterPanel(_ tool: ToolKind) -> Bool {
         switch tool {
-        case .brightnessAdjust, .lassoSelection, .rectangleSelection, .ellipseSelection:
+        case .brightnessAdjust, .lassoSelection, .smartSelection, .rectangleSelection, .ellipseSelection:
             return true
         default:
             return false
@@ -1548,6 +1548,8 @@ struct RightInspectorView: View {
                 perspectiveParameterControls
             } else if viewModel.workspace.toolSession.activeTool == .bucket {
                 bucketFillParameterControls
+            } else if viewModel.workspace.toolSession.activeTool == .smartSelection {
+                smartSelectionParameterControls
             } else if isLassoFillToolActive {
                 lassoFillParameterControls
             } else if usesFillParameterControls {
@@ -2322,6 +2324,36 @@ struct RightInspectorView: View {
             Text(settings.isContiguous ? "从落点向相邻像素扩散" : "替换采样范围内所有相近颜色")
                 .font(.system(size: 9.5, weight: .medium))
                 .foregroundStyle(Color.white.opacity(0.48))
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var smartSelectionParameterControls: some View {
+        let settings = viewModel.smartSelectionSettings
+        return VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("智能选区")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(Color.white.opacity(0.92))
+                Spacer()
+                Button("重置") { viewModel.resetSmartSelectionSettings() }
+                    .buttonStyle(.borderless)
+                    .controlSize(.mini)
+            }
+
+            BrushParameterSliderRow(
+                title: "识别阈值",
+                value: Double(settings.tolerance * 100),
+                range: 0...100,
+                formatter: { "\(Int($0.rounded()))%" },
+                onPreview: { viewModel.setSmartSelectionTolerance(Float($0 / 100)) },
+                onCommit: { viewModel.setSmartSelectionTolerance(Float($0 / 100)) }
+            )
+
+            Text("粗略圈住目标；每次增减选独立识别新色块。1–9 设为 10%–90%，0 设为 100%；Shift 增选，Option 减选，Enter 切换覆盖/蚂蚁线。")
+                .font(.system(size: 9.5, weight: .medium))
+                .foregroundStyle(Color.white.opacity(0.52))
+                .fixedSize(horizontal: false, vertical: true)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }

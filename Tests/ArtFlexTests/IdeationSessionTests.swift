@@ -381,6 +381,7 @@ private struct IdeationHarness {
         .rectangleSelection,
         .ellipseSelection,
         .lassoSelection,
+        .smartSelection,
         .canvasRotate,
         .canvasCrop,
         .freeTransform

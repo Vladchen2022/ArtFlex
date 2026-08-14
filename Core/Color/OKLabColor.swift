@@ -7,11 +7,15 @@ struct OKLabColor: Sendable, Equatable {
     var b: Float
 
     init(srgb color: RGBAColor) {
-        let linear = SIMD3<Float>(
-            LinearPremultipliedColor.srgbChannelToLinear(color.red),
-            LinearPremultipliedColor.srgbChannelToLinear(color.green),
-            LinearPremultipliedColor.srgbChannelToLinear(color.blue)
+        self.init(
+            linearRed: LinearPremultipliedColor.srgbChannelToLinear(color.red),
+            green: LinearPremultipliedColor.srgbChannelToLinear(color.green),
+            blue: LinearPremultipliedColor.srgbChannelToLinear(color.blue)
         )
+    }
+
+    init(linearRed: Float, green: Float, blue: Float) {
+        let linear = SIMD3<Float>(linearRed, green, blue)
         let lms = SIMD3<Float>(
             simd_dot(linear, SIMD3(0.4122214708, 0.5363325363, 0.0514459929)),
             simd_dot(linear, SIMD3(0.2119034982, 0.6806995451, 0.1073969566)),

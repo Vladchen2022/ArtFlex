@@ -288,6 +288,7 @@ struct CanvasPresentationTests {
             .rectangleSelection,
             .ellipseSelection,
             .lassoSelection,
+            .smartSelection,
             .polygonSelection,
             .lassoFill,
             .textureFill

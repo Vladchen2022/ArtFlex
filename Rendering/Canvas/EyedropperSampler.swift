@@ -3,7 +3,7 @@ import Metal
 import simd
 
 final class EyedropperSampler {
-    private struct SamplingLayer {
+    fileprivate struct SamplingLayer {
         var layer: LayerRecord
         var texture: MTLTexture
         var layerMaskTexture: MTLTexture?
@@ -24,6 +24,17 @@ final class EyedropperSampler {
         var layerMask: LayerTextureSnapshot? = nil
         var clipContent: LayerTextureSnapshot? = nil
         var clipLayerMask: LayerTextureSnapshot? = nil
+    }
+
+    /// Immutable description of a bounded canvas readback. Texture references are
+    /// resolved on the caller's actor; the expensive blit and CPU composition can
+    /// then run off the main actor without reading mutable layer-store dictionaries.
+    struct VisibleRegionRequest: @unchecked Sendable {
+        fileprivate var originX: Int
+        fileprivate var originY: Int
+        fileprivate var width: Int
+        fileprivate var height: Int
+        fileprivate var samplingLayers: [SamplingLayer]
     }
 
     private let serializer: LayerTextureSerializer
@@ -50,7 +61,7 @@ final class EyedropperSampler {
         let width = (maximumX - originX) + 1
         let height = (maximumY - originY) + 1
 
-        let samplingLayers = resolveSamplingLayers(
+        let request = makeVisibleRegionRequest(
             document: document,
             originX: originX,
             originY: originY,
@@ -61,6 +72,72 @@ final class EyedropperSampler {
             contentTextureForLayer: contentTextureForLayer,
             displayTextureForLayer: displayTextureForLayer
         )
+        let compositedPixels = try compositedPixels(for: request)
+
+        let sampled = aggregate(
+            compositedPixels,
+            sampleSize: settings.sampleSize,
+            statistic: settings.statistic
+        )
+        return outputColor(
+            from: sampled,
+            preservesTransparency: settings.preservesTransparency
+        )
+    }
+
+    func makeVisibleRegionRequest(
+        document: ArtDocument,
+        originX: Int,
+        originY: Int,
+        width: Int,
+        height: Int,
+        source: EyedropperSampleSource = .displayedColor,
+        layerSurfaceStore: StageOneLayerSurfaceStore,
+        contentTextureForLayer: ((LayerID) -> MTLTexture?)? = nil,
+        displayTextureForLayer: ((LayerID) -> MTLTexture?)? = nil
+    ) -> VisibleRegionRequest {
+        VisibleRegionRequest(
+            originX: originX,
+            originY: originY,
+            width: width,
+            height: height,
+            samplingLayers: resolveSamplingLayers(
+                document: document,
+                originX: originX,
+                originY: originY,
+                width: width,
+                height: height,
+                source: source,
+                layerSurfaceStore: layerSurfaceStore,
+                contentTextureForLayer: contentTextureForLayer,
+                displayTextureForLayer: displayTextureForLayer
+            )
+        )
+    }
+
+    func snapshotVisibleRegion(_ request: VisibleRegionRequest) throws -> LayerTextureSnapshot {
+        let pixels = try compositedPixels(for: request)
+        var bytes = [UInt8](repeating: 0, count: request.width * request.height * 4)
+        for (index, pixel) in pixels.enumerated() {
+            let bgra = pixel.bgra8PremultipliedBytes
+            let offset = index * 4
+            bytes[offset] = bgra.blue
+            bytes[offset + 1] = bgra.green
+            bytes[offset + 2] = bgra.red
+            bytes[offset + 3] = bgra.alpha
+        }
+        return LayerTextureSnapshot(
+            width: request.width,
+            height: request.height,
+            bytesPerRow: request.width * 4,
+            pixelData: Data(bytes)
+        )
+    }
+
+    private func compositedPixels(
+        for request: VisibleRegionRequest
+    ) throws -> [LinearPremultipliedColor] {
+        let samplingLayers = request.samplingLayers
         var snapshotRequests: [LayerTextureRegionSnapshotRequest] = []
         var snapshotBindings: [(layerIndex: Int, role: SamplingTextureRole)] = []
         for (layerIndex, samplingLayer) in samplingLayers.enumerated() {
@@ -74,10 +151,10 @@ final class EyedropperSampler {
                 guard let texture else { continue }
                 snapshotRequests.append(LayerTextureRegionSnapshotRequest(
                     texture: texture,
-                    originX: originX,
-                    originY: originY,
-                    width: width,
-                    height: height
+                    originX: request.originX,
+                    originY: request.originY,
+                    width: request.width,
+                    height: request.height
                 ))
                 snapshotBindings.append((layerIndex: layerIndex, role: role))
             }
@@ -102,7 +179,7 @@ final class EyedropperSampler {
 
         var compositedPixels = [LinearPremultipliedColor](
             repeating: .clear,
-            count: width * height
+            count: request.width * request.height
         )
         for (samplingLayer, snapshots) in zip(samplingLayers, layerSnapshots) {
             if let curveAdjustmentLUTs = samplingLayer.layer.adjustment?.curveLUTs {
@@ -110,8 +187,8 @@ final class EyedropperSampler {
                     luts: curveAdjustmentLUTs,
                     effectOpacity: samplingLayer.effectiveOpacity,
                     maskSnapshot: snapshots.layerMask,
-                    width: width,
-                    height: height,
+                    width: request.width,
+                    height: request.height,
                     to: &compositedPixels
                 )
                 continue
@@ -127,16 +204,7 @@ final class EyedropperSampler {
                 into: &compositedPixels
             )
         }
-
-        let sampled = aggregate(
-            compositedPixels,
-            sampleSize: settings.sampleSize,
-            statistic: settings.statistic
-        )
-        return outputColor(
-            from: sampled,
-            preservesTransparency: settings.preservesTransparency
-        )
+        return compositedPixels
     }
 
     private func resolveSamplingLayers(
