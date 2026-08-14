@@ -140,6 +140,54 @@ struct TransformInteractionStateTests {
     }
 
     @Test
+    func scalingAfterAHorizontalFlipPreservesTheFlipSign() {
+        let bounds = CanvasRect(
+            origin: .init(x: 0, y: 0),
+            size: .init(x: 100, y: 80)
+        )
+        let preview = freeTransformScaledPreview(
+            bounds: bounds,
+            handle: .right,
+            dragStartPoint: .init(x: 0, y: 40),
+            currentPoint: .init(x: -50, y: 40),
+            startPreview: .init(
+                translation: .init(x: 0, y: 0),
+                scaleX: -1,
+                scaleY: 1,
+                rotationRadians: 0
+            ),
+            uniformScale: false
+        )
+
+        #expect(abs(preview.scaleX + 1.5) < 0.0001)
+        #expect(abs(preview.scaleY - 1) < 0.0001)
+    }
+
+    @Test
+    func scalingAfterAVerticalFlipPreservesTheFlipSign() {
+        let bounds = CanvasRect(
+            origin: .init(x: 0, y: 0),
+            size: .init(x: 100, y: 80)
+        )
+        let preview = freeTransformScaledPreview(
+            bounds: bounds,
+            handle: .bottom,
+            dragStartPoint: .init(x: 50, y: 0),
+            currentPoint: .init(x: 50, y: -40),
+            startPreview: .init(
+                translation: .init(x: 0, y: 0),
+                scaleX: 1,
+                scaleY: -1,
+                rotationRadians: 0
+            ),
+            uniformScale: false
+        )
+
+        #expect(abs(preview.scaleX - 1) < 0.0001)
+        #expect(abs(preview.scaleY + 1.5) < 0.0001)
+    }
+
+    @Test
     func customPivotBoundsAffectWholeLayerRotationCenter() {
         let fullBounds = CanvasRect(
             origin: .init(x: 0, y: 0),

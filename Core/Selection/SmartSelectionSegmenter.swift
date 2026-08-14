@@ -5,32 +5,87 @@ enum SmartSelectionDisplayMode: Sendable, Equatable {
     case marchingAnts
 }
 
+enum MagicWandSampleSize: Int, Codable, Sendable, Equatable, CaseIterable {
+    case point = 1
+    case threeByThree = 3
+    case fiveByFive = 5
+    case elevenByEleven = 11
+    case thirtyOneByThirtyOne = 31
+
+    var dimension: Int { rawValue }
+}
+
+enum MagicWandSampleSource: String, Codable, Sendable, Equatable, CaseIterable {
+    case currentLayer
+    case allVisibleLayers
+}
+
+/// Magic Wand and geometry selections intentionally share one boolean-operation
+/// model so a selection can be continued with a different tool.
+typealias MagicWandSelectionMode = SelectionCombineMode
+
+/// Photoshop-style fuzzy selection settings. Tolerance deliberately uses the
+/// familiar 0...255 scale rather than the old ambiguous percentage.
 struct SmartSelectionSettings: Codable, Sendable, Equatable {
-    var tolerance: Float
+    var tolerance: Int
+    var sampleSize: MagicWandSampleSize
+    var isAntiAliased: Bool
+    var isContiguous: Bool
+    var sampleSource: MagicWandSampleSource
+    var selectionMode: MagicWandSelectionMode
 
-    static let stageOneDefault = SmartSelectionSettings(tolerance: 0.18)
+    static let stageOneDefault = SmartSelectionSettings(
+        tolerance: 32,
+        sampleSize: .point,
+        isAntiAliased: true,
+        isContiguous: true,
+        sampleSource: .allVisibleLayers,
+        selectionMode: .replace
+    )
 
-    init(tolerance: Float) {
-        self.tolerance = Self.clampedTolerance(tolerance)
+    init(
+        tolerance: Int,
+        sampleSize: MagicWandSampleSize = .point,
+        isAntiAliased: Bool = true,
+        isContiguous: Bool = true,
+        sampleSource: MagicWandSampleSource = .allVisibleLayers,
+        selectionMode: MagicWandSelectionMode = .replace
+    ) {
+        self.tolerance = min(max(tolerance, 0), 255)
+        self.sampleSize = sampleSize
+        self.isAntiAliased = isAntiAliased
+        self.isContiguous = isContiguous
+        self.sampleSource = sampleSource
+        self.selectionMode = selectionMode
     }
 
     private enum CodingKeys: String, CodingKey {
         case tolerance
+        case sampleSize
+        case isAntiAliased
+        case isContiguous
+        case sampleSource
+        case selectionMode
     }
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        self.init(tolerance: try container.decodeIfPresent(Float.self, forKey: .tolerance) ?? 0.18)
-    }
-
-    func encode(to encoder: Encoder) throws {
-        var container = encoder.container(keyedBy: CodingKeys.self)
-        try container.encode(Self.clampedTolerance(tolerance), forKey: .tolerance)
-    }
-
-    private static func clampedTolerance(_ value: Float) -> Float {
-        guard value.isFinite else { return stageOneDefault.tolerance }
-        return min(max(value, 0), 1)
+        let decodedTolerance: Int
+        if let integer = try? container.decode(Int.self, forKey: .tolerance) {
+            decodedTolerance = integer
+        } else if let legacy = try? container.decode(Float.self, forKey: .tolerance) {
+            decodedTolerance = Int((min(max(legacy, 0), 1) * 255).rounded())
+        } else {
+            decodedTolerance = Self.stageOneDefault.tolerance
+        }
+        self.init(
+            tolerance: decodedTolerance,
+            sampleSize: try container.decodeIfPresent(MagicWandSampleSize.self, forKey: .sampleSize) ?? .point,
+            isAntiAliased: try container.decodeIfPresent(Bool.self, forKey: .isAntiAliased) ?? true,
+            isContiguous: try container.decodeIfPresent(Bool.self, forKey: .isContiguous) ?? true,
+            sampleSource: try container.decodeIfPresent(MagicWandSampleSource.self, forKey: .sampleSource) ?? .allVisibleLayers,
+            selectionMode: try container.decodeIfPresent(MagicWandSelectionMode.self, forKey: .selectionMode) ?? .replace
+        )
     }
 }
 
@@ -53,394 +108,247 @@ struct SmartSelectionSegmentationResult: Sendable, Equatable {
     var selectedBounds: CanvasRect
 }
 
-/// Color-guided segmentation within a rough lasso.
-///
-/// The interaction follows the same foreground/background hint model as GrabCut:
-/// the lasso boundary is treated as probable background and the strongest
-/// contrasting connected region inside the lasso becomes the foreground seed.
-/// It deliberately stays independent from AppKit/Metal so a Vision or graph-cut
-/// backend can replace it without changing tool routing or selection semantics.
+/// Seed-based fuzzy selector following the same model used by mature magic-wand
+/// and contiguous-selection tools. The pixel provider lets the rendering layer
+/// reuse it with either an in-memory composite or lazy Metal tiles.
 enum SmartSelectionSegmenter {
-    private struct Feature {
-        var lightness: Float
-        var a: Float
-        var b: Float
-        var alpha: Float
-
-        static let zero = Feature(lightness: 0, a: 0, b: 0, alpha: 0)
-
-        static func + (lhs: Feature, rhs: Feature) -> Feature {
-            Feature(
-                lightness: lhs.lightness + rhs.lightness,
-                a: lhs.a + rhs.a,
-                b: lhs.b + rhs.b,
-                alpha: lhs.alpha + rhs.alpha
-            )
-        }
-
-        static func / (lhs: Feature, rhs: Float) -> Feature {
-            guard rhs != 0 else { return .zero }
-            return Feature(
-                lightness: lhs.lightness / rhs,
-                a: lhs.a / rhs,
-                b: lhs.b / rhs,
-                alpha: lhs.alpha / rhs
-            )
-        }
-    }
-
     static func segment(
         raster: SmartSelectionRaster,
-        lassoPoints: [CanvasPoint],
-        settings: SmartSelectionSettings,
-        candidateAlphaBytes: [UInt8]? = nil
+        seedPoint: CanvasPoint,
+        settings: SmartSelectionSettings
     ) -> SmartSelectionSegmentationResult? {
         guard
             raster.width > 0,
             raster.height > 0,
             raster.bytesPerRow >= raster.width * 4,
-            raster.premultipliedBGRABytes.count >= raster.bytesPerRow * raster.height,
-            candidateAlphaBytes == nil || candidateAlphaBytes?.count == raster.width * raster.height,
-            lassoPoints.count >= 3
+            raster.premultipliedBGRABytes.count >= raster.bytesPerRow * raster.height
         else {
             return nil
         }
 
-        var lassoAlpha = rasterizedClosedPolygonMaskBytes(
-            points: lassoPoints,
-            originX: raster.originX,
-            originY: raster.originY,
-            width: raster.width,
-            height: raster.height,
-            // CGContext still antialiases at 1×. A second 2× buffer quadrupled
-            // temporary memory and dominated large-ROI recognition latency.
-            supersampleScale: 1
-        )
-        if let candidateAlphaBytes {
-            for index in lassoAlpha.indices {
-                lassoAlpha[index] = UInt8(clamping:
-                    (Int(lassoAlpha[index]) * Int(candidateAlphaBytes[index]) + 127) / 255
+        return raster.premultipliedBGRABytes.withUnsafeBytes { rawBuffer in
+            let bytes = rawBuffer.bindMemory(to: UInt8.self)
+            return try? segment(
+                originX: raster.originX,
+                originY: raster.originY,
+                width: raster.width,
+                height: raster.height,
+                seedPoint: seedPoint,
+                settings: settings
+            ) { x, y in
+                let offset = (y * raster.bytesPerRow) + (x * 4)
+                return PremultipliedSRGBAPixel(
+                    bgraBlue: bytes[offset],
+                    green: bytes[offset + 1],
+                    red: bytes[offset + 2],
+                    alpha: bytes[offset + 3]
                 )
             }
         }
-        guard lassoAlpha.contains(where: { $0 > 8 }) else { return nil }
+    }
 
-        return raster.premultipliedBGRABytes.withUnsafeBytes { rawBuffer in
-            let bytes = rawBuffer.bindMemory(to: UInt8.self)
-            guard let seedIndex = foregroundSeedIndex(
-                bytes: bytes,
-                bytesPerRow: raster.bytesPerRow,
-                lassoAlpha: lassoAlpha,
-                width: raster.width,
-                height: raster.height
-            ) else {
-                return nil
+    static func segment(
+        originX: Int,
+        originY: Int,
+        width: Int,
+        height: Int,
+        seedPoint: CanvasPoint,
+        settings: SmartSelectionSettings,
+        pixelAt: (Int, Int) throws -> PremultipliedSRGBAPixel
+    ) throws -> SmartSelectionSegmentationResult? {
+        guard width > 0, height > 0 else { return nil }
+        let seedX = Int(seedPoint.x.rounded(.down)) - originX
+        let seedY = Int(seedPoint.y.rounded(.down)) - originY
+        guard seedX >= 0, seedX < width, seedY >= 0, seedY < height else { return nil }
+
+        let reference = try sampledReferencePixel(
+            centerX: seedX,
+            centerY: seedY,
+            width: width,
+            height: height,
+            sampleSize: settings.sampleSize,
+            pixelAt: pixelAt
+        )
+        let threshold = Float(settings.tolerance) / 255
+        let antialiasBand = settings.isAntiAliased ? max(2 / 255, threshold * 0.06) : 0
+
+        @inline(__always)
+        func coverage(_ pixel: PremultipliedSRGBAPixel) -> UInt8 {
+            let distance = FillColorDistance.normalizedDistance(between: pixel, and: reference)
+            if !settings.isAntiAliased {
+                return distance <= threshold ? 255 : 0
             }
+            if distance <= threshold { return 255 }
+            guard distance < threshold + antialiasBand else { return 0 }
+            let fraction = 1 - ((distance - threshold) / antialiasBand)
+            return UInt8(clamping: Int((fraction * 255).rounded()))
+        }
 
-            let seedX = seedIndex % raster.width
-            let seedY = seedIndex / raster.width
-            let reference = medianReferenceFeature(
-                aroundX: seedX,
-                y: seedY,
-                bytes: bytes,
-                bytesPerRow: raster.bytesPerRow,
-                lassoAlpha: lassoAlpha,
-                width: raster.width,
-                height: raster.height
-            )
-            let maximumDistance = perceptualDistanceThreshold(for: settings.tolerance)
-            let maximumDistanceSquared = maximumDistance * maximumDistance
+        var alpha = [UInt8](repeating: 0, count: width * height)
+        var selectedPixelCount = 0
+        var minX = width
+        var minY = height
+        var maxX = -1
+        var maxY = -1
 
-            // 0 = unknown, 1 = rejected, 2 = accepted. Cache the predicate so
-            // accepted pixels inspected from adjacent scanlines do not repeat
-            // the relatively expensive OKLab conversion.
-            var eligibility = [UInt8](repeating: 0, count: raster.width * raster.height)
-            var result = [UInt8](repeating: 0, count: eligibility.count)
-            var queue: [(x: Int, y: Int)] = [(seedX, seedY)]
-            queue.reserveCapacity(min(raster.height * 2, 8_192))
-            var selectedPixelCount = 0
-            var selectedMinX = raster.width
-            var selectedMinY = raster.height
-            var selectedMaxX = -1
-            var selectedMaxY = -1
+        @inline(__always)
+        func record(_ x: Int, _ y: Int, _ value: UInt8) {
+            guard value > 0 else { return }
+            let index = (y * width) + x
+            guard alpha[index] == 0 else { return }
+            alpha[index] = value
+            selectedPixelCount += 1
+            minX = min(minX, x)
+            minY = min(minY, y)
+            maxX = max(maxX, x)
+            maxY = max(maxY, y)
+        }
 
-            @inline(__always)
-            func pixelQualifies(_ x: Int, _ y: Int) -> Bool {
-                guard x >= 0, x < raster.width, y >= 0, y < raster.height else {
-                    return false
-                }
-                let pixelIndex = (y * raster.width) + x
-                guard result[pixelIndex] == 0 else { return false }
-                switch eligibility[pixelIndex] {
-                case 1:
-                    return false
-                case 2:
-                    return true
+        if settings.isContiguous {
+            // 0 unknown, 1 rejected, 2 accepted. This mirrors the scanline
+            // flood-fill structure already used by BucketFillEngine, while the
+            // one-pixel neighbor expansion preserves diagonal edge continuity.
+            var eligibility = [UInt8](repeating: 0, count: width * height)
+            var connected = [UInt8](repeating: 0, count: width * height)
+
+            func acceptedCoverage(_ x: Int, _ y: Int) throws -> UInt8 {
+                guard x >= 0, x < width, y >= 0, y < height else { return 0 }
+                let index = (y * width) + x
+                switch eligibility[index] {
+                case 1: return 0
+                case 2: return alpha[index]
                 default:
-                    guard lassoAlpha[pixelIndex] > 8 else {
-                        eligibility[pixelIndex] = 1
-                        return false
-                    }
-                    let candidate = feature(
-                        atX: x,
-                        y: y,
-                        bytes: bytes,
-                        bytesPerRow: raster.bytesPerRow
-                    )
-                    let accepted = perceptualDistanceSquared(candidate, reference) <= maximumDistanceSquared
-                    eligibility[pixelIndex] = accepted ? 2 : 1
-                    return accepted
+                    let value = coverage(try pixelAt(x, y))
+                    eligibility[index] = value > 0 ? 2 : 1
+                    if value > 0 { alpha[index] = value }
+                    return value
                 }
             }
 
-            @inline(__always)
-            func enqueueNeighborSegments(y: Int, minX: Int, maxX: Int) {
-                guard y >= 0, y < raster.height else { return }
-                var x = max(minX - 1, 0)
-                let upperX = min(maxX + 1, raster.width - 1)
-                while x <= upperX {
-                    while x <= upperX, !pixelQualifies(x, y) {
+            let seedIndex = (seedY * width) + seedX
+            eligibility[seedIndex] = 2
+            alpha[seedIndex] = 255
+            var queue: [(x: Int, y: Int)] = [(seedX, seedY)]
+            queue.reserveCapacity(min(height * 2, 8_192))
+
+            func enqueueSegments(y: Int, from startX: Int, through endX: Int) throws {
+                guard y >= 0, y < height else { return }
+                var x = max(startX, 0)
+                let boundedEnd = min(endX, width - 1)
+                while x <= boundedEnd {
+                    while x <= boundedEnd {
+                        if connected[(y * width) + x] == 0,
+                           try acceptedCoverage(x, y) > 0 {
+                            break
+                        }
                         x += 1
                     }
-                    guard x <= upperX else { break }
+                    guard x <= boundedEnd else { break }
                     queue.append((x, y))
-                    x += 1
-                    while x <= upperX, pixelQualifies(x, y) {
+                    while x <= boundedEnd,
+                          connected[(y * width) + x] == 0,
+                          try acceptedCoverage(x, y) > 0 {
                         x += 1
                     }
                 }
             }
 
             while let seed = queue.popLast() {
-                guard pixelQualifies(seed.x, seed.y) else { continue }
-
-                var leftX = seed.x
-                while leftX > 0, pixelQualifies(leftX - 1, seed.y) {
-                    leftX -= 1
+                let seedIndex = (seed.y * width) + seed.x
+                guard connected[seedIndex] == 0, try acceptedCoverage(seed.x, seed.y) > 0 else { continue }
+                var left = seed.x
+                while left > 0,
+                      connected[(seed.y * width) + left - 1] == 0,
+                      try acceptedCoverage(left - 1, seed.y) > 0 {
+                    left -= 1
                 }
-                var rightX = seed.x
-                while rightX < raster.width - 1, pixelQualifies(rightX + 1, seed.y) {
-                    rightX += 1
+                var right = seed.x
+                while right < width - 1,
+                      connected[(seed.y * width) + right + 1] == 0,
+                      try acceptedCoverage(right + 1, seed.y) > 0 {
+                    right += 1
                 }
 
-                for x in leftX...rightX {
-                    let pixelIndex = (seed.y * raster.width) + x
-                    result[pixelIndex] = lassoAlpha[pixelIndex]
+                for x in left...right {
+                    let index = (seed.y * width) + x
+                    connected[index] = 1
+                    let value = alpha[index]
                     selectedPixelCount += 1
-                    selectedMinX = min(selectedMinX, x)
-                    selectedMinY = min(selectedMinY, seed.y)
-                    selectedMaxX = max(selectedMaxX, x)
-                    selectedMaxY = max(selectedMaxY, seed.y)
+                    minX = min(minX, x)
+                    minY = min(minY, seed.y)
+                    maxX = max(maxX, x)
+                    maxY = max(maxY, seed.y)
+                    alpha[index] = value
                 }
-
-                enqueueNeighborSegments(y: seed.y - 1, minX: leftX, maxX: rightX)
-                enqueueNeighborSegments(y: seed.y + 1, minX: leftX, maxX: rightX)
+                try enqueueSegments(y: seed.y - 1, from: left - 1, through: right + 1)
+                try enqueueSegments(y: seed.y + 1, from: left - 1, through: right + 1)
             }
 
-            guard selectedPixelCount > 0 else { return nil }
-            return SmartSelectionSegmentationResult(
-                originX: raster.originX,
-                originY: raster.originY,
-                width: raster.width,
-                height: raster.height,
-                alphaBytes: result,
-                selectedPixelCount: selectedPixelCount,
-                selectedBounds: CanvasRect(
-                    origin: .init(
-                        x: Double(raster.originX + selectedMinX),
-                        y: Double(raster.originY + selectedMinY)
-                    ),
-                    size: .init(
-                        x: Double(selectedMaxX - selectedMinX + 1),
-                        y: Double(selectedMaxY - selectedMinY + 1)
-                    )
-                )
+            for index in alpha.indices where connected[index] == 0 {
+                alpha[index] = 0
+            }
+        } else {
+            for y in 0..<height {
+                for x in 0..<width {
+                    record(x, y, coverage(try pixelAt(x, y)))
+                }
+            }
+        }
+
+        guard selectedPixelCount > 0, maxX >= minX, maxY >= minY else { return nil }
+        return SmartSelectionSegmentationResult(
+            originX: originX,
+            originY: originY,
+            width: width,
+            height: height,
+            alphaBytes: alpha,
+            selectedPixelCount: selectedPixelCount,
+            selectedBounds: CanvasRect(
+                origin: CanvasPoint(x: Double(originX + minX), y: Double(originY + minY)),
+                size: CanvasPoint(x: Double(maxX - minX + 1), y: Double(maxY - minY + 1))
             )
-        }
-    }
-
-    private static func foregroundSeedIndex(
-        bytes: UnsafeBufferPointer<UInt8>,
-        bytesPerRow: Int,
-        lassoAlpha: [UInt8],
-        width: Int,
-        height: Int
-    ) -> Int? {
-        let centerX = Float(width - 1) * 0.5
-        let centerY = Float(height - 1) * 0.5
-        var boundaryFeature = Feature.zero
-        var boundaryCount: Float = 0
-
-        for y in 0..<height {
-            for x in 0..<width {
-                let index = (y * width) + x
-                guard lassoAlpha[index] > 127, isBoundaryPixel(x: x, y: y, mask: lassoAlpha, width: width, height: height) else {
-                    continue
-                }
-                boundaryFeature = boundaryFeature + feature(
-                    atX: x,
-                    y: y,
-                    bytes: bytes,
-                    bytesPerRow: bytesPerRow
-                )
-                boundaryCount += 1
-            }
-        }
-
-        let probableBackground = boundaryCount > 0 ? boundaryFeature / boundaryCount : nil
-        let sampleStride = max(1, Int(sqrt(Double(width * height) / 20_000).rounded(.down)))
-        let normalization = max(hypot(centerX, centerY), 1)
-        var strongestIndex: Int?
-        var strongestScore: Float = -.greatestFiniteMagnitude
-        var nearestCenterIndex: Int?
-        var nearestCenterDistance = Float.greatestFiniteMagnitude
-
-        for y in stride(from: 0, to: height, by: sampleStride) {
-            for x in stride(from: 0, to: width, by: sampleStride) {
-                let index = (y * width) + x
-                guard lassoAlpha[index] > 127 else { continue }
-                let centerDistance = hypot(Float(x) - centerX, Float(y) - centerY)
-                if centerDistance < nearestCenterDistance {
-                    nearestCenterDistance = centerDistance
-                    nearestCenterIndex = index
-                }
-                guard let probableBackground else { continue }
-                let centrality = max(0, 1 - (centerDistance / normalization))
-                let contrast = perceptualDistance(
-                    feature(atX: x, y: y, bytes: bytes, bytesPerRow: bytesPerRow),
-                    probableBackground
-                )
-                let score = contrast * (0.55 + (centrality * 0.45))
-                if score > strongestScore {
-                    strongestScore = score
-                    strongestIndex = index
-                }
-            }
-        }
-
-        // When the boundary and interior are effectively the same color, the
-        // lasso center is the least surprising target. Otherwise use the most
-        // salient interior tone as the foreground hint.
-        if strongestScore >= 0.025, let strongestIndex {
-            return strongestIndex
-        }
-        return nearestCenterIndex
-    }
-
-    @inline(__always)
-    private static func isBoundaryPixel(
-        x: Int,
-        y: Int,
-        mask: [UInt8],
-        width: Int,
-        height: Int
-    ) -> Bool {
-        if x == 0 || y == 0 || x == width - 1 || y == height - 1 { return true }
-        return mask[(y * width) + x - 1] <= 127
-            || mask[(y * width) + x + 1] <= 127
-            || mask[((y - 1) * width) + x] <= 127
-            || mask[((y + 1) * width) + x] <= 127
-    }
-
-    private static func medianReferenceFeature(
-        aroundX centerX: Int,
-        y centerY: Int,
-        bytes: UnsafeBufferPointer<UInt8>,
-        bytesPerRow: Int,
-        lassoAlpha: [UInt8],
-        width: Int,
-        height: Int
-    ) -> Feature {
-        var lightness: [Float] = []
-        var a: [Float] = []
-        var b: [Float] = []
-        var alpha: [Float] = []
-        let radius = 2
-
-        for y in max(centerY - radius, 0)...min(centerY + radius, height - 1) {
-            for x in max(centerX - radius, 0)...min(centerX + radius, width - 1) {
-                guard lassoAlpha[(y * width) + x] > 127 else { continue }
-                let value = feature(atX: x, y: y, bytes: bytes, bytesPerRow: bytesPerRow)
-                lightness.append(value.lightness)
-                a.append(value.a)
-                b.append(value.b)
-                alpha.append(value.alpha)
-            }
-        }
-
-        guard !lightness.isEmpty else {
-            return feature(atX: centerX, y: centerY, bytes: bytes, bytesPerRow: bytesPerRow)
-        }
-        return Feature(
-            lightness: median(lightness),
-            a: median(a),
-            b: median(b),
-            alpha: median(alpha)
         )
     }
 
-    private static func median(_ values: [Float]) -> Float {
-        let sorted = values.sorted()
-        let middle = sorted.count / 2
-        if sorted.count.isMultiple(of: 2) {
-            return (sorted[middle - 1] + sorted[middle]) * 0.5
+    private static func sampledReferencePixel(
+        centerX: Int,
+        centerY: Int,
+        width: Int,
+        height: Int,
+        sampleSize: MagicWandSampleSize,
+        pixelAt: (Int, Int) throws -> PremultipliedSRGBAPixel
+    ) throws -> PremultipliedSRGBAPixel {
+        let radius = sampleSize.dimension / 2
+        let minX = max(centerX - radius, 0)
+        let minY = max(centerY - radius, 0)
+        let maxX = min(centerX + radius, width - 1)
+        let maxY = min(centerY + radius, height - 1)
+        var red: Float = 0
+        var green: Float = 0
+        var blue: Float = 0
+        var alpha: Float = 0
+        var count: Float = 0
+
+        for y in minY...maxY {
+            for x in minX...maxX {
+                let components = FillColorDistance.unpremultipliedComponents(of: try pixelAt(x, y))
+                red += components.red
+                green += components.green
+                blue += components.blue
+                alpha += components.alpha
+                count += 1
+            }
         }
-        return sorted[middle]
-    }
-
-    @inline(__always)
-    private static func feature(
-        atX x: Int,
-        y: Int,
-        bytes: UnsafeBufferPointer<UInt8>,
-        bytesPerRow: Int
-    ) -> Feature {
-        let offset = (y * bytesPerRow) + (x * 4)
-        let alpha = Float(bytes[offset + 3]) / 255
-        let red: Float
-        let green: Float
-        let blue: Float
-        if alpha > 0.000_01 {
-            red = min(max((Float(bytes[offset + 2]) / 255) / alpha, 0), 1)
-            green = min(max((Float(bytes[offset + 1]) / 255) / alpha, 0), 1)
-            blue = min(max((Float(bytes[offset]) / 255) / alpha, 0), 1)
-        } else {
-            red = 0
-            green = 0
-            blue = 0
-        }
-        let lab: OKLabColor
-        if alpha >= 0.999 {
-            lab = OKLabColor(
-                linearRed: LinearPremultipliedColor.linearChannel(forSRGBByte: bytes[offset + 2]),
-                green: LinearPremultipliedColor.linearChannel(forSRGBByte: bytes[offset + 1]),
-                blue: LinearPremultipliedColor.linearChannel(forSRGBByte: bytes[offset])
-            )
-        } else {
-            lab = OKLabColor(srgb: RGBAColor(red: red, green: green, blue: blue, alpha: alpha))
-        }
-        return Feature(lightness: lab.lightness, a: lab.a, b: lab.b, alpha: alpha)
-    }
-
-    @inline(__always)
-    private static func perceptualDistance(_ lhs: Feature, _ rhs: Feature) -> Float {
-        sqrt(perceptualDistanceSquared(lhs, rhs))
-    }
-
-    @inline(__always)
-    private static func perceptualDistanceSquared(_ lhs: Feature, _ rhs: Feature) -> Float {
-        let deltaLightness = lhs.lightness - rhs.lightness
-        let deltaA = lhs.a - rhs.a
-        let deltaB = lhs.b - rhs.b
-        let deltaAlpha = lhs.alpha - rhs.alpha
-        return (deltaLightness * deltaLightness)
-            + (deltaA * deltaA)
-            + (deltaB * deltaB)
-            + ((deltaAlpha * deltaAlpha) * 0.2)
-    }
-
-    private static func perceptualDistanceThreshold(for tolerance: Float) -> Float {
-        let normalized = min(max(tolerance, 0), 1)
-        return 0.012 + (pow(normalized, 1.3) * 0.55)
+        guard count > 0 else { return try pixelAt(centerX, centerY) }
+        red /= count
+        green /= count
+        blue /= count
+        alpha /= count
+        return PremultipliedSRGBAPixel(
+            red: UInt8(clamping: Int((red * alpha * 255).rounded())),
+            green: UInt8(clamping: Int((green * alpha * 255).rounded())),
+            blue: UInt8(clamping: Int((blue * alpha * 255).rounded())),
+            alpha: UInt8(clamping: Int((alpha * 255).rounded()))
+        )
     }
 }

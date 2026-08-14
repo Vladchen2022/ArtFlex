@@ -283,21 +283,21 @@ struct CanvasPresentationTests {
     }
 
     @Test
-    func everySelectionCreationToolSupportsAnOutsideCanvasStart() {
-        let selectionTools: [ToolKind] = [
+    func geometrySelectionToolsSupportOutsideStartsButMagicWandRequiresACanvasPixel() {
+        let geometrySelectionTools: [ToolKind] = [
             .rectangleSelection,
             .ellipseSelection,
             .lassoSelection,
-            .smartSelection,
             .polygonSelection,
             .lassoFill,
             .textureFill
         ]
 
-        let everySelectionToolSupportsOutsideStart = selectionTools.allSatisfy {
+        let everyGeometryToolSupportsOutsideStart = geometrySelectionTools.allSatisfy {
             $0.supportsOutsideCanvasSelectionStart
         }
-        #expect(everySelectionToolSupportsOutsideStart)
+        #expect(everyGeometryToolSupportsOutsideStart)
+        #expect(!ToolKind.smartSelection.supportsOutsideCanvasSelectionStart)
         #expect(!ToolKind.brush.supportsOutsideCanvasSelectionStart)
         #expect(!ToolKind.freeTransform.supportsOutsideCanvasSelectionStart)
     }

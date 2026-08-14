@@ -293,7 +293,7 @@ final class WorkspaceViewModel: ObservableObject {
     private var snapshotComparePreparationTask: Task<Void, Never>?
     private var adjustmentLayerCheckpointResetTask: Task<Void, Never>?
     private var adjustmentLayerCheckpointLayerID: LayerID?
-    private var lassoRefreshCounter = 0  // 套索拖动时的刷新节流计数器
+    private var lastLassoOverlayRefreshUptime: TimeInterval = 0
     private var freeTransformUsesImplicitSelection = false
     private var implicitFreeTransformSelectionShape: SelectionShape?
     @Published private(set) var isApplyingTransformCommit = false
@@ -5282,8 +5282,41 @@ final class WorkspaceViewModel: ObservableObject {
         fillSettings = .stageOneDefault
     }
 
-    func setSmartSelectionTolerance(_ tolerance: Float) {
-        smartSelectionSettings = SmartSelectionSettings(tolerance: tolerance)
+    func setSmartSelectionTolerance(_ tolerance: Int) {
+        mutateSmartSelectionSettings { $0.tolerance = min(max(tolerance, 0), 255) }
+    }
+
+    func setSmartSelectionSampleSize(_ sampleSize: MagicWandSampleSize) {
+        mutateSmartSelectionSettings { $0.sampleSize = sampleSize }
+    }
+
+    func setSmartSelectionAntiAliased(_ isEnabled: Bool) {
+        mutateSmartSelectionSettings { $0.isAntiAliased = isEnabled }
+    }
+
+    func setSmartSelectionContiguous(_ isEnabled: Bool) {
+        mutateSmartSelectionSettings { $0.isContiguous = isEnabled }
+    }
+
+    func setSmartSelectionSampleSource(_ source: MagicWandSampleSource) {
+        mutateSmartSelectionSettings { $0.sampleSource = source }
+    }
+
+    func setSmartSelectionMode(_ mode: MagicWandSelectionMode) {
+        mutateSmartSelectionSettings { $0.selectionMode = mode }
+    }
+
+    private func mutateSmartSelectionSettings(_ mutation: (inout SmartSelectionSettings) -> Void) {
+        var settings = smartSelectionSettings
+        mutation(&settings)
+        smartSelectionSettings = SmartSelectionSettings(
+            tolerance: settings.tolerance,
+            sampleSize: settings.sampleSize,
+            isAntiAliased: settings.isAntiAliased,
+            isContiguous: settings.isContiguous,
+            sampleSource: settings.sampleSource,
+            selectionMode: settings.selectionMode
+        )
     }
 
     func resetSmartSelectionSettings() {
@@ -5306,8 +5339,8 @@ final class WorkspaceViewModel: ObservableObject {
         showStatus(.init(
             kind: .info,
             message: smartSelectionDisplayMode == .tint
-                ? "智能选区显示为半透明覆盖"
-                : "智能选区显示为蚂蚁线",
+                ? "魔棒选区显示为半透明覆盖"
+                : "魔棒选区显示为蚂蚁线",
             shortcutLabel: "Enter"
         ))
         return true
@@ -5325,10 +5358,10 @@ final class WorkspaceViewModel: ObservableObject {
             return false
         }
         let percent = digit == 0 ? 100 : digit * 10
-        setSmartSelectionTolerance(Float(percent) / 100)
+        setSmartSelectionTolerance(Int((Double(percent) * 2.55).rounded()))
         showStatus(.init(
             kind: .info,
-            message: "智能选区识别阈值已设为 \(percent)%",
+            message: "魔棒容差已设为 \(smartSelectionSettings.tolerance)（\(percent)%）",
             shortcutLabel: characters
         ))
         return true
@@ -6997,7 +7030,7 @@ final class WorkspaceViewModel: ObservableObject {
             activeLassoPreviewPoints = [start]
             activeLassoBounds = CanvasRect(origin: start, size: .init(x: 0, y: 0))
             lassoSamplingDebugPoints = [start]
-            lassoRefreshCounter = 0
+            lastLassoOverlayRefreshUptime = 0
             samePathCommittedDebugShape = nil
             samePathPreviewDebugShape = nil
         } else {
@@ -7005,7 +7038,7 @@ final class WorkspaceViewModel: ObservableObject {
             activeLassoPreviewPoints = []
             activeLassoBounds = nil
             lassoSamplingDebugPoints = []
-            lassoRefreshCounter = 0
+            lastLassoOverlayRefreshUptime = 0
             samePathCommittedDebugShape = nil
             samePathPreviewDebugShape = nil
         }
@@ -7756,6 +7789,8 @@ final class WorkspaceViewModel: ObservableObject {
             return
         case .polygonSelection:
             handlePolygonSelectionClick(at: point, modifiers: modifiers, clickCount: clickCount)
+        case .smartSelection:
+            requestMagicWandSelection(at: point, modifiers: modifiers)
         default:
             break
         }
@@ -7904,6 +7939,7 @@ final class WorkspaceViewModel: ObservableObject {
             case .replace: "新建"
             case .add: "增选"
             case .subtract: "减选"
+            case .intersect: "相交"
             }
             showStatus(.init(kind: .info, message: "已添加顶点，继续点击或双击闭合（当前：\(actionName)）"))
         }
@@ -7964,6 +8000,7 @@ final class WorkspaceViewModel: ObservableObject {
             case .replace: "已创建多边形选区"
             case .add: "已增选多边形区域"
             case .subtract: "已减选多边形区域"
+            case .intersect: "已保留多边形交集"
             }
             showStatus(.init(kind: .success, message: actionName))
         }
@@ -8046,7 +8083,11 @@ final class WorkspaceViewModel: ObservableObject {
         if RuntimeDiagnostics.selectionTraceLoggingEnabled, currentKind == .lasso {
             samePathPreviewDebugShape = nextPreviewShape
         }
-        refreshSelectionOverlayOnly()
+        if currentKind == .lasso {
+            refreshLiveLassoOverlayIfNeeded()
+        } else {
+            refreshSelectionOverlayOnly()
+        }
         relayIdeationOperation(.updateSelection(point: point, modifiers: .init(flags: modifiers)))
     }
 
@@ -8097,7 +8138,7 @@ final class WorkspaceViewModel: ObservableObject {
         if RuntimeDiagnostics.selectionTraceLoggingEnabled {
             samePathPreviewDebugShape = nextPreviewShape
         }
-        refreshSelectionOverlayOnly()
+        refreshLiveLassoOverlayIfNeeded()
         for point in points {
             relayIdeationOperation(.updateSelection(point: point, modifiers: .init(flags: modifiers)))
         }
@@ -8184,18 +8225,6 @@ final class WorkspaceViewModel: ObservableObject {
             }
             refresh()
             showStatus(.init(kind: .info, message: "选区太小"))
-            return
-        }
-        if workspace.toolSession.activeTool == .smartSelection,
-           let preferredShape = input.preferredDisplayShape {
-            commitSmartSelection(
-                preferredShape: preferredShape,
-                combineMode: combineMode,
-                previousCommittedShape: previousCommittedShape,
-                canvasSize: canvasSize,
-                end: end,
-                modifiers: modifiers
-            )
             return
         }
         if workspace.toolSession.activeTool == .lassoFill,
@@ -8458,10 +8487,11 @@ final class WorkspaceViewModel: ObservableObject {
             }.value
             guard self.selectionEpoch == capturedEpoch else { return }
             self.bootstrap.workspaceStore.updateSelection { selection in
-                if capturedCombineMode != .replace {
-                    selection.committedShape = result ?? capturedBaseShape
-                } else {
-                    selection.committedShape = result
+                selection.committedShape = switch capturedCombineMode {
+                case .replace, .subtract, .intersect:
+                    result
+                case .add:
+                    result ?? capturedBaseShape
                 }
                 selection.inProgressShape = nil
                 selection.anchorPoint = nil
@@ -8985,122 +9015,65 @@ final class WorkspaceViewModel: ObservableObject {
         isRefiningSelection = false
     }
 
-    private func commitSmartSelection(
-        preferredShape: SelectionShape,
-        combineMode: SelectionCombineMode,
-        previousCommittedShape: SelectionShape?,
-        canvasSize: CanvasSize,
-        end: CanvasPoint,
+    private func requestMagicWandSelection(
+        at point: CanvasPoint,
         modifiers: NSEvent.ModifierFlags
     ) {
-        let historyBaseShape = previousCommittedShape?.clamped(to: canvasSize)
-        let capturedBaseShape = combineMode == .replace
-            ? nil
-            : (pendingCombineBaseShape ?? previousCommittedShape)?.clamped(to: canvasSize)
-        let displayedBaseShape = combineMode == .replace ? historyBaseShape : capturedBaseShape
-        pendingCombineBaseShape = nil
-        let clampedBounds = preferredShape.bounds.clamped(to: canvasSize)
-        let originX = max(Int(floor(clampedBounds.minX)) - 2, 0)
-        let originY = max(Int(floor(clampedBounds.minY)) - 2, 0)
-        let maxX = min(Int(ceil(clampedBounds.maxX)) + 2, canvasSize.width)
-        let maxY = min(Int(ceil(clampedBounds.maxY)) + 2, canvasSize.height)
-        let width = maxX - originX
-        let height = maxY - originY
-        guard width > 0, height > 0, preferredShape.pathPoints.count >= 3 else {
-            showStatus(.init(kind: .info, message: "智能选区范围太小"))
+        let canvasSize = workspace.document.canvasSize
+        guard point.x >= 0, point.y >= 0,
+              point.x < Double(canvasSize.width), point.y < Double(canvasSize.height) else {
             return
         }
 
-        activeLassoRawPoints = []
-        activeLassoPreviewPoints = []
-        activeLassoBounds = nil
-        lassoSamplingDebugPoints = []
-        samePathPreviewDebugShape = nil
-        samePathCommittedDebugShape = nil
-        bootstrap.workspaceStore.updateSelection { selection in
-            selection.committedShape = displayedBaseShape
-            selection.inProgressShape = preferredShape
-            selection.anchorPoint = nil
-            selection.activeKind = nil
-            selection.activeCombineMode = combineMode
-        }
-        refreshLightweight()
+        cancelActiveRasterizationTask()
+        selectionEpoch += 1
+        let capturedEpoch = selectionEpoch
+        let historyBaseShape = workspace.selection.committedShape?.clamped(to: canvasSize)
+        let historyBaseMaskBytes = selectionMaskBytes(for: historyBaseShape, canvasSize: canvasSize)
+        let mode = resolvedMagicWandSelectionMode(modifiers: modifiers)
+        let settings = smartSelectionSettings
+        let capturedRevision = canvasContentRevision
 
-        do {
-            _ = flushBrushEditingBoundary(reason: "smartSelection")
+        _ = flushBrushEditingBoundary(reason: "magicWandSelection")
             bootstrap.layerSurfaceStore.prepareTextures(
                 for: workspace.document,
                 metal: bootstrap.metalContext
             )
-            let regionRequest = bootstrap.eyedropperSampler.makeVisibleRegionRequest(
-                document: workspace.document,
-                originX: originX,
-                originY: originY,
-                width: width,
-                height: height,
-                source: .displayedColor,
-                layerSurfaceStore: bootstrap.layerSurfaceStore,
-                contentTextureForLayer: { [weak self] layerID in
-                    self?.bootstrap.strokeEngine.displayTexture(for: layerID)
-                },
-                displayTextureForLayer: { [weak self] layerID in
-                    self?.brushDisplayTexture(for: layerID)
-                }
-            )
-            let samplerBox = WorkspaceUncheckedBox(bootstrap.eyedropperSampler)
-            let lassoPoints = preferredShape.pathPoints
-            let settings = smartSelectionSettings
-            let capturedCanvasRevision = canvasContentRevision
-            let capturedBaseMaskBytes = combineMode == .replace
-                ? []
-                : selectionMaskBytes(for: capturedBaseShape, canvasSize: canvasSize)
-            let candidateAlphaBytes = Self.smartSelectionCandidateBytes(
-                combineMode: combineMode,
-                baseMaskBytes: capturedBaseMaskBytes,
-                canvasSize: canvasSize,
-                originX: originX,
-                originY: originY,
-                width: width,
-                height: height
-            )
 
-            selectionEpoch += 1
-            let capturedEpoch = selectionEpoch
-            cancelActiveRasterizationTask()
+            let samplingTexture: MTLTexture
+            do {
+                switch settings.sampleSource {
+            case .currentLayer:
+                let layerID = workspace.document.activeLayerID
+                guard let layer = workspace.document.layer(layerID), layer.isPaintLayer else {
+                    showStatus(.init(kind: .info, message: "当前层没有可采样的像素内容"))
+                    return
+                }
+                    samplingTexture = try makeCompositeTexture(
+                        layers: [layer],
+                        document: workspace.document,
+                        waitUntilCompleted: false
+                    )
+            case .allVisibleLayers:
+                    samplingTexture = try makeVisibleCompositeTexture(waitUntilCompleted: false)
+                }
+            } catch {
+                showStatus(.init(kind: .error, message: "无法建立魔棒采样：\(error.localizedDescription)"))
+                return
+            }
+
+            let textureBox = WorkspaceUncheckedBox(samplingTexture)
+            let engineBox = WorkspaceUncheckedBox(bootstrap.magicWandSelectionEngine)
             isRefiningSelection = true
-            showStatus(.init(kind: .info, message: "正在识别相近色块…"))
+            showStatus(.init(kind: .info, message: "正在按点击颜色建立魔棒选区…"))
 
             activeRasterizationTask = Task { [weak self] in
                 let result = await Task.detached(priority: .userInitiated) {
-                    Result {
-                        let snapshot = try samplerBox.value.snapshotVisibleRegion(regionRequest)
-                        let raster = SmartSelectionRaster(
-                            originX: originX,
-                            originY: originY,
-                            width: snapshot.width,
-                            height: snapshot.height,
-                            bytesPerRow: snapshot.bytesPerRow,
-                            premultipliedBGRABytes: snapshot.pixelData
-                        )
-                        guard let segmented = SmartSelectionSegmenter.segment(
-                            raster: raster,
-                            lassoPoints: lassoPoints,
-                            settings: settings,
-                            candidateAlphaBytes: candidateAlphaBytes
-                        ) else {
-                            return Optional<SelectionShape>.none
-                        }
-                        let incomingShape = Self.fullCanvasSmartSelectionShape(
-                            segmented,
-                            canvasSize: canvasSize,
-                            lassoPoints: lassoPoints
-                        )
-                        return Self.combinedSmartSelectionShape(
-                            incomingShape: incomingShape,
-                            canvasSize: canvasSize,
-                            mode: combineMode,
-                            baseShape: capturedBaseShape,
-                            baseMaskBytes: capturedBaseMaskBytes
+                    Result<SmartSelectionSegmentationResult?, Error> {
+                        try engineBox.value.select(
+                            texture: textureBox.value,
+                            at: point,
+                            settings: settings
                         )
                     }
                 }.value
@@ -9109,22 +9082,28 @@ final class WorkspaceViewModel: ObservableObject {
                 self.activeRasterizationTask = nil
                 self.isRefiningSelection = false
                 guard !Task.isCancelled else { return }
-                guard self.canvasContentRevision == capturedCanvasRevision else {
-                    self.bootstrap.workspaceStore.updateSelection { selection in
-                        selection.committedShape = combineMode == .replace ? historyBaseShape : capturedBaseShape
-                        selection.inProgressShape = nil
-                        selection.anchorPoint = nil
-                        selection.activeKind = nil
-                        selection.activeCombineMode = .replace
-                    }
-                    self.refreshLightweight()
-                    self.showStatus(.init(kind: .info, message: "画布已变化，已取消过期识别结果"))
+                guard self.canvasContentRevision == capturedRevision else {
+                    self.showStatus(.init(kind: .info, message: "画布已变化，已取消过期魔棒结果"))
                     return
                 }
 
                 do {
-                    let resolvedShape = try result.get()
-                    let nextShape = resolvedShape ?? (combineMode == .replace ? nil : capturedBaseShape)
+                    guard let segmented = try result.get() else {
+                        self.showStatus(.init(kind: .info, message: "点击位置没有可选择的相近颜色"))
+                        return
+                    }
+                    let incoming = Self.fullCanvasSmartSelectionShape(
+                        segmented,
+                        canvasSize: canvasSize,
+                        lassoPoints: [point]
+                    )
+                    let nextShape = Self.combinedMagicWandSelectionShape(
+                        incomingShape: incoming,
+                        canvasSize: canvasSize,
+                        mode: mode,
+                        baseShape: historyBaseShape,
+                        baseMaskBytes: historyBaseMaskBytes
+                    )
                     if nextShape != historyBaseShape {
                         self.checkpointSelectionChangeIfPossible(previousCommittedShape: historyBaseShape)
                     }
@@ -9137,42 +9116,53 @@ final class WorkspaceViewModel: ObservableObject {
                     }
                     self.smartSelectionDisplayMode = .tint
                     self.refreshLightweight()
-                    if nextShape == nil {
-                        self.showStatus(.init(kind: .info, message: "圈选范围内没有识别到相近色块"))
-                    } else {
-                        self.recordDrawingActivityIfNeeded()
-                        let actionName: String = switch combineMode {
-                        case .replace: "已创建智能选区"
-                        case .add: "已增选识别色块"
-                        case .subtract: "已减选识别色块"
-                        }
-                        self.showStatus(.init(kind: .success, message: actionName))
-                    }
+                    self.recordDrawingActivityIfNeeded()
+                    self.showStatus(.init(kind: .success, message: self.magicWandSuccessMessage(for: mode)))
                 } catch {
-                    self.bootstrap.workspaceStore.updateSelection { selection in
-                        selection.committedShape = combineMode == .replace ? historyBaseShape : capturedBaseShape
-                        selection.inProgressShape = nil
-                        selection.anchorPoint = nil
-                        selection.activeKind = nil
-                        selection.activeCombineMode = .replace
-                    }
-                    self.refreshLightweight()
                     self.showStatus(.init(kind: .error, message: error.localizedDescription))
                 }
-            }
-            relayIdeationOperation(.commitSelection(end: end, modifiers: .init(flags: modifiers)))
-        } catch {
-            isRefiningSelection = false
-            bootstrap.workspaceStore.updateSelection { selection in
-                selection.committedShape = combineMode == .replace ? historyBaseShape : capturedBaseShape
-                selection.inProgressShape = nil
-                selection.anchorPoint = nil
-                selection.activeKind = nil
-                selection.activeCombineMode = .replace
-            }
-            refreshLightweight()
-            showStatus(.init(kind: .error, message: error.localizedDescription))
         }
+    }
+
+    private func resolvedMagicWandSelectionMode(
+        modifiers: NSEvent.ModifierFlags
+    ) -> MagicWandSelectionMode {
+        let normalized = modifiers.intersection(.deviceIndependentFlagsMask)
+        if normalized.contains(.shift), normalized.contains(.option) { return .intersect }
+        if normalized.contains(.option) { return .subtract }
+        if normalized.contains(.shift) { return .add }
+        return smartSelectionSettings.selectionMode
+    }
+
+    private func magicWandSuccessMessage(for mode: MagicWandSelectionMode) -> String {
+        switch mode {
+        case .replace: return "已创建魔棒选区"
+        case .add: return "已增加魔棒选区"
+        case .subtract: return "已减去魔棒选区"
+        case .intersect: return "已保留魔棒交集"
+        }
+    }
+
+    nonisolated private static func combinedMagicWandSelectionShape(
+        incomingShape: SelectionShape,
+        canvasSize: CanvasSize,
+        mode: MagicWandSelectionMode,
+        baseShape: SelectionShape?,
+        baseMaskBytes: [UInt8]
+    ) -> SelectionShape? {
+        guard let incoming = incomingShape.maskData else { return baseShape }
+        if mode == .replace { return incomingShape.isEmpty ? nil : incomingShape }
+        let merged = SelectionMaskCombiner.combine(
+            base: baseMaskBytes.isEmpty ? nil : baseMaskBytes,
+            incoming: [UInt8](incoming.alphaBytes),
+            mode: mode
+        )
+        let result = SelectionShape.mask(
+            canvasWidth: canvasSize.width,
+            canvasHeight: canvasSize.height,
+            alphaBytes: merged
+        )
+        return result.isEmpty ? nil : result
     }
 
     nonisolated private static func fullCanvasSmartSelectionShape(
@@ -9213,94 +9203,13 @@ final class WorkspaceViewModel: ObservableObject {
         )
     }
 
-    nonisolated private static func combinedSmartSelectionShape(
-        incomingShape: SelectionShape,
-        canvasSize: CanvasSize,
-        mode: SelectionCombineMode,
-        baseShape: SelectionShape?,
-        baseMaskBytes: [UInt8]
-    ) -> SelectionShape? {
-        guard !incomingShape.isEmpty, let incomingMaskData = incomingShape.maskData else {
-            return mode == .replace ? nil : baseShape
-        }
-        guard mode != .replace else { return incomingShape }
-
-        guard baseMaskBytes.count == canvasSize.width * canvasSize.height else {
-            return baseShape
-        }
-        var mergedBytes = baseMaskBytes
-        incomingMaskData.withAlphaBytes { incomingBytes in
-            let count = min(mergedBytes.count, incomingBytes.count)
-            for index in 0..<count {
-                let incoming = incomingBytes[index]
-                guard incoming > 0 else { continue }
-                switch mode {
-                case .replace:
-                    mergedBytes[index] = incoming
-                case .add:
-                    mergedBytes[index] = max(mergedBytes[index], incoming)
-                case .subtract:
-                    let kept = (Int(mergedBytes[index]) * (255 - Int(incoming))) / 255
-                    mergedBytes[index] = UInt8(clamping: kept)
-                }
-            }
-        }
-        let combined = SelectionShape.mask(
-            canvasWidth: canvasSize.width,
-            canvasHeight: canvasSize.height,
-            alphaBytes: mergedBytes
-        )
-        return combined.isEmpty ? nil : combined
-    }
-
-    nonisolated private static func smartSelectionCandidateBytes(
-        combineMode: SelectionCombineMode,
-        baseMaskBytes: [UInt8],
-        canvasSize: CanvasSize,
-        originX: Int,
-        originY: Int,
-        width: Int,
-        height: Int
-    ) -> [UInt8]? {
-        guard combineMode != .replace,
-              baseMaskBytes.count == canvasSize.width * canvasSize.height else {
-            return nil
-        }
-        var candidates = [UInt8](repeating: 0, count: width * height)
-        for localY in 0..<height {
-            let canvasY = originY + localY
-            guard canvasY >= 0, canvasY < canvasSize.height else { continue }
-            for localX in 0..<width {
-                let canvasX = originX + localX
-                guard canvasX >= 0, canvasX < canvasSize.width else { continue }
-                let baseAlpha = baseMaskBytes[(canvasY * canvasSize.width) + canvasX]
-                candidates[(localY * width) + localX] = switch combineMode {
-                case .replace:
-                    255
-                case .add:
-                    255 - baseAlpha
-                case .subtract:
-                    baseAlpha
-                }
-            }
-        }
-        return candidates
-    }
-
     func handleSelectionMouseDown(at point: CanvasPoint, modifiers: NSEvent.ModifierFlags) -> SelectionMouseDownAction {
         let normalized = modifiers.intersection(.deviceIndependentFlagsMask)
         let hasModifier = normalized.contains(.shift) || normalized.contains(.option)
 
         if workspace.toolSession.activeTool == .smartSelection {
-            cancelActiveRasterizationTask()
-            selectionEpoch += 1
-            selectionMoveBaseShape = nil
-            selectionMoveAccumulatedDelta = CanvasPoint(x: 0, y: 0)
-            selectionMovePreviewOffset = CanvasPoint(x: 0, y: 0)
-            pendingCombineBaseShape = bootstrap.workspaceStore.state.selection.committedShape
-            pendingCombineMode = selectionCombineMode(for: .lasso, modifiers: normalized)
-            beginSelection(kind: .lasso, at: point, modifiers: modifiers)
-            return .beginDrawing
+            requestMagicWandSelection(at: point, modifiers: modifiers)
+            return .idle
         }
 
         if workspace.toolSession.activeTool == .polygonSelection {
@@ -9435,7 +9344,7 @@ final class WorkspaceViewModel: ObservableObject {
     private func selectionKindForActiveTool() -> SelectionShapeKind {
         switch workspace.toolSession.activeTool {
         case .ellipseSelection: return .ellipse
-        case .lassoSelection, .smartSelection, .lassoFill, .textureFill: return .lasso
+        case .lassoSelection, .lassoFill, .textureFill: return .lasso
         default: return .rectangle
         }
     }
@@ -15994,6 +15903,9 @@ final class WorkspaceViewModel: ObservableObject {
             return .replace
         }
         let normalized = modifiers.intersection(.deviceIndependentFlagsMask)
+        if normalized.contains(.shift), normalized.contains(.option) {
+            return .intersect
+        }
         if normalized.contains(.option) {
             return .subtract
         }
@@ -16129,46 +16041,49 @@ final class WorkspaceViewModel: ObservableObject {
         baseShape: SelectionShape?
     ) -> SelectionShape? {
         let logger = Logger(subsystem: "ArtFlex", category: "SelectionTrace")
-        let incomingMaskShape = selectionMaskShape(
+        let incomingPatch = selectionMaskPatch(
             from: input.polygonShapes,
-            canvasSize: canvasSize,
-            preferredDisplayShape: input.preferredDisplayShape
+            canvasSize: canvasSize
         )
         if RuntimeDiagnostics.selectionTraceLoggingEnabled {
-            let committedMessage = "[committedSelectionShape] incomingBoundsOrigin=(\(incomingMaskShape.bounds.origin.x),\(incomingMaskShape.bounds.origin.y)) incomingBoundsSize=(\(incomingMaskShape.bounds.size.x),\(incomingMaskShape.bounds.size.y)) mode=\(mode.rawValue)"
+            let committedMessage = "[committedSelectionShape] incomingPatchOrigin=(\(incomingPatch.originX),\(incomingPatch.originY)) incomingPatchSize=(\(incomingPatch.width),\(incomingPatch.height)) mode=\(mode.rawValue)"
             logger.debug("\(committedMessage, privacy: .public)")
             emitSelectionTraceViewModel(committedMessage)
         }
-        guard let incomingMaskData = incomingMaskShape.maskData else {
-            return mode == .replace ? nil : baseShape
+        guard incomingPatch.width > 0, incomingPatch.height > 0 else {
+            return switch mode {
+            case .add, .subtract: baseShape
+            case .replace, .intersect: nil
+            }
         }
 
-        let resultMaskData: SelectionMaskData
-        let resultBounds: CanvasRect
-        switch mode {
-        case .replace:
-            resultMaskData = incomingMaskData
-            resultBounds = incomingMaskShape.bounds
-        case .add, .subtract:
-            var mergedBytes = selectionMaskBytes(for: baseShape, canvasSize: canvasSize)
-            applyIncomingMask(
-                to: &mergedBytes,
-                incomingMaskData: incomingMaskData,
-                incomingBounds: incomingMaskShape.bounds,
-                canvasSize: canvasSize,
-                mode: mode
-            )
-            let maskShape = SelectionShape.mask(
-                canvasWidth: canvasSize.width,
-                canvasHeight: canvasSize.height,
-                alphaBytes: mergedBytes
-            )
-            guard let maskData = maskShape.maskData else {
-                return nil
-            }
-            resultMaskData = maskData
-            resultBounds = maskShape.bounds
+        let baseMaskData: Data? = if mode == .replace {
+            nil
+        } else if let maskData = baseShape?.maskData,
+                  maskData.canvasWidth == canvasSize.width,
+                  maskData.canvasHeight == canvasSize.height {
+            maskData.alphaBytes
+        } else if baseShape != nil {
+            Data(selectionMaskBytes(for: baseShape, canvasSize: canvasSize))
+        } else {
+            nil
         }
+        let merged = SelectionMaskCombiner.combineCanvas(
+            base: baseMaskData,
+            baseBounds: baseShape?.bounds,
+            incoming: incomingPatch,
+            canvasWidth: canvasSize.width,
+            canvasHeight: canvasSize.height,
+            mode: mode
+        )
+        let resultShape = SelectionShape.mask(
+            canvasWidth: canvasSize.width,
+            canvasHeight: canvasSize.height,
+            alphaBytes: merged.alphaBytes,
+            knownBounds: merged.bounds
+        )
+        guard let resultMaskData = resultShape.maskData else { return nil }
+        let resultBounds = resultShape.bounds
 
         guard !resultBounds.isEmpty else {
             return nil
@@ -16180,32 +16095,11 @@ final class WorkspaceViewModel: ObservableObject {
                 SelectionShapeComponent(operation: .add, shape: preferredDisplayShape)
             ]
         } else {
-            let baseDisplayComponents: [SelectionShapeComponent]
-            if let baseShape {
-                if baseShape.kind == .mask, !baseShape.components.isEmpty {
-                    baseDisplayComponents = baseShape.components
-                } else {
-                    baseDisplayComponents = [
-                        SelectionShapeComponent(operation: .add, shape: baseShape)
-                    ]
-                }
-            } else {
-                baseDisplayComponents = []
-            }
-
-            let incomingDisplayComponents: [SelectionShapeComponent]
-            if let preferredDisplayShape = input.preferredDisplayShape {
-                incomingDisplayComponents = [
-                    SelectionShapeComponent(
-                        operation: mode == .subtract ? .subtract : .add,
-                        shape: preferredDisplayShape
-                    )
-                ]
-            } else {
-                incomingDisplayComponents = []
-            }
-
-            displayComponents = baseDisplayComponents + incomingDisplayComponents
+            // Cross-tool combinations may start from a raster-only Magic Wand
+            // mask. A vector component list cannot faithfully describe that
+            // result (and used to hide the existing mask after lasso commit), so
+            // combined results deliberately display their authoritative mask.
+            displayComponents = []
         }
 
         return SelectionShape(
@@ -16214,6 +16108,53 @@ final class WorkspaceViewModel: ObservableObject {
             pathPoints: [],
             maskData: resultMaskData,
             components: displayComponents
+        )
+    }
+
+    nonisolated private func selectionMaskPatch(
+        from polygonShapes: [SelectionPolygonShape],
+        canvasSize: CanvasSize
+    ) -> SelectionMaskCombiner.Patch {
+        let points = polygonShapes.lazy.flatMap { $0 }.flatMap { $0 }
+        guard let first = points.first else {
+            return .init(originX: 0, originY: 0, width: 0, height: 0, alphaBytes: Data())
+        }
+
+        var minX = first.x
+        var minY = first.y
+        var maxX = first.x
+        var maxY = first.y
+        for point in points.dropFirst() {
+            minX = min(minX, point.x)
+            minY = min(minY, point.y)
+            maxX = max(maxX, point.x)
+            maxY = max(maxY, point.y)
+        }
+
+        // Preserve Core Graphics antialiasing at the boundary without turning
+        // a local gesture into a full-canvas rasterization.
+        let originX = min(max(Int(minX.rounded(.down)) - 1, 0), canvasSize.width)
+        let originY = min(max(Int(minY.rounded(.down)) - 1, 0), canvasSize.height)
+        let endX = min(max(Int(maxX.rounded(.up)) + 1, 0), canvasSize.width)
+        let endY = min(max(Int(maxY.rounded(.up)) + 1, 0), canvasSize.height)
+        let width = max(endX - originX, 0)
+        let height = max(endY - originY, 0)
+        guard width > 0, height > 0 else {
+            return .init(originX: 0, originY: 0, width: 0, height: 0, alphaBytes: Data())
+        }
+
+        return SelectionMaskCombiner.Patch(
+            originX: originX,
+            originY: originY,
+            width: width,
+            height: height,
+            alphaBytes: rasterizedSelectionMaskRegionBytes(
+                polygonShapes: polygonShapes,
+                originX: originX,
+                originY: originY,
+                width: width,
+                height: height
+            )
         )
     }
 
@@ -16373,7 +16314,9 @@ final class WorkspaceViewModel: ObservableObject {
 
     private func appendActiveLassoPreviewPointIfNeeded(_ point: CanvasPoint) {
         let displayScale = currentCanvasViewportTransform?.actualDisplayScale ?? 1
-        let minimumCanvasDistance = max(2 / max(displayScale, 0.000_001), 0.75)
+        // The authoritative path retains every sample. Four display pixels are
+        // sufficient for the live outline and keep redraw cost bounded.
+        let minimumCanvasDistance = max(4 / max(displayScale, 0.000_001), 1)
         guard let lastPoint = activeLassoPreviewPoints.last else {
             activeLassoPreviewPoints = [point]
             return
@@ -16381,6 +16324,13 @@ final class WorkspaceViewModel: ObservableObject {
         if distanceBetween(lastPoint, point) >= minimumCanvasDistance {
             activeLassoPreviewPoints.append(point)
         }
+    }
+
+    private func refreshLiveLassoOverlayIfNeeded() {
+        let now = ProcessInfo.processInfo.systemUptime
+        guard now - lastLassoOverlayRefreshUptime >= (1.0 / 60.0) else { return }
+        lastLassoOverlayRefreshUptime = now
+        refreshSelectionOverlayOnly()
     }
 
     private func activeLassoPreviewPath(endingAt point: CanvasPoint) -> [CanvasPoint] {
@@ -16883,6 +16833,8 @@ final class WorkspaceViewModel: ObservableObject {
                     case .subtract:
                         let kept = (Int(result[index]) * (255 - Int(incoming))) / 255
                         result[index] = UInt8(clamping: kept)
+                    case .intersect:
+                        result[index] = UInt8(clamping: (Int(result[index]) * Int(incoming)) / 255)
                     }
                 }
             }
@@ -18242,9 +18194,11 @@ final class WorkspaceViewModel: ObservableObject {
     // CanvasContainerView 里的 SelectionOverlay 只订阅它
     // 选区拖动时只有 overlay 重绘，MetalCanvasHost 完全不受影响
     final class SelectionOverlayProxy: ObservableObject {
+        let maskCacheNamespace = UUID()
         @Published var displayShape: SelectionShape?
         @Published var committedShape: SelectionShape?
         @Published var inProgressShape: SelectionShape?
+        @Published var committedShapeRevision: UInt64 = 0
         @Published var isHiddenForTransientAdjustment: Bool = false
         @Published var activeCombineMode: SelectionCombineMode = .replace
         @Published var isApplyingTransformCommit: Bool = false
@@ -18283,21 +18237,48 @@ final class WorkspaceViewModel: ObservableObject {
         let sel = state.selection
         if selectionOverlayProxy.displayShape != sel.displayShape {
             selectionOverlayProxy.redrawRevision &+= 1
+            selectionOverlayProxy.displayShape = sel.displayShape
         }
-        selectionOverlayProxy.displayShape = sel.displayShape
-        selectionOverlayProxy.committedShape = sel.committedShape
-        selectionOverlayProxy.inProgressShape = sel.inProgressShape
-        selectionOverlayProxy.isHiddenForTransientAdjustment = hidesSelectionOverlayForAdjustmentPreview
-        selectionOverlayProxy.activeCombineMode = sel.activeCombineMode
-        selectionOverlayProxy.isApplyingTransformCommit = isApplyingTransformCommit
-        selectionOverlayProxy.isTransformingSelection = isTransformingSelection
-        selectionOverlayProxy.activeTool = state.toolSession.activeTool
-        selectionOverlayProxy.smartSelectionDisplayMode = smartSelectionDisplayMode
-        selectionOverlayProxy.transformPreviewOffset = transformPreviewOffset
-        selectionOverlayProxy.selectionMovePreviewOffset = selectionMovePreviewOffset
-        selectionOverlayProxy.hidesImplicitFreeTransformSelectionOverlay = hidesImplicitFreeTransformSelectionOverlay
-        selectionOverlayProxy.isFreeTransformDragging = isFreeTransformDragging
-        selectionOverlayProxy.activeFreeTransformInteractionMode = activeFreeTransformInteractionMode
+        if selectionOverlayProxy.committedShape != sel.committedShape {
+            selectionOverlayProxy.committedShapeRevision &+= 1
+            selectionOverlayProxy.committedShape = sel.committedShape
+        }
+        if selectionOverlayProxy.inProgressShape != sel.inProgressShape {
+            selectionOverlayProxy.inProgressShape = sel.inProgressShape
+        }
+        if selectionOverlayProxy.isHiddenForTransientAdjustment != hidesSelectionOverlayForAdjustmentPreview {
+            selectionOverlayProxy.isHiddenForTransientAdjustment = hidesSelectionOverlayForAdjustmentPreview
+        }
+        if selectionOverlayProxy.activeCombineMode != sel.activeCombineMode {
+            selectionOverlayProxy.activeCombineMode = sel.activeCombineMode
+        }
+        if selectionOverlayProxy.isApplyingTransformCommit != isApplyingTransformCommit {
+            selectionOverlayProxy.isApplyingTransformCommit = isApplyingTransformCommit
+        }
+        if selectionOverlayProxy.isTransformingSelection != isTransformingSelection {
+            selectionOverlayProxy.isTransformingSelection = isTransformingSelection
+        }
+        if selectionOverlayProxy.activeTool != state.toolSession.activeTool {
+            selectionOverlayProxy.activeTool = state.toolSession.activeTool
+        }
+        if selectionOverlayProxy.smartSelectionDisplayMode != smartSelectionDisplayMode {
+            selectionOverlayProxy.smartSelectionDisplayMode = smartSelectionDisplayMode
+        }
+        if selectionOverlayProxy.transformPreviewOffset != transformPreviewOffset {
+            selectionOverlayProxy.transformPreviewOffset = transformPreviewOffset
+        }
+        if selectionOverlayProxy.selectionMovePreviewOffset != selectionMovePreviewOffset {
+            selectionOverlayProxy.selectionMovePreviewOffset = selectionMovePreviewOffset
+        }
+        if selectionOverlayProxy.hidesImplicitFreeTransformSelectionOverlay != hidesImplicitFreeTransformSelectionOverlay {
+            selectionOverlayProxy.hidesImplicitFreeTransformSelectionOverlay = hidesImplicitFreeTransformSelectionOverlay
+        }
+        if selectionOverlayProxy.isFreeTransformDragging != isFreeTransformDragging {
+            selectionOverlayProxy.isFreeTransformDragging = isFreeTransformDragging
+        }
+        if selectionOverlayProxy.activeFreeTransformInteractionMode != activeFreeTransformInteractionMode {
+            selectionOverlayProxy.activeFreeTransformInteractionMode = activeFreeTransformInteractionMode
+        }
     }
 
     private func syncNavigatorPreviewProxy() {

@@ -140,7 +140,7 @@ struct CanvasContainerView: View {
                                 switch viewModel.workspace.toolSession.activeTool {
                                 case .ellipseSelection:
                                     .ellipse
-                                case .lassoSelection, .smartSelection, .lassoFill:
+                                case .lassoSelection, .lassoFill:
                                     .lasso
                                 default:
                                     .rectangle
@@ -1232,9 +1232,11 @@ private struct SelectionOverlayHost: View {
                 showsSelectionTint: usesSmartSelectionTint,
                 previewOffset: .init(x: 0, y: 0),
                 prefersVectorDisplay: proxy.activeTool != .smartSelection,
-                smoothsLassoPath: false
+                smoothsLassoPath: false,
+                maskCacheNamespace: proxy.maskCacheNamespace,
+                maskCacheRevision: proxy.committedShapeRevision
             )
-            .id(proxy.redrawRevision)
+            .id(proxy.committedShapeRevision)
             SelectionOverlay(
                 selectionShape: inProgress,
                 presentation: presentation,
@@ -1243,7 +1245,9 @@ private struct SelectionOverlayHost: View {
                 showsSelectionTint: false,
                 previewOffset: .init(x: 0, y: 0),
                 prefersVectorDisplay: true,
-                smoothsLassoPath: true
+                smoothsLassoPath: false,
+                maskCacheNamespace: nil,
+                maskCacheRevision: nil
             )
             .id(proxy.redrawRevision)
         } else if !isApplying, !(isFreeTransform && isTransforming),
@@ -1260,7 +1264,11 @@ private struct SelectionOverlayHost: View {
                     : proxy.selectionMovePreviewOffset,
                 prefersVectorDisplay: proxy.activeTool != .smartSelection
                     && (shape.kind != .mask || !shape.components.isEmpty),
-                smoothsLassoPath: proxy.inProgressShape?.kind == .lasso
+                smoothsLassoPath: false,
+                maskCacheNamespace: proxy.maskCacheNamespace,
+                maskCacheRevision: shape.kind == .mask
+                    ? proxy.committedShapeRevision
+                    : nil
             )
             .id(proxy.redrawRevision)
         }
@@ -1634,7 +1642,7 @@ private final class OutsideCanvasSelectionEventView: NSView {
     }
 
     private func selectionCanvasPoints(from event: NSEvent) -> [CanvasPoint] {
-        guard activeTool == .lassoSelection || activeTool == .smartSelection || activeTool == .lassoFill || activeTool == .textureFill else {
+        guard activeTool == .lassoSelection || activeTool == .lassoFill || activeTool == .textureFill else {
             return [canvasPoint(for: event)]
         }
 
@@ -2661,6 +2669,8 @@ private struct SelectionOverlay: View {
     let previewOffset: CanvasPoint
     let prefersVectorDisplay: Bool
     let smoothsLassoPath: Bool
+    let maskCacheNamespace: UUID?
+    let maskCacheRevision: UInt64?
 
     var body: some View {
         let displayOffsetX = previewOffset.x * (presentation.documentDisplaySize.x / Double(canvasSize.width))
@@ -2825,6 +2835,8 @@ private struct SelectionOverlay: View {
                                     presentation: presentation,
                                     canvasSize: canvasSize,
                                     edgeOnly: false,
+                                    cacheNamespace: maskCacheNamespace,
+                                    cacheRevision: maskCacheRevision,
                                     tint: .white
                                 )
                                 .blendMode(.destinationOut)
@@ -2843,6 +2855,8 @@ private struct SelectionOverlay: View {
                     presentation: presentation,
                     canvasSize: canvasSize,
                     edgeOnly: false,
+                    cacheNamespace: maskCacheNamespace,
+                    cacheRevision: maskCacheRevision,
                     tint: Color(red: 0.12, green: 0.55, blue: 1)
                 )
                 .opacity(0.3)
@@ -2854,6 +2868,8 @@ private struct SelectionOverlay: View {
                     canvasSize: canvasSize,
                     edgeOnly: true,
                     dashesEdge: false,
+                    cacheNamespace: maskCacheNamespace,
+                    cacheRevision: maskCacheRevision,
                     tint: .black.opacity(0.88)
                 )
                 .offset(x: documentFrame.origin.x, y: documentFrame.origin.y)
@@ -2864,6 +2880,8 @@ private struct SelectionOverlay: View {
                     canvasSize: canvasSize,
                     edgeOnly: true,
                     dashesEdge: true,
+                    cacheNamespace: maskCacheNamespace,
+                    cacheRevision: maskCacheRevision,
                     tint: .white
                 )
                 .offset(x: documentFrame.origin.x, y: documentFrame.origin.y)
@@ -3122,16 +3140,13 @@ private struct SelectionMaskImageView: View {
     let canvasSize: CanvasSize
     let edgeOnly: Bool
     var dashesEdge: Bool = false
+    let cacheNamespace: UUID?
+    let cacheRevision: UInt64?
     let tint: Color
 
     var body: some View {
         Group {
-            if let slice = makeSelectionMaskImageSlice(
-                shape: selectionShape,
-                canvasSize: canvasSize,
-                edgeOnly: edgeOnly,
-                dashesEdge: dashesEdge
-            ) {
+            if let slice = resolvedSlice {
                 Image(decorative: slice.cgImage, scale: 1)
                     .resizable()
                     .interpolation(.none)
@@ -3147,6 +3162,25 @@ private struct SelectionMaskImageView: View {
             }
         }
     }
+
+    private var resolvedSlice: SelectionMaskImageSlice? {
+        if let cacheNamespace, let cacheRevision {
+            return SelectionMaskImageCache.shared.slice(
+                shape: selectionShape,
+                canvasSize: canvasSize,
+                edgeOnly: edgeOnly,
+                dashesEdge: dashesEdge,
+                namespace: cacheNamespace,
+                revision: cacheRevision
+            )
+        }
+        return makeSelectionMaskImageSlice(
+            shape: selectionShape,
+            canvasSize: canvasSize,
+            edgeOnly: edgeOnly,
+            dashesEdge: dashesEdge
+        )
+    }
 }
 
 private struct SelectionMaskImageSlice {
@@ -3155,6 +3189,53 @@ private struct SelectionMaskImageSlice {
     let originY: Double
     let displayWidth: Double
     let displayHeight: Double
+}
+
+private final class SelectionMaskImageSliceBox: NSObject {
+    let slice: SelectionMaskImageSlice
+
+    init(_ slice: SelectionMaskImageSlice) {
+        self.slice = slice
+    }
+}
+
+@MainActor
+private final class SelectionMaskImageCache {
+    static let shared = SelectionMaskImageCache()
+
+    private let storage: NSCache<NSString, SelectionMaskImageSliceBox> = {
+        let cache = NSCache<NSString, SelectionMaskImageSliceBox>()
+        cache.countLimit = 18
+        cache.totalCostLimit = 256 * 1_024 * 1_024
+        return cache
+    }()
+
+    func slice(
+        shape: SelectionShape,
+        canvasSize: CanvasSize,
+        edgeOnly: Bool,
+        dashesEdge: Bool,
+        namespace: UUID,
+        revision: UInt64
+    ) -> SelectionMaskImageSlice? {
+        let key = NSString(
+            string: "\(namespace.uuidString)-\(revision)-\(canvasSize.width)x\(canvasSize.height)-\(edgeOnly)-\(dashesEdge)"
+        )
+        if let cached = storage.object(forKey: key) {
+            return cached.slice
+        }
+        guard let slice = makeSelectionMaskImageSlice(
+            shape: shape,
+            canvasSize: canvasSize,
+            edgeOnly: edgeOnly,
+            dashesEdge: dashesEdge
+        ) else {
+            return nil
+        }
+        let cost = slice.cgImage.bytesPerRow * slice.cgImage.height
+        storage.setObject(SelectionMaskImageSliceBox(slice), forKey: key, cost: cost)
+        return slice
+    }
 }
 
 private func makeSelectionMaskImageSlice(

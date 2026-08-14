@@ -2332,7 +2332,7 @@ struct RightInspectorView: View {
         let settings = viewModel.smartSelectionSettings
         return VStack(alignment: .leading, spacing: 10) {
             HStack {
-                Text("智能选区")
+                Text("魔棒选区")
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(Color.white.opacity(0.92))
                 Spacer()
@@ -2341,21 +2341,99 @@ struct RightInspectorView: View {
                     .controlSize(.mini)
             }
 
+            HStack(spacing: 5) {
+                magicWandModeButton("square.dashed", help: "新建选区", mode: .replace, settings: settings)
+                magicWandModeButton("square.stack.3d.up", help: "增加到选区", mode: .add, settings: settings)
+                magicWandModeButton("square.stack.3d.down.right", help: "从选区减去", mode: .subtract, settings: settings)
+                magicWandModeButton("square.intersection.3", help: "与选区相交", mode: .intersect, settings: settings)
+            }
+
             BrushParameterSliderRow(
-                title: "识别阈值",
-                value: Double(settings.tolerance * 100),
-                range: 0...100,
-                formatter: { "\(Int($0.rounded()))%" },
-                onPreview: { viewModel.setSmartSelectionTolerance(Float($0 / 100)) },
-                onCommit: { viewModel.setSmartSelectionTolerance(Float($0 / 100)) }
+                title: "容差",
+                value: Double(settings.tolerance),
+                range: 0...255,
+                formatter: { "\(Int($0.rounded()))" },
+                onPreview: { viewModel.setSmartSelectionTolerance(Int($0.rounded())) },
+                onCommit: { viewModel.setSmartSelectionTolerance(Int($0.rounded())) }
             )
 
-            Text("粗略圈住目标；每次增减选独立识别新色块。1–9 设为 10%–90%，0 设为 100%；Shift 增选，Option 减选，Enter 切换覆盖/蚂蚁线。")
+            HStack(spacing: 8) {
+                Text("采样")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(Color.white.opacity(0.68))
+                Picker(
+                    "采样尺寸",
+                    selection: Binding(
+                        get: { settings.sampleSize },
+                        set: viewModel.setSmartSelectionSampleSize
+                    )
+                ) {
+                    Text("点样本").tag(MagicWandSampleSize.point)
+                    Text("3 × 3 平均").tag(MagicWandSampleSize.threeByThree)
+                    Text("5 × 5 平均").tag(MagicWandSampleSize.fiveByFive)
+                    Text("11 × 11 平均").tag(MagicWandSampleSize.elevenByEleven)
+                    Text("31 × 31 平均").tag(MagicWandSampleSize.thirtyOneByThirtyOne)
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+                .controlSize(.small)
+            }
+
+            HStack(spacing: 12) {
+                Toggle(
+                    "抗锯齿",
+                    isOn: Binding(
+                        get: { settings.isAntiAliased },
+                        set: viewModel.setSmartSelectionAntiAliased
+                    )
+                )
+                Toggle(
+                    "连续",
+                    isOn: Binding(
+                        get: { settings.isContiguous },
+                        set: viewModel.setSmartSelectionContiguous
+                    )
+                )
+            }
+            .toggleStyle(.checkbox)
+            .font(.system(size: 10, weight: .medium))
+            .foregroundStyle(Color.white.opacity(0.75))
+
+            Toggle(
+                "所有可见层取样",
+                isOn: Binding(
+                    get: { settings.sampleSource == .allVisibleLayers },
+                    set: { viewModel.setSmartSelectionSampleSource($0 ? .allVisibleLayers : .currentLayer) }
+                )
+            )
+            .toggleStyle(.checkbox)
+            .font(.system(size: 10, weight: .medium))
+            .foregroundStyle(Color.white.opacity(0.75))
+
+            Text("单击颜色建立选区。Shift 增选，Option 减选，Shift+Option 取交集；1–9 设置 10%–90% 容差，0 设置 100%；Enter 切换覆盖/蚂蚁线。")
                 .font(.system(size: 9.5, weight: .medium))
                 .foregroundStyle(Color.white.opacity(0.52))
                 .fixedSize(horizontal: false, vertical: true)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func magicWandModeButton(
+        _ systemName: String,
+        help: String,
+        mode: MagicWandSelectionMode,
+        settings: SmartSelectionSettings
+    ) -> some View {
+        Button {
+            viewModel.setSmartSelectionMode(mode)
+        } label: {
+            Image(systemName: systemName)
+                .frame(maxWidth: .infinity)
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.small)
+        .tint(settings.selectionMode == mode ? Color.accentColor : Color.white.opacity(0.16))
+        .help(help)
     }
 
     private var pinnedBrushCommonControls: some View {

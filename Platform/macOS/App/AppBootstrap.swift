@@ -27,6 +27,7 @@ final class AppSharedMetalServices {
     let smudgeEngine: SmudgeEngine
     let eyedropperSampler: EyedropperSampler
     let bucketFillEngine: BucketFillEngine
+    let magicWandSelectionEngine: MagicWandSelectionEngine
     let layerMergeController: LayerMergeController
     let pixelClipboardController: PixelClipboardController
     let layerMaskStrokeRenderer: LayerMaskStrokeRenderer
@@ -48,6 +49,7 @@ final class AppSharedMetalServices {
         self.smudgeEngine = SmudgeEngine(serializer: textureSerializer)
         self.eyedropperSampler = EyedropperSampler(serializer: textureSerializer)
         self.bucketFillEngine = BucketFillEngine(serializer: textureSerializer)
+        self.magicWandSelectionEngine = MagicWandSelectionEngine(serializer: textureSerializer)
         self.layerMergeController = LayerMergeController(
             metalContext: metalContext,
             canvasPresenter: canvasPresenter
@@ -77,6 +79,7 @@ struct AppBootstrap {
     let smudgeEngine: SmudgeEngine
     let eyedropperSampler: EyedropperSampler
     let bucketFillEngine: BucketFillEngine
+    let magicWandSelectionEngine: MagicWandSelectionEngine
     let layerMergeController: LayerMergeController
     let pixelClipboardController: PixelClipboardController
     let layerMaskStrokeRenderer: LayerMaskStrokeRenderer
@@ -144,6 +147,7 @@ struct AppBootstrap {
         self.smudgeEngine = resolvedSharedMetalServices.smudgeEngine
         self.eyedropperSampler = resolvedSharedMetalServices.eyedropperSampler
         self.bucketFillEngine = resolvedSharedMetalServices.bucketFillEngine
+        self.magicWandSelectionEngine = resolvedSharedMetalServices.magicWandSelectionEngine
         self.layerMergeController = resolvedSharedMetalServices.layerMergeController
         self.pixelClipboardController = resolvedSharedMetalServices.pixelClipboardController
         self.layerMaskStrokeRenderer = resolvedSharedMetalServices.layerMaskStrokeRenderer

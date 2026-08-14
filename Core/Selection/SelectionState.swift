@@ -8,10 +8,11 @@ enum SelectionShapeKind: String, Codable, Sendable, Equatable {
     case composite
 }
 
-enum SelectionCombineMode: String, Codable, Sendable, Equatable {
+enum SelectionCombineMode: String, Codable, Sendable, Equatable, CaseIterable {
     case replace
     case add
     case subtract
+    case intersect
 }
 
 enum SelectionComponentOperation: String, Codable, Sendable, Equatable {
@@ -435,6 +436,29 @@ struct SelectionShape: Codable, Sendable, Equatable {
         )
     }
 
+    static func mask(
+        canvasWidth: Int,
+        canvasHeight: Int,
+        alphaBytes: Data,
+        knownBounds: CanvasRect? = nil
+    ) -> SelectionShape {
+        let bounds = knownBounds ?? Self.maskBounds(
+            alphaBytes: alphaBytes,
+            canvasWidth: canvasWidth,
+            canvasHeight: canvasHeight
+        )
+        return SelectionShape(
+            kind: .mask,
+            bounds: bounds,
+            pathPoints: [],
+            maskData: SelectionMaskData(
+                canvasWidth: canvasWidth,
+                canvasHeight: canvasHeight,
+                alphaBytes: alphaBytes
+            )
+        )
+    }
+
     private static func maskBounds(alphaBytes: [UInt8], canvasWidth: Int, canvasHeight: Int) -> CanvasRect {
         var minX = canvasWidth
         var minY = canvasHeight
@@ -455,6 +479,35 @@ struct SelectionShape: Codable, Sendable, Equatable {
             return CanvasRect(origin: .init(x: 0, y: 0), size: .init(x: 0, y: 0))
         }
 
+        return CanvasRect(
+            origin: .init(x: Double(minX), y: Double(minY)),
+            size: .init(x: Double(maxX - minX + 1), y: Double(maxY - minY + 1))
+        )
+    }
+
+
+    private static func maskBounds(alphaBytes: Data, canvasWidth: Int, canvasHeight: Int) -> CanvasRect {
+        var minX = canvasWidth
+        var minY = canvasHeight
+        var maxX = -1
+        var maxY = -1
+
+        alphaBytes.withUnsafeBytes { rawBuffer in
+            guard let bytes = rawBuffer.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return }
+            for y in 0..<canvasHeight {
+                let row = y * canvasWidth
+                for x in 0..<canvasWidth where bytes[row + x] > 0 {
+                    minX = min(minX, x)
+                    minY = min(minY, y)
+                    maxX = max(maxX, x)
+                    maxY = max(maxY, y)
+                }
+            }
+        }
+
+        guard maxX >= minX, maxY >= minY else {
+            return CanvasRect(origin: .init(x: 0, y: 0), size: .init(x: 0, y: 0))
+        }
         return CanvasRect(
             origin: .init(x: Double(minX), y: Double(minY)),
             size: .init(x: Double(maxX - minX + 1), y: Double(maxY - minY + 1))

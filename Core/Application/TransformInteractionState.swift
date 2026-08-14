@@ -539,15 +539,15 @@ func freeTransformScaledPreview(
         }
 
         if let uniformRatio {
-            nextScaleX = max(startPreview.scaleX * uniformRatio, 0.05)
-            nextScaleY = max(startPreview.scaleY * uniformRatio, 0.05)
+            nextScaleX = signedScale(startPreview.scaleX, multipliedBy: uniformRatio)
+            nextScaleY = signedScale(startPreview.scaleY, multipliedBy: uniformRatio)
         }
     } else {
         if let xRatio {
-            nextScaleX = max(startPreview.scaleX * xRatio, 0.05)
+            nextScaleX = signedScale(startPreview.scaleX, multipliedBy: xRatio)
         }
         if let yRatio {
-            nextScaleY = max(startPreview.scaleY * yRatio, 0.05)
+            nextScaleY = signedScale(startPreview.scaleY, multipliedBy: yRatio)
         }
     }
 
@@ -571,6 +571,11 @@ func freeTransformScaledPreview(
         scaleY: nextScaleY,
         rotationRadians: startPreview.rotationRadians
     )
+}
+
+private func signedScale(_ scale: Double, multipliedBy ratio: Double) -> Double {
+    let sign = scale < 0 ? -1.0 : 1.0
+    return sign * max(abs(scale) * ratio, 0.05)
 }
 
 func shouldShowFreeTransformHandles(

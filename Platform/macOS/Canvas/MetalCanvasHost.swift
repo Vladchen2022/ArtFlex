@@ -1230,7 +1230,18 @@ final class StrokeCaptureMTKView: MTKView {
             }
             return
         }
-        if activeTool == .rectangleSelection || activeTool == .ellipseSelection || activeTool == .lassoSelection || activeTool == .smartSelection || activeTool == .lassoFill || activeTool == .textureFill {
+        if activeTool == .smartSelection {
+            strokeDelegate?.strokeCaptureView(
+                self,
+                didClickCanvasAt: sample(from: event).location,
+                modifiers: event.modifierFlags.intersection(.deviceIndependentFlagsMask),
+                clickCount: event.clickCount
+            )
+            setNeedsDisplay(bounds)
+            return
+        }
+
+        if activeTool == .rectangleSelection || activeTool == .ellipseSelection || activeTool == .lassoSelection || activeTool == .lassoFill || activeTool == .textureFill {
             let point = sample(from: event).location
             let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
             // 同步询问 ViewModel 应该进入哪种模式
@@ -1345,7 +1356,12 @@ final class StrokeCaptureMTKView: MTKView {
             return
         }
 
-        if activeTool == .rectangleSelection || activeTool == .ellipseSelection || activeTool == .lassoSelection || activeTool == .smartSelection || activeTool == .lassoFill || activeTool == .textureFill {
+        if activeTool == .smartSelection {
+            setNeedsDisplay(bounds)
+            return
+        }
+
+        if activeTool == .rectangleSelection || activeTool == .ellipseSelection || activeTool == .lassoSelection || activeTool == .lassoFill || activeTool == .textureFill {
             switch selectionInteractionMode {
             case .beginMoving:
                 let point = sample(from: event).location
@@ -1363,7 +1379,7 @@ final class StrokeCaptureMTKView: MTKView {
                 let samples = selectionSamples(from: event)
                 let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
                 if RuntimeDiagnostics.selectionTraceLoggingEnabled,
-                   activeTool == .lassoSelection || activeTool == .smartSelection || activeTool == .lassoFill || activeTool == .textureFill {
+                   activeTool == .lassoSelection || activeTool == .lassoFill || activeTool == .textureFill {
                     let message = "[sampleBatch] draggedEvents=\(samples.count) finalCanvas=(\(samples.last?.location.x ?? 0),\(samples.last?.location.y ?? 0))"
                     selectionTraceLogger.debug("\(message, privacy: .public)")
                     emitSelectionTraceHost(message)
@@ -1544,7 +1560,14 @@ final class StrokeCaptureMTKView: MTKView {
             setNeedsDisplay(bounds)
             return
         }
-        if activeTool == .rectangleSelection || activeTool == .ellipseSelection || activeTool == .lassoSelection || activeTool == .smartSelection || activeTool == .lassoFill || activeTool == .textureFill {
+        if activeTool == .smartSelection {
+            lastSample = nil
+            lastPressure = nil
+            setNeedsDisplay(bounds)
+            return
+        }
+
+        if activeTool == .rectangleSelection || activeTool == .ellipseSelection || activeTool == .lassoSelection || activeTool == .lassoFill || activeTool == .textureFill {
             switch selectionInteractionMode {
             case .beginMoving:
                 selectionMoveLastPoint = nil
@@ -1850,7 +1873,7 @@ final class StrokeCaptureMTKView: MTKView {
         )
 
         if RuntimeDiagnostics.selectionTraceLoggingEnabled,
-           activeTool == .lassoSelection || activeTool == .smartSelection || activeTool == .lassoFill || activeTool == .textureFill {
+           activeTool == .lassoSelection || activeTool == .lassoFill || activeTool == .textureFill {
             let message =
                 """
                 [sample] event=\(event.type.rawValue) \
@@ -2009,7 +2032,7 @@ final class StrokeCaptureMTKView: MTKView {
     }
 
     private func selectionSamples(from event: NSEvent) -> [CanvasStrokeSample] {
-        guard activeTool == .lassoSelection || activeTool == .smartSelection || activeTool == .lassoFill || activeTool == .textureFill else {
+        guard activeTool == .lassoSelection || activeTool == .lassoFill || activeTool == .textureFill else {
             return [sample(from: event)]
         }
 

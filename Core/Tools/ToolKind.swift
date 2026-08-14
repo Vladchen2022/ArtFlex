@@ -146,7 +146,7 @@ extension ToolKind {
     var supportsOutsideCanvasSelectionStart: Bool {
         switch self {
         case .polygonSelection, .lassoFill, .textureFill,
-             .rectangleSelection, .ellipseSelection, .lassoSelection, .smartSelection:
+             .rectangleSelection, .ellipseSelection, .lassoSelection:
             return true
         default:
             return false
@@ -215,7 +215,7 @@ extension ToolKind {
         case .lassoSelection:
             return "套索选区"
         case .smartSelection:
-            return "智能选区"
+            return "魔棒选区"
         case .polygonSelection:
             return "几何选区"
         case .lassoFill:
