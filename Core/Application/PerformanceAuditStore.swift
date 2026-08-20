@@ -152,7 +152,9 @@ final class PerformanceAuditStore: @unchecked Sendable {
     private var historyEligibilityRecords: [HistoryEligibilityAuditRecord] = []
 
     var isRecordingEnabled: Bool {
-        recordingEnabled
+        lock.lock()
+        defer { lock.unlock() }
+        return recordingEnabled
     }
 
     func reset() {
@@ -171,7 +173,6 @@ final class PerformanceAuditStore: @unchecked Sendable {
     }
 
     func recordDuration(_ key: String, ms: Double) {
-        guard recordingEnabled else { return }
         lock.lock()
         guard recordingEnabled else {
             lock.unlock()
@@ -187,7 +188,6 @@ final class PerformanceAuditStore: @unchecked Sendable {
     }
 
     func recordInt(_ key: String, value: Int) {
-        guard recordingEnabled else { return }
         lock.lock()
         guard recordingEnabled else {
             lock.unlock()
@@ -203,7 +203,6 @@ final class PerformanceAuditStore: @unchecked Sendable {
     }
 
     func recordHistoryEligibility(_ record: HistoryEligibilityAuditRecord) {
-        guard recordingEnabled else { return }
         lock.lock()
         guard recordingEnabled else {
             lock.unlock()

@@ -270,6 +270,40 @@ struct ProjectArchiveV2Tests {
     }
 
     @Test
+    func archiveReaderRejectsUnsupportedCanvasBeforeDecodingLayerPixels() throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let archiveURL = root.appendingPathComponent("Oversized.artflex", isDirectory: true)
+        try ProjectArchiveV2Writer().write(try makePayload(pixelSeed: 5), to: archiveURL)
+        var limits = ProjectArchiveReadLimits.standard
+        limits.maximumCanvasPixelCount = 4
+
+        #expect(throws: ProjectArchiveV2Error.self) {
+            try ProjectArchiveV2Reader(limits: limits).read(from: archiveURL)
+        }
+    }
+
+    @Test
+    func archiveReaderRejectsLayerResourceOutsideCanvasBounds() throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let archiveURL = root.appendingPathComponent("OutOfBounds.artflex", isDirectory: true)
+        try ProjectArchiveV2Writer().write(try makePayload(pixelSeed: 6), to: archiveURL)
+
+        let manifestURL = archiveURL.appendingPathComponent(ProjectArchiveV2Manifest.manifestFilename)
+        var manifest = try makeDecoder().decode(
+            ProjectArchiveV2Manifest.self,
+            from: Data(contentsOf: manifestURL)
+        )
+        manifest.layers[0].originX = 1
+        try makeEncoder().encode(manifest).write(to: manifestURL, options: .atomic)
+
+        #expect(throws: ProjectArchiveV2Error.invalidLayerSnapshot(manifest.layers[0].layerID)) {
+            try ProjectArchiveV2Reader().read(from: archiveURL)
+        }
+    }
+
+    @Test
     func archiveReaderRejectsReferenceChecksumMismatchWithoutTouchingProjectState() throws {
         let root = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }

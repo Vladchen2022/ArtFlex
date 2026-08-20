@@ -69,6 +69,12 @@ private final class CanvasCompositeTexturePair: @unchecked Sendable {
     }
 }
 
+private struct CanvasCompositeTexturePoolKey: Equatable {
+    let width: Int
+    let height: Int
+    let pixelFormat: MTLPixelFormat
+}
+
 final class StageOneCanvasPresenter: @unchecked Sendable {
     private let device: MTLDevice
     private let pipelineState: MTLRenderPipelineState
@@ -80,6 +86,7 @@ final class StageOneCanvasPresenter: @unchecked Sendable {
     private let canvasVertexBuffer: MTLBuffer
     private let compositePoolLock = NSLock()
     private var compositeTexturePool: [CanvasCompositeTexturePair] = []
+    private var compositeTexturePoolKey: CanvasCompositeTexturePoolKey?
 
     init(device: MTLDevice) throws {
         self.device = device
@@ -459,6 +466,17 @@ final class StageOneCanvasPresenter: @unchecked Sendable {
     ) -> CanvasCompositeTexturePair? {
         compositePoolLock.lock()
         defer { compositePoolLock.unlock() }
+        let requestedKey = CanvasCompositeTexturePoolKey(
+            width: width,
+            height: height,
+            pixelFormat: pixelFormat
+        )
+        if compositeTexturePoolKey != requestedKey {
+            compositeTexturePoolKey = requestedKey
+            // A window resize can produce many exact drawable sizes. Retain any
+            // old pairs still referenced by the GPU, but release idle sizes now.
+            compositeTexturePool.removeAll(where: { !$0.isInUse })
+        }
         if let pair = compositeTexturePool.first(where: {
             !$0.isInUse && $0.first.width == width && $0.first.height == height && $0.first.pixelFormat == pixelFormat
         }) {
@@ -485,8 +503,22 @@ final class StageOneCanvasPresenter: @unchecked Sendable {
     private func releaseCompositeTexturePair(_ pair: CanvasCompositeTexturePair) {
         compositePoolLock.lock()
         pair.isInUse = false
+        if let compositeTexturePoolKey,
+           pair.first.width != compositeTexturePoolKey.width ||
+            pair.first.height != compositeTexturePoolKey.height ||
+            pair.first.pixelFormat != compositeTexturePoolKey.pixelFormat {
+            compositeTexturePool.removeAll(where: { $0 === pair })
+        }
         compositePoolLock.unlock()
     }
+
+#if DEBUG
+    func debugCompositeTexturePoolDimensions() -> [(width: Int, height: Int)] {
+        compositePoolLock.lock()
+        defer { compositePoolLock.unlock() }
+        return compositeTexturePool.map { ($0.first.width, $0.first.height) }
+    }
+#endif
 
     private func clear(_ texture: MTLTexture, commandBuffer: MTLCommandBuffer) {
         let pass = MTLRenderPassDescriptor()

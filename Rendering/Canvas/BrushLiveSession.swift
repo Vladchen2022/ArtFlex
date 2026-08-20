@@ -93,6 +93,20 @@ final class BrushCommitQueue {
         return Array(jobs[headIndex...])
     }
 
+    func countRecentBrushJobs(for layerID: LayerID, limit: Int) -> Int {
+        guard limit > 0, headIndex < jobs.count else { return 0 }
+        var count = 0
+        var index = jobs.count
+        while index > headIndex, count < limit {
+            index -= 1
+            let job = jobs[index]
+            if job.layerID == layerID, job.packets.last?.tool == .brush {
+                count += 1
+            }
+        }
+        return count
+    }
+
     func enqueue(_ job: BrushCommitJob) {
         jobs.append(job)
     }

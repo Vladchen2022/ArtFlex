@@ -63,11 +63,38 @@ final class ColorPickerDisplayImageCache {
         let height: Int
     }
 
-    private var svCache: (key: SVKey, image: CGImage)?
+    private let svCache: NSCache<NSString, CGImage> = {
+        let cache = NSCache<NSString, CGImage>()
+        cache.countLimit = 8
+        cache.totalCostLimit = 8 * 1024 * 1024
+        cache.name = "ArtFlex.ColorPickerSVImages"
+        return cache
+    }()
     private var hueCache: (key: HueKey, image: CGImage)?
     private var horizontalHueCache: (key: HorizontalHueKey, image: CGImage)?
 
+    func cachedSVImage(size: Int, panel: ColorPanelState) -> CGImage? {
+        svCache.object(forKey: svCacheKey(size: size, panel: panel))
+    }
+
+    func storeSVImage(_ image: CGImage, size: Int, panel: ColorPanelState) {
+        svCache.setObject(
+            image,
+            forKey: svCacheKey(size: size, panel: panel),
+            cost: max(size, 0) * max(size, 0) * 4
+        )
+    }
+
     func svImage(size: Int, panel: ColorPanelState, builder: () -> CGImage?) -> CGImage? {
+        if let cached = cachedSVImage(size: size, panel: panel) {
+            return cached
+        }
+        guard let image = builder() else { return nil }
+        storeSVImage(image, size: size, panel: panel)
+        return image
+    }
+
+    private func svCacheKey(size: Int, panel: ColorPanelState) -> NSString {
         let key = SVKey(
             size: size,
             hue: Int(panel.pickerHue.rounded()),
@@ -76,13 +103,15 @@ final class ColorPickerDisplayImageCache {
             lightingHue: Int(panel.lightingHue.rounded()),
             lightingStrength: Int(panel.lightingStrength.rounded())
         )
-        if let svCache, svCache.key == key {
-            return svCache.image
-        }
-        guard let image = builder() else { return nil }
-        svCache = (key, image)
-        return image
+        return "\(key.size):\(key.hue):\(key.lightness):\(key.saturation):\(key.lightingHue):\(key.lightingStrength)"
+            as NSString
     }
+
+#if DEBUG
+    func removeAllSVImagesForTesting() {
+        svCache.removeAllObjects()
+    }
+#endif
 
     func hueImage(height: Int, width: Int, builder: () -> CGImage?) -> CGImage? {
         let key = HueKey(height: height, width: width)
@@ -110,6 +139,32 @@ func sharedColorPickerSVImage(size: Int, panel: ColorPanelState) -> CGImage? {
     ColorPickerDisplayImageCache.shared.svImage(size: size, panel: panel) {
         makeColorPickerSVImage(size: size, panel: panel)
     }
+}
+
+@MainActor
+func cachedSharedColorPickerSVImage(size: Int, panel: ColorPanelState) -> CGImage? {
+    ColorPickerDisplayImageCache.shared.cachedSVImage(size: size, panel: panel)
+}
+
+@MainActor
+func prepareSharedColorPickerSVImage(size: Int, panel: ColorPanelState) async -> CGImage? {
+    if let cached = cachedSharedColorPickerSVImage(size: size, panel: panel) {
+        return cached
+    }
+
+    let renderTask = Task.detached(priority: .userInitiated) {
+        makeColorPickerSVImage(size: size, panel: panel) {
+            Task.isCancelled
+        }
+    }
+    let image = await withTaskCancellationHandler {
+        await renderTask.value
+    } onCancel: {
+        renderTask.cancel()
+    }
+    guard !Task.isCancelled, let image else { return nil }
+    ColorPickerDisplayImageCache.shared.storeSVImage(image, size: size, panel: panel)
+    return image
 }
 
 func makeColorPickerSVImage(

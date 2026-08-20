@@ -793,57 +793,27 @@ struct CanvasContainerView: View {
                     )
                 }
 
-                if let quickColorPickerState = viewModel.quickColorPickerState {
-                    let quickPickerBrushSlots = (0..<4).map { slotIndex in
-                        viewModel.workspace.brushLibrary.preset(atSlot: slotIndex)
-                    }
-                    QuickColorPickerHUD(
-                        state: resolvedQuickColorPickerState(
-                            baseState: quickColorPickerState,
-                            panel: viewModel.workspace.colorPanel
-                        ),
-                        presentation: presentation,
-                        canvasSize: viewModel.workspace.document.canvasSize,
-                        viewportRotationDegrees: viewModel.workspace.viewport.rotationDegrees,
-                        isCanvasHorizontallyFlipped: viewModel.workspace.viewport.isHorizontallyFlipped,
-                        viewportSize: geometry.size,
-                        brushSlots: quickPickerBrushSlots,
-                        selectedBrushPresetID: viewModel.workspace.brushLibrary.selectedPresetID,
-                        onSetPoint: { x, y in
-                            viewModel.setQuickColorPickerPoint(x: x, y: y)
-                        },
-                        onSetHue: { hue in
-                            viewModel.setQuickColorPickerHue(hue)
-                        },
-                        onSelectBrushSlot: { slotIndex in
-                            if let preset = viewModel.workspace.brushLibrary.preset(atSlot: slotIndex) {
-                                viewModel.applyBrushPreset(preset.id)
-                            }
-                        },
-                        onSetRecentBrushSelectionCount: { count in
-                            viewModel.setQuickColorPickerRecentBrushSelectionCount(count)
-                        },
-                        onSetRecentBrushOpacity: { opacity in
-                            viewModel.setQuickColorPickerRecentBrushOpacity(opacity)
-                        },
-                        onSetRecentBrushBrightness: { brightness in
-                            viewModel.setQuickColorPickerRecentBrushBrightness(brightness)
-                        },
-                        onSetRecentBrushSaturation: { saturation in
-                            viewModel.setQuickColorPickerRecentBrushSaturation(saturation)
-                        },
-                        onSetRecentBrushSelectionEditing: { isEditing in
-                            viewModel.setQuickColorPickerRecentBrushSelectionEditing(isEditing)
-                        },
-                        onSetRecentBrushOpacityEditing: { isEditing in
-                            viewModel.setQuickColorPickerRecentBrushOpacityEditing(isEditing)
-                        }
-                    )
-                }
+                QuickColorPickerOverlayHost(
+                    proxy: viewModel.quickColorPickerPresentation,
+                    viewModel: viewModel,
+                    presentation: presentation,
+                    viewportSize: geometry.size
+                )
 
             }
             .clipped()
             .contentShape(Rectangle())
+            .task(
+                id: QuickColorPickerSVImageKey(
+                    size: QuickColorPickerLayout.svRasterSize,
+                    panel: viewModel.workspace.colorPanel
+                )
+            ) {
+                _ = await prepareSharedColorPickerSVImage(
+                    size: QuickColorPickerLayout.svRasterSize,
+                    panel: viewModel.workspace.colorPanel
+                )
+            }
             .overlay {
                 if isCanvasImageDropTarget {
                     RoundedRectangle(cornerRadius: 12)
@@ -1159,6 +1129,82 @@ private struct CanvasWorkspaceBackdrop: View {
                 with: .color(minorGridColor),
             )
         }
+    }
+}
+
+private struct QuickColorPickerOverlayHost: View {
+    @ObservedObject var proxy: QuickColorPickerPresentationProxy
+    let viewModel: WorkspaceViewModel
+    let presentation: CanvasPresentation
+    let viewportSize: CGSize
+
+    var body: some View {
+        let isPresented = proxy.state != nil
+        let renderedState = proxy.state ?? inactiveState
+        let quickPickerBrushSlots = (0..<4).map { slotIndex in
+            viewModel.workspace.brushLibrary.preset(atSlot: slotIndex)
+        }
+        QuickColorPickerHUD(
+            state: resolvedQuickColorPickerState(
+                baseState: renderedState,
+                panel: viewModel.workspace.colorPanel
+            ),
+            presentation: presentation,
+            canvasSize: viewModel.workspace.document.canvasSize,
+            viewportRotationDegrees: viewModel.workspace.viewport.rotationDegrees,
+            isCanvasHorizontallyFlipped: viewModel.workspace.viewport.isHorizontallyFlipped,
+            viewportSize: viewportSize,
+            brushSlots: quickPickerBrushSlots,
+            selectedBrushPresetID: viewModel.workspace.brushLibrary.selectedPresetID,
+            onSetPoint: { x, y in
+                viewModel.setQuickColorPickerPoint(x: x, y: y)
+            },
+            onSetHue: { hue in
+                viewModel.setQuickColorPickerHue(hue)
+            },
+            onSelectBrushSlot: { slotIndex in
+                if let preset = viewModel.workspace.brushLibrary.preset(atSlot: slotIndex) {
+                    viewModel.applyBrushPreset(preset.id)
+                }
+            },
+            onSetRecentBrushSelectionCount: { count in
+                viewModel.setQuickColorPickerRecentBrushSelectionCount(count)
+            },
+            onSetRecentBrushOpacity: { opacity in
+                viewModel.setQuickColorPickerRecentBrushOpacity(opacity)
+            },
+            onSetRecentBrushBrightness: { brightness in
+                viewModel.setQuickColorPickerRecentBrushBrightness(brightness)
+            },
+            onSetRecentBrushSaturation: { saturation in
+                viewModel.setQuickColorPickerRecentBrushSaturation(saturation)
+            },
+            onSetRecentBrushSelectionEditing: { isEditing in
+                viewModel.setQuickColorPickerRecentBrushSelectionEditing(isEditing)
+            },
+            onSetRecentBrushOpacityEditing: { isEditing in
+                viewModel.setQuickColorPickerRecentBrushOpacityEditing(isEditing)
+            }
+        )
+        .opacity(isPresented ? 1 : 0)
+        .allowsHitTesting(isPresented)
+        .accessibilityHidden(!isPresented)
+    }
+
+    private var inactiveState: QuickColorPickerState {
+        let canvasSize = viewModel.workspace.document.canvasSize
+        return QuickColorPickerState(
+            anchorPoint: CanvasPoint(
+                x: Double(canvasSize.width) / 2,
+                y: Double(canvasSize.height) / 2
+            ),
+            panel: viewModel.workspace.colorPanel,
+            recentBrushSelectionCount: 1,
+            recentBrushSelectionLimit: 1,
+            recentBrushOpacity: 1,
+            recentBrushBrightness: 0,
+            recentBrushSaturation: 0
+        )
     }
 }
 

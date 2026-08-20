@@ -195,11 +195,9 @@ final class MetalStrokeEngine: StrokeEngine {
     }
 
     func recentAdjustableBrushCommitCount(for layerID: LayerID) -> Int {
-        min(
-            maxRetainedRecentBrushCommitJobs,
-            commitQueue.snapshot().filter {
-                $0.layerID == layerID && $0.packets.last?.tool == .brush
-            }.count
+        commitQueue.countRecentBrushJobs(
+            for: layerID,
+            limit: maxRetainedRecentBrushCommitJobs
         )
     }
 

@@ -4,6 +4,66 @@ import Testing
 
 struct MetalStrokeEngineQueueTests {
     @Test
+    func hardRoundBrushAntialiasesItsOuterPixelBoundary() throws {
+        guard
+            let metalContext = MetalDeviceContext(),
+            let commandBuffer = metalContext.commandQueue.makeCommandBuffer()
+        else {
+            Issue.record("Metal unavailable")
+            return
+        }
+        let surfaceStore = StageOneLayerSurfaceStore()
+        let serializer = LayerTextureSerializer(metalContext: metalContext)
+        guard let texture = surfaceStore.makeTexture(width: 80, height: 80, metal: metalContext) else {
+            Issue.record("Texture unavailable")
+            return
+        }
+        try serializer.restore(
+            snapshot: LayerTextureSnapshot(
+                width: 80,
+                height: 80,
+                bytesPerRow: 80 * 4,
+                pixelData: Data(repeating: 0, count: 80 * 80 * 4)
+            ),
+            into: texture
+        )
+
+        let renderer = try StageOneBrushRenderer(device: metalContext.device)
+        var brush = BrushSettings.stageOneDefault
+        brush.tipShape = .hardRound
+        brush.size = 24
+        brush.spacingPercent = 5
+        brush.opacity = 1
+        brush.buildMode = .buildUp
+        var samplingState: BrushStrokeSamplingState?
+        _ = renderer.encodeStroke(
+            stroke: StrokeDescriptor(
+                tool: .brush,
+                color: .black,
+                brush: brush,
+                points: [
+                    .init(x: 20.25, y: 40.25, pressure: 1),
+                    .init(x: 32.25, y: 40.25, pressure: 1),
+                    .init(x: 44.25, y: 40.25, pressure: 1),
+                    .init(x: 56.25, y: 40.25, pressure: 1),
+                ],
+                selectionShape: nil,
+                skipLeadingStamp: false
+            ),
+            into: texture,
+            commandQueue: metalContext.commandQueue,
+            commandBuffer: commandBuffer,
+            samplingState: &samplingState
+        )
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+
+        let snapshot = try serializer.snapshot(texture: texture)
+        let alpha = alphaBytes(in: snapshot)
+        #expect(alpha.contains { $0 > 0 && $0 < 255 })
+    }
+
+    @Test
     func paintJitterSeedIsDeterministicVariedAndAlphaNeutral() throws {
         guard let metalContext = MetalDeviceContext() else {
             Issue.record("Metal unavailable")
@@ -531,6 +591,60 @@ struct MetalStrokeEngineQueueTests {
 
         #expect(emitted == 0)
 
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+    }
+
+    @Test
+    func opacityCapSessionInitializesOnlyTilesReachedByTheStroke() throws {
+        guard
+            let metalContext = MetalDeviceContext(),
+            let commandBuffer = metalContext.commandQueue.makeCommandBuffer()
+        else {
+            Issue.record("Metal unavailable")
+            return
+        }
+
+        let surfaceStore = StageOneLayerSurfaceStore()
+        let renderer = try StageOneBrushRenderer(device: metalContext.device)
+        guard
+            let texture = surfaceStore.makeTexture(width: 2_048, height: 2_048, metal: metalContext),
+            let session = renderer.makeOpacityCapSession(
+                for: texture,
+                commandQueue: metalContext.commandQueue
+            )
+        else {
+            Issue.record("Texture unavailable")
+            return
+        }
+        #expect(session.debugInitializedTileCount == 0)
+
+        var brush = BrushSettings.stageOneDefault
+        brush.buildMode = .opacityCap
+        brush.size = 24
+        brush.spacingPercent = 10
+        var samplingState: BrushStrokeSamplingState?
+        let emitted = renderer.encodeOpacityCapStroke(
+            stroke: StrokeDescriptor(
+                tool: .brush,
+                color: .black,
+                brush: brush,
+                points: [
+                    StrokePoint(x: 128, y: 128, pressure: 1),
+                    .init(x: 160, y: 128, pressure: 1),
+                    .init(x: 384, y: 128, pressure: 1),
+                    .init(x: 416, y: 128, pressure: 1),
+                ],
+                selectionShape: nil
+            ),
+            session: session,
+            into: texture,
+            commandBuffer: commandBuffer,
+            samplingState: &samplingState
+        )
+
+        #expect(emitted > 0)
+        #expect(session.debugInitializedTileCount == 2)
         commandBuffer.commit()
         commandBuffer.waitUntilCompleted()
     }

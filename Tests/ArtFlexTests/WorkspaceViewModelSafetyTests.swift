@@ -8,6 +8,41 @@ import Testing
 struct WorkspaceViewModelSafetyTests {
     @Test
     @MainActor
+    func openingQuickColorPickerPublishesOnlyItsDedicatedPresentationProxy() async throws {
+        let harness = try BrushEditingBoundaryHarness()
+        harness.viewModel.updateCanvasToolHover(to: .init(x: 120, y: 120))
+        var workspacePublicationCount = 0
+        var pickerPublicationCount = 0
+        let workspaceObservation = harness.viewModel.objectWillChange.sink {
+            workspacePublicationCount += 1
+        }
+        let pickerObservation = harness.viewModel.quickColorPickerPresentation.objectWillChange.sink {
+            pickerPublicationCount += 1
+        }
+        let redrawRevision = harness.viewModel.recentBrushAdjustmentRedrawRevision
+
+        let handled = harness.viewModel.handleKeyDown(
+            makeCanvasKeyEvent(
+                type: .keyDown,
+                characters: "Z",
+                charactersIgnoringModifiers: "z",
+                modifiers: [.shift],
+                keyCode: 6
+            )
+        )
+        await Task.yield()
+
+        #expect(handled)
+        #expect(harness.viewModel.quickColorPickerState != nil)
+        #expect(workspacePublicationCount == 0)
+        #expect(pickerPublicationCount == 1)
+        #expect(harness.viewModel.recentBrushAdjustmentRedrawRevision == redrawRevision)
+        _ = workspaceObservation
+        _ = pickerObservation
+    }
+
+    @Test
+    @MainActor
     func quickColorPickerPreviewDoesNotPublishWholeWorkspaceAndStillCommits() throws {
         let harness = try BrushEditingBoundaryHarness()
         harness.viewModel.updateCanvasToolHover(to: .init(x: 120, y: 120))

@@ -8,6 +8,17 @@ import UniformTypeIdentifiers
 
 struct PatternPlacementTests {
     @Test
+    @MainActor
+    func decodedPatternTextureCacheHasExplicitMemoryLimits() throws {
+        let harness = try PatternPlacementHarness()
+        defer { harness.cleanup() }
+
+        let limits = harness.viewModel.debugPatternPlacementTextureCacheLimits
+        #expect(limits.count == 8)
+        #expect(limits.cost == 256 * 1024 * 1024)
+    }
+
+    @Test
     func patternPlacementScissorRectClampsToRenderTargetBoundsAtCanvasEdge() throws {
         let scissorRect = try #require(
             patternPlacementScissorRect(

@@ -66,7 +66,10 @@ final class PersistenceController {
         self.serializer = serializer
         self.canvasCapacityPolicy = canvasCapacityPolicy
         self.archiveWriter = ProjectArchiveV2Writer()
-        self.archiveReader = ProjectArchiveV2Reader()
+        var archiveReadLimits = ProjectArchiveReadLimits.standard
+        archiveReadLimits.maximumCanvasEdge = canvasCapacityPolicy.maximumEdge
+        archiveReadLimits.maximumCanvasPixelCount = canvasCapacityPolicy.maximumPixelCount
+        self.archiveReader = ProjectArchiveV2Reader(limits: archiveReadLimits)
         let rootURL = recoveryRootURL ?? Self.defaultRecoveryRootURL()
         self.recoveryProjectURL = rootURL.appendingPathComponent(
             "Autosave.artflex",

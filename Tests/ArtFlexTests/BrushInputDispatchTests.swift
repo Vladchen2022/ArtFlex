@@ -171,7 +171,7 @@ struct BrushInputDispatchTests {
     }
 
     @Test
-    func pendingBrushInputQueuePreservesSamplePacketBoundaries() {
+    func pendingBrushInputQueueCoalescesAdjacentSamplePacketsWithinAFrame() {
         var queue = PendingBrushInputQueue()
         let first = CanvasStrokeSample(location: .init(x: 5, y: 7), pressure: 0.25)
         let second = CanvasStrokeSample(location: .init(x: 9, y: 11), pressure: 0.75)
@@ -183,14 +183,14 @@ struct BrushInputDispatchTests {
 
         let flushed = queue.flush()
 
-        #expect(flushed.count == 4)
-        #expect(flushed.map(\.kind) == [.begin, .samples([first]), .samples([second]), .end])
-        #expect(flushed.map(\.enqueuedAt) == [1, 2, 3, 4])
+        #expect(flushed.count == 3)
+        #expect(flushed.map(\.kind) == [.begin, .samples([first, second]), .end])
+        #expect(flushed.map(\.enqueuedAt) == [1, 2, 4])
         #expect(queue.isEmpty)
     }
 
     @Test
-    func highFrequencyBrushInputKeepsPacketsSmall() {
+    func highFrequencyBrushInputBecomesOneOrderedRenderPacketPerFrame() {
         var queue = PendingBrushInputQueue()
         queue.enqueue(.begin, at: 1)
         for index in 0..<256 {
@@ -212,9 +212,52 @@ struct BrushInputDispatchTests {
             return samples
         }
 
-        #expect(flushed.count == 258)
-        #expect(sampleBatches.count == 256)
-        #expect(sampleBatches.allSatisfy { $0.count == 1 })
+        #expect(flushed.count == 3)
+        #expect(sampleBatches.count == 1)
+        #expect(sampleBatches[0].count == 256)
+        #expect(sampleBatches[0].map(\.location.x) == (0..<256).map(Double.init))
+        #expect(flushed.map(\.enqueuedAt) == [1, 2, 258])
+    }
+
+    @Test
+    func pendingBrushInputQueueDoesNotMergeAcrossStrokeBoundaries() {
+        var queue = PendingBrushInputQueue()
+        let first = CanvasStrokeSample(location: .init(x: 5, y: 7), pressure: 0.25)
+        let second = CanvasStrokeSample(location: .init(x: 9, y: 11), pressure: 0.75)
+
+        queue.enqueue(.begin, at: 1)
+        queue.enqueue(.samples([first]), at: 2)
+        queue.enqueue(.end, at: 3)
+        queue.enqueue(.begin, at: 4)
+        queue.enqueue(.samples([second]), at: 5)
+        queue.enqueue(.end, at: 6)
+
+        let flushed = queue.flush()
+
+        #expect(flushed.map(\.kind) == [
+            .begin,
+            .samples([first]),
+            .end,
+            .begin,
+            .samples([second]),
+            .end,
+        ])
+    }
+
+    @Test
+    @MainActor
+    func brushInputUsesDemandDrivenMetalViewScheduling() {
+        let view = StrokeCaptureMTKView(
+            frame: .init(x: 0, y: 0, width: 120, height: 120),
+            device: nil
+        )
+        view.enableSetNeedsDisplay = false
+        view.isPaused = false
+
+        view.beginDemandDrivenStrokeRendering()
+
+        #expect(view.enableSetNeedsDisplay)
+        #expect(view.isPaused)
     }
 
     @Test

@@ -191,6 +191,42 @@ struct LayerMergeControllerTests {
         #expect(adjusted.blue > 0.45)
         #expect(adjusted.alpha > 0.99)
     }
+
+    @Test
+    func compositorReleasesIdleTexturesFromPreviousDrawableSize() throws {
+        guard let metalContext = MetalDeviceContext() else {
+            Issue.record("Metal unavailable")
+            return
+        }
+        let presenter = try StageOneCanvasPresenter(device: metalContext.device)
+        let controller = LayerMergeController(metalContext: metalContext, canvasPresenter: presenter)
+        let store = StageOneLayerSurfaceStore()
+
+        for size in [64, 128] {
+            guard let destination = store.makeTexture(width: size, height: size, metal: metalContext),
+                  let source = store.makeTexture(width: size, height: size, metal: metalContext),
+                  let mask = store.makeTexture(
+                    width: size,
+                    height: size,
+                    pixelFormat: .r8Unorm,
+                    metal: metalContext
+                  ) else {
+                Issue.record("Texture allocation failed")
+                return
+            }
+            try controller.mergeVisible(
+                layers: [
+                    CanvasLayerCompositeInput(texture: destination, opacity: 1),
+                    CanvasLayerCompositeInput(texture: source, opacity: 1, layerMaskTexture: mask)
+                ],
+                into: destination
+            )
+
+            let dimensions = presenter.debugCompositeTexturePoolDimensions()
+            #expect(!dimensions.isEmpty)
+            #expect(dimensions.allSatisfy { $0.width == size && $0.height == size })
+        }
+    }
 }
 
 private func opaqueColorSnapshot(

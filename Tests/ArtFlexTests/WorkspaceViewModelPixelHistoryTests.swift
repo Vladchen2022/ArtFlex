@@ -1438,6 +1438,11 @@ struct WorkspaceViewModelPixelHistoryTests {
         harness.viewModel.fillSelectionContents()
 
         let featherAlpha = try harness.alpha(atX: 11, y: 32, layerID: layerID)
+        let outerTransparentAlpha = try harness.alpha(atX: 8, y: 32, layerID: layerID)
+        let outerSoftAlpha = try harness.alpha(atX: 9, y: 32, layerID: layerID)
+        #expect(outerTransparentAlpha < 0.001)
+        #expect(outerSoftAlpha > outerTransparentAlpha)
+        #expect(outerSoftAlpha < featherAlpha)
         #expect(featherAlpha > 0.01)
         #expect(featherAlpha < 0.9)
         #expect(try harness.alpha(atX: 32, y: 32, layerID: layerID) > 0.95)
@@ -1495,6 +1500,11 @@ struct WorkspaceViewModelPixelHistoryTests {
         _ = harness.viewModel.flushBrushEditingBoundary(reason: "test feathered brush output")
 
         let featherAlpha = try harness.alpha(atX: 11, y: 32, layerID: layerID)
+        let outerTransparentAlpha = try harness.alpha(atX: 8, y: 32, layerID: layerID)
+        let outerSoftAlpha = try harness.alpha(atX: 9, y: 32, layerID: layerID)
+        #expect(outerTransparentAlpha < 0.001)
+        #expect(outerSoftAlpha > outerTransparentAlpha)
+        #expect(outerSoftAlpha < featherAlpha)
         #expect(featherAlpha > 0.01)
         #expect(featherAlpha < 0.9)
         #expect(try harness.alpha(atX: 32, y: 32, layerID: layerID) > 0.95)

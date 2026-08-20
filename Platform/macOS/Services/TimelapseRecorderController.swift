@@ -690,14 +690,12 @@ final class TimelapseRecorderController: ObservableObject {
 
             input.markAsFinished()
             let semaphore = DispatchSemaphore(value: 0)
-            var exportError: Error?
             writer.finishWriting {
-                exportError = writer.error
                 semaphore.signal()
             }
             semaphore.wait()
 
-            if let exportError {
+            if let exportError = writer.error {
                 throw exportError
             }
 

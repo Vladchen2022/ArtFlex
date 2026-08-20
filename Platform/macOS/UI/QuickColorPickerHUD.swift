@@ -1,5 +1,22 @@
 import SwiftUI
 
+enum QuickColorPickerLayout {
+    static let pickerDiameter: CGFloat = 176
+    static let ringWidth = min(
+        6.0,
+        max(14.0 / 3.0, pickerDiameter * (0.0475 * 2.0 / 3.0))
+    )
+    static let svDisplaySide = max(
+        52.0,
+        ColorHueWheelGeometry.innerSquareSide(
+            diameter: pickerDiameter,
+            ringWidth: ringWidth,
+            gap: 4
+        )
+    )
+    static let svRasterSize = max(64, Int(svDisplaySide * 2))
+}
+
 func quickColorPickerCanUseSteppedSlider(
     range: ClosedRange<Double>,
     step: Double
@@ -50,7 +67,7 @@ struct QuickColorPickerHUD: View {
                 + sliderBackdropPaddingHeight
         )
     }
-    private let pickerDiameter: CGFloat = 176
+    private let pickerDiameter = QuickColorPickerLayout.pickerDiameter
     private let hudPadding: CGFloat = 10
     private let viewportInset: CGFloat = 12
     private let sliderBackdropVerticalPadding: CGFloat = 6
@@ -76,18 +93,8 @@ struct QuickColorPickerHUD: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 
-            let ringWidth = min(
-                6.0,
-                max(14.0 / 3.0, pickerDiameter * (0.0475 * 2.0 / 3.0))
-            )
-            let squareSide = max(
-                52.0,
-                ColorHueWheelGeometry.innerSquareSide(
-                    diameter: pickerDiameter,
-                    ringWidth: ringWidth,
-                    gap: 4
-                )
-            )
+            let ringWidth = QuickColorPickerLayout.ringWidth
+            let squareSide = QuickColorPickerLayout.svDisplaySide
 
             ZStack {
                 ColorHueRingPickerView(
@@ -107,66 +114,71 @@ struct QuickColorPickerHUD: View {
             .frame(maxWidth: .infinity)
             .frame(height: pickerDiameter)
 
-            if state.recentBrushSelectionLimit > 0 {
-                VStack(alignment: .leading, spacing: 6) {
-                    QuickColorPickerMiniSliderRow(
-                        title: "最近",
-                        valueLabel: "\(state.recentBrushSelectionCount)",
-                        value: Double(state.recentBrushSelectionCount),
-                        range: 1...Double(max(1, state.recentBrushSelectionLimit)),
-                        step: 1,
-                        isReversed: true,
-                        onEditingChanged: onSetRecentBrushSelectionEditing
-                    ) { value in
-                        onSetRecentBrushSelectionCount(Int(value.rounded()))
-                    }
-
-                    QuickColorPickerMiniSliderRow(
-                        title: "透明度",
-                        valueLabel: "\(Int((state.recentBrushOpacity * 100).rounded()))%",
-                        value: Double(state.recentBrushOpacity),
-                        range: 0...1,
-                        step: 0.01,
-                        onEditingChanged: onSetRecentBrushOpacityEditing
-                    ) { value in
-                        onSetRecentBrushOpacity(Float(value))
-                    }
-
-                    QuickColorPickerMiniSliderRow(
-                        title: "明度",
-                        valueLabel: signedPercentLabel(for: state.recentBrushBrightness),
-                        value: Double(state.recentBrushBrightness),
-                        range: -1...1,
-                        step: 0.01,
-                        onEditingChanged: onSetRecentBrushOpacityEditing
-                    ) { value in
-                        onSetRecentBrushBrightness(Float(value))
-                    }
-
-                    QuickColorPickerMiniSliderRow(
-                        title: "饱和",
-                        valueLabel: signedPercentLabel(for: state.recentBrushSaturation),
-                        value: Double(state.recentBrushSaturation),
-                        range: -1...1,
-                        step: 0.01,
-                        onEditingChanged: onSetRecentBrushOpacityEditing
-                    ) { value in
-                        onSetRecentBrushSaturation(Float(value))
-                    }
+            let hasRecentBrushes = state.recentBrushSelectionLimit > 0
+            VStack(alignment: .leading, spacing: 6) {
+                QuickColorPickerMiniSliderRow(
+                    title: "最近",
+                    valueLabel: "\(state.recentBrushSelectionCount)",
+                    value: Double(max(state.recentBrushSelectionCount, 1)),
+                    range: 1...Double(max(2, state.recentBrushSelectionLimit)),
+                    step: 1,
+                    isReversed: true,
+                    isEnabled: state.recentBrushSelectionLimit > 1,
+                    onEditingChanged: onSetRecentBrushSelectionEditing
+                ) { value in
+                    onSetRecentBrushSelectionCount(Int(value.rounded()))
                 }
-                .padding(.horizontal, 6)
-                .padding(.vertical, sliderBackdropVerticalPadding)
-                .background(
-                    RoundedRectangle(cornerRadius: 9, style: .continuous)
-                        .fill(Color.black.opacity(0.72))
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 9, style: .continuous)
-                        .stroke(Color.white.opacity(0.16), lineWidth: 1)
-                        .allowsHitTesting(false)
-                )
-                .shadow(color: Color.black.opacity(0.28), radius: 2, x: 0, y: 1)
+
+                QuickColorPickerMiniSliderRow(
+                    title: "透明度",
+                    valueLabel: "\(Int((state.recentBrushOpacity * 100).rounded()))%",
+                    value: Double(state.recentBrushOpacity),
+                    range: 0...1,
+                    step: 0.01,
+                    onEditingChanged: onSetRecentBrushOpacityEditing
+                ) { value in
+                    onSetRecentBrushOpacity(Float(value))
+                }
+
+                QuickColorPickerMiniSliderRow(
+                    title: "明度",
+                    valueLabel: signedPercentLabel(for: state.recentBrushBrightness),
+                    value: Double(state.recentBrushBrightness),
+                    range: -1...1,
+                    step: 0.01,
+                    onEditingChanged: onSetRecentBrushOpacityEditing
+                ) { value in
+                    onSetRecentBrushBrightness(Float(value))
+                }
+
+                QuickColorPickerMiniSliderRow(
+                    title: "饱和",
+                    valueLabel: signedPercentLabel(for: state.recentBrushSaturation),
+                    value: Double(state.recentBrushSaturation),
+                    range: -1...1,
+                    step: 0.01,
+                    onEditingChanged: onSetRecentBrushOpacityEditing
+                ) { value in
+                    onSetRecentBrushSaturation(Float(value))
+                }
             }
+            .padding(.horizontal, 6)
+            .padding(.vertical, sliderBackdropVerticalPadding)
+            .background(
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .fill(Color.black.opacity(0.72))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .stroke(Color.white.opacity(0.16), lineWidth: 1)
+                    .allowsHitTesting(false)
+            )
+            .shadow(color: Color.black.opacity(0.28), radius: 2, x: 0, y: 1)
+            .frame(height: hasRecentBrushes ? nil : 0)
+            .opacity(hasRecentBrushes ? 1 : 0)
+            .clipped()
+            .allowsHitTesting(hasRecentBrushes)
+            .accessibilityHidden(!hasRecentBrushes)
         }
         .padding(hudPadding)
         .background(Color.clear)
@@ -243,6 +255,7 @@ private struct QuickColorPickerMiniSliderRow: View {
     let range: ClosedRange<Double>
     let step: Double
     let isReversed: Bool
+    let isEnabled: Bool
     let onEditingChanged: (Bool) -> Void
     let onChange: (Double) -> Void
 
@@ -253,6 +266,7 @@ private struct QuickColorPickerMiniSliderRow: View {
         range: ClosedRange<Double>,
         step: Double,
         isReversed: Bool = false,
+        isEnabled: Bool = true,
         onEditingChanged: @escaping (Bool) -> Void,
         onChange: @escaping (Double) -> Void
     ) {
@@ -262,6 +276,7 @@ private struct QuickColorPickerMiniSliderRow: View {
         self.range = range
         self.step = step
         self.isReversed = isReversed
+        self.isEnabled = isEnabled
         self.onEditingChanged = onEditingChanged
         self.onChange = onChange
     }
@@ -284,6 +299,7 @@ private struct QuickColorPickerMiniSliderRow: View {
                 )
                 .tint(Color.accentColor)
                 .controlSize(.mini)
+                .disabled(!isEnabled)
             } else {
                 Capsule()
                     .fill(Color.white.opacity(0.16))
@@ -380,8 +396,7 @@ private struct QuickColorPickerSVSquare: View {
                         .scaledToFill()
                         .clipShape(Rectangle())
                 } else {
-                    Rectangle()
-                        .fill(Color.clear)
+                    QuickColorPickerSVFallback(panel: panel)
                 }
 
                 Circle()
@@ -420,22 +435,40 @@ private struct QuickColorPickerSVSquare: View {
 
     @MainActor
     private func updateDisplayImage(size: Int, panel: ColorPanelState) async {
-        let renderTask = Task.detached(priority: .userInitiated) {
-            makeColorPickerSVImage(size: size, panel: panel) {
-                Task.isCancelled
-            }
-        }
-        let image = await withTaskCancellationHandler {
-            await renderTask.value
-        } onCancel: {
-            renderTask.cancel()
-        }
-        guard !Task.isCancelled, let image else { return }
-        displayImage = image
+        displayImage = await prepareSharedColorPickerSVImage(size: size, panel: panel)
     }
 }
 
-private struct QuickColorPickerSVImageKey: Hashable, Sendable {
+private struct QuickColorPickerSVFallback: View {
+    let panel: ColorPanelState
+
+    var body: some View {
+        Rectangle()
+            .fill(
+                Color(
+                    hue: Double(ColorBlocksEngine.wrapHue(panel.pickerHue) / 360),
+                    saturation: 1,
+                    brightness: 1
+                )
+            )
+            .overlay {
+                LinearGradient(
+                    colors: [.white, .clear],
+                    startPoint: .leading,
+                    endPoint: .trailing
+                )
+            }
+            .overlay {
+                LinearGradient(
+                    colors: [.clear, .black],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+            }
+    }
+}
+
+struct QuickColorPickerSVImageKey: Hashable, Sendable {
     let size: Int
     let hue: Int
     let lightness: Int

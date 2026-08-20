@@ -40,4 +40,32 @@ struct SelectionMaskFeathererTests {
         )
         #expect(result == source)
     }
+
+    @Test
+    func featherFallsToZeroBeforeTheAllocatedBoundary() throws {
+        let width = 33
+        let height = 33
+        let radius = 8
+        var source = [UInt8](repeating: 0, count: width * height)
+        for y in 8..<25 {
+            for x in 8..<25 {
+                source[(y * width) + x] = 255
+            }
+        }
+
+        let result = [UInt8](try VImageSelectionMaskFeatherer.feather(
+            alphaBytes: Data(source),
+            width: width,
+            height: height,
+            radiusPixels: radius
+        ))
+        let centerRow = Array(result[(16 * width)..<(17 * width)])
+
+        #expect(centerRow[0] == 0)
+        #expect(centerRow[width - 1] == 0)
+        #expect(centerRow[1] <= 2)
+        #expect(centerRow[2] > centerRow[1])
+        #expect(centerRow[8] > centerRow[7])
+        #expect(centerRow[16] >= 250)
+    }
 }

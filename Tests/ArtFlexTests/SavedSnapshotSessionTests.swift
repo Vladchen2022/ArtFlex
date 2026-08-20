@@ -5,6 +5,21 @@ import Testing
 
 struct SavedSnapshotSessionTests {
     @Test
+    func expiredRecoveryDeadlineSchedulesARetryInTheFuture() {
+        let clock = ContinuousClock()
+        let now = clock.now
+        let expired = now.advanced(by: .seconds(-1))
+
+        let deadline = resolvedRecoveryAutosaveDeadline(
+            now: now,
+            delay: .seconds(15),
+            forcedDeadline: expired
+        )
+
+        #expect(deadline > now)
+    }
+
+    @Test
     @MainActor
     func defaultBootstrapUsesTemporaryPersistenceRootUnderSwiftTestingCLI() throws {
         guard let metalContext = MetalDeviceContext() else {
@@ -249,6 +264,35 @@ struct SavedSnapshotSessionTests {
         #expect(result.savedSnapshots.count == 1)
         #expect(result.savedSnapshots.first?.descriptor.id == savedSnapshot.id)
         #expect(result.savedSnapshots.first?.pixels == savedSnapshot.snapshot)
+    }
+
+    @Test
+    @MainActor
+    func expiredRecoveryDeadlineCommitsRetainedBrushJobsAndWritesRecovery() async throws {
+        let harness = try SavedSnapshotHarness(canvasSize: .init(width: 64, height: 64))
+        defer {
+            try? FileManager.default.removeItem(at: harness.recoveryRootURL)
+        }
+
+        harness.viewModel.beginStrokeIfNeeded()
+        harness.viewModel.applyStroke(samples: [
+            .init(location: .init(x: 12, y: 12), pressure: 1),
+            .init(location: .init(x: 48, y: 48), pressure: 1),
+        ])
+        harness.viewModel.endStroke()
+        let commandBuffer = try #require(harness.bootstrap.metalContext.commandQueue.makeCommandBuffer())
+        _ = harness.viewModel.flushPendingBrushWork(into: commandBuffer)
+        commandBuffer.commit()
+        #expect(harness.bootstrap.strokeEngine.hasPendingBrushCommitJobs)
+
+        harness.viewModel.debugExpireRecoveryAutosaveDeadlineForTests()
+        harness.viewModel.debugPerformRecoveryAutosaveNowForTests()
+        for _ in 0..<300 where !harness.viewModel.hasRecoveryProject {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+
+        #expect(harness.viewModel.hasRecoveryProject)
+        #expect(harness.bootstrap.strokeEngine.hasPendingBrushCommitJobs == false)
     }
 
     @Test

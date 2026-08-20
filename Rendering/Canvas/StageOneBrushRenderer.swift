@@ -156,6 +156,13 @@ final class OpacityCapSessionResources {
     var compoundSecondaryTexture: MTLTexture?
     var compoundSecondarySamplingState: BrushStrokeSamplingState?
     var paintMaterialTexture: MTLTexture?
+    fileprivate var initializedBaseTiles: Set<Int> = []
+    fileprivate var initializedCompoundTiles: Set<Int> = []
+    fileprivate var initializedMaterialTiles: Set<Int> = []
+
+    var debugInitializedTileCount: Int {
+        initializedBaseTiles.count
+    }
 
     init(
         originalTexture: MTLTexture,
@@ -248,6 +255,8 @@ final class StageOneBrushRenderer {
     private var cachedCompoundSecondaryCustomTipTexture: MTLTexture?
     private var cachedOpacityCapOriginalTexture: MTLTexture?
     private var cachedOpacityCapAlphaTexture: MTLTexture?
+    private var cachedOpacityCapZeroAlphaTile: MTLTexture?
+    private var cachedOpacityCapZeroColorTile: MTLTexture?
     private var cachedCompoundSecondaryTexture: MTLTexture?
     private var cachedPaintMaterialTexture: MTLTexture?
     private let reusableUniformBufferLock = NSLock()
@@ -361,21 +370,23 @@ final class StageOneBrushRenderer {
             uint3 paddingAlphaLock;
         };
 
-        float smoothHardnessAlpha(float distance, float hardness) {
-            if (distance >= 1.0) {
-                return 0.0;
-            }
+        float antialiasedUnitCoverage(float distance) {
+            float edgeWidth = max(fwidth(distance), 0.0001);
+            return 1.0 - smoothstep(1.0 - edgeWidth, 1.0 + edgeWidth, distance);
+        }
 
+        float smoothHardnessAlpha(float distance, float hardness) {
+            float outerCoverage = antialiasedUnitCoverage(distance);
             if (hardness >= 0.999) {
-                return 1.0;
+                return outerCoverage;
             }
 
             if (distance <= hardness) {
-                return 1.0;
+                return outerCoverage;
             }
 
             float t = clamp((distance - hardness) / max(1.0 - hardness, 0.0001), 0.0, 1.0);
-            return 1.0 - smoothstep(0.0, 1.0, t);
+            return (1.0 - smoothstep(0.0, 1.0, t)) * outerCoverage;
         }
 
         float tipAlphaForDescriptor(
@@ -404,7 +415,7 @@ final class StageOneBrushRenderer {
 
             if (tipShape == 2) {
                 float squareDistance = max(abs(rotatedPoint.x), abs(rotatedPoint.y));
-                return squareDistance <= 1.0 ? 1.0 : 0.0;
+                return antialiasedUnitCoverage(squareDistance);
             }
 
             if (tipShape == 1) {
@@ -420,9 +431,9 @@ final class StageOneBrushRenderer {
             if (tipShape == 3) {
                 float roundness = clamp(tipRoundness, 0.25, 1.0);
                 float2 shapedPoint = float2(rotatedPoint.x / roundness, rotatedPoint.y);
-                if (max(abs(shapedPoint.x), abs(shapedPoint.y)) >= 1.0) {
-                    return 0.0;
-                }
+                float boundaryCoverage = antialiasedUnitCoverage(
+                    max(abs(shapedPoint.x), abs(shapedPoint.y))
+                );
 
                 if (usesCustomMask) {
                     float2 uv = float2(
@@ -431,7 +442,7 @@ final class StageOneBrushRenderer {
                     );
                     float sampledAlpha = customTipMask.sample(tipSampler, uv).r;
                     float exponent = mix(3.2, 0.75, clamp(tipSoftness, 0.0, 1.0));
-                    return pow(clamp(sampledAlpha, 0.0, 1.0), exponent);
+                    return pow(clamp(sampledAlpha, 0.0, 1.0), exponent) * boundaryCoverage;
                 }
 
                 float customDistance = length(shapedPoint);
@@ -1931,7 +1942,7 @@ final class StageOneBrushRenderer {
         alphaLockTexture: MTLTexture? = nil,
         preservesAlphaWhenAlphaLocked: Bool = true,
         samplingState: inout BrushStrokeSamplingState?,
-        completion: (() -> Void)? = nil
+        completion: (@Sendable () -> Void)? = nil
     ) -> Int {
         guard let commandBuffer = commandQueue.makeCommandBuffer() else {
             completion?()
@@ -2016,8 +2027,10 @@ final class StageOneBrushRenderer {
             }
         }
 
-        clearTexture(alphaTexture, commandQueue: commandQueue)
-        copyTexture(from: texture, to: originalTexture, commandQueue: commandQueue)
+        // Session textures are initialized lazily in canvas-sized tiles when the
+        // stroke first reaches them. A stroke that touches a small region must not
+        // copy and clear the entire canvas before its first visible stamp.
+        _ = commandQueue
         return OpacityCapSessionResources(
             originalTexture: originalTexture,
             alphaTexture: alphaTexture,
@@ -2058,15 +2071,6 @@ final class StageOneBrushRenderer {
             }
         }
 
-        let clearPass = MTLRenderPassDescriptor()
-        clearPass.colorAttachments[0].texture = secondaryTexture
-        clearPass.colorAttachments[0].loadAction = .clear
-        clearPass.colorAttachments[0].storeAction = .store
-        clearPass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0)
-        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: clearPass) else {
-            return nil
-        }
-        encoder.endEncoding()
         session.compoundSecondaryTexture = secondaryTexture
         return secondaryTexture
     }
@@ -2105,15 +2109,6 @@ final class StageOneBrushRenderer {
             }
         }
 
-        let clearPass = MTLRenderPassDescriptor()
-        clearPass.colorAttachments[0].texture = materialTexture
-        clearPass.colorAttachments[0].loadAction = .clear
-        clearPass.colorAttachments[0].storeAction = .store
-        clearPass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0)
-        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: clearPass) else {
-            return nil
-        }
-        encoder.endEncoding()
         session.paintMaterialTexture = materialTexture
         return materialTexture
     }
@@ -2176,7 +2171,7 @@ final class StageOneBrushRenderer {
         alphaLockTexture: MTLTexture? = nil,
         preservesAlphaWhenAlphaLocked: Bool = true,
         samplingState: inout BrushStrokeSamplingState?,
-        completion: (() -> Void)? = nil
+        completion: (@Sendable () -> Void)? = nil
     ) -> Int {
         guard let commandBuffer = commandQueue.makeCommandBuffer() else {
             completion?()
@@ -2393,6 +2388,16 @@ final class StageOneBrushRenderer {
             )
             : nil
         if usesPaintMaterialTexture, paintMaterialTexture == nil {
+            return 0
+        }
+        guard prepareOpacityCapTiles(
+            in: dirtyRect,
+            session: session,
+            workingTexture: texture,
+            compoundSecondaryTexture: compoundSecondaryTexture,
+            paintMaterialTexture: paintMaterialTexture,
+            commandBuffer: commandBuffer
+        ) else {
             return 0
         }
 
@@ -4026,64 +4031,141 @@ final class StageOneBrushRenderer {
         return Data(destination)
     }
 
-    private func clearTexture(
-        _ texture: MTLTexture,
-        commandQueue: MTLCommandQueue,
-        waitForCompletion: Bool = false
-    ) {
-        guard let commandBuffer = commandQueue.makeCommandBuffer() else {
-            return
+    private static let opacityCapTileSize = 256
+
+    private func prepareOpacityCapTiles(
+        in dirtyRect: MTLScissorRect,
+        session: OpacityCapSessionResources,
+        workingTexture: MTLTexture,
+        compoundSecondaryTexture: MTLTexture?,
+        paintMaterialTexture: MTLTexture?,
+        commandBuffer: MTLCommandBuffer
+    ) -> Bool {
+        guard
+            let zeroAlphaTile = opacityCapZeroTile(pixelFormat: .r8Unorm),
+            paintMaterialTexture == nil || opacityCapZeroTile(pixelFormat: .bgra8Unorm_srgb) != nil,
+            let encoder = commandBuffer.makeBlitCommandEncoder()
+        else {
+            return false
         }
+        let zeroColorTile = paintMaterialTexture == nil
+            ? nil
+            : opacityCapZeroTile(pixelFormat: .bgra8Unorm_srgb)
+        let tileSize = Self.opacityCapTileSize
+        let tilesAcross = (workingTexture.width + tileSize - 1) / tileSize
+        let firstTileX = dirtyRect.x / tileSize
+        let firstTileY = dirtyRect.y / tileSize
+        let lastTileX = (dirtyRect.x + dirtyRect.width - 1) / tileSize
+        let lastTileY = (dirtyRect.y + dirtyRect.height - 1) / tileSize
 
-        let descriptor = MTLRenderPassDescriptor()
-        descriptor.colorAttachments[0].texture = texture
-        descriptor.colorAttachments[0].loadAction = .clear
-        descriptor.colorAttachments[0].storeAction = .store
-        descriptor.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
+        for tileY in firstTileY...lastTileY {
+            for tileX in firstTileX...lastTileX {
+                let tileID = (tileY * tilesAcross) + tileX
+                let origin = MTLOrigin(x: tileX * tileSize, y: tileY * tileSize, z: 0)
+                let size = MTLSize(
+                    width: min(tileSize, workingTexture.width - origin.x),
+                    height: min(tileSize, workingTexture.height - origin.y),
+                    depth: 1
+                )
 
-        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: descriptor) else {
-            return
+                if session.initializedBaseTiles.insert(tileID).inserted {
+                    encoder.copy(
+                        from: workingTexture,
+                        sourceSlice: 0,
+                        sourceLevel: 0,
+                        sourceOrigin: origin,
+                        sourceSize: size,
+                        to: session.originalTexture,
+                        destinationSlice: 0,
+                        destinationLevel: 0,
+                        destinationOrigin: origin
+                    )
+                    encoder.copy(
+                        from: zeroAlphaTile,
+                        sourceSlice: 0,
+                        sourceLevel: 0,
+                        sourceOrigin: .init(x: 0, y: 0, z: 0),
+                        sourceSize: size,
+                        to: session.alphaTexture,
+                        destinationSlice: 0,
+                        destinationLevel: 0,
+                        destinationOrigin: origin
+                    )
+                }
+
+                if let compoundSecondaryTexture,
+                   session.initializedCompoundTiles.insert(tileID).inserted {
+                    encoder.copy(
+                        from: zeroAlphaTile,
+                        sourceSlice: 0,
+                        sourceLevel: 0,
+                        sourceOrigin: .init(x: 0, y: 0, z: 0),
+                        sourceSize: size,
+                        to: compoundSecondaryTexture,
+                        destinationSlice: 0,
+                        destinationLevel: 0,
+                        destinationOrigin: origin
+                    )
+                }
+
+                if let paintMaterialTexture, let zeroColorTile,
+                   session.initializedMaterialTiles.insert(tileID).inserted {
+                    encoder.copy(
+                        from: zeroColorTile,
+                        sourceSlice: 0,
+                        sourceLevel: 0,
+                        sourceOrigin: .init(x: 0, y: 0, z: 0),
+                        sourceSize: size,
+                        to: paintMaterialTexture,
+                        destinationSlice: 0,
+                        destinationLevel: 0,
+                        destinationOrigin: origin
+                    )
+                }
+            }
         }
-
         encoder.endEncoding()
-        commandBuffer.commit()
-        
-        // ⚡️ 优化：可选择是否同步等待
-        if waitForCompletion {
-            commandBuffer.waitUntilCompleted()
-        }
+        return true
     }
 
-    private func copyTexture(
-        from sourceTexture: MTLTexture,
-        to destinationTexture: MTLTexture,
-        commandQueue: MTLCommandQueue,
-        waitForCompletion: Bool = false
-    ) {
-        guard
-            let commandBuffer = commandQueue.makeCommandBuffer(),
-            let blitEncoder = commandBuffer.makeBlitCommandEncoder()
-        else {
-            return
+    private func opacityCapZeroTile(pixelFormat: MTLPixelFormat) -> MTLTexture? {
+        if pixelFormat == .r8Unorm, let cachedOpacityCapZeroAlphaTile {
+            return cachedOpacityCapZeroAlphaTile
+        }
+        if pixelFormat == .bgra8Unorm_srgb, let cachedOpacityCapZeroColorTile {
+            return cachedOpacityCapZeroColorTile
         }
 
-        blitEncoder.copy(
-            from: sourceTexture,
-            sourceSlice: 0,
-            sourceLevel: 0,
-            sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
-            sourceSize: MTLSize(width: sourceTexture.width, height: sourceTexture.height, depth: 1),
-            to: destinationTexture,
-            destinationSlice: 0,
-            destinationLevel: 0,
-            destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: pixelFormat,
+            width: Self.opacityCapTileSize,
+            height: Self.opacityCapTileSize,
+            mipmapped: false
         )
-        blitEncoder.endEncoding()
-        commandBuffer.commit()
-        
-        // ⚡️ 优化：可选择是否同步等待
-        if waitForCompletion {
-            commandBuffer.waitUntilCompleted()
+        descriptor.usage = [.shaderRead]
+        descriptor.storageMode = .shared
+        guard let texture = device.makeTexture(descriptor: descriptor) else {
+            return nil
         }
+        let bytesPerPixel = pixelFormat == .r8Unorm ? 1 : 4
+        let bytesPerRow = Self.opacityCapTileSize * bytesPerPixel
+        let zeroBytes = Data(
+            repeating: 0,
+            count: bytesPerRow * Self.opacityCapTileSize
+        )
+        zeroBytes.withUnsafeBytes { bytes in
+            texture.replace(
+                region: MTLRegionMake2D(0, 0, Self.opacityCapTileSize, Self.opacityCapTileSize),
+                mipmapLevel: 0,
+                withBytes: bytes.baseAddress!,
+                bytesPerRow: bytesPerRow
+            )
+        }
+        if pixelFormat == .r8Unorm {
+            cachedOpacityCapZeroAlphaTile = texture
+        } else {
+            cachedOpacityCapZeroColorTile = texture
+        }
+        return texture
     }
 }

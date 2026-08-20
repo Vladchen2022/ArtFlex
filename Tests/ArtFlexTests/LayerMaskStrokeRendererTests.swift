@@ -110,6 +110,42 @@ struct LayerMaskStrokeRendererTests {
         #expect(readMask(texture)[(24 * 48) + 24] < 10)
     }
 
+    @Test
+    func highFrequencyMaskPacketsRemainContinuousAcrossCommandBuffers() throws {
+        let device = try #require(MTLCreateSystemDefaultDevice())
+        let queue = try #require(device.makeCommandQueue())
+        let renderer = try LayerMaskStrokeRenderer(device: device)
+        var brush = BrushSettings.stageOneDefault
+        brush.size = 14
+        brush.opacity = 1
+        brush.tipShape = .hardRound
+        brush.pressureSizeAmount = 0
+        brush.pressureOpacityAmount = 0
+        let texture = try makeMaskTexture(device: device, width: 256, height: 64)
+
+        var previous: CanvasStrokeSample?
+        for x in stride(from: 12, through: 244, by: 2) {
+            let current = CanvasStrokeSample(location: .init(x: Double(x), y: 32), pressure: 1)
+            let samples = previous.map { [$0, current] } ?? [current]
+            _ = renderer.render(
+                samples: samples,
+                brush: brush,
+                targetValue: 1,
+                into: texture,
+                commandQueue: queue
+            )
+            previous = current
+        }
+        let fence = try #require(queue.makeCommandBuffer())
+        fence.commit()
+        fence.waitUntilCompleted()
+
+        let bytes = readMask(texture)
+        for x in 12...244 {
+            #expect(bytes[(32 * 256) + x] > 245)
+        }
+    }
+
     private func makeMaskTexture(device: MTLDevice, width: Int, height: Int) throws -> MTLTexture {
         let descriptor = MTLTextureDescriptor.texture2DDescriptor(
             pixelFormat: .r8Unorm,

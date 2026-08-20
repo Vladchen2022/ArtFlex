@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 import Testing
 @testable import ArtFlex
@@ -91,5 +92,50 @@ struct QuickColorPickerHUDTests {
             shouldCancel: { true }
         )
         #expect(image == nil)
+    }
+
+    @Test
+    @MainActor
+    func svImageCacheKeepsMultiplePickerSizesWarm() throws {
+        let cache = ColorPickerDisplayImageCache.shared
+        cache.removeAllSVImagesForTesting()
+        var buildCount = 0
+        var panel = ColorPanelState.stageOneDefault
+        panel.pickerHue = 143
+
+        func build(size: Int) -> CGImage? {
+            buildCount += 1
+            return makeColorPickerSVImage(size: size, panel: panel)
+        }
+
+        _ = try #require(cache.svImage(size: 64, panel: panel) { build(size: 64) })
+        _ = try #require(cache.svImage(size: 128, panel: panel) { build(size: 128) })
+        _ = try #require(cache.svImage(size: 64, panel: panel) { build(size: 64) })
+
+        #expect(buildCount == 2)
+    }
+
+    @Test
+    @MainActor
+    func hudSVImageCanBePreparedBeforePresentation() async throws {
+        let cache = ColorPickerDisplayImageCache.shared
+        cache.removeAllSVImagesForTesting()
+        var panel = ColorPanelState.stageOneDefault
+        panel.pickerHue = 271
+
+        #expect(cachedSharedColorPickerSVImage(
+            size: QuickColorPickerLayout.svRasterSize,
+            panel: panel
+        ) == nil)
+
+        _ = try #require(await prepareSharedColorPickerSVImage(
+            size: QuickColorPickerLayout.svRasterSize,
+            panel: panel
+        ))
+
+        #expect(cachedSharedColorPickerSVImage(
+            size: QuickColorPickerLayout.svRasterSize,
+            panel: panel
+        ) != nil)
     }
 }

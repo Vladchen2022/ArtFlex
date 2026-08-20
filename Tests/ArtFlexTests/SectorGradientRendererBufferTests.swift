@@ -68,6 +68,42 @@ struct SectorGradientRendererBufferTests {
         #expect(secondLeft.alpha < 0.1)
         #expect(secondRight.alpha > 0.9)
     }
+
+    @Test
+    func completedSectorPreviewsKeepTheReusableVertexPoolBounded() throws {
+        guard let metal = MetalDeviceContext() else {
+            Issue.record("Metal unavailable")
+            return
+        }
+        let renderer = SectorGradientRenderer(device: metal.device)
+        let target = try #require(makeRenderTarget(device: metal.device, width: 16, height: 16))
+
+        for pointCount in [800, 1_600, 3_200, 6_400, 12_800, 25_600, 51_200, 102_400] {
+            let commandBuffer = try #require(metal.commandQueue.makeCommandBuffer())
+            let points = (0..<pointCount).map { index in
+                let angle = (Double(index) / Double(pointCount - 1)) * Double.pi * 2
+                return CanvasPoint(
+                    x: 8 + (cos(angle) * 7),
+                    y: 8 + (sin(angle) * 7)
+                )
+            }
+            renderer.encode(
+                into: renderPass(for: target),
+                commandBuffer: commandBuffer,
+                canvasSize: CanvasSize(width: 16, height: 16),
+                center: CanvasPoint(x: 8, y: 8),
+                pathPoints: points,
+                maxRadius: 8,
+                color: .black
+            )
+            commandBuffer.commit()
+            commandBuffer.waitUntilCompleted()
+        }
+
+        let stats = renderer.debugReusableVertexBufferPoolStats()
+        #expect(stats.count <= 6)
+        #expect(stats.bytes <= 8 * 1024 * 1024)
+    }
 }
 
 private func makeRenderTarget(device: MTLDevice, width: Int, height: Int) -> MTLTexture? {

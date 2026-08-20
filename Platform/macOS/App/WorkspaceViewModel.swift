@@ -3,6 +3,21 @@ import SwiftUI
 import os
 @preconcurrency import Metal
 
+func resolvedRecoveryAutosaveDeadline(
+    now: ContinuousClock.Instant,
+    delay: Duration,
+    forcedDeadline: ContinuousClock.Instant?
+) -> ContinuousClock.Instant {
+    let requestedDeadline = now.advanced(by: delay)
+    guard let forcedDeadline, forcedDeadline > now else {
+        // An expired maximum-deferral deadline is a signal to try autosaving now,
+        // not a deadline that should be reused for every retry. Reusing it creates
+        // an immediate task loop whenever the document is temporarily unsafe.
+        return requestedDeadline
+    }
+    return min(requestedDeadline, forcedDeadline)
+}
+
 private func emitSelectionTraceViewModel(_ message: String) {
     appendSelectionTrace(message)
 }
@@ -59,6 +74,19 @@ enum ProjectSaveIndicatorState: Equatable {
     case saved
     case notYetSaved
     case saving
+}
+
+private final class PatternPlacementTextureCacheEntry {
+    let texture: MTLTexture
+
+    init(texture: MTLTexture) {
+        self.texture = texture
+    }
+}
+
+@MainActor
+final class QuickColorPickerPresentationProxy: ObservableObject {
+    @Published fileprivate(set) var state: QuickColorPickerState?
 }
 
 @MainActor
@@ -165,7 +193,9 @@ final class WorkspaceViewModel: ObservableObject {
     @Published private(set) var hasUnsavedChanges = false {
         didSet {
             if hasUnsavedChanges {
-                scheduleRecoveryAutosave()
+                if !isSuppressingRecoveryAutosaveScheduling {
+                    scheduleRecoveryAutosave()
+                }
             } else {
                 recoveryAutosaveGeneration &+= 1
                 recoveryAutosaveTask?.cancel()
@@ -306,7 +336,12 @@ final class WorkspaceViewModel: ObservableObject {
     @Published private(set) var savedSnapshots: [CanvasSavedSnapshot] = []
     @Published private(set) var ideationSession: IdeationSessionState?
     @Published private(set) var snapshotCompareSession: SnapshotCompareSessionState?
-    @Published private(set) var quickColorPickerState: QuickColorPickerState?
+    let quickColorPickerPresentation = QuickColorPickerPresentationProxy()
+    private(set) var quickColorPickerState: QuickColorPickerState? {
+        didSet {
+            quickColorPickerPresentation.state = quickColorPickerState
+        }
+    }
     @Published var recentBrushAdjustmentRedrawRevision: UInt64 = 0
     @Published private(set) var isWorkspaceChromeHidden = false
     @Published var colorAdjustmentOverlayState = ColorAdjustmentOverlayState.inactive
@@ -334,13 +369,20 @@ final class WorkspaceViewModel: ObservableObject {
     private var shouldResumeTimelapseAfterSnapshotCompare = false
     private var snapshotPreviewPreparationTasks: [UUID: Task<Void, Never>] = [:]
     private var frozenSnapshotPreviewPreparationTask: Task<Void, Never>?
-    private var patternPlacementTextureCache: [UUID: MTLTexture] = [:]
+    private let patternPlacementTextureCache: NSCache<NSUUID, PatternPlacementTextureCacheEntry> = {
+        let cache = NSCache<NSUUID, PatternPlacementTextureCacheEntry>()
+        cache.countLimit = 8
+        cache.totalCostLimit = 256 * 1024 * 1024
+        cache.name = "ArtFlex.PatternPlacementTextures"
+        return cache
+    }()
     private var referenceImageUpgradeTasks: [Int: Task<Void, Never>] = [:]
     private var recoveryAutosaveTask: Task<Void, Never>?
     private var recoveryAutosaveWriteTask: Task<Void, Never>?
     private var projectSaveTask: Task<Void, Never>?
     private var recoveryAutosaveGeneration: UInt64 = 0
     private var recoveryAutosaveForcedDeadline: ContinuousClock.Instant?
+    private var isSuppressingRecoveryAutosaveScheduling = false
     private static let recoveryAutosaveMaximumDeferral: Duration = .seconds(120)
     private var deferredGradientAction: DeferredGradientAction?
     private let selectionTraceLogger = Logger(subsystem: "ArtFlex", category: "SelectionTrace")
@@ -399,6 +441,10 @@ final class WorkspaceViewModel: ObservableObject {
         recoveryAutosaveTask = nil
         recoveryAutosaveGeneration &+= 1
         performRecoveryAutosave(generation: recoveryAutosaveGeneration)
+    }
+
+    func debugExpireRecoveryAutosaveDeadlineForTests() {
+        recoveryAutosaveForcedDeadline = ContinuousClock().now.advanced(by: .seconds(-1))
     }
 #endif
 
@@ -4455,7 +4501,7 @@ final class WorkspaceViewModel: ObservableObject {
             didDelete = library.removeItem(id: itemID)
         }
         if didDelete {
-            patternPlacementTextureCache.removeValue(forKey: itemID)
+            patternPlacementTextureCache.removeObject(forKey: itemID as NSUUID)
             if patternPlacementPhase.itemID == itemID {
                 patternPlacementPhase = .idle
             }
@@ -4514,8 +4560,9 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func patternPlacementTexture(for itemID: UUID) -> MTLTexture? {
-        if let cached = patternPlacementTextureCache[itemID] {
-            return cached
+        let cacheKey = itemID as NSUUID
+        if let cached = patternPlacementTextureCache.object(forKey: cacheKey) {
+            return cached.texture
         }
 
         guard let item = workspace.patternLibrary.item(id: itemID),
@@ -4547,9 +4594,23 @@ final class WorkspaceViewModel: ObservableObject {
             )
         }
         texture.label = "PatternPlacement-\(itemID.uuidString)"
-        patternPlacementTextureCache[itemID] = texture
+        let textureCost = decodedImage.width * decodedImage.height * 4
+        patternPlacementTextureCache.setObject(
+            PatternPlacementTextureCacheEntry(texture: texture),
+            forKey: cacheKey,
+            cost: textureCost
+        )
         return texture
     }
+
+#if DEBUG
+    var debugPatternPlacementTextureCacheLimits: (count: Int, cost: Int) {
+        (
+            count: patternPlacementTextureCache.countLimit,
+            cost: patternPlacementTextureCache.totalCostLimit
+        )
+    }
+#endif
 
     func beginPatternPlacementDrag(at point: CanvasPoint, placeIntoNewLayer: Bool = false) {
         if case .adjusting(let draft) = patternPlacementPhase {
@@ -11538,6 +11599,13 @@ final class WorkspaceViewModel: ObservableObject {
     func handleKeyDown(_ event: NSEvent) -> Bool {
         let normalizedModifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
 
+        // The momentary HUD must stay on the shortest possible event path. In particular,
+        // do not make it wait behind tool/session-specific keyboard dispatch.
+        if shortcutSettings.quickColorPickerShortcut.matchesKeyDown(event) {
+            armQuickColorPickerShortcutIfNeeded()
+            return true
+        }
+
         if toggleSmartSelectionDisplayModeIfPossible(event) {
             return true
         }
@@ -11598,11 +11666,6 @@ final class WorkspaceViewModel: ObservableObject {
         if normalizedModifiers.isEmpty,
            event.charactersIgnoringModifiers?.lowercased() == "a" {
             toggleLayerTransparentPixelLock(workspace.document.activeLayerID)
-            return true
-        }
-
-        if shortcutSettings.quickColorPickerShortcut.matchesKeyDown(event) {
-            armQuickColorPickerShortcutIfNeeded()
             return true
         }
 
@@ -11925,6 +11988,25 @@ final class WorkspaceViewModel: ObservableObject {
         )
         syncSelectionOverlayProxy()
         scheduleWholeLayerInteractionBoundsRefreshIfNeeded(for: state)
+    }
+
+    /// GPU content changed without a WorkspaceState mutation. Publish only the
+    /// render snapshot so high-frequency preview packets do not invalidate the
+    /// entire SwiftUI inspector hierarchy. The stroke-end path performs the
+    /// normal full refresh and history/capability synchronization.
+    private func refreshCanvasContentOnly() {
+        let state = bootstrap.workspaceStore.state
+        let previousSceneSnapshot = sceneSnapshot
+        let updatedSceneSnapshot = currentSceneSnapshot(for: state)
+        sceneSnapshot = updatedSceneSnapshot
+        scheduleNavigatorPreviewRefreshIfSourceChanged(
+            previousSceneSnapshot: previousSceneSnapshot,
+            currentSceneSnapshot: updatedSceneSnapshot
+        )
+        scheduleLuminosityCaptureIfSourceChanged(
+            previousSceneSnapshot: previousSceneSnapshot,
+            currentSceneSnapshot: updatedSceneSnapshot
+        )
     }
 
     /// 仅同步 toolSession 相关状态（画笔大小、不透明度、颜色等），
@@ -12263,7 +12345,7 @@ final class WorkspaceViewModel: ObservableObject {
         )
         lastLayerMaskStrokeSample = samples.last
         canvasContentRevision &+= 1
-        refreshLightweight(reason: "layerMask.strokePreview")
+        refreshCanvasContentOnly()
         return true
     }
 
@@ -13633,15 +13715,16 @@ final class WorkspaceViewModel: ObservableObject {
 
     private func scheduleRecoveryAutosave(delay: Duration = .seconds(30)) {
         let clock = ContinuousClock()
+        let now = clock.now
         if recoveryAutosaveForcedDeadline == nil {
-            recoveryAutosaveForcedDeadline = clock.now.advanced(
+            recoveryAutosaveForcedDeadline = now.advanced(
                 by: Self.recoveryAutosaveMaximumDeferral
             )
         }
-        let requestedDeadline = clock.now.advanced(by: delay)
-        let deadline = min(
-            requestedDeadline,
-            recoveryAutosaveForcedDeadline ?? requestedDeadline
+        let deadline = resolvedRecoveryAutosaveDeadline(
+            now: now,
+            delay: delay,
+            forcedDeadline: recoveryAutosaveForcedDeadline
         )
         recoveryAutosaveGeneration &+= 1
         let generation = recoveryAutosaveGeneration
@@ -13680,11 +13763,31 @@ final class WorkspaceViewModel: ObservableObject {
             straightLineState.phase != .pending,
             colorAdjustmentSession == nil,
             curveAdjustmentSession == nil,
-            !bootstrap.strokeEngine.hasPendingBrushWork,
-            !bootstrap.strokeEngine.hasPendingBrushCommitJobs
+            !bootstrap.strokeEngine.hasPendingBrushWork
         else {
             scheduleRecoveryAutosave(delay: .seconds(15))
             return
+        }
+
+        if bootstrap.strokeEngine.hasPendingBrushCommitJobs {
+            let now = ContinuousClock().now
+            if let forcedDeadline = recoveryAutosaveForcedDeadline,
+               now < forcedDeadline {
+                scheduleRecoveryAutosave(delay: .seconds(15))
+                return
+            }
+
+            // Recent brush jobs are intentionally retained for short-lived
+            // post-stroke adjustment. Once maximum autosave deferral expires,
+            // commit them at this idle boundary so recovery can represent the
+            // visible canvas instead of retrying forever.
+            isSuppressingRecoveryAutosaveScheduling = true
+            _ = flushBrushEditingBoundary(reason: "recoveryAutosave.maximumDeferral")
+            isSuppressingRecoveryAutosaveScheduling = false
+            guard !bootstrap.strokeEngine.hasPendingBrushCommitJobs else {
+                scheduleRecoveryAutosave(delay: .seconds(15))
+                return
+            }
         }
 
         do {
@@ -17973,7 +18076,9 @@ final class WorkspaceViewModel: ObservableObject {
         quickColorPickerDraftState = state
         quickColorPickerState = state
         isRecentBrushSelectionHighlightActive = false
-        syncRecentBrushAdjustmentState(showsSelectionHighlight: false)
+        // Opening the HUD is presentation-only. Recent-brush Metal replay is
+        // performed only after the user changes one of its adjustment controls.
+        // Keeping it out of this key-down path makes HUD presentation constant-time.
     }
 
     private func previewQuickColorPickerState(_ state: QuickColorPickerState) {

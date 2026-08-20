@@ -183,16 +183,20 @@ struct ProjectArchiveReadLimits: Sendable, Equatable {
     var maximumLayerCount: Int
     var maximumReferenceImageCount: Int
     var maximumSavedSnapshotCount: Int
+    var maximumCanvasEdge: Int
+    var maximumCanvasPixelCount: Int
 
     static let standard = ProjectArchiveReadLimits(
         maximumManifestBytes: 8 * 1024 * 1024,
         maximumProjectStateBytes: 64 * 1024 * 1024,
-        maximumStoredAssetBytes: 2 * 1024 * 1024 * 1024,
-        maximumUncompressedAssetBytes: 4 * 1024 * 1024 * 1024,
-        maximumTotalUncompressedBytes: 8 * 1024 * 1024 * 1024,
+        maximumStoredAssetBytes: 512 * 1024 * 1024,
+        maximumUncompressedAssetBytes: 512 * 1024 * 1024,
+        maximumTotalUncompressedBytes: 2 * 1024 * 1024 * 1024,
         maximumLayerCount: 4_096,
         maximumReferenceImageCount: ProjectReferenceImageDescriptor.maximumSlotCount,
-        maximumSavedSnapshotCount: 6
+        maximumSavedSnapshotCount: 6,
+        maximumCanvasEdge: CanvasCapacityPolicy.standard.maximumEdge,
+        maximumCanvasPixelCount: CanvasCapacityPolicy.standard.maximumPixelCount
     )
 }
 
@@ -717,11 +721,12 @@ final class ProjectArchiveV2Reader {
         guard package.layerSnapshots.isEmpty else {
             throw ProjectArchiveV2Error.projectStateContainsInlineLayerSnapshots
         }
+        try validateCanvasSize(package.document.canvasSize)
 
         var layerSnapshots: [LayerHistorySnapshot] = []
         layerSnapshots.reserveCapacity(manifest.layers.count)
         for layer in manifest.layers {
-            try validate(layer)
+            try validate(layer, canvasSize: package.document.canvasSize)
             try reserveUncompressedBytes(layer.asset.uncompressedByteCount)
             let pixelData = try readAsset(
                 layer.asset,
@@ -892,20 +897,45 @@ final class ProjectArchiveV2Reader {
         }
     }
 
-    private func validate(_ layer: ProjectArchiveLayerDescriptor) throws {
+    private func validateCanvasSize(_ canvasSize: CanvasSize) throws {
+        let (pixelCount, overflow) = canvasSize.width.multipliedReportingOverflow(
+            by: canvasSize.height
+        )
+        guard
+            !overflow,
+            canvasSize.width > 0,
+            canvasSize.height > 0,
+            canvasSize.width <= limits.maximumCanvasEdge,
+            canvasSize.height <= limits.maximumCanvasEdge,
+            pixelCount <= limits.maximumCanvasPixelCount
+        else {
+            throw ProjectArchiveV2Error.malformedProjectState("画布尺寸超出读取上限")
+        }
+    }
+
+    private func validate(
+        _ layer: ProjectArchiveLayerDescriptor,
+        canvasSize: CanvasSize
+    ) throws {
         let bytesPerPixel = layer.resourceKind == .mask ? 1 : 4
         let expectedPixelFormat: ProjectArchivePixelFormat = layer.resourceKind == .mask
             ? .grayscale8Unorm
             : .premultipliedBGRA8SRGB
         let (expectedBytesPerRow, rowOverflow) = layer.width.multipliedReportingOverflow(by: bytesPerPixel)
         let (expectedByteCount, countOverflow) = layer.bytesPerRow.multipliedReportingOverflow(by: layer.height)
+        let (maxX, xOverflow) = layer.originX.addingReportingOverflow(layer.width)
+        let (maxY, yOverflow) = layer.originY.addingReportingOverflow(layer.height)
         guard
             !rowOverflow,
             !countOverflow,
+            !xOverflow,
+            !yOverflow,
             layer.originX >= 0,
             layer.originY >= 0,
             layer.width > 0,
             layer.height > 0,
+            maxX <= canvasSize.width,
+            maxY <= canvasSize.height,
             layer.bytesPerRow == expectedBytesPerRow,
             layer.asset.uncompressedByteCount == expectedByteCount,
             layer.pixelFormat == expectedPixelFormat

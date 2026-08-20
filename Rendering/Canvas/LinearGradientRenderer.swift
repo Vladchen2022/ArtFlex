@@ -370,7 +370,7 @@ final class LinearGradientRenderer {
             usesAlphaLock: alphaLockTexture == nil ? 0 : 1
         )
         let resolvedSettings = settings ?? .currentColorToTransparent(color)
-        var gradientStops = resolvedSettings.stops.map { stop in
+        let gradientStops = resolvedSettings.stops.map { stop in
             GradientGPUStop(
                 positionAndPadding: SIMD4(stop.position, 0, 0, 0),
                 color: SIMD4(stop.color.red, stop.color.green, stop.color.blue, stop.color.alpha)

@@ -34,6 +34,85 @@ private final class SectorGradientVertexBufferLease: @unchecked Sendable {
     }
 }
 
+private final class SectorGradientVertexBufferPool: @unchecked Sendable {
+    private static let maxReusableCount = 6
+    private static let maxReusableBytes = 8 * 1024 * 1024
+
+    private let device: MTLDevice
+    private let lock = NSLock()
+    private var leases: [SectorGradientVertexBufferLease] = []
+
+    init(device: MTLDevice) {
+        self.device = device
+    }
+
+    func lease(vertices: [SectorGradientVertex]) -> SectorGradientVertexBufferLease? {
+        let length = MemoryLayout<SectorGradientVertex>.stride * vertices.count
+        guard length > 0 else { return nil }
+
+        lock.lock()
+        let lease: SectorGradientVertexBufferLease?
+        if let reusable = leases
+            .filter({ !$0.isInUse && $0.capacity >= length })
+            .min(by: { $0.capacity < $1.capacity }) {
+            reusable.isInUse = true
+            lease = reusable
+        } else {
+            let capacity = max(length, 16 * 1024)
+            if let buffer = device.makeBuffer(length: capacity, options: .storageModeShared) {
+                let created = SectorGradientVertexBufferLease(buffer: buffer, capacity: capacity)
+                created.isInUse = true
+                leases.append(created)
+                lease = created
+            } else {
+                lease = nil
+            }
+        }
+        lock.unlock()
+
+        guard let lease else { return nil }
+        vertices.withUnsafeBytes { rawBuffer in
+            guard let sourceBaseAddress = rawBuffer.baseAddress else { return }
+            lease.buffer.contents().copyMemory(
+                from: sourceBaseAddress,
+                byteCount: rawBuffer.count
+            )
+        }
+        return lease
+    }
+
+    func release(_ lease: SectorGradientVertexBufferLease) {
+        lock.lock()
+        lease.isInUse = false
+        trimLocked()
+        lock.unlock()
+    }
+
+    private func trimLocked() {
+        var retainedBytes = leases.reduce(0) { $0 + $1.capacity }
+        while leases.count > Self.maxReusableCount || retainedBytes > Self.maxReusableBytes {
+            guard let removalIndex = leases.indices
+                .filter({ !leases[$0].isInUse })
+                .max(by: { leases[$0].capacity < leases[$1].capacity }) else {
+                return
+            }
+            retainedBytes -= leases[removalIndex].capacity
+            leases.remove(at: removalIndex)
+        }
+    }
+
+#if DEBUG
+    func debugStats() -> (count: Int, bytes: Int) {
+        lock.lock()
+        defer { lock.unlock() }
+        return (
+            count: leases.count,
+            bytes: leases.reduce(0) { $0 + $1.capacity }
+        )
+    }
+#endif
+}
+
 enum SectorGradientMaskQuality {
     case preview
     case commit
@@ -94,11 +173,11 @@ final class SectorGradientRenderer {
     private var cachedSelectionMaskShape: SelectionShape?
     private var cachedSelectionMaskCanvasSize: CanvasSize?
     private var cachedSelectionMaskTexture: MTLTexture?
-    private let vertexBufferLeaseLock = NSLock()
-    private var vertexBufferLeases: [SectorGradientVertexBufferLease] = []
+    private let vertexBufferPool: SectorGradientVertexBufferPool
 
     init(device: MTLDevice) {
         self.device = device
+        self.vertexBufferPool = SectorGradientVertexBufferPool(device: device)
         let source = """
         #include <metal_stdlib>
         using namespace metal;
@@ -420,13 +499,13 @@ final class SectorGradientRenderer {
         let vertices = vertexPositions.map {
             SectorGradientVertex(position: SIMD2(Float($0.x), Float($0.y)))
         }
-        guard let vertexBufferLease = leaseVertexBuffer(vertices: vertices) else {
+        guard let vertexBufferLease = vertexBufferPool.lease(vertices: vertices) else {
             return
         }
         var shouldReleaseVertexBufferImmediately = true
         defer {
             if shouldReleaseVertexBufferImmediately {
-                releaseVertexBuffer(vertexBufferLease)
+                vertexBufferPool.release(vertexBufferLease)
             }
         }
 
@@ -476,54 +555,18 @@ final class SectorGradientRenderer {
         encoder.setFragmentTexture(alphaLockTexture ?? fallbackAlphaLockTexture, index: 1)
         encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: vertices.count)
         encoder.endEncoding()
-        commandBuffer.addCompletedHandler { [weak self] _ in
-            self?.releaseVertexBuffer(vertexBufferLease)
+        let vertexBufferPool = vertexBufferPool
+        commandBuffer.addCompletedHandler { _ in
+            vertexBufferPool.release(vertexBufferLease)
         }
         shouldReleaseVertexBufferImmediately = false
     }
 
-    private func leaseVertexBuffer(
-        vertices: [SectorGradientVertex]
-    ) -> SectorGradientVertexBufferLease? {
-        let length = MemoryLayout<SectorGradientVertex>.stride * vertices.count
-        guard length > 0 else { return nil }
-
-        vertexBufferLeaseLock.lock()
-        let lease: SectorGradientVertexBufferLease?
-        if let reusable = vertexBufferLeases
-            .filter({ !$0.isInUse && $0.capacity >= length })
-            .min(by: { $0.capacity < $1.capacity }) {
-            reusable.isInUse = true
-            lease = reusable
-        } else {
-            let capacity = max(length, 16 * 1024)
-            if let buffer = device.makeBuffer(length: capacity, options: .storageModeShared) {
-                let created = SectorGradientVertexBufferLease(buffer: buffer, capacity: capacity)
-                created.isInUse = true
-                vertexBufferLeases.append(created)
-                lease = created
-            } else {
-                lease = nil
-            }
-        }
-        vertexBufferLeaseLock.unlock()
-
-        guard let lease else { return nil }
-        vertices.withUnsafeBytes { rawBuffer in
-            guard let sourceBaseAddress = rawBuffer.baseAddress else { return }
-            lease.buffer.contents().copyMemory(
-                from: sourceBaseAddress,
-                byteCount: rawBuffer.count
-            )
-        }
-        return lease
+#if DEBUG
+    func debugReusableVertexBufferPoolStats() -> (count: Int, bytes: Int) {
+        vertexBufferPool.debugStats()
     }
-
-    private func releaseVertexBuffer(_ lease: SectorGradientVertexBufferLease) {
-        vertexBufferLeaseLock.lock()
-        lease.isInUse = false
-        vertexBufferLeaseLock.unlock()
-    }
+#endif
 
     private func makeSelectionMaskTexture(
         for selectionShape: SelectionShape?,

@@ -404,11 +404,10 @@ struct MetalCanvasHost: NSViewRepresentable {
                 return
             }
         }
-        if nsView.isPaused {
-            nsView.draw()
-        } else {
-            nsView.setNeedsDisplay(nsView.bounds)
-        }
+        // This MTKView is event-driven. Mark it dirty instead of drawing
+        // synchronously from SwiftUI's update pass so AppKit can coalesce
+        // multiple state publications into one presentation frame.
+        nsView.setNeedsDisplay(nsView.bounds)
     }
 }
 
@@ -552,17 +551,43 @@ struct PendingBrushInputBatch: Equatable {
 
 struct PendingBrushInputQueue {
     private(set) var batches: [PendingBrushInputBatch] = []
+    private var pendingSamples: [CanvasStrokeSample] = []
+    private var pendingSamplesEnqueuedAt: UInt64?
 
-    var isEmpty: Bool { batches.isEmpty }
+    var isEmpty: Bool { batches.isEmpty && pendingSamples.isEmpty }
 
     mutating func enqueue(_ kind: PendingBrushInputKind, at timestamp: UInt64 = DispatchTime.now().uptimeNanoseconds) {
-        batches.append(PendingBrushInputBatch(kind: kind, enqueuedAt: timestamp))
+        switch kind {
+        case .samples(let samples):
+            guard !samples.isEmpty else { return }
+            if pendingSamplesEnqueuedAt == nil {
+                pendingSamplesEnqueuedAt = timestamp
+            }
+            pendingSamples.append(contentsOf: samples)
+
+        case .begin, .end:
+            materializePendingSamples()
+            batches.append(PendingBrushInputBatch(kind: kind, enqueuedAt: timestamp))
+        }
     }
 
     mutating func flush() -> [PendingBrushInputBatch] {
+        materializePendingSamples()
         let pending = batches
-        batches = []
+        batches.removeAll(keepingCapacity: true)
         return pending
+    }
+
+    private mutating func materializePendingSamples() {
+        guard !pendingSamples.isEmpty else { return }
+        batches.append(
+            PendingBrushInputBatch(
+                kind: .samples(pendingSamples),
+                enqueuedAt: pendingSamplesEnqueuedAt ?? DispatchTime.now().uptimeNanoseconds
+            )
+        )
+        pendingSamples.removeAll(keepingCapacity: true)
+        pendingSamplesEnqueuedAt = nil
     }
 }
 
@@ -952,7 +977,6 @@ final class StrokeCaptureMTKView: MTKView {
         selectionRefinementRequestHandler?(.feather)
     }
 
-    private let debugDisableMouseCoalescingDuringStroke = true
     private let debugForceConstantPressure = false
     private let debugBypassStartupPressureSmoothing = false
     private let debugLogFirstRawSamples = true
@@ -1257,7 +1281,7 @@ final class StrokeCaptureMTKView: MTKView {
             return
         }
 
-        beginContinuousStrokeRendering()
+        beginDemandDrivenStrokeRendering()
         beginBrushStrokeDiagnostics()
         strokePacketIndex = 0
         strokeInputSampleCount = 0
@@ -1902,16 +1926,11 @@ final class StrokeCaptureMTKView: MTKView {
         isBrushStrokeActive = true
         sawTabletAuxiliaryEvent = false
         brushDebugRecords = []
-        if debugDisableMouseCoalescingDuringStroke {
-            previousMouseCoalescingEnabled = NSEvent.isMouseCoalescingEnabled
-            NSEvent.isMouseCoalescingEnabled = false
-            if RuntimeDiagnostics.brushHotPathLoggingEnabled {
-                brushStrokeLogger.debug("[brush-feel] mouseCoalescingDisabled=\(!NSEvent.isMouseCoalescingEnabled, privacy: .public)")
-                brushStrokeLogger.debug(
-                    "[coalescing] begin previous=\(String(describing: self.previousMouseCoalescingEnabled), privacy: .public) current=\(NSEvent.isMouseCoalescingEnabled, privacy: .public)"
-                )
-            }
-        }
+        // AppKit's default coalescing drops intermediate drag positions. Keep the
+        // raw geometry and let PendingBrushInputQueue batch it once per display
+        // frame; this preserves curved edges without returning to per-event GPU work.
+        previousMouseCoalescingEnabled = NSEvent.isMouseCoalescingEnabled
+        NSEvent.isMouseCoalescingEnabled = false
     }
 
     private func endBrushStrokeDiagnostics() {
@@ -1949,15 +1968,9 @@ final class StrokeCaptureMTKView: MTKView {
 
         if let previousMouseCoalescingEnabled {
             NSEvent.isMouseCoalescingEnabled = previousMouseCoalescingEnabled
-            if diagnosticsEnabled {
-                brushStrokeLogger.debug("[brush-feel] restoredMouseCoalescing=\(NSEvent.isMouseCoalescingEnabled == previousMouseCoalescingEnabled, privacy: .public)")
-                brushStrokeLogger.debug(
-                    "[coalescing] end restored=\(previousMouseCoalescingEnabled, privacy: .public) current=\(NSEvent.isMouseCoalescingEnabled, privacy: .public)"
-                )
-            }
         }
-
         previousMouseCoalescingEnabled = nil
+
         isBrushStrokeActive = false
         sawTabletAuxiliaryEvent = false
         brushDebugRecords = []
@@ -2171,11 +2184,19 @@ final class StrokeCaptureMTKView: MTKView {
         setNeedsDisplay(bounds)
     }
 
-    private func beginContinuousStrokeRendering() {
+    func beginDemandDrivenStrokeRendering() {
         continuousStrokeRenderGraceWorkItem?.cancel()
         continuousStrokeRenderGraceWorkItem = nil
-        enableSetNeedsDisplay = false
-        isPaused = false
+        // Brush input already invalidates the view for every event. Keeping MTKView
+        // in its continuous loop here can enqueue display frames faster than the
+        // drawable is presented, which eventually blocks `currentDrawable` on the
+        // main thread and makes later pointer events arrive tens of milliseconds
+        // late. Demand-driven MTKView drawing coalesces repeated invalidations into
+        // the next display refresh while the pending input queue preserves every
+        // stroke sample.
+        enableSetNeedsDisplay = true
+        isPaused = true
+        setNeedsDisplay(bounds)
     }
 
     private func endContinuousStrokeRendering() {
@@ -2711,11 +2732,7 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
     func draw(in view: MTKView) {
         let diagnosticsEnabled = RuntimeDiagnostics.brushHotPathLoggingEnabled
         let drawStartNs = diagnosticsEnabled ? DispatchTime.now().uptimeNanoseconds : 0
-        guard
-            let drawable = view.currentDrawable,
-            let descriptor = view.currentRenderPassDescriptor,
-            let commandBuffer = metalContext.commandQueue.makeCommandBuffer()
-        else {
+        guard let offscreenCommandBuffer = metalContext.commandQueue.makeCommandBuffer() else {
             return
         }
 
@@ -2725,10 +2742,37 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
         } else {
             flushedInputBatchCount = 0
         }
-        let liveFlushMetrics = onFlushPendingBrushWork(commandBuffer)
+        let liveFlushMetrics = onFlushPendingBrushWork(offscreenCommandBuffer)
         let hadLiveBrushWorkThisFrame =
             flushedInputBatchCount > 0 ||
             (liveFlushMetrics?.flushedPacketCount ?? 0) > 0
+        if hadLiveBrushWorkThisFrame {
+            // Submit texture updates immediately. The following presentation buffer
+            // is ordered behind this one on the same Metal command queue, so it sees
+            // the new pixels without a CPU wait or an early drawable acquisition.
+            offscreenCommandBuffer.commit()
+        }
+
+        var presentationCommandBuffer = offscreenCommandBuffer
+        if hadLiveBrushWorkThisFrame {
+            guard let nextCommandBuffer = metalContext.commandQueue.makeCommandBuffer() else {
+                scheduleInteractiveBrushCommitDrain(hadLiveBrushWorkThisFrame: true)
+                return
+            }
+            presentationCommandBuffer = nextCommandBuffer
+        }
+
+        // Drawable acquisition can block when the presentation pool is exhausted.
+        // Encode all offscreen brush work first, then hold the drawable only for
+        // final scene composition and presentation.
+        guard
+            let descriptor = view.currentRenderPassDescriptor,
+            let drawable = view.currentDrawable
+        else {
+            scheduleInteractiveBrushCommitDrain(hadLiveBrushWorkThisFrame: hadLiveBrushWorkThisFrame)
+            return
+        }
+        let commandBuffer = presentationCommandBuffer
 
         guard let canvasPresenter else {
             if let canvasPresenterInitializationError {
