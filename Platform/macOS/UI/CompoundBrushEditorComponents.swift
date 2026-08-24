@@ -157,6 +157,11 @@ final class CompoundBrushDrawingPadNSView: NSView {
         wantsLayer = true
         layer?.cornerRadius = 8
         layer?.masksToBounds = true
+        if testPattern != nil {
+            DispatchQueue.main.async { [weak self] in
+                self?.loadTestPattern()
+            }
+        }
     }
 
     @available(*, unavailable)
@@ -543,12 +548,127 @@ struct CompoundPressureMixCurveEditor: View {
     }
 }
 
+/// Presents the existing A/B pressure mix in artist-facing terms: the vertical
+/// axis is always texture strength, regardless of the underlying primary weight.
+struct CompoundTextureStrengthCurveEditor: View {
+    let mix: CompoundPressureMixSettings
+    let onChange: (CompoundPressureMixSettings) -> Void
+    let onEditingChanged: (Bool) -> Void
+
+    @State private var isDragging = false
+
+    var body: some View {
+        GeometryReader { proxy in
+            let plot = proxy.frame(in: .local).insetBy(dx: 20, dy: 20)
+            ZStack {
+                RoundedRectangle(cornerRadius: 9)
+                    .fill(Color.black.opacity(0.24))
+
+                Path { path in
+                    for division in 0...4 {
+                        let x = plot.minX + (plot.width * CGFloat(division) / 4)
+                        path.move(to: CGPoint(x: x, y: plot.minY))
+                        path.addLine(to: CGPoint(x: x, y: plot.maxY))
+                        let y = plot.minY + (plot.height * CGFloat(division) / 4)
+                        path.move(to: CGPoint(x: plot.minX, y: y))
+                        path.addLine(to: CGPoint(x: plot.maxX, y: y))
+                    }
+                }
+                .stroke(Color.white.opacity(0.065), lineWidth: 1)
+
+                Path { path in
+                    let points = controlPoints(in: plot)
+                    path.move(to: points[0])
+                    path.addLine(to: points[1])
+                    path.addLine(to: points[2])
+                }
+                .stroke(Color.accentColor, style: StrokeStyle(lineWidth: 2.5, lineJoin: .round))
+
+                ForEach(0..<3, id: \.self) { index in
+                    let point = controlPoints(in: plot)[index]
+                    Circle()
+                        .fill(Color.white)
+                        .overlay(Circle().stroke(Color.accentColor, lineWidth: 2))
+                        .frame(width: 15, height: 15)
+                        .position(point)
+                        .contentShape(Circle().inset(by: -10))
+                        .gesture(
+                            DragGesture(minimumDistance: 0)
+                                .onChanged { drag in
+                                    if isDragging == false {
+                                        isDragging = true
+                                        onEditingChanged(true)
+                                    }
+                                    updatePoint(index, y: drag.location.y, plot: plot)
+                                }
+                                .onEnded { drag in
+                                    updatePoint(index, y: drag.location.y, plot: plot)
+                                    isDragging = false
+                                    onEditingChanged(false)
+                                }
+                        )
+                        .help(["轻压纹理", "中压纹理", "重压纹理"][index])
+                }
+
+                VStack {
+                    HStack {
+                        Text("纹理强")
+                        Spacer()
+                        Text("拖动白点")
+                    }
+                    Spacer()
+                    HStack {
+                        Text("纹理弱")
+                        Spacer()
+                        Text("轻压 → 重压")
+                    }
+                }
+                .font(.system(size: 9, weight: .bold))
+                .foregroundStyle(Color.white.opacity(0.4))
+                .padding(8)
+                .allowsHitTesting(false)
+            }
+        }
+    }
+
+    private func textureStrengths() -> [Float] {
+        [
+            1 - min(max(mix.primaryAtLowPressure, 0), 1),
+            1 - min(max(mix.primaryAtMidPressure, 0), 1),
+            1 - min(max(mix.primaryAtHighPressure, 0), 1)
+        ]
+    }
+
+    private func controlPoints(in rect: CGRect) -> [CGPoint] {
+        let strengths = textureStrengths()
+        return [
+            CGPoint(x: rect.minX, y: rect.maxY - (rect.height * CGFloat(strengths[0]))),
+            CGPoint(x: rect.midX, y: rect.maxY - (rect.height * CGFloat(strengths[1]))),
+            CGPoint(x: rect.maxX, y: rect.maxY - (rect.height * CGFloat(strengths[2])))
+        ]
+    }
+
+    private func updatePoint(_ index: Int, y: CGFloat, plot: CGRect) {
+        let strength = Float(min(max((plot.maxY - y) / max(plot.height, 1), 0), 1))
+        let primaryWeight = 1 - strength
+        var updated = mix
+        switch index {
+        case 0: updated.primaryAtLowPressure = primaryWeight
+        case 1: updated.primaryAtMidPressure = primaryWeight
+        default: updated.primaryAtHighPressure = primaryWeight
+        }
+        onChange(updated)
+    }
+}
+
 struct CompoundEditorSlider: View {
     let title: String
     let value: Double
     let range: ClosedRange<Double>
     let valueText: (Double) -> String
+    let onPreview: (Double) -> Void
     let onCommit: (Double) -> Void
+    let onEditingChanged: (Bool) -> Void
 
     @State private var draftValue: Double
     @State private var text: String
@@ -560,13 +680,17 @@ struct CompoundEditorSlider: View {
         value: Double,
         range: ClosedRange<Double>,
         valueText: @escaping (Double) -> String,
-        onCommit: @escaping (Double) -> Void
+        onPreview: @escaping (Double) -> Void = { _ in },
+        onCommit: @escaping (Double) -> Void,
+        onEditingChanged: @escaping (Bool) -> Void = { _ in }
     ) {
         self.title = title
         self.value = value
         self.range = range
         self.valueText = valueText
+        self.onPreview = onPreview
         self.onCommit = onCommit
+        self.onEditingChanged = onEditingChanged
         _draftValue = State(initialValue: min(max(value, range.lowerBound), range.upperBound))
         _text = State(initialValue: valueText(value))
     }
@@ -579,12 +703,21 @@ struct CompoundEditorSlider: View {
                 .frame(width: 92, alignment: .leading)
 
             Slider(
-                value: $draftValue,
+                value: Binding(
+                    get: { draftValue },
+                    set: { updated in
+                        draftValue = updated
+                        onPreview(updated)
+                    }
+                ),
                 in: range,
                 onEditingChanged: { editing in
                     isSliding = editing
-                    if editing == false {
+                    if editing {
+                        onEditingChanged(true)
+                    } else {
                         commit(draftValue)
+                        onEditingChanged(false)
                     }
                 }
             )
@@ -606,8 +739,12 @@ struct CompoundEditorSlider: View {
                     isTextFocused = false
                 }
                 .onChange(of: isTextFocused) { wasFocused, isFocused in
+                    if wasFocused == false, isFocused {
+                        onEditingChanged(true)
+                    }
                     if wasFocused, isFocused == false {
                         commitText()
+                        onEditingChanged(false)
                     }
                 }
         }

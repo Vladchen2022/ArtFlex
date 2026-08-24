@@ -2940,6 +2940,27 @@ final class WorkspaceViewModel: ObservableObject {
         showStatus(.init(kind: .success, message: "已应用共享笔尖图片"))
     }
 
+    /// Resolves a library tip into an isolated brush draft without changing the
+    /// active tool session. Compound-brush editing uses this to keep Cancel truly
+    /// side-effect free.
+    func brushDraft(
+        _ source: BrushSettings,
+        applyingPrimaryTipImageLibraryItem assetID: BrushTipImageAssetID
+    ) -> BrushSettings? {
+        guard let item = bootstrap.workspaceStore.state.tipImageLibrary.item(id: assetID),
+              let maskData = item.maskData else {
+            return nil
+        }
+        var brush = source
+        brush.tipShape = .customRound
+        brush.customTipSourceSemantic = .importedImage
+        brush.customTipAssetID = item.id
+        brush.customTipImportedSourceInfo = item.sourceInfo
+        brush.customTipMaskData = maskData
+        brush.customTipEnvelopeMaskData = makeEnvelopeMaskData(from: maskData)
+        return brush
+    }
+
     func applyCompoundSecondaryTipImageLibraryItem(_ assetID: BrushTipImageAssetID) {
         guard let item = bootstrap.workspaceStore.state.tipImageLibrary.item(id: assetID),
               let maskData = item.maskData else {
@@ -2957,6 +2978,23 @@ final class WorkspaceViewModel: ObservableObject {
         StageOneBrushPreviewRasterizer.resetCache()
         refresh()
         showStatus(.init(kind: .success, message: "已应用组合笔刷次笔尖"))
+    }
+
+    func brushDraft(
+        _ source: BrushSettings,
+        applyingCompoundSecondaryTipImageLibraryItem assetID: BrushTipImageAssetID
+    ) -> BrushSettings? {
+        guard let item = bootstrap.workspaceStore.state.tipImageLibrary.item(id: assetID),
+              let maskData = item.maskData else {
+            return nil
+        }
+        var brush = source
+        brush.compoundBrush.secondary.tipShape = .customRound
+        brush.compoundBrush.secondary.sourceSemantic = .importedImage
+        brush.compoundBrush.secondary.tipAssetID = item.id
+        brush.compoundBrush.secondary.importedSourceInfo = item.sourceInfo
+        brush.compoundBrush.secondary.customTipMaskData = maskData
+        return brush
     }
 
     func applyTextureFillTipImageLibraryItem(_ assetID: BrushTipImageAssetID) {
@@ -4379,10 +4417,29 @@ final class WorkspaceViewModel: ObservableObject {
         replacingPresetID: String?,
         allowsDuplicate: Bool
     ) -> BrushPresetSaveResult {
+        saveNamedBrushPreset(
+            brush: workspace.toolSession.brush,
+            name: name,
+            colorTag: colorTag,
+            replacingPresetID: replacingPresetID,
+            allowsDuplicate: allowsDuplicate
+        )
+    }
+
+    /// Saves an explicit brush value. Editors with an isolated draft can use
+    /// this without first mutating the active brush in the workspace.
+    @discardableResult
+    func saveNamedBrushPreset(
+        brush: BrushSettings,
+        name: String,
+        colorTag: BrushColorTag?,
+        replacingPresetID: String?,
+        allowsDuplicate: Bool
+    ) -> BrushPresetSaveResult {
         var result: BrushPresetSaveResult?
         bootstrap.workspaceStore.updateBrushLibrary { library in
             result = library.saveNamedPreset(
-                brush: workspace.toolSession.brush,
+                brush: brush,
                 name: name,
                 colorTag: colorTag,
                 replacingPresetID: replacingPresetID,

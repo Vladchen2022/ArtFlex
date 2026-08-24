@@ -44,4 +44,75 @@ struct CompoundBrushEditingTests {
         #expect(ids.contains("secondary-spacing-gaps"))
         #expect(ids.contains("secondary-too-small"))
     }
+
+    @Test
+    func textureStrengthUsesArtistFacingInverseOfPrimaryWeight() {
+        var settings = CompoundBrushSettings.disabledDefault
+        settings.setUniformTextureStrength(0.72)
+
+        #expect(abs(settings.pressureMix.primaryAtLowPressure - 0.28) < 0.0001)
+        #expect(abs(settings.pressureMix.primaryAtMidPressure - 0.28) < 0.0001)
+        #expect(abs(settings.pressureMix.primaryAtHighPressure - 0.28) < 0.0001)
+        #expect(abs(settings.displayedTextureStrength - 0.72) < 0.0001)
+        #expect(settings.hasVariableTextureStrength == false)
+    }
+
+    @Test
+    func pressurePresetsProduceExpectedTextureDirection() {
+        let increasing = CompoundTexturePressurePreset.increases.pressureMix(preserving: 0.8)
+        let increasingLow = 1 - increasing.primaryAtLowPressure
+        let increasingHigh = 1 - increasing.primaryAtHighPressure
+        #expect(increasingLow < increasingHigh)
+
+        let decreasing = CompoundTexturePressurePreset.decreases.pressureMix(preserving: 0.8)
+        let decreasingLow = 1 - decreasing.primaryAtLowPressure
+        let decreasingHigh = 1 - decreasing.primaryAtHighPressure
+        #expect(decreasingLow > decreasingHigh)
+
+        let middle = CompoundTexturePressurePreset.middlePeak.pressureMix(preserving: 0.8)
+        let middleStrength = 1 - middle.primaryAtMidPressure
+        #expect(middleStrength > 1 - middle.primaryAtLowPressure)
+        #expect(middleStrength > 1 - middle.primaryAtHighPressure)
+    }
+
+    @Test
+    func quickRecipesPreserveOrdinaryBrushIdentity() {
+        var source = BrushSettings.stageOneDefault
+        source.tipShape = .square
+        source.size = 137
+        source.opacity = 0.43
+        source.spacingPercent = 17
+        source.paintJitterAmount = 0.38
+
+        for recipe in CompoundBrushRecipe.allCases {
+            let result = recipe.applying(to: source)
+            #expect(result.compoundBrush.enabled)
+            #expect(result.compoundBrush.secondary.sizeMode == .relativeToPrimary)
+            #expect(result.tipShape == source.tipShape)
+            #expect(result.size == source.size)
+            #expect(result.opacity == source.opacity)
+            #expect(result.spacingPercent == source.spacingPercent)
+            #expect(result.paintJitterAmount == source.paintJitterAmount)
+        }
+    }
+
+    @Test
+    func textureOrientationRoundTripsThroughExistingRenderFields() {
+        var settings = CompoundBrushSettings.disabledDefault
+
+        settings.setTextureOrientation(.fixed)
+        #expect(settings.textureOrientation == .fixed)
+        #expect(settings.secondary.followsStrokeDirection == false)
+        #expect(settings.secondary.tileRandomRotation == 0)
+
+        settings.setTextureOrientation(.followsStroke)
+        #expect(settings.textureOrientation == .followsStroke)
+        #expect(settings.secondary.followsStrokeDirection)
+        #expect(settings.secondary.tileRandomRotation == 0)
+
+        settings.setTextureOrientation(.varied)
+        #expect(settings.textureOrientation == .varied)
+        #expect(settings.secondary.followsStrokeDirection)
+        #expect(settings.secondary.tileRandomRotation >= 0.45)
+    }
 }

@@ -759,16 +759,6 @@ struct RightInspectorView: View {
                 }
             }
 
-            if showsCompoundBrushBuilder {
-                CompoundBrushBuilderSheet(viewModel: viewModel) {
-                    withAnimation(.easeOut(duration: 0.16)) {
-                        showsCompoundBrushBuilder = false
-                    }
-                }
-                .transition(.move(edge: .trailing).combined(with: .opacity))
-                .zIndex(2)
-            }
-
             if showsBrushAdvancedSettings {
                 brushAdvancedSettingsOverlay
                     .transition(.move(edge: .trailing).combined(with: .opacity))
@@ -814,6 +804,11 @@ struct RightInspectorView: View {
         .sheet(item: $tipImageLibrarySheetTarget) { target in
             tipImageLibrarySheet(for: target) {
                 tipImageLibrarySheetTarget = nil
+            }
+        }
+        .sheet(isPresented: $showsCompoundBrushBuilder) {
+            CompoundBrushBuilderSheet(viewModel: viewModel) {
+                showsCompoundBrushBuilder = false
             }
         }
         .sheet(item: $brushTipImportCandidate) { candidate in
