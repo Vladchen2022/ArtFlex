@@ -4,6 +4,56 @@ import Testing
 
 struct ProjectArchiveV2Tests {
     @Test
+    func adaptiveArchiveLimitsScaleTotalBudgetButKeepAbsoluteCap() {
+        let canvasPolicy = CanvasCapacityPolicy.standard
+        let low = ProjectArchiveReadLimits.adaptive(
+            recommendedMaxWorkingSetSize: 4 * 1024 * 1024 * 1024,
+            canvasCapacityPolicy: canvasPolicy
+        )
+        let high = ProjectArchiveReadLimits.adaptive(
+            recommendedMaxWorkingSetSize: 128 * 1024 * 1024 * 1024,
+            canvasCapacityPolicy: canvasPolicy
+        )
+
+        #expect(low.maximumTotalUncompressedBytes == 2 * 1024 * 1024 * 1024)
+        #expect(high.maximumTotalUncompressedBytes == 16 * 1024 * 1024 * 1024)
+        #expect(high.maximumCanvasPixelCount == canvasPolicy.maximumPixelCount)
+    }
+
+    @Test
+    func archiveWriterRejectsPayloadThatItsReaderWouldReject() throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let payload = try makePayload(pixelSeed: 91)
+        var limits = ProjectArchiveReadLimits.standard
+        limits.maximumTotalUncompressedBytes = 30
+
+        #expect(throws: ProjectArchiveV2Error.totalAssetSizeTooLarge) {
+            try ProjectArchiveV2Writer(
+                limits: limits,
+                availableCapacityProvider: { _ in Int64.max }
+            ).write(
+                payload,
+                to: root.appendingPathComponent("Rejected.artflex", isDirectory: true)
+            )
+        }
+    }
+
+    @Test
+    func archiveWriterPreflightsDiskBeforeCreatingDestination() throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let archiveURL = root.appendingPathComponent("NoSpace.artflex", isDirectory: true)
+
+        #expect(throws: ProjectArchiveV2Error.self) {
+            try ProjectArchiveV2Writer(
+                availableCapacityProvider: { _ in 1 }
+            ).write(try makePayload(pixelSeed: 92), to: archiveURL)
+        }
+        #expect(!FileManager.default.fileExists(atPath: archiveURL.path))
+    }
+
+    @Test
     func zlibRoundTripsStandardStreamAndRejectsTrailingBytes() throws {
         let source = Data((0..<16_384).map { UInt8($0 % 251) })
 
@@ -74,6 +124,48 @@ struct ProjectArchiveV2Tests {
         #expect(manifest.layers.count == payload.package.layerSnapshots.count)
         #expect(manifest.layers.allSatisfy { $0.asset.compression == .zlib })
         #expect(restored == payload)
+        try ProjectArchiveV2Reader().validateArchive(at: archiveURL)
+    }
+
+    @Test
+    func archiveRoundTripsCheckedProjectPreview() throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let archiveURL = root.appendingPathComponent("Preview.artflex", isDirectory: true)
+        var payload = try makePayload(pixelSeed: 41)
+        payload.previewPNGData = Data([137, 80, 78, 71, 13, 10, 26, 10, 41])
+
+        let manifest = try ProjectArchiveV2Writer().write(payload, to: archiveURL)
+        let restored = try ProjectArchiveV2Reader().read(from: archiveURL)
+
+        #expect(manifest.preview?.relativePath == ProjectArchiveV2Manifest.previewPath)
+        #expect(manifest.preview?.sha256 == ProjectReferenceImageHash.sha256Hex(payload.previewPNGData!))
+        #expect(restored.previewPNGData == payload.previewPNGData)
+        #expect(restored == payload)
+    }
+
+    @Test
+    func inspectionReportsBudgetMetadataWithoutDecodingLayerAssets() throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let archiveURL = root.appendingPathComponent("Inspect.artflex", isDirectory: true)
+        let payload = try makePayload(pixelSeed: 17)
+        let manifest = try ProjectArchiveV2Writer().write(payload, to: archiveURL)
+
+        // Damage a pixel asset after the manifest is written. Metadata inspection must still be
+        // able to reject an unsafe document before touching that asset; a real read must fail.
+        let layerAsset = try #require(manifest.layers.first?.asset)
+        let layerURL = archiveURL.appendingPathComponent(layerAsset.relativePath)
+        try Data([0]).write(to: layerURL, options: .atomic)
+
+        let inspection = try ProjectArchiveV2Reader().inspect(from: archiveURL)
+        #expect(inspection.workspace.document.canvasSize == .init(width: 3, height: 2))
+        #expect(inspection.layerResourceCount == payload.package.layerSnapshots.count)
+        #expect(inspection.referenceArchiveBytes == 5)
+        #expect(inspection.estimatedReferenceResidentBytes > inspection.referenceArchiveBytes)
+        #expect(throws: ProjectArchiveV2Error.self) {
+            try ProjectArchiveV2Reader().read(from: archiveURL)
+        }
     }
 
     @Test

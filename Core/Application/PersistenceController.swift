@@ -1,16 +1,17 @@
 import Foundation
 import Metal
 
-enum ProjectStorageFormat: Equatable {
+enum ProjectStorageFormat: Sendable, Equatable {
     case archiveV2
     case legacyJSON
 }
 
-struct OpenProjectResult {
+struct OpenProjectResult: Sendable {
     var workspace: WorkspaceState
     var layerSnapshots: [LayerHistorySnapshot]
     var referenceImages: [ProjectReferenceImagePayload]
     var savedSnapshots: [PersistentCanvasSnapshotPayload]
+    var previewPNGData: Data?
     var storageFormat: ProjectStorageFormat
 
     init(
@@ -18,14 +19,39 @@ struct OpenProjectResult {
         layerSnapshots: [LayerHistorySnapshot],
         referenceImages: [ProjectReferenceImagePayload] = [],
         savedSnapshots: [PersistentCanvasSnapshotPayload] = [],
+        previewPNGData: Data? = nil,
         storageFormat: ProjectStorageFormat = .legacyJSON
     ) {
         self.workspace = workspace
         self.layerSnapshots = layerSnapshots
         self.referenceImages = referenceImages
         self.savedSnapshots = savedSnapshots
+        self.previewPNGData = previewPNGData
         self.storageFormat = storageFormat
     }
+}
+
+struct ProjectOpenInspection: Sendable, Equatable {
+    var workspace: WorkspaceState
+    var savedSnapshotCount: Int
+    var referenceArchiveBytes: Int
+    var estimatedReferenceResidentBytes: Int
+    var totalUncompressedAssetBytes: Int
+    var storageFormat: ProjectStorageFormat
+}
+
+struct FrozenProjectLayerResource: @unchecked Sendable {
+    var layer: LayerRecord
+    var resourceKind: LayerHistoryResourceKind
+    var texture: MTLTexture
+}
+
+struct FrozenProjectCapture: @unchecked Sendable {
+    var workspace: WorkspaceState
+    var layerResources: [FrozenProjectLayerResource]
+    var referenceImages: [ProjectReferenceImagePayload]
+    var savedSnapshots: [PersistentCanvasSnapshotPayload]
+    var previewTexture: MTLTexture?
 }
 
 enum PersistenceError: LocalizedError {
@@ -51,6 +77,9 @@ final class PersistenceController {
     private let serializer: LayerTextureSerializer
     private let archiveWriter: ProjectArchiveV2Writer
     private let archiveReader: ProjectArchiveV2Reader
+    private let flatContainer: ProjectArchiveFlatContainer
+    private let thumbnailEncoder = ProjectThumbnailEncoder()
+    private let archiveReadLimits: ProjectArchiveReadLimits
     private let canvasCapacityPolicy: CanvasCapacityPolicy
     let recoveryProjectURL: URL
 
@@ -59,17 +88,21 @@ final class PersistenceController {
         layerSurfaceStore: StageOneLayerSurfaceStore,
         serializer: LayerTextureSerializer,
         canvasCapacityPolicy: CanvasCapacityPolicy = .standard,
+        recommendedMaxWorkingSetSize: UInt64? = nil,
         recoveryRootURL: URL? = nil
     ) {
         self.workspaceStore = workspaceStore
         self.layerSurfaceStore = layerSurfaceStore
         self.serializer = serializer
         self.canvasCapacityPolicy = canvasCapacityPolicy
-        self.archiveWriter = ProjectArchiveV2Writer()
-        var archiveReadLimits = ProjectArchiveReadLimits.standard
-        archiveReadLimits.maximumCanvasEdge = canvasCapacityPolicy.maximumEdge
-        archiveReadLimits.maximumCanvasPixelCount = canvasCapacityPolicy.maximumPixelCount
+        let archiveReadLimits = ProjectArchiveReadLimits.adaptive(
+            recommendedMaxWorkingSetSize: recommendedMaxWorkingSetSize,
+            canvasCapacityPolicy: canvasCapacityPolicy
+        )
+        self.archiveReadLimits = archiveReadLimits
+        self.archiveWriter = ProjectArchiveV2Writer(limits: archiveReadLimits)
         self.archiveReader = ProjectArchiveV2Reader(limits: archiveReadLimits)
+        self.flatContainer = ProjectArchiveFlatContainer()
         let rootURL = recoveryRootURL ?? Self.defaultRecoveryRootURL()
         self.recoveryProjectURL = rootURL.appendingPathComponent(
             "Autosave.artflex",
@@ -96,17 +129,98 @@ final class PersistenceController {
         referenceImages: [ProjectReferenceImagePayload] = [],
         savedSnapshots: [PersistentCanvasSnapshotPayload] = []
     ) throws -> ProjectArchivePayload {
-        ProjectArchivePayload(
-            package: try captureProjectPackage(),
-            referenceImages: referenceImages,
-            savedSnapshots: savedSnapshots
+        try materializeProjectPayload(
+            from: freezeProjectCapture(
+                referenceImages: referenceImages,
+                savedSnapshots: savedSnapshots
+            )
         )
     }
 
-    func writeCapturedProject(_ payload: ProjectArchivePayload, to fileURL: URL) throws {
+    /// Copies the live document into immutable private Metal textures. This GPU-only boundary is
+    /// short; pixel readback and archive encoding can happen later without racing new brush work.
+    func freezeProjectCapture(
+        referenceImages: [ProjectReferenceImagePayload] = [],
+        savedSnapshots: [PersistentCanvasSnapshotPayload] = [],
+        previewTexture: MTLTexture? = nil
+    ) throws -> FrozenProjectCapture {
+        let state = workspaceStore.state
+        var sources: [(layer: LayerRecord, resourceKind: LayerHistoryResourceKind, texture: MTLTexture)] = []
+        sources.reserveCapacity(state.document.paintLayers.count * 2)
+
+        for layer in state.document.paintLayers {
+            guard let surfaceID = layerSurfaceStore.surfaceID(for: layer.id),
+                  let texture = layerSurfaceStore.texture(for: surfaceID) else {
+                throw PersistenceError.missingLayerTexture(layer.id)
+            }
+            sources.append((layer, .content, texture))
+            if layer.mask != nil {
+                guard let maskTexture = layerSurfaceStore.maskTexture(for: layer.id) else {
+                    throw PersistenceError.invalidProject("图层蒙版资源缺失")
+                }
+                sources.append((layer, .mask, maskTexture))
+            }
+        }
+
+        var texturesToFreeze = sources.map(\.texture)
+        if let previewTexture {
+            texturesToFreeze.append(previewTexture)
+        }
+        let frozenTextures = try serializer.cloneBatchForDeferredSnapshot(textures: texturesToFreeze)
+        let frozenLayerTextures = frozenTextures.prefix(sources.count)
+        return FrozenProjectCapture(
+            workspace: state,
+            layerResources: zip(sources, frozenLayerTextures).map { source, texture in
+                FrozenProjectLayerResource(
+                    layer: source.layer,
+                    resourceKind: source.resourceKind,
+                    texture: texture
+                )
+            },
+            referenceImages: referenceImages,
+            savedSnapshots: savedSnapshots,
+            previewTexture: previewTexture == nil ? nil : frozenTextures.last
+        )
+    }
+
+    func materializeProjectPayload(
+        from capture: FrozenProjectCapture
+    ) throws -> ProjectArchivePayload {
+        var frozenTextures = capture.layerResources.map(\.texture)
+        if let previewTexture = capture.previewTexture {
+            frozenTextures.append(previewTexture)
+        }
+        let textureSnapshots = try serializer.snapshotBatch(textures: frozenTextures)
+        let layerTextureSnapshots = textureSnapshots.prefix(capture.layerResources.count)
+        let layerSnapshots = zip(capture.layerResources, layerTextureSnapshots).map { item, textureSnapshot in
+            LayerHistorySnapshot(
+                layerID: item.layer.id,
+                resourceKind: item.resourceKind,
+                texture: textureSnapshot
+            )
+        }
+        let previewPNGData: Data?
+        if capture.previewTexture != nil, let previewSnapshot = textureSnapshots.last {
+            previewPNGData = try thumbnailEncoder.encodePNG(from: previewSnapshot)
+        } else {
+            previewPNGData = nil
+        }
+        return ProjectArchivePayload(
+            package: ProjectPackage.fromWorkspace(
+                capture.workspace,
+                layerSnapshots: layerSnapshots
+            ),
+            referenceImages: capture.referenceImages,
+            savedSnapshots: capture.savedSnapshots,
+            previewPNGData: previewPNGData
+        )
+    }
+
+    @discardableResult
+    func writeCapturedProject(_ payload: ProjectArchivePayload, to fileURL: URL) throws -> Data? {
         if Self.shouldUseV2Archive(for: fileURL) {
-            try archiveWriter.write(payload, to: fileURL)
-            return
+            try writeFlatArchive(payload, to: fileURL)
+            return payload.previewPNGData
         }
 
         guard payload.referenceImages.isEmpty, payload.savedSnapshots.isEmpty else {
@@ -120,21 +234,61 @@ final class PersistenceController {
         // Legacy JSON remains writable for asset-free compatibility projects.
         let data = try encoder.encode(payload.package)
         try data.write(to: fileURL, options: .atomic)
+        return nil
+    }
+
+    private func writeFlatArchive(_ payload: ProjectArchivePayload, to destinationURL: URL) throws {
+        let fileManager = FileManager.default
+        let parentURL = destinationURL.deletingLastPathComponent()
+        try fileManager.createDirectory(at: parentURL, withIntermediateDirectories: true)
+        let token = UUID().uuidString
+        let stagingPackageURL = parentURL.appendingPathComponent(
+            ".\(destinationURL.lastPathComponent).\(token).package",
+            isDirectory: true
+        )
+        let stagingArchiveURL = parentURL.appendingPathComponent(
+            ".\(destinationURL.lastPathComponent).\(token).tmp",
+            isDirectory: false
+        )
+        defer {
+            try? fileManager.removeItem(at: stagingPackageURL)
+            try? fileManager.removeItem(at: stagingArchiveURL)
+        }
+
+        try archiveWriter.write(payload, to: stagingPackageURL)
+        try flatContainer.encodePackage(at: stagingPackageURL, to: stagingArchiveURL)
+        try flatContainer.withExtractedPackage(from: stagingArchiveURL, limits: archiveReadLimits) {
+            try archiveReader.validateArchive(at: $0)
+        }
+
+        if fileManager.fileExists(atPath: destinationURL.path) {
+            _ = try fileManager.replaceItemAt(
+                destinationURL,
+                withItemAt: stagingArchiveURL,
+                backupItemName: nil,
+                options: []
+            )
+        } else {
+            try fileManager.moveItem(at: stagingArchiveURL, to: destinationURL)
+        }
     }
 
     func saveRecoveryProject(
         referenceImages: [ProjectReferenceImagePayload] = [],
         savedSnapshots: [PersistentCanvasSnapshotPayload] = []
     ) throws {
-        try FileManager.default.createDirectory(
-            at: recoveryProjectURL.deletingLastPathComponent(),
-            withIntermediateDirectories: true
-        )
-        try saveProject(
-            to: recoveryProjectURL,
+        let payload = try captureProjectPayload(
             referenceImages: referenceImages,
             savedSnapshots: savedSnapshots
         )
+        let stagingURL = try makeRecoveryStagingURL()
+        do {
+            try writeCapturedProject(payload, to: stagingURL)
+            try installRecoveryProject(from: stagingURL)
+        } catch {
+            discardRecoveryStagingProject(at: stagingURL)
+            throw error
+        }
     }
 
     func makeRecoveryStagingURL() throws -> URL {
@@ -154,11 +308,20 @@ final class PersistenceController {
         }
         let fileManager = FileManager.default
         if fileManager.fileExists(atPath: recoveryProjectURL.path) {
+            let backupURLs = recoveryBackupProjectURLs
+            if let oldestBackupURL = backupURLs.last,
+               fileManager.fileExists(atPath: oldestBackupURL.path) {
+                try fileManager.removeItem(at: oldestBackupURL)
+            }
+            if backupURLs.count >= 2,
+               fileManager.fileExists(atPath: backupURLs[0].path) {
+                try fileManager.moveItem(at: backupURLs[0], to: backupURLs[1])
+            }
             _ = try fileManager.replaceItemAt(
                 recoveryProjectURL,
                 withItemAt: stagingURL,
-                backupItemName: nil,
-                options: []
+                backupItemName: backupURLs[0].lastPathComponent,
+                options: [.withoutDeletingBackupItem]
             )
         } else {
             try fileManager.moveItem(at: stagingURL, to: recoveryProjectURL)
@@ -179,61 +342,108 @@ final class PersistenceController {
     }
 
     var hasRecoveryProject: Bool {
-        FileManager.default.fileExists(atPath: recoveryProjectURL.path)
+        recoveryProjectCandidates.contains {
+            FileManager.default.fileExists(atPath: $0.path)
+        }
+    }
+
+    /// Returns the newest complete recovery generation. A torn or manually damaged newest
+    /// generation no longer hides older valid work.
+    func bestAvailableRecoveryProjectURL() -> URL? {
+        recoveryProjectCandidates.first { candidate in
+            guard FileManager.default.fileExists(atPath: candidate.path) else { return false }
+            return (try? inspectProject(from: candidate)) != nil
+        }
+    }
+
+    func openBestAvailableRecoveryProject(
+        preflight: (ProjectOpenInspection) throws -> Void = { _ in }
+    ) throws -> (url: URL, result: OpenProjectResult) {
+        var lastError: Error?
+        for candidate in recoveryProjectCandidates where
+            FileManager.default.fileExists(atPath: candidate.path) {
+            do {
+                return (
+                    candidate,
+                    try openProject(from: candidate, preflight: preflight)
+                )
+            } catch {
+                lastError = error
+            }
+        }
+        throw lastError ?? PersistenceError.invalidProject("没有完整可用的自动恢复工程")
     }
 
     func discardRecoveryProject() throws {
-        guard hasRecoveryProject else { return }
-        try FileManager.default.removeItem(at: recoveryProjectURL)
+        for candidate in recoveryProjectCandidates where
+            FileManager.default.fileExists(atPath: candidate.path) {
+            try FileManager.default.removeItem(at: candidate)
+        }
     }
 
-    private func captureProjectPackage() throws -> ProjectPackage {
-        let state = workspaceStore.state
-        var snapshotLayers: [(layer: LayerRecord, resourceKind: LayerHistoryResourceKind, texture: MTLTexture)] = []
-        snapshotLayers.reserveCapacity(state.document.paintLayers.count * 2)
-
-        for layer in state.document.paintLayers {
-            guard
-                let surfaceID = layerSurfaceStore.surfaceID(for: layer.id),
-                let texture = layerSurfaceStore.texture(for: surfaceID)
-            else {
-                throw PersistenceError.missingLayerTexture(layer.id)
-            }
-
-            snapshotLayers.append((layer: layer, resourceKind: .content, texture: texture))
-            if layer.mask != nil {
-                guard let maskTexture = layerSurfaceStore.maskTexture(for: layer.id) else {
-                    throw PersistenceError.invalidProject("图层蒙版资源缺失")
-                }
-                snapshotLayers.append((layer: layer, resourceKind: .mask, texture: maskTexture))
-            }
+    private var recoveryBackupProjectURLs: [URL] {
+        let root = recoveryProjectURL.deletingLastPathComponent()
+        return (1...2).map { generation in
+            root.appendingPathComponent("Autosave-\(generation).artflex", isDirectory: true)
         }
+    }
 
-        let textureSnapshots = try serializer.snapshotBatch(
-            textures: snapshotLayers.map(\.texture)
-        )
-        let layerSnapshots = zip(snapshotLayers, textureSnapshots).map { item, textureSnapshot in
-            return LayerHistorySnapshot(
-                layerID: item.layer.id,
-                resourceKind: item.resourceKind,
-                texture: textureSnapshot
+    private var recoveryProjectCandidates: [URL] {
+        [recoveryProjectURL] + recoveryBackupProjectURLs
+    }
+
+    func inspectProject(from fileURL: URL) throws -> ProjectOpenInspection {
+        if Self.shouldUseV2Archive(for: fileURL) {
+            let inspection = try withV2PackageDirectory(for: fileURL) {
+                try archiveReader.inspect(from: $0)
+            }
+            return ProjectOpenInspection(
+                workspace: inspection.workspace,
+                savedSnapshotCount: inspection.savedSnapshotCount,
+                referenceArchiveBytes: inspection.referenceArchiveBytes,
+                estimatedReferenceResidentBytes: inspection.estimatedReferenceResidentBytes,
+                totalUncompressedAssetBytes: inspection.totalUncompressedAssetBytes,
+                storageFormat: .archiveV2
             )
         }
 
-        return ProjectPackage.fromWorkspace(
-            state,
-            layerSnapshots: layerSnapshots
+        let byteCount = Int((try? fileURL.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
+        guard byteCount <= archiveReadLimits.maximumTotalUncompressedBytes else {
+            throw ProjectArchiveV2Error.totalAssetSizeTooLarge
+        }
+        let data = try Data(contentsOf: fileURL, options: [.mappedIfSafe])
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let package = try decoder.decode(ProjectPackage.self, from: data)
+        var workspace = package.workspaceState
+        workspace.document.normalizeLayerHierarchy()
+        try validateOpenedProject(workspace: workspace, layerSnapshots: package.layerSnapshots)
+        return ProjectOpenInspection(
+            workspace: workspace,
+            savedSnapshotCount: 0,
+            referenceArchiveBytes: 0,
+            estimatedReferenceResidentBytes: 0,
+            totalUncompressedAssetBytes: data.count,
+            storageFormat: .legacyJSON
         )
     }
 
-    func openProject(from fileURL: URL) throws -> OpenProjectResult {
+    func openProject(
+        from fileURL: URL,
+        preflight: (ProjectOpenInspection) throws -> Void = { _ in }
+    ) throws -> OpenProjectResult {
         let payload: ProjectArchivePayload
         let storageFormat: ProjectStorageFormat
-        if Self.isDirectory(at: fileURL) {
-            payload = try archiveReader.read(from: fileURL)
+        if Self.shouldUseV2Archive(for: fileURL) {
+            try preflight(inspectProject(from: fileURL))
+            payload = try withV2PackageDirectory(for: fileURL) {
+                try archiveReader.read(from: $0)
+            }
             storageFormat = .archiveV2
         } else {
-            let data = try Data(contentsOf: fileURL)
+            let inspection = try inspectProject(from: fileURL)
+            try preflight(inspection)
+            let data = try Data(contentsOf: fileURL, options: [.mappedIfSafe])
             let decoder = JSONDecoder()
             decoder.dateDecodingStrategy = .iso8601
             payload = ProjectArchivePayload(
@@ -254,7 +464,22 @@ final class PersistenceController {
             layerSnapshots: package.layerSnapshots,
             referenceImages: payload.referenceImages,
             savedSnapshots: payload.savedSnapshots,
+            previewPNGData: payload.previewPNGData,
             storageFormat: storageFormat
+        )
+    }
+
+    private func withV2PackageDirectory<T>(
+        for url: URL,
+        _ body: (URL) throws -> T
+    ) throws -> T {
+        if Self.isDirectory(at: url) {
+            return try body(url)
+        }
+        return try flatContainer.withExtractedPackage(
+            from: url,
+            limits: archiveReadLimits,
+            body
         )
     }
 

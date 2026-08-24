@@ -7515,6 +7515,7 @@ private struct NavigatorPreviewPanel: View {
                     isLuminosityPreviewEnabled: false,
                     onAdjustBrushSize: { _ in }
                 )
+                .id(viewModel.documentRenderGeneration)
                 .frame(
                     width: presentation.documentDisplaySize.x,
                     height: presentation.documentDisplaySize.y

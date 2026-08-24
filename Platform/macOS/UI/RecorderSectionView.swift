@@ -94,6 +94,13 @@ struct RecorderSectionView: View {
                 infoLine("已跳过", "\(recorder.droppedFrameCount)")
             }
 
+            if let failure = recorder.lastFailureMessage {
+                Text(failure)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(Color.orange.opacity(0.9))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
             HStack(spacing: 8) {
                 actionButton(recorder.isRecording ? "停止录制" : "开始录制") {
                     viewModel.toggleTimelapseRecording()

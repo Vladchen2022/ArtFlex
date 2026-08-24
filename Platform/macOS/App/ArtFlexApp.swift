@@ -14,15 +14,21 @@ struct ArtFlexApp: App {
     }
 
     var body: some Scene {
-        WindowGroup {
+        Window("ArtFlex", id: "main") {
             if let viewModel = launchState.viewModel {
                 MainWindowView(
                     viewModel: viewModel,
-                    presentationState: presentationState
+                    presentationState: presentationState,
+                    onCanvasReady: {
+                        appDelegate.canvasDidBecomeReady(viewModel: viewModel)
+                    }
                 )
                     .frame(minWidth: 960, minHeight: 700)
                     .onAppear {
                         appDelegate.viewModel = viewModel
+                    }
+                    .onOpenURL { url in
+                        appDelegate.receiveExternalProjectOpenURL(url)
                     }
             } else {
                 ArtFlexLaunchFailureView(
@@ -197,8 +203,44 @@ private struct ArtFlexLaunchFailureView: View {
 
 @MainActor
 final class ArtFlexApplicationDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
-    weak var viewModel: WorkspaceViewModel?
+    weak var viewModel: WorkspaceViewModel? {
+        didSet {
+            guard viewModel != nil else { return }
+            DispatchQueue.main.async { [weak self] in
+                self?.openPendingExternalProjectIfNeeded()
+            }
+        }
+    }
     private var isApprovingTermination = false
+    private var isCanvasReady = false
+    private var externalProjectOpenRequests = ExternalProjectOpenRequestBuffer()
+
+    func application(_ application: NSApplication, open urls: [URL]) {
+        _ = receiveExternalProjectOpenRequest(urls)
+    }
+
+    func application(_ application: NSApplication, openFile filename: String) -> Bool {
+        receiveExternalProjectOpenRequest([URL(fileURLWithPath: filename)])
+    }
+
+    func application(_ application: NSApplication, openFiles filenames: [String]) {
+        let didAcceptRequest = receiveExternalProjectOpenRequest(
+            filenames.map { URL(fileURLWithPath: $0) }
+        )
+        application.reply(toOpenOrPrint: didAcceptRequest ? .success : .failure)
+    }
+
+    func receiveExternalProjectOpenURL(_ url: URL) {
+        _ = receiveExternalProjectOpenRequest([url])
+    }
+
+    func canvasDidBecomeReady(viewModel: WorkspaceViewModel) {
+        self.viewModel = viewModel
+        isCanvasReady = true
+        DispatchQueue.main.async { [weak self] in
+            self?.openPendingExternalProjectIfNeeded()
+        }
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
@@ -258,6 +300,39 @@ final class ArtFlexApplicationDelegate: NSObject, NSApplicationDelegate, NSWindo
 
     func windowDidResignKey(_ notification: Notification) {
         viewModel?.pauseDrawingStatsTracking()
+    }
+
+    private func openPendingExternalProjectIfNeeded() {
+        guard viewModel != nil, isCanvasReady else { return }
+        guard let projectURL = externalProjectOpenRequests.takePendingURL() else {
+            return
+        }
+        openExternalProject(projectURL)
+    }
+
+    @discardableResult
+    private func receiveExternalProjectOpenRequest(_ urls: [URL]) -> Bool {
+        let projectURLs = urls.compactMap(FilePanelService.normalizedProjectOpenURL)
+        guard !projectURLs.isEmpty else { return false }
+        guard let projectURL = externalProjectOpenRequests.receive(
+            projectURLs,
+            isHandlerReady: viewModel != nil && isCanvasReady
+        ) else {
+            // A valid cold-launch request has been queued until the Metal canvas exists.
+            return true
+        }
+        openExternalProject(projectURL)
+        return true
+    }
+
+    private func openExternalProject(_ url: URL) {
+        guard let viewModel else {
+            _ = externalProjectOpenRequests.receive([url], isHandlerReady: false)
+            return
+        }
+        NSApp.activate(ignoringOtherApps: true)
+        NSApp.windows.first?.makeKeyAndOrderFront(nil)
+        viewModel.openProjectFromExternalURL(url)
     }
 
     @MainActor

@@ -88,6 +88,62 @@ struct HistoryControllerTests {
 
     @Test
     @MainActor
+    func topologyDeltaAddLayerUsesNoFullDocumentSnapshotAndRedoRestoresNewPixels() throws {
+        let harness = try BrushHistoryHarness(canvasSize: .init(width: 16, height: 16))
+        let existingLayerID = harness.workspaceStore.state.document.activeLayerID
+        try harness.writeOpaquePixel(layerID: existingLayerID, x: 2, y: 2, value: 80)
+
+        try harness.history.captureCheckpoint(
+            captureMode: .topologyDelta(changedLayerIDs: [])
+        )
+        #expect(harness.history.debugUndoEntryApproxByteCounts.last == 0)
+
+        let addedLayerID = harness.addLayer()
+        try harness.writeOpaquePixel(layerID: addedLayerID, x: 7, y: 7, value: 210)
+
+        #expect(try harness.history.undo())
+        #expect(harness.workspaceStore.state.document.layer(addedLayerID) == nil)
+        #expect(try harness.alpha(atX: 2, y: 2, layerID: existingLayerID) > 0.99)
+
+        #expect(try harness.history.redo())
+        #expect(harness.workspaceStore.state.document.layer(addedLayerID) != nil)
+        #expect(try harness.alpha(atX: 7, y: 7, layerID: addedLayerID) > 0.99)
+        #expect(try harness.alpha(atX: 2, y: 2, layerID: existingLayerID) > 0.99)
+    }
+
+    @Test
+    @MainActor
+    func topologyDeltaDeleteSnapshotsOnlyRemovedLayerAndPreservesCommonPixels() throws {
+        let harness = try BrushHistoryHarness(canvasSize: .init(width: 16, height: 16))
+        let commonLayerID = harness.workspaceStore.state.document.activeLayerID
+        let removedLayerID = harness.addLayer()
+        try harness.writeOpaquePixel(layerID: commonLayerID, x: 3, y: 3, value: 90)
+        try harness.writeOpaquePixel(layerID: removedLayerID, x: 8, y: 8, value: 220)
+
+        try harness.history.captureCheckpoint(
+            captureMode: .topologyDelta(changedLayerIDs: [removedLayerID])
+        )
+        #expect(harness.history.debugUndoEntryApproxByteCounts.last == 16 * 16 * 4)
+
+        harness.workspaceStore.updateDocument { document in
+            document.removeActiveLayer()
+        }
+        harness.layerSurfaceStore.prepareTextures(
+            for: harness.workspaceStore.state.document,
+            metal: harness.metalContext
+        )
+
+        #expect(try harness.history.undo())
+        #expect(try harness.alpha(atX: 8, y: 8, layerID: removedLayerID) > 0.99)
+        #expect(try harness.alpha(atX: 3, y: 3, layerID: commonLayerID) > 0.99)
+
+        #expect(try harness.history.redo())
+        #expect(harness.workspaceStore.state.document.layer(removedLayerID) == nil)
+        #expect(try harness.alpha(atX: 3, y: 3, layerID: commonLayerID) > 0.99)
+    }
+
+    @Test
+    @MainActor
     func undoDoesNotDropTipImageLibraryState() throws {
         let harness = try BrushHistoryHarness(canvasSize: .init(width: 16, height: 16))
         let tipImageLibrary = TipImageLibraryState(
@@ -893,6 +949,40 @@ struct HistoryControllerTests {
             Issue.record("Eraser stroke should not produce workspace-only history entries")
         }
     }
+
+    @Test
+    @MainActor
+    func memoryPressureKeepsNewestRedoRestorePoint() throws {
+        let harness = try BrushHistoryHarness(canvasSize: .init(width: 16, height: 16))
+        let layerID = harness.workspaceStore.state.document.activeLayerID
+        try harness.history.captureCheckpoint(
+            captureMode: .inPlaceChangedLayers([layerID])
+        )
+        try harness.writeOpaquePixel(layerID: layerID, x: 4, y: 4, value: 210)
+
+        #expect(try harness.history.undo())
+        #expect(harness.history.canRedo)
+        harness.history.relieveMemoryPressure(critical: true)
+        #expect(harness.history.canRedo)
+        #expect(try harness.history.redo())
+        #expect(try harness.alpha(atX: 4, y: 4, layerID: layerID) > 0.99)
+    }
+
+    @Test
+    @MainActor
+    func checkpointFailsInsteadOfRecordingMissingLayerPixels() throws {
+        let harness = try BrushHistoryHarness(canvasSize: .init(width: 16, height: 16))
+        let undoCount = harness.history.debugUndoCount
+        let layerID = harness.workspaceStore.state.document.activeLayerID
+        harness.layerSurfaceStore.debugRemoveContentTexture(for: layerID)
+        harness.layerSurfaceStore.debugPreventsTextureAllocation = true
+
+        #expect(throws: Error.self) {
+            try harness.history.captureCheckpoint()
+        }
+        harness.layerSurfaceStore.debugPreventsTextureAllocation = false
+        #expect(harness.history.debugUndoCount == undoCount)
+    }
 }
 
 private enum BrushHistoryHarnessError: Error {
@@ -1031,5 +1121,31 @@ private struct BrushHistoryHarness {
             throw BrushHistoryHarnessError.textureUnavailable
         }
         return try serializer.samplePixel(texture: texture, x: x, y: y).alpha
+    }
+
+    func writeOpaquePixel(layerID: LayerID, x: Int, y: Int, value: UInt8) throws {
+        guard
+            let surfaceID = layerSurfaceStore.surfaceID(for: layerID),
+            let texture = layerSurfaceStore.texture(for: surfaceID)
+        else {
+            throw BrushHistoryHarnessError.textureUnavailable
+        }
+        let width = workspaceStore.state.document.canvasSize.width
+        let height = workspaceStore.state.document.canvasSize.height
+        var pixels = Data(repeating: 0, count: width * height * 4)
+        let offset = (y * width + x) * 4
+        pixels[offset] = value
+        pixels[offset + 1] = value
+        pixels[offset + 2] = value
+        pixels[offset + 3] = 255
+        try serializer.restore(
+            snapshot: LayerTextureSnapshot(
+                width: width,
+                height: height,
+                bytesPerRow: width * 4,
+                pixelData: pixels
+            ),
+            into: texture
+        )
     }
 }

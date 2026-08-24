@@ -102,6 +102,20 @@ struct AppBootstrap {
         .standard(recommendedMaxWorkingSetSize: metalContext.device.recommendedMaxWorkingSetSize)
     }
 
+    var archiveReadLimits: ProjectArchiveReadLimits {
+        .adaptive(
+            recommendedMaxWorkingSetSize: metalContext.device.recommendedMaxWorkingSetSize,
+            canvasCapacityPolicy: canvasCapacityPolicy
+        )
+    }
+
+    var documentResourceBudgetPolicy: DocumentResourceBudgetPolicy {
+        .standard(
+            recommendedMaxWorkingSetSize: metalContext.device.recommendedMaxWorkingSetSize,
+            archiveLimits: archiveReadLimits
+        )
+    }
+
     @MainActor
     init(
         workspaceStore: WorkspaceStore = WorkspaceStore(),
@@ -157,6 +171,7 @@ struct AppBootstrap {
             pngExporter: pngExporter
         )
         let testPersistenceRoot = Self.testPersistenceRootURL()
+        let isolatedDefaults = testPersistenceRoot.flatMap(Self.isolatedUserDefaults(for:))
         self.persistenceController = PersistenceController(
             workspaceStore: workspaceStore,
             layerSurfaceStore: layerSurfaceStore,
@@ -164,6 +179,7 @@ struct AppBootstrap {
             canvasCapacityPolicy: .standard(
                 recommendedMaxWorkingSetSize: metalContext.device.recommendedMaxWorkingSetSize
             ),
+            recommendedMaxWorkingSetSize: metalContext.device.recommendedMaxWorkingSetSize,
             recoveryRootURL: persistenceRecoveryRootURL
                 ?? testPersistenceRoot?.appendingPathComponent("Recovery", isDirectory: true)
         )
@@ -171,7 +187,10 @@ struct AppBootstrap {
             workspaceStore: workspaceStore,
             layerSurfaceStore: layerSurfaceStore,
             serializer: textureSerializer,
-            metalContext: metalContext
+            metalContext: metalContext,
+            maxResidentBytes: HistoryController.adaptiveMaxResidentBytes(
+                recommendedMaxWorkingSetSize: metalContext.device.recommendedMaxWorkingSetSize
+            )
         )
         self.filePanelService = FilePanelService()
         self.brushLibraryPersistenceController = brushLibraryPersistenceController ?? BrushLibraryPersistenceController(
@@ -188,13 +207,30 @@ struct AppBootstrap {
         self.timelapseRecorder = TimelapseRecorderController(
             workspaceStore: workspaceStore,
             layerSurfaceStore: layerSurfaceStore,
-            serializer: textureSerializer
+            serializer: textureSerializer,
+            defaults: isolatedDefaults ?? .standard
         )
-        self.drawingStatsController = drawingStatsController ?? DrawingStatsController()
+        if let drawingStatsController {
+            self.drawingStatsController = drawingStatsController
+        } else if let testPersistenceRoot {
+            self.drawingStatsController = DrawingStatsController(
+                persistenceController: DrawingStatsPersistenceController(
+                    baseDirectoryURL: testPersistenceRoot.deletingLastPathComponent()
+                )
+            )
+        } else {
+            self.drawingStatsController = DrawingStatsController()
+        }
     }
 
     private static func testPersistenceRootURL() -> URL? {
         let environment = ProcessInfo.processInfo.environment
+        if let explicitPath = environment["ARTFLEX_TEST_APPLICATION_SUPPORT_ROOT"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           !explicitPath.isEmpty {
+            return URL(fileURLWithPath: explicitPath, isDirectory: true)
+                .standardizedFileURL
+        }
         let executablePath = CommandLine.arguments.first ?? ""
         let isRunningTests = environment["XCTestConfigurationFilePath"] != nil
             || Bundle.main.bundleURL.pathExtension.lowercased() == "xctest"
@@ -209,5 +245,10 @@ struct AppBootstrap {
             .appendingPathComponent("ArtFlexTests-\(ProcessInfo.processInfo.globallyUniqueString)", isDirectory: true)
             .appendingPathComponent("ApplicationSupport", isDirectory: true)
             .appendingPathComponent("ArtFlex", isDirectory: true)
+    }
+
+    private static func isolatedUserDefaults(for rootURL: URL) -> UserDefaults? {
+        let identifier = UInt(bitPattern: rootURL.standardizedFileURL.path.hashValue)
+        return UserDefaults(suiteName: "com.vladchen.ArtFlex.Isolated.\(identifier)")
     }
 }

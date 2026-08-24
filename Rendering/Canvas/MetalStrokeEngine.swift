@@ -514,6 +514,13 @@ final class MetalStrokeEngine: StrokeEngine {
         clearRecentBrushAdjustment()
     }
 
+    /// Drops only derived preview surfaces. Pending or live brush work is left untouched so an
+    /// OS pressure event can never remove user pixels.
+    func purgeTransientPreviewTexturesIfIdle() {
+        guard !hasPendingBrushWork, !hasPendingBrushCommitJobs else { return }
+        invalidateRecentBrushPreviewCache()
+    }
+
     func makeOpacityCapSessionForImmediateStroke(texture: MTLTexture) -> OpacityCapSessionResources? {
         brushRenderer.makeOpacityCapSession(
             for: texture,

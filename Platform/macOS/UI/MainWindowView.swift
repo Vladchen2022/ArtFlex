@@ -3,6 +3,7 @@ import SwiftUI
 struct MainWindowView: View {
     @ObservedObject var viewModel: WorkspaceViewModel
     let presentationState: AppPresentationState
+    let onCanvasReady: () -> Void
 
     var body: some View {
         VStack(spacing: 0) {
@@ -21,7 +22,8 @@ struct MainWindowView: View {
             } else {
                 StandardWorkspaceShell(
                     viewModel: viewModel,
-                    openSettings: presentationState.presentSettingsSheet
+                    openSettings: presentationState.presentSettingsSheet,
+                    onCanvasReady: onCanvasReady
                 )
             }
         }
@@ -146,6 +148,7 @@ private struct StandardWorkspaceShell: View {
 
     @ObservedObject var viewModel: WorkspaceViewModel
     let openSettings: () -> Void
+    let onCanvasReady: () -> Void
     @State private var showsCompactInspector = false
 
     var body: some View {
@@ -174,7 +177,10 @@ private struct StandardWorkspaceShell: View {
                             }
                     }
 
-                    CanvasContainerView(viewModel: viewModel)
+                    CanvasContainerView(
+                        viewModel: viewModel,
+                        onReady: onCanvasReady
+                    )
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                         .clipped()
                         .contentShape(Rectangle())

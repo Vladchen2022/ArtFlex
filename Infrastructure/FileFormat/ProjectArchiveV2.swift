@@ -100,12 +100,15 @@ struct ProjectArchiveV2Manifest: Codable, Sendable, Equatable {
     static let currentReaderVersion = 2
     static let manifestFilename = "manifest.json"
     static let projectStatePath = "project.json"
+    static let previewPath = "preview.png"
+    static let maximumPreviewByteCount = 16 * 1024 * 1024
 
     var formatIdentifier: String
     var formatVersion: Int
     var minimumReaderVersion: Int
     var savedAt: Date
     var projectState: ProjectArchiveAssetDescriptor
+    var preview: ProjectArchiveAssetDescriptor?
     var layers: [ProjectArchiveLayerDescriptor]
     var referenceImages: [ProjectArchiveReferenceImageEntry]
     var savedSnapshots: [ProjectArchiveCanvasSnapshotEntry]
@@ -116,6 +119,7 @@ struct ProjectArchiveV2Manifest: Codable, Sendable, Equatable {
         case minimumReaderVersion
         case savedAt
         case projectState
+        case preview
         case layers
         case referenceImages
         case savedSnapshots
@@ -124,6 +128,7 @@ struct ProjectArchiveV2Manifest: Codable, Sendable, Equatable {
     init(
         savedAt: Date,
         projectState: ProjectArchiveAssetDescriptor,
+        preview: ProjectArchiveAssetDescriptor? = nil,
         layers: [ProjectArchiveLayerDescriptor],
         referenceImages: [ProjectArchiveReferenceImageEntry],
         savedSnapshots: [ProjectArchiveCanvasSnapshotEntry] = []
@@ -133,6 +138,7 @@ struct ProjectArchiveV2Manifest: Codable, Sendable, Equatable {
         self.minimumReaderVersion = Self.currentReaderVersion
         self.savedAt = savedAt
         self.projectState = projectState
+        self.preview = preview
         self.layers = layers
         self.referenceImages = referenceImages
         self.savedSnapshots = savedSnapshots
@@ -145,6 +151,7 @@ struct ProjectArchiveV2Manifest: Codable, Sendable, Equatable {
         minimumReaderVersion = try container.decode(Int.self, forKey: .minimumReaderVersion)
         savedAt = try container.decode(Date.self, forKey: .savedAt)
         projectState = try container.decode(ProjectArchiveAssetDescriptor.self, forKey: .projectState)
+        preview = try container.decodeIfPresent(ProjectArchiveAssetDescriptor.self, forKey: .preview)
         layers = try container.decode([ProjectArchiveLayerDescriptor].self, forKey: .layers)
         referenceImages = try container.decodeIfPresent(
             [ProjectArchiveReferenceImageEntry].self,
@@ -162,16 +169,30 @@ struct ProjectArchivePayload: Sendable, Equatable {
     var package: ProjectPackage
     var referenceImages: [ProjectReferenceImagePayload]
     var savedSnapshots: [PersistentCanvasSnapshotPayload]
+    var previewPNGData: Data?
 
     init(
         package: ProjectPackage,
         referenceImages: [ProjectReferenceImagePayload] = [],
-        savedSnapshots: [PersistentCanvasSnapshotPayload] = []
+        savedSnapshots: [PersistentCanvasSnapshotPayload] = [],
+        previewPNGData: Data? = nil
     ) {
         self.package = package
         self.referenceImages = referenceImages
         self.savedSnapshots = savedSnapshots
+        self.previewPNGData = previewPNGData
     }
+}
+
+/// Metadata-only view used to reject unsafe projects before any full-resolution pixel asset is
+/// decompressed. The project state is small and contains no inline V2 layer pixels.
+struct ProjectArchiveInspection: Sendable, Equatable {
+    var workspace: WorkspaceState
+    var layerResourceCount: Int
+    var savedSnapshotCount: Int
+    var referenceArchiveBytes: Int
+    var estimatedReferenceResidentBytes: Int
+    var totalUncompressedAssetBytes: Int
 }
 
 struct ProjectArchiveReadLimits: Sendable, Equatable {
@@ -198,6 +219,32 @@ struct ProjectArchiveReadLimits: Sendable, Equatable {
         maximumCanvasEdge: CanvasCapacityPolicy.standard.maximumEdge,
         maximumCanvasPixelCount: CanvasCapacityPolicy.standard.maximumPixelCount
     )
+
+    /// Keeps writer and reader limits symmetrical while scaling the total archive budget to the
+    /// Metal device. Individual assets remain bounded so a malformed package cannot force one
+    /// unreasonably large allocation during validation or open.
+    static func adaptive(
+        recommendedMaxWorkingSetSize: UInt64?,
+        canvasCapacityPolicy: CanvasCapacityPolicy
+    ) -> ProjectArchiveReadLimits {
+        var limits = standard
+        limits.maximumCanvasEdge = canvasCapacityPolicy.maximumEdge
+        limits.maximumCanvasPixelCount = canvasCapacityPolicy.maximumPixelCount
+
+        guard let recommendedMaxWorkingSetSize, recommendedMaxWorkingSetSize > 0 else {
+            return limits
+        }
+
+        let gibibyte = UInt64(1024 * 1024 * 1024)
+        let adaptiveTotal = min(
+            16 * gibibyte,
+            max(2 * gibibyte, recommendedMaxWorkingSetSize / 8)
+        )
+        limits.maximumTotalUncompressedBytes = Int(
+            min(adaptiveTotal, UInt64(Int.max))
+        )
+        return limits
+    }
 }
 
 enum ProjectArchiveV2Error: LocalizedError, Sendable, Equatable {
@@ -215,6 +262,7 @@ enum ProjectArchiveV2Error: LocalizedError, Sendable, Equatable {
     case storedByteCountMismatch(path: String, expected: Int, actual: Int)
     case assetTooLarge(path: String, byteCount: Int)
     case totalAssetSizeTooLarge
+    case insufficientDiskSpace(requiredBytes: Int64, availableBytes: Int64)
     case checksumMismatch(String)
     case duplicateLayerID(LayerID)
     case duplicateReferenceSlot(Int)
@@ -261,6 +309,8 @@ enum ProjectArchiveV2Error: LocalizedError, Sendable, Equatable {
             return "工程资产超出读取上限：\(path)，\(byteCount) 字节"
         case .totalAssetSizeTooLarge:
             return "工程包解压后的总大小超出读取上限"
+        case let .insufficientDiskSpace(requiredBytes, availableBytes):
+            return "磁盘可用空间不足：保存至少需要 \(ByteCountFormatter.string(fromByteCount: requiredBytes, countStyle: .file))，当前可用 \(ByteCountFormatter.string(fromByteCount: availableBytes, countStyle: .file))"
         case .checksumMismatch(let path):
             return "工程资产校验失败：\(path)"
         case .duplicateLayerID(let layerID):
@@ -351,9 +401,17 @@ enum ProjectArchiveRelativePath {
 
 final class ProjectArchiveV2Writer {
     private let fileManager: FileManager
+    private let limits: ProjectArchiveReadLimits
+    private let availableCapacityProvider: (URL) -> Int64?
 
-    init(fileManager: FileManager = .default) {
+    init(
+        fileManager: FileManager = .default,
+        limits: ProjectArchiveReadLimits = .standard,
+        availableCapacityProvider: @escaping (URL) -> Int64? = ProjectArchiveV2Writer.availableCapacity
+    ) {
         self.fileManager = fileManager
+        self.limits = limits
+        self.availableCapacityProvider = availableCapacityProvider
     }
 
     @discardableResult
@@ -362,10 +420,20 @@ final class ProjectArchiveV2Writer {
         to destinationURL: URL,
         savedAt: Date = Date()
     ) throws -> ProjectArchiveV2Manifest {
-        try validate(payload)
+        var projectState = payload.package
+        projectState.layerSnapshots = []
+        let projectData = try Self.makeEncoder().encode(projectState)
+        let estimatedUncompressedBytes = try validate(
+            payload,
+            projectStateByteCount: projectData.count
+        )
 
         let parentURL = destinationURL.deletingLastPathComponent()
         try fileManager.createDirectory(at: parentURL, withIntermediateDirectories: true)
+        try validateAvailableCapacity(
+            at: parentURL,
+            estimatedUncompressedBytes: estimatedUncompressedBytes
+        )
 
         var destinationIsDirectory: ObjCBool = false
         if fileManager.fileExists(atPath: destinationURL.path, isDirectory: &destinationIsDirectory),
@@ -386,9 +454,6 @@ final class ProjectArchiveV2Writer {
         }
 
         do {
-            var projectState = payload.package
-            projectState.layerSnapshots = []
-            let projectData = try Self.makeEncoder().encode(projectState)
             let projectAsset = makeAssetDescriptor(
                 relativePath: ProjectArchiveV2Manifest.projectStatePath,
                 compression: .none,
@@ -396,6 +461,20 @@ final class ProjectArchiveV2Writer {
                 uncompressedData: projectData
             )
             try write(projectData, descriptor: projectAsset, into: stagingURL)
+
+            let previewAsset: ProjectArchiveAssetDescriptor?
+            if let previewPNGData = payload.previewPNGData {
+                let descriptor = makeAssetDescriptor(
+                    relativePath: ProjectArchiveV2Manifest.previewPath,
+                    compression: .none,
+                    storedData: previewPNGData,
+                    uncompressedData: previewPNGData
+                )
+                try write(previewPNGData, descriptor: descriptor, into: stagingURL)
+                previewAsset = descriptor
+            } else {
+                previewAsset = nil
+            }
 
             var layerDescriptors: [ProjectArchiveLayerDescriptor] = []
             layerDescriptors.reserveCapacity(payload.package.layerSnapshots.count)
@@ -492,13 +571,24 @@ final class ProjectArchiveV2Writer {
             let manifest = ProjectArchiveV2Manifest(
                 savedAt: savedAt,
                 projectState: projectAsset,
+                preview: previewAsset,
                 layers: layerDescriptors,
                 referenceImages: referenceEntries,
                 savedSnapshots: savedSnapshotEntries
             )
             let manifestData = try Self.makeEncoder().encode(manifest)
+            guard manifestData.count <= limits.maximumManifestBytes else {
+                throw ProjectArchiveV2Error.manifestTooLarge(manifestData.count)
+            }
             let manifestURL = stagingURL.appendingPathComponent(ProjectArchiveV2Manifest.manifestFilename)
             try manifestData.write(to: manifestURL, options: .atomic)
+
+            // Verify the exact bytes on disk before the atomic replacement. Validation streams
+            // one asset at a time, avoiding a second full-project resident copy.
+            try ProjectArchiveV2Reader(
+                fileManager: fileManager,
+                limits: limits
+            ).validateArchive(at: stagingURL)
 
             if fileManager.fileExists(atPath: destinationURL.path) {
                 _ = try fileManager.replaceItemAt(
@@ -521,8 +611,43 @@ final class ProjectArchiveV2Writer {
         }
     }
 
-    private func validate(_ payload: ProjectArchivePayload) throws {
+    @discardableResult
+    private func validate(
+        _ payload: ProjectArchivePayload,
+        projectStateByteCount: Int
+    ) throws -> Int {
+        guard projectStateByteCount <= limits.maximumProjectStateBytes else {
+            throw ProjectArchiveV2Error.assetTooLarge(
+                path: ProjectArchiveV2Manifest.projectStatePath,
+                byteCount: projectStateByteCount
+            )
+        }
+        var totalUncompressedBytes = 0
+        func reserve(_ byteCount: Int, path: String) throws {
+            guard byteCount >= 0, byteCount <= limits.maximumUncompressedAssetBytes else {
+                throw ProjectArchiveV2Error.assetTooLarge(path: path, byteCount: byteCount)
+            }
+            let (sum, overflow) = totalUncompressedBytes.addingReportingOverflow(byteCount)
+            guard !overflow, sum <= limits.maximumTotalUncompressedBytes else {
+                throw ProjectArchiveV2Error.totalAssetSizeTooLarge
+            }
+            totalUncompressedBytes = sum
+        }
+        try reserve(projectStateByteCount, path: ProjectArchiveV2Manifest.projectStatePath)
+        if let previewPNGData = payload.previewPNGData {
+            guard previewPNGData.count <= ProjectArchiveV2Manifest.maximumPreviewByteCount else {
+                throw ProjectArchiveV2Error.assetTooLarge(
+                    path: ProjectArchiveV2Manifest.previewPath,
+                    byteCount: previewPNGData.count
+                )
+            }
+            try reserve(previewPNGData.count, path: ProjectArchiveV2Manifest.previewPath)
+        }
+
         let layerSnapshots = payload.package.layerSnapshots
+        guard layerSnapshots.count <= limits.maximumLayerCount else {
+            throw ProjectArchiveV2Error.malformedManifest("图层数量超出保存上限")
+        }
         let resourceKeys = layerSnapshots.map {
             ProjectArchiveLayerResourceKey(layerID: $0.layerID, resourceKind: $0.resourceKind)
         }
@@ -553,10 +678,18 @@ final class ProjectArchiveV2Writer {
             else {
                 throw ProjectArchiveV2Error.invalidLayerSnapshot(layerSnapshot.layerID)
             }
+            try reserve(
+                texture.pixelData.count,
+                path: "图层 \(layerSnapshot.layerID.rawValue.uuidString)"
+            )
         }
 
         var slots = Set<Int>()
         var recordIDs = Set<UUID>()
+        guard payload.referenceImages.count <= limits.maximumReferenceImageCount else {
+            throw ProjectArchiveV2Error.malformedManifest("参考图数量超出保存上限")
+        }
+        var reservedReferenceAssetIDs = Set<ProjectReferenceImageAssetID>()
         for referenceImage in payload.referenceImages {
             do {
                 try referenceImage.validate()
@@ -569,9 +702,15 @@ final class ProjectArchiveV2Writer {
             guard recordIDs.insert(referenceImage.descriptor.id).inserted else {
                 throw ProjectArchiveV2Error.duplicateReferenceID(referenceImage.descriptor.id)
             }
+            if reservedReferenceAssetIDs.insert(referenceImage.descriptor.assetID).inserted {
+                try reserve(
+                    referenceImage.encodedImageData.count,
+                    path: "参考图 \(referenceImage.descriptor.originalFilename)"
+                )
+            }
         }
 
-        guard payload.savedSnapshots.count <= 6 else {
+        guard payload.savedSnapshots.count <= limits.maximumSavedSnapshotCount else {
             throw ProjectArchiveV2Error.malformedManifest("画布快照数量超出上限")
         }
         var snapshotIDs = Set<UUID>()
@@ -601,7 +740,36 @@ final class ProjectArchiveV2Writer {
             else {
                 throw ProjectArchiveV2Error.invalidSavedSnapshot(descriptor.id)
             }
+            try reserve(
+                savedSnapshot.pixels.pixelData.count,
+                path: "画布快照 \(descriptor.id.uuidString)"
+            )
         }
+        return totalUncompressedBytes
+    }
+
+    private func validateAvailableCapacity(
+        at parentURL: URL,
+        estimatedUncompressedBytes: Int
+    ) throws {
+        guard let availableBytes = availableCapacityProvider(parentURL), availableBytes >= 0 else {
+            return
+        }
+        let safetyMargin = Int64(64 * 1024 * 1024)
+        let estimated = Int64(clamping: estimatedUncompressedBytes)
+        let (requiredBytes, overflow) = estimated.addingReportingOverflow(safetyMargin)
+        guard !overflow, availableBytes >= requiredBytes else {
+            throw ProjectArchiveV2Error.insufficientDiskSpace(
+                requiredBytes: overflow ? Int64.max : requiredBytes,
+                availableBytes: availableBytes
+            )
+        }
+    }
+
+    private static func availableCapacity(at url: URL) -> Int64? {
+        try? url.resourceValues(
+            forKeys: [.volumeAvailableCapacityForImportantUsageKey]
+        ).volumeAvailableCapacityForImportantUsage
     }
 
     private static func expectedLayerResourceKeys(in document: ArtDocument) -> Set<ProjectArchiveLayerResourceKey> {
@@ -667,35 +835,202 @@ final class ProjectArchiveV2Reader {
         self.limits = limits
     }
 
-    func read(from archiveURL: URL) throws -> ProjectArchivePayload {
-        var archiveIsDirectory: ObjCBool = false
-        guard
-            fileManager.fileExists(atPath: archiveURL.path, isDirectory: &archiveIsDirectory),
-            archiveIsDirectory.boolValue
-        else {
-            throw ProjectArchiveV2Error.archiveIsNotDirectory
-        }
-
-        let manifestURL = archiveURL.appendingPathComponent(ProjectArchiveV2Manifest.manifestFilename)
-        guard fileManager.fileExists(atPath: manifestURL.path) else {
-            throw ProjectArchiveV2Error.missingManifest
-        }
-        let manifestSize = try fileByteCount(at: manifestURL)
-        guard manifestSize <= limits.maximumManifestBytes else {
-            throw ProjectArchiveV2Error.manifestTooLarge(manifestSize)
-        }
-
-        let manifest: ProjectArchiveV2Manifest
-        do {
-            manifest = try Self.makeDecoder().decode(
-                ProjectArchiveV2Manifest.self,
-                from: Data(contentsOf: manifestURL)
+    func inspect(from archiveURL: URL) throws -> ProjectArchiveInspection {
+        let manifest = try loadManifest(from: archiveURL)
+        var totalUncompressedBytes = 0
+        func reserve(_ descriptor: ProjectArchiveAssetDescriptor) throws {
+            guard descriptor.storedByteCount <= limits.maximumStoredAssetBytes,
+                  descriptor.uncompressedByteCount <= limits.maximumUncompressedAssetBytes else {
+                throw ProjectArchiveV2Error.assetTooLarge(
+                    path: descriptor.relativePath,
+                    byteCount: max(descriptor.storedByteCount, descriptor.uncompressedByteCount)
+                )
+            }
+            let (sum, overflow) = totalUncompressedBytes.addingReportingOverflow(
+                descriptor.uncompressedByteCount
             )
-        } catch {
-            throw ProjectArchiveV2Error.malformedManifest(error.localizedDescription)
+            guard !overflow, sum <= limits.maximumTotalUncompressedBytes else {
+                throw ProjectArchiveV2Error.totalAssetSizeTooLarge
+            }
+            totalUncompressedBytes = sum
         }
-        try validateManifestHeader(manifest)
-        try validateManifestCollections(manifest)
+
+        try reserve(manifest.projectState)
+        if let preview = manifest.preview {
+            guard preview.uncompressedByteCount <= ProjectArchiveV2Manifest.maximumPreviewByteCount else {
+                throw ProjectArchiveV2Error.assetTooLarge(
+                    path: preview.relativePath,
+                    byteCount: preview.uncompressedByteCount
+                )
+            }
+            try reserve(preview)
+        }
+        let projectData = try readAsset(
+            manifest.projectState,
+            from: archiveURL,
+            maximumUncompressedBytes: limits.maximumProjectStateBytes
+        )
+        let package: ProjectPackage
+        do {
+            package = try Self.makeDecoder().decode(ProjectPackage.self, from: projectData)
+        } catch {
+            throw ProjectArchiveV2Error.malformedProjectState(error.localizedDescription)
+        }
+        guard package.layerSnapshots.isEmpty else {
+            throw ProjectArchiveV2Error.projectStateContainsInlineLayerSnapshots
+        }
+        try validateCanvasSize(package.document.canvasSize)
+
+        for layer in manifest.layers {
+            try validate(layer, canvasSize: package.document.canvasSize)
+            try reserve(layer.asset)
+        }
+        let expectedResourceKeys = Self.expectedLayerResourceKeys(in: package.document)
+        let actualResourceKeys = Set(manifest.layers.map {
+            ProjectArchiveLayerResourceKey(layerID: $0.layerID, resourceKind: $0.resourceKind)
+        })
+        guard actualResourceKeys == expectedResourceKeys else {
+            throw ProjectArchiveV2Error.projectLayerSetMismatch
+        }
+
+        var referenceArchiveBytes = 0
+        var estimatedReferenceResidentBytes = 0
+        var reservedReferencePaths = Set<String>()
+        for entry in manifest.referenceImages {
+            if reservedReferencePaths.insert(entry.asset.relativePath).inserted {
+                try reserve(entry.asset)
+                referenceArchiveBytes = Self.saturatingAdd(
+                    referenceArchiveBytes,
+                    entry.asset.uncompressedByteCount
+                )
+            }
+            let decodedBytes = Self.estimatedReferenceDecodedBytes(
+                width: entry.descriptor.pixelWidth,
+                height: entry.descriptor.pixelHeight,
+                maximumDimension: 768
+            )
+            estimatedReferenceResidentBytes = Self.saturatingAdd(
+                estimatedReferenceResidentBytes,
+                Self.saturatingAdd(entry.asset.uncompressedByteCount, decodedBytes)
+            )
+        }
+
+        for entry in manifest.savedSnapshots {
+            try validate(entry)
+            guard entry.descriptor.canvasSize == package.document.canvasSize else {
+                throw ProjectArchiveV2Error.invalidSavedSnapshot(entry.descriptor.id)
+            }
+            try reserve(entry.asset)
+        }
+
+        var workspace = package.workspaceState
+        workspace.document.normalizeLayerHierarchy()
+        return ProjectArchiveInspection(
+            workspace: workspace,
+            layerResourceCount: manifest.layers.count,
+            savedSnapshotCount: manifest.savedSnapshots.count,
+            referenceArchiveBytes: referenceArchiveBytes,
+            estimatedReferenceResidentBytes: estimatedReferenceResidentBytes,
+            totalUncompressedAssetBytes: totalUncompressedBytes
+        )
+    }
+
+    /// Performs a complete integrity pass without retaining decoded layer and snapshot pixels.
+    /// The writer uses this against its staging directory before replacing the last good project.
+    func validateArchive(at archiveURL: URL) throws {
+        let manifest = try loadManifest(from: archiveURL)
+        var totalUncompressedBytes = 0
+        func reserveUncompressedBytes(_ count: Int) throws {
+            let (sum, overflow) = totalUncompressedBytes.addingReportingOverflow(count)
+            guard !overflow, sum <= limits.maximumTotalUncompressedBytes else {
+                throw ProjectArchiveV2Error.totalAssetSizeTooLarge
+            }
+            totalUncompressedBytes = sum
+        }
+
+        try reserveUncompressedBytes(manifest.projectState.uncompressedByteCount)
+        if let preview = manifest.preview {
+            guard preview.uncompressedByteCount <= ProjectArchiveV2Manifest.maximumPreviewByteCount else {
+                throw ProjectArchiveV2Error.assetTooLarge(
+                    path: preview.relativePath,
+                    byteCount: preview.uncompressedByteCount
+                )
+            }
+            try reserveUncompressedBytes(preview.uncompressedByteCount)
+            _ = try readAsset(
+                preview,
+                from: archiveURL,
+                maximumUncompressedBytes: ProjectArchiveV2Manifest.maximumPreviewByteCount
+            )
+        }
+        let projectData = try readAsset(
+            manifest.projectState,
+            from: archiveURL,
+            maximumUncompressedBytes: limits.maximumProjectStateBytes
+        )
+        let package: ProjectPackage
+        do {
+            package = try Self.makeDecoder().decode(ProjectPackage.self, from: projectData)
+        } catch {
+            throw ProjectArchiveV2Error.malformedProjectState(error.localizedDescription)
+        }
+        guard package.layerSnapshots.isEmpty else {
+            throw ProjectArchiveV2Error.projectStateContainsInlineLayerSnapshots
+        }
+        try validateCanvasSize(package.document.canvasSize)
+
+        for layer in manifest.layers {
+            try validate(layer, canvasSize: package.document.canvasSize)
+            try reserveUncompressedBytes(layer.asset.uncompressedByteCount)
+            _ = try readAsset(
+                layer.asset,
+                from: archiveURL,
+                maximumUncompressedBytes: limits.maximumUncompressedAssetBytes
+            )
+        }
+        let expectedResourceKeys = Self.expectedLayerResourceKeys(in: package.document)
+        let decodedResourceKeys = Set(manifest.layers.map {
+            ProjectArchiveLayerResourceKey(layerID: $0.layerID, resourceKind: $0.resourceKind)
+        })
+        guard decodedResourceKeys == expectedResourceKeys else {
+            throw ProjectArchiveV2Error.projectLayerSetMismatch
+        }
+
+        var validatedReferencePaths = Set<String>()
+        for entry in manifest.referenceImages {
+            guard validatedReferencePaths.insert(entry.asset.relativePath).inserted else { continue }
+            try reserveUncompressedBytes(entry.asset.uncompressedByteCount)
+            let data = try readAsset(
+                entry.asset,
+                from: archiveURL,
+                maximumUncompressedBytes: limits.maximumUncompressedAssetBytes
+            )
+            do {
+                _ = try ProjectReferenceImagePayload(
+                    descriptor: entry.descriptor,
+                    encodedImageData: data
+                )
+            } catch {
+                throw ProjectArchiveV2Error.invalidReferenceImage(error.localizedDescription)
+            }
+        }
+
+        for entry in manifest.savedSnapshots {
+            try validate(entry)
+            guard entry.descriptor.canvasSize == package.document.canvasSize else {
+                throw ProjectArchiveV2Error.invalidSavedSnapshot(entry.descriptor.id)
+            }
+            try reserveUncompressedBytes(entry.asset.uncompressedByteCount)
+            _ = try readAsset(
+                entry.asset,
+                from: archiveURL,
+                maximumUncompressedBytes: limits.maximumUncompressedAssetBytes
+            )
+        }
+    }
+
+    func read(from archiveURL: URL) throws -> ProjectArchivePayload {
+        let manifest = try loadManifest(from: archiveURL)
 
         var totalUncompressedBytes = 0
         func reserveUncompressedBytes(_ count: Int) throws {
@@ -707,6 +1042,23 @@ final class ProjectArchiveV2Reader {
         }
 
         try reserveUncompressedBytes(manifest.projectState.uncompressedByteCount)
+        let previewPNGData: Data?
+        if let preview = manifest.preview {
+            guard preview.uncompressedByteCount <= ProjectArchiveV2Manifest.maximumPreviewByteCount else {
+                throw ProjectArchiveV2Error.assetTooLarge(
+                    path: preview.relativePath,
+                    byteCount: preview.uncompressedByteCount
+                )
+            }
+            try reserveUncompressedBytes(preview.uncompressedByteCount)
+            previewPNGData = try readAsset(
+                preview,
+                from: archiveURL,
+                maximumUncompressedBytes: ProjectArchiveV2Manifest.maximumPreviewByteCount
+            )
+        } else {
+            previewPNGData = nil
+        }
         let projectData = try readAsset(
             manifest.projectState,
             from: archiveURL,
@@ -816,8 +1168,41 @@ final class ProjectArchiveV2Reader {
         return ProjectArchivePayload(
             package: package,
             referenceImages: referenceImages,
-            savedSnapshots: savedSnapshots
+            savedSnapshots: savedSnapshots,
+            previewPNGData: previewPNGData
         )
+    }
+
+    private func loadManifest(from archiveURL: URL) throws -> ProjectArchiveV2Manifest {
+        var archiveIsDirectory: ObjCBool = false
+        guard
+            fileManager.fileExists(atPath: archiveURL.path, isDirectory: &archiveIsDirectory),
+            archiveIsDirectory.boolValue
+        else {
+            throw ProjectArchiveV2Error.archiveIsNotDirectory
+        }
+
+        let manifestURL = archiveURL.appendingPathComponent(ProjectArchiveV2Manifest.manifestFilename)
+        guard fileManager.fileExists(atPath: manifestURL.path) else {
+            throw ProjectArchiveV2Error.missingManifest
+        }
+        let manifestSize = try fileByteCount(at: manifestURL)
+        guard manifestSize <= limits.maximumManifestBytes else {
+            throw ProjectArchiveV2Error.manifestTooLarge(manifestSize)
+        }
+
+        let manifest: ProjectArchiveV2Manifest
+        do {
+            manifest = try Self.makeDecoder().decode(
+                ProjectArchiveV2Manifest.self,
+                from: Data(contentsOf: manifestURL)
+            )
+        } catch {
+            throw ProjectArchiveV2Error.malformedManifest(error.localizedDescription)
+        }
+        try validateManifestHeader(manifest)
+        try validateManifestCollections(manifest)
+        return manifest
     }
 
     private func validateManifestHeader(_ manifest: ProjectArchiveV2Manifest) throws {
@@ -862,6 +1247,12 @@ final class ProjectArchiveV2Reader {
         }
 
         try validateAsset(manifest.projectState)
+        if let preview = manifest.preview {
+            guard preview.relativePath == ProjectArchiveV2Manifest.previewPath else {
+                throw ProjectArchiveV2Error.invalidRelativePath(preview.relativePath)
+            }
+            try validateAsset(preview)
+        }
         for layer in manifest.layers {
             let resourceKey = ProjectArchiveLayerResourceKey(
                 layerID: layer.layerID,
@@ -1049,6 +1440,29 @@ final class ProjectArchiveV2Reader {
             keys.insert(ProjectArchiveLayerResourceKey(layerID: layer.id, resourceKind: .mask))
         }
         return keys
+    }
+
+    private static func estimatedReferenceDecodedBytes(
+        width: Int,
+        height: Int,
+        maximumDimension: Int
+    ) -> Int {
+        guard width > 0, height > 0, maximumDimension > 0 else { return Int.max }
+        let largestDimension = max(width, height)
+        let scale = min(1, Double(maximumDimension) / Double(largestDimension))
+        let decodedWidth = max(1, Int((Double(width) * scale).rounded(.up)))
+        let decodedHeight = max(1, Int((Double(height) * scale).rounded(.up)))
+        return saturatingMultiply(saturatingMultiply(decodedWidth, decodedHeight), 4)
+    }
+
+    private static func saturatingMultiply(_ lhs: Int, _ rhs: Int) -> Int {
+        let (value, overflow) = lhs.multipliedReportingOverflow(by: rhs)
+        return overflow ? Int.max : value
+    }
+
+    private static func saturatingAdd(_ lhs: Int, _ rhs: Int) -> Int {
+        let (value, overflow) = lhs.addingReportingOverflow(rhs)
+        return overflow ? Int.max : value
     }
 }
 

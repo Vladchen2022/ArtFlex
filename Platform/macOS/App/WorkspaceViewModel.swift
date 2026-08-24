@@ -225,6 +225,10 @@ final class WorkspaceViewModel: ObservableObject {
     @Published private(set) var canMergeDown = false
     @Published private(set) var canMergeVisible = false
     @Published private(set) var strokeResetToken = 0
+    /// Advances only when the entire document and its GPU surface graph are replaced.
+    /// Canvas hosts use this identity to discard coordinators that still retain the
+    /// previous document's surface IDs or drawable state.
+    @Published private(set) var documentRenderGeneration: UInt64 = 0
     @Published private(set) var isGeneratorRegionSelectionArmed = false
     @Published private(set) var isGeneratorStrokeModeEnabled = false
     @Published private(set) var activeMaskEditingLayerID: LayerID?
@@ -255,6 +259,7 @@ final class WorkspaceViewModel: ObservableObject {
     @Published private(set) var isRefiningSelection = false
     @Published private(set) var isSavingSnapshot = false
     @Published private(set) var isPreparingSnapshotCompare = false
+    @Published private(set) var isProjectOpening = false
     @Published private(set) var isLuminosityPreviewEnabled = false
     @Published private(set) var isFreeTransformDragging = false
     @Published private(set) var activeFreeTransformInteractionMode: FreeTransformInteractionMode?
@@ -376,10 +381,15 @@ final class WorkspaceViewModel: ObservableObject {
         cache.name = "ArtFlex.PatternPlacementTextures"
         return cache
     }()
+    private var memoryPressureSource: DispatchSourceMemoryPressure?
     private var referenceImageUpgradeTasks: [Int: Task<Void, Never>] = [:]
     private var recoveryAutosaveTask: Task<Void, Never>?
     private var recoveryAutosaveWriteTask: Task<Void, Never>?
     private var projectSaveTask: Task<Void, Never>?
+    private var projectOpenTask: Task<Void, Never>?
+    private var pendingManualSaveAfterRecoveryAutosave = false
+    private var pendingManualSaveAfterTimelapse = false
+    private var recoveryAutosaveWaitingForTimelapse = false
     private var recoveryAutosaveGeneration: UInt64 = 0
     private var recoveryAutosaveForcedDeadline: ContinuousClock.Instant?
     private var isSuppressingRecoveryAutosaveScheduling = false
@@ -525,10 +535,24 @@ final class WorkspaceViewModel: ObservableObject {
             }
             return try self.makeVisibleCompositeTexture(waitUntilCompleted: false)
         }
+        bootstrap.timelapseRecorder.shouldDeferCapture = { [weak self] in
+            guard let self else { return true }
+            return self.isProjectSaving
+                || self.isProjectOpening
+                || self.recoveryAutosaveWriteTask != nil
+                || self.snapshotSaveTask != nil
+                || self.isRasterExporting
+                || self.pendingManualSaveAfterTimelapse
+                || self.recoveryAutosaveWaitingForTimelapse
+        }
+        bootstrap.timelapseRecorder.onBecameIdle = { [weak self] in
+            self?.resumePersistenceAfterTimelapseBecameIdle()
+        }
         syncTimelapseDocumentContext()
         syncDrawingStatsDocumentContext()
         if installsZoomKeyboardMonitor {
             setupZoomKeyboardMonitor()
+            setupMemoryPressureMonitor()
         }
         if didSanitizePersistedBrushResources || didApplyLaunchDefaultBrushPreset {
             persistBrushLibrary()
@@ -540,6 +564,60 @@ final class WorkspaceViewModel: ObservableObject {
         if hasRecoveryProject {
             status = .init(kind: .info, message: "检测到自动恢复工程，可从顶部工具栏恢复")
         }
+    }
+
+    deinit {
+        projectOpenTask?.cancel()
+        memoryPressureSource?.cancel()
+    }
+
+    private func setupMemoryPressureMonitor() {
+        let source = DispatchSource.makeMemoryPressureSource(
+            eventMask: [.warning, .critical],
+            queue: .main
+        )
+        source.setEventHandler { [weak self, weak source] in
+            let events = source?.data ?? []
+            Task { @MainActor [weak self] in
+                self?.handleMemoryPressure(events)
+            }
+        }
+        source.resume()
+        memoryPressureSource = source
+    }
+
+    private func handleMemoryPressure(_ events: DispatchSource.MemoryPressureEvent) {
+        let isCritical = events.contains(.critical)
+        bootstrap.textureSerializer.trimStagingPool(
+            toMaxResidentBytes: isCritical ? 0 : 8 * 1024 * 1024
+        )
+        patternPlacementTextureCache.removeAllObjects()
+        StageOneBrushPreviewRasterizer.resetCache()
+        bootstrap.strokeEngine.purgeTransientPreviewTexturesIfIdle()
+        bootstrap.historyController.relieveMemoryPressure(critical: isCritical)
+
+        cancelPendingSnapshotComparePreparation(resumeTimelapseIfNeeded: false)
+        cancelSnapshotPreviewPreparationTasks()
+        if snapshotCompareSession == nil {
+            var trimmedSnapshots = savedSnapshots
+            for index in trimmedSnapshots.indices {
+                trimmedSnapshots[index].previewImage = nil
+            }
+            savedSnapshots = trimmedSnapshots
+        }
+        if isCritical {
+            layerThumbnailCache.removeAll(keepingCapacity: false)
+            layerThumbnailRevision &+= 1
+            if hasUnsavedChanges {
+                scheduleRecoveryAutosave(delay: .seconds(10))
+            }
+            showStatus(.init(
+                kind: .info,
+                message: "系统内存紧张，已释放可重建缓存和较旧历史；画布内容未受影响"
+            ))
+        }
+        canUndo = bootstrap.historyController.canUndo
+        canRedo = bootstrap.historyController.canRedo
     }
 
     // Cmd+= / Cmd+- 完全绕过菜单系统，直接本地拦截
@@ -3526,6 +3604,11 @@ final class WorkspaceViewModel: ObservableObject {
                     self.showStatus(.init(kind: .error, message: "无法读取参考图"))
                     return
                 }
+                guard self.ensureDocumentResourceBudget(
+                    replacingReferenceImageAt: slotID,
+                    with: asset,
+                    action: "载入参考图"
+                ) else { return }
 
                 self.replaceReferenceImageSlotAsset(asset, at: slotID, selectAfterUpdate: true)
                 self.noteProjectReferenceImagesChanged()
@@ -3558,6 +3641,11 @@ final class WorkspaceViewModel: ObservableObject {
                     self.showStatus(.init(kind: .error, message: "无法读取参考图"))
                     return
                 }
+                guard self.ensureDocumentResourceBudget(
+                    replacingReferenceImageAt: slotID,
+                    with: asset,
+                    action: "载入参考图"
+                ) else { return }
 
                 self.replaceReferenceImageSlotAsset(asset, at: slotID, selectAfterUpdate: true)
                 self.noteProjectReferenceImagesChanged()
@@ -3584,6 +3672,11 @@ final class WorkspaceViewModel: ObservableObject {
                 guard let upgraded else { return }
                 guard self.referenceImageSlots.indices.contains(slotID) else { return }
                 guard self.referenceImageSlots[slotID].asset?.sourceURL?.standardizedFileURL == sourceIdentifier else { return }
+                guard self.ensureDocumentResourceBudget(
+                    replacingReferenceImageAt: slotID,
+                    with: upgraded,
+                    action: "放大参考图预览"
+                ) else { return }
 
                 self.replaceReferenceImageSlotAsset(
                     upgraded,
@@ -4840,21 +4933,34 @@ final class WorkspaceViewModel: ObservableObject {
                 return
             }
 
-            checkpointSingleLayerHistoryIfPossible(
+            guard checkpointSingleLayerHistoryIfPossible(
                 layerID: layerID,
                 operationKind: "patternPlacement.apply"
-            )
+            ) else {
+                patternPlacementPhase = .armed(itemID: draft.itemID)
+                return
+            }
             targetLayerID = layerID
             targetTexture = texture
             successMessage = "已贴入当前图层：\(item.displayName)"
 
         case .newLayer:
-            checkpointHistoryIfPossible(
+            guard ensureDocumentResourceBudget(
+                additionalPaintLayers: 1,
+                action: "新建图案图层"
+            ) else {
+                patternPlacementPhase = .armed(itemID: draft.itemID)
+                return
+            }
+            guard checkpointHistoryIfPossible(
                 operationKind: "patternPlacement.apply",
                 topologyOperation: true,
                 additionalOperationKinds: ["document.addLayer"],
-                captureMode: .full
-            )
+                captureMode: .topologyDelta(changedLayerIDs: [])
+            ) else {
+                patternPlacementPhase = .armed(itemID: draft.itemID)
+                return
+            }
 
             var addedLayer: LayerRecord?
             bootstrap.workspaceStore.updateDocument { document in
@@ -6155,7 +6261,15 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func addLayer() {
-        checkpointHistoryIfPossible()
+        guard ensureDocumentResourceBudget(
+            additionalPaintLayers: 1,
+            action: "新增图层"
+        ) else { return }
+        guard checkpointHistoryIfPossible(
+            operationKind: "layer.add",
+            topologyOperation: true,
+            captureMode: .topologyDelta(changedLayerIDs: [])
+        ) else { return }
         var addedLayerID: LayerID?
         bootstrap.workspaceStore.updateDocument { document in
             addedLayerID = document.addLayer().id
@@ -6169,10 +6283,14 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func addCurveAdjustmentLayer() {
+        guard ensureDocumentResourceBudget(
+            additionalPaintLayers: 1,
+            action: "新增调整层"
+        ) else { return }
         guard checkpointHistoryIfPossible(
             operationKind: "layer.addCurveAdjustment",
             topologyOperation: true,
-            captureMode: .full
+            captureMode: .topologyDelta(changedLayerIDs: [])
         ) else { return }
         var addedLayerID: LayerID?
         bootstrap.workspaceStore.updateDocument { document in
@@ -6262,7 +6380,15 @@ final class WorkspaceViewModel: ObservableObject {
 
     func addLayer(toGroup groupID: LayerID) {
         guard workspace.document.layer(groupID)?.isGroup == true else { return }
-        checkpointHistoryIfPossible(topologyOperation: true)
+        guard ensureDocumentResourceBudget(
+            additionalPaintLayers: 1,
+            action: "新增图层"
+        ) else { return }
+        guard checkpointHistoryIfPossible(
+            operationKind: "layer.addToGroup",
+            topologyOperation: true,
+            captureMode: .topologyDelta(changedLayerIDs: [])
+        ) else { return }
         var addedLayerID: LayerID?
         bootstrap.workspaceStore.updateDocument { document in
             let layer = document.addLayer()
@@ -6278,7 +6404,11 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func addLayerGroup(containing layerIDs: Set<LayerID> = []) {
-        checkpointHistoryIfPossible(topologyOperation: true)
+        guard checkpointHistoryIfPossible(
+            operationKind: "layerGroup.add",
+            topologyOperation: true,
+            captureMode: .topologyDelta(changedLayerIDs: [])
+        ) else { return }
         bootstrap.workspaceStore.updateDocument { document in
             _ = document.addGroup(named: "图层组", containing: layerIDs)
         }
@@ -6289,7 +6419,11 @@ final class WorkspaceViewModel: ObservableObject {
 
     func ungroupLayerGroup(_ groupID: LayerID) {
         guard workspace.document.layer(groupID)?.isGroup == true else { return }
-        checkpointHistoryIfPossible(topologyOperation: true)
+        guard checkpointHistoryIfPossible(
+            operationKind: "layerGroup.ungroup",
+            topologyOperation: true,
+            captureMode: .topologyDelta(changedLayerIDs: [])
+        ) else { return }
         var changed = false
         bootstrap.workspaceStore.updateDocument { document in
             changed = document.removeGroupKeepingChildren(groupID)
@@ -6311,7 +6445,13 @@ final class WorkspaceViewModel: ObservableObject {
             cancelSelectionTransform(clearSelectionAfterCancel: true)
         }
 
-        checkpointHistoryIfPossible()
+        let removedLayerID = workspace.document.activeLayerID
+        guard checkpointHistoryIfPossible(
+            operationKind: "layer.delete",
+            candidateChangedLayerIDs: [removedLayerID],
+            topologyOperation: true,
+            captureMode: .topologyDelta(changedLayerIDs: [removedLayerID])
+        ) else { return }
         let initialCount = workspace.document.layers.count
         bootstrap.workspaceStore.updateDocument { document in
             document.removeActiveLayer()
@@ -6327,7 +6467,21 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func duplicateActiveLayer() {
-        checkpointHistoryIfPossible()
+        let activeLayerAddsSurface = workspace.document.layer(
+            workspace.document.activeLayerID
+        )?.isPaintLayer == true
+        guard ensureDocumentResourceBudget(
+            additionalPaintLayers: activeLayerAddsSurface ? 1 : 0,
+            additionalMasks: workspace.document.layer(
+                workspace.document.activeLayerID
+            )?.mask == nil ? 0 : 1,
+            action: "复制图层"
+        ) else { return }
+        guard checkpointHistoryIfPossible(
+            operationKind: "layer.duplicate",
+            topologyOperation: true,
+            captureMode: .topologyDelta(changedLayerIDs: [])
+        ) else { return }
 
         let sourceLayerID = workspace.document.activeLayerID
         var duplicatedLayerID: LayerID?
@@ -6385,7 +6539,14 @@ final class WorkspaceViewModel: ObservableObject {
             return
         }
 
-        checkpointHistoryIfPossible()
+        guard checkpointHistoryIfPossible(
+            operationKind: "layer.mergeDown",
+            candidateChangedLayerIDs: [context.source.id, context.destination.id],
+            topologyOperation: true,
+            captureMode: .topologyDelta(
+                changedLayerIDs: [context.source.id, context.destination.id]
+            )
+        ) else { return }
 
         do {
             try bootstrap.layerMergeController.merge(
@@ -6483,7 +6644,13 @@ final class WorkspaceViewModel: ObservableObject {
             return
         }
 
-        checkpointHistoryIfPossible()
+        let mergedLayerIDs = context.visibleLayers.map(\.id)
+        guard checkpointHistoryIfPossible(
+            operationKind: "layer.mergeVisible",
+            candidateChangedLayerIDs: mergedLayerIDs,
+            topologyOperation: true,
+            captureMode: .topologyDelta(changedLayerIDs: mergedLayerIDs)
+        ) else { return }
 
         do {
             try bootstrap.layerMergeController.mergeVisible(
@@ -6523,14 +6690,19 @@ final class WorkspaceViewModel: ObservableObject {
             showStatus(.init(kind: .info, message: "当前没有可盖印的可见图层"))
             return
         }
+        guard ensureDocumentResourceBudget(
+            additionalPaintLayers: 1,
+            action: "盖印可见图层"
+        ) else { return }
 
         do {
             let stampedTexture = try makeVisibleCompositeTexture()
-            checkpointHistoryIfPossible(
+            guard checkpointHistoryIfPossible(
                 operationKind: "layer.stampVisible",
                 topologyOperation: true,
-                additionalOperationKinds: ["layer.composite"]
-            )
+                additionalOperationKinds: ["layer.composite"],
+                captureMode: .topologyDelta(changedLayerIDs: [])
+            ) else { return }
 
             var createdLayerID: LayerID?
             bootstrap.workspaceStore.updateDocument { document in
@@ -6594,11 +6766,15 @@ final class WorkspaceViewModel: ObservableObject {
             beginEditingActiveLayerMask()
             return
         }
+        guard ensureDocumentResourceBudget(
+            additionalMasks: 1,
+            action: "添加图层蒙版"
+        ) else { return }
         guard checkpointHistoryIfPossible(
             operationKind: "layerMask.add",
             candidateChangedLayerIDs: [layerID],
             topologyOperation: true,
-            captureMode: .full
+            captureMode: .topologyDelta(changedLayerIDs: [layerID])
         ) else { return }
         bootstrap.workspaceStore.updateDocument { document in
             guard let index = document.layers.firstIndex(where: { $0.id == layerID }) else { return }
@@ -6686,7 +6862,7 @@ final class WorkspaceViewModel: ObservableObject {
             operationKind: "layerMask.delete",
             candidateChangedLayerIDs: [layerID],
             topologyOperation: true,
-            captureMode: .full
+            captureMode: .topologyDelta(changedLayerIDs: [layerID])
         ) else { return }
         bootstrap.workspaceStore.updateDocument { document in
             guard let index = document.layers.firstIndex(where: { $0.id == layerID }) else { return }
@@ -10771,13 +10947,18 @@ final class WorkspaceViewModel: ObservableObject {
             showStatus(.init(kind: .info, message: outsideCanvasMessage))
             return false
         }
+        guard ensureDocumentResourceBudget(
+            additionalPaintLayers: 1,
+            action: "导入为新图层"
+        ) else { return false }
 
         do {
-            checkpointHistoryIfPossible(
+            guard checkpointHistoryIfPossible(
                 operationKind: historyOperationKind,
                 topologyOperation: true,
-                additionalOperationKinds: additionalHistoryOperationKinds
-            )
+                additionalOperationKinds: additionalHistoryOperationKinds,
+                captureMode: .topologyDelta(changedLayerIDs: [])
+            ) else { return false }
 
             let insertionIndex = min(
                 (workspace.document.layers.firstIndex(where: { $0.id == workspace.document.activeLayerID }) ?? (workspace.document.layers.count - 1)) + 1,
@@ -12074,11 +12255,12 @@ final class WorkspaceViewModel: ObservableObject {
         bootstrap.eyedropperSampler
     }
 
+    @discardableResult
     func checkpointSingleLayerHistoryIfPossible(
         layerID: LayerID,
         operationKind: String,
         workspaceOverride: WorkspaceState? = nil
-    ) {
+    ) -> Bool {
         checkpointHistoryIfPossible(
             operationKind: operationKind,
             candidateChangedLayerIDs: [layerID],
@@ -12890,6 +13072,11 @@ final class WorkspaceViewModel: ObservableObject {
             return
         }
 
+        guard ensureDocumentResourceBudget(
+            additionalSavedSnapshots: 1,
+            action: "保存画布快照"
+        ) else { return }
+
         do {
             _ = flushBrushEditingBoundary(reason: "handleSnapshotSavePrimaryAction")
             let snapshot = try makeVisibleCompositeSnapshot()
@@ -12915,6 +13102,12 @@ final class WorkspaceViewModel: ObservableObject {
             requestOpenSnapshotCompare()
             return
         }
+
+
+        guard ensureDocumentResourceBudget(
+            additionalSavedSnapshots: 1,
+            action: "保存画布快照"
+        ) else { return }
 
         do {
             _ = flushBrushEditingBoundary(reason: "requestSnapshotSavePrimaryAction")
@@ -13216,6 +13409,21 @@ final class WorkspaceViewModel: ObservableObject {
             showStatus(.init(kind: .info, message: "方案试探已开启"))
             return
         }
+        let branchCopies = saturatingMultiply(
+            currentLiveSurfaceByteCount(),
+            by: 4
+        )
+        let branchCompositeBytes = saturatingMultiply(
+            saturatingMultiply(
+                workspace.document.canvasSize.width,
+                by: workspace.document.canvasSize.height
+            ),
+            by: 4
+        )
+        guard ensureDocumentResourceBudget(
+            additionalWorkingBytes: saturatingAdd(branchCopies, branchCompositeBytes),
+            action: "进入方案试探"
+        ) else { return }
 
         do {
             _ = flushBrushEditingBoundary(reason: "startIdeationSession")
@@ -13334,16 +13542,29 @@ final class WorkspaceViewModel: ObservableObject {
             showStatus(.init(kind: .info, message: "工程正在保存，请稍候"))
             return false
         }
+        guard !timelapseRecorder.isBusy else {
+            pendingManualSaveAfterTimelapse = true
+            showStatus(.init(kind: .info, message: "录像帧写入完成后将立即保存工程"))
+            return true
+        }
+        guard recoveryAutosaveWriteTask == nil else {
+            pendingManualSaveAfterRecoveryAutosave = true
+            showStatus(.init(kind: .info, message: "自动恢复写入完成后将立即保存工程"))
+            return true
+        }
         guard let prepared = prepareProjectSave() else { return false }
 
         isProjectSaving = true
         showStatus(.init(kind: .info, message: "正在保存工程：\(prepared.url.lastPathComponent)"))
         let persistenceBox = WorkspaceUncheckedBox(bootstrap.persistenceController)
-        let payloadBox = WorkspaceUncheckedBox(prepared.payload)
+        let captureBox = WorkspaceUncheckedBox(prepared.capture)
         projectSaveTask = Task { [weak self] in
             let result = await Task.detached(priority: .utility) {
                 Result {
-                    try persistenceBox.value.writeCapturedProject(payloadBox.value, to: prepared.url)
+                    let payload = try persistenceBox.value.materializeProjectPayload(
+                        from: captureBox.value
+                    )
+                    return try persistenceBox.value.writeCapturedProject(payload, to: prepared.url)
                 }
             }.value
             guard let self else { return }
@@ -13354,25 +13575,141 @@ final class WorkspaceViewModel: ObservableObject {
         return true
     }
 
+    private func ensureDocumentResourceBudget(
+        additionalPaintLayers: Int = 0,
+        additionalMasks: Int = 0,
+        additionalSavedSnapshots: Int = 0,
+        additionalWorkingBytes: Int = 0,
+        replacingReferenceImageAt slotID: Int? = nil,
+        with referenceImageAsset: ReferenceImageAsset? = nil,
+        action: String
+    ) -> Bool {
+        if let encodedCount = referenceImageAsset?.encodedImageData?.count,
+           encodedCount > bootstrap.archiveReadLimits.maximumUncompressedAssetBytes {
+            showStatus(.init(
+                kind: .error,
+                message: "无法\(action)：单张参考图超过工程格式的安全资产上限"
+            ))
+            return false
+        }
+        let referenceBytes = currentReferenceImageByteCounts(
+            replacingSlotID: slotID,
+            with: referenceImageAsset
+        )
+        let assessment = bootstrap.documentResourceBudgetPolicy.assess(
+            canvasSize: workspace.document.canvasSize,
+            paintLayerCount: workspace.document.paintLayers.count + additionalPaintLayers,
+            maskCount: workspace.document.paintLayers.filter { $0.mask != nil }.count + additionalMasks,
+            savedSnapshotCount: savedSnapshots.count + additionalSavedSnapshots,
+            referenceImageBytes: referenceBytes.archive,
+            referenceImageResidentBytes: referenceBytes.resident,
+            historyResidentBytes: bootstrap.historyController.residentByteCount,
+            additionalWorkingBytes: additionalWorkingBytes
+        )
+        guard !assessment.isSupported else { return true }
+
+        let peak = ByteCountFormatter.string(
+            fromByteCount: Int64(clamping: assessment.footprint.estimatedSavePeakBytes),
+            countStyle: .memory
+        )
+        showStatus(.init(
+            kind: .error,
+            message: "无法\(action)：\(assessment.rejectionReason ?? "超出安全资源范围")（预计保存峰值 \(peak)）"
+        ))
+        return false
+    }
+
+    private func currentReferenceImageByteCounts(
+        replacingSlotID: Int? = nil,
+        with replacementAsset: ReferenceImageAsset? = nil
+    ) -> (archive: Int, resident: Int) {
+        referenceImageSlots.reduce(into: (archive: 0, resident: 0)) { total, slot in
+            let asset = slot.id == replacingSlotID ? replacementAsset : slot.asset
+            guard let asset else { return }
+            total.resident = saturatingAdd(total.resident, asset.rgbaPixels.count)
+            if let encodedCount = asset.encodedImageData?.count {
+                total.archive = saturatingAdd(total.archive, encodedCount)
+                total.resident = saturatingAdd(total.resident, encodedCount)
+            }
+        }
+    }
+
+    private func currentLiveSurfaceByteCount() -> Int {
+        let pixels = saturatingMultiply(
+            workspace.document.canvasSize.width,
+            by: workspace.document.canvasSize.height
+        )
+        let paintBytes = saturatingMultiply(
+            saturatingMultiply(pixels, by: workspace.document.paintLayers.count),
+            by: 4
+        )
+        let maskBytes = saturatingMultiply(
+            pixels,
+            by: workspace.document.paintLayers.filter { $0.mask != nil }.count
+        )
+        return saturatingAdd(paintBytes, maskBytes)
+    }
+
+    private func currentDocumentInteractiveResidentByteCount() -> Int {
+        let referenceBytes = currentReferenceImageByteCounts()
+        return bootstrap.documentResourceBudgetPolicy.assess(
+            canvasSize: workspace.document.canvasSize,
+            paintLayerCount: workspace.document.paintLayers.count,
+            maskCount: workspace.document.paintLayers.filter { $0.mask != nil }.count,
+            savedSnapshotCount: savedSnapshots.count,
+            referenceImageBytes: referenceBytes.archive,
+            referenceImageResidentBytes: referenceBytes.resident,
+            historyResidentBytes: bootstrap.historyController.residentByteCount
+        ).footprint.estimatedInteractiveResidentBytes
+    }
+
+    private func saturatingMultiply(_ lhs: Int, by rhs: Int) -> Int {
+        guard lhs >= 0, rhs >= 0 else { return Int.max }
+        let (value, overflow) = lhs.multipliedReportingOverflow(by: rhs)
+        return overflow ? Int.max : value
+    }
+
+    private func saturatingAdd(_ lhs: Int, _ rhs: Int) -> Int {
+        guard lhs >= 0, rhs >= 0 else { return Int.max }
+        let (value, overflow) = lhs.addingReportingOverflow(rhs)
+        return overflow ? Int.max : value
+    }
+
     @discardableResult
     private func saveProjectSynchronously() -> Bool {
         guard !isProjectSaving else {
             showStatus(.init(kind: .info, message: "工程正在保存，请稍候"))
             return false
         }
+        guard recoveryAutosaveWriteTask == nil else {
+            showStatus(.init(kind: .info, message: "正在完成自动恢复写入，请稍候再退出"))
+            return false
+        }
+        guard !timelapseRecorder.isBusy else {
+            showStatus(.init(kind: .info, message: "正在完成录像帧写入，请稍候再退出或打开工程"))
+            return false
+        }
         guard let prepared = prepareProjectSave() else { return false }
         isProjectSaving = true
         let result = Result {
-            try bootstrap.persistenceController.writeCapturedProject(prepared.payload, to: prepared.url)
+            let payload = try bootstrap.persistenceController.materializeProjectPayload(
+                from: prepared.capture
+            )
+            return try bootstrap.persistenceController.writeCapturedProject(payload, to: prepared.url)
         }
         isProjectSaving = false
         finishProjectSave(prepared, result: result)
-        return (try? result.get()) != nil
+        do {
+            _ = try result.get()
+            return true
+        } catch {
+            return false
+        }
     }
 
     private struct PreparedProjectSave {
         var url: URL
-        var payload: ProjectArchivePayload
+        var capture: FrozenProjectCapture
         var previousDocumentName: String
         var savedDocumentName: String
         var changeGeneration: UInt64
@@ -13423,13 +13760,15 @@ final class WorkspaceViewModel: ObservableObject {
         }
 
         do {
-            let payload = try bootstrap.persistenceController.captureProjectPayload(
+            let previewTexture = try? makeVisibleCompositeTexture(waitUntilCompleted: false)
+            let capture = try bootstrap.persistenceController.freezeProjectCapture(
                 referenceImages: try projectReferenceImagePayloads(),
-                savedSnapshots: persistentSavedSnapshotPayloads()
+                savedSnapshots: persistentSavedSnapshotPayloads(),
+                previewTexture: previewTexture
             )
             return PreparedProjectSave(
                 url: url,
-                payload: payload,
+                capture: capture,
                 previousDocumentName: previousDocumentName,
                 savedDocumentName: savedDocumentName,
                 changeGeneration: recoveryAutosaveGeneration
@@ -13447,11 +13786,14 @@ final class WorkspaceViewModel: ObservableObject {
 
     private func finishProjectSave(
         _ prepared: PreparedProjectSave,
-        result: Result<Void, Error>
+        result: Result<Data?, Error>
     ) {
         do {
-            try result.get()
+            let previewPNGData = try result.get()
             currentProjectURL = prepared.url
+            let thumbnailApplied = previewPNGData.map {
+                bootstrap.filePanelService.applyProjectThumbnail($0, to: prepared.url)
+            } ?? false
             if recoveryAutosaveGeneration == prepared.changeGeneration {
                 hasUnsavedChanges = false
                 try? bootstrap.persistenceController.discardRecoveryProject()
@@ -13461,7 +13803,10 @@ final class WorkspaceViewModel: ObservableObject {
             persistBrushLibrary()
             syncTimelapseDocumentContext()
             syncDrawingStatsDocumentContext()
-            let suffix = hasUnsavedChanges ? "；保存后又有新改动" : ""
+            var suffix = hasUnsavedChanges ? "；保存后又有新改动" : ""
+            if previewPNGData != nil, !thumbnailApplied {
+                suffix += "；Finder 缩略图更新失败"
+            }
             showStatus(.init(
                 kind: .success,
                 message: "已保存工程：\(prepared.url.lastPathComponent)\(suffix)"
@@ -13487,7 +13832,15 @@ final class WorkspaceViewModel: ObservableObject {
             return
         }
 
-        openProject(from: url, isRecovery: false)
+        beginProjectOpen(from: url, isRecovery: false)
+    }
+
+    func openProjectFromExternalURL(_ url: URL) {
+        guard let projectURL = FilePanelService.normalizedProjectOpenURL(url) else {
+            showStatus(.init(kind: .error, message: "无法识别要打开的 ArtFlex 工程"))
+            return
+        }
+        beginProjectOpen(from: projectURL, isRecovery: false)
     }
 
     func recoverAutosavedProject() {
@@ -13496,10 +13849,7 @@ final class WorkspaceViewModel: ObservableObject {
             showStatus(.init(kind: .info, message: "没有可恢复的自动保存工程"))
             return
         }
-        openProject(
-            from: bootstrap.persistenceController.recoveryProjectURL,
-            isRecovery: true
-        )
+        beginProjectOpen(from: nil, isRecovery: true)
     }
 
     func discardAutosavedProject() {
@@ -13515,90 +13865,221 @@ final class WorkspaceViewModel: ObservableObject {
         }
     }
 
+    private func beginProjectOpen(from url: URL?, isRecovery: Bool) {
+        let action = isRecovery ? "恢复工程" : "打开工程"
+        guard canBeginDocumentPersistence(action: action) else { return }
+        guard !isProjectSaving, recoveryAutosaveWriteTask == nil else {
+            showStatus(.init(kind: .info, message: "正在完成工程写入，请稍候再打开其他工程"))
+            return
+        }
+        guard !timelapseRecorder.isBusy else {
+            showStatus(.init(kind: .info, message: "正在完成录像帧写入，请稍候再(action)"))
+            return
+        }
+
+        switch confirmUnsavedChangesIfNeeded(
+            messageText: "当前画布有未保存内容",
+            informativeText: "打开其他工程前，要先保存当前内容吗？"
+        ) {
+        case .save:
+            guard saveProjectSynchronously() else { return }
+        case .discard:
+            break
+        case .cancel:
+            showStatus(.init(kind: .info, message: "已取消打开工程"))
+            return
+        }
+
+        let policy = bootstrap.documentResourceBudgetPolicy
+        let currentResidentBytes = currentDocumentInteractiveResidentByteCount()
+        let persistenceBox = WorkspaceUncheckedBox(bootstrap.persistenceController)
+        isProjectOpening = true
+        showStatus(.init(kind: .info, message: isRecovery ? "正在验证并恢复工程…" : "正在验证并打开工程…"))
+
+        projectOpenTask?.cancel()
+        projectOpenTask = Task { [weak self] in
+            let result = await Task.detached(priority: .userInitiated) {
+                Result<(URL, OpenProjectResult), Error> {
+                    let preflight: (ProjectOpenInspection) throws -> Void = { inspection in
+                        let assessment = policy.assess(
+                            canvasSize: inspection.workspace.document.canvasSize,
+                            paintLayerCount: inspection.workspace.document.paintLayers.count,
+                            maskCount: inspection.workspace.document.paintLayers.filter { $0.mask != nil }.count,
+                            savedSnapshotCount: inspection.savedSnapshotCount,
+                            referenceImageBytes: inspection.referenceArchiveBytes,
+                            referenceImageResidentBytes: inspection.estimatedReferenceResidentBytes
+                        )
+                        guard assessment.isSupported else {
+                            throw PersistenceError.invalidProject(
+                                assessment.rejectionReason ?? "工程超出当前设备的安全资源范围"
+                            )
+                        }
+                        let (transitionPeak, overflow) = assessment.footprint.estimatedSavePeakBytes
+                            .addingReportingOverflow(currentResidentBytes)
+                        guard !overflow, transitionPeak <= policy.maximumSavePeakBytes else {
+                            throw PersistenceError.invalidProject(
+                                "打开工程时，新旧文档同时驻留会超过安全内存峰值"
+                            )
+                        }
+                    }
+
+                    if isRecovery {
+                        let opened = try persistenceBox.value.openBestAvailableRecoveryProject(
+                            preflight: preflight
+                        )
+                        return (opened.url, opened.result)
+                    }
+                    guard let url else { throw CocoaError(.fileNoSuchFile) }
+                    return (
+                        url,
+                        try persistenceBox.value.openProject(from: url, preflight: preflight)
+                    )
+                }
+            }.value
+
+            guard let self, !Task.isCancelled else { return }
+            self.projectOpenTask = nil
+            self.isProjectOpening = false
+            do {
+                let opened = try result.get()
+                try self.applyOpenedProjectResult(
+                    opened.1,
+                    sourceURL: opened.0,
+                    isRecovery: isRecovery
+                )
+            } catch {
+                self.showStatus(.init(kind: .error, message: error.localizedDescription))
+            }
+        }
+    }
+
     func openProject(from url: URL, isRecovery: Bool) {
         guard canBeginDocumentPersistence(action: isRecovery ? "恢复工程" : "打开工程") else {
             return
         }
+        guard !isProjectSaving, recoveryAutosaveWriteTask == nil else {
+            showStatus(.init(kind: .info, message: "正在完成工程写入，请稍候再打开其他工程"))
+            return
+        }
+
+        switch confirmUnsavedChangesIfNeeded(
+            messageText: "当前画布有未保存内容",
+            informativeText: "打开其他工程前，要先保存当前内容吗？"
+        ) {
+        case .save:
+            guard saveProjectSynchronously() else { return }
+        case .discard:
+            break
+        case .cancel:
+            showStatus(.init(kind: .info, message: "已取消打开工程"))
+            return
+        }
+
         do {
-            let result = try bootstrap.persistenceController.openProject(from: url)
-            let existingWorkspace = bootstrap.workspaceStore.state
-            var openedWorkspace = Self.workspaceForOpenedProject(
-                result.workspace,
-                currentWorkspace: existingWorkspace
-            )
-            if !isRecovery {
-                openedWorkspace.document.metadata.name = Self.projectDisplayName(for: url)
-            }
-            let stagedLayerTextures = try stageOpenedProjectTextures(
-                result.layerSnapshots,
-                canvasSize: openedWorkspace.document.canvasSize
-            )
-
-            switch confirmUnsavedChangesIfNeeded(
-                messageText: "当前画布有未保存内容",
-                informativeText: "打开其他工程前，要先保存当前内容吗？"
-            ) {
-            case .save:
-                guard saveProjectSynchronously() else { return }
-            case .discard:
-                break
-            case .cancel:
-                showStatus(.init(kind: .info, message: "已取消打开工程"))
-                return
-            }
-
-            _ = drainPendingBrushCommitsIfNeeded(resetLiveSession: true)
-            pauseDrawingStatsTracking()
-            cancelColorAdjustmentSessionIfNeeded(showFeedback: false)
-            cancelCurveAdjustmentIfNeeded(showFeedback: false)
-            resolveTransformSession(reason: .documentOpen)
-            resetTransientDocumentInteractionsForReplacement()
-            timelapseRecorder.stopRecording()
-            resetSnapshotToolState(resumeTimelapseIfNeeded: false)
-            perspectiveGuideMatchState = .init()
-            bootstrap.workspaceStore.replaceState(openedWorkspace)
-            _ = synchronizeTipImageLibraryFromWorkspace(persistIfChanged: false)
-            Self.normalizeLegacySelectionIfNeeded(in: bootstrap.workspaceStore)
-            bootstrap.layerSurfaceStore.reset()
-            _ = bootstrap.layerSurfaceStore.surfaceRecords(
-                for: bootstrap.workspaceStore.state.document
-            )
-
-            for stagedLayer in stagedLayerTextures {
-                switch stagedLayer.resourceKind {
-                case .content:
-                    guard let surfaceID = bootstrap.layerSurfaceStore.surfaceID(for: stagedLayer.layerID) else {
-                        throw PersistenceError.invalidProject("无法恢复图层 \(stagedLayer.layerID.rawValue.uuidString)")
-                    }
-                    bootstrap.layerSurfaceStore.swapTexture(for: surfaceID, with: stagedLayer.texture)
-                case .mask:
-                    bootstrap.layerSurfaceStore.setMaskTexture(stagedLayer.texture, for: stagedLayer.layerID)
+            let policy = bootstrap.documentResourceBudgetPolicy
+            let currentResidentBytes = currentDocumentInteractiveResidentByteCount()
+            let result = try bootstrap.persistenceController.openProject(from: url) { inspection in
+                let assessment = policy.assess(
+                    canvasSize: inspection.workspace.document.canvasSize,
+                    paintLayerCount: inspection.workspace.document.paintLayers.count,
+                    maskCount: inspection.workspace.document.paintLayers.filter { $0.mask != nil }.count,
+                    savedSnapshotCount: inspection.savedSnapshotCount,
+                    referenceImageBytes: inspection.referenceArchiveBytes,
+                    referenceImageResidentBytes: inspection.estimatedReferenceResidentBytes
+                )
+                guard assessment.isSupported else {
+                    throw PersistenceError.invalidProject(
+                        assessment.rejectionReason ?? "工程超出当前设备的安全资源范围"
+                    )
+                }
+                let (peak, overflow) = assessment.footprint.estimatedSavePeakBytes
+                    .addingReportingOverflow(currentResidentBytes)
+                guard !overflow, peak <= policy.maximumSavePeakBytes else {
+                    throw PersistenceError.invalidProject("打开工程时，新旧文档同时驻留会超过安全内存峰值")
                 }
             }
-            bootstrap.textureSerializer.purgeStagingTextures(
-                exceeding: bootstrap.workspaceStore.state.document.canvasSize
-            )
-
-            bootstrap.historyController.resetHistory()
-            restoreProjectReferenceImages(result.referenceImages)
-            restorePersistentSavedSnapshots(result.savedSnapshots)
-            currentProjectURL = isRecovery || result.storageFormat == .legacyJSON ? nil : url
-            hasUnsavedChanges = isRecovery
-            persistBrushLibrary()
-            syncTimelapseDocumentContext()
-            syncDrawingStatsDocumentContext()
-            showStatus(.init(
-                kind: .success,
-                message: isRecovery
-                    ? "已恢复自动保存工程，请另存为正式工程"
-                    : result.storageFormat == .legacyJSON
-                        ? "已打开旧版工程，保存时请另存为 .artflex：\(url.lastPathComponent)"
-                        : "已打开工程：\(url.lastPathComponent)"
-            ))
-            refresh()
+            try applyOpenedProjectResult(result, sourceURL: url, isRecovery: isRecovery)
         } catch {
             showStatus(.init(kind: .error, message: error.localizedDescription))
         }
+    }
+
+    private func applyOpenedProjectResult(
+        _ result: OpenProjectResult,
+        sourceURL: URL,
+        isRecovery: Bool
+    ) throws {
+        let existingWorkspace = bootstrap.workspaceStore.state
+        var openedWorkspace = Self.workspaceForOpenedProject(
+            result.workspace,
+            currentWorkspace: existingWorkspace
+        )
+        if !isRecovery {
+            openedWorkspace.document.metadata.name = Self.projectDisplayName(for: sourceURL)
+        }
+        let stagedLayerTextures = try stageOpenedProjectTextures(
+            result.layerSnapshots,
+            canvasSize: openedWorkspace.document.canvasSize
+        )
+
+        _ = drainPendingBrushCommitsIfNeeded(resetLiveSession: true)
+        pauseDrawingStatsTracking()
+        cancelColorAdjustmentSessionIfNeeded(showFeedback: false)
+        cancelCurveAdjustmentIfNeeded(showFeedback: false)
+        resolveTransformSession(reason: .documentOpen)
+        resetTransientDocumentInteractionsForReplacement()
+        timelapseRecorder.stopRecording()
+        resetSnapshotToolState(resumeTimelapseIfNeeded: false)
+        perspectiveGuideMatchState = .init()
+        bootstrap.workspaceStore.replaceState(openedWorkspace)
+        _ = synchronizeTipImageLibraryFromWorkspace(persistIfChanged: false)
+        Self.normalizeLegacySelectionIfNeeded(in: bootstrap.workspaceStore)
+        bootstrap.layerSurfaceStore.reset()
+        _ = bootstrap.layerSurfaceStore.surfaceRecords(
+            for: bootstrap.workspaceStore.state.document
+        )
+
+        for stagedLayer in stagedLayerTextures {
+            switch stagedLayer.resourceKind {
+            case .content:
+                guard let surfaceID = bootstrap.layerSurfaceStore.surfaceID(for: stagedLayer.layerID) else {
+                    throw PersistenceError.invalidProject(
+                        "无法恢复图层 \(stagedLayer.layerID.rawValue.uuidString)"
+                    )
+                }
+                bootstrap.layerSurfaceStore.swapTexture(for: surfaceID, with: stagedLayer.texture)
+            case .mask:
+                bootstrap.layerSurfaceStore.setMaskTexture(stagedLayer.texture, for: stagedLayer.layerID)
+            }
+        }
+        bootstrap.textureSerializer.purgeStagingTextures(
+            exceeding: bootstrap.workspaceStore.state.document.canvasSize
+        )
+
+        publishDocumentReplacementRenderState()
+
+        bootstrap.historyController.resetHistory()
+        restoreProjectReferenceImages(result.referenceImages)
+        restorePersistentSavedSnapshots(result.savedSnapshots)
+        currentProjectURL = isRecovery || result.storageFormat == .legacyJSON ? nil : sourceURL
+        if !isRecovery,
+           result.storageFormat == .archiveV2,
+           let previewPNGData = result.previewPNGData {
+            _ = bootstrap.filePanelService.applyProjectThumbnail(previewPNGData, to: sourceURL)
+        }
+        hasUnsavedChanges = isRecovery
+        persistBrushLibrary()
+        syncTimelapseDocumentContext()
+        syncDrawingStatsDocumentContext()
+        showStatus(.init(
+            kind: .success,
+            message: isRecovery
+                ? "已恢复自动保存工程，请另存为正式工程"
+                : result.storageFormat == .legacyJSON
+                    ? "已打开旧版工程，保存时请另存为 .artflex：\(sourceURL.lastPathComponent)"
+                    : "已打开工程：\(sourceURL.lastPathComponent)"
+        ))
+        refresh()
     }
 
     private func stageOpenedProjectTextures(
@@ -13747,6 +14228,15 @@ final class WorkspaceViewModel: ObservableObject {
 
     private func performRecoveryAutosave(generation: UInt64) {
         guard hasUnsavedChanges else { return }
+        guard !timelapseRecorder.isBusy else {
+            recoveryAutosaveWaitingForTimelapse = true
+            return
+        }
+        recoveryAutosaveWaitingForTimelapse = false
+        guard !isProjectSaving, projectSaveTask == nil else {
+            scheduleRecoveryAutosave(delay: .seconds(15))
+            return
+        }
         guard recoveryAutosaveWriteTask == nil else {
             scheduleRecoveryAutosave(delay: .seconds(15))
             return
@@ -13756,6 +14246,9 @@ final class WorkspaceViewModel: ObservableObject {
             !isApplyingGradientCommit,
             !isApplyingTransformCommit,
             !isBucketFillInProgress,
+            !isSavingSnapshot,
+            !isPreparingSnapshotCompare,
+            !isRasterExporting,
             !isTransformingSelection,
             patternPlacementPhase.draft == nil,
             linearGradientState.phase == .idle,
@@ -13791,9 +14284,9 @@ final class WorkspaceViewModel: ObservableObject {
         }
 
         do {
-            // GPU-backed layer snapshots are frozen synchronously at this safe edit boundary.
-            // The returned payload is value-only and can be compressed/written off MainActor.
-            let payload = try bootstrap.persistenceController.captureProjectPayload(
+            // The main actor performs only one private-to-private Metal copy. Pixel readback,
+            // checksums, compression, and disk I/O continue on the utility task.
+            let capture = try bootstrap.persistenceController.freezeProjectCapture(
                 referenceImages: try projectReferenceImagePayloads(),
                 savedSnapshots: persistentSavedSnapshotPayloads()
             )
@@ -13803,6 +14296,9 @@ final class WorkspaceViewModel: ObservableObject {
             recoveryAutosaveWriteTask = Task { [weak self] in
                 let result = await Task.detached(priority: .utility) {
                     Result {
+                        let payload = try persistenceBox.value.materializeProjectPayload(
+                            from: capture
+                        )
                         try persistenceBox.value.writeCapturedProject(payload, to: stagingURL)
                     }
                 }.value
@@ -13812,6 +14308,12 @@ final class WorkspaceViewModel: ObservableObject {
                     return
                 }
                 self.recoveryAutosaveWriteTask = nil
+                defer {
+                    if self.pendingManualSaveAfterRecoveryAutosave {
+                        self.pendingManualSaveAfterRecoveryAutosave = false
+                        _ = self.saveProject()
+                    }
+                }
 
                 guard
                     self.hasUnsavedChanges,
@@ -13838,7 +14340,23 @@ final class WorkspaceViewModel: ObservableObject {
         }
     }
 
+    private func resumePersistenceAfterTimelapseBecameIdle() {
+        if pendingManualSaveAfterTimelapse {
+            pendingManualSaveAfterTimelapse = false
+            _ = saveProject()
+            return
+        }
+        if recoveryAutosaveWaitingForTimelapse {
+            recoveryAutosaveWaitingForTimelapse = false
+            scheduleRecoveryAutosave(delay: .zero)
+        }
+    }
+
     private func canBeginDocumentPersistence(action: String) -> Bool {
+        guard !isProjectOpening else {
+            showStatus(.init(kind: .info, message: "工程正在打开，请稍候"))
+            return false
+        }
         guard
             !isApplyingPatternPlacementCommit,
             !isApplyingGradientCommit,
@@ -13850,6 +14368,10 @@ final class WorkspaceViewModel: ObservableObject {
         }
         guard !isTransformingSelection else {
             showStatus(.init(kind: .info, message: "请先确认或取消自由变形，再\(action)"))
+            return false
+        }
+        guard !isSavingSnapshot, !isPreparingSnapshotCompare, !isRasterExporting else {
+            showStatus(.init(kind: .info, message: "正在完成快照或导出，请稍后再\(action)"))
             return false
         }
         guard patternPlacementPhase.draft == nil else {
@@ -13984,6 +14506,7 @@ final class WorkspaceViewModel: ObservableObject {
         )
         seedDefaultBackgroundLayerIfNeeded(for: newWorkspace.document)
         bootstrap.textureSerializer.purgeStagingTextures(exceeding: newWorkspace.document.canvasSize)
+        publishDocumentReplacementRenderState()
         bootstrap.historyController.resetHistory()
 
         currentProjectURL = nil
@@ -13993,6 +14516,19 @@ final class WorkspaceViewModel: ObservableObject {
         syncDrawingStatsDocumentContext()
         showStatus(.init(kind: .success, message: "已创建新画布：\(canvasSize.width)×\(canvasSize.height)"))
         refresh()
+    }
+
+    /// Publishes one rendering boundary after replacing the workspace and all layer
+    /// textures. A normal redraw revision is insufficient because an existing Metal
+    /// view can retain surface identifiers from the former document.
+    private func publishDocumentReplacementRenderState() {
+        bootstrap.strokeEngine.resetBrushPipelineState()
+        clearRecentBrushAdjustmentState()
+        invalidateWholeLayerInteractionBoundsCache()
+        documentChangeRevision &+= 1
+        canvasContentRevision = documentChangeRevision
+        strokeResetToken &+= 1
+        documentRenderGeneration &+= 1
     }
 
     private func seedDefaultBackgroundLayerIfNeeded(for document: ArtDocument) {
@@ -15454,7 +15990,19 @@ final class WorkspaceViewModel: ObservableObject {
         _ snapshot: LayerTextureSnapshot,
         named layerName: String
     ) throws {
-        checkpointHistoryIfPossible()
+        guard ensureDocumentResourceBudget(
+            additionalPaintLayers: 1,
+            action: "将结果加入新图层"
+        ) else {
+            throw CocoaError(.fileWriteOutOfSpace)
+        }
+        guard checkpointHistoryIfPossible(
+            operationKind: "layer.appendCompositeSnapshot",
+            topologyOperation: true,
+            captureMode: .topologyDelta(changedLayerIDs: [])
+        ) else {
+            throw CocoaError(.fileWriteUnknown)
+        }
         var createdLayerID: LayerID?
         bootstrap.workspaceStore.updateDocument { document in
             createdLayerID = document.addLayer(named: layerName).id

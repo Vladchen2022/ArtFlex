@@ -38,6 +38,7 @@ let package = Package(
                 "HANDOFF.md",
                 "HANDOFF_TEXTURE_FILL_2026-07-13.md",
                 "LICENSE",
+                "Platform/macOS/Distribution",
                 "README.md",
                 "selection-trace.log",
                 "Tests"

@@ -243,15 +243,35 @@ struct WorkspaceViewModelSafetyTests {
         try harness.bootstrap.persistenceController.saveProject(to: legacyURL)
         try harness.bootstrap.persistenceController.saveProject(to: packageURL)
 
+        let initialCanvasContentRevision = harness.viewModel.canvasContentRevision
+        let initialRenderGeneration = harness.viewModel.documentRenderGeneration
+        let initialStrokeResetToken = harness.viewModel.strokeResetToken
         harness.viewModel.openProject(from: legacyURL, isRecovery: false)
 
         #expect(!harness.viewModel.hasUnsavedChanges)
         #expect(harness.viewModel.projectSaveIndicatorState == .notYetSaved)
+        #expect(harness.viewModel.canvasContentRevision > initialCanvasContentRevision)
+        #expect(harness.viewModel.documentRenderGeneration == initialRenderGeneration + 1)
+        #expect(harness.viewModel.strokeResetToken == initialStrokeResetToken + 1)
+        #expect(
+            harness.viewModel.sceneSnapshot.renderSnapshot.canvasContentRevision
+                == harness.viewModel.canvasContentRevision
+        )
 
+        let legacyCanvasContentRevision = harness.viewModel.canvasContentRevision
+        let legacyRenderGeneration = harness.viewModel.documentRenderGeneration
+        let legacyStrokeResetToken = harness.viewModel.strokeResetToken
         harness.viewModel.openProject(from: packageURL, isRecovery: false)
 
         #expect(!harness.viewModel.hasUnsavedChanges)
         #expect(harness.viewModel.projectSaveIndicatorState == .saved)
+        #expect(harness.viewModel.canvasContentRevision > legacyCanvasContentRevision)
+        #expect(harness.viewModel.documentRenderGeneration == legacyRenderGeneration + 1)
+        #expect(harness.viewModel.strokeResetToken == legacyStrokeResetToken + 1)
+        #expect(
+            harness.viewModel.sceneSnapshot.renderSnapshot.canvasContentRevision
+                == harness.viewModel.canvasContentRevision
+        )
     }
 
     @Test
@@ -296,6 +316,8 @@ struct WorkspaceViewModelSafetyTests {
         try harness.makePendingBrushCommit()
         PerformanceAuditStore.shared.reset()
         harness.viewModel.setBrushOpacity(0.42)
+        let initialRenderGeneration = harness.viewModel.documentRenderGeneration
+        let initialStrokeResetToken = harness.viewModel.strokeResetToken
 
         harness.viewModel.createNewCanvasDiscardingUnsavedChanges(
             name: "Safety Test",
@@ -305,6 +327,8 @@ struct WorkspaceViewModelSafetyTests {
 
         let backgroundLayerID = try #require(harness.viewModel.workspace.document.layers.first?.id)
         #expect(harness.bootstrap.strokeEngine.hasPendingBrushCommitJobs == false)
+        #expect(harness.viewModel.documentRenderGeneration == initialRenderGeneration + 1)
+        #expect(harness.viewModel.strokeResetToken == initialStrokeResetToken + 1)
         #expect(harness.viewModel.workspace.document.canvasSize == .init(width: 32, height: 32))
         #expect(harness.viewModel.workspace.document.layers.first?.name == LayerRecord.defaultBackgroundLayerName)
         #expect(harness.viewModel.workspace.document.layers.count == 2)

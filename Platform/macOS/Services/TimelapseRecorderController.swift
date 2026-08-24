@@ -106,6 +106,7 @@ final class TimelapseRecorderController: ObservableObject {
     @Published private(set) var droppedFrameCount = 0
     @Published private(set) var isExportingVideo = false
     @Published private(set) var lastExportedVideoURL: URL?
+    @Published private(set) var lastFailureMessage: String?
 
     private let workspaceStore: WorkspaceStore
     private let layerSurfaceStore: StageOneLayerSurfaceStore
@@ -125,6 +126,8 @@ final class TimelapseRecorderController: ObservableObject {
     /// as the canvas, export and eyedropper paths. The legacy layer fallback is kept
     /// for isolated controller tests and bootstrap-time use.
     var compositeTextureProvider: (() throws -> MTLTexture)?
+    var shouldDeferCapture: (() -> Bool)?
+    var onBecameIdle: (() -> Void)?
 
     init(
         workspaceStore: WorkspaceStore,
@@ -149,6 +152,10 @@ final class TimelapseRecorderController: ObservableObject {
 
     var canExportVideo: Bool {
         currentSessionDirectory != nil && savedFrameCount > 0 && !isExportingVideo && pendingJobCount == 0
+    }
+
+    var isBusy: Bool {
+        pendingJobCount > 0 || isExportingVideo
     }
 
     func syncCurrentDocument(documentName: String, documentFileURL: URL? = nil) {
@@ -197,6 +204,7 @@ final class TimelapseRecorderController: ObservableObject {
         lastCapturedRevision = 0
         lastCaptureDate = nil
         lastExportedVideoURL = nil
+        lastFailureMessage = nil
         captureTimer?.invalidate()
         captureTimer = nil
         return sessionDirectory
@@ -250,6 +258,7 @@ final class TimelapseRecorderController: ObservableObject {
                     self.lastExportedVideoURL = url
                 }
                 completion(result)
+                self.notifyIfIdle()
             }
         }
     }
@@ -315,10 +324,34 @@ final class TimelapseRecorderController: ObservableObject {
     }
 
     private func capturePendingFrame(documentName: String) {
+        if shouldDeferCapture?() == true {
+            captureTimer?.invalidate()
+            captureTimer = Timer.scheduledTimer(withTimeInterval: 0.75, repeats: false) { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    self.captureTimer = nil
+                    self.capturePendingFrame(documentName: documentName)
+                }
+            }
+            return
+        }
         guard
             let revision = pendingRevision,
             revision != lastCapturedRevision,
-            let sessionDirectory = currentSessionDirectory,
+            let sessionDirectory = currentSessionDirectory
+        else {
+            return
+        }
+        guard Self.hasSafeDiskReserve(at: sessionDirectory) else {
+            isRecording = false
+            captureTimer?.invalidate()
+            captureTimer = nil
+            pendingRevision = nil
+            droppedFrameCount += 1
+            lastFailureMessage = "磁盘可用空间低于 512 MB，已停止录像以保护工程保存"
+            return
+        }
+        guard
             let captureSource = makeCaptureSource(documentName: documentName)
         else {
             return
@@ -365,9 +398,27 @@ final class TimelapseRecorderController: ObservableObject {
                 self.pendingJobCount = max(0, self.pendingJobCount - 1)
                 if case .success = result {
                     self.savedFrameCount += 1
+                    self.lastFailureMessage = nil
+                } else if case .failure(let error) = result {
+                    self.lastFailureMessage = "录像帧写入失败：\(error.localizedDescription)"
                 }
+                self.notifyIfIdle()
             }
         }
+    }
+
+    private func notifyIfIdle() {
+        guard !isBusy else { return }
+        onBecameIdle?()
+    }
+
+    nonisolated private static func hasSafeDiskReserve(at url: URL) -> Bool {
+        guard let available = try? url.resourceValues(
+            forKeys: [.volumeAvailableCapacityForImportantUsageKey]
+        ).volumeAvailableCapacityForImportantUsage else {
+            return true
+        }
+        return available >= 512 * 1024 * 1024
     }
 
     private func makeCaptureSource(documentName: String) -> RecorderCaptureSource? {

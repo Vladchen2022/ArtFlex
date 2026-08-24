@@ -11,6 +11,14 @@ final class StageOneLayerSurfaceStore {
     private var texturesBySurfaceID: [LayerSurfaceID: MTLTexture] = [:]
     private var contentStateByLayerID: [LayerID: LayerSurfaceContentState] = [:]
     private var maskTexturesByLayerID: [LayerID: MTLTexture] = [:]
+#if DEBUG
+    var debugPreventsTextureAllocation = false
+
+    func debugRemoveContentTexture(for layerID: LayerID) {
+        guard let surfaceID = surfacesByLayerID[layerID]?.surfaceID else { return }
+        texturesBySurfaceID.removeValue(forKey: surfaceID)
+    }
+#endif
 
     func surfaceRecords(for document: ArtDocument) -> [LayerSurfaceRecord] {
         document.layers.compactMap { layer in
@@ -65,6 +73,9 @@ final class StageOneLayerSurfaceStore {
         let records = surfaceRecords(for: document)
 
         for record in records where texturesBySurfaceID[record.surfaceID] == nil {
+#if DEBUG
+            if debugPreventsTextureAllocation { continue }
+#endif
             guard let texture = makeTexture(for: record, metal: metal) else {
                 continue
             }

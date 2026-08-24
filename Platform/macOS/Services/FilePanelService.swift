@@ -7,6 +7,11 @@ final class FilePanelService {
     private static let artFlexProjectType: UTType = UTType(
         tag: "artflex",
         tagClass: .filenameExtension,
+        conformingTo: .data
+    ) ?? UTType(exportedAs: "com.vladchen.artflex.project", conformingTo: .data)
+    private static let legacyArtFlexPackageType: UTType = UTType(
+        tag: "artflex",
+        tagClass: .filenameExtension,
         conformingTo: .package
     ) ?? UTType(exportedAs: "com.vladchen.artflex.project-package", conformingTo: .package)
 
@@ -22,13 +27,34 @@ final class FilePanelService {
 
     func presentProjectOpenPanel() -> URL? {
         let panel = NSOpenPanel()
-        panel.allowedContentTypes = [Self.artFlexProjectType, .json]
+        panel.allowedContentTypes = [Self.artFlexProjectType, Self.legacyArtFlexPackageType, .json]
+        // Older projects may have been created before the package UTI was
+        // registered, so Finder still reports them as ordinary directories.
         panel.canChooseDirectories = true
         panel.canChooseFiles = true
         panel.allowsMultipleSelection = false
         panel.title = "打开 ArtFlex 工程"
+        panel.message = "选择 .artflex 工程文件、旧版工程包或 .artflex.json 文件"
         panel.prompt = "打开"
-        return panel.runModal() == .OK ? panel.url : nil
+        guard panel.runModal() == .OK, let selectedURL = panel.url else {
+            return nil
+        }
+        return Self.normalizedProjectOpenURL(selectedURL)
+    }
+
+    nonisolated static func normalizedProjectOpenURL(_ selectedURL: URL) -> URL? {
+        var candidate = selectedURL.standardizedFileURL
+        while candidate.path != candidate.pathComponents.first {
+            if candidate.pathExtension.lowercased() == "artflex" {
+                return candidate
+            }
+            let parent = candidate.deletingLastPathComponent()
+            guard parent != candidate else { break }
+            candidate = parent
+        }
+        return selectedURL.pathExtension.lowercased() == "json"
+            ? selectedURL.standardizedFileURL
+            : nil
     }
 
     func presentPNGExportPanel(defaultName: String) -> URL? {
@@ -123,6 +149,12 @@ final class FilePanelService {
 
     func revealInFinder(_ url: URL) {
         NSWorkspace.shared.activateFileViewerSelecting([url])
+    }
+
+    @discardableResult
+    func applyProjectThumbnail(_ pngData: Data, to fileURL: URL) -> Bool {
+        guard let image = NSImage(data: pngData) else { return false }
+        return NSWorkspace.shared.setIcon(image, forFile: fileURL.path, options: [])
     }
 
     @discardableResult

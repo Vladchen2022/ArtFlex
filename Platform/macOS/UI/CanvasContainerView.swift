@@ -11,6 +11,7 @@ private func emitSelectionTraceCanvas(_ message: String) {
 struct CanvasContainerView: View {
     @ObservedObject var viewModel: WorkspaceViewModel
     var onCanvasInteraction: (() -> Void)? = nil
+    var onReady: (() -> Void)? = nil
     @State private var panStartOffset: CanvasPoint?
     @State private var selectionRefinementDialogKind: SelectionRefinementKind?
     @State private var selectionRefinementRadiusPixels = 16
@@ -24,7 +25,8 @@ struct CanvasContainerView: View {
             CanvasViewportHost(
                 viewport: viewModel.workspace.viewport,
                 canvasSize: viewModel.workspace.document.canvasSize,
-                availableSize: geometry.size
+                availableSize: geometry.size,
+                documentRenderGeneration: viewModel.documentRenderGeneration
             ) { presentation, documentPresentation, documentCenter in
             let viewportTransform = CanvasViewportTransform(
                 canvasSize: viewModel.workspace.document.canvasSize,
@@ -288,6 +290,7 @@ struct CanvasContainerView: View {
                             viewModel.adjustBrushSize(by: delta)
                         }
                     )
+                    .id(viewModel.documentRenderGeneration)
                     .frame(
                         width: presentation.documentDisplaySize.x,
                         height: presentation.documentDisplaySize.y
@@ -838,6 +841,7 @@ struct CanvasContainerView: View {
             }
             .onAppear {
                 viewModel.updateCanvasViewportSize(geometry.size)
+                onReady?()
             }
             .onChange(of: geometry.size) { _, newSize in
                 viewModel.updateCanvasViewportSize(newSize)
@@ -1227,6 +1231,9 @@ private struct CanvasViewportHost<Content: View>: View {
     let viewport: CanvasViewport
     let canvasSize: CanvasSize
     let availableSize: CGSize
+    /// Makes document replacement an explicit dependency of this otherwise
+    /// viewport-isolated subtree.
+    let documentRenderGeneration: UInt64
     @ViewBuilder let content: (CanvasPresentation, CanvasPresentation, CanvasPoint) -> Content
 
     var body: some View {

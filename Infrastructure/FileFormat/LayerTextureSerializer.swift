@@ -271,6 +271,53 @@ final class LayerTextureSerializer {
         )
     }
 
+    /// Freezes live GPU resources with one private-to-private blit. The returned textures can be
+    /// read on a utility task while painting continues on the original layer textures.
+    func cloneBatchForDeferredSnapshot(textures: [MTLTexture]) throws -> [MTLTexture] {
+        guard !textures.isEmpty else { return [] }
+        var clones: [MTLTexture] = []
+        clones.reserveCapacity(textures.count)
+        for source in textures {
+            let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+                pixelFormat: source.pixelFormat,
+                width: source.width,
+                height: source.height,
+                mipmapped: false
+            )
+            descriptor.usage = [.shaderRead, .shaderWrite, .renderTarget]
+            descriptor.storageMode = .private
+            guard let clone = metalContext.device.makeTexture(descriptor: descriptor) else {
+                throw CocoaError(.fileWriteUnknown)
+            }
+            clones.append(clone)
+        }
+
+        guard let commandBuffer = metalContext.commandQueue.makeCommandBuffer(),
+              let encoder = commandBuffer.makeBlitCommandEncoder() else {
+            throw CocoaError(.fileWriteUnknown)
+        }
+        for (source, clone) in zip(textures, clones) {
+            encoder.copy(
+                from: source,
+                sourceSlice: 0,
+                sourceLevel: 0,
+                sourceOrigin: .init(x: 0, y: 0, z: 0),
+                sourceSize: .init(width: source.width, height: source.height, depth: 1),
+                to: clone,
+                destinationSlice: 0,
+                destinationLevel: 0,
+                destinationOrigin: .init(x: 0, y: 0, z: 0)
+            )
+        }
+        encoder.endEncoding()
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+        guard commandBuffer.status == .completed else {
+            throw commandBuffer.error ?? CocoaError(.fileWriteUnknown)
+        }
+        return clones
+    }
+
     func snapshotBatch(textures: [MTLTexture]) throws -> [LayerTextureSnapshot] {
         guard !textures.isEmpty else { return [] }
         if textures.contains(where: { Self.requiresTiledTransfer($0) }) {

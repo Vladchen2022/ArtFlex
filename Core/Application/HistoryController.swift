@@ -79,12 +79,16 @@ struct WorkspaceHistoryEntry: Sendable, Equatable {
     var layerSnapshots: [LayerHistorySnapshot]
     var approxByteCount: Int
     var mode: Mode
+    var preservesCommonLayerTexturesAcrossTopologyChange: Bool
     var visibleMetadata: VisibleHistoryEntryMetadata
 }
 
 enum HistoryCaptureMode {
     case full
     case inPlaceChangedLayers([LayerID])
+    /// Canvas dimensions stay fixed, but layer or mask topology may change. Only resources that
+    /// disappear or are mutated need snapshots; common layer textures remain resident.
+    case topologyDelta(changedLayerIDs: [LayerID])
     case workspaceOnly
     case metadataOnly
 }
@@ -92,6 +96,9 @@ enum HistoryCaptureMode {
 private enum HistoryControllerError: LocalizedError {
     case dirtyRestoreTopologyMismatch
     case fullResetRequestedForDirtyEntry
+    case missingCaptureResource(layerID: LayerID, resourceKind: LayerHistoryResourceKind)
+    case missingRestoreResource(layerID: LayerID, resourceKind: LayerHistoryResourceKind)
+    case unableToAllocateRestoreResource(layerID: LayerID, resourceKind: LayerHistoryResourceKind)
 
     var errorDescription: String? {
         switch self {
@@ -99,6 +106,12 @@ private enum HistoryControllerError: LocalizedError {
             return "Dirty history restore topology mismatch."
         case .fullResetRequestedForDirtyEntry:
             return "Full reset restore cannot be used with a dirty history entry."
+        case let .missingCaptureResource(layerID, resourceKind):
+            return "History capture is missing \(resourceKind.rawValue) pixels for layer \(layerID.rawValue.uuidString)."
+        case let .missingRestoreResource(layerID, resourceKind):
+            return "History restore target is missing \(resourceKind.rawValue) pixels for layer \(layerID.rawValue.uuidString)."
+        case let .unableToAllocateRestoreResource(layerID, resourceKind):
+            return "History restore could not allocate \(resourceKind.rawValue) pixels for layer \(layerID.rawValue.uuidString)."
         }
     }
 }
@@ -115,6 +128,17 @@ struct HistoryEligibilityAuditContext: Sendable {
 final class HistoryController {
     static let defaultMaxEntries = 24
     static let defaultMaxResidentBytes = 768 * 1024 * 1024
+
+    static func adaptiveMaxResidentBytes(recommendedMaxWorkingSetSize: UInt64?) -> Int {
+        guard let recommendedMaxWorkingSetSize, recommendedMaxWorkingSetSize > 0 else {
+            return defaultMaxResidentBytes
+        }
+        let minimum = UInt64(128 * 1024 * 1024)
+        return Int(min(
+            UInt64(defaultMaxResidentBytes),
+            max(minimum, recommendedMaxWorkingSetSize / 16)
+        ))
+    }
 
     private let workspaceStore: WorkspaceStore
     private let layerSurfaceStore: StageOneLayerSurfaceStore
@@ -149,6 +173,26 @@ final class HistoryController {
 
     var canUndo: Bool { !undoStack.isEmpty }
     var canRedo: Bool { !redoStack.isEmpty }
+    var residentByteCount: Int { undoResidentBytes + redoResidentBytes }
+
+    /// Releases oldest history first while keeping the newest restore point. This is used only
+    /// after an OS memory-pressure notification; document pixels are never discarded.
+    func relieveMemoryPressure(critical: Bool) {
+        let entryTarget = critical ? 2 : 6
+        let byteTarget = critical ? maxResidentBytes / 8 : maxResidentBytes / 3
+        trimForPressure(
+            &undoStack,
+            residentBytes: &undoResidentBytes,
+            entryTarget: entryTarget,
+            byteTarget: byteTarget
+        )
+        trimForPressure(
+            &redoStack,
+            residentBytes: &redoResidentBytes,
+            entryTarget: critical ? 1 : 3,
+            byteTarget: critical ? maxResidentBytes / 16 : maxResidentBytes / 6
+        )
+    }
 
     var nextUndoRestoresWorkspaceOnly: Bool {
         guard let entry = undoStack.last else { return false }
@@ -295,27 +339,36 @@ final class HistoryController {
         }
         let snapshotLayerIDs: Set<LayerID>
         let mode: WorkspaceHistoryEntry.Mode
+        let preservesCommonLayerTexturesAcrossTopologyChange: Bool
 
         switch resolvedCapture {
         case .full:
             snapshotLayerIDs = Set(workspace.document.paintLayers.map(\.id))
             mode = .full
+            preservesCommonLayerTexturesAcrossTopologyChange = false
         case .inPlaceChangedLayers(let changedLayerIDs):
             snapshotLayerIDs = Set(changedLayerIDs)
             mode = .inPlaceChangedLayers(
                 topologySignature: topologySignature(for: workspace),
                 changedLayerIDs: changedLayerIDs
             )
+            preservesCommonLayerTexturesAcrossTopologyChange = false
+        case .topologyDelta(let changedLayerIDs):
+            snapshotLayerIDs = Set(changedLayerIDs)
+            mode = .full
+            preservesCommonLayerTexturesAcrossTopologyChange = true
         case .workspaceOnly:
             snapshotLayerIDs = []
             mode = .workspaceOnly(topologySignature: topologySignature(for: workspace))
+            preservesCommonLayerTexturesAcrossTopologyChange = false
         case .metadataOnly:
             snapshotLayerIDs = []
             mode = .metadataOnly(identitySignature: identitySignature(for: workspace))
+            preservesCommonLayerTexturesAcrossTopologyChange = false
         }
         let requiresFullCanvasSnapshots: Bool
         switch resolvedCapture {
-        case .full:
+        case .full, .topologyDelta:
             requiresFullCanvasSnapshots = true
         case .inPlaceChangedLayers, .workspaceOnly, .metadataOnly:
             requiresFullCanvasSnapshots = false
@@ -333,14 +386,21 @@ final class HistoryController {
         } else {
             var snapshotLayers: [(layer: LayerRecord, resourceKind: LayerHistoryResourceKind, texture: MTLTexture)] = []
             for layer in workspace.document.paintLayers where snapshotLayerIDs.contains(layer.id) {
-                guard
-                    let surfaceID = layerSurfaceStore.surfaceID(for: layer.id),
-                    let texture = layerSurfaceStore.texture(for: surfaceID)
-                else {
-                    continue
+                guard let surfaceID = layerSurfaceStore.surfaceID(for: layer.id),
+                      let texture = layerSurfaceStore.texture(for: surfaceID) else {
+                    throw HistoryControllerError.missingCaptureResource(
+                        layerID: layer.id,
+                        resourceKind: .content
+                    )
                 }
                 snapshotLayers.append((layer: layer, resourceKind: .content, texture: texture))
-                if layer.mask != nil, let maskTexture = layerSurfaceStore.maskTexture(for: layer.id) {
+                if layer.mask != nil {
+                    guard let maskTexture = layerSurfaceStore.maskTexture(for: layer.id) else {
+                        throw HistoryControllerError.missingCaptureResource(
+                            layerID: layer.id,
+                            resourceKind: .mask
+                        )
+                    }
                     snapshotLayers.append((layer: layer, resourceKind: .mask, texture: maskTexture))
                 }
             }
@@ -367,6 +427,7 @@ final class HistoryController {
             layerSnapshots: layerSnapshots,
             approxByteCount: approxByteCount,
             mode: mode,
+            preservesCommonLayerTexturesAcrossTopologyChange: preservesCommonLayerTexturesAcrossTopologyChange,
             visibleMetadata: VisibleHistoryEntryMetadata(
                 actionKey: "generic.checkpoint",
                 affectedLayerIDs: Array(snapshotLayerIDs)
@@ -482,7 +543,11 @@ final class HistoryController {
         )
         switch entry.mode {
         case .full:
-            try restoreWithFullReset(entry: entry, workspace: mergedWorkspace)
+            if entry.preservesCommonLayerTexturesAcrossTopologyChange {
+                try restoreTopologyDelta(entry: entry, workspace: mergedWorkspace)
+            } else {
+                try restoreWithFullReset(entry: entry, workspace: mergedWorkspace)
+            }
         case .inPlaceChangedLayers(let topologySignature, let changedLayerIDs):
             try restoreInPlaceChangedLayers(
                 entry: entry,
@@ -503,7 +568,11 @@ final class HistoryController {
     func restoreExact(entry: WorkspaceHistoryEntry) throws {
         switch entry.mode {
         case .full:
-            try restoreWithFullReset(entry: entry, workspace: entry.workspace)
+            if entry.preservesCommonLayerTexturesAcrossTopologyChange {
+                try restoreTopologyDelta(entry: entry, workspace: entry.workspace)
+            } else {
+                try restoreWithFullReset(entry: entry, workspace: entry.workspace)
+            }
         case .inPlaceChangedLayers(let topologySignature, let changedLayerIDs):
             try restoreInPlaceChangedLayers(
                 entry: entry,
@@ -557,13 +626,33 @@ final class HistoryController {
         guard case .full = entry.mode else {
             throw HistoryControllerError.fullResetRequestedForDirtyEntry
         }
+        let stagedTextures = try stageFullCanvasSnapshots(
+            entry.layerSnapshots,
+            workspace: workspace
+        )
         workspaceStore.replaceState(workspace)
         layerSurfaceStore.reset()
-        layerSurfaceStore.prepareTextures(
-            for: workspace.document,
-            metal: metalContext
+        installStagedTextures(stagedTextures, workspace: workspace)
+    }
+
+    private func restoreTopologyDelta(
+        entry: WorkspaceHistoryEntry,
+        workspace: WorkspaceState
+    ) throws {
+        guard workspaceStore.state.document.canvasSize == workspace.document.canvasSize else {
+            throw HistoryControllerError.dirtyRestoreTopologyMismatch
+        }
+        let stagedTextures = try stageFullCanvasSnapshots(
+            entry.layerSnapshots,
+            workspace: workspace,
+            requireCompleteDocument: false
         )
-        try restoreSnapshots(entry.layerSnapshots)
+        workspaceStore.replaceState(workspace)
+        // Common layer textures remain resident. Deleted or mutated resources were restored into
+        // independent textures before the document topology changed, so allocation/readback
+        // failure cannot leave the workspace half-restored.
+        installStagedTextures(stagedTextures, workspace: workspace)
+        layerSurfaceStore.prepareTextures(for: workspace.document, metal: metalContext)
     }
 
     private func restoreInPlaceChangedLayers(
@@ -581,15 +670,21 @@ final class HistoryController {
             throw HistoryControllerError.dirtyRestoreTopologyMismatch
         }
 
-        workspaceStore.replaceState(workspace)
-        layerSurfaceStore.prepareTextures(
-            for: workspace.document,
-            metal: metalContext
-        )
         try restoreSnapshots(entry.layerSnapshots)
+        workspaceStore.replaceState(workspace)
     }
 
     private func currentEntryCaptureMode(for targetEntry: WorkspaceHistoryEntry) -> HistoryCaptureMode {
+        if targetEntry.preservesCommonLayerTexturesAcrossTopologyChange {
+            let currentPaintLayerIDs = Set(workspaceStore.state.document.paintLayers.map(\.id))
+            let targetPaintLayerIDs = Set(targetEntry.workspace.document.paintLayers.map(\.id))
+            let currentOnlyLayerIDs = currentPaintLayerIDs.subtracting(targetPaintLayerIDs)
+            let targetChangedLayerIDs = Set(targetEntry.layerSnapshots.map(\.layerID))
+                .intersection(currentPaintLayerIDs)
+            return .topologyDelta(
+                changedLayerIDs: Array(currentOnlyLayerIDs.union(targetChangedLayerIDs))
+            )
+        }
         switch targetEntry.mode {
         case .full:
             return .full
@@ -612,8 +707,8 @@ final class HistoryController {
     }
 
     private func restoreSnapshots(_ layerSnapshots: [LayerHistorySnapshot]) throws {
-        var batchItems: [(snapshot: LayerTextureSnapshot, texture: MTLTexture, destinationX: Int, destinationY: Int)] = []
-        batchItems.reserveCapacity(layerSnapshots.count)
+        var targets: [(layerSnapshot: LayerHistorySnapshot, texture: MTLTexture)] = []
+        targets.reserveCapacity(layerSnapshots.count)
 
         for layerSnapshot in layerSnapshots {
             let texture: MTLTexture?
@@ -624,16 +719,133 @@ final class HistoryController {
             case .mask:
                 texture = layerSurfaceStore.maskTexture(for: layerSnapshot.layerID)
             }
-            guard let texture else { continue }
-            batchItems.append((
-                snapshot: layerSnapshot.texture,
+            guard let texture else {
+                throw HistoryControllerError.missingRestoreResource(
+                    layerID: layerSnapshot.layerID,
+                    resourceKind: layerSnapshot.resourceKind
+                )
+            }
+            targets.append((layerSnapshot, texture))
+        }
+
+        // Restore into full-size clones first. This also makes the tiled transfer path atomic:
+        // a later staging failure cannot leave earlier tiles written into the live layer.
+        let replacementTextures = try serializer.cloneBatchForDeferredSnapshot(
+            textures: targets.map(\.texture)
+        )
+        let batchItems = zip(targets, replacementTextures).map { target, replacement in
+            (
+                snapshot: target.layerSnapshot.texture,
+                texture: replacement,
+                destinationX: target.layerSnapshot.originX,
+                destinationY: target.layerSnapshot.originY
+            )
+        }
+        try serializer.restoreBatch(batchItems)
+        for (target, replacement) in zip(targets, replacementTextures) {
+            switch target.layerSnapshot.resourceKind {
+            case .content:
+                guard let surfaceID = layerSurfaceStore.surfaceID(for: target.layerSnapshot.layerID) else {
+                    throw HistoryControllerError.missingRestoreResource(
+                        layerID: target.layerSnapshot.layerID,
+                        resourceKind: .content
+                    )
+                }
+                layerSurfaceStore.swapTexture(for: surfaceID, with: replacement)
+            case .mask:
+                layerSurfaceStore.setMaskTexture(replacement, for: target.layerSnapshot.layerID)
+            }
+        }
+    }
+
+    private struct StagedHistoryResource {
+        var layerID: LayerID
+        var resourceKind: LayerHistoryResourceKind
+        var texture: MTLTexture
+    }
+
+    /// Builds and fills all replacement textures before mutating the live workspace. History
+    /// restoration is therefore all-or-nothing even if Metal cannot allocate another surface.
+    private func stageFullCanvasSnapshots(
+        _ snapshots: [LayerHistorySnapshot],
+        workspace: WorkspaceState,
+        requireCompleteDocument: Bool = true
+    ) throws -> [StagedHistoryResource] {
+        let expectedKeys: Set<String> = Set(workspace.document.paintLayers.flatMap { layer -> [String] in
+            var keys = [historyResourceKey(layerID: layer.id, resourceKind: .content)]
+            if layer.mask != nil {
+                keys.append(historyResourceKey(layerID: layer.id, resourceKind: .mask))
+            }
+            return keys
+        })
+        var actualKeys = Set<String>()
+        var staged: [StagedHistoryResource] = []
+        var restoreItems: [(snapshot: LayerTextureSnapshot, texture: MTLTexture, destinationX: Int, destinationY: Int)] = []
+        staged.reserveCapacity(snapshots.count)
+        restoreItems.reserveCapacity(snapshots.count)
+
+        for snapshot in snapshots {
+            let key = historyResourceKey(layerID: snapshot.layerID, resourceKind: snapshot.resourceKind)
+            guard expectedKeys.contains(key), actualKeys.insert(key).inserted,
+                  snapshot.coversFullCanvas(workspace.document.canvasSize) else {
+                throw HistoryControllerError.dirtyRestoreTopologyMismatch
+            }
+            let pixelFormat: MTLPixelFormat = snapshot.resourceKind == .mask
+                ? .r8Unorm
+                : .bgra8Unorm_srgb
+            guard let texture = layerSurfaceStore.makeTexture(
+                width: workspace.document.canvasSize.width,
+                height: workspace.document.canvasSize.height,
+                pixelFormat: pixelFormat,
+                metal: metalContext
+            ) else {
+                throw HistoryControllerError.unableToAllocateRestoreResource(
+                    layerID: snapshot.layerID,
+                    resourceKind: snapshot.resourceKind
+                )
+            }
+            staged.append(.init(
+                layerID: snapshot.layerID,
+                resourceKind: snapshot.resourceKind,
+                texture: texture
+            ))
+            restoreItems.append((
+                snapshot: snapshot.texture,
                 texture: texture,
-                destinationX: layerSnapshot.originX,
-                destinationY: layerSnapshot.originY
+                destinationX: 0,
+                destinationY: 0
             ))
         }
 
-        try serializer.restoreBatch(batchItems)
+        if requireCompleteDocument, actualKeys != expectedKeys {
+            throw HistoryControllerError.dirtyRestoreTopologyMismatch
+        }
+        try serializer.restoreBatch(restoreItems)
+        return staged
+    }
+
+    private func installStagedTextures(
+        _ resources: [StagedHistoryResource],
+        workspace: WorkspaceState
+    ) {
+        _ = layerSurfaceStore.surfaceRecords(for: workspace.document)
+        for resource in resources {
+            switch resource.resourceKind {
+            case .content:
+                if let surfaceID = layerSurfaceStore.surfaceID(for: resource.layerID) {
+                    layerSurfaceStore.swapTexture(for: surfaceID, with: resource.texture)
+                }
+            case .mask:
+                layerSurfaceStore.setMaskTexture(resource.texture, for: resource.layerID)
+            }
+        }
+    }
+
+    private func historyResourceKey(
+        layerID: LayerID,
+        resourceKind: LayerHistoryResourceKind
+    ) -> String {
+        "\(layerID.rawValue.uuidString):\(resourceKind.rawValue)"
     }
 
 #if DEBUG
@@ -817,6 +1029,10 @@ final class HistoryController {
                 return .full
             }
             return .inPlaceChangedLayers(uniqueLayerIDs)
+        case .topologyDelta(let changedLayerIDs):
+            let validPaintLayerIDs = Set(workspace.document.paintLayers.map(\.id))
+            let uniqueLayerIDs = Array(Set(changedLayerIDs).intersection(validPaintLayerIDs))
+            return .topologyDelta(changedLayerIDs: uniqueLayerIDs)
         case .workspaceOnly:
             return .workspaceOnly
         case .metadataOnly:
@@ -878,6 +1094,22 @@ final class HistoryController {
         }
 
         while residentBytes > maxResidentBytes, stack.count > 1 {
+            let removed = stack.removeFirst()
+            residentBytes = max(0, residentBytes - removed.approxByteCount)
+        }
+    }
+
+    private func trimForPressure(
+        _ stack: inout [WorkspaceHistoryEntry],
+        residentBytes: inout Int,
+        entryTarget: Int,
+        byteTarget: Int
+    ) {
+        while stack.count > max(1, entryTarget) {
+            let removed = stack.removeFirst()
+            residentBytes = max(0, residentBytes - removed.approxByteCount)
+        }
+        while residentBytes > max(0, byteTarget), stack.count > 1 {
             let removed = stack.removeFirst()
             residentBytes = max(0, residentBytes - removed.approxByteCount)
         }
