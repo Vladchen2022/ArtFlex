@@ -1,6 +1,29 @@
 import AppKit
 import SwiftUI
 
+enum CompoundBrushTipLibraryLayout {
+    static let idealSize = CGSize(width: 820, height: 600)
+    static let containerInset: CGFloat = 32
+
+    static func size(fitting containerSize: CGSize) -> CGSize {
+        CGSize(
+            width: min(idealSize.width, max(1, containerSize.width - containerInset)),
+            height: min(idealSize.height, max(1, containerSize.height - containerInset))
+        )
+    }
+}
+
+private struct CompoundBrushEditorSizePreferenceKey: PreferenceKey {
+    static let defaultValue = CGSize(
+        width: CompoundBrushTipLibraryLayout.idealSize.width + CompoundBrushTipLibraryLayout.containerInset,
+        height: CompoundBrushTipLibraryLayout.idealSize.height + CompoundBrushTipLibraryLayout.containerInset
+    )
+
+    static func reduce(value: inout CGSize, nextValue: () -> CGSize) {
+        value = nextValue()
+    }
+}
+
 /// A result-oriented brush editor. The active workspace brush is not
 /// mutated while this sheet is open; Apply is the only operation that writes
 /// the isolated draft back to the tool session.
@@ -50,6 +73,7 @@ struct CompoundBrushBuilderSheet: View {
     @State private var primaryPendingSelection: BrushTipImageAssetID?
     @State private var secondaryPendingSelection: BrushTipImageAssetID?
     @State private var isSaveSheetPresented = false
+    @State private var editorViewportSize = CompoundBrushEditorSizePreferenceKey.defaultValue
 
     init(viewModel: WorkspaceViewModel, onClose: @escaping () -> Void) {
         self.viewModel = viewModel
@@ -88,6 +112,18 @@ struct CompoundBrushBuilderSheet: View {
             footer
         }
         .frame(minWidth: 760, idealWidth: 1040, minHeight: 660, idealHeight: 760)
+        .background {
+            GeometryReader { proxy in
+                Color.clear.preference(
+                    key: CompoundBrushEditorSizePreferenceKey.self,
+                    value: proxy.size
+                )
+            }
+        }
+        .onPreferenceChange(CompoundBrushEditorSizePreferenceKey.self) { size in
+            guard size.width > 0, size.height > 0 else { return }
+            editorViewportSize = size
+        }
         .background(Color(red: 0.10, green: 0.10, blue: 0.11))
         .foregroundStyle(.white)
         .preferredColorScheme(.dark)
@@ -1371,6 +1407,7 @@ struct CompoundBrushBuilderSheet: View {
     private func tipImageLibrarySheet(for target: TipLibraryTarget) -> some View {
         let items = viewModel.workspace.tipImageLibrary.items
         let selection = pendingSelection(for: target)
+        let sheetSize = CompoundBrushTipLibraryLayout.size(fitting: editorViewportSize)
 
         VStack(alignment: .leading, spacing: 14) {
             HStack {
@@ -1439,7 +1476,7 @@ struct CompoundBrushBuilderSheet: View {
             }
         }
         .padding(18)
-        .frame(minWidth: 820, minHeight: 600)
+        .frame(width: sheetSize.width, height: sheetSize.height, alignment: .topLeading)
         .foregroundStyle(.white)
         .background(Color(red: 0.10, green: 0.10, blue: 0.11))
         .preferredColorScheme(.dark)

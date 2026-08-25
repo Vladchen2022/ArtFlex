@@ -4,6 +4,24 @@ import CoreGraphics
 
 struct CompoundBrushEditingTests {
     @Test
+    func tipLibrarySheetUsesIdealSizeButNeverExceedsEditorViewport() {
+        let roomy = CompoundBrushTipLibraryLayout.size(
+            fitting: CGSize(width: 1040, height: 760)
+        )
+        #expect(roomy == CGSize(width: 820, height: 600))
+
+        let narrow = CompoundBrushTipLibraryLayout.size(
+            fitting: CGSize(width: 760, height: 660)
+        )
+        #expect(narrow == CGSize(width: 728, height: 600))
+
+        let short = CompoundBrushTipLibraryLayout.size(
+            fitting: CGSize(width: 760, height: 520)
+        )
+        #expect(short == CGSize(width: 728, height: 488))
+    }
+
+    @Test
     func firstCompoundEnableUsesNaturalBuildUpButReenablePreservesConfiguredMode() {
         var newBrush = BrushSettings.stageOneDefault
         newBrush.buildMode = .opacityCap
