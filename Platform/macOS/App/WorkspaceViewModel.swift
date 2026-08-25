@@ -1843,7 +1843,7 @@ final class WorkspaceViewModel: ObservableObject {
 
     func setCompoundBrushEnabled(_ enabled: Bool) {
         bootstrap.workspaceStore.updateToolSession { session in
-            session.brush.compoundBrush.enabled = enabled
+            session.brush.setCompoundBrushEnabledUsingArtistDefault(enabled)
         }
         refreshToolSessionOnly()
     }

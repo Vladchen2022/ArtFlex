@@ -654,10 +654,6 @@ struct RightInspectorView: View {
     }
 
     @ObservedObject var viewModel: WorkspaceViewModel
-    @State private var showsPressureCurveEditor = false
-    @State private var showsPressureSizeCurveEditor = false
-    @State private var showsBrushRandomControls = false
-    @State private var showsPressureAdvancedControls = false
     @State private var tipPaintMode: TipPaintMode = .round
     @State private var brushTipCanvasDisplayMode: BrushTipCanvasDisplayMode = .edit
     @State private var brushTipImportCandidate: BrushTipImportCandidate?
@@ -686,7 +682,6 @@ struct RightInspectorView: View {
     @State private var draggedTipImageLibraryAssetID: BrushTipImageAssetID?
     @State private var tipImageLibraryDropTargetID: BrushTipImageAssetID?
     @State private var showsCompoundBrushBuilder = false
-    @State private var showsBrushAdvancedSettings = false
     @State private var libraryInspectorTab: LibraryInspectorTab = .brush
     @State private var librarySearchText = ""
     @State private var libraryFilter: LibraryFilter = .all
@@ -759,11 +754,6 @@ struct RightInspectorView: View {
                 }
             }
 
-            if showsBrushAdvancedSettings {
-                brushAdvancedSettingsOverlay
-                    .transition(.move(edge: .trailing).combined(with: .opacity))
-                    .zIndex(3)
-            }
         }
         .frame(width: Self.standardWidth)
         .frame(maxHeight: .infinity)
@@ -786,7 +776,6 @@ struct RightInspectorView: View {
         }
         .onChange(of: viewModel.workspace.toolSession.activeTool) { oldTool, newTool in
             guard oldTool != newTool else { return }
-            showsBrushAdvancedSettings = false
             if oldTool == .textureFill || newTool == .textureFill {
                 textureFillPreviewMaterialScale = nil
                 textureFillPreviewCoverage = nil
@@ -2675,19 +2664,6 @@ struct RightInspectorView: View {
 
                 Spacer(minLength: 0)
 
-                if compoundEnabled {
-                    Button {
-                        showsCompoundBrushBuilder = true
-                    } label: {
-                        Image(systemName: "pencil")
-                            .font(.system(size: 9, weight: .bold))
-                            .frame(width: 20, height: 20)
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.mini)
-                    .buttonTooltip("编辑组合笔刷 A/B")
-                }
-
                 Toggle(
                     "",
                     isOn: Binding(
@@ -2715,12 +2691,12 @@ struct RightInspectorView: View {
             )
 
             Button {
-                withAnimation(.easeOut(duration: 0.16)) {
-                    showsBrushAdvancedSettings = true
-                }
+                showsCompoundBrushBuilder = true
             } label: {
-                HStack(spacing: 0) {
-                    Text("高级笔刷设置")
+                HStack(spacing: 6) {
+                    Image(systemName: "pencil.and.scribble")
+                        .font(.system(size: 10, weight: .semibold))
+                    Text("编辑当前画笔")
                         .font(.system(size: 10.5, weight: .semibold))
                         .lineLimit(1)
                         .minimumScaleFactor(0.8)
@@ -2737,170 +2713,7 @@ struct RightInspectorView: View {
                 )
             }
             .buttonStyle(.plain)
-            .buttonTooltip("打开不常用的高级笔刷参数")
-        }
-    }
-
-    private var brushAdvancedParameterControls: some View {
-        let brush = viewModel.workspace.toolSession.brush
-        let compoundEnabled = brush.compoundBrush.enabled
-        let rawRotation = Double(brush.stampRotationDegrees)
-        let signedRotation = rawRotation > 180 ? rawRotation - 360 : rawRotation
-
-        return VStack(alignment: .leading, spacing: 9) {
-            if !compoundEnabled {
-                brushParameterSectionHeader("笔尖排布")
-
-                BrushParameterSliderRow(
-                    title: "位置散布",
-                    value: Double(brush.scatterAmount * 50),
-                    range: 0...250,
-                    formatter: { "\(Int($0.rounded()))%" },
-                    onPreview: { viewModel.setBrushScatterAmount(Float($0 / 50)) },
-                    onCommit: { viewModel.setBrushScatterAmount(Float($0 / 50)) }
-                )
-
-                if brush.tipShape.hasVisibleRotation {
-                    BrushParameterSliderRow(
-                        title: "笔尖角度",
-                        value: signedRotation,
-                        range: -180...180,
-                        formatter: { "\(Int($0.rounded()))°" },
-                        onPreview: { viewModel.setBrushStampRotationDegrees(Float($0)) },
-                        onCommit: { viewModel.setBrushStampRotationDegrees(Float($0)) }
-                    )
-
-                    Toggle(
-                        "跟随笔迹方向",
-                        isOn: Binding(
-                            get: { brush.followsStrokeDirection },
-                            set: { viewModel.setBrushFollowsStrokeDirection($0) }
-                        )
-                    )
-                    .toggleStyle(.switch)
-                    .controlSize(.mini)
-                    .font(.system(size: 10.5, weight: .semibold))
-                    .foregroundStyle(Color.white.opacity(0.78))
-
-                    brushDisclosureButton(
-                        title: "角度随机",
-                        isExpanded: showsBrushRandomControls
-                    ) {
-                        showsBrushRandomControls.toggle()
-                    }
-
-                    if showsBrushRandomControls {
-                        BrushParameterSliderRow(
-                            title: "角度随机",
-                            value: Double(brush.angleJitterAmount * 180),
-                            range: 0...180,
-                            formatter: { "\(Int($0.rounded()))°" },
-                            onPreview: { viewModel.setBrushAngleJitterAmount(Float($0 / 180)) },
-                            onCommit: { viewModel.setBrushAngleJitterAmount(Float($0 / 180)) }
-                        )
-                    }
-                }
-            }
-
-            brushSectionDivider
-            brushParameterSectionHeader(
-                compoundEnabled ? "整体压力响应" : "压力响应",
-                detail: compoundEnabled ? "A/B 共用当前曲线，独立响应请进入组合编辑器" : nil
-            )
-
-            if !compoundEnabled {
-                HStack(spacing: 7) {
-                    pressureCurveButton(
-                        title: "尺寸曲线",
-                        systemImage: "waveform.path.ecg",
-                        isEnabled: viewModel.displayedPressureSizeAmount > 0.0001
-                    ) {
-                        showsPressureSizeCurveEditor.toggle()
-                    }
-                    .popover(isPresented: $showsPressureSizeCurveEditor, arrowEdge: .bottom) {
-                        pressureSizeCurveEditor
-                            .padding(14)
-                            .frame(width: 296, height: 236, alignment: .topLeading)
-                            .background(Color(red: 0.965, green: 0.965, blue: 0.955))
-                    }
-
-                    pressureCurveButton(
-                        title: "透明曲线",
-                        systemImage: "drop",
-                        isEnabled: viewModel.displayedPressureOpacityAmount > 0.0001
-                    ) {
-                        showsPressureCurveEditor.toggle()
-                    }
-                    .popover(isPresented: $showsPressureCurveEditor, arrowEdge: .bottom) {
-                        pressureCurveEditor
-                            .padding(14)
-                            .frame(width: 296, height: 236, alignment: .topLeading)
-                            .background(Color(red: 0.965, green: 0.965, blue: 0.955))
-                    }
-                }
-            }
-
-            brushDisclosureButton(
-                title: "压力高级设置",
-                isExpanded: showsPressureAdvancedControls
-            ) {
-                showsPressureAdvancedControls.toggle()
-            }
-
-            if showsPressureAdvancedControls {
-                BrushParameterSliderRow(
-                    title: "最小尺寸",
-                    value: Double(brush.sizeLowerBound * 100),
-                    range: 0...100,
-                    formatter: { "\(Int($0.rounded()))%" },
-                    onPreview: { viewModel.setSizeLowerBound(Float($0 / 100)) },
-                    onCommit: { viewModel.setSizeLowerBound(Float($0 / 100)) }
-                )
-                .opacity(viewModel.displayedPressureSizeAmount > 0.0001 ? 1 : 0.45)
-                .allowsHitTesting(viewModel.displayedPressureSizeAmount > 0.0001)
-
-                BrushParameterSliderRow(
-                    title: "压感灵敏度",
-                    value: Double(brush.pressureSensitivity),
-                    range: 0.25...2,
-                    formatter: { String(format: "%.2fx", $0) },
-                    onPreview: { viewModel.setPressureSensitivity(Float($0)) },
-                    onCommit: { viewModel.setPressureSensitivity(Float($0)) }
-                )
-            }
-
-            brushSectionDivider
-            brushParameterSectionHeader("颜料与叠加")
-
-            Picker(
-                "叠加方式",
-                selection: Binding(
-                    get: { brush.buildMode },
-                    set: { viewModel.setBrushBuildMode($0) }
-                )
-            ) {
-                Text("自然叠加").tag(BrushBuildMode.buildUp)
-                Text("不透明度封顶").tag(BrushBuildMode.opacityCap)
-            }
-            .pickerStyle(.segmented)
-            .controlSize(.small)
-            .labelsHidden()
-
-            if brush.buildMode == .buildUp {
-                BrushParameterSliderRow(
-                    title: "叠加补偿",
-                    value: Double(viewModel.displayedBuildUpOpacityCompensationAmount * 100),
-                    range: 0...100,
-                    formatter: { "\(Int($0.rounded()))%" },
-                    onPreview: { viewModel.setBuildUpOpacityCompensationAmount(Float($0 / 100)) },
-                    onCommit: { viewModel.setBuildUpOpacityCompensationAmount(Float($0 / 100)) }
-                )
-
-                Text("补偿紧密笔尖重复叠加造成的浓度变化；100% 时尽量保持目标不透明度。")
-                    .font(.system(size: 8.5, weight: .medium))
-                    .foregroundStyle(Color.white.opacity(0.42))
-                    .fixedSize(horizontal: false, vertical: true)
-            }
+            .buttonTooltip("在同一窗口编辑常用参数、叠加方式和组合笔尖")
         }
     }
 
@@ -2930,133 +2743,6 @@ struct RightInspectorView: View {
             liveValueText: { "\(Int($0 * 100))%" },
             onCommit: { viewModel.setPaintJitterAmount(Float($0)) }
         )
-    }
-
-    private var brushAdvancedActions: some View {
-        HStack {
-            Spacer(minLength: 0)
-            Button {
-                viewModel.saveCurrentBrushPreset()
-            } label: {
-                Label("保存到画笔库", systemImage: "square.and.arrow.down")
-                    .font(.system(size: 10.5, weight: .semibold))
-            }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
-        }
-    }
-
-    private var brushAdvancedSettingsOverlay: some View {
-        VStack(spacing: 0) {
-            HStack(spacing: 10) {
-                Button {
-                    withAnimation(.easeOut(duration: 0.16)) {
-                        showsBrushAdvancedSettings = false
-                    }
-                } label: {
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: 11, weight: .bold))
-                        .frame(width: 28, height: 28)
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-                .buttonTooltip("返回右侧面板")
-
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("高级笔刷设置")
-                        .font(.system(size: 14, weight: .bold))
-                        .foregroundStyle(Color.white.opacity(0.96))
-                    Text("低频参数移至此处，主界面优先留给图层")
-                        .font(.system(size: 9.5, weight: .medium))
-                        .foregroundStyle(Color.white.opacity(0.48))
-                }
-
-                Spacer(minLength: 0)
-
-                Text(viewModel.workspace.toolSession.brush.compoundBrush.enabled ? "组合笔刷" : "普通笔刷")
-                    .font(.system(size: 9.5, weight: .semibold))
-                    .foregroundStyle(Color.white.opacity(0.62))
-                    .padding(.horizontal, 9)
-                    .padding(.vertical, 5)
-                    .background(
-                        Capsule()
-                            .fill(Color.white.opacity(0.07))
-                    )
-            }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 12)
-
-            Divider()
-                .overlay(Color.white.opacity(0.08))
-
-            ScrollView(.vertical, showsIndicators: true) {
-                VStack(alignment: .leading, spacing: 12) {
-                    brushAdvancedParameterControls
-                    brushAdvancedActions
-                }
-                .padding(16)
-                .frame(maxWidth: 372, alignment: .topLeading)
-                .frame(maxWidth: .infinity, alignment: .top)
-            }
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        .background(Color(red: 0.12, green: 0.12, blue: 0.13))
-    }
-
-    private var brushSectionDivider: some View {
-        Divider()
-            .overlay(Color.white.opacity(0.08))
-            .padding(.vertical, 2)
-    }
-
-    private func brushParameterSectionHeader(_ title: String, detail: String? = nil) -> some View {
-        VStack(alignment: .leading, spacing: 1) {
-            Text(title)
-                .font(.system(size: 10.5, weight: .bold))
-                .foregroundStyle(Color.white.opacity(0.72))
-            if let detail {
-                Text(detail)
-                    .font(.system(size: 8.5, weight: .medium))
-                    .foregroundStyle(Color.white.opacity(0.4))
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-        }
-    }
-
-    private func brushDisclosureButton(
-        title: String,
-        isExpanded: Bool,
-        action: @escaping () -> Void
-    ) -> some View {
-        Button(action: action) {
-            HStack(spacing: 5) {
-                Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
-                    .font(.system(size: 8, weight: .bold))
-                Text(title)
-                    .font(.system(size: 9.5, weight: .semibold))
-                Spacer(minLength: 0)
-            }
-            .foregroundStyle(Color.white.opacity(0.58))
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-    }
-
-    private func pressureCurveButton(
-        title: String,
-        systemImage: String,
-        isEnabled: Bool,
-        action: @escaping () -> Void
-    ) -> some View {
-        Button(action: action) {
-            Label(title, systemImage: systemImage)
-                .font(.system(size: 9.5, weight: .semibold))
-                .frame(maxWidth: .infinity)
-        }
-        .buttonStyle(.bordered)
-        .controlSize(.mini)
-        .disabled(!isEnabled)
-        .help(isEnabled ? "编辑\(title)" : "先提高对应的压感强度")
     }
 
     private var textureFillTipSourceSummary: String {
@@ -3427,102 +3113,6 @@ struct RightInspectorView: View {
             blue: Double(rgb.blue),
             opacity: 1
         )
-    }
-
-    private var pressureSizeCurveEditor: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            curvePresetRow(
-                applyPreset: viewModel.applySizeCurvePreset,
-                reset: viewModel.resetSizeCurveToDefault
-            )
-            .fixedSize(horizontal: false, vertical: true)
-            .layoutPriority(1)
-            .zIndex(2)
-
-            CurveEditorView(
-                state: viewModel.sizePressureCurveState,
-                isEnabled: true,
-                appearance: .light,
-                allowsEndpointMovement: false,
-                allowsPointInsertion: true,
-                allowsPointRemoval: true
-            ) { nextState in
-                viewModel.setSizePressureCurveState(nextState)
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-            .layoutPriority(0)
-            .zIndex(1)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-    }
-
-    private var pressureCurveEditor: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            curvePresetRow(
-                applyPreset: viewModel.applyOpacityCurvePreset,
-                reset: viewModel.resetOpacityCurveToDefault
-            )
-            .fixedSize(horizontal: false, vertical: true)
-            .layoutPriority(1)
-            .zIndex(2)
-
-            CurveEditorView(
-                state: viewModel.opacityPressureCurveState,
-                isEnabled: true,
-                appearance: .light,
-                allowsEndpointMovement: false,
-                allowsPointInsertion: true,
-                allowsPointRemoval: true
-            ) { nextState in
-                viewModel.setOpacityPressureCurveState(nextState)
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-            .layoutPriority(0)
-            .zIndex(1)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-    }
-
-    private func curvePresetRow(
-        applyPreset: @escaping (PressureCurvePreset) -> Void,
-        reset: @escaping () -> Void
-    ) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 8) {
-                ForEach(PressureCurvePreset.allCases, id: \.self) { preset in
-                    pressureCurvePresetChip(title: preset.displayName) {
-                        applyPreset(preset)
-                    }
-                }
-                pressureCurvePresetChip(title: "恢复默认") {
-                    reset()
-                }
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    private func pressureCurvePresetChip(
-        title: String,
-        action: @escaping () -> Void
-    ) -> some View {
-        Text(title)
-            .font(.system(size: 11, weight: .semibold))
-            .foregroundStyle(Color.black)
-            .lineLimit(1)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
-            .background(
-                RoundedRectangle(cornerRadius: 9)
-                    .fill(Color(red: 0.80, green: 0.80, blue: 0.78))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 9)
-                    .stroke(Color.black.opacity(0.22), lineWidth: 1)
-            )
-            .shadow(color: Color.black.opacity(0.05), radius: 1, y: 1)
-            .contentShape(RoundedRectangle(cornerRadius: 9))
-            .onTapGesture(perform: action)
     }
 
     private var brushLibrarySection: some View {

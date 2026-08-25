@@ -1,10 +1,15 @@
 import AppKit
 import SwiftUI
 
-/// A result-oriented compound brush editor. The active workspace brush is not
+/// A result-oriented brush editor. The active workspace brush is not
 /// mutated while this sheet is open; Apply is the only operation that writes
 /// the isolated draft back to the tool session.
 struct CompoundBrushBuilderSheet: View {
+    private enum PressureCurveKind: Equatable {
+        case size
+        case opacity
+    }
+
     private enum TipLibraryTarget: String, Identifiable {
         case primary
         case secondary
@@ -39,6 +44,8 @@ struct CompoundBrushBuilderSheet: View {
     @State private var previewGeneration = 0
 
     @State private var showsAdvanced = false
+    @State private var showsSizeCurveEditor = false
+    @State private var showsOpacityCurveEditor = false
     @State private var tipLibraryTarget: TipLibraryTarget?
     @State private var primaryPendingSelection: BrushTipImageAssetID?
     @State private var secondaryPendingSelection: BrushTipImageAssetID?
@@ -83,10 +90,8 @@ struct CompoundBrushBuilderSheet: View {
         .frame(minWidth: 760, idealWidth: 1040, minHeight: 660, idealHeight: 760)
         .background(Color(red: 0.10, green: 0.10, blue: 0.11))
         .foregroundStyle(.white)
+        .preferredColorScheme(.dark)
         .onAppear {
-            var enabledDraft = draftBrush
-            enabledDraft.compoundBrush.enabled = true
-            draftBrush = enabledDraft
             previewPathToken &+= 1
             schedulePreviews(immediate: true)
         }
@@ -115,9 +120,9 @@ struct CompoundBrushBuilderSheet: View {
     private var header: some View {
         HStack(spacing: 12) {
             VStack(alignment: .leading, spacing: 3) {
-                Text("组合笔刷")
+                Text("笔刷编辑器")
                     .font(.system(size: 17, weight: .bold))
-                Text("主笔尖决定轮廓，纹理笔尖只改变轮廓内部的质感")
+                Text("常用参数、笔触叠加和组合纹理在这里一次完成")
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(Color.white.opacity(0.52))
             }
@@ -149,14 +154,23 @@ struct CompoundBrushBuilderSheet: View {
             HStack(spacing: 8) {
                 Text("实时试笔")
                     .font(.system(size: 13, weight: .bold))
-                Picker("预览", selection: $previewChannel) {
-                    Text("结果").tag(CompoundBrushPreviewChannel.result)
-                    Text("主笔尖").tag(CompoundBrushPreviewChannel.primary)
-                    Text("纹理").tag(CompoundBrushPreviewChannel.secondary)
+                if draftBrush.compoundBrush.enabled {
+                    Picker("预览", selection: $previewChannel) {
+                        Text("结果").tag(CompoundBrushPreviewChannel.result)
+                        Text("主笔尖").tag(CompoundBrushPreviewChannel.primary)
+                        Text("纹理").tag(CompoundBrushPreviewChannel.secondary)
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.segmented)
+                    .controlSize(.small)
+                } else {
+                    Text("普通笔刷")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(Color.white.opacity(0.58))
+                        .padding(.horizontal, 9)
+                        .padding(.vertical, 4)
+                        .background(Color.white.opacity(0.06), in: Capsule())
                 }
-                .labelsHidden()
-                .pickerStyle(.segmented)
-                .controlSize(.small)
                 Spacer()
                 Menu {
                     ForEach(CompoundBrushPreviewBackground.allCases) { background in
@@ -241,6 +255,16 @@ struct CompoundBrushBuilderSheet: View {
                     .foregroundStyle(Color.white.opacity(0.62))
             }
 
+            editorSlider(
+                title: "笔刷大小",
+                value: Double(draftBrush.size),
+                range: 1...512,
+                scale: .logarithmic,
+                valueText: { "\(Int($0.rounded())) px" }
+            ) { brush, value in
+                brush.size = Float(value)
+            }
+
             VStack(alignment: .leading, spacing: 7) {
                 HStack {
                     Text("轻压 / 中压 / 重压")
@@ -271,14 +295,200 @@ struct CompoundBrushBuilderSheet: View {
 
     private var settingsContent: some View {
         VStack(alignment: .leading, spacing: 16) {
-            quickStartSection
-            combinationSection
+            brushStructureSection
+            commonBrushSection
+            strokeBuildSection
+            if draftBrush.compoundBrush.enabled {
+                quickStartSection
+                combinationSection
+            }
             tipSection
-            textureBehaviorSection
+            if draftBrush.compoundBrush.enabled {
+                textureBehaviorSection
+            }
             advancedSection
-            diagnosticsSection
+            if draftBrush.compoundBrush.enabled {
+                diagnosticsSection
+            }
         }
         .frame(maxWidth: 620, alignment: .topLeading)
+    }
+
+    private var brushStructureSection: some View {
+        editorPanel(title: "笔刷结构", detail: "普通笔刷和组合笔刷共用同一套常用参数与叠加设置") {
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("组合笔刷")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundStyle(Color.white.opacity(0.9))
+                    Text(draftBrush.compoundBrush.enabled ? "A 控制轮廓，B 提供内部纹理" : "当前只使用主笔尖 A")
+                        .font(.system(size: 9, weight: .medium))
+                        .foregroundStyle(Color.white.opacity(0.5))
+                }
+                Spacer()
+                Toggle(
+                    "",
+                    isOn: Binding(
+                        get: { draftBrush.compoundBrush.enabled },
+                        set: { enabled in
+                            performEdit { $0.setCompoundBrushEnabledUsingArtistDefault(enabled) }
+                            if enabled == false { previewChannel = .result }
+                        }
+                    )
+                )
+                .labelsHidden()
+                .toggleStyle(.switch)
+                .controlSize(.small)
+            }
+            .padding(10)
+            .background(Color.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 8))
+            .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.white.opacity(0.08), lineWidth: 1))
+        }
+    }
+
+    private var commonBrushSection: some View {
+        editorPanel(title: "常用参数", detail: "与主界面工具参数使用同一份画笔数据，应用后两边保持一致") {
+            editorSlider(
+                title: "基础不透明度",
+                value: Double(draftBrush.opacity),
+                range: 0.01...1,
+                valueText: percentText
+            ) { $0.opacity = Float($1) }
+
+            editorSlider(
+                title: "间距",
+                value: Double(draftBrush.spacingPercent),
+                range: 1...1_000,
+                scale: .logarithmic,
+                valueText: { "\(Int($0.rounded()))%" }
+            ) { $0.spacingPercent = Float($1) }
+
+            editorSlider(
+                title: "尺寸随机",
+                value: Double(draftBrush.sizeJitterAmount),
+                range: 0...1,
+                valueText: percentText
+            ) { $0.sizeJitterAmount = Float($1) }
+
+            editorSlider(
+                title: draftBrush.compoundBrush.enabled ? "整体尺寸" : "尺寸压感",
+                value: Double(displayedPressureSizeAmount),
+                range: 0...1,
+                valueText: percentText
+            ) { brush, value in
+                if brush.compoundBrush.enabled {
+                    brush.compoundBrush.globalPressureSizeAmount = Float(value)
+                } else {
+                    brush.pressureSizeAmount = Float(value)
+                }
+            }
+
+            editorSlider(
+                title: draftBrush.compoundBrush.enabled ? "整体透明" : "不透明压感",
+                value: Double(displayedPressureOpacityAmount),
+                range: 0...1,
+                valueText: percentText
+            ) { brush, value in
+                if brush.compoundBrush.enabled {
+                    brush.compoundBrush.globalPressureOpacityAmount = Float(value)
+                } else {
+                    brush.pressureOpacityAmount = Float(value)
+                }
+            }
+
+            editorSlider(
+                title: "杂色",
+                value: Double(draftBrush.effectivePaintJitterAmount),
+                range: 0...1,
+                valueText: percentText
+            ) { brush, value in
+                if brush.compoundBrush.enabled {
+                    brush.compoundBrush.globalPaintJitterAmount = Float(value)
+                } else {
+                    brush.paintJitterAmount = Float(value)
+                }
+                if value <= 0.001 { brush.oilPaint.isEnabled = false }
+            }
+
+            Divider().overlay(Color.white.opacity(0.07))
+
+            HStack(spacing: 10) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("仿真油画笔")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(Color.white.opacity(oilPaintIsAvailable ? 0.86 : 0.42))
+                    Text(oilPaintIsAvailable ? "保留笔头中的旧颜色" : "先提高杂色后才能启用")
+                        .font(.system(size: 9, weight: .medium))
+                        .foregroundStyle(Color.white.opacity(0.45))
+                }
+                Spacer()
+                Toggle(
+                    "",
+                    isOn: Binding(
+                        get: { draftBrush.oilPaint.isEnabled && oilPaintIsAvailable },
+                        set: { enabled in
+                            performEdit { $0.oilPaint.isEnabled = enabled && oilPaintIsAvailable }
+                        }
+                    )
+                )
+                .labelsHidden()
+                .toggleStyle(.switch)
+                .controlSize(.small)
+                .disabled(!oilPaintIsAvailable)
+            }
+
+            if draftBrush.oilPaint.isEnabled && oilPaintIsAvailable {
+                editorSlider(
+                    title: "新色装载",
+                    value: Double(draftBrush.oilPaint.newColorLoad),
+                    range: 0...1,
+                    valueText: percentText
+                ) { $0.oilPaint.newColorLoad = Float($1) }
+
+                editorSlider(
+                    title: "明度跟随",
+                    value: Double(draftBrush.oilPaint.lightnessFollow),
+                    range: 0...1,
+                    valueText: percentText
+                ) { $0.oilPaint.lightnessFollow = Float($1) }
+            }
+        }
+    }
+
+    private var strokeBuildSection: some View {
+        editorPanel(title: "笔触叠加", detail: "这项设置会随画笔一起保存，直接决定重复描画时如何累积颜色") {
+            Picker(
+                "叠加方式",
+                selection: Binding(
+                    get: { draftBrush.buildMode },
+                    set: { mode in performEdit { $0.buildMode = mode } }
+                )
+            ) {
+                Text("自然叠加").tag(BrushBuildMode.buildUp)
+                Text("不透明度封顶").tag(BrushBuildMode.opacityCap)
+            }
+            .labelsHidden()
+            .pickerStyle(.segmented)
+            .controlSize(.small)
+
+            Text(
+                draftBrush.buildMode == .buildUp
+                    ? "适合大多数画笔：重复经过同一区域时自然加深。"
+                    : "特殊模式：单次笔触内部限制在目标不透明度，不适合作为普通默认值。"
+            )
+            .font(.system(size: 9, weight: .medium))
+            .foregroundStyle(Color.white.opacity(0.52))
+            .fixedSize(horizontal: false, vertical: true)
+
+            if draftBrush.buildMode == .buildUp {
+                editorSlider(
+                    title: "叠加补偿",
+                    value: Double(draftBrush.buildUpOpacityCompensationAmount),
+                    range: 0...1,
+                    valueText: percentText
+                ) { $0.buildUpOpacityCompensationAmount = Float($1) }
+            }
+        }
     }
 
     private var quickStartSection: some View {
@@ -343,7 +553,12 @@ struct CompoundBrushBuilderSheet: View {
     }
 
     private var tipSection: some View {
-        editorPanel(title: "两个笔尖", detail: "主笔尖控制外轮廓，纹理笔尖只提供内部明暗结构") {
+        editorPanel(
+            title: draftBrush.compoundBrush.enabled ? "两个笔尖" : "主笔尖",
+            detail: draftBrush.compoundBrush.enabled
+                ? "主笔尖控制外轮廓，纹理笔尖只提供内部明暗结构"
+                : "主笔尖决定普通笔刷的外形"
+        ) {
             HStack(alignment: .top, spacing: 10) {
                 tipCard(
                     title: "主笔尖 · 轮廓",
@@ -362,24 +577,26 @@ struct CompoundBrushBuilderSheet: View {
                     }
                 }
 
-                Image(systemName: "plus")
-                    .font(.system(size: 13, weight: .bold))
-                    .foregroundStyle(Color.white.opacity(0.32))
-                    .padding(.top, 56)
+                if draftBrush.compoundBrush.enabled {
+                    Image(systemName: "plus")
+                        .font(.system(size: 13, weight: .bold))
+                        .foregroundStyle(Color.white.opacity(0.32))
+                        .padding(.top, 56)
 
-                tipCard(
-                    title: "纹理笔尖 · 内部",
-                    summary: secondaryTipSummary,
-                    image: secondaryPreviewImage,
-                    target: .secondary,
-                    selectedShape: draftBrush.compoundBrush.secondary.tipShape
-                ) { shape in
-                    performEdit { brush in
-                        brush.compoundBrush.secondary.tipShape = shape
-                        brush.compoundBrush.secondary.sourceSemantic = .procedural
-                        brush.compoundBrush.secondary.tipAssetID = nil
-                        brush.compoundBrush.secondary.importedSourceInfo = nil
-                        brush.compoundBrush.secondary.customTipMaskData = nil
+                    tipCard(
+                        title: "纹理笔尖 · 内部",
+                        summary: secondaryTipSummary,
+                        image: secondaryPreviewImage,
+                        target: .secondary,
+                        selectedShape: draftBrush.compoundBrush.secondary.tipShape
+                    ) { shape in
+                        performEdit { brush in
+                            brush.compoundBrush.secondary.tipShape = shape
+                            brush.compoundBrush.secondary.sourceSemantic = .procedural
+                            brush.compoundBrush.secondary.tipAssetID = nil
+                            brush.compoundBrush.secondary.importedSourceInfo = nil
+                            brush.compoundBrush.secondary.customTipMaskData = nil
+                        }
                     }
                 }
             }
@@ -426,90 +643,181 @@ struct CompoundBrushBuilderSheet: View {
         DisclosureGroup(isExpanded: $showsAdvanced) {
             VStack(alignment: .leading, spacing: 13) {
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("纹理随压力")
+                    Text("压力响应")
                         .font(.system(size: 11, weight: .bold))
-                    HStack(spacing: 7) {
-                        ForEach(CompoundTexturePressurePreset.allCases) { preset in
-                            Button(preset.displayName) {
-                                performEdit { $0.compoundBrush.applyTexturePressurePreset(preset) }
-                            }
-                            .buttonStyle(CompoundEditorButtonStyle(isProminent: false))
+
+                    HStack(spacing: 8) {
+                        curveEditorButton(title: "尺寸曲线", systemImage: "waveform.path.ecg") {
+                            showsSizeCurveEditor.toggle()
+                        }
+                        .popover(isPresented: $showsSizeCurveEditor, arrowEdge: .bottom) {
+                            pressureCurvePopover(kind: .size)
+                        }
+
+                        curveEditorButton(title: "透明曲线", systemImage: "drop") {
+                            showsOpacityCurveEditor.toggle()
+                        }
+                        .popover(isPresented: $showsOpacityCurveEditor, arrowEdge: .bottom) {
+                            pressureCurvePopover(kind: .opacity)
                         }
                     }
-                    CompoundTextureStrengthCurveEditor(
-                        mix: draftBrush.compoundBrush.pressureMix,
-                        onChange: { mix in previewEdit { $0.compoundBrush.pressureMix = mix } },
-                        onEditingChanged: handleInteractiveEditing
-                    )
-                    .frame(height: 148)
+
+                    editorSlider(
+                        title: "最小尺寸",
+                        value: Double(draftBrush.sizeLowerBound),
+                        range: 0...1,
+                        valueText: percentText
+                    ) { $0.sizeLowerBound = Float($1) }
+
+                    editorSlider(
+                        title: "压感灵敏度",
+                        value: Double(draftBrush.pressureSensitivity),
+                        range: 0.25...2,
+                        valueText: { String(format: "%.2fx", $0) }
+                    ) { $0.pressureSensitivity = Float($1) }
                 }
 
                 Divider().overlay(Color.white.opacity(0.07))
 
-                Group {
-                    editorSlider(
-                        title: "主笔尖大小",
-                        value: Double(draftBrush.size),
-                        range: 1...512,
-                        valueText: { "\(Int($0.rounded())) px" }
-                    ) { $0.size = Float($1) }
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("笔尖排布与随机")
+                        .font(.system(size: 11, weight: .bold))
 
                     editorSlider(
-                        title: "主笔尖间距",
-                        value: Double(draftBrush.spacingPercent),
-                        range: 0...200,
-                        valueText: { "\(Int($0.rounded()))%" }
-                    ) { $0.spacingPercent = Float($1) }
+                        title: "位置散布",
+                        value: Double(draftBrush.scatterAmount),
+                        range: 0...5,
+                        valueText: { "\(Int(($0 * 50).rounded()))%" }
+                    ) { $0.scatterAmount = Float($1) }
 
                     editorSlider(
-                        title: "纹理角度",
-                        value: Double(draftBrush.compoundBrush.secondary.angleDegrees),
-                        range: -180...180,
-                        valueText: { "\(Int($0.rounded()))°" }
-                    ) { $0.compoundBrush.secondary.angleDegrees = Float($1) }
-
-                    editorSlider(
-                        title: "随机旋转",
-                        value: Double(draftBrush.compoundBrush.secondary.tileRandomRotation),
+                        title: "抖动",
+                        value: Double(draftBrush.jitterAmount),
                         range: 0...1,
                         valueText: percentText
-                    ) { $0.compoundBrush.secondary.tileRandomRotation = Float($1) }
+                    ) { $0.jitterAmount = Float($1) }
+
+                    if draftBrush.tipShape.hasVisibleRotation {
+                        editorSlider(
+                            title: "笔尖角度",
+                            value: signedPrimaryRotation,
+                            range: -180...180,
+                            valueText: { "\(Int($0.rounded()))°" }
+                        ) { brush, value in
+                            var normalized = Float(value).truncatingRemainder(dividingBy: 360)
+                            if normalized < 0 { normalized += 360 }
+                            brush.stampRotationDegrees = normalized
+                        }
+
+                        HStack(spacing: 10) {
+                            Text("跟随笔迹方向")
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundStyle(Color.white.opacity(0.82))
+                                .frame(width: 92, alignment: .leading)
+                            Toggle(
+                                "",
+                                isOn: Binding(
+                                    get: { draftBrush.followsStrokeDirection },
+                                    set: { follows in performEdit { $0.followsStrokeDirection = follows } }
+                                )
+                            )
+                            .labelsHidden()
+                            .toggleStyle(.switch)
+                            .controlSize(.small)
+                            Spacer()
+                        }
+
+                        editorSlider(
+                            title: "角度随机",
+                            value: Double(draftBrush.angleJitterAmount),
+                            range: 0...1,
+                            valueText: { "\(Int(($0 * 180).rounded()))°" }
+                        ) { $0.angleJitterAmount = Float($1) }
+                    }
 
                     editorSlider(
-                        title: "纹理柔度",
-                        value: Double(draftBrush.compoundBrush.secondary.softness),
+                        title: "颜色随机",
+                        value: Double(draftBrush.colorJitterAmount),
                         range: 0...1,
                         valueText: percentText
-                    ) { $0.compoundBrush.secondary.softness = Float($1) }
+                    ) { $0.colorJitterAmount = Float($1) }
+                }
 
-                    editorSlider(
-                        title: "纹理圆度",
-                        value: Double(draftBrush.compoundBrush.secondary.roundness),
-                        range: 0.05...1,
-                        valueText: percentText
-                    ) { $0.compoundBrush.secondary.roundness = Float($1) }
+                if draftBrush.compoundBrush.enabled {
+                    Divider().overlay(Color.white.opacity(0.07))
 
-                    editorSlider(
-                        title: "尺寸压感",
-                        value: Double(draftBrush.compoundBrush.secondary.pressureSizeAmount),
-                        range: 0...1,
-                        valueText: percentText
-                    ) { $0.compoundBrush.secondary.pressureSizeAmount = Float($1) }
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("纹理随压力")
+                            .font(.system(size: 11, weight: .bold))
+                        HStack(spacing: 7) {
+                            ForEach(CompoundTexturePressurePreset.allCases) { preset in
+                                Button(preset.displayName) {
+                                    performEdit { $0.compoundBrush.applyTexturePressurePreset(preset) }
+                                }
+                                .buttonStyle(CompoundEditorButtonStyle(isProminent: false))
+                            }
+                        }
+                        CompoundTextureStrengthCurveEditor(
+                            mix: draftBrush.compoundBrush.pressureMix,
+                            onChange: { mix in previewEdit { $0.compoundBrush.pressureMix = mix } },
+                            onEditingChanged: handleInteractiveEditing
+                        )
+                        .frame(height: 148)
+                    }
 
-                    editorSlider(
-                        title: "透明压感",
-                        value: Double(draftBrush.compoundBrush.secondary.pressureOpacityAmount),
-                        range: 0...1,
-                        valueText: percentText
-                    ) { $0.compoundBrush.secondary.pressureOpacityAmount = Float($1) }
+                    Divider().overlay(Color.white.opacity(0.07))
+
+                    Group {
+                        editorSlider(
+                            title: "纹理角度",
+                            value: Double(draftBrush.compoundBrush.secondary.angleDegrees),
+                            range: -180...180,
+                            valueText: { "\(Int($0.rounded()))°" }
+                        ) { $0.compoundBrush.secondary.angleDegrees = Float($1) }
+
+                        editorSlider(
+                            title: "随机旋转",
+                            value: Double(draftBrush.compoundBrush.secondary.tileRandomRotation),
+                            range: 0...1,
+                            valueText: percentText
+                        ) { $0.compoundBrush.secondary.tileRandomRotation = Float($1) }
+
+                        editorSlider(
+                            title: "纹理柔度",
+                            value: Double(draftBrush.compoundBrush.secondary.softness),
+                            range: 0...1,
+                            valueText: percentText
+                        ) { $0.compoundBrush.secondary.softness = Float($1) }
+
+                        editorSlider(
+                            title: "纹理圆度",
+                            value: Double(draftBrush.compoundBrush.secondary.roundness),
+                            range: 0.05...1,
+                            valueText: percentText
+                        ) { $0.compoundBrush.secondary.roundness = Float($1) }
+
+                        editorSlider(
+                            title: "纹理尺寸压感",
+                            value: Double(draftBrush.compoundBrush.secondary.pressureSizeAmount),
+                            range: 0...1,
+                            valueText: percentText
+                        ) { $0.compoundBrush.secondary.pressureSizeAmount = Float($1) }
+
+                        editorSlider(
+                            title: "纹理透明压感",
+                            value: Double(draftBrush.compoundBrush.secondary.pressureOpacityAmount),
+                            range: 0...1,
+                            valueText: percentText
+                        ) { $0.compoundBrush.secondary.pressureOpacityAmount = Float($1) }
+                    }
                 }
             }
             .padding(.top, 12)
         } label: {
             VStack(alignment: .leading, spacing: 2) {
-                Text("高级设置")
+                Text("更多设置")
                     .font(.system(size: 12, weight: .bold))
-                Text("压力曲线、角度、边缘与两个笔尖的基础参数")
+                Text("压力曲线、排布随机、角度与纹理细节")
                     .font(.system(size: 9, weight: .medium))
                     .foregroundStyle(Color.white.opacity(0.46))
             }
@@ -688,6 +996,7 @@ struct CompoundBrushBuilderSheet: View {
         title: String,
         value: Double,
         range: ClosedRange<Double>,
+        scale: CompoundEditorSliderScale = .linear,
         valueText: @escaping (Double) -> String,
         update: @escaping (inout BrushSettings, Double) -> Void
     ) -> some View {
@@ -695,11 +1004,84 @@ struct CompoundBrushBuilderSheet: View {
             title: title,
             value: value,
             range: range,
+            scale: scale,
             valueText: valueText,
             onPreview: { value in previewEdit { update(&$0, value) } },
             onCommit: { value in previewEdit { update(&$0, value) } },
             onEditingChanged: handleInteractiveEditing
         )
+    }
+
+    private func curveEditorButton(
+        title: String,
+        systemImage: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Label(title, systemImage: systemImage)
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(Color.white.opacity(0.86))
+                .frame(maxWidth: .infinity)
+        }
+        .buttonStyle(CompoundEditorButtonStyle(isProminent: false))
+    }
+
+    private func pressureCurvePopover(kind: PressureCurveKind) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 7) {
+                ForEach(PressureCurvePreset.allCases, id: \.self) { preset in
+                    Button(preset.displayName) {
+                        performEdit { brush in
+                            switch kind {
+                            case .size:
+                                brush.setSizePressureCurveState(preset.sizeCurveState)
+                            case .opacity:
+                                brush.setOpacityPressureCurveState(preset.opacityCurveState)
+                            }
+                        }
+                    }
+                    .buttonStyle(CompoundEditorButtonStyle(isProminent: false))
+                }
+
+                Spacer()
+
+                Button("重置") {
+                    performEdit { brush in
+                        switch kind {
+                        case .size:
+                            brush.setSizePressureCurveState(BrushSettings.stageOneDefault.resolvedSizePressureCurveState)
+                        case .opacity:
+                            brush.setOpacityPressureCurveState(BrushSettings.stageOneDefault.resolvedOpacityPressureCurveState)
+                        }
+                    }
+                }
+                .buttonStyle(CompoundEditorButtonStyle(isProminent: false))
+            }
+
+            CurveEditorView(
+                state: kind == .size
+                    ? draftBrush.resolvedSizePressureCurveState
+                    : draftBrush.resolvedOpacityPressureCurveState,
+                isEnabled: true,
+                appearance: .dark,
+                allowsEndpointMovement: false,
+                allowsPointInsertion: true,
+                allowsPointRemoval: true
+            ) { nextState in
+                previewEdit { brush in
+                    switch kind {
+                    case .size:
+                        brush.setSizePressureCurveState(nextState)
+                    case .opacity:
+                        brush.setOpacityPressureCurveState(nextState)
+                    }
+                }
+            }
+        }
+        .padding(12)
+        .frame(width: 330, height: 270)
+        .background(Color(red: 0.10, green: 0.10, blue: 0.11))
+        .preferredColorScheme(.dark)
     }
 
     private var orientationBinding: Binding<CompoundTextureOrientation> {
@@ -716,12 +1098,34 @@ struct CompoundBrushBuilderSheet: View {
         return 1 - ((spacing - 4) / 136)
     }
 
+    private var displayedPressureSizeAmount: Float {
+        draftBrush.compoundBrush.enabled
+            ? draftBrush.compoundBrush.globalPressureSizeAmount
+            : draftBrush.pressureSizeAmount
+    }
+
+    private var displayedPressureOpacityAmount: Float {
+        draftBrush.compoundBrush.enabled
+            ? draftBrush.compoundBrush.globalPressureOpacityAmount
+            : draftBrush.pressureOpacityAmount
+    }
+
+    private var oilPaintIsAvailable: Bool {
+        draftBrush.effectivePaintJitterAmount > 0.001
+    }
+
+    private var signedPrimaryRotation: Double {
+        let rotation = Double(draftBrush.stampRotationDegrees)
+        return rotation > 180 ? rotation - 360 : rotation
+    }
+
     private var drawingPadBrush: BrushSettings {
         switch previewChannel {
         case .result:
             var result = draftBrush
-            result.compoundBrush.enabled = true
-            result.compoundBrush.mode = result.compoundBrush.mode.editorEquivalent
+            if result.compoundBrush.enabled {
+                result.compoundBrush.mode = result.compoundBrush.mode.editorEquivalent
+            }
             return result
         case .primary:
             var primary = draftBrush
@@ -791,7 +1195,6 @@ struct CompoundBrushBuilderSheet: View {
     private func previewEdit(_ edit: (inout BrushSettings) -> Void) {
         var updated = draftBrush
         edit(&updated)
-        updated.compoundBrush.enabled = true
         draftBrush = updated
     }
 
@@ -799,7 +1202,6 @@ struct CompoundBrushBuilderSheet: View {
         finishInteractiveEditing()
         var updated = draftBrush
         edit(&updated)
-        updated.compoundBrush.enabled = true
         replaceDraft(updated)
     }
 
@@ -872,8 +1274,9 @@ struct CompoundBrushBuilderSheet: View {
         previewGeneration &+= 1
         let generation = previewGeneration
         var brush = draftBrush
-        brush.compoundBrush.enabled = true
-        brush.compoundBrush.mode = brush.compoundBrush.mode.editorEquivalent
+        if brush.compoundBrush.enabled {
+            brush.compoundBrush.mode = brush.compoundBrush.mode.editorEquivalent
+        }
         let secondary = secondaryPreviewBrush(from: brush)
         let seed = previewSeed
 
@@ -1027,6 +1430,7 @@ struct CompoundBrushBuilderSheet: View {
         .frame(minWidth: 820, minHeight: 600)
         .foregroundStyle(.white)
         .background(Color(red: 0.10, green: 0.10, blue: 0.11))
+        .preferredColorScheme(.dark)
     }
 
     private func applyPendingTip(for target: TipLibraryTarget) {
@@ -1039,7 +1443,7 @@ struct CompoundBrushBuilderSheet: View {
             updated = viewModel.brushDraft(draftBrush, applyingCompoundSecondaryTipImageLibraryItem: selection)
         }
         if var updated {
-            updated.compoundBrush.enabled = true
+            if target == .secondary { updated.compoundBrush.enabled = true }
             replaceDraft(updated)
         }
     }

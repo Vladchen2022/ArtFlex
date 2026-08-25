@@ -4,6 +4,24 @@ import CoreGraphics
 
 struct CompoundBrushEditingTests {
     @Test
+    func firstCompoundEnableUsesNaturalBuildUpButReenablePreservesConfiguredMode() {
+        var newBrush = BrushSettings.stageOneDefault
+        newBrush.buildMode = .opacityCap
+        newBrush.setCompoundBrushEnabledUsingArtistDefault(true)
+
+        #expect(newBrush.compoundBrush.enabled)
+        #expect(newBrush.buildMode == .buildUp)
+
+        var configuredBrush = BrushSettings.stageOneDefault
+        configuredBrush.compoundBrush.secondary.relativeSizeRatio = 1.7
+        configuredBrush.buildMode = .opacityCap
+        configuredBrush.setCompoundBrushEnabledUsingArtistDefault(true)
+
+        #expect(configuredBrush.compoundBrush.enabled)
+        #expect(configuredBrush.buildMode == .opacityCap)
+    }
+
+    @Test
     func drawingPadConvertsAppKitYAxisToTopDownRasterCoordinates() {
         let bounds = CGRect(x: 10, y: 20, width: 200, height: 100)
 

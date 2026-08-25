@@ -1,8 +1,21 @@
 import Foundation
 
+extension BrushSettings {
+    mutating func setCompoundBrushEnabledUsingArtistDefault(_ enabled: Bool) {
+        let startsNewCompoundConfiguration = enabled
+            && compoundBrush.enabled == false
+            && compoundBrush == .disabledDefault
+        compoundBrush.enabled = enabled
+        if startsNewCompoundConfiguration {
+            buildMode = .buildUp
+        }
+    }
+}
+
 /// Artist-facing starting points for the compound-brush mask system.
-/// Recipes only change compound-specific values; the selected primary tip,
-/// colour, opacity and other ordinary brush settings remain untouched.
+/// Recipes preserve the selected primary tip and ordinary visual parameters.
+/// A brush entering compound mode for the first time starts with natural build-up;
+/// a previously configured compound brush keeps its chosen build mode.
 enum CompoundBrushRecipe: String, CaseIterable, Identifiable, Sendable {
     case fineGrain
     case dryBrush
@@ -31,7 +44,7 @@ enum CompoundBrushRecipe: String, CaseIterable, Identifiable, Sendable {
 
     func applying(to source: BrushSettings) -> BrushSettings {
         var brush = source
-        brush.compoundBrush.enabled = true
+        brush.setCompoundBrushEnabledUsingArtistDefault(true)
         brush.compoundBrush.secondary.sizeMode = .relativeToPrimary
 
         switch self {

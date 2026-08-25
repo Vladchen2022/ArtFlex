@@ -680,10 +680,16 @@ struct CompoundTextureStrengthCurveEditor: View {
     }
 }
 
+enum CompoundEditorSliderScale {
+    case linear
+    case logarithmic
+}
+
 struct CompoundEditorSlider: View {
     let title: String
     let value: Double
     let range: ClosedRange<Double>
+    let scale: CompoundEditorSliderScale
     let valueText: (Double) -> String
     let onPreview: (Double) -> Void
     let onCommit: (Double) -> Void
@@ -698,6 +704,7 @@ struct CompoundEditorSlider: View {
         title: String,
         value: Double,
         range: ClosedRange<Double>,
+        scale: CompoundEditorSliderScale = .linear,
         valueText: @escaping (Double) -> String,
         onPreview: @escaping (Double) -> Void = { _ in },
         onCommit: @escaping (Double) -> Void,
@@ -706,6 +713,7 @@ struct CompoundEditorSlider: View {
         self.title = title
         self.value = value
         self.range = range
+        self.scale = scale
         self.valueText = valueText
         self.onPreview = onPreview
         self.onCommit = onCommit
@@ -723,13 +731,14 @@ struct CompoundEditorSlider: View {
 
             Slider(
                 value: Binding(
-                    get: { draftValue },
-                    set: { updated in
+                    get: { sliderPosition(for: draftValue) },
+                    set: { position in
+                        let updated = resolvedValue(for: position)
                         draftValue = updated
                         onPreview(updated)
                     }
                 ),
-                in: range,
+                in: sliderRange,
                 onEditingChanged: { editing in
                     isSliding = editing
                     if editing {
@@ -748,10 +757,23 @@ struct CompoundEditorSlider: View {
             }
 
             TextField("", text: $text)
-                .textFieldStyle(.roundedBorder)
+                .textFieldStyle(.plain)
                 .font(.system(size: 10, weight: .semibold).monospacedDigit())
+                .foregroundStyle(Color.white.opacity(0.96))
                 .multilineTextAlignment(.trailing)
-                .frame(width: 76)
+                .frame(width: 68, height: 22)
+                .padding(.horizontal, 5)
+                .background(
+                    RoundedRectangle(cornerRadius: 5)
+                        .fill(Color.black.opacity(isTextFocused ? 0.32 : 0.18))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 5)
+                        .stroke(
+                            isTextFocused ? Color.accentColor.opacity(0.75) : Color.white.opacity(0.08),
+                            lineWidth: 1
+                        )
+                )
                 .focused($isTextFocused)
                 .onSubmit {
                     commitText()
@@ -771,6 +793,35 @@ struct CompoundEditorSlider: View {
             guard isSliding == false, isTextFocused == false else { return }
             draftValue = min(max(updated, range.lowerBound), range.upperBound)
             text = valueText(draftValue)
+        }
+    }
+
+    private var sliderRange: ClosedRange<Double> {
+        scale == .linear ? range : 0...1
+    }
+
+    private func resolvedValue(for position: Double) -> Double {
+        switch scale {
+        case .linear:
+            return min(max(position, range.lowerBound), range.upperBound)
+        case .logarithmic:
+            let lower = max(range.lowerBound, 0.000_001)
+            let upper = max(range.upperBound, lower)
+            let exponent = min(max(position, 0), 1)
+            return lower * pow(upper / lower, exponent)
+        }
+    }
+
+    private func sliderPosition(for actualValue: Double) -> Double {
+        let clamped = min(max(actualValue, range.lowerBound), range.upperBound)
+        switch scale {
+        case .linear:
+            return clamped
+        case .logarithmic:
+            let lower = max(range.lowerBound, 0.000_001)
+            let upper = max(range.upperBound, lower)
+            guard upper > lower else { return 0 }
+            return log(clamped / lower) / log(upper / lower)
         }
     }
 

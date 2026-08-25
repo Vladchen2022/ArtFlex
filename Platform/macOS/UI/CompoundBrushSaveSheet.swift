@@ -27,7 +27,8 @@ struct CompoundBrushSaveSheet: View {
         let candidate = selected?.isBuiltIn == false ? selected : nil
         replaceCandidate = candidate
         let nextIndex = library.presets.filter { !$0.isBuiltIn }.count + 1
-        _name = State(initialValue: candidate?.name ?? "组合笔刷 \(nextIndex)")
+        let defaultName = brush.compoundBrush.enabled ? "组合笔刷 \(nextIndex)" : "画笔 \(nextIndex)"
+        _name = State(initialValue: candidate?.name ?? defaultName)
         _selectedColorTag = State(initialValue: candidate?.colorTag)
         _replacesCurrent = State(initialValue: candidate != nil)
     }
@@ -49,7 +50,7 @@ struct CompoundBrushSaveSheet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             VStack(alignment: .leading, spacing: 3) {
-                Text("保存组合笔刷")
+                Text(brush.compoundBrush.enabled ? "保存组合笔刷" : "保存画笔")
                     .font(.system(size: 17, weight: .bold))
                 Text("命名并保存到画笔库；替换会保留原来的库位置。")
                     .font(.system(size: 10, weight: .medium))
@@ -59,7 +60,7 @@ struct CompoundBrushSaveSheet: View {
             VStack(alignment: .leading, spacing: 6) {
                 Text("名称")
                     .font(.system(size: 11, weight: .semibold))
-                TextField("组合笔刷名称", text: $name)
+                TextField("画笔名称", text: $name)
                     .textFieldStyle(.roundedBorder)
             }
 
@@ -113,6 +114,9 @@ struct CompoundBrushSaveSheet: View {
         }
         .padding(20)
         .frame(width: 470)
+        .foregroundStyle(Color.white.opacity(0.92))
+        .background(Color(red: 0.10, green: 0.10, blue: 0.11))
+        .preferredColorScheme(.dark)
     }
 
     private func colorTagButton(
