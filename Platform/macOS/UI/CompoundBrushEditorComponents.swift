@@ -83,6 +83,22 @@ enum CompoundBrushPreviewPath: String, CaseIterable, Identifiable {
     }
 }
 
+enum CompoundBrushDrawingPadCoordinateMapper {
+    static func rasterPoint(
+        forAppKitPoint point: CGPoint,
+        in bounds: CGRect,
+        resolution: Int
+    ) -> CGPoint {
+        guard bounds.width > 0, bounds.height > 0 else { return .zero }
+
+        let normalizedX = min(max((point.x - bounds.minX) / bounds.width, 0), 1)
+        // AppKit views use a bottom-left origin, while the brush raster stores row zero at the top.
+        let normalizedY = min(max((bounds.maxY - point.y) / bounds.height, 0), 1)
+        let rasterExtent = CGFloat(max(resolution - 1, 0))
+        return CGPoint(x: normalizedX * rasterExtent, y: normalizedY * rasterExtent)
+    }
+}
+
 struct CompoundBrushDrawingPad: NSViewRepresentable {
     let brush: BrushSettings
     let pressure: Float
@@ -382,8 +398,11 @@ final class CompoundBrushDrawingPadNSView: NSView {
     }
 
     private func strokePoint(for point: CGPoint, event: NSEvent) -> StrokePoint {
-        let normalizedX = min(max(point.x / max(bounds.width, 1), 0), 1)
-        let normalizedY = min(max(point.y / max(bounds.height, 1), 0), 1)
+        let rasterPoint = CompoundBrushDrawingPadCoordinateMapper.rasterPoint(
+            forAppKitPoint: point,
+            in: bounds,
+            resolution: resolution
+        )
         let eventPressure = event.pressure
         let isTabletPressureEvent = event.type == .tabletPoint
             || event.type == .pressure
@@ -392,8 +411,8 @@ final class CompoundBrushDrawingPadNSView: NSView {
             ? eventPressure
             : fixedPressure
         return StrokePoint(
-            x: Double(normalizedX * CGFloat(resolution - 1)),
-            y: Double(normalizedY * CGFloat(resolution - 1)),
+            x: Double(rasterPoint.x),
+            y: Double(rasterPoint.y),
             pressure: pressure
         )
     }

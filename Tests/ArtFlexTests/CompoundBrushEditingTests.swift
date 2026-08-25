@@ -1,7 +1,30 @@
 import Testing
+import CoreGraphics
 @testable import ArtFlex
 
 struct CompoundBrushEditingTests {
+    @Test
+    func drawingPadConvertsAppKitYAxisToTopDownRasterCoordinates() {
+        let bounds = CGRect(x: 10, y: 20, width: 200, height: 100)
+
+        let nearTop = CompoundBrushDrawingPadCoordinateMapper.rasterPoint(
+            forAppKitPoint: CGPoint(x: 60, y: 110),
+            in: bounds,
+            resolution: 101
+        )
+        let nearBottom = CompoundBrushDrawingPadCoordinateMapper.rasterPoint(
+            forAppKitPoint: CGPoint(x: 160, y: 30),
+            in: bounds,
+            resolution: 101
+        )
+
+        #expect(abs(nearTop.x - 25) < 0.001)
+        #expect(abs(nearTop.y - 10) < 0.001)
+        #expect(abs(nearBottom.x - 75) < 0.001)
+        #expect(abs(nearBottom.y - 90) < 0.001)
+        #expect(nearTop.y < nearBottom.y)
+    }
+
     @Test
     func primaryAndSecondaryTipsCanBeCopiedAndSwapped() {
         var brush = BrushSettings.stageOneDefault
