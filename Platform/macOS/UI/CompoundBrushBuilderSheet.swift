@@ -91,6 +91,7 @@ struct CompoundBrushBuilderSheet: View {
         .background(Color(red: 0.10, green: 0.10, blue: 0.11))
         .foregroundStyle(.white)
         .preferredColorScheme(.dark)
+        .interactiveDismissDisabled()
         .onAppear {
             previewPathToken &+= 1
             schedulePreviews(immediate: true)
@@ -869,7 +870,6 @@ struct CompoundBrushBuilderSheet: View {
 
             Button("取消", action: onClose)
                 .buttonStyle(CompoundEditorButtonStyle(isProminent: false))
-                .keyboardShortcut(.cancelAction)
 
             Button("应用到当前画笔") {
                 applyDraftAndClose()
@@ -1082,6 +1082,18 @@ struct CompoundBrushBuilderSheet: View {
         .frame(width: 330, height: 270)
         .background(Color(red: 0.10, green: 0.10, blue: 0.11))
         .preferredColorScheme(.dark)
+        .onExitCommand {
+            dismissPressureCurvePopover(kind)
+        }
+    }
+
+    private func dismissPressureCurvePopover(_ kind: PressureCurveKind) {
+        switch kind {
+        case .size:
+            showsSizeCurveEditor = false
+        case .opacity:
+            showsOpacityCurveEditor = false
+        }
     }
 
     private var orientationBinding: Binding<CompoundTextureOrientation> {
