@@ -4,6 +4,8 @@ import SwiftUI
 enum CompoundBrushTipLibraryLayout {
     static let idealSize = CGSize(width: 820, height: 600)
     static let containerInset: CGFloat = 32
+    static let thumbnailHeight: CGFloat = 88
+    static let thumbnailInset: CGFloat = 8
 
     static func size(fitting containerSize: CGSize) -> CGSize {
         CGSize(
@@ -1434,43 +1436,55 @@ struct CompoundBrushBuilderSheet: View {
                 .disabled(selection == nil)
             }
 
-            ScrollView {
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: 132, maximum: 180), spacing: 10)], spacing: 10) {
-                    ForEach(items) { item in
-                        Button {
-                            setPendingSelection(item.id, for: target)
-                        } label: {
-                            VStack(alignment: .leading, spacing: 7) {
-                                ZStack {
-                                    Color.black.frame(height: 88)
-                                    if let image = StageOneBrushPreviewRasterizer.importedAssetImage(
-                                        from: item.maskData,
-                                        resolution: 88
-                                    ) {
-                                        Image(decorative: image, scale: 1)
-                                            .resizable()
-                                            .interpolation(.none)
-                                            .scaledToFit()
-                                            .padding(8)
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 132, maximum: 180), spacing: 10)], spacing: 10) {
+                        ForEach(items) { item in
+                            Button {
+                                setPendingSelection(item.id, for: target)
+                            } label: {
+                                VStack(alignment: .leading, spacing: 7) {
+                                    ZStack {
+                                        Color.black
+                                        if let image = StageOneBrushPreviewRasterizer.importedAssetImage(
+                                            from: item.maskData,
+                                            resolution: Int(CompoundBrushTipLibraryLayout.thumbnailHeight)
+                                        ) {
+                                            Image(decorative: image, scale: 1)
+                                                .resizable()
+                                                .interpolation(.none)
+                                                .scaledToFit()
+                                                .padding(CompoundBrushTipLibraryLayout.thumbnailInset)
+                                        }
                                     }
+                                    .frame(maxWidth: .infinity)
+                                    .frame(height: CompoundBrushTipLibraryLayout.thumbnailHeight)
+                                    .clipped()
+                                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                                    Text(item.displayName)
+                                        .font(.system(size: 11, weight: .semibold))
+                                        .lineLimit(1)
+                                    Text("\(item.sourceInfo.pixelWidth) × \(item.sourceInfo.pixelHeight)")
+                                        .font(.system(size: 9))
+                                        .foregroundStyle(.secondary)
                                 }
-                                .clipShape(RoundedRectangle(cornerRadius: 6))
-                                Text(item.displayName)
-                                    .font(.system(size: 11, weight: .semibold))
-                                    .lineLimit(1)
-                                Text("\(item.sourceInfo.pixelWidth) × \(item.sourceInfo.pixelHeight)")
-                                    .font(.system(size: 9))
-                                    .foregroundStyle(.secondary)
+                                .padding(7)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .background(Color.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 7))
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 7)
+                                        .stroke(selection == item.id ? Color.accentColor : Color.white.opacity(0.07), lineWidth: 2)
+                                )
                             }
-                            .padding(7)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(Color.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 7))
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 7)
-                                    .stroke(selection == item.id ? Color.accentColor : Color.white.opacity(0.07), lineWidth: 2)
-                            )
+                            .buttonStyle(.plain)
+                            .id(item.id)
                         }
-                        .buttonStyle(.plain)
+                    }
+                }
+                .onAppear {
+                    guard let firstItemID = items.first?.id else { return }
+                    DispatchQueue.main.async {
+                        proxy.scrollTo(firstItemID, anchor: .top)
                     }
                 }
             }
