@@ -124,13 +124,17 @@ final class LayerMergeController {
             throw CocoaError(.fileWriteUnknown)
         }
 
-        canvasPresenter.encode(
+        guard canvasPresenter.encode(
             layerInputs: compositeInputs,
             into: renderPassDescriptor,
             commandBuffer: commandBuffer
-        )
+        ) else {
+            commandBuffer.commit()
+            throw CocoaError(.fileWriteUnknown)
+        }
 
         guard let blitEncoder = commandBuffer.makeBlitCommandEncoder() else {
+            commandBuffer.commit()
             throw CocoaError(.fileWriteUnknown)
         }
 

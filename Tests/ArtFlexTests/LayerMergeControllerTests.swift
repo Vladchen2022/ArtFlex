@@ -5,6 +5,35 @@ import Testing
 
 struct LayerMergeControllerTests {
     @Test
+    func compositeAllocationFailureDoesNotFallBackOrOverwriteDestination() throws {
+        let metal = try #require(MetalDeviceContext())
+        let presenter = try StageOneCanvasPresenter(device: metal.device)
+        let controller = LayerMergeController(metalContext: metal, canvasPresenter: presenter)
+        let store = StageOneLayerSurfaceStore()
+        let source = try #require(store.makeTexture(width: 4, height: 4, metal: metal))
+        let target = try #require(store.makeTexture(width: 4, height: 4, metal: metal))
+        let serializer = LayerTextureSerializer(metalContext: metal)
+        let before = opaqueColorSnapshot(width: 4, height: 4, red: 0, green: 0, blue: 255)
+        try serializer.restore(snapshot: before, into: target)
+        try serializer.restore(snapshot: opaqueColorSnapshot(width: 4, height: 4,
+            red: 255, green: 0, blue: 0), into: source)
+        presenter.debugPreventsCompositeTextureAllocation = true
+        #expect(throws: (any Error).self) {
+            try controller.mergeVisible(layers: [
+                .init(texture: target, opacity: 1),
+                .init(texture: source, opacity: 1, blendMode: .multiply)
+            ], into: target)
+        }
+        #expect(try serializer.snapshot(texture: target) == before)
+        presenter.debugPreventsCompositeTextureAllocation = false
+        try controller.mergeVisible(layers: [
+            .init(texture: target, opacity: 1),
+            .init(texture: source, opacity: 1, blendMode: .multiply)
+        ], into: target)
+        #expect(try serializer.snapshot(texture: target) != before)
+    }
+
+    @Test
     func mergeVisibleCompositesVisibleLayersInOrder() throws {
         guard let metalContext = MetalDeviceContext() else {
             Issue.record("Metal unavailable")

@@ -3,6 +3,8 @@ import Foundation
 final class TextureFillLibraryPersistenceController: @unchecked Sendable {
     private let fileManager: FileManager
     private let rootDirectoryURL: URL?
+    private let protectedFile = ProtectedLibraryFile()
+    var loadFailureDescription: String? { protectedFile.loadFailureDescription }
 
     init(
         fileManager: FileManager = .default,
@@ -13,11 +15,8 @@ final class TextureFillLibraryPersistenceController: @unchecked Sendable {
     }
 
     func loadLibrary() -> TextureFillLibraryState? {
-        guard let url = persistentLibraryURL(),
-              let data = try? Data(contentsOf: url) else {
-            return nil
-        }
-        return try? JSONDecoder().decode(TextureFillLibraryState.self, from: data)
+        guard let url = persistentLibraryURL() else { return nil }
+        return protectedFile.load(from: url) { try JSONDecoder().decode(TextureFillLibraryState.self, from: $0) }
     }
 
     func saveLibrary(_ library: TextureFillLibraryState) throws {
@@ -29,7 +28,9 @@ final class TextureFillLibraryPersistenceController: @unchecked Sendable {
 
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        try encoder.encode(library).write(to: url, options: .atomic)
+        try protectedFile.save(encoder.encode(library), to: url) {
+            _ = try JSONDecoder().decode(TextureFillLibraryState.self, from: $0)
+        }
     }
 
     private func persistentLibraryURL(createDirectories: Bool = false) -> URL? {

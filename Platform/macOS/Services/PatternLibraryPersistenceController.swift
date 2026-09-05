@@ -87,6 +87,8 @@ final class PatternLibraryPersistenceController: @unchecked Sendable {
     private static let maximumImportDimension = 4096
     private let fileManager: FileManager
     private let rootDirectoryURL: URL?
+    private let protectedFile = ProtectedLibraryFile()
+    var loadFailureDescription: String? { protectedFile.loadFailureDescription }
 
     init(
         fileManager: FileManager = .default,
@@ -98,10 +100,9 @@ final class PatternLibraryPersistenceController: @unchecked Sendable {
 
     func loadLibrary() -> PatternLibraryLoadResult? {
         guard let url = persistentLibraryURL() else { return nil }
-        guard let data = try? Data(contentsOf: url) else { return nil }
-        guard let library = try? JSONDecoder().decode(PatternLibraryState.self, from: data) else {
-            return nil
-        }
+        guard let library = protectedFile.load(from: url, decode: {
+            try JSONDecoder().decode(PatternLibraryState.self, from: $0)
+        }) else { return nil }
 
         let sanitized = sanitizedLibraryRemovingMissingAssets(library)
         return PatternLibraryLoadResult(
@@ -118,7 +119,7 @@ final class PatternLibraryPersistenceController: @unchecked Sendable {
         }
 
         let data = try Self.makeEncoder().encode(library)
-        try data.write(to: url, options: .atomic)
+        try protectedFile.save(data, to: url) { _ = try JSONDecoder().decode(PatternLibraryState.self, from: $0) }
         purgeOrphanedManagedAssets(for: library)
     }
 
@@ -803,7 +804,21 @@ final class PatternLibraryPersistenceController: @unchecked Sendable {
     private func purgeOrphanedManagedAssets(for library: PatternLibraryState) {
         guard let root = patternLibraryRootURL(createDirectories: false) else { return }
 
-        let retainedItems = library.items + library.deletedItems
+        var retainedItems = library.items + library.deletedItems
+        if let libraryURL = persistentLibraryURL() {
+            let previousURL = ProtectedLibraryFile.previousVersionURL(for: libraryURL)
+            do {
+                let data = try Data(contentsOf: previousURL)
+                let previous = try JSONDecoder().decode(PatternLibraryState.self, from: data)
+                retainedItems += previous.items + previous.deletedItems
+            } catch let error as NSError where error.domain == NSCocoaErrorDomain
+                && error.code == NSFileReadNoSuchFileError {
+                // First save has no previous generation.
+            } catch {
+                // If the backup cannot be inspected, deleting assets is unsafe.
+                return
+            }
+        }
         let referencedRelativePaths = Set(
             retainedItems.flatMap { item -> [String] in
                 var paths: [String] = []

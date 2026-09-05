@@ -3,6 +3,8 @@ import Foundation
 final class BlockReferenceModuleLibraryPersistenceController: @unchecked Sendable {
     private let fileManager: FileManager
     private let rootDirectoryURL: URL?
+    private let protectedFile = ProtectedLibraryFile()
+    var loadFailureDescription: String? { protectedFile.loadFailureDescription }
 
     init(
         fileManager: FileManager = .default,
@@ -14,9 +16,9 @@ final class BlockReferenceModuleLibraryPersistenceController: @unchecked Sendabl
 
     func loadLibrary() -> BlockReferenceModuleLibraryState? {
         guard let url = persistentLibraryURL(),
-              let data = try? Data(contentsOf: url),
-              var library = try? JSONDecoder().decode(BlockReferenceModuleLibraryState.self, from: data)
-        else { return nil }
+              var library = protectedFile.load(from: url, decode: {
+                  try JSONDecoder().decode(BlockReferenceModuleLibraryState.self, from: $0)
+              }) else { return nil }
         library.normalize()
         return library
     }
@@ -29,7 +31,9 @@ final class BlockReferenceModuleLibraryPersistenceController: @unchecked Sendabl
         }
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        try encoder.encode(library).write(to: url, options: .atomic)
+        try protectedFile.save(encoder.encode(library), to: url) {
+            _ = try JSONDecoder().decode(BlockReferenceModuleLibraryState.self, from: $0)
+        }
     }
 
     private func persistentLibraryURL(createDirectories: Bool = false) -> URL? {

@@ -242,13 +242,7 @@ extension WorkspaceViewModel {
             ? workspaceSnapshotClearingSelection()
             : nil
 
-        checkpointSingleLayerHistoryIfPossible(
-            layerID: layerID,
-            operationKind: "curveAdjustment.commit",
-            workspaceOverride: historyWorkspaceOverride
-        )
-
-        curveAdjustmentRenderer.encodePreview(
+        guard curveAdjustmentRenderer.encodePreview(
             sourceTexture: sourceTexture,
             previewTexture: targetTexture,
             maskTexture: renderPlan.maskTexture,
@@ -257,7 +251,13 @@ extension WorkspaceViewModel {
             overlayOnly: false,
             effectRegion: renderPlan.effectRegion,
             commandBuffer: commandBuffer
-        )
+        ) else {
+            commandBuffer.commit()
+            if showFeedback {
+                presentWorkspaceStatus(kind: .error, message: "无法准备曲线调整结果，原图层未修改")
+            }
+            return false
+        }
         commandBuffer.commit()
         commandBuffer.waitUntilCompleted()
 
@@ -269,6 +269,11 @@ extension WorkspaceViewModel {
             return false
         }
 
+        guard checkpointSingleLayerHistoryIfPossible(
+            layerID: layerID,
+            operationKind: "curveAdjustment.commit",
+            workspaceOverride: historyWorkspaceOverride
+        ) else { return false }
         layerSurfaceStore.swapTexture(for: surfaceID, with: targetTexture)
         if shouldClearCommittedSelectionAfterApply {
             clearCommittedSelectionAfterCurveAdjustmentApply()

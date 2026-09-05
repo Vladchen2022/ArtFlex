@@ -96,6 +96,9 @@ struct CanvasContainerView: View {
                                 hadLiveBrushWorkThisFrame: hadLiveBrushWorkThisFrame
                             )
                         },
+                        onRenderingFailure: { message in
+                            viewModel.presentWorkspaceStatus(kind: .error, message: message)
+                        },
                         resolveBrushDisplayTexture: { layerID in
                             viewModel.brushDisplayTexture(for: layerID)
                         },

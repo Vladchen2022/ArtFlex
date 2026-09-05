@@ -677,6 +677,7 @@ final class ColorAdjustmentRenderer {
         commandBuffer.commit()
     }
 
+    @discardableResult
     func encodePreview(
         sourceTexture: MTLTexture,
         previewTexture: MTLTexture,
@@ -690,22 +691,21 @@ final class ColorAdjustmentRenderer {
         overlayOnly: Bool,
         effectRegion: MTLRegion?,
         commandBuffer: MTLCommandBuffer
-    ) {
+    ) -> Bool {
         let copyRegion = MTLRegionMake2D(0, 0, sourceTexture.width, sourceTexture.height)
-        if let blitEncoder = commandBuffer.makeBlitCommandEncoder() {
-            blitEncoder.copy(
-                from: sourceTexture,
-                sourceSlice: 0,
-                sourceLevel: 0,
-                sourceOrigin: copyRegion.origin,
-                sourceSize: copyRegion.size,
-                to: previewTexture,
-                destinationSlice: 0,
-                destinationLevel: 0,
-                destinationOrigin: copyRegion.origin
-            )
-            blitEncoder.endEncoding()
-        }
+        guard let blitEncoder = commandBuffer.makeBlitCommandEncoder() else { return false }
+        blitEncoder.copy(
+            from: sourceTexture,
+            sourceSlice: 0,
+            sourceLevel: 0,
+            sourceOrigin: copyRegion.origin,
+            sourceSize: copyRegion.size,
+            to: previewTexture,
+            destinationSlice: 0,
+            destinationLevel: 0,
+            destinationOrigin: copyRegion.origin
+        )
+        blitEncoder.endEncoding()
 
         let descriptor = MTLRenderPassDescriptor()
         descriptor.colorAttachments[0].texture = previewTexture
@@ -713,7 +713,7 @@ final class ColorAdjustmentRenderer {
         descriptor.colorAttachments[0].storeAction = .store
 
         guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: descriptor) else {
-            return
+            return false
         }
 
         let vertices = [
@@ -795,6 +795,7 @@ final class ColorAdjustmentRenderer {
         }
         encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
         encoder.endEncoding()
+        return true
     }
 
     private func makeMaterialTexture(maskData: Data) -> MTLTexture? {

@@ -8,6 +8,8 @@ struct PersistedBrushResources {
 final class BrushLibraryPersistenceController: @unchecked Sendable {
     private let fileManager: FileManager
     private let rootDirectoryURL: URL?
+    private let protectedFile = ProtectedLibraryFile()
+    var loadFailureDescription: String? { protectedFile.loadFailureDescription }
 
     init(
         fileManager: FileManager = .default,
@@ -19,7 +21,10 @@ final class BrushLibraryPersistenceController: @unchecked Sendable {
 
     func loadResources() -> PersistedBrushResources? {
         guard let url = persistentLibraryURL() else { return nil }
-        guard let data = try? Data(contentsOf: url) else { return nil }
+        return protectedFile.load(from: url, decode: Self.decodeResources)
+    }
+
+    private static func decodeResources(_ data: Data) throws -> PersistedBrushResources {
         let decoder = JSONDecoder()
         if let archive = try? decoder.decode(BrushLibraryArchive.self, from: data) {
             return PersistedBrushResources(
@@ -27,13 +32,8 @@ final class BrushLibraryPersistenceController: @unchecked Sendable {
                 tipImageLibrary: archive.resolvedTipImageLibrary
             )
         }
-        if let library = try? decoder.decode(BrushLibraryState.self, from: data) {
-            return PersistedBrushResources(
-                library: library,
-                tipImageLibrary: .empty
-            )
-        }
-        return nil
+        let library = try decoder.decode(BrushLibraryState.self, from: data)
+        return PersistedBrushResources(library: library, tipImageLibrary: .empty)
     }
 
     func saveResources(
@@ -52,7 +52,7 @@ final class BrushLibraryPersistenceController: @unchecked Sendable {
                 tipImageLibrary: tipImageLibrary
             )
         )
-        try data.write(to: url, options: .atomic)
+        try protectedFile.save(data, to: url) { _ = try Self.decodeResources($0) }
     }
 
     func exportLibrary(

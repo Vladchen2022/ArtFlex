@@ -6,13 +6,18 @@ import os
 func resolvedRecoveryAutosaveDeadline(
     now: ContinuousClock.Instant,
     delay: Duration,
-    forcedDeadline: ContinuousClock.Instant?
+    forcedDeadline: ContinuousClock.Instant?,
+    scheduledDeadline: ContinuousClock.Instant? = nil
 ) -> ContinuousClock.Instant {
     let requestedDeadline = now.advanced(by: delay)
     guard let forcedDeadline, forcedDeadline > now else {
         // An expired maximum-deferral deadline is a signal to try autosaving now,
         // not a deadline that should be reused for every retry. Reusing it creates
         // an immediate task loop whenever the document is temporarily unsafe.
+        // Keep an already scheduled retry from being postponed by every new stroke.
+        if let scheduledDeadline, scheduledDeadline > now {
+            return min(requestedDeadline, scheduledDeadline)
+        }
         return requestedDeadline
     }
     return min(requestedDeadline, forcedDeadline)
@@ -197,10 +202,12 @@ final class WorkspaceViewModel: ObservableObject {
                     scheduleRecoveryAutosave()
                 }
             } else {
+                recoveryAutosaveInvalidationGeneration &+= 1
                 recoveryAutosaveGeneration &+= 1
                 recoveryAutosaveTask?.cancel()
                 recoveryAutosaveTask = nil
                 recoveryAutosaveForcedDeadline = nil
+                recoveryAutosaveScheduledDeadline = nil
             }
         }
     }
@@ -391,7 +398,10 @@ final class WorkspaceViewModel: ObservableObject {
     private var pendingManualSaveAfterTimelapse = false
     private var recoveryAutosaveWaitingForTimelapse = false
     private var recoveryAutosaveGeneration: UInt64 = 0
+    /// Changes only when a completed capture must no longer be installed, not for new strokes.
+    private var recoveryAutosaveInvalidationGeneration: UInt64 = 0
     private var recoveryAutosaveForcedDeadline: ContinuousClock.Instant?
+    private var recoveryAutosaveScheduledDeadline: ContinuousClock.Instant?
     private var isSuppressingRecoveryAutosaveScheduling = false
     private static let recoveryAutosaveMaximumDeferral: Duration = .seconds(120)
     private var deferredGradientAction: DeferredGradientAction?
@@ -456,6 +466,10 @@ final class WorkspaceViewModel: ObservableObject {
     func debugExpireRecoveryAutosaveDeadlineForTests() {
         recoveryAutosaveForcedDeadline = ContinuousClock().now.advanced(by: .seconds(-1))
     }
+
+    var debugRecoveryAutosaveBeforeInstall: (() -> Void)?
+
+    var debugRecoveryAutosaveWriteInFlight: Bool { recoveryAutosaveWriteTask != nil }
 #endif
 
     private static let textureFillMinimumSliceDistance: Double = 2.5
@@ -563,6 +577,15 @@ final class WorkspaceViewModel: ObservableObject {
         hasRecoveryProject = bootstrap.persistenceController.hasRecoveryProject
         if hasRecoveryProject {
             status = .init(kind: .info, message: "检测到自动恢复工程，可从顶部工具栏恢复")
+        }
+        let libraryLoadFailures = [
+            bootstrap.brushLibraryPersistenceController.loadFailureDescription,
+            bootstrap.patternLibraryPersistenceController.loadFailureDescription,
+            bootstrap.textureFillLibraryPersistenceController.loadFailureDescription,
+            bootstrap.blockReferenceModuleLibraryPersistenceController.loadFailureDescription
+        ].compactMap { $0 }
+        if !libraryLoadFailures.isEmpty {
+            status = .init(kind: .error, message: libraryLoadFailures.joined(separator: "；"))
         }
     }
 
@@ -13932,9 +13955,11 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func discardAutosavedProject() {
+        recoveryAutosaveInvalidationGeneration &+= 1
         recoveryAutosaveGeneration &+= 1
         recoveryAutosaveTask?.cancel()
         recoveryAutosaveTask = nil
+        recoveryAutosaveScheduledDeadline = nil
         do {
             try bootstrap.persistenceController.discardRecoveryProject()
             hasRecoveryProject = false
@@ -14284,8 +14309,10 @@ final class WorkspaceViewModel: ObservableObject {
         let deadline = resolvedRecoveryAutosaveDeadline(
             now: now,
             delay: delay,
-            forcedDeadline: recoveryAutosaveForcedDeadline
+            forcedDeadline: recoveryAutosaveForcedDeadline,
+            scheduledDeadline: recoveryAutosaveScheduledDeadline
         )
+        recoveryAutosaveScheduledDeadline = deadline
         recoveryAutosaveGeneration &+= 1
         let generation = recoveryAutosaveGeneration
         recoveryAutosaveTask?.cancel()
@@ -14301,6 +14328,7 @@ final class WorkspaceViewModel: ObservableObject {
                 self.recoveryAutosaveGeneration == generation
             else { return }
             self.recoveryAutosaveTask = nil
+            self.recoveryAutosaveScheduledDeadline = nil
             self.performRecoveryAutosave(generation: generation)
         }
     }
@@ -14377,6 +14405,7 @@ final class WorkspaceViewModel: ObservableObject {
             )
             let stagingURL = try bootstrap.persistenceController.makeRecoveryStagingURL()
             let persistenceBox = WorkspaceUncheckedBox(bootstrap.persistenceController)
+            let invalidationGeneration = recoveryAutosaveInvalidationGeneration
 
             recoveryAutosaveWriteTask = Task { [weak self] in
                 let result = await Task.detached(priority: .utility) {
@@ -14397,6 +14426,9 @@ final class WorkspaceViewModel: ObservableObject {
                     return
                 }
                 self.recoveryAutosaveWriteTask = nil
+#if DEBUG
+                self.debugRecoveryAutosaveBeforeInstall?()
+#endif
                 defer {
                     if self.pendingManualSaveAfterRecoveryAutosave {
                         self.pendingManualSaveAfterRecoveryAutosave = false
@@ -14406,7 +14438,7 @@ final class WorkspaceViewModel: ObservableObject {
 
                 guard
                     self.hasUnsavedChanges,
-                    self.recoveryAutosaveGeneration == generation
+                    self.recoveryAutosaveInvalidationGeneration == invalidationGeneration
                 else {
                     persistenceBox.value.discardRecoveryStagingProject(at: stagingURL)
                     return
@@ -14419,12 +14451,18 @@ final class WorkspaceViewModel: ObservableObject {
                     self.recoveryAutosaveForcedDeadline = ContinuousClock().now.advanced(
                         by: Self.recoveryAutosaveMaximumDeferral
                     )
+                    if self.recoveryAutosaveGeneration != generation {
+                        // Preserve this complete recovery point, then catch up to newer edits.
+                        self.scheduleRecoveryAutosave()
+                    }
                 } catch {
                     persistenceBox.value.discardRecoveryStagingProject(at: stagingURL)
+                    self.showStatus(.init(kind: .error, message: "自动恢复保存失败，已有副本保留；请手动保存工程：\(error.localizedDescription)"))
                     self.scheduleRecoveryAutosave(delay: .seconds(30))
                 }
             }
         } catch {
+            showStatus(.init(kind: .error, message: "无法准备自动恢复副本；请手动保存工程：\(error.localizedDescription)"))
             scheduleRecoveryAutosave(delay: .seconds(30))
         }
     }
@@ -14611,6 +14649,12 @@ final class WorkspaceViewModel: ObservableObject {
     /// textures. A normal redraw revision is insufficient because an existing Metal
     /// view can retain surface identifiers from the former document.
     private func publishDocumentReplacementRenderState() {
+        recoveryAutosaveInvalidationGeneration &+= 1
+        recoveryAutosaveGeneration &+= 1
+        recoveryAutosaveTask?.cancel()
+        recoveryAutosaveTask = nil
+        recoveryAutosaveScheduledDeadline = nil
+        recoveryAutosaveForcedDeadline = nil
         bootstrap.strokeEngine.resetBrushPipelineState()
         clearRecentBrushAdjustmentState()
         invalidateWholeLayerInteractionBoundsCache()
@@ -16057,11 +16101,14 @@ final class WorkspaceViewModel: ObservableObject {
         guard let commandBuffer = bootstrap.metalContext.commandQueue.makeCommandBuffer() else {
             throw CocoaError(.fileWriteUnknown)
         }
-        bootstrap.canvasPresenter.encode(
+        guard bootstrap.canvasPresenter.encode(
             layerInputs: textureEntries,
             into: renderPassDescriptor,
             commandBuffer: commandBuffer
-        )
+        ) else {
+            commandBuffer.commit()
+            throw PersistenceError.invalidProject("无法准备完整图层合成，已停止操作，未替换画布内容")
+        }
         commandBuffer.commit()
         if waitUntilCompleted {
             commandBuffer.waitUntilCompleted()

@@ -153,6 +153,7 @@ final class HistoryController {
     private var redoResidentBytes = 0
 #if DEBUG
     private(set) var debugAttemptedFullResetWithDirtyEntry = false
+    var debugPreventsCheckpointCapture = false
 #endif
 
     init(
@@ -226,6 +227,9 @@ final class HistoryController {
         captureMode: HistoryCaptureMode = .full,
         auditContext: HistoryEligibilityAuditContext? = nil
     ) throws {
+#if DEBUG
+        if debugPreventsCheckpointCapture { throw CocoaError(.fileWriteUnknown) }
+#endif
         let entry = try makeEntryWithAudit(
             workspaceOverride: workspaceOverride,
             captureMode: captureMode,
@@ -242,6 +246,9 @@ final class HistoryController {
         providedLayerSnapshots: [LayerHistorySnapshot],
         auditContext: HistoryEligibilityAuditContext? = nil
     ) throws {
+#if DEBUG
+        if debugPreventsCheckpointCapture { throw CocoaError(.fileWriteUnknown) }
+#endif
         let entry = try makeEntryWithAudit(
             workspaceOverride: workspaceOverride,
             captureMode: captureMode,

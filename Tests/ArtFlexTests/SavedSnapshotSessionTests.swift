@@ -5,6 +5,80 @@ import Testing
 
 struct SavedSnapshotSessionTests {
     @Test
+    func continuedEditingCannotPostponeAnExpiredRecoveryRetry() {
+        let now = ContinuousClock().now
+        let retry = now.advanced(by: .seconds(7))
+        let actual = resolvedRecoveryAutosaveDeadline(
+            now: now, delay: .seconds(30),
+            forcedDeadline: now.advanced(by: .seconds(-1)), scheduledDeadline: retry
+        )
+        #expect(actual == retry)
+    }
+
+    @Test
+    @MainActor
+    func editsDuringRecoveryWriteKeepTheCompletedRecoveryPoint() async throws {
+        let harness = try SavedSnapshotHarness(canvasSize: .init(width: 32, height: 32))
+        defer { try? FileManager.default.removeItem(at: harness.recoveryRootURL) }
+        harness.viewModel.fillAtPoint(.init(x: 4, y: 4))
+        let capturedName = harness.viewModel.workspace.document.metadata.name
+        harness.viewModel.debugRecoveryAutosaveBeforeInstall = {
+            // A completed write may be older than the newest edit without being invalid.
+            harness.viewModel.debugRecoveryAutosaveBeforeInstall = nil
+            harness.viewModel.setSelectedColor(RGBAColor(red: 1, green: 0, blue: 0, alpha: 1))
+            harness.viewModel.fillAtPoint(.init(x: 8, y: 8))
+        }
+        harness.viewModel.debugPerformRecoveryAutosaveNowForTests()
+        for _ in 0..<500 where harness.viewModel.debugRecoveryAutosaveWriteInFlight {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(harness.viewModel.hasRecoveryProject)
+        #expect(harness.viewModel.hasUnsavedChanges)
+        let restored = try harness.bootstrap.persistenceController.inspectProject(
+            from: harness.bootstrap.persistenceController.recoveryProjectURL
+        )
+        #expect(restored.workspace.document.metadata.name == capturedName)
+    }
+
+    @Test
+    @MainActor
+    func discardedRecoveryCannotBeReinstalledByAnOlderWrite() async throws {
+        let harness = try SavedSnapshotHarness(canvasSize: .init(width: 32, height: 32))
+        defer { try? FileManager.default.removeItem(at: harness.recoveryRootURL) }
+        harness.viewModel.fillAtPoint(.init(x: 4, y: 4))
+        harness.viewModel.debugRecoveryAutosaveBeforeInstall = {
+            harness.viewModel.debugRecoveryAutosaveBeforeInstall = nil
+            harness.viewModel.discardAutosavedProject()
+        }
+        harness.viewModel.debugPerformRecoveryAutosaveNowForTests()
+        for _ in 0..<500 where harness.viewModel.debugRecoveryAutosaveWriteInFlight {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(!harness.viewModel.hasRecoveryProject)
+        #expect(!harness.bootstrap.persistenceController.hasRecoveryProject)
+    }
+
+    @Test
+    @MainActor
+    func replacingDocumentCannotInstallRecoveryFromThePreviousDocument() async throws {
+        let harness = try SavedSnapshotHarness(canvasSize: .init(width: 32, height: 32))
+        defer { try? FileManager.default.removeItem(at: harness.recoveryRootURL) }
+        harness.viewModel.fillAtPoint(.init(x: 4, y: 4))
+        harness.viewModel.debugRecoveryAutosaveBeforeInstall = {
+            harness.viewModel.debugRecoveryAutosaveBeforeInstall = nil
+            harness.viewModel.createNewCanvasDiscardingUnsavedChanges(
+                name: "另一工程", canvasSize: .init(width: 24, height: 24), resolutionDPI: 72
+            )
+        }
+        harness.viewModel.debugPerformRecoveryAutosaveNowForTests()
+        for _ in 0..<500 where harness.viewModel.debugRecoveryAutosaveWriteInFlight {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(harness.viewModel.workspace.document.metadata.name == "另一工程")
+        #expect(!harness.bootstrap.persistenceController.hasRecoveryProject)
+    }
+
+    @Test
     func nonProductionAppBundlesUseProcessIsolatedPersistenceWhileProductionStaysCompatible() throws {
         let temporaryRoot = URL(fileURLWithPath: "/tmp/ArtFlex-Isolation-Policy", isDirectory: true)
         #expect(AppPersistenceIsolationPolicy.isolatedRootURL(

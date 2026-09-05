@@ -6865,6 +6865,7 @@ private struct NavigatorPreviewPanel: View {
                     onFlushPendingBrushWork: { _ in nil },
                     canDrainPendingBrushCommitsInteractively: { _ in false },
                     onDrainPendingBrushCommitsInteractively: { _ in },
+                    onRenderingFailure: { _ in },
                     resolveBrushDisplayTexture: { layerID in
                         viewModel.brushDisplayTexture(for: layerID)
                     },

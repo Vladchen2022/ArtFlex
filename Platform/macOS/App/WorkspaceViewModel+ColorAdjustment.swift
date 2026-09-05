@@ -214,13 +214,7 @@ extension WorkspaceViewModel {
             ? workspaceSnapshotClearingSelection()
             : nil
 
-        checkpointSingleLayerHistoryIfPossible(
-            layerID: layerID,
-            operationKind: "colorAdjustment.commit",
-            workspaceOverride: historyWorkspaceOverride
-        )
-
-        colorAdjustmentRenderer.encodePreview(
+        guard colorAdjustmentRenderer.encodePreview(
             sourceTexture: sourceTexture,
             previewTexture: targetTexture,
             maskTexture: renderPlan.maskTexture,
@@ -233,7 +227,11 @@ extension WorkspaceViewModel {
             overlayOnly: false,
             effectRegion: renderPlan.effectRegion,
             commandBuffer: commandBuffer
-        )
+        ) else {
+            commandBuffer.commit()
+            presentWorkspaceStatus(kind: .error, message: "无法准备色彩调整结果，原图层未修改")
+            return false
+        }
         commandBuffer.commit()
         commandBuffer.waitUntilCompleted()
 
@@ -243,6 +241,12 @@ extension WorkspaceViewModel {
             return false
         }
 
+        // The GPU result is private until both rendering and undo capture succeed.
+        guard checkpointSingleLayerHistoryIfPossible(
+            layerID: layerID,
+            operationKind: "colorAdjustment.commit",
+            workspaceOverride: historyWorkspaceOverride
+        ) else { return false }
         layerSurfaceStore.swapTexture(for: surfaceID, with: targetTexture)
         if shouldClearCommittedSelectionAfterApply {
             clearCommittedSelectionAfterColorAdjustmentApply()

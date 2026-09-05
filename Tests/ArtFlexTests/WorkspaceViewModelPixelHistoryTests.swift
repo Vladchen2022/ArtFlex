@@ -6,6 +6,41 @@ import Testing
 struct WorkspaceViewModelPixelHistoryTests {
     @Test
     @MainActor
+    func adjustmentCommitPreservesPixelsAndSessionWhenUndoCaptureFails() throws {
+        for usesCurve in [false, true] {
+            let harness = try PixelHistoryHarness(canvasSize: .init(width: 64, height: 64))
+            let layerID = harness.viewModel.workspace.document.activeLayerID
+            try fillOpaqueRect(in: harness, layerID: layerID,
+                originX: 12, originY: 12, width: 28, height: 28,
+                color: .init(red: 0.4, green: 0.4, blue: 0.4, alpha: 1))
+            let before = try harness.snapshot(layerID: layerID)
+            if usesCurve {
+                #expect(harness.viewModel.beginCurveAdjustmentFromWholeLayerIfNeeded(showFeedback: false))
+                harness.viewModel.updateCurveAdjustmentChannelPoints([
+                    .init(x: 0, y: 0), .init(x: 0.5, y: 0.25), .init(x: 1, y: 1)
+                ], channel: .rgb)
+            } else {
+                harness.viewModel.setColorAdjustmentBrightness(0.55)
+            }
+            harness.bootstrap.historyController.debugPreventsCheckpointCapture = true
+            let succeeded = usesCurve
+                ? harness.viewModel.confirmCurveAdjustmentIfNeeded(showFeedback: false)
+                : harness.viewModel.confirmColorAdjustmentSession()
+            #expect(!succeeded)
+            #expect(try harness.snapshot(layerID: layerID) == before)
+            #expect(!harness.bootstrap.historyController.canUndo)
+            #expect(usesCurve ? harness.viewModel.curveAdjustmentSession != nil
+                             : harness.viewModel.colorAdjustmentSession != nil)
+            harness.bootstrap.historyController.debugPreventsCheckpointCapture = false
+            #expect(usesCurve ? harness.viewModel.confirmCurveAdjustmentIfNeeded(showFeedback: false)
+                             : harness.viewModel.confirmColorAdjustmentSession())
+            harness.viewModel.undo()
+            #expect(try harness.snapshot(layerID: layerID) == before)
+        }
+    }
+
+    @Test
+    @MainActor
     func horizontalCanvasFlipChangesOnlyViewportAndLeavesLayerPixelsUntouched() throws {
         let harness = try PixelHistoryHarness(canvasSize: .init(width: 64, height: 64))
         let activeLayerID = harness.viewModel.workspace.document.activeLayerID

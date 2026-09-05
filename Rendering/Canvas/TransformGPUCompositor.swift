@@ -353,11 +353,15 @@ final class TransformGPUCompositor {
         )!
 
         if session.mode == .selection, let baseTexture = session.baseTexture {
-            canvasPresenter.encode(
+            guard canvasPresenter.encode(
                 layerTextures: [(texture: baseTexture, opacity: 1)],
                 into: clearPass,
                 commandBuffer: commandBuffer
-            )
+            ) else {
+                commandBuffer.commit()
+                Task { @MainActor in completion(nil) }
+                return
+            }
         }
 
         let overlayPass = renderPassDescriptor(

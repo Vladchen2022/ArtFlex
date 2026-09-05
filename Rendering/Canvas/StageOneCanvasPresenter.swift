@@ -87,6 +87,9 @@ final class StageOneCanvasPresenter: @unchecked Sendable {
     private let compositePoolLock = NSLock()
     private var compositeTexturePool: [CanvasCompositeTexturePair] = []
     private var compositeTexturePoolKey: CanvasCompositeTexturePoolKey?
+#if DEBUG
+    var debugPreventsCompositeTextureAllocation = false
+#endif
 
     init(device: MTLDevice) throws {
         self.device = device
@@ -307,14 +310,15 @@ final class StageOneCanvasPresenter: @unchecked Sendable {
         encoder.endEncoding()
     }
 
+    @discardableResult
     func encode(
         layerTextures: [(texture: MTLTexture, opacity: Float)],
         samplingMode: CanvasDisplaySamplingMode = .linear,
         into renderPassDescriptor: MTLRenderPassDescriptor,
         commandBuffer: MTLCommandBuffer
-    ) {
+    ) -> Bool {
         guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor) else {
-            return
+            return false
         }
 
         encoder.setRenderPipelineState(pipelineState)
@@ -336,29 +340,30 @@ final class StageOneCanvasPresenter: @unchecked Sendable {
         }
 
         encoder.endEncoding()
+        return true
     }
 
+    @discardableResult
     func encode(
         layerInputs: [CanvasLayerCompositeInput],
         samplingMode: CanvasDisplaySamplingMode = .linear,
         into renderPassDescriptor: MTLRenderPassDescriptor,
         commandBuffer: MTLCommandBuffer
-    ) {
+    ) -> Bool {
         let visibleInputs = layerInputs.filter { $0.opacity > 0 }
-        guard !visibleInputs.isEmpty else { return }
+        guard !visibleInputs.isEmpty else { return true }
 
         if visibleInputs.allSatisfy({
             $0.blendMode == .normal && $0.clipMaskTexture == nil && $0.clipLayerMaskTexture == nil
                 && $0.layerMaskTexture == nil
                 && $0.curveAdjustmentLUTs == nil
         }) {
-            encode(
+            return encode(
                 layerTextures: visibleInputs.map { ($0.texture, $0.opacity) },
                 samplingMode: samplingMode,
                 into: renderPassDescriptor,
                 commandBuffer: commandBuffer
             )
-            return
         }
 
         guard let targetTexture = renderPassDescriptor.colorAttachments[0].texture,
@@ -367,23 +372,24 @@ final class StageOneCanvasPresenter: @unchecked Sendable {
                 height: targetTexture.height,
                 pixelFormat: targetTexture.pixelFormat
               ) else {
-            encode(
-                layerTextures: visibleInputs.map { ($0.texture, $0.opacity) },
-                samplingMode: samplingMode,
-                into: renderPassDescriptor,
-                commandBuffer: commandBuffer
-            )
-            return
+            // Never silently replace masked/blended pixels with normal blending.
+            return false
         }
 
-        clear(texturePair.first, commandBuffer: commandBuffer)
+        // Callers commit failed buffers without presenting/installing their output. This
+        // releases in-flight resources even if a later layer or encoder cannot be prepared.
+        commandBuffer.addCompletedHandler { [weak self, weak texturePair] _ in
+            guard let self, let texturePair else { return }
+            self.releaseCompositeTexturePair(texturePair)
+        }
+        guard clear(texturePair.first, commandBuffer: commandBuffer) else { return false }
         var backdrop = texturePair.first
         var output = texturePair.second
         let sampler = samplingMode == .nearest ? nearestSamplerState : linearSamplerState
 
         for input in visibleInputs {
             if let curveAdjustmentLUTs = input.curveAdjustmentLUTs {
-                curveAdjustmentRenderer.encodePreview(
+                guard curveAdjustmentRenderer.encodePreview(
                     sourceTexture: backdrop,
                     previewTexture: output,
                     maskTexture: input.layerMaskTexture,
@@ -393,7 +399,7 @@ final class StageOneCanvasPresenter: @unchecked Sendable {
                     effectRegion: nil,
                     effectOpacity: input.opacity,
                     commandBuffer: commandBuffer
-                )
+                ) else { return false }
                 swap(&backdrop, &output)
                 continue
             }
@@ -401,7 +407,7 @@ final class StageOneCanvasPresenter: @unchecked Sendable {
             pass.colorAttachments[0].texture = output
             pass.colorAttachments[0].loadAction = .dontCare
             pass.colorAttachments[0].storeAction = .store
-            guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: pass) else { continue }
+            guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: pass) else { return false }
             encoder.setRenderPipelineState(blendPipelineState)
             encoder.setVertexBuffer(canvasVertexBuffer, offset: 0, index: 0)
             encoder.setFragmentSamplerState(sampler, index: 0)
@@ -424,8 +430,7 @@ final class StageOneCanvasPresenter: @unchecked Sendable {
         }
 
         guard let finalEncoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor) else {
-            releaseCompositeTexturePair(texturePair)
-            return
+            return false
         }
         finalEncoder.setRenderPipelineState(pipelineState)
         finalEncoder.setVertexBuffer(canvasVertexBuffer, offset: 0, index: 0)
@@ -440,10 +445,7 @@ final class StageOneCanvasPresenter: @unchecked Sendable {
         finalEncoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
         finalEncoder.endEncoding()
 
-        commandBuffer.addCompletedHandler { [weak self, weak texturePair] _ in
-            guard let self, let texturePair else { return }
-            self.releaseCompositeTexturePair(texturePair)
-        }
+        return true
     }
 
     private func blendModeIndex(_ blendMode: LayerBlendMode) -> UInt32 {
@@ -466,6 +468,9 @@ final class StageOneCanvasPresenter: @unchecked Sendable {
     ) -> CanvasCompositeTexturePair? {
         compositePoolLock.lock()
         defer { compositePoolLock.unlock() }
+#if DEBUG
+        if debugPreventsCompositeTextureAllocation { return nil }
+#endif
         let requestedKey = CanvasCompositeTexturePoolKey(
             width: width,
             height: height,
@@ -520,14 +525,15 @@ final class StageOneCanvasPresenter: @unchecked Sendable {
     }
 #endif
 
-    private func clear(_ texture: MTLTexture, commandBuffer: MTLCommandBuffer) {
+    private func clear(_ texture: MTLTexture, commandBuffer: MTLCommandBuffer) -> Bool {
         let pass = MTLRenderPassDescriptor()
         pass.colorAttachments[0].texture = texture
         pass.colorAttachments[0].loadAction = .clear
         pass.colorAttachments[0].storeAction = .store
         pass.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
-        let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: pass)
-        encoder?.endEncoding()
+        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: pass) else { return false }
+        encoder.endEncoding()
+        return true
     }
 
     func encodePreview(

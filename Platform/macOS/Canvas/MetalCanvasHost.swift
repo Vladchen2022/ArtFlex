@@ -188,6 +188,7 @@ struct MetalCanvasHost: NSViewRepresentable {
     let onFlushPendingBrushWork: (MTLCommandBuffer) -> BrushFlushMetrics?
     let canDrainPendingBrushCommitsInteractively: (Bool) -> Bool
     let onDrainPendingBrushCommitsInteractively: (Bool) -> Void
+    let onRenderingFailure: (String) -> Void
     let resolveBrushDisplayTexture: (LayerID) -> MTLTexture?
     let resolvePatternPlacementTexture: (UUID) -> MTLTexture?
     let onEyedropperSample: (CanvasPoint) -> Void
@@ -265,6 +266,7 @@ struct MetalCanvasHost: NSViewRepresentable {
             onFlushPendingBrushWork: onFlushPendingBrushWork,
             canDrainPendingBrushCommitsInteractively: canDrainPendingBrushCommitsInteractively,
             onDrainPendingBrushCommitsInteractively: onDrainPendingBrushCommitsInteractively,
+            onRenderingFailure: onRenderingFailure,
             resolveBrushDisplayTexture: resolveBrushDisplayTexture,
             resolvePatternPlacementTexture: resolvePatternPlacementTexture,
             onEyedropperSample: onEyedropperSample,
@@ -2636,6 +2638,8 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
     private let onFlushPendingBrushWork: (MTLCommandBuffer) -> BrushFlushMetrics?
     private let canDrainPendingBrushCommitsInteractively: (Bool) -> Bool
     private let onDrainPendingBrushCommitsInteractively: (Bool) -> Void
+    private let onRenderingFailure: (String) -> Void
+    private var hasReportedCompositionFailure = false
     private let resolveBrushDisplayTexture: (LayerID) -> MTLTexture?
     private let resolvePatternPlacementTexture: (UUID) -> MTLTexture?
     private let onEyedropperSample: (CanvasPoint) -> Void
@@ -2759,6 +2763,7 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
         onFlushPendingBrushWork: @escaping (MTLCommandBuffer) -> BrushFlushMetrics?,
         canDrainPendingBrushCommitsInteractively: @escaping (Bool) -> Bool,
         onDrainPendingBrushCommitsInteractively: @escaping (Bool) -> Void,
+        onRenderingFailure: @escaping (String) -> Void,
         resolveBrushDisplayTexture: @escaping (LayerID) -> MTLTexture?,
         resolvePatternPlacementTexture: @escaping (UUID) -> MTLTexture?,
         onEyedropperSample: @escaping (CanvasPoint) -> Void,
@@ -2853,6 +2858,7 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
         self.onFlushPendingBrushWork = onFlushPendingBrushWork
         self.canDrainPendingBrushCommitsInteractively = canDrainPendingBrushCommitsInteractively
         self.onDrainPendingBrushCommitsInteractively = onDrainPendingBrushCommitsInteractively
+        self.onRenderingFailure = onRenderingFailure
         self.resolveBrushDisplayTexture = resolveBrushDisplayTexture
         self.resolvePatternPlacementTexture = resolvePatternPlacementTexture
         self.onEyedropperSample = onEyedropperSample
@@ -3056,6 +3062,22 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
             func compositeInputs(_ entries: [VisibleLayerEntry]) -> [CanvasLayerCompositeInput] {
                 entries.map(\.input)
             }
+            func encodeLayers(_ layers: [VisibleLayerEntry]) -> Bool {
+                guard canvasPresenter.encode(
+                    layerInputs: compositeInputs(layers), samplingMode: displaySamplingMode,
+                    into: descriptor, commandBuffer: commandBuffer
+                ) else {
+                    // Complete offscreen work and release its resources, but keep the last
+                    // successfully presented frame instead of showing incorrect blending.
+                    commandBuffer.commit()
+                    if !hasReportedCompositionFailure {
+                        hasReportedCompositionFailure = true
+                        onRenderingFailure("无法准备完整图层显示，已保留上一帧；请保存工程后释放内存")
+                    }
+                    return false
+                }
+                return true
+            }
 
             if hasPatternPlacementPreview,
                let activeLayerSurfaceID,
@@ -3064,12 +3086,7 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
                 let lowerPrefix = Array(orderedVisibleLayers.prefix { $0.surfaceID != activeLayerSurfaceID })
                 let activeLayerEntries = orderedVisibleLayers.filter { $0.surfaceID == activeLayerSurfaceID }
                 let lowerLayers = lowerPrefix + activeLayerEntries
-                canvasPresenter.encode(
-                    layerInputs: compositeInputs(lowerLayers),
-                    samplingMode: displaySamplingMode,
-                    into: descriptor,
-                    commandBuffer: commandBuffer
-                )
+                guard encodeLayers(lowerLayers) else { return }
 
                 descriptor.colorAttachments[0].loadAction = .load
                 descriptor.colorAttachments[0].storeAction = .store
@@ -3089,23 +3106,13 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
                 if !upperLayers.isEmpty {
                     descriptor.colorAttachments[0].loadAction = .load
                     descriptor.colorAttachments[0].storeAction = .store
-                    canvasPresenter.encode(
-                        layerInputs: compositeInputs(upperLayers),
-                        samplingMode: displaySamplingMode,
-                        into: descriptor,
-                        commandBuffer: commandBuffer
-                    )
+                    guard encodeLayers(upperLayers) else { return }
                 }
             } else if hasGradientPreview, let activeLayerSurfaceID {
                 let lowerPrefix = Array(orderedVisibleLayers.prefix { $0.surfaceID != activeLayerSurfaceID })
                 let activeLayerEntries = orderedVisibleLayers.filter { $0.surfaceID == activeLayerSurfaceID }
                 let lowerLayers = lowerPrefix + activeLayerEntries
-                canvasPresenter.encode(
-                    layerInputs: compositeInputs(lowerLayers),
-                    samplingMode: displaySamplingMode,
-                    into: descriptor,
-                    commandBuffer: commandBuffer
-                )
+                guard encodeLayers(lowerLayers) else { return }
 
                 descriptor.colorAttachments[0].loadAction = .load
                 descriptor.colorAttachments[0].storeAction = .store
@@ -3149,21 +3156,12 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
                 if !upperLayers.isEmpty {
                     descriptor.colorAttachments[0].loadAction = .load
                     descriptor.colorAttachments[0].storeAction = .store
-                    canvasPresenter.encode(
-                        layerInputs: compositeInputs(upperLayers),
-                        samplingMode: displaySamplingMode,
-                        into: descriptor,
-                        commandBuffer: commandBuffer
-                    )
+                    guard encodeLayers(upperLayers) else { return }
                 }
             } else {
-                canvasPresenter.encode(
-                    layerInputs: compositeInputs(orderedVisibleLayers),
-                    samplingMode: displaySamplingMode,
-                    into: descriptor,
-                    commandBuffer: commandBuffer
-                )
+                guard encodeLayers(orderedVisibleLayers) else { return }
             }
+            hasReportedCompositionFailure = false
 
             if hasActivePreview, let surfaceID = activeLayerSurfaceID {
                 descriptor.colorAttachments[0].loadAction = .load

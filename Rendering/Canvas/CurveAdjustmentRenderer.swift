@@ -258,6 +258,7 @@ final class CurveAdjustmentRenderer {
         commandBuffer.commit()
     }
 
+    @discardableResult
     func encodePreview(
         sourceTexture: MTLTexture,
         previewTexture: MTLTexture,
@@ -268,8 +269,8 @@ final class CurveAdjustmentRenderer {
         effectRegion: MTLRegion?,
         effectOpacity: Float = 1,
         commandBuffer: MTLCommandBuffer
-    ) {
-        guard let blitEncoder = commandBuffer.makeBlitCommandEncoder() else { return }
+    ) -> Bool {
+        guard let blitEncoder = commandBuffer.makeBlitCommandEncoder() else { return false }
         blitEncoder.copy(
             from: sourceTexture,
             sourceSlice: 0,
@@ -288,7 +289,7 @@ final class CurveAdjustmentRenderer {
         descriptor.colorAttachments[0].loadAction = .load
         descriptor.colorAttachments[0].storeAction = .store
 
-        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: descriptor) else { return }
+        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: descriptor) else { return false }
         encoder.setRenderPipelineState(pipelineState)
         if let effectRegion {
             encoder.setScissorRect(MTLScissorRect(
@@ -368,6 +369,7 @@ final class CurveAdjustmentRenderer {
 
         encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: vertices.count)
         encoder.endEncoding()
+        return true
     }
 
     private func preparedLUT(_ values: [Float], sampleCount: Int = 256) -> [Float] {
