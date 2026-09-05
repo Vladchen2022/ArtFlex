@@ -12,13 +12,14 @@ final class BrushV2Session {
     var initializedTiles: Set<Int> = []
     var stampCounts = [0, 0, 0]
     var lastVariants = [-1, -1, -1]
+    var averageOpacity: [Float] = [0, 0, 0]
 
     init?(device: MTLDevice, width: Int, height: Int) {
         let descriptor = MTLTextureDescriptor.texture2DDescriptor(
             pixelFormat: .rg16Float, width: width, height: height, mipmapped: false
         )
         descriptor.storageMode = .private
-        descriptor.usage = [.renderTarget, .shaderRead]
+        descriptor.usage = [.renderTarget, .shaderRead, .shaderWrite]
         guard let a = device.makeTexture(descriptor: descriptor),
               let b = device.makeTexture(descriptor: descriptor),
               let range = device.makeTexture(descriptor: descriptor) else { return nil }
@@ -37,6 +38,7 @@ struct BrushV2Stamp {
     var contribution: Float
     var contrast: Float
     var softness: Float
+    var averageOpacity: Float
 }
 
 private struct BrushV2Composite {
@@ -56,6 +58,7 @@ final class BrushV2Renderer {
     private let device: MTLDevice
     private let stampPipeline: MTLRenderPipelineState
     private let compositePipeline: MTLRenderPipelineState
+    private let washPipeline: MTLComputePipelineState
     private let zeroTile: MTLTexture
     private let whiteTip: MTLTexture
     private var tips: [Data: MTLTexture] = [:]
@@ -66,7 +69,7 @@ final class BrushV2Renderer {
         #include <metal_stdlib>
         using namespace metal;
         struct Stamp { float2 center; float radius; float rotation; float2 canvas;
-          uint shape; float roundness; float flow; float contribution; float contrast; float softness; };
+          uint shape; float roundness; float flow; float contribution; float contrast; float softness; float averageOpacity; };
         struct Out { float4 position [[position]]; float2 local; uint index [[flat]]; };
         vertex Out stampVertex(uint id [[vertex_id]], uint instance [[instance_id]],
                                const device Stamp *stamps [[buffer(0)]]) {
@@ -78,13 +81,12 @@ final class BrushV2Renderer {
           Out o; o.position = float4(pixel.x/s.canvas.x*2-1,1-pixel.y/s.canvas.y*2,0,1);
           o.local=q*1.415; o.index=instance; return o;
         }
-        fragment float4 stampFragment(Out in [[stage_in]],
-             const device Stamp *stamps [[buffer(0)]], texture2d<float> tip [[texture(0)]]) {
-          Stamp s=stamps[in.index]; float c=cos(s.rotation), sn=sin(s.rotation);
-          float2 q=float2(c*in.local.x+sn*in.local.y,-sn*in.local.x+c*in.local.y);
+        float sampleMask(Stamp s, float2 local, float aa, texture2d<float> tip) {
+          float c=cos(s.rotation), sn=sin(s.rotation);
+          float2 q=float2(c*local.x+sn*local.y,-sn*local.x+c*local.y);
           q.x/=max(s.roundness,0.05);
-          if(any(abs(q)>1)) discard_fragment();
-          float aa=max(fwidth(length(q)),0.001); float mask;
+          if(any(abs(q)>1)) return 0;
+          float mask;
           if(s.shape==3) {
             constexpr sampler smp(coord::normalized,address::clamp_to_zero,filter::linear);
             mask=tip.sample(smp,q*0.5+0.5).r;
@@ -96,9 +98,43 @@ final class BrushV2Renderer {
           } else if(s.shape==2) { mask=1; }
           else if(s.shape==1) { mask=pow(max(1-length(q),0.0),2.0); }
           else { mask=1-smoothstep(1-aa,1.0,length(q)); }
+          return clamp(mask,0.0,1.0);
+        }
+        fragment float4 stampFragment(Out in [[stage_in]],
+             const device Stamp *stamps [[buffer(0)]], texture2d<float> tip [[texture(0)]]) {
+          Stamp s=stamps[in.index];
+          float mask=sampleMask(s,in.local,max(fwidth(length(in.local)),0.001),tip);
           float deposit=clamp(mask*s.flow,0.0,1.0);
           // R = unweighted paint; G = contribution-limited paint.
           return float4(deposit,deposit*s.contribution,0,deposit);
+        }
+        // Ordered per-pixel wash accumulation. Unlike contribution-weighted
+        // source-over, easing pressure cannot erase paint already laid down.
+        // Flow interpolates toward the pressure-defined ceiling, independently
+        // of the eventual A/B overlay. Each dispatch owns distinct pixels.
+        kernel void washStamps(uint2 gid [[thread_position_in_grid]],
+          constant uint4 &region [[buffer(0)]], constant uint &count [[buffer(1)]],
+          const device Stamp *stamps [[buffer(2)]], texture2d<float> tip [[texture(0)]],
+          texture2d<float,access::read_write> paint [[texture(1)]]) {
+          if(any(gid>=region.zw)) return;
+          uint2 xy=gid+region.xy; float2 value=paint.read(xy).rg;
+          for(uint i=0;i<count;i++) {
+            Stamp s=stamps[i]; float2 q=(float2(xy)+0.5-s.center)/s.radius;
+            if(any(abs(q)>1.415)) continue;
+            float mask=sampleMask(s,q,max(1.0/s.radius,0.001),tip);
+            float target=s.contribution; float full=value.g;
+            if(s.averageOpacity>target) {
+              if(s.averageOpacity>value.g) {
+                full=mix(mask*target,s.averageOpacity,value.g/max(s.averageOpacity,0.00001));
+              }
+            } else if(target>value.g) { full=mix(value.g,target,mask); }
+            value.g=mix(value.g,full,s.flow);
+            value.r+=mask*s.flow*(1-value.r);
+            // Persist at the same precision after every dab, regardless of
+            // whether the OS delivered one event or a coalesced packet.
+            value=float2(half2(value));
+          }
+          paint.write(float4(value,0,0),xy);
         }
         struct Composite { float4 color; float4 selectionBounds; uint mode; uint clipRange; uint selection;
           uint alphaLock; uint eraser; uint compound; uint material; uint preservesAlpha; };
@@ -122,8 +158,10 @@ final class BrushV2Renderer {
           float2 av=a.read(xy).rg, bv=b.read(xy).rg;
           float coverage=av.g;
           if(u.compound!=0) {
-            coverage=u.mode==0 ? min(av.g+bv.g,1.0)
-              : av.g + max(av.r-av.g,0.0)*bv.g;
+            if(u.mode==2) {
+              coverage=av.g<=0.5 ? 2*av.g*bv.g : 1-2*(1-av.g)*(1-bv.g);
+            } else { coverage=u.mode==0 ? min(av.g+bv.g,1.0)
+              : av.g + max(av.r-av.g,0.0)*bv.g; }
           }
           if(u.clipRange!=0) coverage*=range.read(xy).r;
           if(u.selection==1) coverage*=selection.read(xy).r;
@@ -145,6 +183,7 @@ final class BrushV2Renderer {
         }
         """
         let library = try device.makeLibrary(source: source, options: nil)
+        washPipeline = try device.makeComputePipelineState(function: library.makeFunction(name: "washStamps")!)
         let stamp = MTLRenderPipelineDescriptor()
         stamp.vertexFunction = library.makeFunction(name: "stampVertex")
         stamp.fragmentFunction = library.makeFunction(name: "stampFragment")
@@ -181,6 +220,7 @@ final class BrushV2Renderer {
         guard let config = stroke.brush.engineV2 else { return nil }
         if session.v2 == nil { session.v2 = BrushV2Session(device: device, width: target.width, height: target.height) }
         guard let state = session.v2 else { return nil }
+        let isOverlay = config.combination == .overlayMask
         let tips = [stroke.brush.compoundBrush.enabled ? stroke.brush.resolvedCompoundPrimaryTip : stroke.brush.primaryTipAsCompoundSecondary,
                     stroke.brush.compoundBrush.secondary, stroke.brush.primaryTipAsCompoundSecondary]
         var allStamps: [[BrushV2Stamp]] = [[],[],[]]
@@ -193,21 +233,28 @@ final class BrushV2Renderer {
                     ? BrushSettings.resolvedPressureFactor(responseAmount: stroke.brush.compoundBrush.globalPressureSizeAmount,
                         curvedPressure: p) : 1
                 let radius = max(0.5, tip.resolvedBaseSize(for: stroke.brush.size)*tip.resolvedSizeFactor(for:p)*globalSize*sample.sizeMultiplier/2)
-                let opacityFactor = BrushSettings.resolvedPressureFactor(responseAmount: tip.pressureOpacityAmount, curvedPressure: p)
+                let opacityFactor = isOverlay ? tip.resolvedOpacityFactor(for: p)
+                    : BrushSettings.resolvedPressureFactor(responseAmount: tip.pressureOpacityAmount, curvedPressure: p)
                 let overallOpacity = stroke.brush.compoundBrush.enabled
                     ? BrushSettings.resolvedPressureFactor(responseAmount: stroke.brush.compoundBrush.globalPressureOpacityAmount, curvedPressure: p) : 1
-                let weight = stroke.brush.compoundBrush.enabled && role < 2
+                let weight = !isOverlay && stroke.brush.compoundBrush.enabled && role < 2
                     ? config.contribution(primary: role==0, pressure: sample.point.pressure) : 1
-                let flow = role==2 ? 1 : (role==1 && config.combination == .stampMask
+                let flow = role==2 ? 1 : (role==1 && (config.combination == .stampMask || isOverlay)
                     ? config.secondaryFlow : config.resolvedFlow(sample.point.pressure) * (role==0 ? config.primaryFlow : config.secondaryFlow))
+                let targetOpacity = role==2 ? 1 : weight*tip.opacity*opacityFactor*overallOpacity
+                state.averageOpacity[role] = max(targetOpacity, state.averageOpacity[role]*0.9 + targetOpacity*0.1)
+                // The authored rotation may combine fuzzy-dab and pressure.
+                let angle = isOverlay && !tip.followsStrokeDirection
+                    ? tip.angleDegrees + (sample.angleDegrees-tip.angleDegrees)*(1-tip.pressureRotationAmount+tip.pressureRotationAmount*p)
+                    : sample.angleDegrees
                 let s = BrushV2Stamp(center: SIMD2(Float(sample.point.x),Float(sample.point.y)),
-                    radius: radius, rotation: sample.angleDegrees * .pi/180,
+                    radius: radius, rotation: angle * .pi/180,
                     canvas: SIMD2(Float(target.width),Float(target.height)),
                     shape: tip.tipShape == .customRound && tip.customTipMaskData != nil ? 3 : (tip.tipShape == .square ? 2 : (tip.tipShape == .softRound ? 1 : 0)),
                     roundness: tip.roundness, flow: flow,
-                    contribution: role==2 ? 1 : weight*tip.opacity*opacityFactor*overallOpacity,
+                    contribution: targetOpacity,
                     contrast: role==2 ? 1 : (role==0 ? config.primaryContrast : config.secondaryContrast),
-                    softness: tip.softness)
+                    softness: tip.softness, averageOpacity: state.averageOpacity[role])
                 let r = Double(radius*1.415+2)
                 let x=max(0,Int(floor(sample.point.x-r))), y=max(0,Int(floor(sample.point.y-r)))
                 let right=min(target.width,Int(ceil(sample.point.x+r))), bottom=min(target.height,Int(ceil(sample.point.y+r)))
@@ -226,8 +273,6 @@ final class BrushV2Renderer {
             descriptor.colorAttachments[0].texture=textures[role]
             descriptor.colorAttachments[0].loadAction = .load
             descriptor.colorAttachments[0].storeAction = .store
-            guard let encoder=commandBuffer.makeRenderCommandEncoder(descriptor:descriptor) else { continue }
-            encoder.setRenderPipelineState(stampPipeline)
             let variants = role==0 ? config.primaryVariants : (role==1 ? config.secondaryVariants : [])
             let sources = [tips[role].customTipMaskData] + variants.map { Optional($0) }
             // Batch the common single-image case. Multi-image tips choose a new
@@ -248,6 +293,14 @@ final class BrushV2Renderer {
                 if let last=batches.indices.last, batches[last].0 === texture { batches[last].1.append(s) }
                 else { batches.append((texture,[s])) }
             }
+            if isOverlay && role<2 {
+                for (texture, stamps) in batches {
+                    encodeWash(stamps, tip: texture, target: textures[role], commandBuffer: commandBuffer)
+                }
+                continue
+            }
+            guard let encoder=commandBuffer.makeRenderCommandEncoder(descriptor:descriptor) else { continue }
+            encoder.setRenderPipelineState(stampPipeline)
             for (texture, stamps) in batches {
                 guard let buffer=stamps.withUnsafeBytes({ device.makeBuffer(bytes:$0.baseAddress!,length:$0.count,options:.storageModeShared) }) else { continue }
                 encoder.setVertexBuffer(buffer,offset:0,index:0)
@@ -268,7 +321,7 @@ final class BrushV2Renderer {
             let sb=shape?.bounds
             var u=BrushV2Composite(color:SIMD4(stroke.color.red,stroke.color.green,stroke.color.blue,stroke.color.alpha*stroke.brush.opacity),
                 selectionBounds:SIMD4(Float(sb?.minX ?? 0),Float(sb?.minY ?? 0),Float(sb?.size.x ?? 0),Float(sb?.size.y ?? 0)),
-                mode:config.combination == .pressureBlend ? 0:1, clipRange:config.clipsToRange ? 1:0,
+                mode:isOverlay ? 2 : (config.combination == .pressureBlend ? 0:1), clipRange:config.clipsToRange ? 1:0,
                 selection:selectionKind,alphaLock:alphaLock == nil ? 0:1,eraser:stroke.tool == .eraser ? 1:0,
                 compound:stroke.brush.compoundBrush.enabled ? 1:0, material:material == nil ? 0:1,
                 preservesAlpha:preservesAlpha ? 1:0)
@@ -280,6 +333,30 @@ final class BrushV2Renderer {
             encoder.endEncoding()
         }
         return bounds
+    }
+
+    private func encodeWash(_ stamps: [BrushV2Stamp], tip: MTLTexture, target: MTLTexture,
+                            commandBuffer: MTLCommandBuffer) {
+        // Bound each dispatch, so a short dab batch never scans the full canvas.
+        var left=target.width, top=target.height, right=0, bottom=0
+        for s in stamps {
+            let r=s.radius*1.415+2
+            left=min(left,max(0,Int(floor(s.center.x-r)))); top=min(top,max(0,Int(floor(s.center.y-r))))
+            right=max(right,min(target.width,Int(ceil(s.center.x+r)))); bottom=max(bottom,min(target.height,Int(ceil(s.center.y+r))))
+        }
+        guard right>left, bottom>top,
+              let buffer=stamps.withUnsafeBytes({device.makeBuffer(bytes:$0.baseAddress!,length:$0.count,options:.storageModeShared)}),
+              let encoder=commandBuffer.makeComputeCommandEncoder() else { return }
+        var region=SIMD4<UInt32>(UInt32(left),UInt32(top),UInt32(right-left),UInt32(bottom-top))
+        var count=UInt32(stamps.count)
+        encoder.setComputePipelineState(washPipeline)
+        encoder.setBytes(&region,length:MemoryLayout<SIMD4<UInt32>>.stride,index:0)
+        encoder.setBytes(&count,length:4,index:1)
+        encoder.setBuffer(buffer,offset:0,index:2)
+        encoder.setTexture(tip,index:0);encoder.setTexture(target,index:1)
+        encoder.dispatchThreads(MTLSize(width:right-left,height:bottom-top,depth:1),
+                                threadsPerThreadgroup:MTLSize(width:8,height:8,depth:1))
+        encoder.endEncoding()
     }
 
     private func tipTexture(_ data: Data?) -> MTLTexture {

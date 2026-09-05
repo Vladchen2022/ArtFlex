@@ -6,6 +6,7 @@ struct BrushEngineV2: Codable, Equatable, Sendable {
     enum Combination: String, Codable, CaseIterable, Identifiable {
         case pressureBlend = "压力双笔尖"
         case stampMask = "盖印遮罩"
+        case overlayMask = "叠加蒙版"
         var id: String { rawValue }
     }
 
@@ -24,6 +25,8 @@ struct BrushEngineV2: Codable, Equatable, Sendable {
     var secondaryVariants: [Data] = []
     var primaryContrast: Float = 1
     var secondaryContrast: Float = 1
+    /// Present only for imported reference presets; never embeds a local path.
+    var referenceName: String?
 
     static let complementarySecondary = CompoundPressureMixSettings(
         primaryAtLowPressure: 1, primaryAtMidPressure: 0.55, primaryAtHighPressure: 0

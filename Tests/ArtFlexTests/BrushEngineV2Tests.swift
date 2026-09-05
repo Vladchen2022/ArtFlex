@@ -4,6 +4,63 @@ import Testing
 @testable import ArtFlex
 
 struct BrushEngineV2Tests {
+    @Test func metalPipelineCompiles() throws {
+        _ = try BrushV2Renderer(device: #require(MTLCreateSystemDefaultDevice()))
+    }
+    @Test func overlayUsesActualPressureCurvesAndRecoversFullPrimary() throws {
+        var brush=BrushSettings.v2Default
+        brush.size=24;brush.engineV2?.combination = .overlayMask;brush.engineV2?.inputMaximum=1
+        brush.compoundBrush.enabled=true
+        var a=brush.primaryTipAsCompoundSecondary
+        a.pressureOpacityAmount=1;a.opacityPressureCurve = .identity;a.spacingPercent=6
+        var b=a
+        b.tipShape = .customRound;b.customTipMaskData=Data(repeating:64,count:32*32)
+        b.spacingPercent=1000;b.pressureOpacityAmount=0
+        brush.compoundBrush.primary=a;brush.compoundBrush.secondary=b
+        let points=[StrokePoint(x:20,y:64,pressure:0.25),StrokePoint(x:108,y:64,pressure:0.25)]
+        let light=try render(brush,points:points)
+        // At x=20, B is 64/255 and A approaches 25%: overlay ~= 12.5%.
+        #expect(light[(64*128+20)*4+3] < 40)
+        #expect(light[(64*128+20)*4+3] > 15)
+        let heavy=try render(brush,points:points.map{StrokePoint(x:$0.x,y:$0.y,pressure:1)})
+        #expect(heavy[(64*128+64)*4+3]>=254)
+        // No B at this pixel. Overlay still preserves an opaque A, unlike multiply.
+        #expect(light[(64*128+64)*4+3]==0)
+    }
+
+    @Test func overlayWashNeverThinsExistingPaintWhenPressureDrops() throws {
+        var brush=BrushSettings.v2Default;brush.size=24
+        brush.engineV2?.combination = .overlayMask;brush.engineV2?.inputMaximum=1
+        brush.pressureOpacityAmount=1;brush.opacityPressureCurve = .identity
+        let points=[StrokePoint(x:20,y:64,pressure:1),StrokePoint(x:108,y:64,pressure:1),
+                    StrokePoint(x:20,y:64,pressure:0.1)]
+        let bytes=try render(brush,points:points,packets:true)
+        #expect(bytes[(64*128+64)*4+3]>=254)
+        #expect(try render(brush,points:points)==bytes)
+    }
+
+    @Test func importedKritaReferenceProducesPressureGrainInsteadOfUniformFading() throws {
+        guard let path=ProcessInfo.processInfo.environment["ARTFLEX_KRITA_REFERENCE"] else {return}
+        let imported=try KritaMaskedBrushImporter.load(url:URL(fileURLWithPath:path))
+        #expect(imported.name=="06-01-蜡笔")
+        var brush=imported.brush;brush.size=36
+        #expect(brush.resolvedCompoundPrimaryTip.pressureSizeAmount==0)
+        #expect(brush.resolvedCompoundPrimaryTip.followsStrokeDirection==false)
+        #expect(brush.resolvedCompoundPrimaryTip.customTipMaskData?.count==36*36)
+        #expect(brush.compoundBrush.secondary.customTipMaskData?.count==90*90)
+        #expect(abs(brush.compoundBrush.secondary.relativeSizeRatio-1.5454545)<0.00001)
+        #expect(brush.compoundBrush.secondary.spacingPercent==75)
+        #expect(abs(brush.compoundBrush.secondary.resolvedOpacityFactor(for:0.1)-0.6925)<0.001)
+        #expect(brush.compoundBrush.secondary.resolvedOpacityFactor(for:0.3)==1)
+        let points=(0...40).map {i in StrokePoint(x:Double(i)*2.5+14,y:64,pressure:Float(i)/40)}
+        let full=try render(brush,points:points)
+        #expect(full == (try render(brush,points:points,packets:true)))
+        let strip=(20..<109).map { x in Int(full[(64*128+x)*4+3]) }
+        #expect(strip.suffix(20).reduce(0,+)>strip.prefix(20).reduce(0,+)*2)
+        #expect(strip.max()!>240)
+        #expect(try JSONDecoder().decode(BrushSettings.self,from:JSONEncoder().encode(brush))==brush)
+    }
+
     private func render(_ brush: BrushSettings, points: [StrokePoint], packets: Bool = false,
                         repetitions: Int = 1, selection: SelectionShape? = nil, locksHalfTransparentWhite: Bool = false) throws -> [UInt8] {
         let device=try #require(MTLCreateSystemDefaultDevice())

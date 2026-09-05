@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 enum CompoundBrushTipLibraryLayout {
     static let idealSize = CGSize(width: 820, height: 600)
@@ -98,6 +99,7 @@ struct CompoundBrushBuilderSheet: View {
     @State private var primaryPendingSelection: BrushTipImageAssetID?
     @State private var secondaryPendingSelection: BrushTipImageAssetID?
     @State private var isSaveSheetPresented = false
+    @State private var importMessage: String?
     @State private var editorViewportSize = CompoundBrushEditorSizePreferenceKey.defaultValue
 
     init(viewModel: WorkspaceViewModel, onClose: @escaping () -> Void) {
@@ -180,14 +182,18 @@ struct CompoundBrushBuilderSheet: View {
                 onCancel: { isSaveSheetPresented = false }
             )
         }
+        .alert("Krita 预设导入", isPresented: Binding(get:{importMessage != nil},set:{if !$0 {importMessage=nil}})) {
+            Button("确定") { importMessage=nil }
+        } message: { Text(importMessage ?? "") }
     }
 
     private var header: some View {
         HStack(spacing: 12) {
             VStack(alignment: .leading, spacing: 3) {
-                Text("笔刷工作室 · V2")
+                Text("笔刷工作室 · 0905.2")
                     .font(.system(size: 17, weight: .bold))
-                Text("独立盖印 · 流量累积 · 压力混合")
+                Text(draftBrush.engineV2?.combination == .overlayMask
+                     ? "主笔尖颜料 · 蒙版盖印 · 浓度压感" : "独立盖印 · 流量累积 · 压力混合")
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(Color.white.opacity(0.52))
             }
@@ -222,8 +228,8 @@ struct CompoundBrushBuilderSheet: View {
                 if draftBrush.compoundBrush.enabled {
                     Picker("预览", selection: $previewChannel) {
                         Text("结果").tag(CompoundBrushPreviewChannel.result)
-                        Text("笔尖 A").tag(CompoundBrushPreviewChannel.primary)
-                        Text("笔尖 B").tag(CompoundBrushPreviewChannel.secondary)
+                        Text(draftBrush.engineV2?.combination == .overlayMask ? "主笔尖" : "笔尖 A").tag(CompoundBrushPreviewChannel.primary)
+                        Text(draftBrush.engineV2?.combination == .overlayMask ? "蒙版" : "笔尖 B").tag(CompoundBrushPreviewChannel.secondary)
                     }
                     .labelsHidden()
                     .pickerStyle(.segmented)
@@ -378,7 +384,8 @@ struct CompoundBrushBuilderSheet: View {
             } else {
                 HStack(spacing: 5) {
                     ForEach(["整体", "笔尖 A", "笔尖 B", "压力", "范围"], id: \.self) { page in
-                        Button(page) { editorPage = page }
+                        Button(draftBrush.engineV2?.combination == .overlayMask
+                               ? (["笔尖 A":"主笔尖", "笔尖 B":"蒙版笔尖", "压力":"浓度压感"][page] ?? page) : page) { editorPage = page }
                             .buttonStyle(CompoundEditorButtonStyle(isProminent: editorPage == page))
                     }
                 }
@@ -395,11 +402,27 @@ struct CompoundBrushBuilderSheet: View {
     }
 
     private var v2StartingPoints: some View {
-        HStack {
-            Button("新建实色笔") { replaceDraft(.v2Default); editorPage = "整体" }
-            Button("新建压感蜡笔") { replaceDraft(.v2Crayon); editorPage = "整体" }
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Button("新建实色笔") { replaceDraft(.v2Default); editorPage = "整体" }
+                Button("旧版随机颗粒") { replaceDraft(.v2Crayon); editorPage = "整体" }
+            }
+            Button("导入 Krita 叠加蒙版笔刷…", action: importKritaBrush)
         }
         .buttonStyle(CompoundEditorButtonStyle(isProminent: false))
+    }
+
+    private func importKritaBrush() {
+        let panel=NSOpenPanel()
+        panel.title="导入 Krita 像素笔刷 · PNG 双笔尖 / Overlay"
+        panel.allowedContentTypes=[UTType(filenameExtension:"kpp") ?? .data]
+        panel.allowsMultipleSelection=false;panel.canChooseDirectories=false
+        guard panel.runModal() == .OK,let url=panel.url else {return}
+        do {
+            let imported=try KritaMaskedBrushImporter.load(url:url)
+            replaceDraft(imported.brush);editorPage="压力"
+            importMessage="\(imported.name)\n\n"+imported.notes.joined(separator:"\n")+"\n\n只修改了编辑草稿。请调整试笔大小，满意后另存为新笔刷。"
+        } catch { importMessage=error.localizedDescription }
     }
 
     private var v2OverallPage: some View {
@@ -411,20 +434,30 @@ struct CompoundBrushBuilderSheet: View {
                 v2Slider("流量", key: \.flow, range: 0.01...1)
                 v2Slider("流量压感", key: \.pressureFlow)
                 v2Slider("轻压最低流量", key: \.minimumFlow)
-                Text("100% 不透明度 + 100% 流量可直接画实。无需寻找或切换‘不透明度封顶’。")
+                Text(draftBrush.engineV2?.combination == .overlayMask
+                     ? "浓度还受主笔尖压感曲线控制。叠加蒙版会随主笔尖浓度提高，从颗粒逐渐填实。"
+                     : "100% 不透明度 + 100% 流量可直接画实。无需寻找或切换‘不透明度封顶’。")
                     .font(.system(size: 11)).foregroundStyle(.secondary)
             }
             if draftBrush.compoundBrush.enabled {
-                editorPanel(title: "组合方法", detail: "双笔尖：A/B 都落色。遮罩：A 落色，B 的盖印决定 A 的局部颗粒；重压可恢复 A。") {
+                editorPanel(title: "组合方法", detail: "叠加蒙版：主笔尖形成颜料浓度，蒙版的盖印改变局部覆盖。浓度越高，肌理空隙越容易填实。") {
                     Picker("组合方法", selection: Binding(get: { draftBrush.engineV2!.combination }, set: { value in performEdit {
                         $0.engineV2?.combination = value
                         $0.engineV2?.secondaryContribution = value == .stampMask ? .primaryOnly : BrushEngineV2.complementarySecondary
+                        if value == .overlayMask {
+                            if $0.compoundBrush.primary == nil { $0.compoundBrush.primary = $0.primaryTipAsCompoundSecondary }
+                            $0.compoundBrush.primary?.pressureOpacityAmount = 1
+                            $0.compoundBrush.primary?.opacityPressureCurve = .identity
+                            $0.compoundBrush.globalPressureOpacityAmount = 0
+                        }
                     } })) {
                         ForEach(BrushEngineV2.Combination.allCases) { Text($0.rawValue).tag($0) }
                     }.pickerStyle(.segmented)
                 }
             }
-            editorPanel(title: "整体尺寸与透明压感", detail: "默认透明压感关闭，轻压保留颜料颜色。压力也可以只改变 A/B 肌理。") {
+            editorPanel(title: "整体尺寸与透明压感", detail: draftBrush.engineV2?.combination == .overlayMask
+                        ? "主笔尖与蒙版的浓度曲线在‘浓度压感’页。整体透明压感会再乘一次，建议保持关闭。"
+                        : "默认透明压感关闭，轻压保留颜料颜色。压力也可以只改变 A/B 肌理。") {
                 editorSlider(title: draftBrush.compoundBrush.enabled ? "A 间距" : "间距",value:Double(draftBrush.quickSpacingPercent),range:1...1000,scale:.logarithmic,
                     valueText:{"\(Int($0.rounded()))%"}) { $0.quickSpacingPercent=Float($1) }
                 editorSlider(title: draftBrush.compoundBrush.enabled ? "A 尺寸随机" : "尺寸随机",value:Double(draftBrush.quickSizeJitterAmount),range:0...1,valueText:percentText) { $0.quickSizeJitterAmount=Float($1) }
@@ -468,7 +501,7 @@ struct CompoundBrushBuilderSheet: View {
         let tip = actualTarget == .range ? draftBrush.primaryTipAsCompoundSecondary : (primary ? draftBrush.resolvedCompoundPrimaryTip : draftBrush.compoundBrush.secondary)
         let variants = primary ? draftBrush.engineV2?.primaryVariants.count ?? 0 : draftBrush.engineV2?.secondaryVariants.count ?? 0
         return VStack(spacing: 16) {
-            editorPanel(title: primary ? "笔尖 A" : "笔尖 B", detail: "保持素材原始灰度。间距沿笔迹计算，每个笔尖独立盖印。") {
+            editorPanel(title: draftBrush.engineV2?.combination == .overlayMask ? (primary ? "主笔尖 · 颜料" : "蒙版笔尖 · 肌理") : (primary ? "笔尖 A" : "笔尖 B"), detail: "保持素材原始灰度。间距沿笔迹计算，每个笔尖独立盖印。") {
                 tipCard(title: "笔尖素材", summary: compoundTipSummary(tip,customLabel: "自定义素材"), image: actualTarget == .range ? rangePreviewImage : (primary ? primaryPreviewImage : secondaryPreviewImage),
                     target: actualTarget, selectedShape: tip.tipShape) { shape in
                         performEdit { brush in
@@ -501,7 +534,14 @@ struct CompoundBrushBuilderSheet: View {
             editorPanel(title:"手感校准", detail:"正常重压只需达到这个输入值，就映射为 100%。降低数值适合轻手；不会改变源图案。") {
                 v2Slider("正常重压输入",key:\.inputMaximum,range:0.2...1)
             }
-            editorPanel(title:"压力如何分配 A / B",detail:"横向是轻、中、重压力。两支笔各自控制，不强制互相扣除；同时 100% 可以同时落色。") {
+            if draftBrush.engineV2?.combination == .overlayMask {
+                if let name=draftBrush.engineV2?.referenceName {
+                    Text("参考预设 · \(name)").font(.system(size:12,weight:.semibold))
+                }
+                overlayOpacityPanel(primary:true)
+                overlayOpacityPanel(primary:false)
+            } else {
+              editorPanel(title:"压力如何分配 A / B",detail:"横向是轻、中、重压力。两支笔各自控制，不强制互相扣除；同时 100% 可以同时落色。") {
                 Button("恢复轻 B / 重 A") { performEdit { brush in
                     let isMask = brush.engineV2?.combination == .stampMask
                     brush.engineV2?.primaryContribution = .default
@@ -521,6 +561,40 @@ struct CompoundBrushBuilderSheet: View {
                             if primary { brush.engineV2?.primaryContribution=c } else { brush.engineV2?.secondaryContribution=c }
                         }
                     }
+                }
+            }
+            }
+        }
+    }
+
+    private func overlayOpacityPanel(primary: Bool) -> some View {
+        let tip=primary ? draftBrush.resolvedCompoundPrimaryTip : draftBrush.compoundBrush.secondary
+        let state=tip.opacityPressureCurve ?? .identity
+        return editorPanel(title:primary ? "主笔尖浓度" : "蒙版笔尖浓度",
+            detail:primary ? "主笔尖越浓，叠加后越实；低浓度时保留更多肌理。" : "控制蒙版盖印的浓度，不是 B 在颜色中的占比。") {
+            editorSlider(title:"不透明度压感",value:Double(tip.pressureOpacityAmount),range:0...1,valueText:percentText) { brush,value in
+                if primary {brush.compoundBrush.primary?.pressureOpacityAmount=Float(value)}
+                else {brush.compoundBrush.secondary.pressureOpacityAmount=Float(value)}
+            }
+            CurveEditorView(state:state,isEnabled:true,appearance:.dark,onEditingChanged:handleInteractiveEditing) { next in
+                previewEdit { brush in
+                    if primary {brush.compoundBrush.primary?.opacityPressureCurve=next}
+                    else {brush.compoundBrush.secondary.opacityPressureCurve=next}
+                }
+            }.frame(height:170)
+            Text("横轴：输入压力　纵轴：笔尖浓度 · 拖动节点；双击中间节点删除")
+                .font(.system(size:10)).foregroundStyle(.secondary)
+            ForEach(state.points.indices,id:\.self) { index in
+                let point=state.points[index]
+                editorSlider(title:"点 \(index+1) 压力",value:Double(point.x),range:0...1,valueText:percentText) { brush,value in
+                    var curve=primary ? brush.resolvedCompoundPrimaryTip.opacityPressureCurve ?? .identity : brush.compoundBrush.secondary.opacityPressureCurve ?? .identity
+                    curve=curve.movingPoint(at:index,to:.init(x:Float(value),y:point.y))
+                    if primary {brush.compoundBrush.primary?.opacityPressureCurve=curve} else {brush.compoundBrush.secondary.opacityPressureCurve=curve}
+                }
+                editorSlider(title:"点 \(index+1) 浓度",value:Double(point.y),range:0...1,valueText:percentText) { brush,value in
+                    var curve=primary ? brush.resolvedCompoundPrimaryTip.opacityPressureCurve ?? .identity : brush.compoundBrush.secondary.opacityPressureCurve ?? .identity
+                    curve=curve.movingPoint(at:index,to:.init(x:point.x,y:Float(value)))
+                    if primary {brush.compoundBrush.primary?.opacityPressureCurve=curve} else {brush.compoundBrush.secondary.opacityPressureCurve=curve}
                 }
             }
         }
@@ -543,7 +617,8 @@ struct CompoundBrushBuilderSheet: View {
                     Text("组合笔刷")
                         .font(.system(size: 11, weight: .bold))
                         .foregroundStyle(Color.white.opacity(0.9))
-                    Text(draftBrush.compoundBrush.enabled ? "A 与 B 都实际绘制，压力决定两者贡献" : "当前只使用主笔尖 A")
+                    Text(draftBrush.compoundBrush.enabled
+                         ? (draftBrush.engineV2?.combination == .overlayMask ? "主笔尖绘制颜料，蒙版笔尖调制覆盖" : "A 与 B 都实际绘制，压力决定两者贡献") : "当前只使用主笔尖 A")
                         .font(.system(size: 9, weight: .medium))
                         .foregroundStyle(Color.white.opacity(0.5))
                 }

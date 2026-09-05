@@ -101,19 +101,33 @@ final class BrushEditorMetalView: MTKView, MTKViewDelegate {
         self.onPressure=onPressure
         if self.brush != brush || self.color != color || self.pigmentPalette != pigmentPalette || self.seed != seed {
             self.brush=brush;self.color=color;self.pigmentPalette=pigmentPalette;self.seed=seed;needsReplay=true
+            if let pattern=generatedPattern { strokes=[generatedPoints(pattern,pressure:pressure)] }
         }
         if self.clearToken != clearToken {
             self.clearToken=clearToken;strokes=[];active=[];generatedPattern=nil;needsReplay=true
         }
         if self.patternToken != patternToken {
             self.patternToken=patternToken;generatedPattern=pattern
-            strokes=pattern.map{[$0.points(resolution:extent,pressure:pressure)]} ?? []
+            strokes=pattern.map{[generatedPoints($0,pressure:pressure)]} ?? []
             needsReplay=true
         } else if self.pressure != pressure,let pattern=generatedPattern {
-            strokes=[pattern.points(resolution:extent,pressure:pressure)];needsReplay=true
+            strokes=[generatedPoints(pattern,pressure:pressure)];needsReplay=true
         }
         self.pressure=pressure;self.previewBackground=background
         needsDisplay=true
+    }
+
+    private func generatedPoints(_ pattern: CompoundBrushPreviewPath, pressure: Float) -> [StrokePoint] {
+        let primary=brush.compoundBrush.enabled ? brush.resolvedCompoundPrimaryTip.resolvedBaseSize(for:brush.size) : brush.size
+        let secondary=brush.compoundBrush.enabled && brush.engineV2?.combination == .pressureBlend
+            ? brush.compoundBrush.secondary.resolvedBaseSize(for:brush.size) : 0
+        let inset=min(Double(max(primary,secondary))*0.707,Double(extent)*0.35)
+        let scale=(Double(extent)-2*inset)/Double(extent)
+        // Automatic examples fit their endpoint dabs. Freehand input retains
+        // exact pointer coordinates and may intentionally cross the boundary.
+        return pattern.points(resolution:extent,pressure:pressure).map {
+            StrokePoint(x:inset+$0.x*scale,y:inset+$0.y*scale,pressure:$0.pressure)
+        }
     }
 
     func mtkView(_ view:MTKView,drawableSizeWillChange size:CGSize) { needsDisplay=true }

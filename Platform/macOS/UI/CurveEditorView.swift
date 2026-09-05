@@ -13,6 +13,7 @@ struct CurveEditorView: NSViewRepresentable {
     var allowsEndpointMovement: Bool = true
     var allowsPointInsertion: Bool = true
     var allowsPointRemoval: Bool = true
+    var onEditingChanged: (Bool) -> Void = { _ in }
     var onChange: (CurveChannelState) -> Void
 
     func makeNSView(context: Context) -> CurveEditorNSView {
@@ -24,6 +25,7 @@ struct CurveEditorView: NSViewRepresentable {
             allowsEndpointMovement: allowsEndpointMovement,
             allowsPointInsertion: allowsPointInsertion,
             allowsPointRemoval: allowsPointRemoval,
+            onEditingChanged: onEditingChanged,
             onChange: onChange
         )
         return view
@@ -37,12 +39,25 @@ struct CurveEditorView: NSViewRepresentable {
             allowsEndpointMovement: allowsEndpointMovement,
             allowsPointInsertion: allowsPointInsertion,
             allowsPointRemoval: allowsPointRemoval,
+            onEditingChanged: onEditingChanged,
             onChange: onChange
         )
     }
 }
 
 final class CurveEditorNSView: NSView {
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        // macOS 14+ defaults to false; a scrolled-off curve must not paint
+        // its dirty rectangle over sibling controls in the hosting view.
+        clipsToBounds = true
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        clipsToBounds = true
+    }
+
     private let graphInset: CGFloat = 12
     private let gridDivisions = 4
     private let pointHitRadius: CGFloat = 8
@@ -55,6 +70,7 @@ final class CurveEditorNSView: NSView {
     private var allowsPointInsertion = true
     private var allowsPointRemoval = true
     private var onChange: ((CurveChannelState) -> Void)?
+    private var onEditingChanged: ((Bool) -> Void)?
     private var selectedPointIndex: Int?
     private var draggingPointIndex: Int?
     private var contextualMenuPointIndex: Int?
@@ -68,6 +84,7 @@ final class CurveEditorNSView: NSView {
         allowsEndpointMovement: Bool,
         allowsPointInsertion: Bool,
         allowsPointRemoval: Bool,
+        onEditingChanged: @escaping (Bool) -> Void = { _ in },
         onChange: @escaping (CurveChannelState) -> Void
     ) {
         channelState = state
@@ -77,6 +94,7 @@ final class CurveEditorNSView: NSView {
         self.allowsPointInsertion = allowsPointInsertion
         self.allowsPointRemoval = allowsPointRemoval
         self.onChange = onChange
+        self.onEditingChanged = onEditingChanged
         if let selectedPointIndex, !state.points.indices.contains(selectedPointIndex) {
             self.selectedPointIndex = nil
             draggingPointIndex = nil
@@ -90,7 +108,7 @@ final class CurveEditorNSView: NSView {
         let graphRect = graphBounds
 
         colors.background.setFill()
-        dirtyRect.fill()
+        bounds.fill()
 
         let panelPath = NSBezierPath(roundedRect: drawBounds, xRadius: 10, yRadius: 10)
         colors.panelFill.setFill()
@@ -157,14 +175,8 @@ final class CurveEditorNSView: NSView {
 
         let clickPoint = convert(event.locationInWindow, from: nil)
         let graphRect = graphBounds
-        guard graphRect.contains(clickPoint) else {
-            selectedPointIndex = nil
-            draggingPointIndex = nil
-            needsDisplay = true
-            return
-        }
-
         if let hitIndex = hitPointIndex(at: clickPoint, in: graphRect) {
+            onEditingChanged?(true)
             selectedPointIndex = hitIndex
             if allowsPointRemoval,
                event.clickCount >= 2,
@@ -174,9 +186,19 @@ final class CurveEditorNSView: NSView {
                 selectedPointIndex = nil
                 draggingPointIndex = nil
                 onChange?(channelState)
+                onEditingChanged?(false)
             } else {
                 draggingPointIndex = hitIndex
             }
+            needsDisplay = true
+            return
+        }
+
+        // Endpoint handles straddle the graph border. Hit-test the whole
+        // handle before rejecting empty space outside the plotting area.
+        guard graphRect.contains(clickPoint) else {
+            selectedPointIndex = nil
+            draggingPointIndex = nil
             needsDisplay = true
             return
         }
@@ -185,6 +207,7 @@ final class CurveEditorNSView: NSView {
         if allowsPointInsertion,
            distanceToCurve(from: clickPoint, in: graphRect) <= curveHitDistance,
            let insertion = channelState.insertingPoint(normalizedPoint) {
+            onEditingChanged?(true)
             channelState = insertion.state
             selectedPointIndex = insertion.insertedIndex
             draggingPointIndex = insertion.insertedIndex
@@ -219,6 +242,7 @@ final class CurveEditorNSView: NSView {
     }
 
     override func mouseUp(with event: NSEvent) {
+        if draggingPointIndex != nil { onEditingChanged?(false) }
         draggingPointIndex = nil
     }
 
@@ -359,11 +383,13 @@ final class CurveEditorNSView: NSView {
     private func deletePoint(at index: Int) -> Bool {
         guard index != 0, index != channelState.points.count - 1 else { return false }
         guard channelState.points.indices.contains(index) else { return false }
+        onEditingChanged?(true)
         channelState = channelState.removingPoint(at: index)
         selectedPointIndex = nil
         draggingPointIndex = nil
         contextualMenuPointIndex = nil
         onChange?(channelState)
+        onEditingChanged?(false)
         needsDisplay = true
         return true
     }
