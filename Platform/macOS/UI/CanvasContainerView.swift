@@ -16,6 +16,7 @@ struct CanvasContainerView: View {
     @State private var selectionRefinementDialogKind: SelectionRefinementKind?
     @State private var selectionRefinementRadiusPixels = 16
     @State private var isCanvasImageDropTarget = false
+    @StateObject private var outsideCanvasBrushInputRelay = OutsideCanvasBrushInputRelay()
     private static let showsSelectionDebugOverlay = false
 
     var body: some View {
@@ -288,7 +289,8 @@ struct CanvasContainerView: View {
                         isLuminosityPreviewEnabled: viewModel.isLuminosityPreviewEnabled,
                         onAdjustBrushSize: { delta in
                             viewModel.adjustBrushSize(by: delta)
-                        }
+                        },
+                        outsideCanvasBrushInputRelay: outsideCanvasBrushInputRelay
                     )
                     .id(viewModel.documentRenderGeneration)
                     .frame(
@@ -769,6 +771,17 @@ struct CanvasContainerView: View {
                             )
                         },
                         onPolygonHover: viewModel.updateCanvasToolHover
+                    )
+                    .frame(width: geometry.size.width, height: geometry.size.height)
+                }
+
+                if viewModel.workspace.toolSession.activeTool == .brush,
+                   !viewModel.isPanModeActive {
+                    OutsideCanvasBrushEventBridge(
+                        transform: viewportTransform,
+                        activeTool: viewModel.workspace.toolSession.activeTool,
+                        isPanModeActive: viewModel.isPanModeActive,
+                        inputRelay: outsideCanvasBrushInputRelay
                     )
                     .frame(width: geometry.size.width, height: geometry.size.height)
                 }
@@ -1539,6 +1552,156 @@ private struct OutsideCanvasSelectionEventBridge: NSViewRepresentable {
         view.onCommitSelectionMove = onCommitSelectionMove
         view.onPolygonClick = onPolygonClick
         view.onPolygonHover = onPolygonHover
+    }
+}
+
+private struct OutsideCanvasBrushEventBridge: NSViewRepresentable {
+    let transform: CanvasViewportTransform
+    let activeTool: ToolKind
+    let isPanModeActive: Bool
+    let inputRelay: OutsideCanvasBrushInputRelay
+
+    func makeNSView(context: Context) -> OutsideCanvasBrushEventView {
+        let view = OutsideCanvasBrushEventView()
+        update(view)
+        return view
+    }
+
+    func updateNSView(_ nsView: OutsideCanvasBrushEventView, context: Context) {
+        update(nsView)
+    }
+
+    private func update(_ view: OutsideCanvasBrushEventView) {
+        view.transform = transform
+        view.activeTool = activeTool
+        view.isPanModeActive = isPanModeActive
+        view.inputRelay = inputRelay
+    }
+}
+
+private final class OutsideCanvasBrushEventView: NSView {
+    var transform = CanvasViewportTransform(
+        canvasSize: .init(width: 1, height: 1),
+        viewport: .stageOneDefault,
+        availableWidth: 1,
+        availableHeight: 1
+    )
+    var activeTool: ToolKind = .brush
+    var isPanModeActive = false
+    var inputRelay: OutsideCanvasBrushInputRelay?
+
+    private var localEventMonitor: Any?
+    private var isCapturingOutsideStart = false
+
+    override var isFlipped: Bool { true }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        nil
+    }
+
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        if newWindow == nil {
+            removeLocalEventMonitor()
+            cancelCaptureIfNeeded()
+        }
+        super.viewWillMove(toWindow: newWindow)
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window != nil {
+            installLocalEventMonitorIfNeeded()
+        }
+    }
+
+    private func installLocalEventMonitorIfNeeded() {
+        guard localEventMonitor == nil else { return }
+        localEventMonitor = NSEvent.addLocalMonitorForEvents(
+            matching: [.leftMouseDown, .leftMouseDragged, .leftMouseUp]
+        ) { [weak self] event in
+            self?.handleLocalEvent(event) ?? event
+        }
+    }
+
+    private func removeLocalEventMonitor() {
+        guard let localEventMonitor else { return }
+        NSEvent.removeMonitor(localEventMonitor)
+        self.localEventMonitor = nil
+    }
+
+    private func handleLocalEvent(_ event: NSEvent) -> NSEvent? {
+        guard event.window === window || isCapturingOutsideStart else { return event }
+
+        switch event.type {
+        case .leftMouseDown:
+            guard !isCapturingOutsideStart else { return nil }
+            let startsOutsideCanvas = outsideCanvasPoint(for: event) != nil
+            let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            guard shouldBeginOutsideCanvasBrushStroke(
+                activeTool: activeTool,
+                isPanModeActive: isPanModeActive,
+                modifiers: modifiers,
+                startsOutsideCanvas: startsOutsideCanvas
+            ) else {
+                return event
+            }
+            isCapturingOutsideStart = true
+            inputRelay?.begin(with: event)
+            return nil
+
+        case .leftMouseDragged:
+            guard isCapturingOutsideStart else { return event }
+            inputRelay?.append(events: brushEvents(from: event))
+            return nil
+
+        case .leftMouseUp:
+            guard isCapturingOutsideStart else { return event }
+            isCapturingOutsideStart = false
+            inputRelay?.end(with: event)
+            return nil
+
+        default:
+            return event
+        }
+    }
+
+    private func outsideCanvasPoint(for event: NSEvent) -> CanvasPoint? {
+        let localPoint = convert(event.locationInWindow, from: nil)
+        guard bounds.contains(localPoint) else { return nil }
+        let point = transform.viewportToCanvas(
+            .init(x: localPoint.x, y: localPoint.y),
+            clamped: false
+        )
+        return transform.containsCanvasPoint(point) ? nil : point
+    }
+
+    private func brushEvents(from event: NSEvent) -> [NSEvent] {
+        var events = [event]
+        while let queuedEvent = window?.nextEvent(
+            matching: .leftMouseDragged,
+            until: .distantPast,
+            inMode: .eventTracking,
+            dequeue: true
+        ) {
+            events.append(queuedEvent)
+        }
+        if events.count == 1 {
+            while let queuedEvent = window?.nextEvent(
+                matching: .leftMouseDragged,
+                until: .distantPast,
+                inMode: .default,
+                dequeue: true
+            ) {
+                events.append(queuedEvent)
+            }
+        }
+        return events
+    }
+
+    private func cancelCaptureIfNeeded() {
+        guard isCapturingOutsideStart else { return }
+        isCapturingOutsideStart = false
+        inputRelay?.cancel()
     }
 }
 

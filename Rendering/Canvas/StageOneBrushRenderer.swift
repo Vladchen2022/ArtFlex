@@ -114,8 +114,8 @@ private struct CompositeUniforms {
     var brushColor: SIMD4<Float>
     var mode: UInt32 = 0
     var usesCompoundMask: UInt32 = 0
+    var compoundMode: UInt32 = 0
     var usesPaintMaterialTexture: UInt32 = 0
-    var paddingValue: UInt32 = 0
     var paintJitterAmount: Float = 0
     var paintContrastAmount: Float = 0
     var jitterDirectionDegrees: Float = 0
@@ -151,13 +151,18 @@ struct BrushStrokeSamplingState {
 
 final class OpacityCapSessionResources {
     let originalTexture: MTLTexture
+    /// Ordinary opacity-cap strokes accumulate here. In pressure dual-tip mode
+    /// this texture instead stores the independently sampled stroke range.
     let alphaTexture: MTLTexture
     let reusesCachedTextures: Bool
+    var compoundPrimaryTexture: MTLTexture?
     var compoundSecondaryTexture: MTLTexture?
+    var compoundPrimarySamplingState: BrushStrokeSamplingState?
     var compoundSecondarySamplingState: BrushStrokeSamplingState?
     var paintMaterialTexture: MTLTexture?
     fileprivate var initializedBaseTiles: Set<Int> = []
-    fileprivate var initializedCompoundTiles: Set<Int> = []
+    fileprivate var initializedCompoundPrimaryTiles: Set<Int> = []
+    fileprivate var initializedCompoundSecondaryTiles: Set<Int> = []
     fileprivate var initializedMaterialTiles: Set<Int> = []
 
     var debugInitializedTileCount: Int {
@@ -194,6 +199,7 @@ private let customTipMaskResolution = 256
 private enum CustomTipTextureRole {
     case primary
     case primaryEnvelope
+    case compoundPrimary
     case compoundSecondary
 }
 
@@ -233,6 +239,7 @@ final class StageOneBrushRenderer {
     private let smudgeFrozenTexturePipelineState: MTLRenderPipelineState
     private let smudgeGatherPipelineState: MTLComputePipelineState
     private let opacityCapMaskPipelineState: MTLRenderPipelineState
+    private let compoundRangeMaskPipelineState: MTLRenderPipelineState
     private let compoundPrimaryMaskPipelineState: MTLRenderPipelineState
     private let compoundSecondaryMaskPipelineState: MTLRenderPipelineState
     private let compoundPrimaryBuildUpMaskPipelineState: MTLRenderPipelineState
@@ -251,12 +258,15 @@ final class StageOneBrushRenderer {
     private var cachedPrimaryCustomTipTexture: MTLTexture?
     private var cachedPrimaryEnvelopeCustomTipSourceData: Data?
     private var cachedPrimaryEnvelopeCustomTipTexture: MTLTexture?
+    private var cachedCompoundPrimaryCustomTipSourceData: Data?
+    private var cachedCompoundPrimaryCustomTipTexture: MTLTexture?
     private var cachedCompoundSecondaryCustomTipSourceData: Data?
     private var cachedCompoundSecondaryCustomTipTexture: MTLTexture?
     private var cachedOpacityCapOriginalTexture: MTLTexture?
     private var cachedOpacityCapAlphaTexture: MTLTexture?
     private var cachedOpacityCapZeroAlphaTile: MTLTexture?
     private var cachedOpacityCapZeroColorTile: MTLTexture?
+    private var cachedCompoundPrimaryTexture: MTLTexture?
     private var cachedCompoundSecondaryTexture: MTLTexture?
     private var cachedPaintMaterialTexture: MTLTexture?
     private let reusableUniformBufferLock = NSLock()
@@ -355,8 +365,8 @@ final class StageOneBrushRenderer {
             float4 brushColor;
             uint mode;
             uint usesCompoundMask;
+            uint compoundMode;
             uint usesPaintMaterialTexture;
-            uint paddingValue;
             float paintJitterAmount;
             float paintContrastAmount;
             float jitterDirectionDegrees;
@@ -578,7 +588,21 @@ final class StageOneBrushRenderer {
             }
 
             float interior;
-            if (uniforms.compoundMode == 3) { // overlay
+            if (uniforms.compoundMode == 4) { // maskedOverlay
+                // True masking-brush behavior: keep A's authored grayscale
+                // texture and use B only as an independent alpha mask. No
+                // envelope floor or A/B interpolation is permitted here.
+                float primaryAlpha = clamp(
+                    primaryTexture * uniforms.compoundPrimaryOpacityFactor
+                        * uniforms.compoundGlobalOpacityFactor,
+                    0.0,
+                    1.0
+                );
+                interior = primaryAlpha <= 0.5
+                    ? 2.0 * secondaryField * primaryAlpha
+                    : 1.0 - (2.0 * (1.0 - secondaryField) * (1.0 - primaryAlpha));
+                return clamp(interior, 0.0, 1.0);
+            } else if (uniforms.compoundMode == 3) { // legacy overlay
                 // Photoshop-style dual brush: combine A and B with the configured
                 // pressure-mix curve, then apply final opacity pressure once through
                 // compoundGlobalOpacityFactor below.
@@ -593,9 +617,28 @@ final class StageOneBrushRenderer {
                     ? 2.0 * secondaryField * primaryAlpha
                     : 1.0 - (2.0 * (1.0 - secondaryField) * (1.0 - primaryAlpha));
                 interior = mix(secondaryField, clamp(overlaid, 0.0, 1.0), mixWeight);
+            } else if (uniforms.compoundMode == 0) { // pressure dual-tip
+                // A and B are both real paint sources. Pressure only changes
+                // their relative contribution: light pressure is B-led, heavy
+                // pressure is A-led, and the middle alpha-composites both.
+                // B remains clipped to A's authored envelope, but A's actual
+                // grayscale pixels—not a solid envelope fill—are preserved.
+                float primaryContribution = clamp(
+                    primaryTexture * uniforms.compoundPrimaryOpacityFactor * mixWeight,
+                    0.0,
+                    1.0
+                );
+                float secondaryContribution = clamp(
+                    secondaryField * (1.0 - mixWeight) * primaryEnvelope,
+                    0.0,
+                    1.0
+                );
+                interior = primaryContribution +
+                    (secondaryContribution * (1.0 - primaryContribution));
+                return clamp(interior * uniforms.compoundGlobalOpacityFactor, 0.0, 1.0);
             } else {
-                // Pressure mix controls how much of the primary body survives versus
-                // the secondary texture appearance.
+                // Legacy subtract/intersect behavior is retained for existing
+                // presets that intentionally use B as an internal stencil.
                 float primaryBody = uniforms.compoundPrimaryOpacityFactor * mixWeight;
                 interior = primaryBody + (1.0 - primaryBody) * compoundAppearance;
             }
@@ -1257,6 +1300,40 @@ final class StageOneBrushRenderer {
             return float4(flowAlpha, flowAlpha, flowAlpha, flowAlpha);
         }
 
+        fragment float4 stageOneCompoundRangeMaskFragment(
+            VertexOut in [[stage_in]],
+            const device BrushUniforms *uniformsArray [[buffer(1)]],
+            texture2d<float, access::read> selectionMask [[texture(0)]],
+            texture2d<float, access::read> alphaLockTexture [[texture(1)]],
+            texture2d<float, access::sample> primaryEnvelopeTipMask [[texture(5)]]
+        ) {
+            BrushUniforms uniforms = uniformsArray[in.instanceID];
+            float rangeAlpha = primaryEnvelopeAlpha(
+                in.localPoint,
+                uniforms,
+                primaryEnvelopeTipMask
+            );
+            if (rangeAlpha <= 0.001) {
+                discard_fragment();
+            }
+
+            float selectionAlpha = selectionAlphaForBrushPixel(in.pixelPoint, uniforms, selectionMask);
+            if (selectionAlpha <= 0.001) {
+                discard_fragment();
+            }
+            rangeAlpha *= selectionAlpha;
+
+            if (uniforms.usesAlphaLock != 0) {
+                uint x = uint(clamp(in.pixelPoint.x, 0.0, uniforms.canvasSize.x - 1.0));
+                uint y = uint(clamp(in.pixelPoint.y, 0.0, uniforms.canvasSize.y - 1.0));
+                if (alphaLockTexture.read(uint2(x, y)).a <= 0.001) {
+                    discard_fragment();
+                }
+            }
+
+            return float4(rangeAlpha, rangeAlpha, rangeAlpha, rangeAlpha);
+        }
+
         fragment float4 stageOneCompoundPrimaryMaskFragment(
             VertexOut in [[stage_in]],
             const device BrushUniforms *uniformsArray [[buffer(1)]],
@@ -1284,18 +1361,20 @@ final class StageOneBrushRenderer {
                 0.0,
                 1.0
             );
-            // Let the real A texture appear from light pressure onward, while a
-            // restrained envelope floor closes its larger channels progressively.
-            // Both terms are continuous over the full pressure range: a narrow
-            // high-pressure switch makes the stroke jump from sparse to dead black.
-            float texturedPressure = 0.98 * pow(effectivePrimaryPressure, 0.75);
-            float densityPressure = 0.92 * (
-                1.0 - pow(1.0 - effectivePrimaryPressure, 1.5)
-            );
-            float primaryAlpha = max(
-                texturedPrimary * texturedPressure,
-                primaryEnvelope * densityPressure
-            );
+            float primaryAlpha;
+            if (uniforms.compoundMode == 4) { // maskedOverlay
+                primaryAlpha = texturedPrimary * effectivePrimaryPressure;
+            } else {
+                // Legacy overlay behavior retained for existing saved brushes.
+                float texturedPressure = 0.98 * pow(effectivePrimaryPressure, 0.75);
+                float densityPressure = 0.92 * (
+                    1.0 - pow(1.0 - effectivePrimaryPressure, 1.5)
+                );
+                primaryAlpha = max(
+                    texturedPrimary * texturedPressure,
+                    primaryEnvelope * densityPressure
+                );
+            }
             if (primaryAlpha <= 0.001) {
                 discard_fragment();
             }
@@ -1332,7 +1411,12 @@ final class StageOneBrushRenderer {
             if (secondaryAlpha <= 0.001) {
                 discard_fragment();
             }
-            float flowAlpha = uniforms.opacity * secondaryAlpha;
+            // Krita's masking painter uses unit master opacity. B's own opacity
+            // dynamics remain active, while the toolbar/master opacity belongs
+            // to the primary paint stream.
+            float flowAlpha = uniforms.compoundMode == 4
+                ? secondaryAlpha
+                : uniforms.opacity * secondaryAlpha;
             return float4(flowAlpha, flowAlpha, flowAlpha, flowAlpha);
         }
 
@@ -1341,6 +1425,7 @@ final class StageOneBrushRenderer {
             const device BrushUniforms *uniformsArray [[buffer(1)]],
             texture2d<float, access::read> selectionMask [[texture(0)]],
             texture2d<float, access::read> alphaLockTexture [[texture(1)]],
+            texture2d<float, access::sample> customTipMask [[texture(2)]],
             texture2d<float, access::sample> primaryEnvelopeTipMask [[texture(5)]]
         ) {
             BrushUniforms uniforms = uniformsArray[in.instanceID];
@@ -1348,11 +1433,9 @@ final class StageOneBrushRenderer {
             // footprint that can close under repeated 5% stamps; the raw A
             // grayscale texture contains fixed channels that cannot become solid
             // regardless of pressure. B remains the material/grain stream.
-            float primaryAlpha = primaryEnvelopeAlpha(
-                in.localPoint,
-                uniforms,
-                primaryEnvelopeTipMask
-            );
+            float primaryAlpha = uniforms.compoundMode == 4
+                ? primaryTextureAlpha(in.localPoint, uniforms, customTipMask)
+                : primaryEnvelopeAlpha(in.localPoint, uniforms, primaryEnvelopeTipMask);
             float pressureAlpha = uniforms.compoundPrimaryOpacityFactor
                 * uniforms.compoundGlobalOpacityFactor;
             float targetAlpha = uniforms.opacity * primaryAlpha * pressureAlpha;
@@ -1394,7 +1477,8 @@ final class StageOneBrushRenderer {
             // low pressure after Overlay and makes the light stroke disappear.
             // B may still have its own explicitly configured opacity response.
             float pressureAlpha = uniforms.compoundSecondaryOpacityFactor;
-            float targetAlpha = uniforms.opacity * secondaryAlpha * pressureAlpha;
+            float masterOpacity = uniforms.compoundMode == 4 ? 1.0 : uniforms.opacity;
+            float targetAlpha = masterOpacity * secondaryAlpha * pressureAlpha;
             float flowAlpha = buildUpVisibleAlpha(targetAlpha, uniforms);
             if (flowAlpha <= 0.001) {
                 discard_fragment();
@@ -1452,6 +1536,7 @@ final class StageOneBrushRenderer {
             texture2d<float, access::sample> alphaTexture [[texture(1)]],
             texture2d<float, access::sample> compoundSecondaryTexture [[texture(2)]],
             texture2d<float, access::sample> paintMaterialTexture [[texture(3)]],
+            texture2d<float, access::sample> compoundPrimaryTexture [[texture(4)]],
             sampler textureSampler [[sampler(0)]],
             constant CompositeUniforms &uniforms [[buffer(0)]]
         ) {
@@ -1459,9 +1544,18 @@ final class StageOneBrushRenderer {
             float accumulatedAlpha = alphaTexture.sample(textureSampler, in.texCoord).r;
             if (uniforms.usesCompoundMask != 0) {
                 float secondaryAlpha = compoundSecondaryTexture.sample(textureSampler, in.texCoord).r;
-                accumulatedAlpha = accumulatedAlpha <= 0.5
-                    ? 2.0 * secondaryAlpha * accumulatedAlpha
-                    : 1.0 - (2.0 * (1.0 - secondaryAlpha) * (1.0 - accumulatedAlpha));
+                if (uniforms.compoundMode == 0) {
+                    // Pressure dual-tip: range, A and B are sampled independently.
+                    // A and B both contribute real pixels; the outer stream only
+                    // clips their union to the intended stroke footprint.
+                    float primaryAlpha = compoundPrimaryTexture.sample(textureSampler, in.texCoord).r;
+                    float dualTipAlpha = primaryAlpha + secondaryAlpha * (1.0 - primaryAlpha);
+                    accumulatedAlpha = dualTipAlpha * accumulatedAlpha;
+                } else {
+                    accumulatedAlpha = accumulatedAlpha <= 0.5
+                        ? 2.0 * secondaryAlpha * accumulatedAlpha
+                        : 1.0 - (2.0 * (1.0 - secondaryAlpha) * (1.0 - accumulatedAlpha));
+                }
             }
             float cappedAlpha = clamp(accumulatedAlpha * uniforms.brushColor.a, 0.0, 1.0);
 
@@ -1676,6 +1770,29 @@ final class StageOneBrushRenderer {
             self.opacityCapMaskPipelineState = try device.makeRenderPipelineState(descriptor: opacityCapMaskDescriptor)
         } catch {
             throw StageOneBrushRendererInitializationError.pipelineState("opacityCapMask", error)
+        }
+
+        let compoundRangeMaskDescriptor = MTLRenderPipelineDescriptor()
+        compoundRangeMaskDescriptor.vertexFunction = vertexFunction
+        guard let compoundRangeMaskFunction = library.makeFunction(name: "stageOneCompoundRangeMaskFragment") else {
+            throw StageOneBrushRendererInitializationError.missingFunction("stageOneCompoundRangeMaskFragment")
+        }
+        compoundRangeMaskDescriptor.fragmentFunction = compoundRangeMaskFunction
+        compoundRangeMaskDescriptor.colorAttachments[0].pixelFormat = .r8Unorm
+        let compoundRangeMaskAttachment = compoundRangeMaskDescriptor.colorAttachments[0]!
+        compoundRangeMaskAttachment.isBlendingEnabled = true
+        compoundRangeMaskAttachment.rgbBlendOperation = .max
+        compoundRangeMaskAttachment.alphaBlendOperation = .max
+        compoundRangeMaskAttachment.sourceRGBBlendFactor = .one
+        compoundRangeMaskAttachment.sourceAlphaBlendFactor = .one
+        compoundRangeMaskAttachment.destinationRGBBlendFactor = .one
+        compoundRangeMaskAttachment.destinationAlphaBlendFactor = .one
+        do {
+            self.compoundRangeMaskPipelineState = try device.makeRenderPipelineState(
+                descriptor: compoundRangeMaskDescriptor
+            )
+        } catch {
+            throw StageOneBrushRendererInitializationError.pipelineState("compoundRangeMask", error)
         }
 
         let compoundPrimaryMaskDescriptor = MTLRenderPipelineDescriptor()
@@ -2075,6 +2192,44 @@ final class StageOneBrushRenderer {
         return secondaryTexture
     }
 
+    private func ensureCompoundPrimaryTexture(
+        for session: OpacityCapSessionResources,
+        matching texture: MTLTexture,
+        commandBuffer: MTLCommandBuffer
+    ) -> MTLTexture? {
+        if let existing = session.compoundPrimaryTexture {
+            return existing
+        }
+
+        let primaryTexture: MTLTexture
+        if session.reusesCachedTextures,
+           let cached = cachedCompoundPrimaryTexture,
+           cached.width == texture.width,
+           cached.height == texture.height {
+            primaryTexture = cached
+        } else {
+            let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+                pixelFormat: .r8Unorm,
+                width: texture.width,
+                height: texture.height,
+                mipmapped: false
+            )
+            descriptor.usage = [.renderTarget, .shaderRead]
+            descriptor.storageMode = .private
+            guard let created = device.makeTexture(descriptor: descriptor) else {
+                return nil
+            }
+            primaryTexture = created
+            if session.reusesCachedTextures {
+                cachedCompoundPrimaryTexture = created
+            }
+        }
+
+        _ = commandBuffer
+        session.compoundPrimaryTexture = primaryTexture
+        return primaryTexture
+    }
+
     private func ensurePaintMaterialTexture(
         for session: OpacityCapSessionResources,
         matching texture: MTLTexture,
@@ -2116,7 +2271,14 @@ final class StageOneBrushRenderer {
     private func usesIndependentCompoundMask(for stroke: StrokeDescriptor) -> Bool {
         (stroke.tool == .brush || stroke.tool == .eraser) &&
             stroke.brush.compoundBrush.enabled &&
-            stroke.brush.compoundBrush.mode == .overlay
+            (stroke.brush.compoundBrush.mode == .textureBlend ||
+             stroke.brush.compoundBrush.mode == .overlay ||
+             stroke.brush.compoundBrush.mode == .maskedOverlay)
+    }
+
+    private func usesPressureDualTipPipeline(for stroke: StrokeDescriptor) -> Bool {
+        usesIndependentCompoundMask(for: stroke) &&
+            stroke.brush.compoundBrush.mode == .textureBlend
     }
 
     private func usesPaintMaterialTexture(for stroke: StrokeDescriptor) -> Bool {
@@ -2126,27 +2288,29 @@ final class StageOneBrushRenderer {
         )
     }
 
-    private func compoundSecondarySamplingStroke(from stroke: StrokeDescriptor) -> StrokeDescriptor {
-        let secondary = stroke.brush.compoundBrush.secondary
+    private func compoundTipSamplingStroke(
+        from stroke: StrokeDescriptor,
+        tip: CompoundSecondaryTipSettings
+    ) -> StrokeDescriptor {
         var samplingBrush = stroke.brush
-        samplingBrush.size = secondary.resolvedBaseSize(for: stroke.brush.size)
-        samplingBrush.spacingPercent = secondary.spacingPercent
-        samplingBrush.scatterAmount = 0
+        samplingBrush.size = tip.resolvedBaseSize(for: stroke.brush.size)
+        samplingBrush.spacingPercent = tip.spacingPercent
+        samplingBrush.scatterAmount = tip.scatterAmount
         samplingBrush.jitterAmount = 0
-        samplingBrush.sizeJitterAmount = 0
-        samplingBrush.angleJitterAmount = 0
-        samplingBrush.stampRotationDegrees = secondary.angleDegrees
-        samplingBrush.followsStrokeDirection = secondary.followsStrokeDirection
-        samplingBrush.pressureSizeAmount = secondary.pressureSizeAmount
-        samplingBrush.sizeCurveLow = secondary.sizeCurveLow
-        samplingBrush.sizeCurveMid = secondary.sizeCurveMid
-        samplingBrush.sizeCurveHigh = secondary.sizeCurveHigh
+        samplingBrush.sizeJitterAmount = tip.sizeJitterAmount
+        samplingBrush.angleJitterAmount = tip.angleJitterAmount
+        samplingBrush.stampRotationDegrees = tip.angleDegrees
+        samplingBrush.followsStrokeDirection = tip.followsStrokeDirection
+        samplingBrush.pressureSizeAmount = tip.pressureSizeAmount
+        samplingBrush.sizeCurveLow = tip.sizeCurveLow
+        samplingBrush.sizeCurveMid = tip.sizeCurveMid
+        samplingBrush.sizeCurveHigh = tip.sizeCurveHigh
         samplingBrush.sizePressureCurve = nil
-        samplingBrush.pressureOpacityAmount = secondary.pressureOpacityAmount
-        samplingBrush.opacityCurveLow = secondary.opacityCurveLow
-        samplingBrush.opacityCurveMid = secondary.opacityCurveMid
-        samplingBrush.opacityCurveHigh = secondary.opacityCurveHigh
-        samplingBrush.opacityPressureCurve = secondary.opacityPressureCurve
+        samplingBrush.pressureOpacityAmount = tip.pressureOpacityAmount
+        samplingBrush.opacityCurveLow = tip.opacityCurveLow
+        samplingBrush.opacityCurveMid = tip.opacityCurveMid
+        samplingBrush.opacityCurveHigh = tip.opacityCurveHigh
+        samplingBrush.opacityPressureCurve = tip.opacityPressureCurve
         samplingBrush.compoundBrush.enabled = false
 
         return StrokeDescriptor(
@@ -2160,6 +2324,14 @@ final class StageOneBrushRenderer {
             paintVariationSeed: stroke.paintVariationSeed,
             pigmentPalette: stroke.pigmentPalette
         )
+    }
+
+    private func compoundPrimarySamplingStroke(from stroke: StrokeDescriptor) -> StrokeDescriptor {
+        compoundTipSamplingStroke(from: stroke, tip: stroke.brush.resolvedCompoundPrimaryTip)
+    }
+
+    private func compoundSecondarySamplingStroke(from stroke: StrokeDescriptor) -> StrokeDescriptor {
+        compoundTipSamplingStroke(from: stroke, tip: stroke.brush.compoundBrush.secondary)
     }
 
     @discardableResult
@@ -2314,23 +2486,37 @@ final class StageOneBrushRenderer {
         samplingState: inout BrushStrokeSamplingState?
     ) -> Int {
         let usesIndependentCompoundMask = usesIndependentCompoundMask(for: stroke)
+        let usesPressureDualTip = usesPressureDualTipPipeline(for: stroke)
         let usesCompoundBuildUp = usesIndependentCompoundMask && stroke.brush.buildMode == .buildUp
         if usesIndependentCompoundMask, samplingState?.isFlushing == true {
+            session.compoundPrimarySamplingState?.isFlushing = true
             session.compoundSecondarySamplingState?.isFlushing = true
         }
 
+        // The outer brush is the independently sampled stroke-range stream.
+        // Legacy compound modes still use it as their visible A stream.
         let samples = interpolatedPoints(for: stroke, samplingState: &samplingState)
+        var primarySamples: [StampSample] = []
         var secondarySamples: [StampSample] = []
+        let primaryStroke = usesPressureDualTip
+            ? compoundPrimarySamplingStroke(from: stroke)
+            : nil
         let secondaryStroke = usesIndependentCompoundMask
             ? compoundSecondarySamplingStroke(from: stroke)
             : nil
+        if let primaryStroke {
+            primarySamples = interpolatedPoints(
+                for: primaryStroke,
+                samplingState: &session.compoundPrimarySamplingState
+            )
+        }
         if let secondaryStroke {
             secondarySamples = interpolatedPoints(
                 for: secondaryStroke,
                 samplingState: &session.compoundSecondarySamplingState
             )
         }
-        guard !samples.isEmpty || !secondarySamples.isEmpty else {
+        guard !samples.isEmpty || !primarySamples.isEmpty || !secondarySamples.isEmpty else {
             return 0
         }
         if !samples.isEmpty {
@@ -2345,6 +2531,14 @@ final class StageOneBrushRenderer {
             recordRenderedPixelBounds(
                 for: secondarySamples,
                 stroke: secondaryStroke,
+                texture: texture,
+                samplingState: &samplingState
+            )
+        }
+        if !primarySamples.isEmpty, let primaryStroke {
+            recordRenderedPixelBounds(
+                for: primarySamples,
+                stroke: primaryStroke,
                 texture: texture,
                 samplingState: &samplingState
             )
@@ -2365,10 +2559,28 @@ final class StageOneBrushRenderer {
         } else {
             nil
         }
-        guard let dirtyRect = unionScissorRects(primaryDirtyRect, secondaryDirtyRect) else {
+        let compoundPrimaryDirtyRect: MTLScissorRect? = if let primaryStroke, !primarySamples.isEmpty {
+            opacityCapDirtyRect(for: primarySamples, stroke: primaryStroke, texture: texture)
+        } else {
+            nil
+        }
+        guard let dirtyRect = unionScissorRects(
+            unionScissorRects(primaryDirtyRect, compoundPrimaryDirtyRect),
+            secondaryDirtyRect
+        ) else {
             return 0
         }
 
+        let compoundPrimaryTexture = usesPressureDualTip
+            ? ensureCompoundPrimaryTexture(
+                for: session,
+                matching: texture,
+                commandBuffer: commandBuffer
+            )
+            : nil
+        if usesPressureDualTip, compoundPrimaryTexture == nil {
+            return 0
+        }
         let compoundSecondaryTexture = usesIndependentCompoundMask
             ? ensureCompoundSecondaryTexture(
                 for: session,
@@ -2394,6 +2606,7 @@ final class StageOneBrushRenderer {
             in: dirtyRect,
             session: session,
             workingTexture: texture,
+            compoundPrimaryTexture: compoundPrimaryTexture,
             compoundSecondaryTexture: compoundSecondaryTexture,
             paintMaterialTexture: paintMaterialTexture,
             commandBuffer: commandBuffer
@@ -2409,7 +2622,9 @@ final class StageOneBrushRenderer {
         if !samples.isEmpty,
            let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: accumulationPassDescriptor) {
             let primaryMaskPipelineState: MTLRenderPipelineState
-            if usesCompoundBuildUp {
+            if usesPressureDualTip {
+                primaryMaskPipelineState = compoundRangeMaskPipelineState
+            } else if usesCompoundBuildUp {
                 primaryMaskPipelineState = compoundPrimaryBuildUpMaskPipelineState
             } else if usesIndependentCompoundMask {
                 primaryMaskPipelineState = compoundPrimaryMaskPipelineState
@@ -2441,7 +2656,7 @@ final class StageOneBrushRenderer {
                     texture: texture,
                     selectionShape: selectionShape,
                     modeOverride: 0,
-                    includeBrushOpacity: true,
+                    includeBrushOpacity: usesPressureDualTip == false,
                     preservesAlphaWhenAlphaLocked: preservesAlphaWhenAlphaLocked
                 )
             }
@@ -2449,6 +2664,58 @@ final class StageOneBrushRenderer {
             encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4, instanceCount: uniformsArray.count)
 
             encoder.endEncoding()
+        }
+
+        if usesPressureDualTip,
+           primarySamples.isEmpty == false,
+           let primaryStroke,
+           let compoundPrimaryTexture {
+            let primaryTipPassDescriptor = MTLRenderPassDescriptor()
+            primaryTipPassDescriptor.colorAttachments[0].texture = compoundPrimaryTexture
+            primaryTipPassDescriptor.colorAttachments[0].loadAction = .load
+            primaryTipPassDescriptor.colorAttachments[0].storeAction = .store
+
+            if let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: primaryTipPassDescriptor) {
+                encoder.setRenderPipelineState(
+                    usesCompoundBuildUp
+                        ? compoundSecondaryBuildUpMaskPipelineState
+                        : compoundSecondaryMaskPipelineState
+                )
+                encoder.setVertexBuffer(vertexBuffer, offset: 0, index: 0)
+                let primaryTip = stroke.brush.resolvedCompoundPrimaryTip
+                let primaryTipTexture = customTipTexture(
+                    for: compoundPrimaryCustomTipMaskData(for: stroke),
+                    role: .compoundPrimary
+                ) ?? defaultTipTexture
+                encoder.setFragmentTexture(primaryTipTexture, index: 6)
+                encoder.setFragmentSamplerState(tipSamplerState, index: 1)
+                encoder.setScissorRect(dirtyRect)
+
+                var primaryTipUniforms = primarySamples.map { sample in
+                    makeCompoundTipUniforms(
+                        for: sample,
+                        stroke: stroke,
+                        samplingStroke: primaryStroke,
+                        tip: primaryTip,
+                        contribution: stroke.brush.compoundBrush.pressureMix
+                            .resolvedPrimaryWeight(for: sample.point.pressure),
+                        texture: texture,
+                        selectionShape: selectionShape
+                    )
+                }
+                setInstancedUniforms(
+                    &primaryTipUniforms,
+                    encoder: encoder,
+                    commandBuffer: commandBuffer
+                )
+                encoder.drawPrimitives(
+                    type: .triangleStrip,
+                    vertexStart: 0,
+                    vertexCount: 4,
+                    instanceCount: primaryTipUniforms.count
+                )
+                encoder.endEncoding()
+            }
         }
 
         if usesPaintMaterialTexture,
@@ -2506,6 +2773,7 @@ final class StageOneBrushRenderer {
 
         if usesIndependentCompoundMask,
            secondarySamples.isEmpty == false,
+           let secondaryStroke,
            let compoundSecondaryTexture {
             let secondaryPassDescriptor = MTLRenderPassDescriptor()
             secondaryPassDescriptor.colorAttachments[0].texture = compoundSecondaryTexture
@@ -2528,10 +2796,25 @@ final class StageOneBrushRenderer {
                 encoder.setFragmentSamplerState(tipSamplerState, index: 1)
                 encoder.setScissorRect(dirtyRect)
 
-                var secondaryUniforms = secondarySamples.map {
-                    makeCompoundSecondaryUniforms(
-                        for: $0,
+                let secondaryTip = stroke.brush.compoundBrush.secondary
+                var secondaryUniforms = secondarySamples.map { sample in
+                    let contribution: Float
+                    if usesPressureDualTip {
+                        let primaryWeight = stroke.brush.compoundBrush.pressureMix
+                            .resolvedPrimaryWeight(for: sample.point.pressure)
+                        contribution = (1 - primaryWeight) * stroke.brush.compoundBrush.secondaryStrength
+                    } else {
+                        contribution = secondaryTip.resolvedOpacityFactor(
+                            for: sample.point.pressure,
+                            pressureSensitivity: stroke.brush.pressureSensitivity
+                        ) * stroke.brush.compoundBrush.secondaryStrength
+                    }
+                    return makeCompoundTipUniforms(
+                        for: sample,
                         stroke: stroke,
+                        samplingStroke: secondaryStroke,
+                        tip: secondaryTip,
+                        contribution: contribution,
                         texture: texture,
                         selectionShape: selectionShape
                     )
@@ -2563,6 +2846,7 @@ final class StageOneBrushRenderer {
             encoder.setFragmentTexture(session.alphaTexture, index: 1)
             encoder.setFragmentTexture(compoundSecondaryTexture ?? defaultTipTexture, index: 2)
             encoder.setFragmentTexture(paintMaterialTexture ?? defaultTipTexture, index: 3)
+            encoder.setFragmentTexture(compoundPrimaryTexture ?? defaultTipTexture, index: 4)
             encoder.setFragmentSamplerState(compositeSamplerState, index: 0)
             encoder.setScissorRect(dirtyRect)
 
@@ -2600,6 +2884,7 @@ final class StageOneBrushRenderer {
                 ),
                 mode: stroke.tool == .eraser ? 1 : 0,
                 usesCompoundMask: usesIndependentCompoundMask ? 1 : 0,
+                compoundMode: compoundBrushModeCode(stroke.brush.compoundBrush.mode),
                 usesPaintMaterialTexture: usesPaintMaterialTexture ? 1 : 0,
                 paintJitterAmount: stroke.brush.effectivePaintJitterAmount,
                 paintContrastAmount: stroke.brush.effectivePaintContrastAmount,
@@ -2617,7 +2902,7 @@ final class StageOneBrushRenderer {
             encoder.endEncoding()
         }
 
-        return max(samples.count, secondarySamples.count)
+        return max(samples.count, max(primarySamples.count, secondarySamples.count))
     }
 
     func debugInterpolatedStrokeSamples(
@@ -2633,6 +2918,16 @@ final class StageOneBrushRenderer {
     ) -> [StampSample] {
         interpolatedPoints(
             for: compoundSecondarySamplingStroke(from: stroke),
+            samplingState: &samplingState
+        )
+    }
+
+    func debugInterpolatedCompoundPrimarySamples(
+        for stroke: StrokeDescriptor,
+        samplingState: inout BrushStrokeSamplingState?
+    ) -> [StampSample] {
+        interpolatedPoints(
+            for: compoundPrimarySamplingStroke(from: stroke),
             samplingState: &samplingState
         )
     }
@@ -2776,7 +3071,7 @@ final class StageOneBrushRenderer {
         let compoundSecondaryOpacityFactor = compoundSecondary.resolvedOpacityFactor(
             for: opacityPressure,
             pressureSensitivity: stroke.brush.pressureSensitivity
-        )
+        ) * min(max(stroke.brush.compoundBrush.secondaryStrength, 0), 1)
         let compoundSecondaryBaseSize = compoundSecondary.resolvedBaseSize(for: stroke.brush.size)
         let compoundSecondaryDiameterPx = max(compoundSecondaryBaseSize * compoundSecondarySizeFactor, 1)
         let compoundSecondaryAdvancePx = max(
@@ -2798,7 +3093,8 @@ final class StageOneBrushRenderer {
             ? min(max(primarySpacingPx / primaryStampDiameterPx, 0.02), 1)
             : 1
         let compoundSecondaryAngleDegrees = compoundSecondary.angleDegrees +
-            (compoundSecondary.followsStrokeDirection ? tangentDegrees : 0)
+            (compoundSecondary.followsStrokeDirection ? tangentDegrees : 0) +
+            (360 * effectivePressure * min(max(compoundSecondary.pressureRotationAmount, 0), 1))
         let selectionMode: UInt32
         let selectionMin: SIMD2<Float>
         let selectionMax: SIMD2<Float>
@@ -2890,26 +3186,78 @@ final class StageOneBrushRenderer {
         )
     }
 
-    private func makeCompoundSecondaryUniforms(
+    private func makeCompoundTipUniforms(
         for sample: StampSample,
         stroke: StrokeDescriptor,
+        samplingStroke: StrokeDescriptor,
+        tip: CompoundSecondaryTipSettings,
+        contribution: Float,
         texture: MTLTexture,
         selectionShape: SelectionShape?
     ) -> BrushUniforms {
         var uniforms = makeUniforms(
             for: sample,
-            stroke: stroke,
+            stroke: samplingStroke,
             texture: texture,
             selectionShape: selectionShape,
             modeOverride: 0,
-            includeBrushOpacity: true
+            includeBrushOpacity: false
         )
-        uniforms.radius = max(uniforms.compoundSecondaryDiameterPx * 0.5, 0.5)
+        // A and B have their own pressure responses through `samplingStroke`,
+        // but the editor also exposes one global response for the whole brush.
+        // Apply that response once here; leaving it on the disabled compound
+        // sampling brush would silently drop it, while applying it to the
+        // range mask would make the range itself paint pixels again.
+        let pressure = min(max(sample.point.pressure, 0), 1)
+        let curvedGlobalSizePressure = BrushSettings.resolvedSizeCurvePressure(
+            pressure: max(pressure, 0.01),
+            pressureSensitivity: stroke.brush.pressureSensitivity,
+            sizeLowerBound: stroke.brush.sizeLowerBound,
+            state: stroke.brush.resolvedSizePressureCurveState
+        )
+        let globalSizeResponse = min(
+            max(stroke.brush.compoundBrush.globalPressureSizeAmount, 0),
+            1
+        )
+        let globalSizeFactor = BrushSettings.resolvedPressureFactor(
+            responseAmount: globalSizeResponse,
+            curvedPressure: curvedGlobalSizePressure
+        )
+        uniforms.radius *= globalSizeFactor
 
-        let advance = max(uniforms.compoundSecondaryAdvancePx, 1)
+        let curvedGlobalOpacityPressure = BrushSettings.resolvedOpacityCurvePressure(
+            pressure: max(pressure, 0.005),
+            pressureSensitivity: stroke.brush.pressureSensitivity,
+            state: stroke.brush.resolvedOpacityPressureCurveState
+        )
+        let globalOpacityResponse = min(
+            max(stroke.brush.compoundBrush.globalPressureOpacityAmount, 0),
+            1
+        )
+        let globalOpacityFactor = BrushSettings.resolvedPressureFactor(
+            responseAmount: globalOpacityResponse,
+            curvedPressure: curvedGlobalOpacityPressure
+        )
+        let diameter = max(uniforms.radius * 2, 1)
+        let advance = max(diameter * max(tip.spacingPercent, 1) / 100, 0.5)
+        uniforms.compoundEnabled = 1
+        uniforms.compoundMode = compoundBrushModeCode(stroke.brush.compoundBrush.mode)
+        uniforms.compoundSecondaryShape = brushTipShapeCode(tip.tipShape)
+        uniforms.compoundSecondaryOpacityFactor = min(
+            max(contribution * tip.opacity * globalOpacityFactor, 0),
+            1
+        )
+        uniforms.compoundSecondaryDiameterPx = diameter
+        uniforms.compoundSecondaryAdvancePx = advance
+        uniforms.compoundSecondarySoftness = tip.softness
+        uniforms.compoundSecondaryRoundness = tip.roundness
+        uniforms.compoundSecondaryAngleDegrees = sample.angleDegrees +
+            (360 * min(max(sample.point.pressure, 0), 1) * min(max(tip.pressureRotationAmount, 0), 1))
+        uniforms.compoundSecondaryTileRandomRotation = tip.tileRandomRotation
+        uniforms.opacity = min(max(stroke.brush.opacity, 0), 1)
         if stroke.brush.buildMode == .buildUp {
             uniforms.buildUpOpacitySpacingRatio = min(
-                max(advance / max(uniforms.compoundSecondaryDiameterPx, 1), 0.02),
+                max(advance / diameter, 0.02),
                 1
             )
         }
@@ -2948,6 +3296,8 @@ final class StageOneBrushRenderer {
             return 2
         case .overlay:
             return 3
+        case .maskedOverlay:
+            return 4
         }
     }
 
@@ -3923,6 +4273,14 @@ final class StageOneBrushRenderer {
         return stroke.brush.compoundBrush.secondary.customTipMaskData
     }
 
+    private func compoundPrimaryCustomTipMaskData(for stroke: StrokeDescriptor) -> Data? {
+        let primary = stroke.brush.resolvedCompoundPrimaryTip
+        guard primary.tipShape == .customRound else {
+            return nil
+        }
+        return primary.customTipMaskData
+    }
+
     private func customTipTexture(for data: Data?, role: CustomTipTextureRole) -> MTLTexture? {
         guard let sourceData = data else {
             switch role {
@@ -3932,6 +4290,9 @@ final class StageOneBrushRenderer {
             case .primaryEnvelope:
                 cachedPrimaryEnvelopeCustomTipSourceData = nil
                 cachedPrimaryEnvelopeCustomTipTexture = nil
+            case .compoundPrimary:
+                cachedCompoundPrimaryCustomTipSourceData = nil
+                cachedCompoundPrimaryCustomTipTexture = nil
             case .compoundSecondary:
                 cachedCompoundSecondaryCustomTipSourceData = nil
                 cachedCompoundSecondaryCustomTipTexture = nil
@@ -3948,6 +4309,10 @@ final class StageOneBrushRenderer {
             if cachedPrimaryEnvelopeCustomTipSourceData == sourceData, let cachedPrimaryEnvelopeCustomTipTexture {
                 return cachedPrimaryEnvelopeCustomTipTexture
             }
+        case .compoundPrimary:
+            if cachedCompoundPrimaryCustomTipSourceData == sourceData, let cachedCompoundPrimaryCustomTipTexture {
+                return cachedCompoundPrimaryCustomTipTexture
+            }
         case .compoundSecondary:
             if cachedCompoundSecondaryCustomTipSourceData == sourceData, let cachedCompoundSecondaryCustomTipTexture {
                 return cachedCompoundSecondaryCustomTipTexture
@@ -3962,6 +4327,9 @@ final class StageOneBrushRenderer {
             case .primaryEnvelope:
                 cachedPrimaryEnvelopeCustomTipSourceData = nil
                 cachedPrimaryEnvelopeCustomTipTexture = nil
+            case .compoundPrimary:
+                cachedCompoundPrimaryCustomTipSourceData = nil
+                cachedCompoundPrimaryCustomTipTexture = nil
             case .compoundSecondary:
                 cachedCompoundSecondaryCustomTipSourceData = nil
                 cachedCompoundSecondaryCustomTipTexture = nil
@@ -3999,6 +4367,9 @@ final class StageOneBrushRenderer {
         case .primaryEnvelope:
             cachedPrimaryEnvelopeCustomTipSourceData = sourceData
             cachedPrimaryEnvelopeCustomTipTexture = texture
+        case .compoundPrimary:
+            cachedCompoundPrimaryCustomTipSourceData = sourceData
+            cachedCompoundPrimaryCustomTipTexture = texture
         case .compoundSecondary:
             cachedCompoundSecondaryCustomTipSourceData = sourceData
             cachedCompoundSecondaryCustomTipTexture = texture
@@ -4037,6 +4408,7 @@ final class StageOneBrushRenderer {
         in dirtyRect: MTLScissorRect,
         session: OpacityCapSessionResources,
         workingTexture: MTLTexture,
+        compoundPrimaryTexture: MTLTexture?,
         compoundSecondaryTexture: MTLTexture?,
         paintMaterialTexture: MTLTexture?,
         commandBuffer: MTLCommandBuffer
@@ -4093,8 +4465,23 @@ final class StageOneBrushRenderer {
                     )
                 }
 
+                if let compoundPrimaryTexture,
+                   session.initializedCompoundPrimaryTiles.insert(tileID).inserted {
+                    encoder.copy(
+                        from: zeroAlphaTile,
+                        sourceSlice: 0,
+                        sourceLevel: 0,
+                        sourceOrigin: .init(x: 0, y: 0, z: 0),
+                        sourceSize: size,
+                        to: compoundPrimaryTexture,
+                        destinationSlice: 0,
+                        destinationLevel: 0,
+                        destinationOrigin: origin
+                    )
+                }
+
                 if let compoundSecondaryTexture,
-                   session.initializedCompoundTiles.insert(tileID).inserted {
+                   session.initializedCompoundSecondaryTiles.insert(tileID).inserted {
                     encoder.copy(
                         from: zeroAlphaTile,
                         sourceSlice: 0,

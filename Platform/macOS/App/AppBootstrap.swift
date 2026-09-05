@@ -59,6 +59,33 @@ final class AppSharedMetalServices {
     }
 }
 
+enum AppPersistenceIsolationPolicy {
+    static let productionBundleIdentifiers: Set<String> = [
+        "com.vladchen.artflex",
+        "com.vladchen.artflex.debug"
+    ]
+
+    static func isolatedRootURL(
+        bundleIdentifier: String?,
+        temporaryDirectory: URL,
+        processIdentifier: Int32
+    ) -> URL? {
+        guard let normalizedIdentifier = bundleIdentifier?.lowercased(),
+              !productionBundleIdentifiers.contains(normalizedIdentifier) else {
+            return nil
+        }
+        let safeBundleIdentifier = normalizedIdentifier
+            .map { $0.isLetter || $0.isNumber || $0 == "." || $0 == "-" ? $0 : "_" }
+            .reduce(into: "") { $0.append($1) }
+        return temporaryDirectory
+            .appendingPathComponent("ArtFlex-Isolated", isDirectory: true)
+            .appendingPathComponent(safeBundleIdentifier, isDirectory: true)
+            .appendingPathComponent("Process-\(processIdentifier)", isDirectory: true)
+            .appendingPathComponent("ApplicationSupport", isDirectory: true)
+            .appendingPathComponent("ArtFlex", isDirectory: true)
+    }
+}
+
 struct AppBootstrap {
     let workspaceStore: WorkspaceStore
     let metalContext: MetalDeviceContext
@@ -224,7 +251,8 @@ struct AppBootstrap {
     }
 
     private static func testPersistenceRootURL() -> URL? {
-        let environment = ProcessInfo.processInfo.environment
+        let processInfo = ProcessInfo.processInfo
+        let environment = processInfo.environment
         if let explicitPath = environment["ARTFLEX_TEST_APPLICATION_SUPPORT_ROOT"]?
             .trimmingCharacters(in: .whitespacesAndNewlines),
            !explicitPath.isEmpty {
@@ -238,13 +266,24 @@ struct AppBootstrap {
             || executablePath.hasSuffix(".xctest")
             || CommandLine.arguments.contains("--test-bundle-path")
             || CommandLine.arguments.contains(where: { $0.contains(".xctest/") })
-        guard isRunningTests else {
-            return nil
+        if isRunningTests {
+            return FileManager.default.temporaryDirectory
+                .appendingPathComponent(
+                    "ArtFlexTests-\(processInfo.globallyUniqueString)",
+                    isDirectory: true
+                )
+                .appendingPathComponent("ApplicationSupport", isDirectory: true)
+                .appendingPathComponent("ArtFlex", isDirectory: true)
         }
-        return FileManager.default.temporaryDirectory
-            .appendingPathComponent("ArtFlexTests-\(ProcessInfo.processInfo.globallyUniqueString)", isDirectory: true)
-            .appendingPathComponent("ApplicationSupport", isDirectory: true)
-            .appendingPathComponent("ArtFlex", isDirectory: true)
+
+        // Development helper apps (for example ArtFlexUITest) must never share recovery,
+        // libraries, or statistics with a production bundle. A process-specific root also
+        // prevents two visible UI-test launches from rotating each other's recovery history.
+        return AppPersistenceIsolationPolicy.isolatedRootURL(
+            bundleIdentifier: Bundle.main.bundleIdentifier,
+            temporaryDirectory: FileManager.default.temporaryDirectory,
+            processIdentifier: processInfo.processIdentifier
+        )
     }
 
     private static func isolatedUserDefaults(for rootURL: URL) -> UserDefaults? {

@@ -446,28 +446,39 @@ struct CompoundPressureMixSettings: Codable, Equatable, Sendable {
             return primaryAtMidPressure + ((primaryAtHighPressure - primaryAtMidPressure) * t)
         }
     }
+
+    var isUniform: Bool {
+        abs(primaryAtLowPressure - primaryAtMidPressure) < 0.0001 &&
+            abs(primaryAtMidPressure - primaryAtHighPressure) < 0.0001
+    }
 }
 
 enum CompoundBrushMode: String, Codable, Equatable, Sendable, CaseIterable {
     case textureBlend
     case subtract
+    /// Two independently sampled tip streams combined with a grayscale Alpha
+    /// Overlay operation. This matches the masking-brush model used by Krita:
+    /// A keeps its real texture, while B only modulates the accumulated alpha.
+    case maskedOverlay
     case overlay
     case intersect
 
     var displayName: String {
         switch self {
         case .textureBlend:
-            return "纹理出现处"
+            return "压力双笔尖"
         case .subtract:
             return "纹理空白处"
+        case .maskedOverlay:
+            return "真实遮罩"
         case .overlay:
-            return "叠加遮罩"
+            return "旧版叠加"
         case .intersect:
             return "旧版相交"
         }
     }
 
-    static let editorCases: [CompoundBrushMode] = [.textureBlend, .subtract, .overlay]
+    static let editorCases: [CompoundBrushMode] = [.textureBlend, .subtract, .maskedOverlay]
 
     var editorEquivalent: CompoundBrushMode {
         self == .intersect ? .textureBlend : self
@@ -503,6 +514,10 @@ struct CompoundSecondaryTipSettings: Codable, Equatable, Sendable {
         case size
         case relativeSizeRatio
         case spacingPercent
+        case opacity
+        case scatterAmount
+        case sizeJitterAmount
+        case angleJitterAmount
         case pressureSizeAmount
         case pressureOpacityAmount
         case sizeCurveLow
@@ -513,6 +528,7 @@ struct CompoundSecondaryTipSettings: Codable, Equatable, Sendable {
         case opacityCurveHigh
         case opacityPressureCurve
         case tileRandomRotation
+        case pressureRotationAmount
     }
 
     var tipShape: BrushTipShape
@@ -530,6 +546,10 @@ struct CompoundSecondaryTipSettings: Codable, Equatable, Sendable {
     var size: Float
     var relativeSizeRatio: Float
     var spacingPercent: Float
+    var opacity: Float
+    var scatterAmount: Float
+    var sizeJitterAmount: Float
+    var angleJitterAmount: Float
 
     var pressureSizeAmount: Float
     var pressureOpacityAmount: Float
@@ -546,6 +566,9 @@ struct CompoundSecondaryTipSettings: Codable, Equatable, Sendable {
     /// 0 = no random rotation, 1 = full 360° random rotation per tile
     var tileRandomRotation: Float
 
+    /// 0 = no pressure-driven rotation, 1 = one full rotation over 0...100% pressure.
+    var pressureRotationAmount: Float
+
     static let `default` = CompoundSecondaryTipSettings(
         tipShape: .softRound,
         sourceSemantic: .procedural,
@@ -560,6 +583,10 @@ struct CompoundSecondaryTipSettings: Codable, Equatable, Sendable {
         size: 24,
         relativeSizeRatio: 1.8,
         spacingPercent: 25,
+        opacity: 1,
+        scatterAmount: 0,
+        sizeJitterAmount: 0,
+        angleJitterAmount: 0,
         pressureSizeAmount: 0.30,
         pressureOpacityAmount: 1.00,
         sizeCurveLow: 0.20,
@@ -569,7 +596,8 @@ struct CompoundSecondaryTipSettings: Codable, Equatable, Sendable {
         opacityCurveMid: 0.60,
         opacityCurveHigh: 1.00,
         opacityPressureCurve: nil,
-        tileRandomRotation: 1.0
+        tileRandomRotation: 1.0,
+        pressureRotationAmount: 0
     )
 
     func resolvedSizeFactor(for pressure: Float) -> Float {
@@ -611,6 +639,23 @@ struct CompoundSecondaryTipSettings: Codable, Equatable, Sendable {
         )
     }
 
+    var resolvedOpacityPressureCurveState: CurveChannelState {
+        opacityPressureCurve ?? BrushSettings.legacyPressureCurveState(
+            low: opacityCurveLow,
+            mid: opacityCurveMid,
+            high: opacityCurveHigh
+        )
+    }
+
+    mutating func setOpacityPressureCurveState(_ state: CurveChannelState) {
+        let normalized = BrushSettings.normalizedPressureCurveState(state)
+        opacityPressureCurve = normalized
+        let compatibilityValues = BrushSettings.legacyPressureCurveValues(from: normalized)
+        opacityCurveLow = compatibilityValues.low
+        opacityCurveMid = compatibilityValues.mid
+        opacityCurveHigh = compatibilityValues.high
+    }
+
     func resolvedBaseSize(for primarySize: Float) -> Float {
         switch sizeMode {
         case .absolutePixels:
@@ -635,6 +680,10 @@ struct CompoundSecondaryTipSettings: Codable, Equatable, Sendable {
         size: Float,
         relativeSizeRatio: Float,
         spacingPercent: Float,
+        opacity: Float = 1,
+        scatterAmount: Float = 0,
+        sizeJitterAmount: Float = 0,
+        angleJitterAmount: Float = 0,
         pressureSizeAmount: Float,
         pressureOpacityAmount: Float,
         sizeCurveLow: Float,
@@ -644,7 +693,8 @@ struct CompoundSecondaryTipSettings: Codable, Equatable, Sendable {
         opacityCurveMid: Float,
         opacityCurveHigh: Float,
         opacityPressureCurve: CurveChannelState? = nil,
-        tileRandomRotation: Float = 1.0
+        tileRandomRotation: Float = 1.0,
+        pressureRotationAmount: Float = 0
     ) {
         self.tipShape = tipShape
         self.sourceSemantic = sourceSemantic
@@ -659,6 +709,10 @@ struct CompoundSecondaryTipSettings: Codable, Equatable, Sendable {
         self.size = size
         self.relativeSizeRatio = relativeSizeRatio
         self.spacingPercent = spacingPercent
+        self.opacity = min(max(opacity, 0), 1)
+        self.scatterAmount = min(max(scatterAmount, 0), 2)
+        self.sizeJitterAmount = min(max(sizeJitterAmount, 0), 1)
+        self.angleJitterAmount = min(max(angleJitterAmount, 0), 1)
         self.pressureSizeAmount = pressureSizeAmount
         self.pressureOpacityAmount = pressureOpacityAmount
         self.sizeCurveLow = sizeCurveLow
@@ -669,6 +723,7 @@ struct CompoundSecondaryTipSettings: Codable, Equatable, Sendable {
         self.opacityCurveHigh = opacityCurveHigh
         self.opacityPressureCurve = opacityPressureCurve
         self.tileRandomRotation = tileRandomRotation
+        self.pressureRotationAmount = pressureRotationAmount
     }
 
     init(from decoder: Decoder) throws {
@@ -688,6 +743,10 @@ struct CompoundSecondaryTipSettings: Codable, Equatable, Sendable {
         size = try container.decodeIfPresent(Float.self, forKey: .size) ?? defaults.size
         relativeSizeRatio = try container.decodeIfPresent(Float.self, forKey: .relativeSizeRatio) ?? defaults.relativeSizeRatio
         spacingPercent = try container.decodeIfPresent(Float.self, forKey: .spacingPercent) ?? defaults.spacingPercent
+        opacity = try container.decodeIfPresent(Float.self, forKey: .opacity) ?? defaults.opacity
+        scatterAmount = try container.decodeIfPresent(Float.self, forKey: .scatterAmount) ?? defaults.scatterAmount
+        sizeJitterAmount = try container.decodeIfPresent(Float.self, forKey: .sizeJitterAmount) ?? defaults.sizeJitterAmount
+        angleJitterAmount = try container.decodeIfPresent(Float.self, forKey: .angleJitterAmount) ?? defaults.angleJitterAmount
         pressureSizeAmount = try container.decodeIfPresent(Float.self, forKey: .pressureSizeAmount) ?? defaults.pressureSizeAmount
         pressureOpacityAmount = try container.decodeIfPresent(Float.self, forKey: .pressureOpacityAmount) ?? defaults.pressureOpacityAmount
         sizeCurveLow = try container.decodeIfPresent(Float.self, forKey: .sizeCurveLow) ?? defaults.sizeCurveLow
@@ -698,6 +757,8 @@ struct CompoundSecondaryTipSettings: Codable, Equatable, Sendable {
         opacityCurveHigh = try container.decodeIfPresent(Float.self, forKey: .opacityCurveHigh) ?? defaults.opacityCurveHigh
         opacityPressureCurve = try container.decodeIfPresent(CurveChannelState.self, forKey: .opacityPressureCurve)
         tileRandomRotation = try container.decodeIfPresent(Float.self, forKey: .tileRandomRotation) ?? defaults.tileRandomRotation
+        pressureRotationAmount = try container.decodeIfPresent(Float.self, forKey: .pressureRotationAmount)
+            ?? defaults.pressureRotationAmount
     }
 
     func encode(to encoder: Encoder) throws {
@@ -715,6 +776,10 @@ struct CompoundSecondaryTipSettings: Codable, Equatable, Sendable {
         try container.encode(size, forKey: .size)
         try container.encode(relativeSizeRatio, forKey: .relativeSizeRatio)
         try container.encode(spacingPercent, forKey: .spacingPercent)
+        try container.encode(opacity, forKey: .opacity)
+        try container.encode(scatterAmount, forKey: .scatterAmount)
+        try container.encode(sizeJitterAmount, forKey: .sizeJitterAmount)
+        try container.encode(angleJitterAmount, forKey: .angleJitterAmount)
         try container.encode(pressureSizeAmount, forKey: .pressureSizeAmount)
         try container.encode(pressureOpacityAmount, forKey: .pressureOpacityAmount)
         try container.encode(sizeCurveLow, forKey: .sizeCurveLow)
@@ -725,15 +790,19 @@ struct CompoundSecondaryTipSettings: Codable, Equatable, Sendable {
         try container.encode(opacityCurveHigh, forKey: .opacityCurveHigh)
         try container.encodeIfPresent(opacityPressureCurve, forKey: .opacityPressureCurve)
         try container.encode(tileRandomRotation, forKey: .tileRandomRotation)
+        try container.encode(pressureRotationAmount, forKey: .pressureRotationAmount)
     }
 }
 
 struct CompoundBrushSettings: Codable, Equatable, Sendable {
     enum CodingKeys: String, CodingKey {
+        case schemaVersion
         case enabled
         case mode
+        case primary
         case secondary
         case pressureMix
+        case secondaryStrength
         case globalPressureSizeAmount
         case globalPressureOpacityAmount
         case globalPaintJitterAmount
@@ -742,8 +811,16 @@ struct CompoundBrushSettings: Codable, Equatable, Sendable {
 
     var enabled: Bool
     var mode: CompoundBrushMode
+    /// The paint-producing A tip. A nil value is a legacy document and is
+    /// resolved from the outer brush tip until the editor materializes it.
+    /// The outer brush tip remains the stroke-range/envelope definition.
+    var primary: CompoundSecondaryTipSettings?
     var secondary: CompoundSecondaryTipSettings
     var pressureMix: CompoundPressureMixSettings
+    /// Overall contribution of the secondary tip. This is intentionally
+    /// independent from `pressureMix`: the latter controls which real tip is
+    /// dominant at each pressure, while this value only scales B as a whole.
+    var secondaryStrength: Float
     var globalPressureSizeAmount: Float
     var globalPressureOpacityAmount: Float
     var globalPaintJitterAmount: Float
@@ -752,8 +829,10 @@ struct CompoundBrushSettings: Codable, Equatable, Sendable {
     static let disabledDefault = CompoundBrushSettings(
         enabled: false,
         mode: .textureBlend,
+        primary: nil,
         secondary: .default,
         pressureMix: .default,
+        secondaryStrength: 1,
         globalPressureSizeAmount: 0,
         globalPressureOpacityAmount: 0,
         globalPaintJitterAmount: 0,
@@ -763,8 +842,10 @@ struct CompoundBrushSettings: Codable, Equatable, Sendable {
     init(
         enabled: Bool,
         mode: CompoundBrushMode,
+        primary: CompoundSecondaryTipSettings? = nil,
         secondary: CompoundSecondaryTipSettings,
         pressureMix: CompoundPressureMixSettings,
+        secondaryStrength: Float = 1,
         globalPressureSizeAmount: Float = 0,
         globalPressureOpacityAmount: Float = 0,
         globalPaintJitterAmount: Float = 0,
@@ -772,8 +853,10 @@ struct CompoundBrushSettings: Codable, Equatable, Sendable {
     ) {
         self.enabled = enabled
         self.mode = mode
+        self.primary = primary
         self.secondary = secondary
         self.pressureMix = pressureMix
+        self.secondaryStrength = min(max(secondaryStrength, 0), 1)
         self.globalPressureSizeAmount = globalPressureSizeAmount
         self.globalPressureOpacityAmount = globalPressureOpacityAmount
         self.globalPaintJitterAmount = globalPaintJitterAmount
@@ -785,8 +868,25 @@ struct CompoundBrushSettings: Codable, Equatable, Sendable {
         let defaults = CompoundBrushSettings.disabledDefault
         enabled = try container.decodeIfPresent(Bool.self, forKey: .enabled) ?? defaults.enabled
         mode = try container.decodeIfPresent(CompoundBrushMode.self, forKey: .mode) ?? defaults.mode
+        primary = try container.decodeIfPresent(CompoundSecondaryTipSettings.self, forKey: .primary)
         secondary = try container.decodeIfPresent(CompoundSecondaryTipSettings.self, forKey: .secondary) ?? defaults.secondary
-        pressureMix = try container.decodeIfPresent(CompoundPressureMixSettings.self, forKey: .pressureMix) ?? defaults.pressureMix
+        let decodedPressureMix = try container.decodeIfPresent(
+            CompoundPressureMixSettings.self,
+            forKey: .pressureMix
+        ) ?? defaults.pressureMix
+        if let decodedSecondaryStrength = try container.decodeIfPresent(Float.self, forKey: .secondaryStrength) {
+            pressureMix = decodedPressureMix
+            secondaryStrength = min(max(decodedSecondaryStrength, 0), 1)
+        } else if mode == .textureBlend, decodedPressureMix.isUniform {
+            // Older editor builds stored the "texture strength" slider by
+            // flattening all three pressure weights. Recover that visible
+            // strength, then restore the intended light-B/heavy-A crossover.
+            secondaryStrength = 1 - min(max(decodedPressureMix.primaryAtMidPressure, 0), 1)
+            pressureMix = .default
+        } else {
+            pressureMix = decodedPressureMix
+            secondaryStrength = defaults.secondaryStrength
+        }
         globalPressureSizeAmount = try container.decodeIfPresent(Float.self, forKey: .globalPressureSizeAmount)
             ?? defaults.globalPressureSizeAmount
         globalPressureOpacityAmount = try container.decodeIfPresent(Float.self, forKey: .globalPressureOpacityAmount)
@@ -799,10 +899,13 @@ struct CompoundBrushSettings: Codable, Equatable, Sendable {
 
     func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(2, forKey: .schemaVersion)
         try container.encode(enabled, forKey: .enabled)
         try container.encode(mode, forKey: .mode)
+        try container.encodeIfPresent(primary, forKey: .primary)
         try container.encode(secondary, forKey: .secondary)
         try container.encode(pressureMix, forKey: .pressureMix)
+        try container.encode(secondaryStrength, forKey: .secondaryStrength)
         try container.encode(globalPressureSizeAmount, forKey: .globalPressureSizeAmount)
         try container.encode(globalPressureOpacityAmount, forKey: .globalPressureOpacityAmount)
         try container.encode(globalPaintJitterAmount, forKey: .globalPaintJitterAmount)
@@ -1211,8 +1314,11 @@ struct BrushSettings: Codable, Sendable, Equatable {
         if points.count < 2 {
             points = [.init(x: 0, y: 0), .init(x: 1, y: 1)]
         }
-        points[0] = .init(x: 0, y: 0)
-        points[points.count - 1] = .init(x: 1, y: 1)
+        // Pressure curves may intentionally have non-zero output at minimum
+        // pressure (for example a crayon that never collapses below ~39% size).
+        // Pin the domain endpoints, but preserve their authored output values.
+        points[0] = .init(x: 0, y: points[0].y)
+        points[points.count - 1] = .init(x: 1, y: points[points.count - 1].y)
         return CurveChannelState(points: points)
     }
 
@@ -1352,7 +1458,9 @@ extension BrushSettings {
         buildMode == .opacityCap || (
             buildMode == .buildUp &&
             compoundBrush.enabled &&
-            compoundBrush.mode == .overlay
+            (compoundBrush.mode == .textureBlend ||
+             compoundBrush.mode == .overlay ||
+             compoundBrush.mode == .maskedOverlay)
         )
     }
 
@@ -1371,6 +1479,10 @@ extension BrushSettings {
             size: size,
             relativeSizeRatio: 1,
             spacingPercent: spacingPercent,
+            opacity: 1,
+            scatterAmount: scatterAmount,
+            sizeJitterAmount: sizeJitterAmount,
+            angleJitterAmount: angleJitterAmount,
             pressureSizeAmount: pressureSizeAmount,
             pressureOpacityAmount: pressureOpacityAmount,
             sizeCurveLow: sizeCurveLow,
@@ -1380,46 +1492,35 @@ extension BrushSettings {
             opacityCurveMid: opacityCurveMid,
             opacityCurveHigh: opacityCurveHigh,
             opacityPressureCurve: opacityPressureCurve,
-            tileRandomRotation: compoundBrush.secondary.tileRandomRotation
+            tileRandomRotation: compoundBrush.secondary.tileRandomRotation,
+            pressureRotationAmount: compoundBrush.secondary.pressureRotationAmount
         )
     }
 
+    /// A legacy compound brush stored its visible A tip directly on
+    /// `BrushSettings`. New compound brushes keep the outer tip as the stroke
+    /// range and store the paint-producing A tip independently.
+    var resolvedCompoundPrimaryTip: CompoundSecondaryTipSettings {
+        compoundBrush.primary ?? primaryTipAsCompoundSecondary
+    }
+
+    mutating func materializeCompoundPrimaryTipIfNeeded() {
+        if compoundBrush.primary == nil {
+            compoundBrush.primary = primaryTipAsCompoundSecondary
+        }
+    }
+
     mutating func copyPrimaryTipToCompoundSecondary() {
-        compoundBrush.secondary = primaryTipAsCompoundSecondary
+        compoundBrush.secondary = resolvedCompoundPrimaryTip
     }
 
     mutating func copyCompoundSecondaryTipToPrimary() {
-        let secondary = compoundBrush.secondary
-        tipShape = secondary.tipShape
-        customTipSourceSemantic = secondary.sourceSemantic
-        customTipAssetID = secondary.tipAssetID
-        customTipImportedSourceInfo = secondary.importedSourceInfo
-        customTipMaskData = secondary.customTipMaskData
-        customTipEnvelopeMaskData = secondary.customTipMaskData
-        customTipSoftness = secondary.softness
-        customTipRoundness = secondary.roundness
-        customTipAngleDegrees = secondary.angleDegrees
-        stampRotationDegrees = secondary.angleDegrees
-        followsStrokeDirection = secondary.followsStrokeDirection
-        size = secondary.resolvedBaseSize(for: size)
-        spacingPercent = secondary.spacingPercent
-        pressureSizeAmount = secondary.pressureSizeAmount
-        pressureOpacityAmount = secondary.pressureOpacityAmount
-        sizeCurveLow = secondary.sizeCurveLow
-        sizeCurveMid = secondary.sizeCurveMid
-        sizeCurveHigh = secondary.sizeCurveHigh
-        sizePressureCurve = nil
-        opacityCurveLow = secondary.opacityCurveLow
-        opacityCurveMid = secondary.opacityCurveMid
-        opacityCurveHigh = secondary.opacityCurveHigh
-        opacityPressureCurve = secondary.opacityPressureCurve
+        compoundBrush.primary = compoundBrush.secondary
     }
 
     mutating func swapCompoundPrimaryAndSecondaryTips() {
-        var originalPrimary = primaryTipAsCompoundSecondary
-        originalPrimary.sizeMode = .absolutePixels
-        originalPrimary.size = size
-        copyCompoundSecondaryTipToPrimary()
+        let originalPrimary = resolvedCompoundPrimaryTip
+        compoundBrush.primary = compoundBrush.secondary
         compoundBrush.secondary = originalPrimary
     }
 }

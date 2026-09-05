@@ -37,11 +37,12 @@ struct DocumentStateTests {
 
     @Test
     func compoundBrushEditorExposesOnlyDistinctRenderModes() {
-        #expect(CompoundBrushMode.editorCases == [.textureBlend, .subtract, .overlay])
+        #expect(CompoundBrushMode.editorCases == [.textureBlend, .subtract, .maskedOverlay])
         #expect(CompoundBrushMode.intersect.editorEquivalent == .textureBlend)
-        #expect(CompoundBrushMode.textureBlend.displayName == "纹理出现处")
+        #expect(CompoundBrushMode.textureBlend.displayName == "压力双笔尖")
         #expect(CompoundBrushMode.subtract.displayName == "纹理空白处")
-        #expect(CompoundBrushMode.overlay.displayName == "叠加遮罩")
+        #expect(CompoundBrushMode.maskedOverlay.displayName == "真实遮罩")
+        #expect(CompoundBrushMode.overlay.displayName == "旧版叠加")
     }
 
     @Test

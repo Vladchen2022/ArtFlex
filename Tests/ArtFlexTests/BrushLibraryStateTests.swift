@@ -551,12 +551,12 @@ struct BrushLibraryStateTests {
             .preset(id: BrushPreset.pressureGrainCrayonPresetID)
 
         #expect(relaunchedCrayon?.isBuiltIn == true)
-        #expect(relaunchedCrayon?.brush.buildMode == .buildUp)
+        #expect(relaunchedCrayon?.brush.buildMode == .opacityCap)
         #expect(
             secondViewModel.workspace.brushLibrary.selectedPresetID
                 == BrushPreset.pressureGrainCrayonPresetID
         )
-        #expect(secondViewModel.workspace.toolSession.brush.buildMode == .buildUp)
+        #expect(secondViewModel.workspace.toolSession.brush.buildMode == .opacityCap)
         #expect(
             secondViewModel.workspace.brushLibrary.presets
                 .filter { $0.id == BrushPreset.pressureGrainCrayonPresetID }.count == 1
@@ -621,35 +621,38 @@ struct BrushLibraryStateTests {
         #expect(crayon.name == "颗粒蜡笔")
         #expect(crayon.isBuiltIn)
         #expect(crayon.slotIndex == 0)
-        #expect(crayon.brush.size == 29)
-        #expect(crayon.brush.spacingPercent == 5)
-        #expect(crayon.brush.pressureSizeAmount == 0)
-        #expect(crayon.brush.pressureOpacityAmount == 0)
-        #expect(crayon.brush.buildMode == .buildUp)
-        #expect(crayon.brush.buildUpOpacityCompensationAmount == 1)
+        #expect(crayon.brush.size == 126)
+        #expect(crayon.brush.spacingPercent == 6)
+        #expect(crayon.brush.pressureSizeAmount == 1)
+        #expect(crayon.brush.pressureOpacityAmount == 1)
+        #expect(crayon.brush.followsStrokeDirection)
+        #expect(crayon.brush.buildMode == .opacityCap)
+        #expect(crayon.brush.buildUpOpacityCompensationAmount == 0)
         #expect(crayon.brush.compoundBrush.enabled)
-        #expect(crayon.brush.compoundBrush.mode == .overlay)
+        #expect(crayon.brush.compoundBrush.mode == .maskedOverlay)
         #expect(crayon.brush.compoundBrush.pressureMix == .balanced)
         #expect(crayon.brush.compoundBrush.globalPressureSizeAmount == 0)
-        #expect(crayon.brush.compoundBrush.globalPressureOpacityAmount == 1)
+        #expect(crayon.brush.compoundBrush.globalPressureOpacityAmount == 0)
         #expect(abs(crayon.brush.customTipSoftness - (44.0 / 49.0)) < 0.0001)
         #expect(
-            abs(crayon.brush.compoundBrush.secondary.relativeSizeRatio - (214.0 / 150.0)) < 0.0001
+            abs(crayon.brush.compoundBrush.secondary.relativeSizeRatio - 1.5454545) < 0.0001
         )
         #expect(crayon.brush.compoundBrush.secondary.spacingPercent == 75)
         #expect(abs(crayon.brush.compoundBrush.secondary.softness - (44.0 / 49.0)) < 0.0001)
         #expect(crayon.brush.compoundBrush.secondary.followsStrokeDirection == false)
-        #expect(crayon.brush.compoundBrush.secondary.pressureSizeAmount == 0)
-        #expect(crayon.brush.compoundBrush.secondary.pressureOpacityAmount == 0)
-        #expect(crayon.brush.compoundBrush.secondary.tileRandomRotation == 0)
+        #expect(crayon.brush.compoundBrush.secondary.pressureSizeAmount == 1)
+        #expect(crayon.brush.compoundBrush.secondary.pressureOpacityAmount == 1)
+        #expect(crayon.brush.compoundBrush.secondary.tileRandomRotation == 1)
+        #expect(crayon.brush.compoundBrush.secondary.pressureRotationAmount == 1)
         #expect(
             crayon.brush.compoundBrush.secondary.opacityPressureCurve?.points == [
-                .init(x: 0, y: 0),
+                .init(x: 0, y: 0.492462),
+                .init(x: 0.253695, y: 1),
                 .init(x: 1, y: 1)
             ]
         )
         #expect(
-            abs(crayon.brush.compoundBrush.secondary.resolvedOpacityFactor(for: 0) - 1) < 0.0001
+            abs(crayon.brush.compoundBrush.secondary.resolvedOpacityFactor(for: 0) - 0.492462) < 0.0001
         )
         #expect(
             abs(crayon.brush.compoundBrush.secondary.resolvedOpacityFactor(for: 0.5) - 1) < 0.0001
@@ -657,6 +660,13 @@ struct BrushLibraryStateTests {
         #expect(
             crayon.brush.resolvedOpacityPressureCurveState.points == [
                 .init(x: 0, y: 0),
+                .init(x: 1, y: 1)
+            ]
+        )
+        #expect(
+            crayon.brush.resolvedSizePressureCurveState.points == [
+                .init(x: 0, y: 0.389558),
+                .init(x: 0.305221, y: 0.658635),
                 .init(x: 1, y: 1)
             ]
         )
@@ -707,12 +717,12 @@ struct BrushLibraryStateTests {
         #expect(migrated.presets.filter { $0.id == BrushPreset.pressureGrainCrayonPresetID }.count == 1)
         #expect(crayon.slotIndex == 9)
         #expect(crayon.name == "颗粒蜡笔")
-        #expect(crayon.brush.spacingPercent == 5)
-        #expect(crayon.brush.buildMode == .buildUp)
-        #expect(crayon.brush.buildUpOpacityCompensationAmount == 1)
-        #expect(crayon.brush.compoundBrush.mode == .overlay)
-        #expect(crayon.brush.compoundBrush.globalPressureOpacityAmount == 1)
-        #expect(crayon.brush.compoundBrush.secondary.tileRandomRotation == 0)
+        #expect(crayon.brush.spacingPercent == 6)
+        #expect(crayon.brush.buildMode == .opacityCap)
+        #expect(crayon.brush.buildUpOpacityCompensationAmount == 0)
+        #expect(crayon.brush.compoundBrush.mode == .maskedOverlay)
+        #expect(crayon.brush.compoundBrush.globalPressureOpacityAmount == 0)
+        #expect(crayon.brush.compoundBrush.secondary.tileRandomRotation == 1)
     }
 
     @Test

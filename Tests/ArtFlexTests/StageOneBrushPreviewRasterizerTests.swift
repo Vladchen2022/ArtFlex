@@ -175,6 +175,120 @@ struct StageOneBrushPreviewRasterizerTests {
     }
 
     @Test
+    func pressureDualTipPaintsBAtLightPressureBothAtMidPressureAndAAtHeavyPressure() throws {
+        let resolution = 192
+        var brush = BrushSettings.stageOneDefault
+        brush.size = 80
+        brush.spacingPercent = 100
+        brush.buildMode = .opacityCap
+        brush.tipShape = .hardRound
+        brush.pressureSizeAmount = 0
+        brush.pressureOpacityAmount = 0
+        brush.compoundBrush.enabled = true
+        brush.compoundBrush.mode = .textureBlend
+        brush.materializeCompoundPrimaryTipIfNeeded()
+        brush.compoundBrush.primary?.tipShape = .customRound
+        brush.compoundBrush.primary?.sourceSemantic = .customMask
+        brush.compoundBrush.primary?.customTipMaskData = makeVerticalMask(side: 64)
+        brush.compoundBrush.primary?.softness = 44.0 / 49.0
+        brush.compoundBrush.primary?.sizeMode = .relativeToPrimary
+        brush.compoundBrush.primary?.relativeSizeRatio = 1
+        brush.compoundBrush.primary?.spacingPercent = 100
+        brush.compoundBrush.primary?.pressureSizeAmount = 0
+        brush.compoundBrush.primary?.pressureOpacityAmount = 0
+        brush.compoundBrush.pressureMix = .default
+        brush.compoundBrush.secondaryStrength = 1
+        brush.compoundBrush.secondary.tipShape = .customRound
+        brush.compoundBrush.secondary.sourceSemantic = .customMask
+        brush.compoundBrush.secondary.customTipMaskData = makeHorizontalMask(side: 64)
+        brush.compoundBrush.secondary.sizeMode = .relativeToPrimary
+        brush.compoundBrush.secondary.relativeSizeRatio = 1
+        brush.compoundBrush.secondary.spacingPercent = 100
+        brush.compoundBrush.secondary.softness = 44.0 / 49.0
+        brush.compoundBrush.secondary.pressureSizeAmount = 0
+        brush.compoundBrush.secondary.pressureOpacityAmount = 0
+
+        func render(pressure: Float) throws -> [UInt8] {
+            var samplingState: BrushStrokeSamplingState?
+            return try #require(StageOneBrushPreviewRasterizer.strokeAlphaBytes(
+                for: brush,
+                resolution: resolution,
+                points: [
+                    StrokePoint(x: 96, y: 96, pressure: pressure),
+                    StrokePoint(x: 97, y: 96, pressure: pressure)
+                ],
+                samplingState: &samplingState,
+                flushPendingSamples: true
+            ))
+        }
+
+        let light = try render(pressure: 0)
+        let middle = try render(pressure: 0.5)
+        let heavy = try render(pressure: 1)
+
+        let primaryExclusive = heavy.indices.filter { heavy[$0] > 48 && light[$0] < 8 }
+        let secondaryExclusive = light.indices.filter { light[$0] > 48 && heavy[$0] < 8 }
+        let primaryStillVisibleAtMid = primaryExclusive.filter { middle[$0] > 20 }
+        let secondaryStillVisibleAtMid = secondaryExclusive.filter { middle[$0] > 20 }
+
+        #expect(alphaMax(in: light) > 48)
+        #expect(alphaMax(in: heavy) > 48)
+        #expect(primaryExclusive.count > 40)
+        #expect(secondaryExclusive.count > 40)
+        #expect(primaryStillVisibleAtMid.count > primaryExclusive.count / 2)
+        #expect(secondaryStillVisibleAtMid.count > secondaryExclusive.count / 2)
+    }
+
+    @Test
+    func trueMaskOverlayDoesNotFillHolesInThePrimaryTip() throws {
+        var brush = BrushSettings.stageOneDefault
+        brush.size = 72
+        brush.spacingPercent = 12
+        brush.buildMode = .opacityCap
+        brush.tipShape = .customRound
+        brush.customTipSourceSemantic = .customMask
+        brush.customTipMaskData = makeVerticalMask(side: 32)
+        brush.customTipEnvelopeMaskData = Data(repeating: 255, count: 32 * 32)
+        brush.customTipSoftness = 44.0 / 49.0
+        brush.pressureSizeAmount = 0
+        brush.pressureOpacityAmount = 0
+        brush.compoundBrush.enabled = true
+        brush.compoundBrush.mode = .maskedOverlay
+        brush.compoundBrush.globalPressureSizeAmount = 0
+        brush.compoundBrush.globalPressureOpacityAmount = 0
+        brush.compoundBrush.secondary.tipShape = .hardRound
+        brush.compoundBrush.secondary.sizeMode = .relativeToPrimary
+        brush.compoundBrush.secondary.relativeSizeRatio = 1
+        brush.compoundBrush.secondary.spacingPercent = 12
+        brush.compoundBrush.secondary.pressureSizeAmount = 0
+        brush.compoundBrush.secondary.pressureOpacityAmount = 0
+
+        func render(_ candidate: BrushSettings) throws -> [UInt8] {
+            var samplingState: BrushStrokeSamplingState?
+            return try #require(StageOneBrushPreviewRasterizer.strokeAlphaBytes(
+                for: candidate,
+                resolution: 192,
+                points: [
+                    StrokePoint(x: 48, y: 96, pressure: 1),
+                    StrokePoint(x: 144, y: 96, pressure: 1)
+                ],
+                samplingState: &samplingState,
+                flushPendingSamples: true
+            ))
+        }
+
+        let trueMask = try render(brush)
+        var legacyBrush = brush
+        legacyBrush.compoundBrush.mode = .overlay
+        let legacy = try render(legacyBrush)
+
+        let trueMaskCoverage = alphaCoverageCount(in: trueMask, threshold: 64)
+        let legacyCoverage = alphaCoverageCount(in: legacy, threshold: 64)
+        #expect(trueMaskCoverage > 0)
+        #expect(legacyCoverage > trueMaskCoverage * 2)
+    }
+
+    @Test
     func editorMaskPreviewCropsAndUsesOpaqueMonochromePixels() throws {
         guard let image = StageOneBrushPreviewRasterizer.editorMaskImage(
             from: makeVerticalMask(side: 16),
@@ -348,7 +462,7 @@ struct StageOneBrushPreviewRasterizerTests {
     }
 
     @Test
-    func pressureGrainCrayonMovesFromSparseTextureToDenseHeavyStroke() throws {
+    func pressureGrainCrayonPreservesTextureWhilePressureBuildsCoverage() throws {
         var sourceBrush = BrushSettings.stageOneDefault
         sourceBrush.tipShape = .customRound
         sourceBrush.customTipSourceSemantic = .importedImage
@@ -370,7 +484,8 @@ struct StageOneBrushPreviewRasterizerTests {
         let crayon = try #require(
             BrushPreset.pressureGrainCrayon(derivedFrom: sourcePreset, slotIndex: 4)
         )
-        #expect(crayon.brush.buildMode == .buildUp)
+        #expect(crayon.brush.buildMode == .opacityCap)
+        #expect(crayon.brush.compoundBrush.mode == .maskedOverlay)
 
         let crayonBrush = crayon.brush
 
@@ -433,8 +548,8 @@ struct StageOneBrushPreviewRasterizerTests {
         #expect(heavyAverage > mediumAverage * 1.5)
         #expect(lightCoverage > 0)
         #expect(alphaMax(in: heavy) >= 248)
-        #expect((pressureSeriesInteriorAverages.first ?? 0) > 0.03)
-        #expect((pressureSeriesInteriorAverages.last ?? 0) > 0.88)
+        #expect((pressureSeriesInteriorAverages.first ?? 0) > 0.001)
+        #expect((pressureSeriesInteriorAverages.last ?? 0) > 0.25)
         for index in 1..<pressureSeriesInteriorAverages.count {
             let previous = pressureSeriesInteriorAverages[index - 1]
             let current = pressureSeriesInteriorAverages[index]
@@ -444,10 +559,12 @@ struct StageOneBrushPreviewRasterizerTests {
         // Medium pressure must retain visible A-tip texture instead of becoming
         // a uniform translucent sheet.
         #expect(mediumInteriorVariation > 0.1)
-        // The Photoshop reference resolves the primary body to an essentially
-        // solid mark at maximum pressure.
-        #expect(heavyDenseCoverage > 0.95)
-        #expect(heavyNearBlackCoverage > 0.95)
+        // A real masking brush must not replace the source tip with a solid
+        // envelope at high pressure. Visible holes and alpha variation remain.
+        #expect(heavyDenseCoverage > 0.15)
+        #expect(heavyDenseCoverage < 0.8)
+        #expect(heavyNearBlackCoverage > 0.15)
+        #expect(heavyNearBlackCoverage < 0.8)
 
     }
 
@@ -625,6 +742,18 @@ struct StageOneBrushPreviewRasterizerTests {
         var bytes = [UInt8](repeating: 0, count: side * side)
         let xRange = max(0, side / 2 - 1)...min(side - 1, side / 2)
         let yRange = max(0, side / 5)...min(side - 1, side - side / 5)
+        for y in yRange {
+            for x in xRange {
+                bytes[(y * side) + x] = 255
+            }
+        }
+        return Data(bytes)
+    }
+
+    private func makeHorizontalMask(side: Int) -> Data {
+        var bytes = [UInt8](repeating: 0, count: side * side)
+        let xRange = max(0, side / 5)...min(side - 1, side - side / 5)
+        let yRange = max(0, side / 2 - 1)...min(side - 1, side / 2)
         for y in yRange {
             for x in xRange {
                 bytes[(y * side) + x] = 255

@@ -266,7 +266,7 @@ final class ArtFlexApplicationDelegate: NSObject, NSApplicationDelegate, NSWindo
     }
 
     func applicationDidResignActive(_ notification: Notification) {
-        viewModel?.pauseDrawingStatsTracking()
+        viewModel?.applicationDidResignActiveForPersistence()
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {

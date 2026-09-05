@@ -2997,6 +2997,24 @@ final class WorkspaceViewModel: ObservableObject {
         return brush
     }
 
+    func brushDraft(
+        _ source: BrushSettings,
+        applyingCompoundPrimaryTipImageLibraryItem assetID: BrushTipImageAssetID
+    ) -> BrushSettings? {
+        guard let item = bootstrap.workspaceStore.state.tipImageLibrary.item(id: assetID),
+              let maskData = item.maskData else {
+            return nil
+        }
+        var brush = source
+        brush.materializeCompoundPrimaryTipIfNeeded()
+        brush.compoundBrush.primary?.tipShape = .customRound
+        brush.compoundBrush.primary?.sourceSemantic = .importedImage
+        brush.compoundBrush.primary?.tipAssetID = item.id
+        brush.compoundBrush.primary?.importedSourceInfo = item.sourceInfo
+        brush.compoundBrush.primary?.customTipMaskData = maskData
+        return brush
+    }
+
     func applyTextureFillTipImageLibraryItem(_ assetID: BrushTipImageAssetID) {
         guard let item = bootstrap.workspaceStore.state.tipImageLibrary.item(id: assetID),
               let maskData = item.maskData else {
@@ -13843,10 +13861,11 @@ final class WorkspaceViewModel: ObservableObject {
 
     private func finishProjectSave(
         _ prepared: PreparedProjectSave,
-        result: Result<Data?, Error>
+        result: Result<ProjectWriteOutcome, Error>
     ) {
         do {
-            let previewPNGData = try result.get()
+            let outcome = try result.get()
+            let previewPNGData = outcome.previewPNGData
             currentProjectURL = prepared.url
             let thumbnailApplied = previewPNGData.map {
                 bootstrap.filePanelService.applyProjectThumbnail($0, to: prepared.url)
@@ -13863,6 +13882,9 @@ final class WorkspaceViewModel: ObservableObject {
             var suffix = hasUnsavedChanges ? "；保存后又有新改动" : ""
             if previewPNGData != nil, !thumbnailApplied {
                 suffix += "；Finder 缩略图更新失败"
+            }
+            if let versionBackupWarning = outcome.versionBackupWarning {
+                suffix += "；\(versionBackupWarning)"
             }
             showStatus(.init(
                 kind: .success,
@@ -14283,6 +14305,12 @@ final class WorkspaceViewModel: ObservableObject {
         }
     }
 
+    func applicationDidResignActiveForPersistence() {
+        pauseDrawingStatsTracking()
+        guard hasUnsavedChanges else { return }
+        scheduleRecoveryAutosave(delay: .zero)
+    }
+
     private func performRecoveryAutosave(generation: UInt64) {
         guard hasUnsavedChanges else { return }
         guard !timelapseRecorder.isBusy else {
@@ -14356,7 +14384,11 @@ final class WorkspaceViewModel: ObservableObject {
                         let payload = try persistenceBox.value.materializeProjectPayload(
                             from: capture
                         )
-                        try persistenceBox.value.writeCapturedProject(payload, to: stagingURL)
+                        _ = try persistenceBox.value.writeCapturedProject(
+                            payload,
+                            to: stagingURL,
+                            recordsVersionBackup: false
+                        )
                     }
                 }.value
 

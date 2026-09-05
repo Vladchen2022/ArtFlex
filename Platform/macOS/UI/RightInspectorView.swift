@@ -7098,7 +7098,8 @@ private struct NavigatorPreviewPanel: View {
                     onApplyTransform: {},
                     onCancelTransform: {},
                     isLuminosityPreviewEnabled: false,
-                    onAdjustBrushSize: { _ in }
+                    onAdjustBrushSize: { _ in },
+                    outsideCanvasBrushInputRelay: nil
                 )
                 .id(viewModel.documentRenderGeneration)
                 .frame(

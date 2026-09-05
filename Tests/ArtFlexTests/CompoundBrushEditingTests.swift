@@ -1,5 +1,6 @@
 import Testing
 import CoreGraphics
+import Foundation
 @testable import ArtFlex
 
 struct CompoundBrushEditingTests {
@@ -40,6 +41,33 @@ struct CompoundBrushEditingTests {
     }
 
     @Test
+    func enablingCompoundBrushPreservesRangeAndMaterializesIndependentPrimaryTip() throws {
+        var brush = BrushSettings.stageOneDefault
+        brush.tipShape = .square
+        brush.spacingPercent = 7
+        brush.scatterAmount = 0.35
+        brush.setCompoundBrushEnabledUsingArtistDefault(true)
+
+        let primary = try #require(brush.compoundBrush.primary)
+        #expect(brush.tipShape == .square)
+        #expect(brush.spacingPercent == 7)
+        #expect(primary.tipShape == .square)
+        #expect(primary.spacingPercent == 7)
+        #expect(primary.scatterAmount == 0.35)
+
+        brush.compoundBrush.primary?.spacingPercent = 31
+        brush.compoundBrush.primary?.opacity = 0.72
+        brush.compoundBrush.primary?.sizeJitterAmount = 0.44
+        let data = try JSONEncoder().encode(brush)
+        let decoded = try JSONDecoder().decode(BrushSettings.self, from: data)
+
+        #expect(decoded.spacingPercent == 7)
+        #expect(decoded.compoundBrush.primary?.spacingPercent == 31)
+        #expect(decoded.compoundBrush.primary?.opacity == 0.72)
+        #expect(decoded.compoundBrush.primary?.sizeJitterAmount == 0.44)
+    }
+
+    @Test
     func drawingPadConvertsAppKitYAxisToTopDownRasterCoordinates() {
         let bounds = CGRect(x: 10, y: 20, width: 200, height: 100)
 
@@ -62,32 +90,50 @@ struct CompoundBrushEditingTests {
     }
 
     @Test
+    func pressureMixCurveUsesWholePlotCoordinatesAndSelectsNearestPoint() {
+        let plot = CGRect(x: 20, y: 20, width: 300, height: 100)
+
+        #expect(CompoundPressureMixCurveInteraction.nearestControlPoint(toX: 24, in: plot) == 0)
+        #expect(CompoundPressureMixCurveInteraction.nearestControlPoint(toX: 176, in: plot) == 1)
+        #expect(CompoundPressureMixCurveInteraction.nearestControlPoint(toX: 318, in: plot) == 2)
+        #expect(abs(CompoundPressureMixCurveInteraction.secondaryStrength(atY: 20, in: plot) - 1) < 0.0001)
+        #expect(abs(CompoundPressureMixCurveInteraction.secondaryStrength(atY: 70, in: plot) - 0.5) < 0.0001)
+        #expect(abs(CompoundPressureMixCurveInteraction.secondaryStrength(atY: 120, in: plot)) < 0.0001)
+    }
+
+    @Test
     func primaryAndSecondaryTipsCanBeCopiedAndSwapped() {
         var brush = BrushSettings.stageOneDefault
+        brush.compoundBrush.enabled = true
         brush.tipShape = .square
         brush.size = 64
         brush.spacingPercent = 23
         brush.pressureSizeAmount = 0.72
+        brush.materializeCompoundPrimaryTipIfNeeded()
+        brush.compoundBrush.primary?.tipShape = .customRound
+        brush.compoundBrush.primary?.spacingPercent = 41
         brush.compoundBrush.secondary.tipShape = .softRound
         brush.compoundBrush.secondary.sizeMode = .absolutePixels
         brush.compoundBrush.secondary.size = 19
         brush.compoundBrush.secondary.spacingPercent = 88
         brush.compoundBrush.secondary.pressureSizeAmount = 0.18
 
-        let originalPrimary = brush.primaryTipAsCompoundSecondary
+        let originalRangeShape = brush.tipShape
+        let originalRangeSpacing = brush.spacingPercent
+        let originalPrimary = brush.resolvedCompoundPrimaryTip
         let originalSecondary = brush.compoundBrush.secondary
         brush.swapCompoundPrimaryAndSecondaryTips()
 
-        #expect(brush.tipShape == originalSecondary.tipShape)
-        #expect(brush.size == originalSecondary.size)
-        #expect(brush.spacingPercent == originalSecondary.spacingPercent)
+        #expect(brush.tipShape == originalRangeShape)
+        #expect(brush.spacingPercent == originalRangeSpacing)
+        #expect(brush.resolvedCompoundPrimaryTip.tipShape == originalSecondary.tipShape)
+        #expect(brush.resolvedCompoundPrimaryTip.spacingPercent == originalSecondary.spacingPercent)
         #expect(brush.compoundBrush.secondary.tipShape == originalPrimary.tipShape)
         #expect(brush.compoundBrush.secondary.spacingPercent == originalPrimary.spacingPercent)
-        #expect(brush.compoundBrush.secondary.resolvedBaseSize(for: brush.size) == 64)
 
         brush.copyPrimaryTipToCompoundSecondary()
-        #expect(brush.compoundBrush.secondary.tipShape == brush.tipShape)
-        #expect(brush.compoundBrush.secondary.spacingPercent == brush.spacingPercent)
+        #expect(brush.compoundBrush.secondary.tipShape == brush.resolvedCompoundPrimaryTip.tipShape)
+        #expect(brush.compoundBrush.secondary.spacingPercent == brush.resolvedCompoundPrimaryTip.spacingPercent)
     }
 
     @Test
@@ -105,15 +151,32 @@ struct CompoundBrushEditingTests {
     }
 
     @Test
-    func textureStrengthUsesArtistFacingInverseOfPrimaryWeight() {
+    func textureStrengthDoesNotFlattenPressureMix() {
         var settings = CompoundBrushSettings.disabledDefault
+        let originalMix = settings.pressureMix
         settings.setUniformTextureStrength(0.72)
 
-        #expect(abs(settings.pressureMix.primaryAtLowPressure - 0.28) < 0.0001)
-        #expect(abs(settings.pressureMix.primaryAtMidPressure - 0.28) < 0.0001)
-        #expect(abs(settings.pressureMix.primaryAtHighPressure - 0.28) < 0.0001)
+        #expect(settings.pressureMix == originalMix)
+        #expect(abs(settings.secondaryStrength - 0.72) < 0.0001)
         #expect(abs(settings.displayedTextureStrength - 0.72) < 0.0001)
-        #expect(settings.hasVariableTextureStrength == false)
+        #expect(settings.hasVariableTextureStrength)
+    }
+
+    @Test
+    func legacyUniformTextureStrengthMigratesToIndependentStrengthAndPressureCrossover() throws {
+        var current = CompoundBrushSettings.disabledDefault
+        current.pressureMix = .secondaryOnly
+        let encoded = try JSONEncoder().encode(current)
+        var object = try #require(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        object.removeValue(forKey: "secondaryStrength")
+        let legacyData = try JSONSerialization.data(withJSONObject: object)
+
+        let migrated = try JSONDecoder().decode(CompoundBrushSettings.self, from: legacyData)
+
+        #expect(migrated.pressureMix == .default)
+        #expect(migrated.secondaryStrength == 1)
+        #expect(migrated.pressureMix.resolvedPrimaryWeight(for: 0) == 0)
+        #expect(migrated.pressureMix.resolvedPrimaryWeight(for: 1) == 1)
     }
 
     @Test

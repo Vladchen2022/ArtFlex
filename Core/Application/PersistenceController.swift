@@ -54,6 +54,12 @@ struct FrozenProjectCapture: @unchecked Sendable {
     var previewTexture: MTLTexture?
 }
 
+struct ProjectWriteOutcome: Sendable, Equatable {
+    var previewPNGData: Data?
+    var versionBackupURL: URL?
+    var versionBackupWarning: String?
+}
+
 enum PersistenceError: LocalizedError {
     case missingLayerTexture(LayerID)
     case invalidProject(String)
@@ -71,7 +77,22 @@ enum PersistenceError: LocalizedError {
     }
 }
 
+private enum ProjectVersionBackupError: LocalizedError {
+    case sourceInsideBackupRoot
+
+    var errorDescription: String? {
+        switch self {
+        case .sourceInsideBackupRoot:
+            return "不能把版本副本再次写入版本目录"
+        }
+    }
+}
+
 final class PersistenceController {
+    static let recoveryBackupGenerationCount = 8
+    static let staleRecoveryStagingAge: TimeInterval = 24 * 60 * 60
+    static let maximumProjectVersionBackupCount = 5
+
     private let workspaceStore: WorkspaceStore
     private let layerSurfaceStore: StageOneLayerSurfaceStore
     private let serializer: LayerTextureSerializer
@@ -82,6 +103,7 @@ final class PersistenceController {
     private let archiveReadLimits: ProjectArchiveReadLimits
     private let canvasCapacityPolicy: CanvasCapacityPolicy
     let recoveryProjectURL: URL
+    let versionBackupRootURL: URL
 
     init(
         workspaceStore: WorkspaceStore,
@@ -89,7 +111,8 @@ final class PersistenceController {
         serializer: LayerTextureSerializer,
         canvasCapacityPolicy: CanvasCapacityPolicy = .standard,
         recommendedMaxWorkingSetSize: UInt64? = nil,
-        recoveryRootURL: URL? = nil
+        recoveryRootURL: URL? = nil,
+        versionBackupRootURL: URL? = nil
     ) {
         self.workspaceStore = workspaceStore
         self.layerSurfaceStore = layerSurfaceStore
@@ -108,7 +131,10 @@ final class PersistenceController {
             "Autosave.artflex",
             isDirectory: true
         )
-        Self.discardAbandonedRecoveryStagingProjects(in: rootURL)
+        self.versionBackupRootURL = versionBackupRootURL
+            ?? rootURL.deletingLastPathComponent()
+                .appendingPathComponent("VersionBackups", isDirectory: true)
+        Self.discardStaleRecoveryStagingProjects(in: rootURL)
     }
 
     func saveProject(
@@ -120,7 +146,7 @@ final class PersistenceController {
             referenceImages: referenceImages,
             savedSnapshots: savedSnapshots
         )
-        try writeCapturedProject(payload, to: fileURL)
+        _ = try writeCapturedProject(payload, to: fileURL)
     }
 
     /// Freezes the current workspace and GPU layer resources into a value payload. Call this at a
@@ -217,24 +243,53 @@ final class PersistenceController {
     }
 
     @discardableResult
-    func writeCapturedProject(_ payload: ProjectArchivePayload, to fileURL: URL) throws -> Data? {
+    func writeCapturedProject(
+        _ payload: ProjectArchivePayload,
+        to fileURL: URL,
+        recordsVersionBackup: Bool = true
+    ) throws -> ProjectWriteOutcome {
         if Self.shouldUseV2Archive(for: fileURL) {
             try writeFlatArchive(payload, to: fileURL)
-            return payload.previewPNGData
+        } else {
+            guard payload.referenceImages.isEmpty, payload.savedSnapshots.isEmpty else {
+                throw PersistenceError.legacyFormatCannotStoreAssets
+            }
+
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            encoder.dateEncodingStrategy = .iso8601
+
+            // Legacy JSON remains writable for asset-free compatibility projects.
+            let data = try encoder.encode(payload.package)
+            try data.write(to: fileURL, options: .atomic)
         }
 
-        guard payload.referenceImages.isEmpty, payload.savedSnapshots.isEmpty else {
-            throw PersistenceError.legacyFormatCannotStoreAssets
+        guard recordsVersionBackup else {
+            return ProjectWriteOutcome(
+                previewPNGData: payload.previewPNGData,
+                versionBackupURL: nil,
+                versionBackupWarning: nil
+            )
         }
 
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        encoder.dateEncodingStrategy = .iso8601
-
-        // Legacy JSON remains writable for asset-free compatibility projects.
-        let data = try encoder.encode(payload.package)
-        try data.write(to: fileURL, options: .atomic)
-        return nil
+        let versionResult = archiveVerifiedProjectVersion(
+            at: fileURL,
+            documentID: payload.package.document.metadata.drawingStatsID
+        )
+        switch versionResult {
+        case .success(let backupURL):
+            return ProjectWriteOutcome(
+                previewPNGData: payload.previewPNGData,
+                versionBackupURL: backupURL,
+                versionBackupWarning: nil
+            )
+        case .failure(let error):
+            return ProjectWriteOutcome(
+                previewPNGData: payload.previewPNGData,
+                versionBackupURL: nil,
+                versionBackupWarning: "工程已保存，但版本副本创建失败：\(error.localizedDescription)"
+            )
+        }
     }
 
     private func writeFlatArchive(_ payload: ProjectArchivePayload, to destinationURL: URL) throws {
@@ -273,6 +328,127 @@ final class PersistenceController {
         }
     }
 
+    private func archiveVerifiedProjectVersion(
+        at projectURL: URL,
+        documentID: UUID
+    ) -> Result<URL, Error> {
+        Result {
+            let fileManager = FileManager.default
+            let standardizedSource = projectURL.standardizedFileURL
+            let standardizedBackupRoot = versionBackupRootURL.standardizedFileURL
+            let backupRootPrefix = standardizedBackupRoot.path.hasSuffix("/")
+                ? standardizedBackupRoot.path
+                : standardizedBackupRoot.path + "/"
+            guard !standardizedSource.path.hasPrefix(backupRootPrefix) else {
+                throw ProjectVersionBackupError.sourceInsideBackupRoot
+            }
+
+            let documentDirectory = standardizedBackupRoot.appendingPathComponent(
+                documentID.uuidString.lowercased(),
+                isDirectory: true
+            )
+            try fileManager.createDirectory(
+                at: documentDirectory,
+                withIntermediateDirectories: true
+            )
+
+            let timestamp = Self.projectVersionTimestamp(for: Date())
+            let sourceName = Self.safeVersionFilenameComponent(
+                standardizedSource.deletingPathExtension().lastPathComponent
+            )
+            let sourceExtension = standardizedSource.pathExtension.isEmpty
+                ? "artflex"
+                : standardizedSource.pathExtension
+            let uniqueSuffix = UUID().uuidString.prefix(8).lowercased()
+            let finalURL = documentDirectory.appendingPathComponent(
+                "\(timestamp)-\(uniqueSuffix)-\(sourceName).\(sourceExtension)",
+                isDirectory: false
+            )
+            let stagingURL = documentDirectory.appendingPathComponent(
+                ".Pending-Version-\(UUID().uuidString).\(sourceExtension)",
+                isDirectory: false
+            )
+            defer { try? fileManager.removeItem(at: stagingURL) }
+
+            try fileManager.copyItem(at: standardizedSource, to: stagingURL)
+            _ = try inspectProject(from: stagingURL)
+            try fileManager.moveItem(at: stagingURL, to: finalURL)
+            pruneProjectVersionBackups(in: documentDirectory, preserving: finalURL)
+            return finalURL
+        }
+    }
+
+    func projectVersionBackupURLs(for documentID: UUID) -> [URL] {
+        let directory = versionBackupRootURL.appendingPathComponent(
+            documentID.uuidString.lowercased(),
+            isDirectory: true
+        )
+        guard let candidates = try? FileManager.default.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return []
+        }
+        return candidates
+            .filter { (try? $0.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true }
+            .sorted { $0.lastPathComponent > $1.lastPathComponent }
+    }
+
+    private func pruneProjectVersionBackups(in directory: URL, preserving newestURL: URL) {
+        guard let candidates = try? FileManager.default.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return
+        }
+        let newestPath = newestURL.standardizedFileURL.resolvingSymlinksInPath().path
+        let versions = candidates
+            .filter { candidate in
+                candidate.standardizedFileURL.resolvingSymlinksInPath().path != newestPath
+                    && (try? candidate.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true
+            }
+            .sorted { $0.lastPathComponent > $1.lastPathComponent }
+        let keepOlderCount = max(Self.maximumProjectVersionBackupCount - 1, 0)
+        for expiredURL in versions.dropFirst(keepOlderCount) {
+            try? FileManager.default.removeItem(at: expiredURL)
+        }
+    }
+
+    private static func projectVersionTimestamp(for date: Date) -> String {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.locale = Locale(identifier: "en_US_POSIX")
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let components = calendar.dateComponents(
+            [.year, .month, .day, .hour, .minute, .second, .nanosecond],
+            from: date
+        )
+        let milliseconds = (components.nanosecond ?? 0) / 1_000_000
+        return String(
+            format: "%04d%02d%02d-%02d%02d%02d-%03d",
+            components.year ?? 0,
+            components.month ?? 0,
+            components.day ?? 0,
+            components.hour ?? 0,
+            components.minute ?? 0,
+            components.second ?? 0,
+            milliseconds
+        )
+    }
+
+    private static func safeVersionFilenameComponent(_ source: String) -> String {
+        let trimmed = source.trimmingCharacters(in: .whitespacesAndNewlines)
+        let sanitized = trimmed.map { character -> Character in
+            if character == "/" || character == ":" || character == "\\" {
+                return "_"
+            }
+            return character
+        }
+        let result = String(sanitized).prefix(80)
+        return result.isEmpty ? "未命名" : String(result)
+    }
+
     func saveRecoveryProject(
         referenceImages: [ProjectReferenceImagePayload] = [],
         savedSnapshots: [PersistentCanvasSnapshotPayload] = []
@@ -283,7 +459,11 @@ final class PersistenceController {
         )
         let stagingURL = try makeRecoveryStagingURL()
         do {
-            try writeCapturedProject(payload, to: stagingURL)
+            _ = try writeCapturedProject(
+                payload,
+                to: stagingURL,
+                recordsVersionBackup: false
+            )
             try installRecoveryProject(from: stagingURL)
         } catch {
             discardRecoveryStagingProject(at: stagingURL)
@@ -313,9 +493,20 @@ final class PersistenceController {
                fileManager.fileExists(atPath: oldestBackupURL.path) {
                 try fileManager.removeItem(at: oldestBackupURL)
             }
-            if backupURLs.count >= 2,
-               fileManager.fileExists(atPath: backupURLs[0].path) {
-                try fileManager.moveItem(at: backupURLs[0], to: backupURLs[1])
+            if backupURLs.count >= 2 {
+                for destinationIndex in stride(
+                    from: backupURLs.count - 1,
+                    through: 1,
+                    by: -1
+                ) {
+                    let sourceURL = backupURLs[destinationIndex - 1]
+                    let destinationURL = backupURLs[destinationIndex]
+                    guard fileManager.fileExists(atPath: sourceURL.path) else { continue }
+                    if fileManager.fileExists(atPath: destinationURL.path) {
+                        try fileManager.removeItem(at: destinationURL)
+                    }
+                    try fileManager.moveItem(at: sourceURL, to: destinationURL)
+                }
             }
             _ = try fileManager.replaceItemAt(
                 recoveryProjectURL,
@@ -383,7 +574,7 @@ final class PersistenceController {
 
     private var recoveryBackupProjectURLs: [URL] {
         let root = recoveryProjectURL.deletingLastPathComponent()
-        return (1...2).map { generation in
+        return (1...Self.recoveryBackupGenerationCount).map { generation in
             root.appendingPathComponent("Autosave-\(generation).artflex", isDirectory: true)
         }
     }
@@ -503,18 +694,32 @@ final class PersistenceController {
             .appendingPathComponent("Recovery", isDirectory: true)
     }
 
-    private static func discardAbandonedRecoveryStagingProjects(in rootURL: URL) {
-        guard let candidates = try? FileManager.default.contentsOfDirectory(
+    static func discardStaleRecoveryStagingProjects(
+        in rootURL: URL,
+        now: Date = Date(),
+        staleAfter: TimeInterval = staleRecoveryStagingAge,
+        fileManager: FileManager = .default
+    ) {
+        guard let candidates = try? fileManager.contentsOfDirectory(
             at: rootURL,
-            includingPropertiesForKeys: [.isDirectoryKey],
+            includingPropertiesForKeys: [.contentModificationDateKey, .creationDateKey],
             options: []
         ) else {
             return
         }
+        let cutoff = now.addingTimeInterval(-max(staleAfter, 0))
         for candidate in candidates where
             candidate.lastPathComponent.hasPrefix("Pending-")
                 || candidate.lastPathComponent.hasPrefix(".Pending-") {
-            try? FileManager.default.removeItem(at: candidate)
+            let values = try? candidate.resourceValues(forKeys: [
+                .contentModificationDateKey,
+                .creationDateKey
+            ])
+            guard let lastWrite = values?.contentModificationDate ?? values?.creationDate,
+                  lastWrite <= cutoff else {
+                continue
+            }
+            try? fileManager.removeItem(at: candidate)
         }
     }
 

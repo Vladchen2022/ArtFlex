@@ -244,4 +244,82 @@ struct BrushStrokeSamplingTests {
         #expect(primaryFullGap.map { abs($0 - 1.74) < 0.05 } == true)
         #expect(secondaryFullGap.map { abs($0 - 29.132) < 0.1 } == true)
     }
+
+    @Test
+    func pressureDualTipSamplesRangeAAndBAtThreeIndependentCadences() throws {
+        let device = MTLCreateSystemDefaultDevice()
+        #expect(device != nil)
+        guard let device else { return }
+
+        let renderer = try StageOneBrushRenderer(device: device)
+        var brush = BrushSettings.stageOneDefault
+        brush.size = 40
+        brush.spacingPercent = 5
+        brush.compoundBrush.enabled = true
+        brush.compoundBrush.mode = .textureBlend
+        brush.materializeCompoundPrimaryTipIfNeeded()
+        brush.compoundBrush.primary?.sizeMode = .relativeToPrimary
+        brush.compoundBrush.primary?.relativeSizeRatio = 1
+        brush.compoundBrush.primary?.spacingPercent = 20
+        brush.compoundBrush.secondary.sizeMode = .relativeToPrimary
+        brush.compoundBrush.secondary.relativeSizeRatio = 1
+        brush.compoundBrush.secondary.spacingPercent = 75
+
+        let stroke = StrokeDescriptor(
+            tool: .brush,
+            color: .black,
+            brush: brush,
+            points: [
+                StrokePoint(x: 0, y: 20, pressure: 0.5),
+                StrokePoint(x: 160, y: 20, pressure: 0.5)
+            ],
+            selectionShape: nil
+        )
+
+        var rangeState: BrushStrokeSamplingState?
+        var primaryState: BrushStrokeSamplingState?
+        var secondaryState: BrushStrokeSamplingState?
+        var rangeSamples = renderer.debugInterpolatedStrokeSamples(
+            for: stroke,
+            samplingState: &rangeState
+        )
+        var primarySamples = renderer.debugInterpolatedCompoundPrimarySamples(
+            for: stroke,
+            samplingState: &primaryState
+        )
+        var secondarySamples = renderer.debugInterpolatedCompoundSecondarySamples(
+            for: stroke,
+            samplingState: &secondaryState
+        )
+
+        rangeState?.isFlushing = true
+        primaryState?.isFlushing = true
+        secondaryState?.isFlushing = true
+        let flush = StrokeDescriptor(
+            tool: .brush,
+            color: .black,
+            brush: brush,
+            points: [],
+            selectionShape: nil,
+            skipLeadingStamp: true
+        )
+        rangeSamples += renderer.debugInterpolatedStrokeSamples(
+            for: flush,
+            samplingState: &rangeState
+        )
+        primarySamples += renderer.debugInterpolatedCompoundPrimarySamples(
+            for: flush,
+            samplingState: &primaryState
+        )
+        secondarySamples += renderer.debugInterpolatedCompoundSecondarySamples(
+            for: flush,
+            samplingState: &secondaryState
+        )
+
+        #expect(rangeSamples.count > primarySamples.count * 3)
+        #expect(primarySamples.count > secondarySamples.count * 2)
+        #expect(rangeSamples.count > 60)
+        #expect(primarySamples.count > 15)
+        #expect(secondarySamples.count >= 5)
+    }
 }

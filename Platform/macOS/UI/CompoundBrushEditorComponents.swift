@@ -196,7 +196,9 @@ final class CompoundBrushDrawingPadNSView: NSView {
         testPattern: CompoundBrushPreviewPath?,
         testPatternToken: Int
     ) {
-        fixedPressure = min(max(pressure, 0.01), 1)
+        let clampedPressure = min(max(pressure, 0.01), 1)
+        let testPatternPressureChanged = abs(fixedPressure - clampedPressure) > 0.0001
+        fixedPressure = clampedPressure
 
         if previewBackground != background {
             previewBackground = background
@@ -221,6 +223,10 @@ final class CompoundBrushDrawingPadNSView: NSView {
         self.testPattern = testPattern
         if self.testPatternToken != testPatternToken {
             self.testPatternToken = testPatternToken
+            loadTestPattern()
+            return
+        }
+        if testPatternPressureChanged, testPattern != nil {
             loadTestPattern()
             return
         }
@@ -567,14 +573,15 @@ struct CompoundPressureMixCurveEditor: View {
     }
 }
 
-/// Presents the existing A/B pressure mix in artist-facing terms: the vertical
-/// axis is always texture strength, regardless of the underlying primary weight.
+/// Presents the A/B pressure mix in artist-facing terms: the vertical axis is
+/// B's share, while the complementary share is painted by A.
 struct CompoundTextureStrengthCurveEditor: View {
     let mix: CompoundPressureMixSettings
     let onChange: (CompoundPressureMixSettings) -> Void
     let onEditingChanged: (Bool) -> Void
 
     @State private var isDragging = false
+    @State private var activeControlPoint: Int?
 
     var body: some View {
         GeometryReader { proxy in
@@ -610,34 +617,18 @@ struct CompoundTextureStrengthCurveEditor: View {
                         .overlay(Circle().stroke(Color.accentColor, lineWidth: 2))
                         .frame(width: 15, height: 15)
                         .position(point)
-                        .contentShape(Circle().inset(by: -10))
-                        .gesture(
-                            DragGesture(minimumDistance: 0)
-                                .onChanged { drag in
-                                    if isDragging == false {
-                                        isDragging = true
-                                        onEditingChanged(true)
-                                    }
-                                    updatePoint(index, y: drag.location.y, plot: plot)
-                                }
-                                .onEnded { drag in
-                                    updatePoint(index, y: drag.location.y, plot: plot)
-                                    isDragging = false
-                                    onEditingChanged(false)
-                                }
-                        )
-                        .help(["轻压纹理", "中压纹理", "重压纹理"][index])
+                        .help(["轻压时 B 的比例", "中压时 B 的比例", "重压时 B 的比例"][index])
                 }
 
                 VStack {
                     HStack {
-                        Text("纹理强")
+                        Text("B 强 / A 弱")
                         Spacer()
                         Text("拖动白点")
                     }
                     Spacer()
                     HStack {
-                        Text("纹理弱")
+                        Text("B 弱 / A 强")
                         Spacer()
                         Text("轻压 → 重压")
                     }
@@ -647,6 +638,32 @@ struct CompoundTextureStrengthCurveEditor: View {
                 .padding(8)
                 .allowsHitTesting(false)
             }
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 0, coordinateSpace: .local)
+                    .onChanged { drag in
+                        if isDragging == false {
+                            isDragging = true
+                            activeControlPoint = CompoundPressureMixCurveInteraction.nearestControlPoint(
+                                toX: drag.location.x,
+                                in: plot
+                            )
+                            onEditingChanged(true)
+                        }
+                        guard let activeControlPoint else { return }
+                        updatePoint(activeControlPoint, y: drag.location.y, plot: plot)
+                    }
+                    .onEnded { drag in
+                        let index = activeControlPoint ?? CompoundPressureMixCurveInteraction.nearestControlPoint(
+                            toX: drag.location.x,
+                            in: plot
+                        )
+                        updatePoint(index, y: drag.location.y, plot: plot)
+                        activeControlPoint = nil
+                        isDragging = false
+                        onEditingChanged(false)
+                    }
+            )
         }
     }
 
@@ -668,7 +685,10 @@ struct CompoundTextureStrengthCurveEditor: View {
     }
 
     private func updatePoint(_ index: Int, y: CGFloat, plot: CGRect) {
-        let strength = Float(min(max((plot.maxY - y) / max(plot.height, 1), 0), 1))
+        let strength = CompoundPressureMixCurveInteraction.secondaryStrength(
+            atY: y,
+            in: plot
+        )
         let primaryWeight = 1 - strength
         var updated = mix
         switch index {
@@ -677,6 +697,19 @@ struct CompoundTextureStrengthCurveEditor: View {
         default: updated.primaryAtHighPressure = primaryWeight
         }
         onChange(updated)
+    }
+}
+
+enum CompoundPressureMixCurveInteraction {
+    static func nearestControlPoint(toX x: CGFloat, in plot: CGRect) -> Int {
+        let candidates = [plot.minX, plot.midX, plot.maxX]
+        return candidates.enumerated().min { lhs, rhs in
+            abs(lhs.element - x) < abs(rhs.element - x)
+        }?.offset ?? 1
+    }
+
+    static func secondaryStrength(atY y: CGFloat, in plot: CGRect) -> Float {
+        Float(min(max((plot.maxY - y) / max(plot.height, 1), 0), 1))
     }
 }
 

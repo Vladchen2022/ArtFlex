@@ -173,7 +173,11 @@ struct ProjectPersistenceIntegrationTests {
             savedSnapshots: [savedSnapshot, replacementSnapshot]
         )
         let stagingURL = try controller.makeRecoveryStagingURL()
-        try controller.writeCapturedProject(capturedReplacement, to: stagingURL)
+        try controller.writeCapturedProject(
+            capturedReplacement,
+            to: stagingURL,
+            recordsVersionBackup: false
+        )
         try controller.installRecoveryProject(from: stagingURL)
         #expect(
             try controller.openProject(from: controller.recoveryProjectURL).savedSnapshots
@@ -196,7 +200,11 @@ struct ProjectPersistenceIntegrationTests {
             savedSnapshots: [savedSnapshot, replacementSnapshot, thirdSnapshot]
         )
         let thirdStagingURL = try controller.makeRecoveryStagingURL()
-        try controller.writeCapturedProject(capturedThirdGeneration, to: thirdStagingURL)
+        try controller.writeCapturedProject(
+            capturedThirdGeneration,
+            to: thirdStagingURL,
+            recordsVersionBackup: false
+        )
         try controller.installRecoveryProject(from: thirdStagingURL)
 
         let secondBackupURL = recoveryRoot.appendingPathComponent(
@@ -215,5 +223,135 @@ struct ProjectPersistenceIntegrationTests {
         #expect(controller.bestAvailableRecoveryProjectURL() == secondBackupURL)
         try controller.discardRecoveryProject()
         #expect(!controller.hasRecoveryProject)
+    }
+
+    @Test
+    @MainActor
+    func recoveryRotationRetainsEightVerifiedGenerationsInOrder() throws {
+        guard let metalContext = MetalDeviceContext() else {
+            Issue.record("Metal unavailable")
+            return
+        }
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ArtFlex-RecoveryRotation-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        var workspace = WorkspaceState.stageOneDefault
+        workspace.document.canvasSize = .init(width: 4, height: 3)
+        let store = WorkspaceStore(state: workspace)
+        let surfaces = StageOneLayerSurfaceStore()
+        surfaces.prepareTextures(for: workspace.document, metal: metalContext)
+        let controller = PersistenceController(
+            workspaceStore: store,
+            layerSurfaceStore: surfaces,
+            serializer: LayerTextureSerializer(metalContext: metalContext),
+            recoveryRootURL: root.appendingPathComponent("Recovery", isDirectory: true),
+            versionBackupRootURL: root.appendingPathComponent("Versions", isDirectory: true)
+        )
+
+        for generation in 1...10 {
+            var payload = try controller.captureProjectPayload()
+            payload.package.document.metadata.name = "恢复代数 \(generation)"
+            let stagingURL = try controller.makeRecoveryStagingURL()
+            _ = try controller.writeCapturedProject(
+                payload,
+                to: stagingURL,
+                recordsVersionBackup: false
+            )
+            try controller.installRecoveryProject(from: stagingURL)
+        }
+
+        let expectedNames = (2...10).reversed().map { "恢复代数 \($0)" }
+        let candidates = [controller.recoveryProjectURL] + (1...8).map {
+            controller.recoveryProjectURL.deletingLastPathComponent()
+                .appendingPathComponent("Autosave-\($0).artflex")
+        }
+        let names = try candidates.map {
+            try controller.inspectProject(from: $0).workspace.document.metadata.name
+        }
+        #expect(names == expectedNames)
+    }
+
+    @Test
+    @MainActor
+    func formalSavesKeepFiveVerifiedVersionBackupsWithoutBackingUpRecoveryWrites() throws {
+        guard let metalContext = MetalDeviceContext() else {
+            Issue.record("Metal unavailable")
+            return
+        }
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ArtFlex-VersionBackups-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        var workspace = WorkspaceState.stageOneDefault
+        workspace.document.canvasSize = .init(width: 4, height: 3)
+        let documentID = workspace.document.metadata.drawingStatsID
+        let store = WorkspaceStore(state: workspace)
+        let surfaces = StageOneLayerSurfaceStore()
+        surfaces.prepareTextures(for: workspace.document, metal: metalContext)
+        let controller = PersistenceController(
+            workspaceStore: store,
+            layerSurfaceStore: surfaces,
+            serializer: LayerTextureSerializer(metalContext: metalContext),
+            recoveryRootURL: root.appendingPathComponent("Recovery", isDirectory: true),
+            versionBackupRootURL: root.appendingPathComponent("Versions", isDirectory: true)
+        )
+        let destinationURL = root.appendingPathComponent("长期作业.artflex")
+
+        for revision in 1...7 {
+            var payload = try controller.captureProjectPayload()
+            payload.package.document.metadata.name = "正式版本 \(revision)"
+            let outcome = try controller.writeCapturedProject(payload, to: destinationURL)
+            #expect(outcome.versionBackupURL != nil)
+            #expect(outcome.versionBackupWarning == nil)
+        }
+
+        let backups = controller.projectVersionBackupURLs(for: documentID)
+        #expect(backups.count == PersistenceController.maximumProjectVersionBackupCount)
+        let backupNames = try backups.map {
+            try controller.inspectProject(from: $0).workspace.document.metadata.name
+        }
+        #expect(backupNames == [
+            "正式版本 7", "正式版本 6", "正式版本 5", "正式版本 4", "正式版本 3"
+        ])
+
+        var recoveryPayload = try controller.captureProjectPayload()
+        recoveryPayload.package.document.metadata.name = "仅自动恢复"
+        let stagingURL = try controller.makeRecoveryStagingURL()
+        _ = try controller.writeCapturedProject(
+            recoveryPayload,
+            to: stagingURL,
+            recordsVersionBackup: false
+        )
+        try controller.installRecoveryProject(from: stagingURL)
+        #expect(controller.projectVersionBackupURLs(for: documentID).count == 5)
+    }
+
+    @Test
+    func startupCleanupRemovesOnlyExpiredRecoveryStagingFiles() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ArtFlex-StagingCleanup-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let freshPending = root.appendingPathComponent("Pending-fresh.artflex")
+        let oldPending = root.appendingPathComponent("Pending-old.artflex")
+        let oldHiddenPending = root.appendingPathComponent(".Pending-Version-old.artflex")
+        let ordinaryFile = root.appendingPathComponent("Autosave.artflex")
+        for url in [freshPending, oldPending, oldHiddenPending, ordinaryFile] {
+            try Data([1]).write(to: url)
+        }
+        let now = Date(timeIntervalSince1970: 2_000_000_000)
+        let oldDate = now.addingTimeInterval(-PersistenceController.staleRecoveryStagingAge - 1)
+        try FileManager.default.setAttributes([.modificationDate: oldDate], ofItemAtPath: oldPending.path)
+        try FileManager.default.setAttributes([.modificationDate: oldDate], ofItemAtPath: oldHiddenPending.path)
+        try FileManager.default.setAttributes([.modificationDate: oldDate], ofItemAtPath: ordinaryFile.path)
+        try FileManager.default.setAttributes([.modificationDate: now], ofItemAtPath: freshPending.path)
+
+        PersistenceController.discardStaleRecoveryStagingProjects(in: root, now: now)
+
+        #expect(FileManager.default.fileExists(atPath: freshPending.path))
+        #expect(!FileManager.default.fileExists(atPath: oldPending.path))
+        #expect(!FileManager.default.fileExists(atPath: oldHiddenPending.path))
+        #expect(FileManager.default.fileExists(atPath: ordinaryFile.path))
     }
 }

@@ -5,6 +5,36 @@ import Testing
 
 struct SavedSnapshotSessionTests {
     @Test
+    func nonProductionAppBundlesUseProcessIsolatedPersistenceWhileProductionStaysCompatible() throws {
+        let temporaryRoot = URL(fileURLWithPath: "/tmp/ArtFlex-Isolation-Policy", isDirectory: true)
+        #expect(AppPersistenceIsolationPolicy.isolatedRootURL(
+            bundleIdentifier: "com.vladchen.artflex",
+            temporaryDirectory: temporaryRoot,
+            processIdentifier: 100
+        ) == nil)
+        #expect(AppPersistenceIsolationPolicy.isolatedRootURL(
+            bundleIdentifier: "com.vladchen.artflex.debug",
+            temporaryDirectory: temporaryRoot,
+            processIdentifier: 100
+        ) == nil)
+
+        let first = try #require(AppPersistenceIsolationPolicy.isolatedRootURL(
+            bundleIdentifier: "com.artflex.ui-test",
+            temporaryDirectory: temporaryRoot,
+            processIdentifier: 100
+        ))
+        let second = try #require(AppPersistenceIsolationPolicy.isolatedRootURL(
+            bundleIdentifier: "com.artflex.ui-test",
+            temporaryDirectory: temporaryRoot,
+            processIdentifier: 101
+        ))
+        #expect(first != second)
+        #expect(first.path.contains("com.artflex.ui-test/Process-100/ApplicationSupport/ArtFlex"))
+        #expect(second.path.contains("com.artflex.ui-test/Process-101/ApplicationSupport/ArtFlex"))
+        #expect(!first.path.hasPrefix(NSHomeDirectory() + "/Library/Application Support/ArtFlex"))
+    }
+
+    @Test
     func expiredRecoveryDeadlineSchedulesARetryInTheFuture() {
         let clock = ContinuousClock()
         let now = clock.now
@@ -17,6 +47,29 @@ struct SavedSnapshotSessionTests {
         )
 
         #expect(deadline > now)
+    }
+
+    @Test
+    @MainActor
+    func resigningActiveWritesDirtyCanvasRecoveryWithoutWaitingForNormalDelay() async throws {
+        let harness = try SavedSnapshotHarness(canvasSize: .init(width: 32, height: 32))
+        defer {
+            try? FileManager.default.removeItem(at: harness.recoveryRootURL)
+        }
+        harness.viewModel.fillAtPoint(.init(x: 4, y: 4))
+        #expect(harness.viewModel.hasUnsavedChanges)
+
+        harness.viewModel.applicationDidResignActiveForPersistence()
+        for _ in 0..<300 where !harness.viewModel.hasRecoveryProject {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+
+        #expect(harness.viewModel.hasRecoveryProject)
+        #expect(
+            try harness.bootstrap.persistenceController.inspectProject(
+                from: harness.bootstrap.persistenceController.recoveryProjectURL
+            ).workspace.document.canvasSize == .init(width: 32, height: 32)
+        )
     }
 
     @Test

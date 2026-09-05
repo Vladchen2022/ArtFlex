@@ -90,6 +90,70 @@ func shouldPrioritizeCanvasKeyHandlerBeforeToolShortcut(
     return key == "b" || key == "e"
 }
 
+enum EyedropperSamplingGestureMode: Equatable {
+    case inactive
+    case dedicatedTool
+    case temporaryOverride
+
+    func shouldSample(with modifiers: NSEvent.ModifierFlags) -> Bool {
+        switch self {
+        case .inactive:
+            return false
+        case .dedicatedTool:
+            return true
+        case .temporaryOverride:
+            return modifiers.contains(.option)
+        }
+    }
+}
+
+func eyedropperSamplingGestureModeForMouseDown(
+    activeTool: ToolKind,
+    allowsTemporaryOverride: Bool,
+    modifiers: NSEvent.ModifierFlags
+) -> EyedropperSamplingGestureMode {
+    if activeTool == .eyedropper {
+        return .dedicatedTool
+    }
+    if allowsTemporaryOverride, modifiers.contains(.option) {
+        return .temporaryOverride
+    }
+    return .inactive
+}
+
+func shouldBeginOutsideCanvasBrushStroke(
+    activeTool: ToolKind,
+    isPanModeActive: Bool,
+    modifiers: NSEvent.ModifierFlags,
+    startsOutsideCanvas: Bool
+) -> Bool {
+    activeTool == .brush &&
+        !isPanModeActive &&
+        !modifiers.contains(.option) &&
+        startsOutsideCanvas
+}
+
+@MainActor
+final class OutsideCanvasBrushInputRelay: ObservableObject {
+    weak var captureView: StrokeCaptureMTKView?
+
+    func begin(with event: NSEvent) {
+        captureView?.beginOutsideCanvasBrushStroke(with: event)
+    }
+
+    func append(events: [NSEvent]) {
+        captureView?.appendOutsideCanvasBrushStroke(events: events)
+    }
+
+    func end(with event: NSEvent) {
+        captureView?.endOutsideCanvasBrushStroke(with: event)
+    }
+
+    func cancel() {
+        captureView?.cancelOutsideCanvasBrushStroke()
+    }
+}
+
 struct MetalCanvasHost: NSViewRepresentable {
     let sceneSnapshot: CanvasSceneSnapshot
     let externalRedrawRevision: UInt64
@@ -169,6 +233,7 @@ struct MetalCanvasHost: NSViewRepresentable {
     let onCancelTransform: () -> Void
     let isLuminosityPreviewEnabled: Bool
     let onAdjustBrushSize: (Float) -> Void
+    let outsideCanvasBrushInputRelay: OutsideCanvasBrushInputRelay?
     private let brushFeelLogger = Logger(subsystem: "ArtFlex", category: "BrushFeel")
 
     func makeCoordinator() -> MetalCanvasCoordinator {
@@ -260,6 +325,7 @@ struct MetalCanvasHost: NSViewRepresentable {
         view.wantsLayer = true
         view.viewportRenderScale = viewportRenderScale
         view.displaySamplingMode = displaySamplingMode
+        outsideCanvasBrushInputRelay?.captureView = view
         view.layer?.backgroundColor = CGColor(
             red: 1,
             green: 1,
@@ -304,6 +370,7 @@ struct MetalCanvasHost: NSViewRepresentable {
         let previousLuminosityPreview = context.coordinator.isLuminosityPreviewEnabled
         context.coordinator.isLuminosityPreviewEnabled = isLuminosityPreviewEnabled
         if let view = nsView as? StrokeCaptureMTKView {
+            outsideCanvasBrushInputRelay?.captureView = view
             view.contextMenuSelectionShape = isTransformingSelection ? nil : sceneSnapshot.selectionShape
             view.selectionRefinementRequestHandler = onRequestSelectionRefinement
             let previousCanvasSize = view.canvasSize
@@ -872,6 +939,8 @@ final class StrokeCaptureMTKView: MTKView {
     private var activeFreeTransformDragPoint: CanvasPoint?
     private var activeFreeTransformDragMode: FreeTransformInteractionMode?
     private var isGradientDragActive = false
+    private var eyedropperSamplingGestureMode: EyedropperSamplingGestureMode = .inactive
+    private var isOutsideCanvasBrushStrokeActive = false
     private var previousMouseCoalescingEnabled: Bool?
     private var brushDebugRecords: [BrushInputDebugRecord] = []
     private let minimumTabletPressure: Float = 0.02
@@ -1173,8 +1242,14 @@ final class StrokeCaptureMTKView: MTKView {
             return
         }
 
-        if activeTool == .eyedropper || shouldUseEyedropperOverride(for: event) {
-            strokeDelegate?.strokeCaptureView(self, didSampleColorAt: sample(from: event).location)
+        let requestedEyedropperGestureMode = eyedropperSamplingGestureModeForMouseDown(
+            activeTool: activeTool,
+            allowsTemporaryOverride: allowsTemporaryEyedropperOverride,
+            modifiers: activeModifierFlags
+        )
+        if requestedEyedropperGestureMode != .inactive {
+            eyedropperSamplingGestureMode = requestedEyedropperGestureMode
+            sampleEyedropperColorIfInsideCanvas(from: event)
             setNeedsDisplay(bounds)
             return
         }
@@ -1314,6 +1389,14 @@ final class StrokeCaptureMTKView: MTKView {
             return
         }
 
+        if eyedropperSamplingGestureMode != .inactive {
+            if eyedropperSamplingGestureMode.shouldSample(with: activeModifierFlags) {
+                sampleEyedropperColorIfInsideCanvas(from: event)
+            }
+            setNeedsDisplay(bounds)
+            return
+        }
+
         if activeTool == .polygonSelection {
             switch selectionInteractionMode {
             case .beginMoving:
@@ -1374,12 +1457,6 @@ final class StrokeCaptureMTKView: MTKView {
             setNeedsDisplay(bounds)
             return
         }
-        if activeTool == .eyedropper || shouldUseEyedropperOverride(for: event) {
-            strokeDelegate?.strokeCaptureView(self, didSampleColorAt: sample(from: event).location)
-            setNeedsDisplay(bounds)
-            return
-        }
-
         if activeTool == .smartSelection {
             setNeedsDisplay(bounds)
             return
@@ -1517,6 +1594,17 @@ final class StrokeCaptureMTKView: MTKView {
         updateCursorIndicator()
         updateCursorAppearance()
 
+        if eyedropperSamplingGestureMode != .inactive {
+            if eyedropperSamplingGestureMode.shouldSample(with: activeModifierFlags) {
+                sampleEyedropperColorIfInsideCanvas(from: event)
+            }
+            eyedropperSamplingGestureMode = .inactive
+            lastSample = nil
+            lastPressure = nil
+            setNeedsDisplay(bounds)
+            return
+        }
+
         if patternPlacementPhase != .idle {
             strokeDelegate?.strokeCaptureView(self, didEndPatternPlacementAt: sample(from: event).location)
             lastSample = nil
@@ -1638,7 +1726,7 @@ final class StrokeCaptureMTKView: MTKView {
             return
         }
 
-        if activeTool == .eyedropper || activeTool == .bucket || shouldUseEyedropperOverride(for: event) {
+        if activeTool == .eyedropper || activeTool == .bucket {
             lastSample = nil
             lastPressure = nil
             setNeedsDisplay(bounds)
@@ -1912,6 +2000,18 @@ final class StrokeCaptureMTKView: MTKView {
         return sample
     }
 
+    private func sampleEyedropperColorIfInsideCanvas(from event: NSEvent) {
+        let location = convert(event.locationInWindow, from: nil)
+        guard bounds.contains(location) else { return }
+        let mapping = mapViewLocationToCanvasSample(
+            viewLocation: location,
+            viewBounds: bounds,
+            canvasSize: canvasSize,
+            clampsToDocumentBounds: true
+        )
+        strokeDelegate?.strokeCaptureView(self, didSampleColorAt: mapping.canvasPoint)
+    }
+
     private func isBrushLikeToolActive() -> Bool {
         activeTool == .brush || activeTool == .eraser || activeTool == .smudge
             || activeTool == .brightnessAdjust || activeTool == .colorVitalization
@@ -2168,11 +2268,6 @@ final class StrokeCaptureMTKView: MTKView {
         return flushedSampleBatchCount
     }
 
-    private func shouldUseEyedropperOverride(for event: NSEvent) -> Bool {
-        allowsTemporaryEyedropperOverride &&
-            event.modifierFlags.intersection(.deviceIndependentFlagsMask).contains(.option)
-    }
-
     private func beginContinuousTransformRendering() {
         enableSetNeedsDisplay = false
         isPaused = false
@@ -2237,12 +2332,83 @@ final class StrokeCaptureMTKView: MTKView {
         pendingTransformLatestPoint = nil
         pendingTransformInteractionMode = nil
         isGradientDragActive = false
+        eyedropperSamplingGestureMode = .inactive
+        isOutsideCanvasBrushStrokeActive = false
         activeFreeTransformDragPoint = nil
         activeFreeTransformDragMode = nil
         isPaused = true
         enableSetNeedsDisplay = true
         setNeedsDisplay(bounds)
         updateCursorAppearance()
+    }
+
+    func beginOutsideCanvasBrushStroke(with event: NSEvent) {
+        guard activeTool == .brush, !isPanModeActive, !isOutsideCanvasBrushStrokeActive else { return }
+        activeModifierFlags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        guard !activeModifierFlags.contains(.option) else { return }
+
+        window?.makeFirstResponder(self)
+        cancelBrushSizePreviewSettle()
+        isAdjustingBrushSizePreview = false
+        brushSizePreviewExpiresAtNs = 0
+        suppressBrushOutlineForActiveInput()
+        hoverLocation = convert(event.locationInWindow, from: nil)
+        updateCursorIndicator()
+        updateCursorAppearance()
+
+        beginDemandDrivenStrokeRendering()
+        beginBrushStrokeDiagnostics()
+        strokePacketIndex = 0
+        strokeInputSampleCount = 0
+        smoothedPosition = nil
+        let firstSample = smoothed(sample(from: event))
+        lastSample = firstSample
+        isOutsideCanvasBrushStrokeActive = true
+        enqueuePendingBrushBegin()
+        emitCoalescedStrokeSamples([firstSample])
+        strokePacketIndex += 1
+        setNeedsDisplay(bounds)
+    }
+
+    func appendOutsideCanvasBrushStroke(events: [NSEvent]) {
+        guard isOutsideCanvasBrushStrokeActive, !events.isEmpty else { return }
+        if let lastEvent = events.last {
+            activeModifierFlags = lastEvent.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            hoverLocation = convert(lastEvent.locationInWindow, from: nil)
+            updateCursorIndicator()
+            updateCursorAppearance()
+        }
+        let samples = events.map { smoothed(sample(from: $0)) }
+        emitCoalescedStrokeSamples(samples)
+        lastSample = samples.last
+        strokePacketIndex += 1
+        setNeedsDisplay(bounds)
+    }
+
+    func endOutsideCanvasBrushStroke(with event: NSEvent) {
+        guard isOutsideCanvasBrushStrokeActive else { return }
+        appendOutsideCanvasBrushStroke(events: [event])
+        finishOutsideCanvasBrushStroke()
+    }
+
+    func cancelOutsideCanvasBrushStroke() {
+        guard isOutsideCanvasBrushStrokeActive else { return }
+        finishOutsideCanvasBrushStroke()
+    }
+
+    private func finishOutsideCanvasBrushStroke() {
+        enqueuePendingBrushEnd()
+        _ = flushPendingBrushInputQueue()
+        endContinuousStrokeRendering()
+        endBrushStrokeDiagnostics()
+        scheduleBrushOutlineRevealAfterIdle()
+        isOutsideCanvasBrushStrokeActive = false
+        strokePacketIndex = 0
+        strokeInputSampleCount = 0
+        lastSample = nil
+        smoothedPosition = nil
+        lastPressure = nil
+        setNeedsDisplay(bounds)
     }
 
     private func updateCursorIndicator() {

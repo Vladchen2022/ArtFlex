@@ -290,6 +290,63 @@ struct BrushInputDispatchTests {
     }
 
     @Test
+    func outsideCanvasBrushStartOnlyClaimsPlainBrushGestures() {
+        #expect(shouldBeginOutsideCanvasBrushStroke(
+            activeTool: .brush,
+            isPanModeActive: false,
+            modifiers: [],
+            startsOutsideCanvas: true
+        ))
+        #expect(!shouldBeginOutsideCanvasBrushStroke(
+            activeTool: .brush,
+            isPanModeActive: false,
+            modifiers: [.option],
+            startsOutsideCanvas: true
+        ))
+        #expect(!shouldBeginOutsideCanvasBrushStroke(
+            activeTool: .brush,
+            isPanModeActive: true,
+            modifiers: [],
+            startsOutsideCanvas: true
+        ))
+        #expect(!shouldBeginOutsideCanvasBrushStroke(
+            activeTool: .eraser,
+            isPanModeActive: false,
+            modifiers: [],
+            startsOutsideCanvas: true
+        ))
+        #expect(!shouldBeginOutsideCanvasBrushStroke(
+            activeTool: .brush,
+            isPanModeActive: false,
+            modifiers: [],
+            startsOutsideCanvas: false
+        ))
+    }
+
+    @Test
+    func temporaryEyedropperTracksOnlyUntilOptionIsReleased() {
+        #expect(eyedropperSamplingGestureModeForMouseDown(
+            activeTool: .brush,
+            allowsTemporaryOverride: true,
+            modifiers: [.option]
+        ) == .temporaryOverride)
+        #expect(eyedropperSamplingGestureModeForMouseDown(
+            activeTool: .brush,
+            allowsTemporaryOverride: true,
+            modifiers: []
+        ) == .inactive)
+        #expect(eyedropperSamplingGestureModeForMouseDown(
+            activeTool: .eyedropper,
+            allowsTemporaryOverride: false,
+            modifiers: []
+        ) == .dedicatedTool)
+        #expect(EyedropperSamplingGestureMode.temporaryOverride.shouldSample(with: [.option]))
+        #expect(!EyedropperSamplingGestureMode.temporaryOverride.shouldSample(with: []))
+        #expect(EyedropperSamplingGestureMode.dedicatedTool.shouldSample(with: []))
+        #expect(!EyedropperSamplingGestureMode.inactive.shouldSample(with: [.option]))
+    }
+
+    @Test
     func localBrushSizePreviewIsNotStompedUntilModelCatchesUpOrTimeout() {
         let keepLocal = resolveBrushSizePreview(
             displayBrushSize: 40,

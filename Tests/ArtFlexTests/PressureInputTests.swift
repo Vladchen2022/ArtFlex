@@ -88,6 +88,22 @@ struct PressureInputTests {
     }
 
     @Test
+    func pressureCurvePreservesAuthoredEndpointOutputValues() {
+        let state = CurveChannelState(points: [
+            .init(x: 0.2, y: 0.39),
+            .init(x: 0.6, y: 0.72),
+            .init(x: 0.9, y: 0.94)
+        ])
+
+        let normalized = BrushSettings.normalizedPressureCurveState(state)
+
+        #expect(normalized.points.first?.x == 0)
+        #expect(abs((normalized.points.first?.y ?? 0) - 0.39) < 0.0001)
+        #expect(normalized.points.last?.x == 1)
+        #expect(abs((normalized.points.last?.y ?? 0) - 0.94) < 0.0001)
+    }
+
+    @Test
     func spacingCompensatedBuildUpAlphaReducesPerDabFlowForTightSpacing() {
         let loose = BrushSettings.spacingCompensatedBuildUpAlpha(
             targetVisibleAlpha: 0.7,

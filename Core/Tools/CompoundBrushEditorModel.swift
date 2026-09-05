@@ -9,6 +9,9 @@ extension BrushSettings {
         if startsNewCompoundConfiguration {
             buildMode = .buildUp
         }
+        if enabled {
+            materializeCompoundPrimaryTipIfNeeded()
+        }
     }
 }
 
@@ -95,10 +98,10 @@ enum CompoundTexturePressurePreset: String, CaseIterable, Identifiable, Sendable
 
     var displayName: String {
         switch self {
-        case .constant: return "不随压力"
-        case .increases: return "重压增强"
-        case .decreases: return "轻压增强"
-        case .middlePeak: return "中压增强"
+        case .constant: return "固定比例"
+        case .increases: return "重压增强 B"
+        case .decreases: return "轻压 B / 重压 A"
+        case .middlePeak: return "中压增强 B"
         }
     }
 
@@ -153,7 +156,7 @@ extension CompoundBrushSettings {
     }
 
     var displayedTextureStrength: Float {
-        textureStrengthAtMidPressure
+        min(max(secondaryStrength, 0), 1)
     }
 
     var hasVariableTextureStrength: Bool {
@@ -164,16 +167,15 @@ extension CompoundBrushSettings {
     }
 
     mutating func setUniformTextureStrength(_ strength: Float) {
-        let primaryWeight = 1 - min(max(strength, 0), 1)
-        pressureMix = CompoundPressureMixSettings(
-            primaryAtLowPressure: primaryWeight,
-            primaryAtMidPressure: primaryWeight,
-            primaryAtHighPressure: primaryWeight
-        )
+        secondaryStrength = min(max(strength, 0), 1)
     }
 
     mutating func applyTexturePressurePreset(_ preset: CompoundTexturePressurePreset) {
-        pressureMix = preset.pressureMix(preserving: max(displayedTextureStrength, 0.05))
+        pressureMix = preset.pressureMix(preserving: 1)
+    }
+
+    mutating func restoreLightTextureHeavyPrimaryMix() {
+        pressureMix = .default
     }
 
     var textureOrientation: CompoundTextureOrientation {

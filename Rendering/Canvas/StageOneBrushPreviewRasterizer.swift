@@ -568,10 +568,13 @@ enum StageOneBrushPreviewRasterizer {
         }
 
         var materialBrush = brush
+        let compoundPrimaryBaseSize = brush.compoundBrush.enabled
+            ? brush.resolvedCompoundPrimaryTip.resolvedBaseSize(for: brush.size)
+            : 0
         let secondaryBaseSize = brush.compoundBrush.enabled
             ? brush.compoundBrush.secondary.resolvedBaseSize(for: brush.size)
             : 0
-        let largestBaseSize = max(brush.size, secondaryBaseSize, 1)
+        let largestBaseSize = max(brush.size, compoundPrimaryBaseSize, secondaryBaseSize, 1)
         let targetDiameter = Float(resolution) * 0.14
         let sizeScale = targetDiameter / largestBaseSize
 
@@ -581,6 +584,10 @@ enum StageOneBrushPreviewRasterizer {
         materialBrush.pressureOpacityAmount = 0
         materialBrush.compoundBrush.globalPressureSizeAmount = 0
         materialBrush.compoundBrush.globalPressureOpacityAmount = 0
+        if materialBrush.compoundBrush.primary != nil {
+            materialBrush.compoundBrush.primary?.pressureSizeAmount = 0
+            materialBrush.compoundBrush.primary?.pressureOpacityAmount = 0
+        }
         materialBrush.compoundBrush.secondary.pressureSizeAmount = 0
         materialBrush.compoundBrush.secondary.pressureOpacityAmount = 0
         if materialBrush.compoundBrush.secondary.sizeMode == .absolutePixels {
@@ -1160,26 +1167,11 @@ enum StageOneBrushPreviewRasterizer {
         hasher.combine(brush.compoundBrush.globalPressureOpacityAmount)
         hasher.combine(brush.compoundBrush.globalPaintJitterAmount)
         hasher.combine(brush.compoundBrush.globalPaintContrastAmount)
+        hasher.combine(brush.compoundBrush.secondaryStrength)
+        let primary = brush.resolvedCompoundPrimaryTip
+        combineCompoundTip(primary, into: &hasher)
         let secondary = brush.compoundBrush.secondary
-        hasher.combine(secondary.tipShape.rawValue)
-        hasher.combine(secondary.sourceSemantic.rawValue)
-        hasher.combine(maskFingerprint(for: secondary.customTipMaskData))
-        hasher.combine(secondary.softness)
-        hasher.combine(secondary.roundness)
-        hasher.combine(secondary.angleDegrees)
-        hasher.combine(secondary.followsStrokeDirection)
-        hasher.combine(secondary.sizeMode.rawValue)
-        hasher.combine(secondary.size)
-        hasher.combine(secondary.relativeSizeRatio)
-        hasher.combine(secondary.spacingPercent)
-        hasher.combine(secondary.pressureSizeAmount)
-        hasher.combine(secondary.pressureOpacityAmount)
-        hasher.combine(secondary.sizeCurveLow)
-        hasher.combine(secondary.sizeCurveMid)
-        hasher.combine(secondary.sizeCurveHigh)
-        hasher.combine(secondary.opacityCurveLow)
-        hasher.combine(secondary.opacityCurveMid)
-        hasher.combine(secondary.opacityCurveHigh)
+        combineCompoundTip(secondary, into: &hasher)
         let mix = brush.compoundBrush.pressureMix
         hasher.combine(mix.primaryAtLowPressure)
         hasher.combine(mix.primaryAtMidPressure)
@@ -1188,6 +1180,38 @@ enum StageOneBrushPreviewRasterizer {
         hasher.combine(pressure)
         hasher.combine(paintVariationSeed)
         return NSString(string: String(hasher.finalize()))
+    }
+
+    private static func combineCompoundTip(
+        _ tip: CompoundSecondaryTipSettings,
+        into hasher: inout Hasher
+    ) {
+        hasher.combine(tip.tipShape.rawValue)
+        hasher.combine(tip.sourceSemantic.rawValue)
+        hasher.combine(maskFingerprint(for: tip.customTipMaskData))
+        hasher.combine(tip.softness)
+        hasher.combine(tip.roundness)
+        hasher.combine(tip.angleDegrees)
+        hasher.combine(tip.followsStrokeDirection)
+        hasher.combine(tip.sizeMode.rawValue)
+        hasher.combine(tip.size)
+        hasher.combine(tip.relativeSizeRatio)
+        hasher.combine(tip.spacingPercent)
+        hasher.combine(tip.opacity)
+        hasher.combine(tip.scatterAmount)
+        hasher.combine(tip.sizeJitterAmount)
+        hasher.combine(tip.angleJitterAmount)
+        hasher.combine(tip.pressureSizeAmount)
+        hasher.combine(tip.pressureOpacityAmount)
+        hasher.combine(tip.sizeCurveLow)
+        hasher.combine(tip.sizeCurveMid)
+        hasher.combine(tip.sizeCurveHigh)
+        hasher.combine(tip.opacityCurveLow)
+        hasher.combine(tip.opacityCurveMid)
+        hasher.combine(tip.opacityCurveHigh)
+        combineCurveState(tip.opacityPressureCurve, into: &hasher)
+        hasher.combine(tip.tileRandomRotation)
+        hasher.combine(tip.pressureRotationAmount)
     }
 
     private static func makeMaterialFieldCacheKey(

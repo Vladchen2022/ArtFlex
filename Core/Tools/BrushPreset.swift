@@ -111,20 +111,20 @@ extension BrushPreset {
         }
 
         var brush = source.brush
-        brush.size = 29
+        // Exact working size and transfer model from Krita preset 06-01-蜡笔.
+        brush.size = 126
         brush.opacity = 1
-        // Keep stroke opacity uncapped. The dense A-tip stream must be allowed to
-        // accumulate from textured light pressure into a solid heavy stroke.
-        brush.buildMode = .buildUp
-        // Photoshop source preset: primary tip spacing 5%, no size dynamics.
-        brush.spacingPercent = 5
+        // Krita PaintOpAction=2 is WASH: repeated dabs in one stroke share an
+        // opacity ceiling instead of accumulating like BUILDUP.
+        brush.buildMode = .opacityCap
+        brush.spacingPercent = 6
         brush.scatterAmount = 0
         brush.jitterAmount = 0
         brush.colorJitterAmount = 0
         brush.paintJitterAmount = 0
         brush.paintContrastAmount = 0
         brush.stampRotationDegrees = 0
-        brush.followsStrokeDirection = false
+        brush.followsStrokeDirection = true
         // The imported grayscale mask should pass through with an exponent of
         // approximately one. ArtFlex's softness mapping reaches that at 44/49.
         brush.customTipSoftness = 44.0 / 49.0
@@ -132,15 +132,16 @@ extension BrushPreset {
         brush.customTipAngleDegrees = 0
         brush.pressureSensitivity = 1
         brush.sizeLowerBound = 0
-        brush.pressureSizeAmount = 0
-        // Transfer pressure is applied once to both independently accumulated
-        // streams. A becomes solid through its tight 5% cadence, not through an
-        // artificial envelope fill or a pressure-driven A/B switch.
-        brush.pressureOpacityAmount = 0
-        // At 5% spacing, raw source-over would saturate even light pressure almost
-        // immediately. Reuse the spacing-aware flow compensation so the requested
-        // visible opacity remains stable while heavy pressure can still reach solid.
-        brush.buildUpOpacityCompensationAmount = 1
+        brush.pressureSizeAmount = 1
+        brush.setSizePressureCurveState(
+            CurveChannelState(points: [
+                .init(x: 0, y: 0.389558),
+                .init(x: 0.305221, y: 0.658635),
+                .init(x: 1, y: 1)
+            ])
+        )
+        brush.pressureOpacityAmount = 1
+        brush.buildUpOpacityCompensationAmount = 0
         brush.setOpacityPressureCurveState(
             CurveChannelState(points: [
                 .init(x: 0, y: 0),
@@ -149,31 +150,34 @@ extension BrushPreset {
         )
 
         brush.compoundBrush.enabled = true
-        brush.compoundBrush.mode = .overlay
-        // Photoshop's Dual Brush keeps both tips active. Pressure controls paint
-        // transfer; it does not replace B with A at a threshold.
+        brush.compoundBrush.mode = .maskedOverlay
         brush.compoundBrush.pressureMix = .balanced
         brush.compoundBrush.globalPressureSizeAmount = 0
-        brush.compoundBrush.globalPressureOpacityAmount = 1
+        brush.compoundBrush.globalPressureOpacityAmount = 0
         brush.compoundBrush.globalPaintJitterAmount = 0
         brush.compoundBrush.globalPaintContrastAmount = 0
 
         brush.compoundBrush.secondary.followsStrokeDirection = false
         brush.compoundBrush.secondary.sizeMode = .relativeToPrimary
-        // Photoshop source preset: A=150 px, B=214 px, B spacing=75%.
-        brush.compoundBrush.secondary.relativeSizeRatio = 214.0 / 150.0
+        // Krita MaskingBrush/MasterSizeCoeff and the embedded B-tip spacing.
+        brush.compoundBrush.secondary.relativeSizeRatio = 1.5454545454545454
         brush.compoundBrush.secondary.spacingPercent = 75
         brush.compoundBrush.secondary.softness = 44.0 / 49.0
-        brush.compoundBrush.secondary.pressureSizeAmount = 0
-        brush.compoundBrush.secondary.pressureOpacityAmount = 0
+        brush.compoundBrush.secondary.pressureSizeAmount = 1
+        brush.compoundBrush.secondary.sizeCurveLow = 0.2
+        brush.compoundBrush.secondary.sizeCurveMid = 0.5
+        brush.compoundBrush.secondary.sizeCurveHigh = 0.8
+        brush.compoundBrush.secondary.pressureOpacityAmount = 1
         brush.compoundBrush.secondary.opacityPressureCurve = CurveChannelState(points: [
-            .init(x: 0, y: 0),
+            .init(x: 0, y: 0.492462),
+            .init(x: 0.253695, y: 1),
             .init(x: 1, y: 1)
         ])
-        brush.compoundBrush.secondary.opacityCurveLow = 0
-        brush.compoundBrush.secondary.opacityCurveMid = 0.5
+        brush.compoundBrush.secondary.opacityCurveLow = 0.85
+        brush.compoundBrush.secondary.opacityCurveMid = 1
         brush.compoundBrush.secondary.opacityCurveHigh = 1
-        brush.compoundBrush.secondary.tileRandomRotation = 0
+        brush.compoundBrush.secondary.tileRandomRotation = 1
+        brush.compoundBrush.secondary.pressureRotationAmount = 1
 
         return BrushPreset(
             id: pressureGrainCrayonPresetID,
