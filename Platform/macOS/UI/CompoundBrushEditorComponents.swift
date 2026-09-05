@@ -386,14 +386,11 @@ final class CompoundBrushDrawingPadNSView: NSView {
         guard base.count == stroke.count else { return base }
         var result = base
         for index in result.indices {
-            switch buildMode {
-            case .opacityCap:
-                result[index] = max(base[index], stroke[index])
-            case .buildUp:
-                let source = Int(stroke[index])
-                let destination = Int(base[index])
-                result[index] = UInt8(clamping: source + ((destination * (255 - source) + 127) / 255))
-            }
+            // A completed stroke always composites over earlier strokes.
+            // The opacity ceiling applies only within that stroke's session.
+            let source = Int(stroke[index])
+            let destination = Int(base[index])
+            result[index] = UInt8(clamping: source + ((destination * (255 - source) + 127) / 255))
         }
         return result
     }

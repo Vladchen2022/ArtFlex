@@ -914,6 +914,7 @@ struct CompoundBrushSettings: Codable, Equatable, Sendable {
 }
 
 struct BrushSettings: Codable, Sendable, Equatable {
+    var engineV2: BrushEngineV2? = nil
     var size: Float
     var opacity: Float
     var buildMode: BrushBuildMode
@@ -993,6 +994,7 @@ struct BrushSettings: Codable, Sendable, Equatable {
     )
 
     enum CodingKeys: String, CodingKey {
+        case engineV2
         case size
         case opacity
         case buildMode
@@ -1114,6 +1116,8 @@ struct BrushSettings: Codable, Sendable, Equatable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         let defaults = BrushSettings.stageOneDefault
 
+        engineV2 = try container.decodeIfPresent(BrushEngineV2.self, forKey: .engineV2)
+
         size = try container.decodeIfPresent(Float.self, forKey: .size) ?? defaults.size
         opacity = try container.decodeIfPresent(Float.self, forKey: .opacity) ?? defaults.opacity
         buildMode = try container.decodeIfPresent(BrushBuildMode.self, forKey: .buildMode) ?? defaults.buildMode
@@ -1159,6 +1163,7 @@ struct BrushSettings: Codable, Sendable, Equatable {
     func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(size, forKey: .size)
+        try container.encodeIfPresent(engineV2, forKey: .engineV2)
         try container.encode(opacity, forKey: .opacity)
         try container.encode(buildMode, forKey: .buildMode)
         try container.encode(tipShape, forKey: .tipShape)
@@ -1455,7 +1460,7 @@ extension BrushSettings {
     /// and B in independent accumulation textures so their own stamp cadences
     /// survive until the final pixel blend.
     var requiresStrokeMaskSession: Bool {
-        buildMode == .opacityCap || (
+        engineV2 != nil || buildMode == .opacityCap || (
             buildMode == .buildUp &&
             compoundBrush.enabled &&
             (compoundBrush.mode == .textureBlend ||

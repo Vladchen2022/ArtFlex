@@ -2431,7 +2431,7 @@ struct RightInspectorView: View {
 
             BrushParameterSliderRow(
                 title: "间距",
-                value: Double(brush.spacingPercent),
+                value: Double(brush.quickSpacingPercent),
                 range: 1...1_000,
                 scale: .logarithmic,
                 formatter: { "\(Int($0.rounded()))%" },
@@ -2441,7 +2441,7 @@ struct RightInspectorView: View {
 
             BrushParameterSliderRow(
                 title: "尺寸随机",
-                value: Double(brush.sizeJitterAmount * 100),
+                value: Double(brush.quickSizeJitterAmount * 100),
                 range: 0...100,
                 formatter: { "\(Int($0.rounded()))%" },
                 onPreview: { viewModel.setBrushSizeJitterAmount(Float($0 / 100)) },

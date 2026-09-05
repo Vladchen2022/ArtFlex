@@ -2,6 +2,9 @@ import Foundation
 
 extension BrushSettings {
     mutating func setCompoundBrushEnabledUsingArtistDefault(_ enabled: Bool) {
+        if engineV2 != nil, enabled, compoundBrush.primary == nil {
+            compoundBrush.primary = primaryTipAsCompoundSecondary
+        }
         let startsNewCompoundConfiguration = enabled
             && compoundBrush.enabled == false
             && compoundBrush == .disabledDefault

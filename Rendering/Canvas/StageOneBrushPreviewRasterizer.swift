@@ -874,7 +874,7 @@ enum StageOneBrushPreviewRasterizer {
             shape: brush.tipShape,
             sourceSemantic: brush.customTipSourceSemantic,
             maskData: brush.customTipMaskData,
-            softness: brush.customTipSoftness,
+            softness: brush.engineV2 == nil ? brush.customTipSoftness : 44.0 / 49.0,
             roundness: brush.customTipRoundness,
             angleDegrees: brush.customTipAngleDegrees,
             resolution: resolution

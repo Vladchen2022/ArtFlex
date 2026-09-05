@@ -28,9 +28,11 @@ struct CompoundBrushSaveSheet: View {
         replaceCandidate = candidate
         let nextIndex = library.presets.filter { !$0.isBuiltIn }.count + 1
         let defaultName = brush.compoundBrush.enabled ? "组合笔刷 \(nextIndex)" : "画笔 \(nextIndex)"
-        _name = State(initialValue: candidate?.name ?? defaultName)
+        _name = State(initialValue: defaultName)
         _selectedColorTag = State(initialValue: candidate?.colorTag)
-        _replacesCurrent = State(initialValue: candidate != nil)
+        // This sheet is opened by “另存为新笔刷”; overwriting must be
+        // explicitly selected, never inherited from the currently active preset.
+        _replacesCurrent = State(initialValue: false)
     }
 
     private var duplicatePreset: BrushPreset? {
@@ -52,7 +54,7 @@ struct CompoundBrushSaveSheet: View {
             VStack(alignment: .leading, spacing: 3) {
                 Text(brush.compoundBrush.enabled ? "保存组合笔刷" : "保存画笔")
                     .font(.system(size: 17, weight: .bold))
-                Text("命名并保存到画笔库；替换会保留原来的库位置。")
+                Text("默认另存新笔刷；只有主动开启替换，才会覆盖原预设。")
                     .font(.system(size: 10, weight: .medium))
                     .foregroundStyle(.secondary)
             }

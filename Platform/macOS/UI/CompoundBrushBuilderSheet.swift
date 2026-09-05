@@ -69,7 +69,11 @@ struct CompoundBrushBuilderSheet: View {
     @State private var interactiveAnchor: BrushSettings?
 
     @State private var previewChannel: CompoundBrushPreviewChannel = .result
-    @State private var previewBackground: CompoundBrushPreviewBackground = .dark
+    @State private var previewBackground: CompoundBrushPreviewBackground = .light
+    @State private var editorPage = "整体"
+    @State private var addingVariant = false
+    @State private var inputPressure: Float = 0
+    @State private var tabletInput = false
     @State private var previewPressure: Float = 0.5
     @State private var previewPath: CompoundBrushPreviewPath? = .curve
     @State private var previewPathToken = 1
@@ -165,7 +169,7 @@ struct CompoundBrushBuilderSheet: View {
             previewTask?.cancel()
             previewTask = nil
         }
-        .sheet(item: $tipLibraryTarget) { target in
+        .sheet(item: $tipLibraryTarget, onDismiss: { addingVariant = false }) { target in
             tipImageLibrarySheet(for: target)
         }
         .sheet(isPresented: $isSaveSheetPresented) {
@@ -181,9 +185,9 @@ struct CompoundBrushBuilderSheet: View {
     private var header: some View {
         HStack(spacing: 12) {
             VStack(alignment: .leading, spacing: 3) {
-                Text("笔刷编辑器")
+                Text("笔刷工作室 · V2")
                     .font(.system(size: 17, weight: .bold))
-                Text("常用参数、笔触叠加和组合纹理在这里一次完成")
+                Text("独立盖印 · 流量累积 · 压力混合")
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(Color.white.opacity(0.52))
             }
@@ -253,17 +257,23 @@ struct CompoundBrushBuilderSheet: View {
                 .buttonStyle(.borderless)
             }
 
-            CompoundBrushDrawingPad(
+            BrushEditorMetalPreview(
                 brush: drawingPadBrush,
+                color: viewModel.workspace.toolSession.selectedColor,
+                pigmentPalette: previewPigmentPalette,
                 pressure: previewPressure,
                 background: previewBackground,
                 clearToken: clearToken,
-                paintVariationSeed: previewSeed,
-                testPattern: previewPath,
-                testPatternToken: previewPathToken
+                seed: previewSeed,
+                pattern: previewPath,
+                patternToken: previewPathToken,
+                onPressure: { value,tablet in inputPressure=value;tabletInput=tablet }
             )
-            .frame(minHeight: 240)
+            .aspectRatio(1,contentMode:.fit)
             .overlay(RoundedRectangle(cornerRadius: 9).stroke(Color.white.opacity(0.11), lineWidth: 1))
+
+            Text("修改参数会重新计算试笔；与主画布共用 Metal 绘制引擎")
+                .font(.system(size: 10)).foregroundStyle(.secondary)
 
             HStack(spacing: 6) {
                 Text("试笔")
@@ -299,7 +309,7 @@ struct CompoundBrushBuilderSheet: View {
             }
 
             HStack(spacing: 8) {
-                Text("压力")
+                Text("模拟压力")
                     .font(.system(size: 10, weight: .semibold))
                     .foregroundStyle(Color.white.opacity(0.5))
                 Slider(
@@ -315,6 +325,9 @@ struct CompoundBrushBuilderSheet: View {
                     .frame(width: 38, alignment: .trailing)
                     .foregroundStyle(Color.white.opacity(0.62))
             }
+
+            Text(tabletInput ? "数位笔输入 \(Int(inputPressure*100))% → 校准 \(Int((draftBrush.engineV2?.pressure(inputPressure) ?? inputPressure)*100))%" : "鼠标使用模拟压力 · 数位笔自动使用真实压力")
+                .font(.system(size:10)).foregroundStyle(.secondary)
 
             editorSlider(
                 title: "笔刷大小",
@@ -356,26 +369,171 @@ struct CompoundBrushBuilderSheet: View {
 
     private var settingsContent: some View {
         VStack(alignment: .leading, spacing: 16) {
-            brushStructureSection
-            commonBrushSection
-            strokeBuildSection
-            if draftBrush.compoundBrush.enabled {
-                quickStartSection
-                combinationSection
-                if draftBrush.compoundBrush.mode == .textureBlend {
-                    pressureDistributionSection
+            if draftBrush.engineV2 == nil {
+                editorPanel(title: "旧版笔刷 · 保留原效果", detail: "当前预览仍使用旧引擎。重建只修改编辑草稿，不覆盖原预设。") {
+                    Button("以当前素材重建 V2") { performEdit { $0.rebuildWithV2() } }
+                        .buttonStyle(CompoundEditorButtonStyle(isProminent: true))
+                    v2StartingPoints
                 }
-            }
-            tipSection
-            if draftBrush.compoundBrush.enabled {
-                textureBehaviorSection
-            }
-            advancedSection
-            if draftBrush.compoundBrush.enabled {
-                diagnosticsSection
+            } else {
+                HStack(spacing: 5) {
+                    ForEach(["整体", "笔尖 A", "笔尖 B", "压力", "范围"], id: \.self) { page in
+                        Button(page) { editorPage = page }
+                            .buttonStyle(CompoundEditorButtonStyle(isProminent: editorPage == page))
+                    }
+                }
+                switch editorPage {
+                case "笔尖 A": v2TipPage(.primary)
+                case "笔尖 B": v2TipPage(.secondary)
+                case "压力": v2PressurePage
+                case "范围": v2RangePage
+                default: v2OverallPage
+                }
             }
         }
         .frame(maxWidth: 620, alignment: .topLeading)
+    }
+
+    private var v2StartingPoints: some View {
+        HStack {
+            Button("新建实色笔") { replaceDraft(.v2Default); editorPage = "整体" }
+            Button("新建压感蜡笔") { replaceDraft(.v2Crayon); editorPage = "整体" }
+        }
+        .buttonStyle(CompoundEditorButtonStyle(isProminent: false))
+    }
+
+    private var v2OverallPage: some View {
+        VStack(spacing: 16) {
+            editorPanel(title: "从可用的画笔开始", detail: "起点会替换当前草稿；随时可撤销或恢复打开状态。") { v2StartingPoints }
+            brushStructureSection
+            editorPanel(title: "颜色与流量", detail: "不透明度决定这一次笔触的上限；流量决定每次盖印落下多少颜料。抬笔重画可继续加深。") {
+                editorSlider(title: "不透明度", value: Double(draftBrush.opacity), range: 0.01...1, valueText: percentText) { $0.opacity = Float($1) }
+                v2Slider("流量", key: \.flow, range: 0.01...1)
+                v2Slider("流量压感", key: \.pressureFlow)
+                v2Slider("轻压最低流量", key: \.minimumFlow)
+                Text("100% 不透明度 + 100% 流量可直接画实。无需寻找或切换‘不透明度封顶’。")
+                    .font(.system(size: 11)).foregroundStyle(.secondary)
+            }
+            if draftBrush.compoundBrush.enabled {
+                editorPanel(title: "组合方法", detail: "双笔尖：A/B 都落色。遮罩：A 落色，B 的盖印决定 A 的局部颗粒；重压可恢复 A。") {
+                    Picker("组合方法", selection: Binding(get: { draftBrush.engineV2!.combination }, set: { value in performEdit {
+                        $0.engineV2?.combination = value
+                        $0.engineV2?.secondaryContribution = value == .stampMask ? .primaryOnly : BrushEngineV2.complementarySecondary
+                    } })) {
+                        ForEach(BrushEngineV2.Combination.allCases) { Text($0.rawValue).tag($0) }
+                    }.pickerStyle(.segmented)
+                }
+            }
+            editorPanel(title: "整体尺寸与透明压感", detail: "默认透明压感关闭，轻压保留颜料颜色。压力也可以只改变 A/B 肌理。") {
+                editorSlider(title: draftBrush.compoundBrush.enabled ? "A 间距" : "间距",value:Double(draftBrush.quickSpacingPercent),range:1...1000,scale:.logarithmic,
+                    valueText:{"\(Int($0.rounded()))%"}) { $0.quickSpacingPercent=Float($1) }
+                editorSlider(title: draftBrush.compoundBrush.enabled ? "A 尺寸随机" : "尺寸随机",value:Double(draftBrush.quickSizeJitterAmount),range:0...1,valueText:percentText) { $0.quickSizeJitterAmount=Float($1) }
+                editorSlider(title: "尺寸压感", value: Double(displayedPressureSizeAmount), range: 0...1, valueText: percentText) { brush, value in
+                    if brush.compoundBrush.enabled { brush.compoundBrush.globalPressureSizeAmount = Float(value) }
+                    else { brush.pressureSizeAmount = Float(value) }
+                }
+                editorSlider(title: "透明压感", value: Double(displayedPressureOpacityAmount), range: 0...1, valueText: percentText) { brush, value in
+                    if brush.compoundBrush.enabled { brush.compoundBrush.globalPressureOpacityAmount = Float(value) }
+                    else { brush.pressureOpacityAmount = Float(value) }
+                }
+            }
+            editorPanel(title: "颜色变化", detail: "与主面板的杂色、仿真油画笔共享设置；颜色运算继续使用原有颜料模块。") {
+                editorSlider(title:"杂色",value:Double(draftBrush.effectivePaintJitterAmount),range:0...1,valueText:percentText) { brush,value in
+                    if brush.compoundBrush.enabled { brush.compoundBrush.globalPaintJitterAmount=Float(value) }
+                    else { brush.paintJitterAmount=Float(value) }
+                }
+                editorSlider(title:"明暗对比",value:Double(draftBrush.effectivePaintContrastAmount),range:0...1,valueText:percentText) { brush,value in
+                    if brush.compoundBrush.enabled { brush.compoundBrush.globalPaintContrastAmount=Float(value) }
+                    else { brush.paintContrastAmount=Float(value) }
+                }
+                Toggle("仿真油画笔",isOn:Binding(get:{draftBrush.oilPaint.isEnabled},set:{value in performEdit{$0.oilPaint.isEnabled=value}}))
+                    .disabled(!oilPaintIsAvailable)
+                if draftBrush.oilPaint.isEnabled {
+                    editorSlider(title:"新色装载",value:Double(draftBrush.oilPaint.newColorLoad),range:0...1,valueText:percentText) { $0.oilPaint.newColorLoad=Float($1) }
+                    editorSlider(title:"明度跟随",value:Double(draftBrush.oilPaint.lightnessFollow),range:0...1,valueText:percentText) { $0.oilPaint.lightnessFollow=Float($1) }
+                }
+            }
+        }
+    }
+
+    private func v2Slider(_ title: String, key: WritableKeyPath<BrushEngineV2, Float>, range: ClosedRange<Double> = 0...1) -> some View {
+        editorSlider(title: title, value: Double(draftBrush.engineV2?[keyPath: key] ?? 0), range: range, valueText: percentText) { brush,value in
+            brush.engineV2?[keyPath: key] = Float(value)
+        }
+    }
+
+    private func v2TipPage(_ target: TipLibraryTarget) -> some View {
+        let primary = target == .primary
+        let actualTarget: TipLibraryTarget = primary && !draftBrush.compoundBrush.enabled ? .range : target
+        let tip = actualTarget == .range ? draftBrush.primaryTipAsCompoundSecondary : (primary ? draftBrush.resolvedCompoundPrimaryTip : draftBrush.compoundBrush.secondary)
+        let variants = primary ? draftBrush.engineV2?.primaryVariants.count ?? 0 : draftBrush.engineV2?.secondaryVariants.count ?? 0
+        return VStack(spacing: 16) {
+            editorPanel(title: primary ? "笔尖 A" : "笔尖 B", detail: "保持素材原始灰度。间距沿笔迹计算，每个笔尖独立盖印。") {
+                tipCard(title: "笔尖素材", summary: compoundTipSummary(tip,customLabel: "自定义素材"), image: actualTarget == .range ? rangePreviewImage : (primary ? primaryPreviewImage : secondaryPreviewImage),
+                    target: actualTarget, selectedShape: tip.tipShape) { shape in
+                        performEdit { brush in
+                            if actualTarget == .range { setRangeTipShape(shape,brush:&brush) }
+                            else { setCompoundTipShape(shape,target:target,brush:&brush) }
+                        }
+                    }
+                compoundTipControls(actualTarget)
+                v2Slider("盖印流量", key: primary ? \.primaryFlow : \.secondaryFlow, range: 0.01...1)
+                editorSlider(title: "素材对比度", value: Double(primary ? draftBrush.engineV2!.primaryContrast : draftBrush.engineV2!.secondaryContrast), range: 0.25...3,
+                    valueText: { String(format:"%.2fx",$0) }) { brush,value in
+                        if primary { brush.engineV2?.primaryContrast = Float(value) } else { brush.engineV2?.secondaryContrast = Float(value) }
+                    }
+                HStack {
+                    Text("\(variants + 1) 张素材 · 每印随机，避免连续重复").font(.system(size:11)).foregroundStyle(.secondary)
+                    Spacer()
+                    Button("添加变体") { addingVariant = true; prepareTipLibrary(actualTarget); tipLibraryTarget = actualTarget }
+                        .disabled(tip.customTipMaskData == nil)
+                        .help("先选一张图像笔尖，再添加随机变体")
+                    if variants>0 {
+                        Button("清除变体") { performEdit { if primary { $0.engineV2?.primaryVariants=[] } else { $0.engineV2?.secondaryVariants=[] } } }
+                    }
+                }.buttonStyle(CompoundEditorButtonStyle(isProminent:false))
+            }
+        }
+    }
+
+    private var v2PressurePage: some View {
+        VStack(spacing:16) {
+            editorPanel(title:"手感校准", detail:"正常重压只需达到这个输入值，就映射为 100%。降低数值适合轻手；不会改变源图案。") {
+                v2Slider("正常重压输入",key:\.inputMaximum,range:0.2...1)
+            }
+            editorPanel(title:"压力如何分配 A / B",detail:"横向是轻、中、重压力。两支笔各自控制，不强制互相扣除；同时 100% 可以同时落色。") {
+                Button("恢复轻 B / 重 A") { performEdit { brush in
+                    let isMask = brush.engineV2?.combination == .stampMask
+                    brush.engineV2?.primaryContribution = .default
+                    brush.engineV2?.secondaryContribution = isMask ? .primaryOnly : BrushEngineV2.complementarySecondary
+                } }
+                    .buttonStyle(CompoundEditorButtonStyle(isProminent:false))
+                ForEach([true,false],id:\.self) { primary in
+                    Text(primary ? "A 的贡献" : "B 的贡献").font(.system(size:12,weight:.bold))
+                    ForEach(0..<3) { point in
+                        let curve = primary ? draftBrush.engineV2!.primaryContribution : draftBrush.engineV2!.secondaryContribution
+                        let values=[curve.primaryAtLowPressure,curve.primaryAtMidPressure,curve.primaryAtHighPressure]
+                        editorSlider(title:["轻压","中压","重压"][point],value:Double(values[point]),range:0...1,valueText:percentText) { brush,value in
+                            var c=primary ? brush.engineV2!.primaryContribution : brush.engineV2!.secondaryContribution
+                            if point==0 { c.primaryAtLowPressure=Float(value) }
+                            else if point==1 { c.primaryAtMidPressure=Float(value) }
+                            else { c.primaryAtHighPressure=Float(value) }
+                            if primary { brush.engineV2?.primaryContribution=c } else { brush.engineV2?.secondaryContribution=c }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private var v2RangePage: some View {
+        editorPanel(title:"可选的笔触范围",detail:"默认由 A/B 的真实盖印形成外形。开启后，第三个笔尖只裁切范围，不落色。") {
+            Toggle("限制在单独的笔触范围内",isOn:Binding(get:{draftBrush.engineV2?.clipsToRange ?? false},set:{value in performEdit{$0.engineV2?.clipsToRange=value}}))
+            if draftBrush.engineV2?.clipsToRange == true {
+                tipCard(title:"范围素材",summary:rangeTipSummary,image:rangePreviewImage,target:.range,selectedShape:draftBrush.tipShape) { shape in performEdit { setRangeTipShape(shape,brush:&$0) } }
+                compoundTipControls(.range)
+            }
+        }
     }
 
     private var brushStructureSection: some View {
@@ -749,12 +907,12 @@ struct CompoundBrushBuilderSheet: View {
     }
 
     private func compoundTipControls(_ target: TipLibraryTarget) -> some View {
-        let tip = target == .primary
+        let tip = target == .range ? draftBrush.primaryTipAsCompoundSecondary : target == .primary
             ? draftBrush.resolvedCompoundPrimaryTip
             : draftBrush.compoundBrush.secondary
         return VStack(alignment: .leading, spacing: 8) {
-            editorSlider(
-                title: "相对范围尺寸",
+            if target != .range { editorSlider(
+                title: "相对笔刷尺寸",
                 value: Double(tip.relativeSizeRatio),
                 range: 0.05...4,
                 valueText: { String(format: "%.2fx", $0) }
@@ -763,7 +921,7 @@ struct CompoundBrushBuilderSheet: View {
                     $0.sizeMode = .relativeToPrimary
                     $0.relativeSizeRatio = Float(value)
                 }
-            }
+            } }
 
             editorSlider(
                 title: "间距",
@@ -775,14 +933,14 @@ struct CompoundBrushBuilderSheet: View {
                 updateCompoundTip(target, brush: &brush) { $0.spacingPercent = Float(value) }
             }
 
-            editorSlider(
+            if target != .range { editorSlider(
                 title: "笔尖不透明度",
                 value: Double(tip.opacity),
                 range: 0...1,
                 valueText: percentText
             ) { brush, value in
                 updateCompoundTip(target, brush: &brush) { $0.opacity = Float(value) }
-            }
+            } }
 
             editorSlider(
                 title: "位置散布",
@@ -829,6 +987,20 @@ struct CompoundBrushBuilderSheet: View {
                 updateCompoundTip(target, brush: &brush) { $0.pressureSizeAmount = Float(value) }
             }
 
+            editorSlider(title: "透明压感",value:Double(tip.pressureOpacityAmount),range:0...1,valueText:percentText) { brush,value in
+                updateCompoundTip(target,brush:&brush) { $0.pressureOpacityAmount=Float(value) }
+            }
+
+            editorSlider(title: "圆度",value:Double(tip.roundness),range:0.05...1,valueText:percentText) { brush,value in
+                updateCompoundTip(target,brush:&brush) { $0.roundness=Float(value) }
+            }
+
+            if draftBrush.engineV2 != nil && tip.tipShape == .customRound && tip.customTipMaskData != nil {
+                editorSlider(title: "素材边缘柔化",value:Double(tip.softness),range:0...1,valueText:percentText) { brush,value in
+                    updateCompoundTip(target,brush:&brush) { $0.softness=Float(value) }
+                }
+            }
+
             HStack(spacing: 10) {
                 Text("跟随笔迹方向")
                     .font(.system(size: 11, weight: .semibold))
@@ -861,7 +1033,18 @@ struct CompoundBrushBuilderSheet: View {
         brush.materializeCompoundPrimaryTipIfNeeded()
         switch target {
         case .range:
-            return
+            var tip = brush.primaryTipAsCompoundSecondary
+            edit(&tip)
+            brush.spacingPercent = tip.spacingPercent
+            brush.scatterAmount = tip.scatterAmount
+            brush.sizeJitterAmount = tip.sizeJitterAmount
+            brush.angleJitterAmount = tip.angleJitterAmount
+            brush.stampRotationDegrees = tip.angleDegrees
+            brush.followsStrokeDirection = tip.followsStrokeDirection
+            brush.pressureSizeAmount = tip.pressureSizeAmount
+            brush.pressureOpacityAmount = tip.pressureOpacityAmount
+            brush.customTipRoundness = tip.roundness
+            brush.customTipSoftness = tip.softness
         case .primary:
             guard var tip = brush.compoundBrush.primary else { return }
             edit(&tip)
@@ -1002,6 +1185,7 @@ struct CompoundBrushBuilderSheet: View {
                     .foregroundStyle(Color.white.opacity(0.46))
             }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
         .padding(13)
         .background(panelBackground)
     }
@@ -1357,22 +1541,25 @@ struct CompoundBrushBuilderSheet: View {
     private var drawingPadBrush: BrushSettings {
         switch previewChannel {
         case .result:
-            var result = draftBrush
-            if result.compoundBrush.enabled {
-                result.compoundBrush.mode = result.compoundBrush.mode.editorEquivalent
-            }
-            return result
+            return draftBrush
         case .primary:
             return compoundTipPreviewBrush(
                 from: draftBrush,
-                tip: draftBrush.resolvedCompoundPrimaryTip
+                tip: draftBrush.compoundBrush.enabled ? draftBrush.resolvedCompoundPrimaryTip : draftBrush.primaryTipAsCompoundSecondary
             )
         case .secondary:
             return compoundTipPreviewBrush(
                 from: draftBrush,
-                tip: draftBrush.compoundBrush.secondary
+                tip: draftBrush.compoundBrush.secondary,
+                primary: false
             )
         }
+    }
+
+    private var previewPigmentPalette: BrushPigmentPalette {
+        var session = viewModel.workspace.toolSession
+        session.brush = drawingPadBrush
+        return session.activeOilPaintPalette
     }
 
     private var rangeTipSummary: String {
@@ -1555,17 +1742,15 @@ struct CompoundBrushBuilderSheet: View {
         previewTask?.cancel()
         previewGeneration &+= 1
         let generation = previewGeneration
-        var brush = draftBrush
-        if brush.compoundBrush.enabled {
-            brush.compoundBrush.mode = brush.compoundBrush.mode.editorEquivalent
-        }
+        let brush = draftBrush
         let primary = compoundTipPreviewBrush(
             from: brush,
             tip: brush.resolvedCompoundPrimaryTip
         )
         let secondary = compoundTipPreviewBrush(
             from: brush,
-            tip: brush.compoundBrush.secondary
+            tip: brush.compoundBrush.secondary,
+            primary: false
         )
         let seed = previewSeed
 
@@ -1602,9 +1787,15 @@ struct CompoundBrushBuilderSheet: View {
 
     private func compoundTipPreviewBrush(
         from brush: BrushSettings,
-        tip: CompoundSecondaryTipSettings
+        tip: CompoundSecondaryTipSettings,
+        primary: Bool = true
     ) -> BrushSettings {
         var preview = brush
+        if !primary, let config = brush.engineV2 {
+            preview.engineV2?.primaryFlow = config.secondaryFlow
+            preview.engineV2?.primaryVariants = config.secondaryVariants
+            preview.engineV2?.primaryContrast = config.secondaryContrast
+        }
         preview.compoundBrush.enabled = false
         preview.tipShape = tip.tipShape
         preview.customTipSourceSemantic = tip.sourceSemantic
@@ -1682,7 +1873,7 @@ struct CompoundBrushBuilderSheet: View {
                         setPendingSelection(first, for: target)
                     }
                 }
-                Button("取消") { tipLibraryTarget = nil }
+                Button("取消") { tipLibraryTarget = nil; addingVariant = false }
                 Button("应用") {
                     applyPendingTip(for: target)
                     tipLibraryTarget = nil
@@ -1763,6 +1954,17 @@ struct CompoundBrushBuilderSheet: View {
             updated = viewModel.brushDraft(draftBrush, applyingCompoundSecondaryTipImageLibraryItem: selection)
         }
         if var updated {
+            if addingVariant {
+                let data = target == .range ? updated.customTipMaskData : (target == .primary ? updated.resolvedCompoundPrimaryTip.customTipMaskData : updated.compoundBrush.secondary.customTipMaskData)
+                if let data {
+                    performEdit { brush in
+                        if target != .secondary { brush.engineV2?.primaryVariants.append(data) }
+                        else { brush.engineV2?.secondaryVariants.append(data) }
+                    }
+                }
+                addingVariant = false
+                return
+            }
             if target != .range { updated.compoundBrush.enabled = true }
             replaceDraft(updated)
         }

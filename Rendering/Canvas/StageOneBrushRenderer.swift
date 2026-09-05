@@ -150,6 +150,7 @@ struct BrushStrokeSamplingState {
 }
 
 final class OpacityCapSessionResources {
+    var v2: BrushV2Session?
     let originalTexture: MTLTexture
     /// Ordinary opacity-cap strokes accumulate here. In pressure dual-tip mode
     /// this texture instead stores the independently sampled stroke range.
@@ -273,6 +274,7 @@ final class StageOneBrushRenderer {
     private var reusableUniformBuffers: [MTLBuffer] = []
     private var reusableUniformBufferBytes = 0
     private(set) var debugCustomTipResampleCount = 0
+    private var v2Renderer: BrushV2Renderer?
 
     init(device: MTLDevice) throws {
         self.device = device
@@ -2268,6 +2270,47 @@ final class StageOneBrushRenderer {
         return materialTexture
     }
 
+    /// Reuse the established pigment/bristle material shader in V2. Only the
+    /// coverage/flow engine changed; oil reservoirs and color variation keep
+    /// their existing color-standard implementation.
+    private func encodeV2PaintMaterial(stroke: StrokeDescriptor, samples: [StampSample],
+        session: OpacityCapSessionResources, texture: MTLTexture, bounds: BrushPixelBounds,
+        commandBuffer: MTLCommandBuffer, selectionMask: MTLTexture?, alphaLockTexture: MTLTexture?) -> MTLTexture? {
+        guard usesPaintMaterialTexture(for: stroke),
+              let material = ensurePaintMaterialTexture(for: session, matching: texture, commandBuffer: commandBuffer) else { return nil }
+        let rect = MTLScissorRect(x: bounds.originX, y: bounds.originY, width: bounds.width, height: bounds.height)
+        guard prepareOpacityCapTiles(in: rect, session: session, workingTexture: texture,
+            compoundPrimaryTexture: nil, compoundSecondaryTexture: nil, paintMaterialTexture: material,
+            commandBuffer: commandBuffer) else { return nil }
+        guard !samples.isEmpty else { return material }
+        let pass = MTLRenderPassDescriptor()
+        pass.colorAttachments[0].texture = material
+        pass.colorAttachments[0].loadAction = .load
+        pass.colorAttachments[0].storeAction = .store
+        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: pass) else { return material }
+        encoder.setRenderPipelineState(paintMaterialPipelineState)
+        encoder.setVertexBuffer(vertexBuffer, offset: 0, index: 0)
+        encoder.setFragmentTexture(selectionMask, index: 0)
+        encoder.setFragmentTexture(alphaLockTexture ?? fallbackAlphaLockTexture, index: 1)
+        encoder.setFragmentTexture(defaultTipTexture, index: 5)
+        encoder.setFragmentSamplerState(tipSamplerState, index: 1)
+        encoder.setScissorRect(rect)
+        var uniforms = samples.map { sample in
+            var u = makeUniforms(for: sample, stroke: stroke, texture: texture,
+                selectionShape: stroke.selectionShape, modeOverride: 0, includeBrushOpacity: false)
+            // Color is independent of the grain holes and A/B contribution.
+            // Use a solid material footprint; coverage is applied later by V2.
+            u.tipShape = 0
+            u.radius = max(stroke.brush.size * (stroke.brush.compoundBrush.enabled
+                ? stroke.brush.resolvedCompoundPrimaryTip.relativeSizeRatio : 1) / 2, 0.5) * sample.sizeMultiplier
+            return u
+        }
+        setInstancedUniforms(&uniforms, encoder: encoder, commandBuffer: commandBuffer)
+        encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4, instanceCount: uniforms.count)
+        encoder.endEncoding()
+        return material
+    }
+
     private func usesIndependentCompoundMask(for stroke: StrokeDescriptor) -> Bool {
         (stroke.tool == .brush || stroke.tool == .eraser) &&
             stroke.brush.compoundBrush.enabled &&
@@ -2485,6 +2528,37 @@ final class StageOneBrushRenderer {
         preservesAlphaWhenAlphaLocked: Bool = true,
         samplingState: inout BrushStrokeSamplingState?
     ) -> Int {
+        if let config = stroke.brush.engineV2 {
+            if v2Renderer == nil { v2Renderer = try? BrushV2Renderer(device: device) }
+            guard let v2Renderer else { return 0 }
+            // A stroke can begin completely outside the canvas. Retain a
+            // session even before its first visible pixel so pen-up can flush
+            // the pending segment that crosses into the canvas.
+            if samplingState == nil { samplingState = BrushStrokeSamplingState() }
+            if samplingState?.isFlushing == true {
+                session.compoundPrimarySamplingState?.isFlushing = true
+                session.compoundSecondarySamplingState?.isFlushing = true
+            }
+            let aStroke = stroke.brush.compoundBrush.enabled ? compoundPrimarySamplingStroke(from: stroke) : stroke
+            let a = interpolatedPoints(for: aStroke, samplingState: &session.compoundPrimarySamplingState)
+            let b = stroke.brush.compoundBrush.enabled
+                ? interpolatedPoints(for: compoundSecondarySamplingStroke(from: stroke), samplingState: &session.compoundSecondarySamplingState) : []
+            let range = config.clipsToRange ? interpolatedPoints(for: stroke, samplingState: &samplingState) : []
+            let selection = makeSelectionMaskTexture(for: stroke.selectionShape,
+                canvasSize: CanvasSize(width: texture.width, height: texture.height))
+            if let bounds = v2Renderer.encode(stroke: stroke, streams: [a,b,range], session: session,
+                target: texture, commandBuffer: commandBuffer, selection: selection,
+                alphaLock: alphaLockTexture, preservesAlpha: preservesAlphaWhenAlphaLocked, materialProvider: { bounds in
+                    self.encodeV2PaintMaterial(stroke: stroke, samples: a, session: session,
+                        texture: texture, bounds: bounds, commandBuffer: commandBuffer,
+                        selectionMask: selection, alphaLockTexture: alphaLockTexture)
+                }) {
+                var state = samplingState ?? BrushStrokeSamplingState()
+                state.renderedPixelBounds = state.renderedPixelBounds.map { $0.union(bounds) } ?? bounds
+                samplingState = state
+            }
+            return max(a.count,max(b.count,range.count))
+        }
         let usesIndependentCompoundMask = usesIndependentCompoundMask(for: stroke)
         let usesPressureDualTip = usesPressureDualTipPipeline(for: stroke)
         let usesCompoundBuildUp = usesIndependentCompoundMask && stroke.brush.buildMode == .buildUp
@@ -3812,6 +3886,9 @@ final class StageOneBrushRenderer {
         _ samples: [StampSample],
         stroke: StrokeDescriptor
     ) -> [StampSample] {
+        // V2 pressure filtering belongs to the input stream. Packet-local
+        // smoothing here would make saved replay differ from the live stroke.
+        if stroke.brush.engineV2 != nil { return samples }
         guard
             samples.count >= 3,
             stroke.tool == .brush || stroke.tool == .eraser
@@ -3980,7 +4057,7 @@ final class StageOneBrushRenderer {
         for selectionShape: SelectionShape?,
         canvasSize: CanvasSize
     ) -> MTLTexture? {
-        guard let selectionShape, selectionShape.kind == .lasso || selectionShape.kind == .mask else {
+        guard let selectionShape, selectionShape.kind == .lasso || selectionShape.kind == .mask || selectionShape.kind == .composite else {
             cachedSelectionMaskShape = nil
             cachedSelectionMaskCanvasSize = nil
             cachedSelectionMaskTexture = nil
