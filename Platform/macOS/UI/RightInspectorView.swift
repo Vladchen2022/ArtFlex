@@ -5839,15 +5839,15 @@ struct RightInspectorView: View {
                     }
                 GeometryReader { geometry in
                     let cellSide = min(geometry.size.width, geometry.size.height)
-                    let previewSide = cellSide * 0.56
+                    let previewSide = cellSide * 0.80
                     let glyphSide = max(14, cellSide * 0.18)
 
                     ZStack(alignment: .bottomTrailing) {
-                        brushStrokePreview(for: preset.brush, activeTool: .brush)
+                        BrushLibraryStrokeThumbnail(brush: preset.brush)
                             .frame(width: previewSide, height: previewSide)
                             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                            .padding(.leading, cellSide * 0.10)
-                            .padding(.top, cellSide * 0.08)
+                            .padding(.leading, cellSide * 0.02)
+                            .padding(.top, cellSide * 0.02)
 
                         brushPreviewGlyph(for: preset.brush, activeTool: .brush, maxExtent: glyphSide)
                             .frame(width: glyphSide, height: glyphSide, alignment: .center)
@@ -6059,193 +6059,6 @@ struct RightInspectorView: View {
             }
         }
         return true
-    }
-
-    private func brushStrokePreview(for brush: BrushSettings, activeTool: ToolKind) -> some View {
-        Canvas { context, size in
-            let start = CGPoint(x: size.width * 0.18, y: size.height * 0.78)
-            let end = CGPoint(x: size.width * 0.82, y: size.height * 0.22)
-            let dx = end.x - start.x
-            let dy = end.y - start.y
-            let pathAngle = atan2(dy, dx)
-
-            let scatter = Double(brush.scatterAmount)
-            let jitter = Double(brush.jitterAmount)
-            let stampCount = StageOneBrushPreviewRasterizer.libraryStrokePreviewStampCount(
-                spacingPercent: brush.spacingPercent
-            )
-
-            let baseWidth = min(size.width, size.height) * 0.42
-            let primaryStampResolution = previewRasterResolution(
-                for: baseWidth,
-                minimum: 44,
-                maximum: 72,
-                scale: 1.35
-            )
-            let primaryStampPreviewImage = bestEffortStampPreviewImage(
-                for: brush,
-                resolution: primaryStampResolution
-            )
-
-            for index in 0..<stampCount {
-                let t = stampCount == 1 ? 0.0 : Double(index) / Double(stampCount - 1)
-                let pressure = previewStrokePressure(at: t)
-                let pressureMetrics = previewBrushStrokeMetrics(for: brush, pressure: pressure)
-                var point = CGPoint(
-                    x: start.x + (dx * t),
-                    y: start.y + (dy * t)
-                )
-
-                if scatter > 0.001 {
-                    let normal = CGPoint(x: -dy, y: dx)
-                    let normalLength = max(sqrt((normal.x * normal.x) + (normal.y * normal.y)), 0.001)
-                    let normalized = CGPoint(x: normal.x / normalLength, y: normal.y / normalLength)
-                    let offset = (
-                        StageOneBrushPreviewRasterizer.stableRandom(
-                            x: point.x,
-                            y: point.y,
-                            index: index,
-                            salt: 0x9E37_79B9
-                        ) * 2.0 - 1.0
-                    ) * scatter * 2.6
-                    point.x += normalized.x * offset
-                    point.y += normalized.y * offset
-                }
-
-                let sizeScale = 1.0 - (
-                    StageOneBrushPreviewRasterizer.stableRandom(
-                        x: point.x,
-                        y: point.y,
-                        index: index,
-                        salt: 0xC2B2_AE35
-                    ) * jitter * 0.45
-                )
-                let stampWidth = max(4, baseWidth * sizeScale * pressureMetrics.sizeFactor)
-                let rect = CGRect(
-                    x: point.x - (stampWidth / 2),
-                    y: point.y - (stampWidth / 2),
-                    width: stampWidth,
-                    height: stampWidth
-                )
-
-                var angle = Double(brush.stampRotationDegrees) * .pi / 180.0
-                if brush.followsStrokeDirection {
-                    angle += pathAngle
-                }
-                angle += (
-                    StageOneBrushPreviewRasterizer.stableRandom(
-                        x: point.x,
-                        y: point.y,
-                        index: index,
-                        salt: 0x27D4_EB2F
-                    ) * 2.0 - 1.0
-                ) * jitter * 0.65
-
-                context.drawLayer { layer in
-                    layer.opacity = pressureMetrics.opacity
-                    layer.translateBy(x: rect.midX, y: rect.midY)
-                    layer.rotate(by: Angle(radians: angle))
-                    layer.translateBy(x: -rect.midX, y: -rect.midY)
-
-                    if let primaryStampPreviewImage {
-                        let resolved = layer.resolve(Image(decorative: primaryStampPreviewImage, scale: 1))
-                        layer.draw(resolved, in: rect)
-                    }
-                }
-            }
-        }
-    }
-
-    private func previewStrokePressure(at progress: Double) -> Double {
-        let clamped = min(max(progress, 0), 1)
-        // Simulate heavy → light: start at high pressure and ease out to near-zero.
-        let inverted = 1.0 - clamped
-        let eased = inverted * inverted * (3 - (2 * inverted))
-        return 0.05 + (0.90 * eased)
-    }
-
-    private func previewBrushStrokeMetrics(
-        for brush: BrushSettings,
-        pressure: Double
-    ) -> (sizeFactor: Double, opacity: Double) {
-        let effectivePressure = min(max(pressure, 0), 1)
-        let sizePressure = max(effectivePressure, 0.01)
-        let opacityPressure = max(effectivePressure, 0.005)
-        let sizeResponseSource = brush.compoundBrush.enabled
-            ? brush.compoundBrush.globalPressureSizeAmount
-            : brush.pressureSizeAmount
-        let opacityResponseSource = brush.compoundBrush.enabled
-            ? brush.compoundBrush.globalPressureOpacityAmount
-            : brush.pressureOpacityAmount
-        let sizeResponse = min(max(Double(sizeResponseSource), 0), 1)
-        let opacityResponse = min(max(Double(opacityResponseSource), 0), 1)
-        let curvedSizePressure = previewSizeCurvePressure(sizePressure, brush: brush)
-        let lowerBound = min(max(Double(brush.sizeLowerBound), 0), 1)
-        let lowerBoundedPressure = lowerBound + ((1 - lowerBound) * curvedSizePressure)
-        let rawSizeFactor = (1 - sizeResponse) + (sizeResponse * lowerBoundedPressure)
-        let curvedOpacityPressure = previewOpacityCurvePressure(opacityPressure, brush: brush)
-        let rawOpacityFactor = Double(
-            BrushSettings.resolvedPressureFactor(
-                responseAmount: Float(opacityResponse),
-                curvedPressure: Float(curvedOpacityPressure)
-            )
-        )
-
-        let sizeFactor = rawSizeFactor
-        let targetVisibleOpacity = Float(brush.opacity) * Float(rawOpacityFactor)
-        let spacingPx = max(Float(Double(brush.size) * Double(brush.spacingPercent) / 100.0), 0.5)
-        let stampDiameterPx = max(Float(brush.size) * Float(sizeFactor), 1)
-        let compensationAmount = BrushSettings.resolvedBuildUpCompensationAmount(
-            automaticCompensationAmount: brush.buildMode == .buildUp ? 1 : 0,
-            brushCompensationAmount: brush.buildUpOpacityCompensationAmount
-        )
-        let visibleOpacity = brush.buildMode == .buildUp
-            ? BrushSettings.resolvedBuildUpVisibleAlpha(
-                targetVisibleAlpha: targetVisibleOpacity,
-                spacingPx: spacingPx,
-                stampDiameterPx: stampDiameterPx,
-                compensationAmount: compensationAmount
-            )
-            : targetVisibleOpacity
-        let resolvedOpacity = min(max(Double(visibleOpacity), 0.03), 0.85)
-        return (max(sizeFactor, 0.04), resolvedOpacity)
-    }
-
-    private func previewPressureResponsePressure(
-        _ pressure: Double,
-        brush: BrushSettings
-    ) -> Double {
-        let clamped = min(max(pressure, 0), 1)
-        let sensitivity = min(max(Double(brush.pressureSensitivity), 0), 2)
-        guard sensitivity > 0.0001 else {
-            return 1
-        }
-        return pow(clamped, sensitivity)
-    }
-
-    private func previewSizeCurvePressure(
-        _ pressure: Double,
-        brush: BrushSettings
-    ) -> Double {
-        Double(
-            BrushSettings.samplePressureCurve(
-                pressure: Float(pressure),
-                state: brush.resolvedSizePressureCurveState
-            )
-        )
-    }
-
-    private func previewOpacityCurvePressure(
-        _ pressure: Double,
-        brush: BrushSettings
-    ) -> Double {
-        Double(
-            BrushSettings.resolvedOpacityCurvePressure(
-                pressure: Float(pressure),
-                pressureSensitivity: brush.pressureSensitivity,
-                state: brush.resolvedOpacityPressureCurveState
-            )
-        )
     }
 
     private func brushPreviewGlyph(

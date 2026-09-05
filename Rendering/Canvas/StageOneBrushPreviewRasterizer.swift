@@ -273,6 +273,53 @@ enum StageOneBrushPreviewRasterizer {
         textureFillPreviewCache.removeAllObjects()
     }
 
+    /// Called on a background queue. The shared preview context is serialized;
+    /// no document, active stroke, or user preset is touched.
+    static func libraryStrokePreviewImage(for brush: BrushSettings, resolution: Int = 256) -> CGImage? {
+        guard (64...512).contains(resolution) else { return nil }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        guard let data = try? encoder.encode(brush) else { return nil }
+        // Include the entire versioned brush, including both masks and curves.
+        // A primary-tip-only key would leave stale thumbnails after B changes.
+        let digest = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+        let key = NSString(string: "library-metal-stroke-1|\(resolution)|\(digest)")
+        compoundPreviewRendererLock.lock()
+        defer { compoundPreviewRendererLock.unlock() }
+        if let cached = cache.object(forKey: key) { return cached.image }
+        guard let context = compoundPreviewRendererContext,
+              let texture = makePreviewTexture(device: context.device, resolution: resolution),
+              let buffer = context.commandQueue.makeCommandBuffer() else { return nil }
+        clearPreviewTexture(texture, commandQueue: context.commandQueue)
+        let recipe = BrushLibraryPreviewRecipe(brush: brush, resolution: resolution)
+        var sampling: BrushStrokeSamplingState?
+        let session = recipe.brush.requiresStrokeMaskSession
+            ? context.renderer.makeOpacityCapSession(for: texture, commandQueue: context.commandQueue,
+                                                    reusesCachedTextures: false) : nil
+        if recipe.brush.requiresStrokeMaskSession && session == nil { return nil }
+        func encode(_ points: [StrokePoint], continuation: Bool) {
+            let stroke = StrokeDescriptor(tool: .brush, color: .white, brush: recipe.brush,
+                points: points, selectionShape: nil, skipLeadingStamp: continuation,
+                paintVariationSeed: BrushLibraryPreviewRecipe.seed)
+            if let session {
+                context.renderer.encodeOpacityCapStroke(stroke: stroke, session: session, into: texture,
+                    commandBuffer: buffer, samplingState: &sampling)
+            } else {
+                context.renderer.encodeStroke(stroke: stroke, into: texture, commandQueue: context.commandQueue,
+                    commandBuffer: buffer, samplingState: &sampling)
+            }
+        }
+        encode([recipe.points[0]] + recipe.points, continuation: false)
+        // Same pen-up flush as the editor and main canvas, preserving the tail.
+        sampling?.isFlushing = true
+        encode([], continuation: true)
+        buffer.commit()
+        buffer.waitUntilCompleted()
+        guard buffer.status == .completed, let image = makeCGImage(from: texture) else { return nil }
+        cache.setObject(CachedImageBox(image: image), forKey: key, cost: image.bytesPerRow * image.height)
+        return image
+    }
+
     static func stampImage(
         for brush: BrushSettings,
         resolution: Int = 128
@@ -815,12 +862,6 @@ enum StageOneBrushPreviewRasterizer {
             cost: image.bytesPerRow * image.height
         )
         return image
-    }
-
-    static func libraryStrokePreviewStampCount(spacingPercent: Float) -> Int {
-        let spacing = max(0.18, min(Double(spacingPercent) / 100.0, 1.5))
-        let estimatedCount = Int(ceil(2.05 / spacing)) + 1
-        return min(7, max(3, estimatedCount))
     }
 
     static func stableRandom(x: Double, y: Double, index: Int, salt: UInt64) -> Double {

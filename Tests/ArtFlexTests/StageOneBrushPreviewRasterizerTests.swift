@@ -30,16 +30,6 @@ struct StageOneBrushPreviewRasterizerTests {
     }
 
     @Test
-    func brushLibraryStrokePreviewUsesSparseBoundedStampCount() {
-        #expect(StageOneBrushPreviewRasterizer.libraryStrokePreviewStampCount(spacingPercent: 0) == 7)
-        #expect(StageOneBrushPreviewRasterizer.libraryStrokePreviewStampCount(spacingPercent: 18) == 7)
-        #expect(StageOneBrushPreviewRasterizer.libraryStrokePreviewStampCount(spacingPercent: 50) == 6)
-        #expect(StageOneBrushPreviewRasterizer.libraryStrokePreviewStampCount(spacingPercent: 100) == 4)
-        #expect(StageOneBrushPreviewRasterizer.libraryStrokePreviewStampCount(spacingPercent: 150) == 3)
-        #expect(StageOneBrushPreviewRasterizer.libraryStrokePreviewStampCount(spacingPercent: 500) == 3)
-    }
-
-    @Test
     func incrementalStrokeSessionMatchesWholeStrokeRasterization() throws {
         let resolution = 256
         let points = [
