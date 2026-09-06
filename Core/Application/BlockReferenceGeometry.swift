@@ -468,7 +468,8 @@ private func blockCanvasPointToSegmentDistance(
     )
 }
 
-func blockObjectFaces(_ object: BlockReferenceObject, radialSegments: Int = 8) -> [BlockMeshFace] {
+func blockObjectFaces(_ object: BlockReferenceObject, radialSegments requestedSegments: Int? = nil) -> [BlockMeshFace] {
+    let radialSegments = min(max(requestedSegments ?? object.radialSegments, 8), 32)
     let localFaces: [[BlockVector3]]
     if let customMesh = object.customMesh {
         let base = customMesh.baseDimensions

@@ -549,7 +549,7 @@ struct CanvasContainerView: View {
                 if viewModel.workspace.toolSession.activeTool == .blockReference,
                    let blockScene = viewModel.blockReferenceScene,
                    blockScene.display.isVisible,
-                   !blockScene.display.isFrozen,
+                   (!blockScene.display.isFrozen || viewModel.blockReferenceWorkflow.inspectionCamera != nil),
                    !viewModel.blockReferenceEditorState.perspectiveMatch.isActive,
                    !viewModel.isPanModeActive {
                     BlockReferenceGestureOverlay(
@@ -598,7 +598,14 @@ struct CanvasContainerView: View {
                             )
                         },
                         onGizmoInputChanged: viewModel.setBlockReferenceGizmoAdjustmentInput,
-                        onGizmoFinish: viewModel.finishBlockReferenceGizmoAdjustment
+                        onGizmoFinish: viewModel.finishBlockReferenceGizmoAdjustment,
+                        primaryNavigationMode: viewModel.blockReferenceWorkflow.navigationMode,
+                        onModifiersChanged: {
+                            let disabled = $0.contains(.command)
+                            if viewModel.blockReferenceWorkflow.temporarilyDisablesSnapping != disabled {
+                                viewModel.blockReferenceWorkflow.temporarilyDisablesSnapping = disabled
+                            }
+                        }
                     )
                     .frame(width: geometry.size.width, height: geometry.size.height)
                 }
@@ -647,6 +654,12 @@ struct CanvasContainerView: View {
                         x: geometry.size.width / 2,
                         y: abs(viewModel.workspace.viewport.rotationDegrees) > 0.05 ? 68 : 28
                     )
+                }
+
+                if viewModel.workspace.toolSession.activeTool == .brush,
+                   viewModel.workspace.document.blockReferenceScene?.display.isFrozen == true {
+                    BlockReferencePaintingBar(viewModel: viewModel)
+                        .position(x: geometry.size.width / 2, y: 30)
                 }
 
                 if viewModel.workspace.toolSession.activeTool == .canvasRotate || abs(viewModel.workspace.viewport.rotationDegrees) > 0.05 {

@@ -254,6 +254,7 @@ final class WorkspaceViewModel: ObservableObject {
     @Published private(set) var selectedMeshWarpControlPointIndices: Set<Int> = []
     @Published private(set) var selectedPerspectiveAnchorID: UUID?
     @Published var blockReferenceEditorState = BlockReferenceEditorState()
+    @Published var blockReferenceWorkflow = BlockReferenceWorkflowState()
     @Published var perspectiveGuideMatchState = PerspectiveGuideMatchState()
     @Published var isBlockReferenceCameraNavigating = false
     var blockReferenceCameraPreview: BlockReferenceCamera?
@@ -1342,15 +1343,22 @@ final class WorkspaceViewModel: ObservableObject {
         normalizesScene: Bool = true,
         _ transform: (inout BlockReferenceScene?) -> Void
     ) -> Bool {
+        if blockReferenceWorkflow.interactionPreview != nil, operationKind == nil {
+            transform(&blockReferenceWorkflow.interactionPreview)
+            if normalizesScene { blockReferenceWorkflow.interactionPreview?.normalize() }
+            return true
+        }
+        var candidate = workspace.document.blockReferenceScene
+            ?? (workspace.toolSession.activeTool == .blockReference ? .empty : nil)
+        transform(&candidate)
+        if normalizesScene { candidate?.normalize() }
+        guard candidate != workspace.document.blockReferenceScene else { return true }
         if let operationKind,
            !captureBlockReferenceHistoryCheckpoint(operationKind: operationKind) {
             return false
         }
         bootstrap.workspaceStore.updateDocument { document in
-            transform(&document.blockReferenceScene)
-            if normalizesScene {
-                document.blockReferenceScene?.normalize()
-            }
+            document.blockReferenceScene = candidate
         }
         hasUnsavedChanges = true
         refreshDocumentOverlayOnly()
@@ -12726,6 +12734,7 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func undo() {
+        if cancelPendingBlockReferenceEditForHistory() { return }
         let auditEnabled = PerformanceAuditStore.shared.isRecordingEnabled
         let startNs = auditEnabled ? DispatchTime.now().uptimeNanoseconds : 0
         defer {
@@ -12935,6 +12944,7 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func redo() {
+        if cancelPendingBlockReferenceEditForHistory() { return }
         let auditEnabled = PerformanceAuditStore.shared.isRecordingEnabled
         let startNs = auditEnabled ? DispatchTime.now().uptimeNanoseconds : 0
         defer {
@@ -14517,6 +14527,9 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     private func resetTransientDocumentInteractionsForReplacement() {
+        cancelBlockReferenceInteraction()
+        blockReferenceWorkflow = .init()
+        blockReferenceEditorState = .init()
         patternPlacementPhase = .idle
         straightLineState = .init()
         linearGradientState = .init()
@@ -14590,6 +14603,7 @@ final class WorkspaceViewModel: ObservableObject {
             break
         }
 
+        resetTransientDocumentInteractionsForReplacement()
         resetSnapshotToolState(resumeTimelapseIfNeeded: false)
         perspectiveGuideMatchState = .init()
 

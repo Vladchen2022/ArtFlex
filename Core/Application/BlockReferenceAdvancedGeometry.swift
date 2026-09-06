@@ -46,6 +46,26 @@ enum BlockHumanJoint: String, CaseIterable, Sendable, Equatable, Hashable {
     }
 }
 
+func blockReferenceResetHumanJoint(_ joint: BlockHumanJoint, in original: BlockHumanPose) -> BlockHumanPose {
+    let fields: [WritableKeyPath<BlockHumanPose, Double>]
+    switch joint {
+    case .pelvis: fields = [\.pelvisYawDegrees]
+    case .head: fields = [\.headPitchDegrees, \.headYawDegrees, \.headRollDegrees]
+    case .torso: fields = [\.torsoPitchDegrees, \.torsoYawDegrees, \.torsoRollDegrees]
+    case .leftShoulder: fields = [\.leftShoulderDegrees, \.leftShoulderFlexionDegrees, \.leftShoulderTwistDegrees]
+    case .rightShoulder: fields = [\.rightShoulderDegrees, \.rightShoulderFlexionDegrees, \.rightShoulderTwistDegrees]
+    case .leftElbow: fields = [\.leftElbowDegrees]
+    case .rightElbow: fields = [\.rightElbowDegrees]
+    case .leftHip: fields = [\.leftHipDegrees, \.leftHipAbductionDegrees, \.leftHipTwistDegrees]
+    case .rightHip: fields = [\.rightHipDegrees, \.rightHipAbductionDegrees, \.rightHipTwistDegrees]
+    case .leftKnee: fields = [\.leftKneeDegrees]
+    case .rightKnee: fields = [\.rightKneeDegrees]
+    }
+    var result = original
+    for field in fields { result[keyPath: field] = BlockHumanPose.standing[keyPath: field] }
+    return result
+}
+
 func blockReferenceHumanPose(
     _ original: BlockHumanPose,
     rotating joint: BlockHumanJoint,
@@ -964,7 +984,13 @@ func blockReferenceSceneSnapshot(name: String, scene: BlockReferenceScene) -> Bl
         savedWorkingPlanes: scene.savedWorkingPlanes,
         groups: scene.groups,
         camera: scene.camera,
-        section: scene.section
+        section: scene.section,
+        customModuleInstances: scene.customModuleInstances,
+        pivotMode: scene.pivotMode,
+        customPivot: scene.customPivot,
+        display: scene.display,
+        snap: scene.snap,
+        cameraSlots: scene.cameraSlots
     )
 }
 

@@ -1993,7 +1993,7 @@ struct RightInspectorView: View {
                                 selectedTab: $blockReferencePanelTab
                             )
                         }
-                        .frame(minHeight: 260, maxHeight: .infinity, alignment: .top)
+                        .frame(minHeight: viewModel.blockReferenceScene?.objects.isEmpty == true ? 90 : 180, maxHeight: .infinity, alignment: .top)
                     }
                     .frame(width: columnWidth)
                     .frame(maxHeight: .infinity, alignment: .top)

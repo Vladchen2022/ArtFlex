@@ -149,6 +149,7 @@ private struct BlockReferenceMetalGeometryCacheKey: Equatable {
     var isFrozen: Bool
     var draft: BlockCreationDraft?
     var numericTransform: BlockReferenceNumericTransform?
+    var placementObjects: [BlockReferenceObject]
 }
 
 private struct BlockReferenceMetalGeometrySource {
@@ -451,6 +452,7 @@ private final class BlockReferenceMetalSolidRenderer {
             if blockReferenceShouldRenderFaces(display: scene.display) {
                 let faceColor = blockReferenceFaceColor(
                     normal: face.normal,
+                    light: scene.display.lightDirection,
                     isDraft: isDraft,
                     isSelected: isSelected,
                     isActive: isActive,
@@ -539,7 +541,8 @@ private final class BlockReferenceMetalSolidRenderer {
             objects: scene.objects,
             isFrozen: scene.display.isFrozen,
             draft: editorState.draft,
-            numericTransform: editorState.numericTransform
+            numericTransform: editorState.numericTransform,
+            placementObjects: editorState.placementObjects
         )
         guard key != geometryCacheKey || geometrySource == nil else { return }
 
@@ -549,16 +552,19 @@ private final class BlockReferenceMetalSolidRenderer {
             (editorState.numericTransform?.applying(to: object) ?? object, false)
         }
         if let draft = editorState.draft {
-            objects.append((BlockReferenceObject(
+            var preview = BlockReferenceObject(
                 id: UUID(uuidString: "00000000-0000-0000-0000-000000000001")!,
                 name: "草稿",
                 kind: draft.kind,
                 position: draft.center,
                 rotation: blockRotation(alignedTo: draft.plane),
                 dimensions: draft.dimensions
-            ), true))
+            )
+            preview.radialSegments = 24
+            objects.append((preview, true))
         }
 
+        objects.append(contentsOf: editorState.placementObjects.map { ($0, true) })
         let renderedFaces = objects.flatMap { object, isDraft in
             blockObjectFaces(object).map { ($0, isDraft, object.style) }
         }
@@ -848,6 +854,7 @@ private func blockReferenceAccentColor() -> SIMD4<Float> {
 
 private func blockReferenceFaceColor(
     normal: BlockVector3,
+    light: BlockVector3 = BlockVector3(x: -0.35, y: -0.55, z: 1).normalized(),
     isDraft: Bool,
     isSelected: Bool,
     isActive: Bool,
@@ -855,7 +862,6 @@ private func blockReferenceFaceColor(
     accent: SIMD4<Float>,
     style: BlockReferenceObjectStyle
 ) -> SIMD4<Float> {
-    let light = BlockVector3(x: -0.35, y: -0.55, z: 1).normalized()
     let lightAmount = Float(min(max(normal.dot(light) * 0.5 + 0.5, 0.18), 1))
     if isDraft {
         return SIMD4(0.24, 0.82, 0.9, 0.62)

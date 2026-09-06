@@ -155,6 +155,40 @@ struct BlockReferencePerspectiveMatchAssessment: Sendable, Equatable {
     var camera: BlockReferenceCamera
     var quality: BlockReferencePerspectiveMatchQuality
     var normalizedLineResidual: Double
+    var warning: String? = nil
+}
+
+/// A two-line intersection has zero residual even when it is ill-conditioned.
+/// Assess angular separation independently of the least-squares residual.
+func blockReferenceMatchLineCondition(
+    lines: [BlockReferencePerspectiveMatchLine], canvasSize: CanvasSize
+) -> (quality: BlockReferencePerspectiveMatchQuality, warning: String?) {
+    let diagonal = hypot(Double(canvasSize.width), Double(canvasSize.height))
+    var weakAxes: [String] = []
+    var poor = false
+    for axis in BlockReferenceAxis.allCases {
+        let family = lines.filter { $0.axis == axis }
+        var largestSine = 0.0
+        for i in family.indices {
+            for j in family.indices where j > i {
+                let a = family[i], b = family[j]
+                let denominator = a.length * b.length
+                guard denominator > 0 else { continue }
+                largestSine = max(largestSine, abs(
+                    (a.end.x - a.start.x) * (b.end.y - b.start.y)
+                        - (a.end.y - a.start.y) * (b.end.x - b.start.x)
+                ) / denominator)
+            }
+        }
+        let short = family.filter { $0.length >= max(12, diagonal * 0.03) }.count < 2
+        if largestSine < sin(2 * .pi / 180) || short {
+            weakAxes.append(axis.displayName)
+            poor = poor || largestSine < sin(0.25 * .pi / 180) || family.count < 2
+        }
+    }
+    guard !weakAxes.isEmpty else { return (.stable, nil) }
+    return (poor ? .poor : .approximate,
+            "\(weakAxes.joined(separator: "/")) 方向线段过短或近乎平行；请选更长、夹角更明显的边。")
 }
 
 /// Finds the point that minimizes the sum of squared distances to the supplied
@@ -246,7 +280,7 @@ func makeBlockReferencePerspectiveMatchAssessment(
     let principal = camera.principalPointNormalized
     let principalIsPlausible = (-0.25...1.25).contains(principal.x)
         && (-0.25...1.25).contains(principal.y)
-    let quality: BlockReferencePerspectiveMatchQuality
+    var quality: BlockReferencePerspectiveMatchQuality
     if residual <= 0.0025, principalIsPlausible {
         quality = .stable
     } else if residual <= 0.01 {
@@ -254,10 +288,14 @@ func makeBlockReferencePerspectiveMatchAssessment(
     } else {
         quality = .poor
     }
+    let condition = blockReferenceMatchLineCondition(lines: state.lines, canvasSize: canvasSize)
+    if condition.quality == .poor { quality = .poor }
+    else if condition.quality == .approximate, quality == .stable { quality = .approximate }
     return BlockReferencePerspectiveMatchAssessment(
         guide: guide,
         camera: camera,
         quality: quality,
-        normalizedLineResidual: residual
+        normalizedLineResidual: residual,
+        warning: condition.warning
     )
 }

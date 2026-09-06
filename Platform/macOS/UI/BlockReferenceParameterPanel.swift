@@ -8,13 +8,15 @@ enum BlockReferencePanelTab: String, CaseIterable {
     case camera
     case scene
 
+    static let allCases: [Self] = [.build, .camera, .scene]
+
     var displayName: String {
         switch self {
-        case .build: return "建模"
+        case .build: return "搭体块"
         case .transform: return "变换"
         case .reference: return "参考"
-        case .camera: return "相机"
-        case .scene: return "场景"
+        case .camera: return "定视角"
+        case .scene: return "绘画参考"
         }
     }
 
@@ -93,6 +95,8 @@ struct BlockReferenceParameterPanel: View {
     @State private var pendingModuleName = ""
     @State private var isModuleNameAlertPresented = false
     @State private var pendingModuleDeletion: BlockReferenceModuleAsset?
+    @State private var pendingSnapshotReplacement: UUID?
+    @State private var pendingCameraReplacement: Int?
     @State private var arrayCount = 3
     @State private var arraySpacing = 40.0
     @State private var radialDegrees = 360.0
@@ -102,14 +106,34 @@ struct BlockReferenceParameterPanel: View {
     @State private var expandedTransformDetail: BlockReferenceTransformDetail?
 
     var body: some View {
+        panelContent
+            .foregroundStyle(Color.white.opacity(0.88))
+            .environment(\.colorScheme, .dark)
+            .alert("替换这张场景快照？", isPresented: Binding(
+                get: { pendingSnapshotReplacement != nil },
+                set: { if !$0 { pendingSnapshotReplacement = nil } }
+            )) {
+                Button("取消", role: .cancel) { pendingSnapshotReplacement = nil }
+                Button("替换快照") {
+                    if let id = pendingSnapshotReplacement { viewModel.replaceBlockReferenceSceneSnapshot(id) }
+                    pendingSnapshotReplacement = nil
+                }
+            } message: {
+                Text("将用当前完整场景覆盖选中的快照，其他快照保持不变。替换后仍可撤销。")
+            }
+    }
+
+    @ViewBuilder private var panelContent: some View {
         if let scene = viewModel.blockReferenceScene {
             switch presentation {
             case .library:
                 libraryPanel
+                    .disabled(scene.display.isFrozen)
             case .context:
                 contextPanel(scene)
             case .objects:
                 objectManagerPanel(scene)
+                    .disabled(scene.display.isFrozen)
             case .cameraSlots:
                 cameraSlotList(scene)
             }
@@ -135,7 +159,7 @@ struct BlockReferenceParameterPanel: View {
                     .foregroundStyle(Color.white.opacity(0.92))
                 Spacer()
                 Text(selectedTab.displayName)
-                    .font(.system(size: 10, weight: .medium).monospacedDigit())
+                    .font(.system(size: 11, weight: .medium).monospacedDigit())
                     .foregroundStyle(Color.white.opacity(0.5))
             }
 
@@ -149,41 +173,68 @@ struct BlockReferenceParameterPanel: View {
             .controlSize(.small)
 
             Text(contextInstruction(scene))
-                .font(.system(size: 10, weight: .medium))
+                .font(.system(size: 11, weight: .medium))
                 .foregroundStyle(Color.white.opacity(0.72))
                 .fixedSize(horizontal: false, vertical: true)
 
+            if scene.display.isFrozen {
+                Text("构图已锁定，查看设置不会解除锁定。").foregroundStyle(.orange)
+                Button("解锁并编辑体块") { viewModel.unlockBlockReferenceForEditing() }
+                    .buttonStyle(.borderedProminent)
+            }
             switch selectedTab {
-            case .build:
-                buildOperationControls
-            case .transform:
-                if let object = viewModel.selectedBlockReferenceObject {
-                    if viewModel.selectedBlockReferenceObjectIDs.count > 1 {
-                        multipleSelectionControls(activeObject: object)
-                        transformDetailControls(object: object, includesGeometry: false)
-                    } else {
-                        selectedObjectControls(object)
-                        transformDetailControls(
-                            object: object,
-                            includesGeometry: object.moduleKind?.isParametric == true
-                                || object.moduleKind == .poseableHuman
-                        )
+            case .build, .transform, .reference:
+                VStack(alignment: .leading, spacing: 12) {
+                    buildOperationControls
+                    Toggle("拖面调尺寸", isOn: $viewModel.blockReferenceWorkflow.resizesFace)
+                        .help("仅基础方块各面、圆柱和圆锥的底面/顶面；Esc 取消")
+                    Toggle("连续放置", isOn: $viewModel.blockReferenceWorkflow.continuousPlacement)
+                    if let object = viewModel.selectedBlockReferenceObject {
+                        Text("已选 \(viewModel.selectedBlockReferenceObjectIDs.count) 个 · \(object.name)")
+                            .font(.headline)
+                        if viewModel.selectedBlockReferenceObjectIDs.count > 1 {
+                            multipleSelectionControls(activeObject: object)
+                        } else {
+                            selectedObjectControls(object)
+                        }
+                        HStack {
+                            Button("贴工作面") { viewModel.landSelectedBlockReferenceObjects() }
+                            Button("落地") { viewModel.landSelectedBlockReferenceObjects(onGround: true) }
+                        }.buttonStyle(.bordered)
+                        if object.customMesh == nil && object.kind != .box {
+                            Picker("曲面质量", selection: Binding(
+                                get: { object.radialSegments },
+                                set: viewModel.setSelectedBlockReferenceCurveQuality
+                            )) {
+                                Text("原始 8 段").tag(8)
+                                Text("平滑 24 段").tag(24)
+                                Text("精细 32 段").tag(32)
+                            }
+                        }
+                        DisclosureGroup("更多变换 · 构造、枢轴、阵列") {
+                            transformDetailControls(object: object,
+                                includesGeometry: object.moduleKind?.isParametric == true || object.moduleKind == .poseableHuman)
+                        }
                     }
-                } else {
-                    emptyTabHint("先在画布或“建模”标签选择体块。")
-                }
-            case .reference:
-                snapControls(scene)
-                referenceConstructionControls(scene)
-                if let object = viewModel.selectedBlockReferenceObject {
-                    objectStyleControls(object)
-                }
+                    DisclosureGroup("工作面与吸附") {
+                        Text("⌘ 暂停吸附；彩色轴控制方向。")
+                        snapControls(scene)
+                        referenceConstructionControls(scene)
+                    }
+                }.disabled(scene.display.isFrozen)
             case .camera:
-                perspectiveMatchControls
-                cameraControls(scene.camera)
-                perspectiveLineControls(scene)
+                cameraWorkflowControls(scene)
+                DisclosureGroup("精确相机参数") { cameraControls(scene.camera) }
+                    .disabled(scene.display.isFrozen || viewModel.blockReferenceWorkflow.inspectionCamera != nil)
+                DisclosureGroup("匹配图片透视") { perspectiveMatchControls }
+                    .disabled(scene.display.isFrozen)
+                DisclosureGroup("透视辅助线") { perspectiveLineControls(scene) }
             case .scene:
-                displayControls(scene)
+                referenceWorkflowControls(scene)
+                DisclosureGroup("对象与显示细项") {
+                    displayControls(scene)
+                    if let object = viewModel.selectedBlockReferenceObject { objectStyleControls(object) }
+                }
                 sceneSnapshotControls(scene)
             }
         }
@@ -205,13 +256,13 @@ struct BlockReferenceParameterPanel: View {
                 set: { viewModel.setBlockReferenceBuildsDirectlyOnSurfaces($0) }
             ))
             .toggleStyle(.switch)
-            .controlSize(.mini)
-            .font(.system(size: 10, weight: .medium))
+            .controlSize(.small)
+            .font(.system(size: 11, weight: .medium))
             .foregroundStyle(Color.white.opacity(0.82))
             .help("开启后，选择基础体块并在现有体块表面拖动，即以该表面作为本次工作面")
 
-            Text("从左侧体块库选择模型；在画布工作面拖出基面，再拖拉高度。")
-                .font(.system(size: 10, weight: .medium))
+            Text("从体块库选择素材；在画布工作面拖出基面，再拖拉高度。")
+                .font(.system(size: 11, weight: .medium))
                 .foregroundStyle(Color.white.opacity(0.46))
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
@@ -225,7 +276,7 @@ struct BlockReferenceParameterPanel: View {
                     .foregroundStyle(Color.white.opacity(0.92))
                 Spacer()
                 Text("选择后在画布创建")
-                    .font(.system(size: 9, weight: .medium))
+                    .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(Color.white.opacity(0.42))
             }
 
@@ -251,7 +302,7 @@ struct BlockReferenceParameterPanel: View {
                             .frame(width: 22, height: 22)
                     }
                     .buttonStyle(.bordered)
-                    .controlSize(.mini)
+                    .controlSize(.small)
                     .buttonTooltip("新建体块类目")
                 }
             }
@@ -299,7 +350,7 @@ struct BlockReferenceParameterPanel: View {
                 let modules = viewModel.blockReferenceModuleLibrary.modules(in: categoryID)
                 if modules.isEmpty {
                     Text("此类目为空。选中场景体块后，在“场景对象”中右键存入这里。")
-                        .font(.system(size: 10, weight: .medium))
+                        .font(.system(size: 11, weight: .medium))
                         .foregroundStyle(Color.white.opacity(0.42))
                         .fixedSize(horizontal: false, vertical: true)
                         .frame(maxWidth: .infinity, minHeight: 58, alignment: .topLeading)
@@ -357,7 +408,7 @@ struct BlockReferenceParameterPanel: View {
             selectedLibrarySelection = selection
         } label: {
             Text(title)
-                .font(.system(size: 10, weight: .semibold))
+                .font(.system(size: 11, weight: .semibold))
                 .lineLimit(1)
                 .padding(.horizontal, 9)
                 .frame(minHeight: 24)
@@ -475,13 +526,13 @@ struct BlockReferenceParameterPanel: View {
                 }
             }
             .buttonStyle(.bordered)
-            .controlSize(.mini)
+            .controlSize(.small)
             .disabled(viewModel.selectedBlockReferenceObjectIDs.isEmpty)
 
             Text(scene.pivotMode == .custom
                  ? "已设置：载入模块时此点落在活动工作面原点"
                  : "默认使用所选体块中心作为模块基准点")
-                .font(.system(size: 9, weight: .medium))
+                .font(.system(size: 11, weight: .medium))
                 .foregroundStyle(Color.white.opacity(0.43))
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -501,15 +552,15 @@ struct BlockReferenceParameterPanel: View {
                     Spacer()
                     if !selection.isEmpty {
                         Text("已选 \(selection.count)")
-                            .font(.system(size: 10, weight: .semibold).monospacedDigit())
+                            .font(.system(size: 11, weight: .semibold).monospacedDigit())
                             .foregroundStyle(Color.accentColor)
                     }
                 }
             }
 
             if scene.objects.isEmpty {
-                Text("暂无体块；从左侧体块库选择模型后在画布拖建。")
-                    .font(.system(size: 10, weight: .medium))
+                Text("暂无体块；从体块库选择素材后在画布拖建。")
+                    .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(Color.white.opacity(0.38))
                     .frame(maxWidth: .infinity, minHeight: 42, alignment: .leading)
             } else {
@@ -566,10 +617,10 @@ struct BlockReferenceParameterPanel: View {
                         .frame(width: 14)
                     VStack(alignment: .leading, spacing: 1) {
                         Text(object.name)
-                            .font(.system(size: 10, weight: isActive ? .bold : .semibold))
+                            .font(.system(size: 11, weight: isActive ? .bold : .semibold))
                             .lineLimit(1)
                         Text(object.geometryDisplayName)
-                            .font(.system(size: 10, weight: .medium))
+                            .font(.system(size: 11, weight: .medium))
                             .foregroundStyle(Color.white.opacity(0.38))
                     }
                     Spacer(minLength: 4)
@@ -611,7 +662,7 @@ struct BlockReferenceParameterPanel: View {
             .buttonTooltip(object.isLocked ? "解锁体块" : "锁定体块")
         }
         .buttonStyle(.borderless)
-        .controlSize(.mini)
+        .controlSize(.small)
         .contextMenu {
             objectModuleContextMenu(object)
         }
@@ -718,13 +769,13 @@ struct BlockReferenceParameterPanel: View {
                 ))
             }
             .toggleStyle(.switch)
-            .controlSize(.mini)
-            .font(.system(size: 10, weight: .medium))
+            .controlSize(.small)
+            .font(.system(size: 11, weight: .medium))
             .foregroundStyle(Color.white.opacity(0.82))
 
             HStack(spacing: 8) {
                 Text("模式")
-                    .font(.system(size: 10, weight: .medium))
+                    .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(Color.white.opacity(0.72))
                 Picker("模式", selection: Binding(
                     get: { scene.display.mode },
@@ -736,7 +787,7 @@ struct BlockReferenceParameterPanel: View {
                 }
                 .labelsHidden()
                 .pickerStyle(.segmented)
-                .controlSize(.mini)
+                .controlSize(.small)
             }
 
             parameterSlider(
@@ -789,14 +840,14 @@ struct BlockReferenceParameterPanel: View {
                 plane.origin.x, plane.origin.y, plane.origin.z,
                 plane.normal.x, plane.normal.y, plane.normal.z
             ))
-            .font(.system(size: 10, weight: .medium, design: .monospaced))
+            .font(.system(size: 11, weight: .medium, design: .monospaced))
             .foregroundStyle(Color.cyan.opacity(0.82))
             .fixedSize(horizontal: false, vertical: true)
 
             VStack(alignment: .leading, spacing: 6) {
                 HStack(spacing: 7) {
                     Text("移动工作面")
-                        .font(.system(size: 10, weight: .semibold))
+                        .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(Color.white.opacity(0.68))
                     Picker("世界轴", selection: $workingPlaneMoveAxis) {
                         ForEach(BlockReferenceAxis.allCases, id: \.self) { axis in
@@ -829,10 +880,10 @@ struct BlockReferenceParameterPanel: View {
                     .buttonStyle(.borderedProminent)
                 }
                 .buttonStyle(.bordered)
-                .controlSize(.mini)
+                .controlSize(.small)
                 .disabled(abs(workingPlaneMoveDistance) <= 0.000_001)
                 Text("按世界 X/Y/Z 轴平移工作面；斜面沿自身法线移动仍使用下方“网格偏移”。")
-                    .font(.system(size: 9, weight: .medium))
+                    .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(Color.white.opacity(0.42))
             }
         }
@@ -858,7 +909,7 @@ struct BlockReferenceParameterPanel: View {
                 .buttonTooltip("删除所选体块")
             }
             .buttonStyle(.bordered)
-            .controlSize(.mini)
+            .controlSize(.small)
 
             numericTransformControls(object)
 
@@ -879,7 +930,7 @@ struct BlockReferenceParameterPanel: View {
                 }
             } else {
                 Text(fixedModuleEditingDescription(object.moduleKind))
-                    .font(.system(size: 10, weight: .medium))
+                    .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(Color.white.opacity(0.46))
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -940,14 +991,14 @@ struct BlockReferenceParameterPanel: View {
                 .buttonTooltip("删除所选体块")
             }
             .buttonStyle(.bordered)
-            .controlSize(.mini)
+            .controlSize(.small)
 
             numericTransformControls(activeObject)
             if viewModel.selectedBlockReferenceObjectIDs.count == 2 {
                 booleanControls(activeObject: activeObject)
             }
             Text("组合变换以所选体块中心为枢轴；尺寸仍需单独选择体块调整。")
-                .font(.system(size: 10, weight: .medium))
+                .font(.system(size: 11, weight: .medium))
                 .foregroundStyle(Color.white.opacity(0.42))
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -977,7 +1028,7 @@ struct BlockReferenceParameterPanel: View {
             .disabled(!viewModel.canApplyBlockReferenceBoolean)
 
             Text("减去方向：活动对象 − 另一个对象；结果替换两个源体块，可撤销。")
-                .font(.system(size: 10, weight: .medium))
+                .font(.system(size: 11, weight: .medium))
                 .foregroundStyle(Color.white.opacity(0.42))
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -1002,11 +1053,11 @@ struct BlockReferenceParameterPanel: View {
                 .tint(transform?.kind == .scale ? Color.accentColor : Color.gray)
             }
             .buttonStyle(.bordered)
-            .controlSize(.mini)
+            .controlSize(.small)
 
             HStack(spacing: 7) {
                 Text("坐标")
-                    .font(.system(size: 10, weight: .semibold))
+                    .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(Color.white.opacity(0.55))
                 Picker("", selection: Binding(
                     get: { viewModel.blockReferenceEditorState.gizmoCoordinateSpace },
@@ -1020,7 +1071,7 @@ struct BlockReferenceParameterPanel: View {
                 .pickerStyle(.segmented)
                 .frame(maxWidth: .infinity)
             }
-            .controlSize(.mini)
+            .controlSize(.small)
 
             if isEditingObject, let transform {
                 HStack(spacing: 5) {
@@ -1029,7 +1080,7 @@ struct BlockReferenceParameterPanel: View {
                             viewModel.setBlockReferenceNumericTransformUniformScale()
                         }
                         .buttonStyle(.bordered)
-                        .controlSize(.mini)
+                        .controlSize(.small)
                         .tint(transform.axis == nil ? Color.accentColor : Color.gray)
                     }
                     ForEach(BlockReferenceAxis.allCases, id: \.self) { axis in
@@ -1037,7 +1088,7 @@ struct BlockReferenceParameterPanel: View {
                             viewModel.setBlockReferenceNumericTransformAxis(axis)
                         }
                         .buttonStyle(.bordered)
-                        .controlSize(.mini)
+                        .controlSize(.small)
                         .tint(transform.axis == axis ? axisColor(axis) : Color.gray)
                     }
                     TextField(
@@ -1048,16 +1099,16 @@ struct BlockReferenceParameterPanel: View {
                         )
                     )
                     .textFieldStyle(.roundedBorder)
-                    .font(.system(size: 10, design: .monospaced))
+                    .font(.system(size: 11, design: .monospaced))
                     .onSubmit { viewModel.commitBlockReferenceNumericTransform() }
                     Button("应用") { viewModel.commitBlockReferenceNumericTransform() }
                         .disabled((transform.kind != .scale && transform.axis == nil) || transform.value == nil)
                     Button("取消") { viewModel.cancelBlockReferenceNumericTransform() }
                 }
                 .buttonStyle(.bordered)
-                .controlSize(.mini)
+                .controlSize(.small)
                 Text("Blender 轴规则：G/R/S → X 为世界轴；再按一次 X（XX）切到局部轴。Y、Z 同理。")
-                    .font(.system(size: 10, weight: .medium))
+                    .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(Color.white.opacity(0.62))
             }
         }
@@ -1084,7 +1135,7 @@ struct BlockReferenceParameterPanel: View {
                 Spacer()
                 Text(assessment.map { planeAnchor == nil ? "需要工作面中心" : $0.quality.displayName }
                     ?? "需要 X/Y/Z 各两条")
-                    .font(.system(size: 9, weight: .semibold))
+                    .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(matchQualityColor(assessment?.quality))
             }
 
@@ -1105,6 +1156,7 @@ struct BlockReferenceParameterPanel: View {
             .buttonStyle(.bordered)
             .controlSize(.small)
 
+            if let warning = assessment?.warning { Text(warning).font(.system(size: 11)).foregroundStyle(.orange) }
             HStack(spacing: 6) {
                 Button(state.isPickingPlaneAnchor ? "请点击画布…" : "拾取工作面中心") {
                     viewModel.pickBlockReferencePerspectiveMatchPlaneAnchor()
@@ -1116,11 +1168,11 @@ struct BlockReferenceParameterPanel: View {
                 .disabled(state.planeAnchor == nil)
                 Spacer()
                 Text(state.planeAnchor == nil ? "自动" : "手动")
-                    .font(.system(size: 9, weight: .semibold))
+                    .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(Color.cyan.opacity(0.86))
             }
             .buttonStyle(.bordered)
-            .controlSize(.mini)
+            .controlSize(.small)
 
             Picker("参考方向", selection: Binding(
                 get: { state.activeAxis },
@@ -1142,7 +1194,7 @@ struct BlockReferenceParameterPanel: View {
                             .frame(width: 6, height: 6)
                         Text("\(axis.displayName) \(state.lineCount(for: axis))")
                     }
-                    .font(.system(size: 9, weight: .semibold).monospacedDigit())
+                    .font(.system(size: 11, weight: .semibold).monospacedDigit())
                 }
                 Spacer()
                 Button("撤销一条") { viewModel.undoLastBlockReferencePerspectiveMatchLine() }
@@ -1157,10 +1209,10 @@ struct BlockReferenceParameterPanel: View {
                 .disabled(!state.hasAnyLines)
             }
             .buttonStyle(.bordered)
-            .controlSize(.mini)
+            .controlSize(.small)
 
             Text("红 X 与绿 Y 应优先取自同一个目标桌面或地面，交点区域用于自动定位工作面；蓝 Z 使用场景竖直边。也可手动拾取工作面中心。")
-                .font(.system(size: 10, weight: .medium))
+                .font(.system(size: 11, weight: .medium))
                 .foregroundStyle(Color.white.opacity(0.58))
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -1183,7 +1235,7 @@ struct BlockReferenceParameterPanel: View {
                 Spacer()
                 Button("重置") { viewModel.resetBlockReferenceCamera() }
                     .buttonStyle(.bordered)
-                    .controlSize(.mini)
+                    .controlSize(.small)
             }
             parameterSlider(
                 title: "水平",
@@ -1235,7 +1287,7 @@ struct BlockReferenceParameterPanel: View {
                 set: { value in viewModel.setBlockReferenceOrthographic(value) }
             ))
             .toggleStyle(.switch)
-            .controlSize(.mini)
+            .controlSize(.small)
             .font(.system(size: 11, weight: .medium))
 
             HStack(spacing: 6) {
@@ -1244,10 +1296,10 @@ struct BlockReferenceParameterPanel: View {
                     .disabled(viewModel.selectedBlockReferenceObjectIDs.isEmpty)
             }
             .buttonStyle(.bordered)
-            .controlSize(.mini)
+            .controlSize(.small)
 
             Text("中键环绕 · ⇧中键平移 · ⌃中键/滚轮缩放 · Home 全部 · 小键盘 1/3/7 视图")
-                .font(.system(size: 10, weight: .medium))
+                .font(.system(size: 11, weight: .medium))
                 .foregroundStyle(Color.white.opacity(0.42))
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -1291,7 +1343,7 @@ struct BlockReferenceParameterPanel: View {
                 .transition(.opacity.combined(with: .move(edge: .top)))
             } else {
                 Text("枢轴、组织和阵列按需展开；同一时间只显示一组高级参数。")
-                    .font(.system(size: 9, weight: .medium))
+                    .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(Color.white.opacity(0.4))
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -1310,11 +1362,11 @@ struct BlockReferenceParameterPanel: View {
             }
         } label: {
             Label(title, systemImage: detail.symbolName)
-                .font(.system(size: 9, weight: .semibold))
+                .font(.system(size: 11, weight: .semibold))
                 .frame(maxWidth: .infinity, minHeight: 25)
         }
         .buttonStyle(.bordered)
-        .controlSize(.mini)
+        .controlSize(.small)
         .tint(isSelected ? Color.accentColor : Color.gray)
     }
 
@@ -1360,11 +1412,11 @@ struct BlockReferenceParameterPanel: View {
                 Button("复制 ⇧D") { viewModel.duplicateSelectedBlockReferenceObject() }
             }
             .buttonStyle(.bordered)
-            .controlSize(.mini)
+            .controlSize(.small)
 
             HStack(spacing: 6) {
                 Text("镜像")
-                    .font(.system(size: 10, weight: .semibold))
+                    .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(Color.white.opacity(0.55))
                 ForEach(BlockReferenceAxis.allCases, id: \.self) { axis in
                     Button(axis.displayName) { viewModel.mirrorSelectedBlockReferenceObjects(axis: axis) }
@@ -1372,11 +1424,11 @@ struct BlockReferenceParameterPanel: View {
                 }
                 Spacer()
                 Text("⌃M → 轴")
-                    .font(.system(size: 10, weight: .medium))
+                    .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(Color.white.opacity(0.38))
             }
             .buttonStyle(.bordered)
-            .controlSize(.mini)
+            .controlSize(.small)
         }
     }
 
@@ -1442,7 +1494,7 @@ struct BlockReferenceParameterPanel: View {
                     .disabled(scene.constructionLines.isEmpty)
             }
             .buttonStyle(.bordered)
-            .controlSize(.mini)
+            .controlSize(.small)
 
             HStack(spacing: 6) {
                 Button("保存工作面") { viewModel.saveCurrentBlockReferenceWorkingPlane() }
@@ -1450,12 +1502,12 @@ struct BlockReferenceParameterPanel: View {
                 Button("−网格偏移") { viewModel.offsetBlockReferenceWorkingPlane(-scene.snap.gridSpacing) }
             }
             .buttonStyle(.bordered)
-            .controlSize(.mini)
+            .controlSize(.small)
 
             ForEach(scene.savedWorkingPlanes) { saved in
                 Button(saved.name) { viewModel.recallBlockReferenceWorkingPlane(saved.id) }
                     .buttonStyle(.bordered)
-                    .controlSize(.mini)
+                    .controlSize(.small)
             }
 
             Divider().overlay(Color.white.opacity(0.08))
@@ -1471,10 +1523,10 @@ struct BlockReferenceParameterPanel: View {
                 ))
             }
             .toggleStyle(.switch)
-            .controlSize(.mini)
-            .font(.system(size: 10, weight: .medium))
+            .controlSize(.small)
+            .font(.system(size: 11, weight: .medium))
             Text("剖切面取自当前工作面；用“取工作面”后开启即可检查遮挡结构。")
-                .font(.system(size: 10, weight: .medium))
+                .font(.system(size: 11, weight: .medium))
                 .foregroundStyle(Color.white.opacity(0.42))
 
             if !scene.measurements.isEmpty {
@@ -1486,7 +1538,7 @@ struct BlockReferenceParameterPanel: View {
                         format: "长 %.1f · ΔX %.1f  ΔY %.1f  ΔZ %.1f",
                         measurement.length, delta.x, delta.y, delta.z
                     ))
-                    .font(.system(size: 10, design: .monospaced))
+                    .font(.system(size: 11, design: .monospaced))
                     .foregroundStyle(Color.white.opacity(0.66))
                 }
             }
@@ -1539,8 +1591,8 @@ struct BlockReferenceParameterPanel: View {
                 }
             ))
             .toggleStyle(.switch)
-            .controlSize(.mini)
-            .font(.system(size: 10, weight: .medium))
+            .controlSize(.small)
+            .font(.system(size: 11, weight: .medium))
         }
     }
 
@@ -1577,57 +1629,51 @@ struct BlockReferenceParameterPanel: View {
             Text(scene.camera.isOrthographic
                 ? "正交投影没有有限消失点；先切换为透视投影。"
                 : "实时线直接延长活动体块的实际棱边，并随相机与体块同步；冻结后才成为可独立编辑的二维辅助。")
-                .font(.system(size: 10, weight: .medium))
+                .font(.system(size: 11, weight: .medium))
                 .foregroundStyle(Color.white.opacity(0.62))
         }
     }
 
     private func cameraSlotList(_ scene: BlockReferenceScene) -> some View {
-        VStack(alignment: .leading, spacing: 7) {
-            HStack {
-                Text("视角槽")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(Color.white.opacity(0.92))
-                Spacer()
-                Text("保存并调用 3D 视角")
-                    .font(.system(size: 9, weight: .medium))
-                    .foregroundStyle(Color.white.opacity(0.42))
-            }
-            ForEach(1...5, id: \.self) { index in
-                let slot = scene.cameraSlots.first(where: { $0.index == index })
-                HStack(spacing: 6) {
-                    Text("\(index)")
-                        .font(.system(size: 10, weight: .bold).monospacedDigit())
-                        .frame(width: 18)
-                    Button(slot == nil ? "载入空槽" : "调用 \(slot?.name ?? "")") {
-                        viewModel.recallBlockReferenceCameraSlot(index)
+        VStack(alignment: .leading, spacing: 10) {
+            Text("构图收藏").font(.headline)
+            ForEach(scene.cameraSlots) { slot in
+                HStack(spacing: 8) {
+                    Button { viewModel.recallBlockReferenceCameraSlot(slot.index) } label: {
+                        BlockReferenceThumbnail(objects: scene.objects, camera: slot.camera)
+                            .frame(width: 64, height: 56)
+                    }.buttonStyle(.plain).help("调用构图")
+                    VStack(alignment: .leading, spacing: 4) {
+                        TextField("构图名称", text: Binding(
+                            get: { slot.name },
+                            set: { viewModel.renameBlockReferenceCameraSlot(slot.index, name: $0) }
+                        )).textFieldStyle(.plain).disabled(slot.isLocked)
+                        HStack(spacing: 5) {
+                            Button("覆盖") { pendingCameraReplacement = slot.index }.disabled(slot.isLocked)
+                            Button { viewModel.setBlockReferenceCameraSlotLocked(slot.index, locked: !slot.isLocked) } label: {
+                                Image(systemName: slot.isLocked ? "lock.fill" : "lock.open")
+                            }.help(slot.isLocked ? "解锁收藏" : "锁定收藏")
+                            Button { viewModel.clearBlockReferenceCameraSlot(slot.index) } label: {
+                                Image(systemName: "trash")
+                            }.disabled(slot.isLocked).help("删除构图收藏")
+                        }
                     }
-                    .disabled(slot == nil)
-                    Button(slot == nil ? "保存" : "覆盖") {
-                        viewModel.storeBlockReferenceCameraSlot(index)
-                    }
-                    .disabled(slot?.isLocked == true)
-                    Button {
-                        viewModel.setBlockReferenceCameraSlotLocked(index, locked: !(slot?.isLocked ?? false))
-                    } label: {
-                        Image(systemName: slot?.isLocked == true ? "lock.fill" : "lock.open")
-                    }
-                    .buttonTooltip(slot?.isLocked == true ? "解锁视角槽 \(index)" : "锁定视角槽 \(index)")
-                    .disabled(slot == nil)
-                    Button(role: .destructive) { viewModel.clearBlockReferenceCameraSlot(index) } label: {
-                        Image(systemName: "trash")
-                    }
-                    .buttonTooltip("清除视角槽 \(index)")
-                    .disabled(slot == nil || slot?.isLocked == true)
                 }
-                .buttonStyle(.bordered)
-                .controlSize(.mini)
+            }
+            if let free = (1...5).first(where: { i in !scene.cameraSlots.contains(where: { $0.index == i }) }) {
+                Button("收藏当前构图") { viewModel.storeBlockReferenceCameraSlot(free) }
+                    .disabled(scene.objects.isEmpty)
+            }
+            if scene.cameraSlots.isEmpty { Text("最多 5 个；锁定收藏后不会被覆盖。").font(.system(size: 11)).foregroundStyle(.secondary) }
+        }.buttonStyle(.bordered).controlSize(.small)
+        .confirmationDialog("覆盖这个构图收藏？", isPresented: Binding(
+            get: { pendingCameraReplacement != nil }, set: { if !$0 { pendingCameraReplacement = nil } }
+        )) {
+            Button("覆盖构图") {
+                if let index = pendingCameraReplacement { viewModel.storeBlockReferenceCameraSlot(index) }
+                pendingCameraReplacement = nil
             }
         }
-        .frame(maxWidth: .infinity, alignment: .topLeading)
-        .font(.system(size: 11, weight: .medium))
-        .foregroundStyle(Color.white.opacity(0.88))
-        .environment(\.colorScheme, .dark)
     }
 
     private func sceneSnapshotControls(_ scene: BlockReferenceScene) -> some View {
@@ -1639,27 +1685,31 @@ struct BlockReferenceParameterPanel: View {
                 Button("保存当前") { viewModel.saveBlockReferenceSceneSnapshot() }
             }
             .buttonStyle(.borderedProminent)
-            .controlSize(.mini)
+            .controlSize(.small)
             if scene.snapshots.isEmpty {
                 emptyTabHint("快照保存体块、相机、工作面、测量、辅助线和剖切状态。")
             } else {
                 ForEach(scene.snapshots) { snapshot in
                     HStack {
-                        Text(snapshot.name)
-                            .font(.system(size: 10, weight: .medium))
-                        Spacer()
-                        Button("恢复") { viewModel.restoreBlockReferenceSceneSnapshot(snapshot.id) }
-                        Button(role: .destructive) { viewModel.deleteBlockReferenceSceneSnapshot(snapshot.id) } label: {
-                            Image(systemName: "trash")
+                        BlockReferenceThumbnail(objects: snapshot.objects, camera: snapshot.camera).frame(width: 48, height: 40)
+                        VStack(alignment: .leading, spacing: 5) {
+                            Text(snapshot.name).font(.system(size: 11, weight: .medium)).lineLimit(1)
+                            HStack(spacing: 5) {
+                                Button("恢复") { viewModel.restoreBlockReferenceSceneSnapshot(snapshot.id) }
+                                Button("替换") { pendingSnapshotReplacement = snapshot.id }
+                                Button(role: .destructive) { viewModel.deleteBlockReferenceSceneSnapshot(snapshot.id) } label: {
+                                    Image(systemName: "trash")
+                                }
+                                .buttonTooltip("删除场景快照 \(snapshot.name)")
+                            }
                         }
-                        .buttonTooltip("删除场景快照 \(snapshot.name)")
                     }
                     .buttonStyle(.bordered)
-                    .controlSize(.mini)
+                    .controlSize(.small)
                 }
             }
             Text("工程保存会同时保存画布、体块场景、视角槽和场景快照。")
-                .font(.system(size: 10, weight: .medium))
+                .font(.system(size: 11, weight: .medium))
                 .foregroundStyle(Color.white.opacity(0.42))
         }
     }
@@ -1676,7 +1726,7 @@ struct BlockReferenceParameterPanel: View {
                     viewModel.updateSelectedBlockReferenceModule(parameters: next)
                 }
             ), in: 1...32)
-            .font(.system(size: 10, weight: .medium))
+            .font(.system(size: 11, weight: .medium))
             TripleBlockNumberFields(
                 title: "构造",
                 labels: ["数量", "进深", "厚度"],
@@ -1698,6 +1748,14 @@ struct BlockReferenceParameterPanel: View {
         let pose = object.humanPose ?? .standing
         return VStack(alignment: .leading, spacing: 5) {
             sectionTitle("人体姿势 · 刚性体块")
+            if let joint = viewModel.blockReferenceEditorState.selectedHumanJoint {
+                Button("复位\(joint.displayName)，保留其他关节") {
+                    viewModel.updateSelectedBlockReferenceModule(pose: blockReferenceResetHumanJoint(joint, in: pose))
+                }
+            } else {
+                Text("在画布点选关节后可单独复位。")
+                    .font(.system(size: 11)).foregroundStyle(.secondary)
+            }
             poseSlider("骨盆水平旋转", value: pose.pelvisYawDegrees, range: -180...180) {
                 var next = pose; next.pelvisYawDegrees = $0
                 viewModel.updateSelectedBlockReferenceModule(pose: next)
@@ -1809,7 +1867,7 @@ struct BlockReferenceParameterPanel: View {
 
     private func emptyTabHint(_ text: String) -> some View {
         Text(text)
-            .font(.system(size: 10, weight: .medium))
+            .font(.system(size: 11, weight: .medium))
             .foregroundStyle(Color.white.opacity(0.42))
             .frame(maxWidth: .infinity, minHeight: 50, alignment: .leading)
     }
@@ -1829,7 +1887,7 @@ struct BlockReferenceParameterPanel: View {
                         Image(systemName: image)
                             .font(.system(size: 11, weight: .semibold))
                         Text(mode.displayName)
-                            .font(.system(size: 10, weight: .semibold))
+                            .font(.system(size: 11, weight: .semibold))
                             .lineLimit(1)
                     }
                     .frame(maxWidth: .infinity, minHeight: 30)
@@ -1838,7 +1896,7 @@ struct BlockReferenceParameterPanel: View {
                         Image(systemName: image)
                             .font(.system(size: 11, weight: .semibold))
                         Text(mode.displayName)
-                            .font(.system(size: 10, weight: .semibold))
+                            .font(.system(size: 11, weight: .semibold))
                             .lineLimit(1)
                     }
                     .frame(maxWidth: .infinity, minHeight: 36)
@@ -1855,13 +1913,13 @@ struct BlockReferenceParameterPanel: View {
 
     private func moduleButton(_ kind: BlockReferenceModuleKind) -> some View {
         Button {
-            viewModel.addBlockReferenceModule(kind)
+            viewModel.beginBlockReferenceModulePlacement(kind)
         } label: {
             HStack(spacing: 5) {
-                Image(systemName: kind.symbolName)
+                BlockReferenceThumbnail(objects: [blockReferenceModuleObject(kind: kind, name: kind.displayName, position: .zero, rotation: .zero)]).frame(width: 42, height: 42)
                     .font(.system(size: 11, weight: .semibold))
                 Text(kind.displayName)
-                    .font(.system(size: 10, weight: .semibold))
+                    .font(.system(size: 11, weight: .semibold))
                     .lineLimit(1)
             }
             .frame(maxWidth: .infinity, minHeight: 30)
@@ -1877,17 +1935,17 @@ struct BlockReferenceParameterPanel: View {
 
     private func customModuleButton(_ asset: BlockReferenceModuleAsset) -> some View {
         Button {
-            viewModel.instantiateBlockReferenceModule(assetID: asset.id)
+            viewModel.beginBlockReferenceAssetPlacement(asset)
         } label: {
             HStack(spacing: 5) {
-                Image(systemName: asset.symbolName)
+                BlockReferenceThumbnail(objects: asset.templateObjects).frame(width: 42, height: 42)
                     .font(.system(size: 11, weight: .semibold))
                 VStack(alignment: .leading, spacing: 1) {
                     Text(asset.name)
-                        .font(.system(size: 10, weight: .semibold))
+                        .font(.system(size: 11, weight: .semibold))
                         .lineLimit(1)
                     Text("\(asset.templateObjects.count) 个体块")
-                        .font(.system(size: 9, weight: .medium).monospacedDigit())
+                        .font(.system(size: 11, weight: .medium).monospacedDigit())
                         .foregroundStyle(Color.white.opacity(0.4))
                 }
                 Spacer(minLength: 0)
@@ -1901,13 +1959,13 @@ struct BlockReferenceParameterPanel: View {
             )
         }
         .buttonStyle(.plain)
-        .help("在活动工作面原点载入“\(asset.name)”")
+        .help("移动光标后点击放置“\(asset.name)”")
         .contextMenu {
             Button("载入") {
-                viewModel.instantiateBlockReferenceModule(assetID: asset.id)
+                viewModel.beginBlockReferenceAssetPlacement(asset)
             }
             Button("载入并编辑部件") {
-                viewModel.instantiateBlockReferenceModule(assetID: asset.id, forEditing: true)
+                viewModel.beginBlockReferenceAssetPlacement(asset, forEditing: true)
             }
             Divider()
             Button("删除模块", role: .destructive) {
@@ -1941,7 +1999,7 @@ struct BlockReferenceParameterPanel: View {
 
     private func sectionTitle(_ text: String) -> some View {
         Text(text)
-            .font(.system(size: 10, weight: .semibold))
+            .font(.system(size: 11, weight: .semibold))
             .foregroundStyle(Color.white.opacity(0.68))
     }
 
@@ -1983,7 +2041,7 @@ private struct TripleBlockNumberFields: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(title)
-                .font(.system(size: 10, weight: .semibold))
+                .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(Color.white.opacity(0.55))
             HStack(spacing: 5) {
                 ForEach(0..<min(labels.count, values.count), id: \.self) { index in
@@ -2019,7 +2077,7 @@ private struct BlockNumberField: View {
     var body: some View {
         HStack(spacing: 3) {
             Text(label)
-                .font(.system(size: 10, weight: .bold))
+                .font(.system(size: 11, weight: .bold))
                 .foregroundStyle(Color.white.opacity(0.45))
             BlockScrubbableNumberTextField(
                 text: $text,

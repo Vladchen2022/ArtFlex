@@ -385,6 +385,7 @@ struct BlockReferenceObject: Identifiable, Codable, Sendable, Equatable {
     var rotation: BlockEulerRotation
     var dimensions: BlockDimensions
     var customMesh: BlockReferenceCustomMesh?
+    var radialSegments: Int = 8
     var moduleKind: BlockReferenceModuleKind?
     var moduleBasePointOffset: BlockVector3?
     var isVisible: Bool
@@ -437,6 +438,7 @@ struct BlockReferenceObject: Identifiable, Codable, Sendable, Equatable {
         case rotation
         case dimensions
         case customMesh
+        case radialSegments
         case moduleKind
         case moduleBasePointOffset
         case isVisible
@@ -456,6 +458,7 @@ struct BlockReferenceObject: Identifiable, Codable, Sendable, Equatable {
         rotation = try container.decode(BlockEulerRotation.self, forKey: .rotation)
         dimensions = try container.decode(BlockDimensions.self, forKey: .dimensions)
         customMesh = try container.decodeIfPresent(BlockReferenceCustomMesh.self, forKey: .customMesh)
+        radialSegments = min(max(try container.decodeIfPresent(Int.self, forKey: .radialSegments) ?? 8, 8), 32)
         moduleKind = try container.decodeIfPresent(BlockReferenceModuleKind.self, forKey: .moduleKind)
         moduleBasePointOffset = try container.decodeIfPresent(
             BlockVector3.self,
@@ -696,6 +699,16 @@ struct BlockReferenceDisplaySettings: Codable, Sendable, Equatable {
     var isFrozen: Bool
     var mode: BlockReferenceDisplayMode
     var showsPerspectiveGuides: Bool
+    var paintingOpacity: Float = 0.35
+    var lightAzimuth: Double = -122
+    var lightElevation: Double = 57
+
+    var effectiveOpacity: Float { isFrozen ? paintingOpacity : opacity }
+    var lightDirection: BlockVector3 {
+        if lightAzimuth == -122 && lightElevation == 57 { return BlockVector3(x: -0.35, y: -0.55, z: 1).normalized() }
+        let a = lightAzimuth * .pi / 180, e = lightElevation * .pi / 180
+        return .init(x: cos(e) * cos(a), y: cos(e) * sin(a), z: sin(e))
+    }
 
     static let stageOneDefault = BlockReferenceDisplaySettings(
         opacity: 0.52,
@@ -715,6 +728,7 @@ struct BlockReferenceDisplaySettings: Codable, Sendable, Equatable {
         case isFrozen
         case mode
         case showsPerspectiveGuides
+        case paintingOpacity, lightAzimuth, lightElevation
     }
 
     init(
@@ -745,10 +759,17 @@ struct BlockReferenceDisplaySettings: Codable, Sendable, Equatable {
         mode = try container.decodeIfPresent(BlockReferenceDisplayMode.self, forKey: .mode)
             ?? .wireframe
         showsPerspectiveGuides = try container.decodeIfPresent(Bool.self, forKey: .showsPerspectiveGuides) ?? false
+        paintingOpacity = try container.decodeIfPresent(Float.self, forKey: .paintingOpacity) ?? opacity
+        lightAzimuth = try container.decodeIfPresent(Double.self, forKey: .lightAzimuth) ?? -122
+        lightElevation = try container.decodeIfPresent(Double.self, forKey: .lightElevation) ?? 57
+        normalize()
     }
 
     mutating func normalize() {
-        opacity = min(max(opacity, 0.05), 1)
+        opacity = min(max(opacity.isFinite ? opacity : 0.8, 0.05), 1)
+        paintingOpacity = min(max(paintingOpacity.isFinite ? paintingOpacity : 0.35, 0.05), 1)
+        lightAzimuth = lightAzimuth.isFinite ? lightAzimuth.truncatingRemainder(dividingBy: 360) : -122
+        lightElevation = min(max(lightElevation.isFinite ? lightElevation : 57, 5), 90)
     }
 }
 
@@ -1204,6 +1225,8 @@ struct BlockReferenceEditorState: Sendable, Equatable {
     var draft: BlockCreationDraft?
     var draftMeasurement: BlockMeasurementGuide?
     var snapPoint: BlockVector3?
+    var snapLabel: String?
+    var placementObjects: [BlockReferenceObject] = []
     var numericTransform: BlockReferenceNumericTransform?
     var hoveredGizmoHandle: BlockReferenceGizmoHandle?
     var activeGizmoHandle: BlockReferenceGizmoHandle?

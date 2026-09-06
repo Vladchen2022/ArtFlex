@@ -17,7 +17,7 @@ struct BlockReferenceOverlay: View {
                 cameraRenderState: cameraRenderState,
                 rendersContinuously: rendersContinuously
             )
-            .opacity(Double(scene.display.opacity))
+            .opacity(Double(scene.display.effectiveOpacity))
 
             if scene.display.showsPerspectiveGuides {
                 TimelineView(.animation(
@@ -556,6 +556,14 @@ struct BlockReferenceOverlay: View {
                 .foregroundStyle(Color.cyan),
             at: CGPoint(x: origin.x + 42, y: origin.y - 14)
         )
+        let extent = max(scene.snap.gridSpacing * 3, 30)
+        let corners = [(-extent, -extent), (extent, -extent), (extent, extent), (-extent, extent)]
+            .compactMap { viewportPoint(scene.workingPlane.worldPoint(u: $0.0, v: $0.1)) }
+        if corners.count == 4 {
+            let patch = polygonPath(corners)
+            context.fill(patch, with: .color(.cyan.opacity(0.06)))
+            context.stroke(patch, with: .color(.cyan.opacity(0.5)), lineWidth: 1)
+        }
     }
 
     private func drawModuleBasePointMarker(in context: GraphicsContext) {
@@ -742,6 +750,8 @@ struct BlockReferenceGestureOverlay: NSViewRepresentable {
     let gizmoPopupPoint: CGPoint?
     let onGizmoInputChanged: (String) -> Void
     let onGizmoFinish: () -> Void
+    var primaryNavigationMode: BlockReferenceNavigationMode? = nil
+    var onModifiersChanged: ((NSEvent.ModifierFlags) -> Void)? = nil
 
     func makeNSView(context: Context) -> BlockReferenceInteractionView {
         let view = BlockReferenceInteractionView()
@@ -755,6 +765,8 @@ struct BlockReferenceGestureOverlay: NSViewRepresentable {
 
     private func configure(_ view: BlockReferenceInteractionView) {
         view.transform = transform
+        view.primaryNavigationMode = primaryNavigationMode
+        view.onModifiersChanged = onModifiersChanged
         view.onBegan = onBegan
         view.onChanged = onChanged
         view.onEnded = onEnded
@@ -784,6 +796,9 @@ final class BlockReferenceInteractionView: NSView, NSTextFieldDelegate {
     var onGizmoInputChanged: ((String) -> Void)?
     var onGizmoFinish: (() -> Void)?
 
+    var primaryNavigationMode: BlockReferenceNavigationMode?
+    var onModifiersChanged: ((NSEvent.ModifierFlags) -> Void)?
+    private var primaryNavigating = false
     private var isPrimaryDragging = false
     private var navigationMode: BlockReferenceNavigationMode?
     private var navigationStartLocation: CGPoint?
@@ -794,7 +809,7 @@ final class BlockReferenceInteractionView: NSView, NSTextFieldDelegate {
     private var gizmoUnitLabel: NSTextField?
 
     override var isFlipped: Bool { true }
-    override var acceptsFirstResponder: Bool { false }
+    override var acceptsFirstResponder: Bool { true }
     override var isOpaque: Bool { false }
 
     override func resetCursorRects() {
@@ -944,7 +959,10 @@ final class BlockReferenceInteractionView: NSView, NSTextFieldDelegate {
         }
     }
 
+    override func flagsChanged(with event: NSEvent) { onModifiersChanged?(event.modifierFlags) }
+
     override func mouseMoved(with event: NSEvent) {
+        onModifiersChanged?(event.modifierFlags)
         let isOverGizmo = onHover?(canvasPoint(for: event)) ?? false
         (isOverGizmo ? NSCursor.openHand : NSCursor.crosshair).set()
     }
@@ -964,6 +982,15 @@ final class BlockReferenceInteractionView: NSView, NSTextFieldDelegate {
     }
 
     override func mouseDown(with event: NSEvent) {
+        window?.makeFirstResponder(self)
+        onModifiersChanged?(event.modifierFlags)
+        if let mode = primaryNavigationMode ?? (event.modifierFlags.contains(.option) ? (event.modifierFlags.contains(.shift) ? .pan : .orbit) : nil) {
+            primaryNavigating = true
+            navigationMode = mode
+            navigationStartLocation = convert(event.locationInWindow, from: nil)
+            onNavigationBegan?(mode)
+            return
+        }
         isPrimaryDragging = true
         let point = canvasPoint(for: event)
         if onHover?(point) == true {
@@ -973,11 +1000,14 @@ final class BlockReferenceInteractionView: NSView, NSTextFieldDelegate {
     }
 
     override func mouseDragged(with event: NSEvent) {
+        onModifiersChanged?(event.modifierFlags)
+        if primaryNavigating { otherMouseDragged(with: event); return }
         guard isPrimaryDragging else { return }
         onChanged?(canvasPoint(for: event))
     }
 
     override func mouseUp(with event: NSEvent) {
+        if primaryNavigating { otherMouseUp(with: event); primaryNavigating = false; return }
         guard isPrimaryDragging else { return }
         onChanged?(canvasPoint(for: event))
         onEnded?()
@@ -1024,6 +1054,12 @@ final class BlockReferenceInteractionView: NSView, NSTextFieldDelegate {
     }
 
     override func scrollWheel(with event: NSEvent) {
+        if event.hasPreciseScrollingDeltas && !event.modifierFlags.contains(.option) {
+            onNavigationBegan?(.pan)
+            onNavigationChanged?(.pan, event.scrollingDeltaX, event.scrollingDeltaY)
+            onNavigationEnded?()
+            return
+        }
         let sensitivity = event.hasPreciseScrollingDeltas ? 0.015 : 0.11
         onZoom?(exp(-event.scrollingDeltaY * sensitivity))
     }
@@ -1147,6 +1183,7 @@ struct BlockReferenceHUD: View {
             Text(
                 "\(scene.objects.count) 个体块 · "
                 + (editorState.numericTransform?.summary ?? editorState.instruction)
+                + (editorState.snapLabel.map { " · 吸附：\($0)" } ?? "")
                 + " · 中键环绕 / ⇧中键平移 / 滚轮缩放"
             )
                 .font(.system(size: 10, weight: .semibold))
@@ -1156,7 +1193,7 @@ struct BlockReferenceHUD: View {
                     .buttonStyle(.borderless)
                     .font(.system(size: 10, weight: .semibold))
             }
-            Button("冻结并绘画") { onFreeze() }
+            Button("锁定参考，返回绘画") { onFreeze() }
                 .buttonStyle(.borderless)
                 .font(.system(size: 10, weight: .semibold))
         }

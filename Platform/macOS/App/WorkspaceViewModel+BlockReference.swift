@@ -3,7 +3,11 @@ import Foundation
 
 extension WorkspaceViewModel {
     var blockReferenceScene: BlockReferenceScene? {
-        guard var scene = workspace.document.blockReferenceScene else { return nil }
+        guard var scene = blockReferenceWorkflow.interactionPreview
+            ?? workspace.document.blockReferenceScene
+            ?? (workspace.toolSession.activeTool == .blockReference ? .empty : nil) else { return nil }
+        if let inspection = blockReferenceWorkflow.inspectionCamera { scene.camera = inspection }
+        if blockReferenceWorkflow.temporarilyDisablesSnapping { scene.snap.enabledKinds = [] }
         if let blockReferenceCameraPreview {
             scene.camera = blockReferenceCameraPreview
         }
@@ -94,7 +98,7 @@ extension WorkspaceViewModel {
         blockReferenceAxisDirections(for: blockReferenceEditorState.gizmoCoordinateSpace)
     }
 
-    private func blockReferenceModuleBasePointSnapshots(
+    func blockReferenceModuleBasePointSnapshots(
         in scene: BlockReferenceScene,
         transformedObjectIDs: Set<UUID>
     ) -> [UUID: BlockVector3] {
@@ -105,7 +109,7 @@ extension WorkspaceViewModel {
         })
     }
 
-    private func blockReferenceTrackedCustomPivot(
+    func blockReferenceTrackedCustomPivot(
         in scene: BlockReferenceScene,
         moduleBasePoints: [UUID: BlockVector3]
     ) -> BlockVector3? {
@@ -300,24 +304,18 @@ extension WorkspaceViewModel {
         blockReferenceEditorState.gizmoLiveValue = nil
         blockReferenceEditorState.gizmoAdjustment = nil
 
-        if blockReferenceScene == nil {
-            _ = updateBlockReferenceDocument(operationKind: "blockReference.create") { scene in
-                scene = .empty
-            }
-        } else {
-            _ = updateBlockReferenceDocument { scene in
-                scene?.display.isVisible = true
-                scene?.display.isFrozen = false
-            }
-        }
-        blockReferenceEditorState.instruction = "在工作面拖出二维基面；松开后再次拖拉高度。"
+        blockReferenceWorkflow = BlockReferenceWorkflowState()
+        blockReferenceEditorState.instruction = blockReferenceScene?.display.isFrozen == true
+            ? "构图已锁定。可以查看设置；需要修改时请明确解锁。"
+            : "从体块库选择素材，在画布放置；Esc 取消。"
     }
 
     func freezeBlockReferenceForPainting() {
         blockReferenceEditorState.perspectiveMatch.isActive = false
         blockReferenceEditorState.perspectiveMatch.draftLine = nil
         cancelBlockReferenceInteraction()
-        _ = updateBlockReferenceDocument { scene in
+        returnToBlockReferenceComposition()
+        _ = updateBlockReferenceDocument(operationKind: "blockReference.lock") { scene in
             scene?.display.isFrozen = true
         }
     }
@@ -330,6 +328,7 @@ extension WorkspaceViewModel {
     func setBlockReferenceEditorMode(_ mode: BlockReferenceEditorMode) {
         cancelBlockReferenceInteraction()
         blockReferenceEditorState.mode = mode
+        blockReferenceWorkflow.navigationMode = nil
         switch mode {
         case .select:
             blockReferenceEditorState.instruction = "点击选择体块；拖动可在当前工作面移动。"
@@ -364,6 +363,8 @@ extension WorkspaceViewModel {
               scene.display.isVisible,
               !scene.display.isFrozen else { return }
 
+        if commitBlockReferencePlacement(at: point, screenScale: screenScale) { return }
+        blockReferenceEditorState.placementObjects = []
         blockReferenceInteractionStartPoint = point
         blockReferenceInteractionHasCheckpoint = false
         blockReferenceEditorState.gizmoAdjustment = nil
@@ -379,6 +380,7 @@ extension WorkspaceViewModel {
         switch blockReferenceEditorState.mode {
         case .select:
             cancelBlockReferenceNumericTransform()
+            if blockReferenceWorkflow.resizesFace { beginBlockReferenceFaceDrag(at: point); return }
             if let selected = selectedBlockReferenceObject,
                selected.moduleKind == .poseableHuman,
                let joint = blockReferenceEditorState.selectedHumanJoint,
@@ -670,7 +672,7 @@ extension WorkspaceViewModel {
                 screenScale: screenScale
             )
             if !blockReferenceInteractionHasCheckpoint {
-                guard captureBlockReferenceHistoryCheckpoint(operationKind: "blockReference.move") else { return }
+            guard beginBlockReferencePreview(operation: "blockReference.move") else { return }
                 blockReferenceInteractionHasCheckpoint = true
             }
             let appliedDelta = snapped.point - startPosition
@@ -695,6 +697,7 @@ extension WorkspaceViewModel {
             blockReferenceEditorState.snapPoint = snapped.kind == nil ? nil : snapped.point
 
         case .transformingGizmo:
+            if blockReferenceWorkflow.faceDrag != nil { updateBlockReferenceFaceDrag(to: point); return }
             updateBlockReferenceGizmoDrag(to: point, scene: scene, screenScale: screenScale)
 
         case .posingHuman:
@@ -718,10 +721,21 @@ extension WorkspaceViewModel {
     }
 
     func endBlockReferenceInteraction() {
+        commitBlockReferencePreview()
+        blockReferenceWorkflow.faceDrag = nil
         switch blockReferenceEditorState.phase {
         case .drawingBase:
             guard let draft = blockReferenceEditorState.draft else {
                 cancelBlockReferenceInteraction()
+                return
+            }
+            if draft.dimensions.width <= 1.01 && draft.dimensions.depth <= 1.01 {
+                var clickDraft = draft
+                clickDraft.baseEnd = draft.baseStart + draft.plane.axisU * 120 + draft.plane.axisV * 120
+                clickDraft.baseStart = draft.baseStart - draft.plane.axisU * 60 - draft.plane.axisV * 60
+                clickDraft.baseEnd = clickDraft.baseEnd - draft.plane.axisU * 60 - draft.plane.axisV * 60
+                clickDraft.height = 120
+                commitBlockReferenceDraft(clickDraft)
                 return
             }
             if draft.dimensions.width <= 1.01 || draft.dimensions.depth <= 1.01 {
@@ -745,6 +759,7 @@ extension WorkspaceViewModel {
 
         case .movingObject:
             let needsFinalNormalization = blockReferenceInteractionHasCheckpoint
+            blockReferenceEditorState.instruction = "移动已确认；可撤销或继续调整。"
             blockReferenceEditorState.phase = .idle
             blockReferenceEditorState.snapPoint = nil
             blockReferenceInteractionStartPoint = nil
@@ -800,7 +815,19 @@ extension WorkspaceViewModel {
     }
 
     func cancelBlockReferenceInteraction() {
+        if blockReferenceWorkflow.pendingPlacement != nil || blockReferenceEditorState.draft != nil
+            || blockReferenceWorkflow.interactionPreview != nil {
+            blockReferenceEditorState.instruction = "已取消当前操作，回到选择。"
+        }
+        blockReferenceEditorState.mode = .select
+        blockReferenceWorkflow.navigationMode = nil
+        blockReferenceWorkflow.faceDrag = nil
+        blockReferenceWorkflow.interactionPreview = nil
+        blockReferenceWorkflow.interactionOperation = nil
+        blockReferenceWorkflow.pendingPlacement = nil
         cancelBlockReferenceNumericTransform()
+        blockReferenceEditorState.placementObjects = []
+        blockReferenceEditorState.snapLabel = nil
         blockReferenceEditorState.phase = .idle
         blockReferenceEditorState.draft = nil
         blockReferenceEditorState.draftMeasurement = nil
@@ -819,6 +846,7 @@ extension WorkspaceViewModel {
         blockReferenceEditorState.activeGizmoHandle = nil
         blockReferenceEditorState.gizmoLiveValue = nil
         blockReferenceEditorState.gizmoAdjustment = nil
+        blockReferenceCameraPreview = nil
         endBlockReferenceCameraNavigation()
     }
 
@@ -925,7 +953,7 @@ extension WorkspaceViewModel {
             by: session.accumulatedDegrees
         )
         if !blockReferenceInteractionHasCheckpoint {
-            guard captureBlockReferenceHistoryCheckpoint(operationKind: "blockReference.humanJoint") else { return }
+            guard beginBlockReferencePreview(operation: "blockReference.humanJoint") else { return }
             blockReferenceInteractionHasCheckpoint = true
         }
         let geometry = blockReferencePoseableHumanGeometry(pose: pose)
@@ -967,6 +995,7 @@ extension WorkspaceViewModel {
         at point: CanvasPoint?,
         screenScale: Double
     ) -> Bool {
+        if updateBlockReferencePlacement(at: point, screenScale: screenScale) { return false }
         guard blockReferenceEditorState.mode == .select,
               blockReferenceEditorState.phase == .idle,
               blockReferenceEditorState.selectedHumanJoint == nil,
@@ -1193,7 +1222,7 @@ extension WorkspaceViewModel {
             case .rotate: operationKind = "blockReference.gizmoRotate"
             case .scale: operationKind = "blockReference.gizmoScale"
             }
-            guard captureBlockReferenceHistoryCheckpoint(operationKind: operationKind) else { return }
+            guard beginBlockReferencePreview(operation: operationKind) else { return }
             blockReferenceInteractionHasCheckpoint = true
         }
         _ = updateBlockReferenceDocument { stored in
@@ -1371,6 +1400,8 @@ extension WorkspaceViewModel {
 
     func clearBlockReferenceScene() {
         guard blockReferenceScene != nil else { return }
+        cancelBlockReferenceInteraction()
+        blockReferenceWorkflow = .init()
         _ = updateBlockReferenceDocument(operationKind: "blockReference.clear") { scene in
             scene = nil
         }
@@ -1378,7 +1409,7 @@ extension WorkspaceViewModel {
     }
 
     func createEmptyBlockReferenceScene() {
-        guard blockReferenceScene == nil else { return }
+        guard workspace.document.blockReferenceScene == nil else { return }
         _ = updateBlockReferenceDocument(operationKind: "blockReference.create") { scene in
             scene = .empty
         }
@@ -1503,6 +1534,7 @@ extension WorkspaceViewModel {
     }
 
     func beginBlockReferenceNumericTransform(_ kind: BlockReferenceNumericTransformKind) {
+        guard blockReferenceScene?.display.isFrozen == false else { return }
         guard let object = selectedBlockReferenceObject,
               !object.isLocked,
               object.isVisible else { return }
@@ -1657,7 +1689,7 @@ extension WorkspaceViewModel {
         }
         guard let scene = blockReferenceScene,
               scene.display.isVisible,
-              !scene.display.isFrozen else { return }
+              !scene.display.isFrozen || blockReferenceWorkflow.inspectionCamera != nil else { return }
         blockReferenceCameraNavigationMode = mode
         blockReferenceCameraNavigationStart = scene.camera
         blockReferenceCameraPreview = nil
@@ -1700,16 +1732,19 @@ extension WorkspaceViewModel {
     }
 
     func endBlockReferenceCameraNavigation() {
-        let operationKind = blockReferenceCameraZoomCommitTask == nil
-            ? "blockReference.cameraNavigation"
-            : nil
+        let operationKind = blockReferenceCameraNavigationMode == .zoom
+            ? "blockReference.cameraZoom"
+            : "blockReference.cameraNavigation"
         blockReferenceCameraZoomCommitTask?.cancel()
         blockReferenceCameraZoomCommitTask = nil
         finishBlockReferenceCameraNavigation(operationKind: operationKind)
     }
 
     private func finishBlockReferenceCameraNavigation(operationKind: String?) {
-        if let camera = blockReferenceCameraPreview {
+        if let camera = blockReferenceCameraPreview, blockReferenceWorkflow.inspectionCamera != nil {
+            blockReferenceWorkflow.inspectionCamera = camera
+            blockReferenceCameraRenderState.finishNavigation(committedCamera: camera)
+        } else if let camera = blockReferenceCameraPreview {
             let didCommit = updateBlockReferenceDocument(
                 operationKind: operationKind
             ) { scene in
@@ -1743,7 +1778,7 @@ extension WorkspaceViewModel {
         } else {
             guard let scene = blockReferenceScene,
                   scene.display.isVisible,
-                  !scene.display.isFrozen else { return }
+                  !scene.display.isFrozen || blockReferenceWorkflow.inspectionCamera != nil else { return }
             camera = scene.camera
             blockReferenceCameraNavigationMode = .zoom
             blockReferenceCameraNavigationStart = scene.camera
@@ -1767,7 +1802,7 @@ extension WorkspaceViewModel {
         blockReferenceCameraZoomCommitTask?.cancel()
         blockReferenceCameraZoomCommitTask = nil
         guard blockReferenceCameraNavigationMode == .zoom else { return }
-        finishBlockReferenceCameraNavigation(operationKind: nil)
+        finishBlockReferenceCameraNavigation(operationKind: "blockReference.cameraZoom")
     }
 
     func frameBlockReferenceCamera(selectedOnly: Bool) {
@@ -1815,6 +1850,14 @@ extension WorkspaceViewModel {
 
     func handleBlockReferenceKeyDown(_ event: NSEvent) -> Bool {
         guard workspace.toolSession.activeTool == .blockReference else { return false }
+        if blockReferenceScene?.display.isFrozen == true {
+            if event.keyCode == 53 {
+                cancelBlockReferenceInteraction()
+                returnToBlockReferenceComposition()
+                return true
+            }
+            return false
+        }
         let modifiers = event.modifierFlags.intersection([.command, .option, .control, .shift])
         let key = blockReferenceShortcutKey(for: event)
 
@@ -2110,7 +2153,7 @@ extension WorkspaceViewModel {
         }
     }
 
-    private func blockWorldPoint(
+    func blockWorldPoint(
         for canvasPoint: CanvasPoint,
         plane: BlockWorkingPlane,
         scene: BlockReferenceScene,
@@ -2126,12 +2169,14 @@ extension WorkspaceViewModel {
         ) else { return nil }
         var snappingScene = scene
         snappingScene.workingPlane = plane
-        return snappedBlockPoint(
+        let result = snappedBlockPoint(
             point,
             scene: snappingScene,
             canvasSize: workspace.document.canvasSize,
             screenScale: screenScale
-        ).point
+        )
+        blockReferenceEditorState.snapLabel = result.kind?.displayName
+        return result.point
     }
 
     private func commitBlockReferenceDraft(_ draft: BlockCreationDraft) {
@@ -2139,13 +2184,14 @@ extension WorkspaceViewModel {
             cancelBlockReferenceInteraction()
             return
         }
-        let object = BlockReferenceObject(
+        var object = BlockReferenceObject(
             name: "\(draft.kind.displayName) \(scene.objects.count + 1)",
             kind: draft.kind,
             position: draft.center,
             rotation: blockRotation(alignedTo: draft.plane),
             dimensions: draft.dimensions
         )
+        object.radialSegments = 24
         _ = updateBlockReferenceDocument(operationKind: "blockReference.add") { stored in
             stored?.objects.append(object)
         }
@@ -2155,7 +2201,7 @@ extension WorkspaceViewModel {
         blockReferenceEditorState.phase = .idle
         blockReferenceEditorState.draft = nil
         blockReferenceEditorState.snapPoint = nil
-        blockReferenceEditorState.mode = .select
+        if !blockReferenceWorkflow.continuousPlacement { blockReferenceEditorState.mode = .select }
         blockReferenceEditorState.instruction = "体块已建立。拖动可移动；参数面板可精确调整尺寸。"
         blockReferenceInteractionStartPoint = nil
         blockReferenceInteractionStartWorldPoint = nil

@@ -130,6 +130,13 @@ struct BlockReferenceSceneSnapshot: Identifiable, Codable, Sendable, Equatable {
     var groups: [BlockReferenceGroup]
     var camera: BlockReferenceCamera
     var section: BlockSectionSettings
+    // Optional for compatibility with snapshots saved before the workflow revision.
+    var customModuleInstances: [BlockReferenceCustomModuleInstance]?
+    var pivotMode: BlockReferencePivotMode?
+    var customPivot: BlockVector3?
+    var display: BlockReferenceDisplaySettings?
+    var snap: BlockReferenceSnapSettings?
+    var cameraSlots: [BlockReferenceCameraSlot]?
 
     init(
         id: UUID = UUID(),
@@ -141,7 +148,13 @@ struct BlockReferenceSceneSnapshot: Identifiable, Codable, Sendable, Equatable {
         savedWorkingPlanes: [BlockSavedWorkingPlane],
         groups: [BlockReferenceGroup],
         camera: BlockReferenceCamera,
-        section: BlockSectionSettings
+        section: BlockSectionSettings,
+        customModuleInstances: [BlockReferenceCustomModuleInstance]? = nil,
+        pivotMode: BlockReferencePivotMode? = nil,
+        customPivot: BlockVector3? = nil,
+        display: BlockReferenceDisplaySettings? = nil,
+        snap: BlockReferenceSnapSettings? = nil,
+        cameraSlots: [BlockReferenceCameraSlot]? = nil
     ) {
         self.id = id
         self.name = name
@@ -153,6 +166,12 @@ struct BlockReferenceSceneSnapshot: Identifiable, Codable, Sendable, Equatable {
         self.groups = groups
         self.camera = camera
         self.section = section
+        self.customModuleInstances = customModuleInstances
+        self.pivotMode = pivotMode
+        self.customPivot = customPivot
+        self.display = display
+        self.snap = snap
+        self.cameraSlots = cameraSlots
     }
 }
 

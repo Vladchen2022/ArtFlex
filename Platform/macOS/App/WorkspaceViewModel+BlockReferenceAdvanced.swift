@@ -204,7 +204,8 @@ extension WorkspaceViewModel {
             blockReferenceEditorState.instruction = "视角槽 \(index) 已锁定。"
             return
         }
-        let slot = BlockReferenceCameraSlot(index: index, name: "视角 \(index)", camera: scene.camera)
+        let name = scene.cameraSlots.first(where: { $0.index == index })?.name ?? "视角 \(index)"
+        let slot = BlockReferenceCameraSlot(index: index, name: name, camera: scene.camera)
         _ = updateBlockReferenceDocument(operationKind: "blockReference.cameraSlot.store") { stored in
             guard var value = stored else { return }
             value.cameraSlots.removeAll { $0.index == index }
@@ -314,13 +315,16 @@ extension WorkspaceViewModel {
 
     func saveBlockReferenceSceneSnapshot() {
         guard let scene = blockReferenceScene else { return }
+        guard scene.snapshots.count < 6 else {
+            blockReferenceEditorState.instruction = "快照已满；请选择要替换的快照，或先删除一个。"
+            return
+        }
         let snapshot = blockReferenceSceneSnapshot(
-            name: "场景快照 \(scene.snapshots.count + 1)",
+            name: "快照 " + Date.now.formatted(date: .omitted, time: .standard),
             scene: scene
         )
         _ = updateBlockReferenceDocument(operationKind: "blockReference.snapshot.save") { stored in
             stored?.snapshots.append(snapshot)
-            if (stored?.snapshots.count ?? 0) > 6 { stored?.snapshots.removeFirst() }
         }
     }
 
@@ -336,6 +340,12 @@ extension WorkspaceViewModel {
             value.groups = snapshot.groups
             value.camera = snapshot.camera
             value.section = snapshot.section
+            value.customModuleInstances = snapshot.customModuleInstances ?? value.customModuleInstances
+            value.pivotMode = snapshot.pivotMode ?? value.pivotMode
+            value.customPivot = snapshot.customPivot ?? value.customPivot
+            value.display = snapshot.display ?? value.display
+            value.snap = snapshot.snap ?? value.snap
+            value.cameraSlots = snapshot.cameraSlots ?? value.cameraSlots
             scene = value
         }
         deselectAllBlockReferenceObjects()
