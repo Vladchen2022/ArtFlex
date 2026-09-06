@@ -7,23 +7,42 @@ import simd
 /// alpha, so repeated dabs build to the requested contribution, not past it.
 final class BrushV2Session {
     let a: MTLTexture
-    let b: MTLTexture
-    let range: MTLTexture
+    private(set) var b: MTLTexture?
+    private(set) var range: MTLTexture?
     var initializedTiles: Set<Int> = []
+    var initializedPigmentTiles: [Set<Int>] = [[], [], []]
     var stampCounts = [0, 0, 0]
     var lastVariants = [-1, -1, -1]
     var averageOpacity: [Float] = [0, 0, 0]
 
-    init?(device: MTLDevice, width: Int, height: Int) {
+    init?(device: MTLDevice, width: Int, height: Int,
+          needsSecondary: Bool = false, needsRange: Bool = false) {
+        guard let a = Self.makePigmentTexture(device: device, width: width, height: height) else { return nil }
+        self.a = a
+        guard ensureFields(needsSecondary: needsSecondary, needsRange: needsRange) else { return nil }
+    }
+
+    /// Ordinary brushes need only A; most compound brushes need A and B.
+    /// Retain allocated fields until stroke completion, including if a caller
+    /// temporarily disables one. Each field initializes its own touched tiles.
+    func ensureFields(needsSecondary: Bool, needsRange: Bool) -> Bool {
+        let secondary = needsSecondary && b == nil
+            ? Self.makePigmentTexture(device: a.device, width: a.width, height: a.height) : b
+        let clipping = needsRange && range == nil
+            ? Self.makePigmentTexture(device: a.device, width: a.width, height: a.height) : range
+        guard !needsSecondary || secondary != nil, !needsRange || clipping != nil else { return false }
+        b = secondary
+        range = clipping
+        return true
+    }
+
+    private static func makePigmentTexture(device: MTLDevice, width: Int, height: Int) -> MTLTexture? {
         let descriptor = MTLTextureDescriptor.texture2DDescriptor(
             pixelFormat: .rg16Float, width: width, height: height, mipmapped: false
         )
         descriptor.storageMode = .private
         descriptor.usage = [.renderTarget, .shaderRead, .shaderWrite]
-        guard let a = device.makeTexture(descriptor: descriptor),
-              let b = device.makeTexture(descriptor: descriptor),
-              let range = device.makeTexture(descriptor: descriptor) else { return nil }
-        self.a = a; self.b = b; self.range = range
+        return device.makeTexture(descriptor: descriptor)
     }
 }
 
@@ -155,9 +174,10 @@ final class BrushV2Renderer {
           texture2d<float,access::read> locked [[texture(5)]],
           texture2d<float,access::read> material [[texture(6)]]) {
           uint2 xy=uint2(in.position.xy); float4 dst=original.read(xy);
-          float2 av=a.read(xy).rg, bv=b.read(xy).rg;
+          float2 av=a.read(xy).rg;
           float coverage=av.g;
           if(u.compound!=0) {
+            float2 bv=b.read(xy).rg;
             if(u.mode==2) {
               coverage=av.g<=0.5 ? 2*av.g*bv.g : 1-2*(1-av.g)*(1-bv.g);
             } else { coverage=u.mode==0 ? min(av.g+bv.g,1.0)
@@ -219,7 +239,9 @@ final class BrushV2Renderer {
                 materialProvider: (BrushPixelBounds) -> MTLTexture?) -> BrushPixelBounds? {
         guard let config = stroke.brush.engineV2 else { return nil }
         if session.v2 == nil { session.v2 = BrushV2Session(device: device, width: target.width, height: target.height) }
-        guard let state = session.v2 else { return nil }
+        guard let state = session.v2,
+              state.ensureFields(needsSecondary: stroke.brush.compoundBrush.enabled,
+                                 needsRange: config.clipsToRange) else { return nil }
         let isOverlay = config.combination == .overlayMask
         let tips = [stroke.brush.compoundBrush.enabled ? stroke.brush.resolvedCompoundPrimaryTip : stroke.brush.primaryTipAsCompoundSecondary,
                     stroke.brush.compoundBrush.secondary, stroke.brush.primaryTipAsCompoundSecondary]
@@ -266,11 +288,13 @@ final class BrushV2Renderer {
             }
         }
         guard let bounds else { return nil }
-        initializeTiles(bounds: bounds, state: state, original: session.originalTexture, target: target, commandBuffer: commandBuffer)
+        guard initializeTiles(bounds: bounds, state: state, original: session.originalTexture,
+                              target: target, commandBuffer: commandBuffer) else { return nil }
         let textures=[state.a,state.b,state.range]
         for role in 0..<3 where !allStamps[role].isEmpty {
+            guard let pigment = textures[role] else { return nil }
             let descriptor=MTLRenderPassDescriptor()
-            descriptor.colorAttachments[0].texture=textures[role]
+            descriptor.colorAttachments[0].texture=pigment
             descriptor.colorAttachments[0].loadAction = .load
             descriptor.colorAttachments[0].storeAction = .store
             let variants = role==0 ? config.primaryVariants : (role==1 ? config.secondaryVariants : [])
@@ -295,7 +319,7 @@ final class BrushV2Renderer {
             }
             if isOverlay && role<2 {
                 for (texture, stamps) in batches {
-                    encodeWash(stamps, tip: texture, target: textures[role], commandBuffer: commandBuffer)
+                    encodeWash(stamps, tip: texture, target: pigment, commandBuffer: commandBuffer)
                 }
                 continue
             }
@@ -326,7 +350,9 @@ final class BrushV2Renderer {
                 compound:stroke.brush.compoundBrush.enabled ? 1:0, material:material == nil ? 0:1,
                 preservesAlpha:preservesAlpha ? 1:0)
             encoder.setFragmentBytes(&u,length:MemoryLayout<BrushV2Composite>.stride,index:0)
-            for (index,texture) in [session.originalTexture,state.a,state.b,state.range,selection ?? whiteTip,alphaLock ?? whiteTip,material ?? whiteTip].enumerated() {
+            // Inactive fields are not sampled. Bind A as a valid full-size
+            // fallback without allocating or reading unused pigment surfaces.
+            for (index,texture) in [session.originalTexture,state.a,state.b ?? state.a,state.range ?? state.a,selection ?? whiteTip,alphaLock ?? whiteTip,material ?? whiteTip].enumerated() {
                 encoder.setFragmentTexture(texture,index:index)
             }
             encoder.drawPrimitives(type:.triangleStrip,vertexStart:0,vertexCount:4)
@@ -373,21 +399,27 @@ final class BrushV2Renderer {
         return texture
     }
 
-    private func initializeTiles(bounds: BrushPixelBounds,state:BrushV2Session,original:MTLTexture,target:MTLTexture,commandBuffer:MTLCommandBuffer) {
-        guard let encoder=commandBuffer.makeBlitCommandEncoder() else { return }
+    private func initializeTiles(bounds: BrushPixelBounds,state:BrushV2Session,original:MTLTexture,target:MTLTexture,commandBuffer:MTLCommandBuffer) -> Bool {
+        guard let encoder=commandBuffer.makeBlitCommandEncoder() else { return false }
         let across=(target.width+255)/256
+        let textures = [state.a, state.b, state.range]
         for y in bounds.originY/256...(bounds.originY+bounds.height-1)/256 {
-            for x in bounds.originX/256...(bounds.originX+bounds.width-1)/256 where state.initializedTiles.insert(y*across+x).inserted {
+            for x in bounds.originX/256...(bounds.originX+bounds.width-1)/256 {
+                let tile = y*across+x
                 let origin=MTLOrigin(x:x*256,y:y*256,z:0)
                 let size=MTLSize(width:min(256,target.width-origin.x),height:min(256,target.height-origin.y),depth:1)
-                encoder.copy(from:target,sourceSlice:0,sourceLevel:0,sourceOrigin:origin,sourceSize:size,
-                    to:original,destinationSlice:0,destinationLevel:0,destinationOrigin:origin)
-                for texture in [state.a,state.b,state.range] {
+                if state.initializedTiles.insert(tile).inserted {
+                    encoder.copy(from:target,sourceSlice:0,sourceLevel:0,sourceOrigin:origin,sourceSize:size,
+                        to:original,destinationSlice:0,destinationLevel:0,destinationOrigin:origin)
+                }
+                for (role, texture) in textures.enumerated() {
+                    guard let texture, state.initializedPigmentTiles[role].insert(tile).inserted else { continue }
                     encoder.copy(from:zeroTile,sourceSlice:0,sourceLevel:0,sourceOrigin:MTLOrigin(x:0,y:0,z:0),sourceSize:size,
                         to:texture,destinationSlice:0,destinationLevel:0,destinationOrigin:origin)
                 }
             }
         }
         encoder.endEncoding()
+        return true
     }
 }
