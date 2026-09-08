@@ -810,10 +810,32 @@ final class BlockReferenceInteractionView: NSView, NSTextFieldDelegate {
     private var gizmoAxisLabel: NSTextField?
     private var gizmoValueField: NSTextField?
     private var gizmoUnitLabel: NSTextField?
+    private let middleMouseCapture = BlockReferenceMiddleMouseCapture()
 
     override var isFlipped: Bool { true }
     override var acceptsFirstResponder: Bool { true }
     override var isOpaque: Bool { false }
+
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        if window !== newWindow {
+            middleMouseCapture.stop()
+            finishScrollNavigation()
+        }
+        super.viewWillMove(toWindow: newWindow)
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        guard window != nil else { return }
+        middleMouseCapture.onBegan = { [weak self] point, modifiers in
+            self?.beginPointerNavigation(at: point, modifiers: modifiers)
+        }
+        middleMouseCapture.onChanged = { [weak self] point in
+            self?.changePointerNavigation(to: point)
+        }
+        middleMouseCapture.onEnded = { [weak self] in self?.finishPointerNavigation() }
+        middleMouseCapture.install(for: self)
+    }
 
     override func resetCursorRects() {
         addCursorRect(bounds, cursor: .crosshair)
@@ -1024,22 +1046,29 @@ final class BlockReferenceInteractionView: NSView, NSTextFieldDelegate {
 
     override func otherMouseDown(with event: NSEvent) {
         guard event.buttonNumber == 2 else { super.otherMouseDown(with: event); return }
+        beginPointerNavigation(at: convert(event.locationInWindow, from: nil), modifiers: event.modifierFlags)
+    }
+
+    private func beginPointerNavigation(at point: CGPoint, modifiers: NSEvent.ModifierFlags) {
         finishScrollNavigation()
         window?.makeFirstResponder(self)
-        let mode = Self.navigationMode(for: event.modifierFlags)
+        let mode = Self.navigationMode(for: modifiers)
         navigationMode = mode
-        navigationStartLocation = convert(event.locationInWindow, from: nil)
+        navigationStartLocation = point
         onNavigationBegan?(mode)
         NSCursor.closedHand.set()
     }
 
     override func otherMouseDragged(with event: NSEvent) {
-        guard let mode = navigationMode,
-              let start = navigationStartLocation else {
+        guard navigationMode != nil else {
             super.otherMouseDragged(with: event)
             return
         }
-        let current = convert(event.locationInWindow, from: nil)
+        changePointerNavigation(to: convert(event.locationInWindow, from: nil))
+    }
+
+    private func changePointerNavigation(to current: CGPoint) {
+        guard let mode = navigationMode, let start = navigationStartLocation else { return }
         onNavigationChanged?(mode, current.x - start.x, current.y - start.y)
     }
 
@@ -1048,6 +1077,11 @@ final class BlockReferenceInteractionView: NSView, NSTextFieldDelegate {
             super.otherMouseUp(with: event)
             return
         }
+        finishPointerNavigation()
+    }
+
+    private func finishPointerNavigation() {
+        guard navigationMode != nil else { return }
         navigationMode = nil
         navigationStartLocation = nil
         onNavigationEnded?()
