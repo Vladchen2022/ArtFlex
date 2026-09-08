@@ -5,6 +5,38 @@ import Testing
 
 struct LayerTextureSerializerQueueSafetyTests {
     @Test
+    func largeRegionReadbackUsesTheExistingTiledPathAndKeepsItsOffset() throws {
+        let metal = try #require(MetalDeviceContext())
+        let audit = PerformanceAuditStore()
+        let serializer = LayerTextureSerializer(metalContext: metal, stagingPoolMaxResidentBytes: 16 * 1024 * 1024, auditStore: audit)
+        let store = StageOneLayerSurfaceStore()
+        let texture = try #require(store.makeTexture(width: 4098, height: 4098, metal: metal))
+        let command = try #require(metal.commandQueue.makeCommandBuffer())
+        let pass = MTLRenderPassDescriptor()
+        pass.colorAttachments[0].texture = texture
+        pass.colorAttachments[0].loadAction = .clear
+        pass.colorAttachments[0].storeAction = .store
+        pass.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
+        let encoder = try #require(command.makeRenderCommandEncoder(descriptor: pass))
+        encoder.endEncoding()
+        command.commit()
+        command.waitUntilCompleted()
+        let corner = LayerTextureSnapshot(width: 1, height: 1, bytesPerRow: 4, pixelData: Data([31, 63, 127, 255]))
+        try serializer.restore(snapshot: corner, into: texture, destinationX: 4097, destinationY: 4097)
+        audit.reset()
+        let snapshots = try serializer.snapshotRegions([
+            .init(texture: texture, originX: 1, originY: 1, width: 4097, height: 4097)
+        ])
+        let snapshot = try #require(snapshots.first)
+        #expect(snapshot.width == 4097 && snapshot.height == 4097)
+        #expect(snapshot.pixelData.count == 4097 * 4097 * 4)
+        #expect(Array(snapshot.pixelData.prefix(4)) == [0, 0, 0, 0])
+        #expect(Array(snapshot.pixelData.suffix(4)) == [31, 63, 127, 255])
+        #expect(serializer.stagingPoolDebugSnapshot().residentBytes <= 16 * 1024 * 1024)
+        #expect(audit.snapshot().durations(for: "LayerTextureSerializer.snapshot").count == 1)
+    }
+
+    @Test
     func independentAuditStoresDoNotMixBatchAndUnrelatedReadbacks() throws {
         let metalContext = try #require(MetalDeviceContext())
         let saveAudit = PerformanceAuditStore()

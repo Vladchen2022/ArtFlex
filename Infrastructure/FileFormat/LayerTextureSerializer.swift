@@ -564,6 +564,17 @@ final class LayerTextureSerializer {
             }
         }
 
+        // Keep large partial-history readbacks on the same bounded staging path as full
+        // snapshots. A region request is not necessarily small on a large canvas.
+        if requests.contains(where: {
+            Self.requiresTiledTransfer(width: $0.width, height: $0.height, pixelFormat: $0.texture.pixelFormat)
+        }) {
+            return try requests.map {
+                try snapshot(texture: $0.texture, originX: $0.originX, originY: $0.originY,
+                    width: $0.width, height: $0.height)
+            }
+        }
+
         let auditEnabled = auditStore.isRecordingEnabled
         let startedAt = auditEnabled ? DispatchTime.now().uptimeNanoseconds : 0
         defer {

@@ -4,6 +4,113 @@ import Testing
 
 struct HistoryControllerTests {
     @Test @MainActor
+    func localUndoRedoRetainsOnlyTheOriginalRegionAndPreservesOutsidePixels() throws {
+        let harness = try BrushHistoryHarness(canvasSize: .init(width: 256, height: 256))
+        let layerID = harness.workspaceStore.state.document.activeLayerID
+        func texture() throws -> MTLTexture {
+            let surfaceID = try #require(harness.layerSurfaceStore.surfaceID(for: layerID))
+            return try #require(harness.layerSurfaceStore.texture(for: surfaceID))
+        }
+        // Sentinel outside the changed area must survive both directions.
+        try harness.writeOpaquePixel(layerID: layerID, x: 200, y: 200, value: 137)
+        let before = try harness.serializer.snapshot(texture: texture())
+        let region = try harness.serializer.snapshot(texture: texture(), originX: 22, originY: 33, width: 12, height: 13)
+        try harness.history.captureCheckpoint(captureMode: .inPlaceChangedLayers([layerID]),
+            providedLayerSnapshots: [.init(layerID: layerID, texture: region, originX: 22, originY: 33)])
+        let patch = LayerTextureSnapshot(width: 12, height: 13, bytesPerRow: 48, pixelData: Data(repeating: 255, count: 624))
+        try harness.serializer.restore(snapshot: patch, into: texture(), destinationX: 22, destinationY: 33)
+        let after = try harness.serializer.snapshot(texture: texture())
+        #expect(harness.history.residentByteCount == 624)
+        for _ in 0..<4 {
+            #expect(try harness.history.undo())
+            #expect(harness.history.residentByteCount == 624)
+            #expect(try harness.serializer.snapshot(texture: texture()) == before)
+            #expect(try harness.history.redo())
+            #expect(harness.history.residentByteCount == 624)
+            #expect(try harness.serializer.snapshot(texture: texture()) == after)
+        }
+    }
+
+    @Test @MainActor
+    func localContentAndMaskHistoryKeepTheirDifferentBoundsInBothDirections() throws {
+        let harness = try BrushHistoryHarness(canvasSize: .init(width: 256, height: 256))
+        let layerID = harness.workspaceStore.state.document.activeLayerID
+        harness.workspaceStore.updateDocument { document in
+            if let index = document.layers.firstIndex(where: { $0.id == layerID }) {
+                document.layers[index].mask = LayerMaskDescriptor()
+            }
+        }
+        harness.layerSurfaceStore.prepareTextures(for: harness.workspaceStore.state.document, metal: harness.metalContext)
+        func textures() throws -> [MTLTexture] {
+            let surfaceID = try #require(harness.layerSurfaceStore.surfaceID(for: layerID))
+            let content = try #require(harness.layerSurfaceStore.texture(for: surfaceID))
+            let mask = try #require(harness.layerSurfaceStore.maskTexture(for: layerID))
+            return [content, mask]
+        }
+        let initialTextures = try textures()
+        let before = try harness.serializer.snapshotBatch(textures: initialTextures)
+        let contentRegion = try harness.serializer.snapshot(texture: initialTextures[0], originX: 10, originY: 10, width: 8, height: 9)
+        let maskRegion = try harness.serializer.snapshot(texture: initialTextures[1], originX: 18, originY: 20, width: 7, height: 11)
+        try harness.history.captureCheckpoint(captureMode: .inPlaceChangedLayers([layerID]), providedLayerSnapshots: [
+            .init(layerID: layerID, texture: contentRegion, originX: 10, originY: 10),
+            .init(layerID: layerID, resourceKind: .mask, texture: maskRegion, originX: 18, originY: 20)
+        ])
+        try harness.serializer.restore(snapshot: .init(width: 8, height: 9, bytesPerRow: 32, pixelData: Data(repeating: 255, count: 288)),
+            into: initialTextures[0], destinationX: 10, destinationY: 10)
+        try harness.serializer.restore(snapshot: .init(width: 7, height: 11, bytesPerRow: 7, pixelData: Data(repeating: 0, count: 77)),
+            into: initialTextures[1], destinationX: 18, destinationY: 20)
+        let after = try harness.serializer.snapshotBatch(textures: textures())
+        for _ in 0..<3 {
+            #expect(try harness.history.undo())
+            #expect(harness.history.residentByteCount == 365)
+            #expect(try harness.serializer.snapshotBatch(textures: textures()) == before)
+            #expect(try harness.history.redo())
+            #expect(harness.history.residentByteCount == 365)
+            #expect(try harness.serializer.snapshotBatch(textures: textures()) == after)
+        }
+    }
+
+    @Test @MainActor
+    func smallDiskRegionHistoryDoesNotLoseDepthAfterUndoAndRedo() throws {
+        let harness = try BrushHistoryHarness(canvasSize: .init(width: 128, height: 128))
+        let cache = HistoryDiskCache(rootURL: FileManager.default.temporaryDirectory.appendingPathComponent("ArtFlexHistoryTests"), maximumBytes: 2_000)
+        let history = HistoryController(workspaceStore: harness.workspaceStore,
+            layerSurfaceStore: harness.layerSurfaceStore, serializer: harness.serializer,
+            metalContext: harness.metalContext, maxResidentBytes: 400, diskCache: cache, hotEntryCount: 1)
+        let layerID = harness.workspaceStore.state.document.activeLayerID
+        func texture() throws -> MTLTexture {
+            let surfaceID = try #require(harness.layerSurfaceStore.surfaceID(for: layerID))
+            return try #require(harness.layerSurfaceStore.texture(for: surfaceID))
+        }
+        var expected = [try harness.serializer.snapshot(texture: texture())]
+        for i in 0..<20 {
+            let x = 2 + (i % 10) * 12, y = 20 + (i / 10) * 20
+            let region = try harness.serializer.snapshot(texture: texture(), originX: x, originY: y, width: 5, height: 5)
+            try history.captureCheckpoint(captureMode: .inPlaceChangedLayers([layerID]),
+                providedLayerSnapshots: [.init(layerID: layerID, texture: region, originX: x, originY: y)])
+            try harness.serializer.restore(snapshot: .init(width: 5, height: 5, bytesPerRow: 20, pixelData: Data(repeating: UInt8(255 - i), count: 100)),
+                into: texture(), destinationX: x, destinationY: y)
+            cache.waitForPendingWrites()
+            expected.append(try harness.serializer.snapshot(texture: texture()))
+        }
+        #expect(history.debugUndoCount == 20 && history.diskEntryCount == 19)
+        for state in expected.dropLast().reversed() {
+            #expect(try history.undo())
+            cache.waitForPendingWrites()
+            #expect(try harness.serializer.snapshot(texture: texture()) == state)
+            #expect(history.residentByteCount <= 200)
+            #expect(history.debugUndoCount + history.debugRedoCount == 20)
+        }
+        for state in expected.dropFirst() {
+            #expect(try history.redo())
+            cache.waitForPendingWrites()
+            #expect(try harness.serializer.snapshot(texture: texture()) == state)
+            #expect(history.residentByteCount <= 200)
+            #expect(history.debugUndoCount + history.debugRedoCount == 20)
+        }
+    }
+
+    @Test @MainActor
     func fullDiskBudgetEvictsOnlyOldestContiguousHistory() throws {
         let harness = try BrushHistoryHarness(canvasSize: .init(width: 16, height: 16))
         // Two layers = 2 KiB per checkpoint: two disk slots plus one resident slot.

@@ -313,6 +313,7 @@ final class HistoryController {
 
         var current = try makeEntryWithAudit(
             captureMode: currentEntryCaptureMode(for: previous),
+            providedLayerSnapshots: try currentLayerSnapshots(matchingRegionsIn: previous),
             auditContext: HistoryEligibilityAuditContext(
                 operationKind: "undo.currentEntryCapture",
                 candidateChangedLayerIDs: [],
@@ -336,6 +337,7 @@ final class HistoryController {
 
         var current = try makeEntryWithAudit(
             captureMode: currentEntryCaptureMode(for: next),
+            providedLayerSnapshots: try currentLayerSnapshots(matchingRegionsIn: next),
             auditContext: HistoryEligibilityAuditContext(
                 operationKind: "redo.currentEntryCapture",
                 candidateChangedLayerIDs: [],
@@ -750,6 +752,39 @@ final class HistoryController {
                 return .full
             }
             return .metadataOnly
+        }
+    }
+
+    /// Undo replaces only these regions, so its inverse needs only the same current pixels.
+    /// Do not expand a small brush checkpoint into a full-layer redo (and then back again).
+    private func currentLayerSnapshots(
+        matchingRegionsIn target: WorkspaceHistoryEntry
+    ) throws -> [LayerHistorySnapshot]? {
+        guard case .inPlaceChangedLayers(let changedIDs) = currentEntryCaptureMode(for: target),
+              target.layerSnapshots.contains(where: { !$0.coversFullCanvas(workspaceStore.state.document.canvasSize) }),
+              let regions = validatedProvidedLayerSnapshots(
+                target.layerSnapshots, workspace: workspaceStore.state,
+                snapshotLayerIDs: Set(changedIDs), requiresFullCanvasSnapshots: false
+              ) else { return nil }
+
+        let requests = try regions.map { region -> LayerTextureRegionSnapshotRequest in
+            let texture: MTLTexture?
+            switch region.resourceKind {
+            case .content:
+                texture = layerSurfaceStore.surfaceID(for: region.layerID).flatMap(layerSurfaceStore.texture(for:))
+            case .mask:
+                texture = layerSurfaceStore.maskTexture(for: region.layerID)
+            }
+            guard let texture else {
+                throw HistoryControllerError.missingCaptureResource(layerID: region.layerID, resourceKind: region.resourceKind)
+            }
+            return LayerTextureRegionSnapshotRequest(texture: texture,
+                originX: region.originX, originY: region.originY,
+                width: region.texture.width, height: region.texture.height)
+        }
+        return try zip(regions, serializer.snapshotRegions(requests)).map { region, pixels in
+            LayerHistorySnapshot(layerID: region.layerID, resourceKind: region.resourceKind,
+                texture: pixels, originX: region.originX, originY: region.originY)
         }
     }
 
