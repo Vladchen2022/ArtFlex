@@ -487,6 +487,7 @@ final class WorkspaceViewModel: ObservableObject {
     var debugRecoveryAutosaveBeforeInstall: (() -> Void)?
 
     var debugRecoveryAutosaveWriteInFlight: Bool { recoveryAutosaveWriteTask != nil }
+    var debugRecoveryAutosaveIsScheduled: Bool { recoveryAutosaveTask != nil }
 #endif
 
     private static let textureFillMinimumSliceDistance: Double = 2.5
@@ -14328,6 +14329,12 @@ final class WorkspaceViewModel: ObservableObject {
 
     private func performRecoveryAutosave(generation: UInt64) {
         guard hasUnsavedChanges else { return }
+        // Timeline browsing temporarily replaces live layers. It is not an accepted edit and
+        // must never become the newest recovery point (even when the forced deadline expires).
+        // Apply/cancel always updates hasUnsavedChanges and schedules the next eligible save.
+        guard visibleHistoryPreviewOriginCount == nil else {
+            return
+        }
         guard !timelapseRecorder.isBusy else {
             recoveryAutosaveWaitingForTimelapse = true
             return
@@ -14467,6 +14474,10 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     private func canBeginDocumentPersistence(action: String) -> Bool {
+        guard visibleHistoryPreviewOriginCount == nil else {
+            showStatus(.init(kind: .info, message: "请先取消历史预览或应用此状态，再\(action)"))
+            return false
+        }
         guard !isProjectSaving, !isChoosingProjectSaveLocation else {
             showStatus(.init(kind: .info, message: "工程正在保存，请稍候再\(action)"))
             return false

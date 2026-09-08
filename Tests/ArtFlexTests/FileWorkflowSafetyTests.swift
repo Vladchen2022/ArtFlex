@@ -7,6 +7,88 @@ import Testing
 @Suite(.serialized)
 @MainActor
 struct FileWorkflowSafetyTests {
+    @Test func temporaryHistoryPreviewCannotReplaceTheRecoveryProject() async throws {
+        let h = try FileWorkflowHarness()
+        defer { h.cleanUp() }
+        h.viewModel.addLayer()
+        let realLayerCount = h.viewModel.workspace.document.layers.count
+        h.viewModel.debugPerformRecoveryAutosaveNowForTests()
+        try await h.waitUntil { !h.viewModel.debugRecoveryAutosaveWriteInFlight }
+        let recovery = h.bootstrap.persistenceController.recoveryProjectURL
+        let realBackup = try Data(contentsOf: recovery)
+        h.viewModel.prepareVisibleHistoryPresentation()
+        h.viewModel.previewVisibleHistory(toAppliedEntryCount: 0)
+        #expect(h.viewModel.workspace.document.layers.count == realLayerCount - 1)
+        h.viewModel.debugPerformRecoveryAutosaveNowForTests()
+        try await h.waitUntil { !h.viewModel.debugRecoveryAutosaveWriteInFlight }
+        #expect(try Data(contentsOf: recovery) == realBackup)
+        #expect(!h.viewModel.debugRecoveryAutosaveIsScheduled)
+        #expect(try h.bootstrap.persistenceController.openProject(from: recovery).workspace.document.layers.count == realLayerCount)
+        h.viewModel.cancelVisibleHistoryPreview()
+        #expect(h.viewModel.workspace.document.layers.count == realLayerCount)
+        #expect(h.viewModel.debugRecoveryAutosaveIsScheduled)
+        h.viewModel.debugPerformRecoveryAutosaveNowForTests()
+        try await h.waitUntil { !h.viewModel.debugRecoveryAutosaveWriteInFlight }
+        #expect(try h.bootstrap.persistenceController.openProject(from: recovery).workspace.document.layers.count == realLayerCount)
+    }
+
+    @Test func manualSaveWaitsForHistoryPreviewToBeAppliedOrCancelled() async throws {
+        let h = try FileWorkflowHarness()
+        defer { h.cleanUp() }
+        h.viewModel.addLayer()
+        h.viewModel.prepareVisibleHistoryPresentation()
+        h.viewModel.previewVisibleHistory(toAppliedEntryCount: 0)
+        let output = h.root.appendingPathComponent("chosen-history.artflex")
+        h.select(output)
+        var completed: Bool?
+        let accepted = h.viewModel.saveProject { completed = $0 }
+        try await h.waitUntil { completed != nil }
+        #expect(!accepted && completed == false)
+        #expect(!FileManager.default.fileExists(atPath: output.path))
+        #expect(h.viewModel.visibleHistoryPreviewTargetCount == 0)
+        h.viewModel.applyVisibleHistoryPreview()
+        completed = nil
+        #expect(h.viewModel.saveProject { completed = $0 })
+        try await h.waitUntil { completed != nil }
+        #expect(completed == true)
+        #expect(try h.bootstrap.persistenceController.openProject(from: output).workspace.document.layers.count == h.viewModel.workspace.document.layers.count)
+    }
+
+    @Test func recoveryFrozenBeforeHistoryPreviewStillInstallsTheAcceptedCanvas() async throws {
+        let h = try FileWorkflowHarness()
+        defer { h.cleanUp() }
+        h.viewModel.addLayer()
+        let originalCount = h.viewModel.workspace.document.layers.count
+        h.viewModel.debugPerformRecoveryAutosaveNowForTests()
+        #expect(h.viewModel.debugRecoveryAutosaveWriteInFlight)
+        h.viewModel.prepareVisibleHistoryPresentation()
+        h.viewModel.previewVisibleHistory(toAppliedEntryCount: 0)
+        try await h.waitUntil { !h.viewModel.debugRecoveryAutosaveWriteInFlight }
+        #expect(h.viewModel.workspace.document.layers.count == originalCount - 1)
+        let recovery = h.bootstrap.persistenceController.recoveryProjectURL
+        #expect(try h.bootstrap.persistenceController.openProject(from: recovery).workspace.document.layers.count == originalCount)
+        h.viewModel.cancelVisibleHistoryPreview()
+    }
+
+    @Test func appliedHistoryStateCanBecomeTheNextRecoveryPoint() async throws {
+        let h = try FileWorkflowHarness()
+        defer { h.cleanUp() }
+        h.viewModel.addLayer()
+        h.viewModel.prepareVisibleHistoryPresentation()
+        h.viewModel.previewVisibleHistory(toAppliedEntryCount: 0)
+        h.viewModel.debugExpireRecoveryAutosaveDeadlineForTests()
+        h.viewModel.debugPerformRecoveryAutosaveNowForTests()
+        #expect(!h.viewModel.debugRecoveryAutosaveWriteInFlight)
+        #expect(!h.viewModel.debugRecoveryAutosaveIsScheduled)
+        #expect(!h.bootstrap.persistenceController.hasRecoveryProject)
+        h.viewModel.applyVisibleHistoryPreview()
+        #expect(h.viewModel.debugRecoveryAutosaveIsScheduled)
+        h.viewModel.debugPerformRecoveryAutosaveNowForTests()
+        try await h.waitUntil { !h.viewModel.debugRecoveryAutosaveWriteInFlight }
+        #expect(h.bootstrap.persistenceController.hasRecoveryProject)
+        #expect(try h.bootstrap.persistenceController.openProject(from: h.bootstrap.persistenceController.recoveryProjectURL).workspace.document.layers == h.viewModel.workspace.document.layers)
+    }
+
     @Test func onlyOneFileDialogAndOneCompletionAreAllowed() {
         _ = NSApplication.shared
         let service = FilePanelService()
