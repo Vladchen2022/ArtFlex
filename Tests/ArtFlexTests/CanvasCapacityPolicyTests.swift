@@ -2,6 +2,19 @@ import Testing
 @testable import ArtFlex
 
 struct CanvasCapacityPolicyTests {
+    @Test func highPrecisionReportsTwiceTheWorkingSetAndUsesTheSameMemoryBudget() throws {
+        let policy = CanvasCapacityPolicy.standard
+        let size = CanvasSize(width: 2048, height: 2048)
+        let standard = policy.assess(size)
+        let high = policy.assess(size, pixelFormat: .rgba16Float)
+        #expect(high.estimatedCoreWorkingSetBytes == standard.estimatedCoreWorkingSetBytes * 2)
+        #expect(high.isSupported)
+        #expect(!policy.assess(CanvasSize(width: 5000, height: 5000), pixelFormat: .rgba16Float).isSupported)
+        let largest = try #require(policy.maximumSupportedSize(aspectWidth: 1, aspectHeight: 1, pixelFormat: .rgba16Float))
+        #expect(largest == CanvasSize(width: 4000, height: 4000))
+        #expect(policy.assess(largest, pixelFormat: .rgba16Float).isSupported)
+    }
+
     @Test func allowsLargeCanvasWithinPixelBudget() {
         let assessment = CanvasCapacityPolicy.standard.assess(
             CanvasSize(width: 8_000, height: 4_000)

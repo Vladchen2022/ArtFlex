@@ -1760,6 +1760,10 @@ final class StrokeCaptureMTKView: MTKView {
     }
 
     override func keyDown(with event: NSEvent) {
+        guard !MenuKeyboardOwnership.shared.isTracking else {
+            super.keyDown(with: event)
+            return
+        }
         let normalizedModifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         activeModifierFlags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         updateCursorAppearance()

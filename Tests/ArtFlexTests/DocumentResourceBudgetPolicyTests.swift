@@ -3,6 +3,21 @@ import Testing
 @testable import ArtFlex
 
 struct DocumentResourceBudgetPolicyTests {
+    @Test func highPrecisionCountsDoubleColorStorageButNotDoubleMaskStorage() {
+        let policy = DocumentResourceBudgetPolicy.standard(recommendedMaxWorkingSetSize: nil, archiveLimits: .standard)
+        let half = policy.assess(canvasSize: .init(width: 1_000, height: 1_000),
+            paintLayerCount: 2, maskCount: 1, savedSnapshotCount: 1, pixelFormat: .rgba16Float)
+        #expect(half.footprint.liveLayerBytes == 17_000_000)
+        #expect(half.footprint.savedSnapshotBytes == 8_000_000)
+        #expect(half.footprint.estimatedTransientBytes == 32_000_000)
+        var constrained = policy
+        constrained.maximumInteractiveResidentBytes = 40_000_000
+        #expect(constrained.assess(canvasSize: .init(width: 1_000, height: 1_000),
+            paintLayerCount: 2, maskCount: 1, savedSnapshotCount: 1).isSupported)
+        #expect(!constrained.assess(canvasSize: .init(width: 1_000, height: 1_000),
+            paintLayerCount: 2, maskCount: 1, savedSnapshotCount: 1, pixelFormat: .rgba16Float).isSupported)
+    }
+
     @Test
     func accountsForLayersMasksSnapshotsAndSaveDuplication() {
         let limits = ProjectArchiveReadLimits.standard

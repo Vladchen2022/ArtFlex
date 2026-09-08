@@ -73,6 +73,7 @@ final class KeyboardBridgeView: NSView {
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         guard window != nil else { return }
+        _ = MenuKeyboardOwnership.shared
         installWorkspaceKeyDownMonitorIfNeeded()
         installWorkspaceKeyUpMonitorIfNeeded()
         installWorkspacePointerDownMonitorIfNeeded()
@@ -80,6 +81,10 @@ final class KeyboardBridgeView: NSView {
     }
 
     override func keyDown(with event: NSEvent) {
+        guard !MenuKeyboardOwnership.shared.isTracking else {
+            super.keyDown(with: event)
+            return
+        }
         let normalizedModifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         if event.keyCode == 48,
            normalizedModifiers.isEmpty,
@@ -111,6 +116,7 @@ final class KeyboardBridgeView: NSView {
     }
 
     func activateIfNeeded() {
+        guard !MenuKeyboardOwnership.shared.isTracking else { return }
         guard let window else { return }
         if shouldPreserveCurrentFirstResponder(window.firstResponder) {
             return
@@ -141,6 +147,7 @@ final class KeyboardBridgeView: NSView {
         guard workspaceKeyDownMonitor == nil else { return }
         workspaceKeyDownMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self, let window = self.window else { return event }
+            guard !MenuKeyboardOwnership.shared.isTracking else { return event }
             guard event.windowNumber == window.windowNumber else { return event }
 
             let normalizedModifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)

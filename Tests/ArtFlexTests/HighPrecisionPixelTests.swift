@@ -5,6 +5,44 @@ import Testing
 @testable import ArtFlex
 
 struct HighPrecisionPixelTests {
+    @Test @MainActor func finderCopyImportsOriginalSixteenBitImageRatherThanFileIcon() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("ArtFlex-file-clipboard-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        var bytes = Data(count: 512 * 8)
+        bytes.withUnsafeMutableBytes { output in
+            for x in 0..<512 {
+                CanvasPixelCodec.write(.init(red: 0.05 + Float(x) / 10000, green: 0.08, blue: 0.03, alpha: 0.5),
+                    into: output, offset: x * 8, encoding: .premultipliedRGBA16FloatLinear)
+            }
+        }
+        let source = LayerTextureSnapshot(width: 512, height: 1, bytesPerRow: 4096,
+            pixelData: bytes, encoding: .premultipliedRGBA16FloatLinear)
+        let board = NSPasteboard(name: .init("ArtFlex-finder-clipboard-\(UUID().uuidString)"))
+        defer { board.releaseGlobally() }
+        for format in [RasterExportFormat.png, .tiff] {
+            let url = root.appendingPathComponent("original.\(format.fileExtension)")
+            let encoded = try RasterExporter().encode(snapshot: source, options: .init(format: format,
+                background: .transparent, bitDepth: .sixteen))
+            try encoded.encodedData.write(to: url)
+            board.clearContents()
+            #expect(board.writeObjects([url as NSURL, NSWorkspace.shared.icon(forFile: url.path)]))
+            let payload = try #require(PixelClipboardController().preferredPayload(from: board))
+            #expect(payload.snapshot.width == 512 && payload.snapshot.height == 1)
+            #expect(payload.snapshot.encoding == .premultipliedRGBA16FloatLinear)
+            #expect(Set((0..<512).map { payload.snapshot.linearPixel(x: $0, y: 0).red }).count > 300)
+            #expect(abs(payload.snapshot.linearPixel(x: 200, y: 0).red - source.linearPixel(x: 200, y: 0).red) < 0.001)
+        }
+    }
+
+    @Test @MainActor func unreadableFinderFileDoesNotPasteItsIcon() {
+        let board = NSPasteboard(name: .init("ArtFlex-missing-file-\(UUID().uuidString)"))
+        defer { board.releaseGlobally() }
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("missing-\(UUID().uuidString).tiff")
+        #expect(board.writeObjects([url as NSURL, NSWorkspace.shared.icon(forFile: url.path)]))
+        #expect(PixelClipboardController().preferredPayload(from: board) == nil)
+    }
+
     @Test @MainActor func sixteenBitImportClipboardAndSelectionFillKeepSubByteColorSteps() throws {
         var bytes = Data(count: 512 * 8)
         bytes.withUnsafeMutableBytes { output in

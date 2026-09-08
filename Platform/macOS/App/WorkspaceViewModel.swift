@@ -668,6 +668,7 @@ final class WorkspaceViewModel: ObservableObject {
     private func setupZoomKeyboardMonitor() {
         NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self else { return event }
+            guard !MenuKeyboardOwnership.shared.isTracking else { return event }
             if NSApp.keyWindow?.identifier?.rawValue == "ReferenceImageFloatingPanel" {
                 return event
             }
@@ -11913,6 +11914,7 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func handleKeyDown(_ event: NSEvent) -> Bool {
+        guard !MenuKeyboardOwnership.shared.isTracking else { return false }
         let normalizedModifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         if event.keyCode == 53, isBucketFillInProgress {
             cancelBucketFill()
@@ -14096,7 +14098,8 @@ final class WorkspaceViewModel: ObservableObject {
                             maskCount: inspection.workspace.document.paintLayers.filter { $0.mask != nil }.count,
                             savedSnapshotCount: inspection.savedSnapshotCount,
                             referenceImageBytes: inspection.referenceArchiveBytes,
-                            referenceImageResidentBytes: inspection.estimatedReferenceResidentBytes
+                            referenceImageResidentBytes: inspection.estimatedReferenceResidentBytes,
+                            pixelFormat: inspection.workspace.document.colorStandard.pixelFormat
                         )
                         guard assessment.isSupported else {
                             throw PersistenceError.invalidProject(
@@ -14630,7 +14633,7 @@ final class WorkspaceViewModel: ObservableObject {
     ) {
         guard !isDocumentTransitionPending,
               canBeginDocumentPersistence(action: "新建画布") else { return }
-        let capacity = canvasCapacityPolicy.assess(canvasSize)
+        let capacity = canvasCapacityPolicy.assess(canvasSize, pixelFormat: pixelFormat)
         guard capacity.isSupported else {
             showStatus(.init(
                 kind: .error,

@@ -83,6 +83,14 @@ final class PixelClipboardController {
 }
 
 private func importableImage(from pasteboard: NSPasteboard) -> NSImage? {
+    // Finder supplies both a file URL and a rendered file icon. Resolve the
+    // original first (as ImagePaletteExtractor does), including its bit depth.
+    // A missing/unreadable file must not silently become the fallback icon.
+    if let url = (pasteboard.readObjects(forClasses: [NSURL.self], options: [
+        .urlReadingFileURLsOnly: true
+    ]) as? [URL])?.first {
+        return NSImage(contentsOf: url)
+    }
     if let image = pasteboard.readObjects(forClasses: [NSImage.self], options: nil)?.first as? NSImage {
         return image
     }

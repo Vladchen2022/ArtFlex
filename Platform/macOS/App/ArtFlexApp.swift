@@ -212,6 +212,7 @@ final class ArtFlexApplicationDelegate: NSObject, NSApplicationDelegate, NSWindo
         }
     }
     private var isApprovingTermination = false
+    var approvedTerminationHandler: (NSApplication) -> Void = { $0.terminate(nil) }
     private var isTerminationRequestPending = false
     private var isWindowCloseRequestPending = false
     private weak var approvedClosingWindow: NSWindow?
@@ -272,21 +273,25 @@ final class ArtFlexApplicationDelegate: NSObject, NSApplicationDelegate, NSWindo
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        if isApprovingTermination { return .terminateNow }
         guard let viewModel else {
             return .terminateNow
         }
 
-        guard !isTerminationRequestPending else { return .terminateLater }
+        guard !isTerminationRequestPending else { return .terminateCancel }
         isTerminationRequestPending = true
-        // Reply only after AppKit has received terminateLater, including the no-change case.
+        // terminateLater enters NSModalPanelRunLoopMode, which can starve the
+        // main-queue/Swift-concurrency work used by our async save and confirmation.
+        // Finish that work in the normal event loop, then issue an approved quit.
         DispatchQueue.main.async { [self] in
             viewModel.confirmCloseOrQuitIfNeeded { [self] allowed in
                 isTerminationRequestPending = false
-                isApprovingTermination = allowed
-                sender.reply(toApplicationShouldTerminate: allowed)
+                guard allowed else { return }
+                isApprovingTermination = true
+                approvedTerminationHandler(sender)
             }
         }
-        return .terminateLater
+        return .terminateCancel
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {

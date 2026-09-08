@@ -7,6 +7,52 @@ import Testing
 @Suite(.serialized)
 @MainActor
 struct FileWorkflowSafetyTests {
+    @Test func cancelledQuitCanRetryAndOnlyTerminatesAfterSuccessfulSave() async throws {
+        let h = try FileWorkflowHarness()
+        defer { h.cleanUp() }
+        h.makeDirty()
+        // This test isolates quit confirmation, not the intentional busy-recovery
+        // rejection. Drain the scheduled recovery before yielding to the other
+        // GPU suites, whose main-actor work can exceed the 30-second idle delay.
+        h.viewModel.debugPerformRecoveryAutosaveNowForTests()
+        try await h.waitUntil { !h.viewModel.debugRecoveryAutosaveWriteInFlight }
+        let delegate = ArtFlexApplicationDelegate()
+        delegate.viewModel = h.viewModel
+        var approved = false
+        var prompts = 0
+        delegate.approvedTerminationHandler = { _ in approved = true }
+        h.bootstrap.filePanelService.confirmForTesting = { reply in
+            prompts += 1
+            reply(.alertThirdButtonReturn)
+        }
+        #expect(delegate.applicationShouldTerminate(NSApplication.shared) == .terminateCancel)
+        try await h.waitUntil { prompts == 1 }
+        try #require(prompts == 1)
+        #expect(!approved && h.viewModel.hasUnsavedChanges)
+        let output = h.root.appendingPathComponent("approved-quit.artflex")
+        h.select(output)
+        h.bootstrap.filePanelService.confirmForTesting = { $0(.alertFirstButtonReturn) }
+        #expect(delegate.applicationShouldTerminate(NSApplication.shared) == .terminateCancel)
+        try await h.waitUntil { approved }
+        #expect(!h.viewModel.hasUnsavedChanges)
+        #expect(try h.bootstrap.persistenceController.openProject(from: output).workspace.document.canvasSize.width == 8)
+    }
+
+    @Test func appQuitKeepsNormalEventLoopUntilSaveConfirmationFinishes() async throws {
+        let h = try FileWorkflowHarness()
+        defer { h.cleanUp() }
+        let delegate = ArtFlexApplicationDelegate()
+        delegate.viewModel = h.viewModel
+        var approvedCount = 0
+        delegate.approvedTerminationHandler = { _ in approvedCount += 1 }
+        let app = NSApplication.shared
+        #expect(delegate.applicationShouldTerminate(app) == .terminateCancel)
+        #expect(delegate.applicationShouldTerminate(app) == .terminateCancel)
+        try await h.waitUntil { approvedCount > 0 }
+        #expect(approvedCount == 1)
+        #expect(delegate.applicationShouldTerminate(app) == .terminateNow)
+    }
+
     @Test func temporaryHistoryPreviewCannotReplaceTheRecoveryProject() async throws {
         func recoveryContents(_ url: URL) throws -> [String: Data] {
             var isDirectory: ObjCBool = false

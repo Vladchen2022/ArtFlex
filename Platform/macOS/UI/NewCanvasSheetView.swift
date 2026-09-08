@@ -287,7 +287,7 @@ struct NewCanvasSheetView: View {
             .frame(height: 246)
 
             let assessment = capacityPolicy.assess(
-                CanvasSize(width: currentWidth, height: currentHeight)
+                CanvasSize(width: currentWidth, height: currentHeight), pixelFormat: pixelFormat
             )
             HStack(spacing: 7) {
                 Image(systemName: assessment.isSupported ? "square.grid.3x3.fill" : "exclamationmark.triangle.fill")
@@ -339,7 +339,8 @@ struct NewCanvasSheetView: View {
         let heightRatio = max(Int(orientedRatio.height.rounded()), 1)
         let size = capacityPolicy.maximumSupportedSize(
             aspectWidth: widthRatio,
-            aspectHeight: heightRatio
+            aspectHeight: heightRatio,
+            pixelFormat: pixelFormat
         ) ?? CanvasSize(width: 2048, height: 2048)
         widthText = "\(size.width)"
         heightText = "\(size.height)"
@@ -404,7 +405,7 @@ struct NewCanvasSheetView: View {
 
     private var isValidCanvasInput: Bool {
         capacityPolicy.assess(
-            CanvasSize(width: currentWidth, height: currentHeight)
+            CanvasSize(width: currentWidth, height: currentHeight), pixelFormat: pixelFormat
         ).isSupported
     }
 

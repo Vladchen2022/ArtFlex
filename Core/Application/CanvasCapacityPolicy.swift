@@ -54,7 +54,7 @@ struct CanvasCapacityPolicy: Sendable, Equatable {
     /// Returns the largest exact integer multiple of an aspect ratio that the
     /// current renderer can support. Keeping this calculation beside `assess`
     /// prevents UI callers from rounding a nominal limit into an invalid size.
-    func maximumSupportedSize(aspectWidth: Int, aspectHeight: Int) -> CanvasSize? {
+    func maximumSupportedSize(aspectWidth: Int, aspectHeight: Int, pixelFormat: ArtPixelFormat = .rgba8) -> CanvasSize? {
         guard aspectWidth > 0, aspectHeight > 0 else { return nil }
 
         let (aspectPixels, aspectOverflow) = aspectWidth.multipliedReportingOverflow(
@@ -64,7 +64,7 @@ struct CanvasCapacityPolicy: Sendable, Equatable {
 
         let edgeScale = maximumEdge / max(aspectWidth, aspectHeight)
         let pixelScale = Int(
-            sqrt(Double(maximumPixelCount) / Double(aspectPixels)).rounded(.down)
+            sqrt(Double(maximumPixelCount / precisionMultiplier(pixelFormat)) / Double(aspectPixels)).rounded(.down)
         )
         var scale = min(edgeScale, pixelScale)
         guard scale > 0 else { return nil }
@@ -73,7 +73,7 @@ struct CanvasCapacityPolicy: Sendable, Equatable {
             width: aspectWidth * scale,
             height: aspectHeight * scale
         )
-        while scale > 0, !assess(size).isSupported {
+        while scale > 0, !assess(size, pixelFormat: pixelFormat).isSupported {
             scale -= 1
             size = CanvasSize(
                 width: aspectWidth * scale,
@@ -83,7 +83,11 @@ struct CanvasCapacityPolicy: Sendable, Equatable {
         return scale > 0 ? size : nil
     }
 
-    func assess(_ canvasSize: CanvasSize) -> CanvasCapacityAssessment {
+    private func precisionMultiplier(_ pixelFormat: ArtPixelFormat) -> Int {
+        pixelFormat == .rgba16Float ? 2 : 1
+    }
+
+    func assess(_ canvasSize: CanvasSize, pixelFormat: ArtPixelFormat = .rgba8) -> CanvasCapacityAssessment {
         guard canvasSize.width > 0, canvasSize.height > 0 else {
             return .init(
                 canvasSize: canvasSize,
@@ -97,9 +101,13 @@ struct CanvasCapacityPolicy: Sendable, Equatable {
         let (pixelCount, pixelOverflow) = canvasSize.width.multipliedReportingOverflow(
             by: canvasSize.height
         )
-        let (workingSet, byteOverflow) = pixelCount.multipliedReportingOverflow(
+        let (baseWorkingSet, baseByteOverflow) = pixelCount.multipliedReportingOverflow(
             by: estimatedCoreBytesPerPixel
         )
+        let multiplier = precisionMultiplier(pixelFormat)
+        let (workingSet, precisionOverflow) = baseWorkingSet.multipliedReportingOverflow(by: multiplier)
+        let byteOverflow = baseByteOverflow || precisionOverflow
+        let precisionPixelLimit = maximumPixelCount / multiplier
         let tileCount = TileGrid(canvasSize: canvasSize)?.tileCount ?? Int.max
 
         let rejectionReason: String?
@@ -107,8 +115,8 @@ struct CanvasCapacityPolicy: Sendable, Equatable {
             rejectionReason = "画布尺寸发生整数溢出"
         } else if canvasSize.width > maximumEdge || canvasSize.height > maximumEdge {
             rejectionReason = "单边不能超过 \(maximumEdge) 像素"
-        } else if pixelCount > maximumPixelCount {
-            rejectionReason = "总像素不能超过 \(maximumPixelCount.formatted())"
+        } else if pixelCount > precisionPixelLimit {
+            rejectionReason = "当前精度下总像素不能超过 \(precisionPixelLimit.formatted())"
         } else {
             rejectionReason = nil
         }
