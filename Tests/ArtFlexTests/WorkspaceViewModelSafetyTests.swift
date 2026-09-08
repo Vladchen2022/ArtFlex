@@ -1532,6 +1532,59 @@ struct WorkspaceViewModelSafetyTests {
 
     @Test
     @MainActor
+    func replacingSelectionSubmitsNewPreviewWithoutWaitingForObsoleteMainActorCallback() throws {
+        let harness = try BrushEditingBoundaryHarness(canvasSize: .init(width: 256, height: 256))
+        let layerID = harness.viewModel.workspace.document.activeLayerID
+        try fillOpaqueRect(
+            in: harness, layerID: layerID, originX: 48, originY: 48,
+            width: 140, height: 140,
+            color: .init(red: 0.24, green: 0.28, blue: 0.32, alpha: 1)
+        )
+        makeRectangleSelection(in: harness.viewModel, minX: 72, minY: 72, maxX: 116, maxY: 116)
+        let base = try harness.color(atX: 152, y: 152, layerID: layerID)
+        harness.viewModel.setColorAdjustmentBrightness(0.55)
+        let obsoleteToken = harness.viewModel.colorAdjustmentPreviewToken
+        #expect(harness.viewModel.colorAdjustmentPreviewRenderInFlight)
+
+        // Stay on MainActor: the previous GPU job may finish, but its actor callback
+        // cannot run yet. Replacing its texture must submit the new job immediately.
+        makeRectangleSelection(in: harness.viewModel, minX: 136, minY: 136, maxX: 172, maxY: 172)
+        #expect(harness.viewModel.colorAdjustmentPreviewToken != obsoleteToken)
+        #expect(!harness.viewModel.colorAdjustmentPreviewRenderNeedsResubmit)
+        let preview = try harness.colorAdjustmentPreviewColor(atX: 152, y: 152)
+        #expect(preview.red > base.red + 0.05)
+        #expect(preview.green > base.green + 0.05)
+        #expect(preview.blue > base.blue + 0.05)
+        #expect(try harness.color(atX: 152, y: 152, layerID: layerID) == base)
+    }
+
+    @Test
+    @MainActor
+    func coalescedColorAdjustmentPreviewFinishesWithLatestParameters() async throws {
+        let harness = try BrushEditingBoundaryHarness(canvasSize: .init(width: 256, height: 256))
+        let layerID = harness.viewModel.workspace.document.activeLayerID
+        try fillOpaqueRect(
+            in: harness, layerID: layerID, originX: 48, originY: 48,
+            width: 140, height: 140,
+            color: .init(red: 0.24, green: 0.28, blue: 0.32, alpha: 1)
+        )
+        makeRectangleSelection(in: harness.viewModel, minX: 72, minY: 72, maxX: 116, maxY: 116)
+        let base = try harness.color(atX: 92, y: 92, layerID: layerID)
+        harness.viewModel.setColorAdjustmentBrightness(-0.55)
+        harness.viewModel.setColorAdjustmentBrightness(0.55)
+        #expect(harness.viewModel.colorAdjustmentPreviewRenderInFlight)
+        #expect(harness.viewModel.colorAdjustmentPreviewRenderNeedsResubmit)
+
+        try await waitForColorAdjustmentPreview(in: harness)
+        let preview = try harness.colorAdjustmentPreviewColor(atX: 92, y: 92)
+        #expect(preview.red > base.red + 0.05)
+        #expect(preview.green > base.green + 0.05)
+        #expect(preview.blue > base.blue + 0.05)
+        #expect(try harness.color(atX: 92, y: 92, layerID: layerID) == base)
+    }
+
+    @Test
+    @MainActor
     func colorAdjustmentWholeLayerPreviewUsesActiveLayerWithoutPainting() async throws {
         let harness = try BrushEditingBoundaryHarness()
         let activeLayerID = harness.viewModel.workspace.document.activeLayerID
@@ -4880,7 +4933,9 @@ private func waitForColorAdjustmentPreview(
     let activeLayerID = harness.viewModel.workspace.document.activeLayerID
     for _ in 0..<timeoutIterations {
         if harness.viewModel.brushDisplayTexture(for: activeLayerID) != nil,
-           harness.viewModel.colorAdjustmentOverlayState.isActive {
+           harness.viewModel.colorAdjustmentOverlayState.isActive,
+           !harness.viewModel.colorAdjustmentPreviewRenderInFlight,
+           !harness.viewModel.colorAdjustmentPreviewRenderNeedsResubmit {
             return
         }
         await Task.yield()
@@ -4913,7 +4968,11 @@ private func waitForColorAdjustmentRedrawRevision(
     timeoutIterations: Int = 200
 ) async throws {
     for _ in 0..<timeoutIterations {
-        if harness.viewModel.colorAdjustmentRedrawRevision > baselineRevision {
+        // A redraw can also mean an older job completed or the original/overlay
+        // changed. Read pixels only after the latest coalesced GPU job has finished.
+        if harness.viewModel.colorAdjustmentRedrawRevision > baselineRevision,
+           !harness.viewModel.colorAdjustmentPreviewRenderInFlight,
+           !harness.viewModel.colorAdjustmentPreviewRenderNeedsResubmit {
             return
         }
         await Task.yield()

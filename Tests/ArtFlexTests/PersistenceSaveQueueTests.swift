@@ -11,10 +11,13 @@ struct PersistenceSaveQueueTests {
             return
         }
 
+        let auditStore = PerformanceAuditStore()
+        let sharedServices = try AppSharedMetalServices(metalContext: metalContext, textureAuditStore: auditStore)
         let bootstrap = try AppBootstrap(
             workspaceStore: WorkspaceStore(),
             metalContext: metalContext,
-            layerSurfaceStore: StageOneLayerSurfaceStore()
+            layerSurfaceStore: StageOneLayerSurfaceStore(),
+            sharedMetalServices: sharedServices
         )
         let viewModel = WorkspaceViewModel(bootstrap: bootstrap, installsZoomKeyboardMonitor: false)
         viewModel.addLayer()
@@ -25,16 +28,18 @@ struct PersistenceSaveQueueTests {
             .appendingPathExtension("artflex")
         defer {
             try? FileManager.default.removeItem(at: outputURL)
-            PerformanceAuditStore.shared.setRecordingEnabled(false)
         }
 
-        PerformanceAuditStore.shared.reset()
+        auditStore.reset()
         try bootstrap.persistenceController.saveProject(to: outputURL)
-        let audit = PerformanceAuditStore.shared.snapshot()
+        let audit = auditStore.snapshot()
         let layerCount = viewModel.workspace.document.layers.count
 
         #expect(audit.durations(for: "LayerTextureSerializer.snapshotBatch(\(layerCount))").count == 1)
         #expect(audit.durations(for: "LayerTextureSerializer.snapshot").isEmpty)
+        let reopened = try bootstrap.persistenceController.openProject(from: outputURL)
+        #expect(reopened.workspace.document.layers == viewModel.workspace.document.layers)
+        #expect(reopened.layerSnapshots.count == layerCount)
     }
 
     @Test

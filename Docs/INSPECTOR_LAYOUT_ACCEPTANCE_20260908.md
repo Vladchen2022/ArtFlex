@@ -51,6 +51,8 @@ NSSplitView 可保存分隔位置，但本需求还要按内容自动收拢，�
 
 完整日志在 `/tmp/artflex-inspector-tests-20260908.log`、`/tmp/artflex-inspector-tests-final-20260908.log`、`/tmp/artflex-inspector-tests-final3-20260908.log`；临时日志可能被系统清理，本记录保留关键结果。
 
+后续收尾：构建 `20260908.18` 已补齐调色预览上下文失效处理，并隔离保存测试的共享计数；保留原断言，新增确定性回归，最终三轮全量各 913 项通过。详见 [调色与保存回归稳定性](PREVIEW_SAVE_REGRESSION_20260908.md)。以上历史失败记录保留，不以之后通过覆盖原始事实。
+
 ## 数据保护与手测清单
 
 原工程备份与旧应用压缩备份位于 `/Users/victorcloux/Downloads/ArtFlex-面板适配备份-20260908-MAssdk/`。界面绘画／图层测试使用该目录下的 `面板适配测试.artflex`，不覆盖原画稿；旧应用只保存为 zip，不部署成第二个可启动版本。

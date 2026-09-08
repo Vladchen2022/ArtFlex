@@ -324,9 +324,7 @@ extension WorkspaceViewModel {
         }()
 
         if requiresPaintedMaskSession {
-            colorAdjustmentPreviewToken &+= 1
-            colorAdjustmentPreviewRenderInFlight = false
-            colorAdjustmentPreviewRenderNeedsResubmit = false
+            invalidateColorAdjustmentPreview()
             colorAdjustmentSession = makePaintedColorAdjustmentSession(
                 layerID: layerID,
                 sourceTexture: sourceTexture,
@@ -569,6 +567,9 @@ extension WorkspaceViewModel {
         }
 
         guard let replacementSession else { return }
+        // The previous job targets a different preview texture. Do not let its
+        // pending MainActor callback delay this session or publish its completion.
+        invalidateColorAdjustmentPreview()
         colorAdjustmentSession = replacementSession
         scheduleColorAdjustmentPreviewUpdate(force: true)
         syncColorAdjustmentOverlayState()
@@ -619,9 +620,7 @@ extension WorkspaceViewModel {
         }
         session.vitalizationMaterial = currentColorVitalizationMaterial()
         colorAdjustmentSession = session
-        colorAdjustmentPreviewToken &+= 1
-        colorAdjustmentPreviewRenderInFlight = false
-        colorAdjustmentPreviewRenderNeedsResubmit = false
+        invalidateColorAdjustmentPreview()
         scheduleColorAdjustmentPreviewUpdate(force: true)
         syncColorAdjustmentOverlayState()
     }
@@ -956,11 +955,15 @@ extension WorkspaceViewModel {
         colorAdjustmentAllowsIdleModeHotkeys = false
         colorAdjustmentBrushMode = .paint
         colorAdjustmentStrokePacketCount = 0
+        invalidateColorAdjustmentPreview()
+        colorAdjustmentRedrawRevision &+= 1
+        syncColorAdjustmentOverlayState()
+    }
+
+    private func invalidateColorAdjustmentPreview() {
         colorAdjustmentPreviewToken &+= 1
         colorAdjustmentPreviewRenderInFlight = false
         colorAdjustmentPreviewRenderNeedsResubmit = false
-        colorAdjustmentRedrawRevision &+= 1
-        syncColorAdjustmentOverlayState()
     }
 
     private func clearCommittedSelectionAfterColorAdjustmentApply() {
@@ -1100,6 +1103,7 @@ extension WorkspaceViewModel {
 
         let parameters = colorAdjustmentSession?.parameters
             ?? defaultColorAdjustmentParameters(for: activeColorAdjustmentEffectMode)
+        invalidateColorAdjustmentPreview()
         if activeColorAdjustmentEffectMode == .vitalization {
             let nextSession = makePaintedColorAdjustmentSession(
                 layerID: layerID,

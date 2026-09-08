@@ -194,12 +194,15 @@ final class LayerTextureSerializer {
     private static let transferTileLength = 1_024
     private let metalContext: MetalDeviceContext
     private let stagingPool: LayerSerializerStagingPool
+    private let auditStore: PerformanceAuditStore
 
     init(
         metalContext: MetalDeviceContext,
-        stagingPoolMaxResidentBytes: Int = 64 * 1024 * 1024
+        stagingPoolMaxResidentBytes: Int = 64 * 1024 * 1024,
+        auditStore: PerformanceAuditStore = .shared
     ) {
         self.metalContext = metalContext
+        self.auditStore = auditStore
         self.stagingPool = LayerSerializerStagingPool(
             device: metalContext.device,
             maxRetainedBytes: stagingPoolMaxResidentBytes
@@ -351,12 +354,12 @@ final class LayerTextureSerializer {
             // Large canvases are intentionally serialized one tiled resource at a time.
             return try textures.map { try snapshot(texture: $0) }
         }
-        let auditEnabled = PerformanceAuditStore.shared.isRecordingEnabled
+        let auditEnabled = auditStore.isRecordingEnabled
         let startedAt = auditEnabled ? DispatchTime.now().uptimeNanoseconds : 0
         defer {
             if auditEnabled {
                 let ms = Double(DispatchTime.now().uptimeNanoseconds - startedAt) / 1_000_000
-                PerformanceAuditStore.shared.recordDuration("LayerTextureSerializer.snapshotBatch(\(textures.count))", ms: ms)
+                auditStore.recordDuration("LayerTextureSerializer.snapshotBatch(\(textures.count))", ms: ms)
             }
         }
 
@@ -455,12 +458,12 @@ final class LayerTextureSerializer {
         width: Int,
         height: Int
     ) throws -> LayerTextureSnapshot {
-        let auditEnabled = PerformanceAuditStore.shared.isRecordingEnabled
+        let auditEnabled = auditStore.isRecordingEnabled
         let startedAt = auditEnabled ? DispatchTime.now().uptimeNanoseconds : 0
         defer {
             if auditEnabled {
                 let ms = Double(DispatchTime.now().uptimeNanoseconds - startedAt) / 1_000_000
-                PerformanceAuditStore.shared.recordDuration("LayerTextureSerializer.snapshot", ms: ms)
+                auditStore.recordDuration("LayerTextureSerializer.snapshot", ms: ms)
             }
         }
 
@@ -561,12 +564,12 @@ final class LayerTextureSerializer {
             }
         }
 
-        let auditEnabled = PerformanceAuditStore.shared.isRecordingEnabled
+        let auditEnabled = auditStore.isRecordingEnabled
         let startedAt = auditEnabled ? DispatchTime.now().uptimeNanoseconds : 0
         defer {
             if auditEnabled {
                 let ms = Double(DispatchTime.now().uptimeNanoseconds - startedAt) / 1_000_000
-                PerformanceAuditStore.shared.recordDuration(
+                auditStore.recordDuration(
                     "LayerTextureSerializer.snapshotRegions(\(requests.count))",
                     ms: ms
                 )
@@ -674,12 +677,12 @@ final class LayerTextureSerializer {
         destinationX: Int,
         destinationY: Int
     ) throws {
-        let auditEnabled = PerformanceAuditStore.shared.isRecordingEnabled
+        let auditEnabled = auditStore.isRecordingEnabled
         let startedAt = auditEnabled ? DispatchTime.now().uptimeNanoseconds : 0
         defer {
             if auditEnabled {
                 let ms = Double(DispatchTime.now().uptimeNanoseconds - startedAt) / 1_000_000
-                PerformanceAuditStore.shared.recordDuration("LayerTextureSerializer.restore", ms: ms)
+                auditStore.recordDuration("LayerTextureSerializer.restore", ms: ms)
             }
         }
 
@@ -775,12 +778,12 @@ final class LayerTextureSerializer {
             }
             return
         }
-        let auditEnabled = PerformanceAuditStore.shared.isRecordingEnabled
+        let auditEnabled = auditStore.isRecordingEnabled
         let startedAt = auditEnabled ? DispatchTime.now().uptimeNanoseconds : 0
         defer {
             if auditEnabled {
                 let ms = Double(DispatchTime.now().uptimeNanoseconds - startedAt) / 1_000_000
-                PerformanceAuditStore.shared.recordDuration("LayerTextureSerializer.restoreBatch(\(items.count))", ms: ms)
+                auditStore.recordDuration("LayerTextureSerializer.restoreBatch(\(items.count))", ms: ms)
             }
         }
 
@@ -854,12 +857,12 @@ final class LayerTextureSerializer {
     }
 
     func samplePixel(texture: MTLTexture, x: Int, y: Int) throws -> RGBAColor {
-        let auditEnabled = PerformanceAuditStore.shared.isRecordingEnabled
+        let auditEnabled = auditStore.isRecordingEnabled
         let startedAt = auditEnabled ? DispatchTime.now().uptimeNanoseconds : 0
         defer {
             if auditEnabled {
                 let ms = Double(DispatchTime.now().uptimeNanoseconds - startedAt) / 1_000_000
-                PerformanceAuditStore.shared.recordDuration("LayerTextureSerializer.samplePixel", ms: ms)
+                auditStore.recordDuration("LayerTextureSerializer.samplePixel", ms: ms)
             }
         }
 

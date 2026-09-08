@@ -5,6 +5,37 @@ import Testing
 
 struct LayerTextureSerializerQueueSafetyTests {
     @Test
+    func independentAuditStoresDoNotMixBatchAndUnrelatedReadbacks() throws {
+        let metalContext = try #require(MetalDeviceContext())
+        let saveAudit = PerformanceAuditStore()
+        let unrelatedAudit = PerformanceAuditStore()
+        let saveSerializer = LayerTextureSerializer(metalContext: metalContext, auditStore: saveAudit)
+        let unrelatedSerializer = LayerTextureSerializer(metalContext: metalContext, auditStore: unrelatedAudit)
+        let surfaceStore = StageOneLayerSurfaceStore()
+        let texture = try #require(surfaceStore.makeTexture(width: 8, height: 8, metal: metalContext))
+        let original = opaqueRedSnapshot(width: 8, height: 8, red: 120)
+        try saveSerializer.restore(snapshot: original, into: texture)
+        saveAudit.reset()
+        unrelatedAudit.reset()
+
+        // Deliberately interleave another client's single readback with a save batch.
+        // With one process-global recorder this is indistinguishable from a save regression.
+        let batch = try saveSerializer.snapshotBatch(textures: [texture, texture])
+        _ = try unrelatedSerializer.snapshot(texture: texture)
+        unrelatedAudit.reset()
+        _ = try unrelatedSerializer.samplePixel(texture: texture, x: 0, y: 0)
+        unrelatedAudit.setRecordingEnabled(false)
+        _ = try saveSerializer.snapshotBatch(textures: [texture, texture])
+
+        #expect(batch == [original, original])
+        #expect(saveAudit.snapshot().durations(for: "LayerTextureSerializer.snapshotBatch(2)").count == 2)
+        #expect(saveAudit.snapshot().durations(for: "LayerTextureSerializer.snapshot").isEmpty)
+        #expect(saveAudit.snapshot().durations(for: "LayerTextureSerializer.samplePixel").isEmpty)
+        #expect(unrelatedAudit.snapshot().durations(for: "LayerTextureSerializer.snapshotBatch(2)").isEmpty)
+        #expect(unrelatedAudit.snapshot().durations(for: "LayerTextureSerializer.samplePixel").count == 1)
+    }
+
+    @Test
     func sharedSerializerConcurrentAccessKeepsStagingPoolConsistent() throws {
         guard let metalContext = MetalDeviceContext() else {
             Issue.record("Metal unavailable")

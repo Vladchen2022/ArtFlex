@@ -32,7 +32,7 @@ final class AppSharedMetalServices {
     let pixelClipboardController: PixelClipboardController
     let layerMaskStrokeRenderer: LayerMaskStrokeRenderer
 
-    init(metalContext: MetalDeviceContext) throws {
+    init(metalContext: MetalDeviceContext, textureAuditStore: PerformanceAuditStore = .shared) throws {
         self.canvasPresenter = try StageOneCanvasPresenter(device: metalContext.device)
         self.patternPlacementRenderer = try PatternPlacementRenderer(device: metalContext.device)
         self.linearGradientRenderer = LinearGradientRenderer(device: metalContext.device)
@@ -43,7 +43,7 @@ final class AppSharedMetalServices {
         self.curveAdjustmentRenderer = try CurveAdjustmentRenderer(device: metalContext.device)
         self.visibleDeltaRenderer = try VisibleDeltaRenderer(device: metalContext.device)
         self.layerContentBoundsDetector = try LayerContentBoundsDetector(device: metalContext.device)
-        let textureSerializer = LayerTextureSerializer(metalContext: metalContext)
+        let textureSerializer = LayerTextureSerializer(metalContext: metalContext, auditStore: textureAuditStore)
         self.textureSerializer = textureSerializer
         self.pngExporter = PNGExporter(serializer: textureSerializer)
         self.smudgeEngine = SmudgeEngine(serializer: textureSerializer)
