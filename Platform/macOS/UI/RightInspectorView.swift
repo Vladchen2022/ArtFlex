@@ -4,7 +4,6 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 private let tipMaskResolution = 256
-private let topInspectorPanelHeight: CGFloat = 264
 private let topInspectorSectionSpacing: CGFloat = 10
 private let topInspectorControlSpacing: CGFloat = 6
 private let topInspectorControlButtonWidth: CGFloat = 24
@@ -14,10 +13,7 @@ private let topInspectorControlIconSize: CGFloat = 11.5
 private let topInspectorPanelPadding: CGFloat = 12
 private let rightInspectorHorizontalPadding: CGFloat = 12
 private let rightInspectorColumnSpacing: CGFloat = 12
-private let rightInspectorPanelSpacing: CGFloat = 12
 private let inspectorPanelPadding: CGFloat = 12
-private let standardInspectorToolMinimumHeight: CGFloat = 200
-private let standardInspectorLayerMinimumHeight: CGFloat = 180
 
 private enum BrushParameterSliderScale {
     case linear
@@ -195,25 +191,6 @@ func rightInspectorUsesTextureLibrary(activeTool: ToolKind) -> Bool {
     activeTool == .lassoFill
         || activeTool == .textureFill
         || activeTool == .colorVitalization
-}
-
-func rightInspectorUsesCompactParameterLayout(
-    activeTool: ToolKind,
-    isBrushTab: Bool,
-    usesTextureFillControls: Bool
-) -> Bool {
-    guard isBrushTab else { return true }
-
-    switch activeTool {
-    case .brightnessAdjust, .colorVitalization, .eyedropper, .perspective, .textureFill:
-        return false
-    case .brush, .eraser, .smudge, .straightLine:
-        return true
-    case .lassoFill:
-        return !usesTextureFillControls
-    default:
-        return true
-    }
 }
 
 func topInspectorPanelContentWidth(panelWidth: CGFloat) -> CGFloat {
@@ -699,6 +676,8 @@ struct RightInspectorView: View {
     @State private var textureFillPreviewVariation: Float?
     @State private var textureFillPreviewPaintJitterAmount: Float?
     @State private var activeOilPaintBoundaryIndex: Int?
+    @State private var layerPropertiesHeight: CGFloat = 96
+    @State private var parameterContentHeight: CGFloat = 320
     var body: some View {
         ZStack {
             GeometryReader { proxy in
@@ -731,7 +710,10 @@ struct RightInspectorView: View {
                         .frame(height: contentHeight, alignment: .top)
 
                         VStack(spacing: 12) {
-                            tipNavigatorPanel(width: columnWidth)
+                            tipNavigatorPanel(
+                                width: columnWidth,
+                                height: InspectorSplitLayout.previewPanelHeight(contentHeight: contentHeight)
+                            )
                             .overlay {
                                 RoundedRectangle(cornerRadius: 12)
                                     .stroke(
@@ -841,29 +823,6 @@ struct RightInspectorView: View {
 
     private var parameterInspectorSection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            if viewModel.workspace.toolSession.activeTool != .colorVitalization {
-                parameterInspectorTabs
-            }
-
-            if parameterInspectorTab == .brush && usesFullBrushParameterControls {
-                pinnedBrushCommonControls
-            }
-
-            ScrollView(.vertical, showsIndicators: true) {
-                parameterInspectorContent
-                .padding(.trailing, 3)
-                .frame(maxWidth: .infinity, alignment: .topLeading)
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-    }
-
-    private var compactParameterInspectorSection: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            if viewModel.workspace.toolSession.activeTool != .colorVitalization {
-                parameterInspectorTabs
-            }
             if parameterInspectorTab == .brush && usesFullBrushParameterControls {
                 pinnedBrushCommonControls
             }
@@ -894,58 +853,44 @@ struct RightInspectorView: View {
         }
     }
 
-    @ViewBuilder
     private var standardParameterAndLayerPanels: some View {
-        if usesCompactParameterInspectorLayout {
-            VStack(spacing: rightInspectorPanelSpacing) {
-                InspectorPanel(title: "") {
-                    compactParameterInspectorSection
+        let parameterChromeHeight: CGFloat = (viewModel.workspace.toolSession.activeTool == .colorVitalization ? 0 : 38) + 24
+        return InspectorPanelSplit(
+            preferenceKey: "inspector.parameterHeight.\(parameterLayoutPreferenceID)",
+            contentHeight: parameterContentHeight
+        ) {
+            InspectorPanel(title: "", fillsAvailableHeight: true) {
+                VStack(spacing: 10) {
+                    if viewModel.workspace.toolSession.activeTool != .colorVitalization {
+                        parameterInspectorTabs
+                    }
+                    ScrollView(.vertical, showsIndicators: true) {
+                        parameterInspectorSection
+                            .frame(minHeight: 1)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .padding(.trailing, 3)
+                            .onGeometryChange(for: CGFloat.self) { proxy in
+                                proxy.size.height + parameterChromeHeight
+                            } action: { height in
+                                if abs(parameterContentHeight - height) > 0.5 { parameterContentHeight = height }
+                            }
+                    }
+                    .accessibilityLabel("工具参数滚动区")
                 }
-                .fixedSize(horizontal: false, vertical: true)
-
-                InspectorPanel(title: "图层", fillsAvailableHeight: true) {
-                    layersSection
-                }
-                .frame(
-                    minHeight: standardInspectorLayerMinimumHeight,
-                    maxHeight: .infinity,
-                    alignment: .top
-                )
             }
-            .frame(maxHeight: .infinity, alignment: .top)
-        } else {
-            VSplitView {
-                InspectorPanel(title: "", fillsAvailableHeight: true) {
-                    parameterInspectorSection
-                }
-                .frame(
-                    minHeight: standardInspectorToolMinimumHeight,
-                    idealHeight: 390,
-                    maxHeight: .infinity,
-                    alignment: .top
-                )
-                .padding(.bottom, rightInspectorPanelSpacing / 2)
-
-                InspectorPanel(title: "图层", fillsAvailableHeight: true) {
-                    layersSection
-                }
-                .frame(
-                    minHeight: standardInspectorLayerMinimumHeight,
-                    idealHeight: 380,
-                    maxHeight: .infinity,
-                    alignment: .top
-                )
-                .padding(.top, rightInspectorPanelSpacing / 2)
+        } layers: {
+            InspectorPanel(title: "图层", fillsAvailableHeight: true) {
+                layersSection
             }
         }
     }
 
-    private var usesCompactParameterInspectorLayout: Bool {
-        rightInspectorUsesCompactParameterLayout(
-            activeTool: viewModel.workspace.toolSession.activeTool,
-            isBrushTab: parameterInspectorTab == .brush,
-            usesTextureFillControls: isLassoFillToolActive && viewModel.lassoFillMode == .texture
-        )
+    private var parameterLayoutPreferenceID: String {
+        switch parameterInspectorTab {
+        case .brush: return "tools"
+        case .colorAdjustment: return "color"
+        case .curves: return "curves"
+        }
     }
 
     private func parameterInspectorTabButton(_ tab: ParameterInspectorTab) -> some View {
@@ -1308,8 +1253,9 @@ struct RightInspectorView: View {
         return acceptedProvider
     }
 
-    private func tipNavigatorPanel(width: CGFloat) -> some View {
+    private func tipNavigatorPanel(width: CGFloat, height: CGFloat) -> some View {
         let contentWidth = topInspectorPanelContentWidth(panelWidth: width)
+        let previewHeight = max(64, height - 96)
 
         return VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 8) {
@@ -1319,7 +1265,7 @@ struct RightInspectorView: View {
 
             Group {
                 if topInspectorTab == .tipShape {
-                    tipShapeSection
+                    tipShapeSection(previewHeight: max(34, previewHeight - (primaryDormantTipRestoreTitle(for: viewModel.workspace.toolSession.brush) == nil ? 0 : 30)))
                         .onAppear {
                             viewModel.setBrushTipEditorVisible(true)
                         }
@@ -1327,17 +1273,17 @@ struct RightInspectorView: View {
                             viewModel.setBrushTipEditorVisible(false)
                         }
                 } else {
-                    navigatorSection
+                    navigatorSection(previewHeight: previewHeight)
                 }
             }
         }
         .frame(
             width: contentWidth,
-            height: topInspectorPanelHeight - (topInspectorPanelPadding * 2),
+            height: height - (topInspectorPanelPadding * 2),
             alignment: .topLeading
         )
         .padding(topInspectorPanelPadding)
-        .frame(width: width, height: topInspectorPanelHeight, alignment: .topLeading)
+        .frame(width: width, height: height, alignment: .topLeading)
         .clipped()
         .background(
             RoundedRectangle(cornerRadius: 12)
@@ -1359,7 +1305,7 @@ struct RightInspectorView: View {
         }
     }
 
-    private var navigatorSection: some View {
+    private func navigatorSection(previewHeight: CGFloat) -> some View {
         VStack(alignment: .leading, spacing: topInspectorSectionSpacing) {
             NavigatorPreviewContainer(
                 proxy: viewModel.navigatorPreviewProxy,
@@ -1367,6 +1313,7 @@ struct RightInspectorView: View {
                 visibleCanvasPolygon: viewModel.navigatorVisibleCanvasPolygon(),
                 canvasSize: viewModel.workspace.document.canvasSize
             )
+            .frame(height: previewHeight)
             .onAppear {
                 viewModel.setNavigatorPreviewVisible(true)
             }
@@ -4056,7 +4003,7 @@ struct RightInspectorView: View {
         }
     }
 
-    private var layersSection: some View {
+    private var layerPropertiesSection: some View {
         VStack(alignment: .leading, spacing: 10) {
             if let activeLayer {
                 if !activeLayer.isAdjustmentLayer {
@@ -4154,76 +4101,94 @@ struct RightInspectorView: View {
                 }
             }
 
-            Divider()
+        }
+    }
 
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 6) {
-                    if !viewModel.workspace.document.layers.contains(where: \.isGroup) {
-                        layerDropInsertionStrip(at: 0)
-                    }
+    private var layersSection: some View {
+        GeometryReader { geometry in
+            VStack(alignment: .leading, spacing: 10) {
+                ScrollView(.vertical, showsIndicators: true) {
+                    layerPropertiesSection
+                        .fixedSize(horizontal: false, vertical: true)
+                        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height in
+                            if abs(layerPropertiesHeight - height) > 0.5 { layerPropertiesHeight = height }
+                        }
+                }
+                .frame(height: min(layerPropertiesHeight, max(44, geometry.size.height - 130)))
+                .accessibilityLabel("图层属性滚动区")
 
-                    ForEach(Array(displayLayerEntries.enumerated()), id: \.element.layer.id) { index, entry in
-                        layerRow(entry.layer, depth: entry.depth)
+                Divider()
+
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 6) {
                         if !viewModel.workspace.document.layers.contains(where: \.isGroup) {
-                            layerDropInsertionStrip(at: index + 1)
+                            layerDropInsertionStrip(at: 0)
+                        }
+
+                        ForEach(Array(displayLayerEntries.enumerated()), id: \.element.layer.id) { index, entry in
+                            layerRow(entry.layer, depth: entry.depth)
+                            if !viewModel.workspace.document.layers.contains(where: \.isGroup) {
+                                layerDropInsertionStrip(at: index + 1)
+                            }
                         }
                     }
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
                 }
-                .frame(maxWidth: .infinity, alignment: .topLeading)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                .accessibilityLabel("图层列表")
+
+                HStack(spacing: 8) {
+                    layerActionButton(systemImage: "plus.square", tooltip: "新建图层") {
+                        if let selectedLayerGroupID {
+                            viewModel.addLayer(toGroup: selectedLayerGroupID)
+                        } else {
+                            viewModel.addLayer()
+                        }
+                    }
+
+                    layerActionButton(systemImage: "slider.horizontal.3", tooltip: "新建曲线调整层") {
+                        viewModel.addCurveAdjustmentLayer()
+                    }
+
+                    layerActionButton(systemImage: "folder.badge.plus", tooltip: "新建图层组") {
+                        viewModel.addLayerGroup()
+                    }
+
+                    layerActionButton(systemImage: "doc.on.doc", tooltip: "复制图层") {
+                        if selectedLayerGroupID == nil {
+                            viewModel.duplicateActiveLayer()
+                        }
+                    }
+
+                    layerActionButton(
+                        systemImage: selectedLayerGroupID == nil ? "trash" : "folder.badge.minus",
+                        tooltip: selectedLayerGroupID == nil ? "删除图层" : "解散图层组",
+                        tint: Color.red.opacity(0.95)
+                    ) {
+                        if let selectedLayerGroupID {
+                            self.selectedLayerGroupID = nil
+                            collapsedLayerGroupIDs.remove(selectedLayerGroupID)
+                            viewModel.ungroupLayerGroup(selectedLayerGroupID)
+                        } else {
+                            viewModel.removeActiveLayer()
+                        }
+                    }
+
+                    Spacer(minLength: 0)
+
+                    layerActionButton(systemImage: "arrow.down.doc", tooltip: "向下合并") {
+                        viewModel.mergeActiveLayerDown()
+                    }
+                    .disabled(!viewModel.canMergeDown)
+
+                    layerActionButton(systemImage: "square.stack.3d.down.right", tooltip: "合并可见图层") {
+                        viewModel.mergeVisibleLayers()
+                    }
+                    .disabled(!viewModel.canMergeVisible)
+                }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-
-            HStack(spacing: 8) {
-                layerActionButton(systemImage: "plus.square", tooltip: "新建图层") {
-                    if let selectedLayerGroupID {
-                        viewModel.addLayer(toGroup: selectedLayerGroupID)
-                    } else {
-                        viewModel.addLayer()
-                    }
-                }
-
-                layerActionButton(systemImage: "slider.horizontal.3", tooltip: "新建曲线调整层") {
-                    viewModel.addCurveAdjustmentLayer()
-                }
-
-                layerActionButton(systemImage: "folder.badge.plus", tooltip: "新建图层组") {
-                    viewModel.addLayerGroup()
-                }
-
-                layerActionButton(systemImage: "doc.on.doc", tooltip: "复制图层") {
-                    if selectedLayerGroupID == nil {
-                        viewModel.duplicateActiveLayer()
-                    }
-                }
-
-                layerActionButton(
-                    systemImage: selectedLayerGroupID == nil ? "trash" : "folder.badge.minus",
-                    tooltip: selectedLayerGroupID == nil ? "删除图层" : "解散图层组",
-                    tint: Color.red.opacity(0.95)
-                ) {
-                    if let selectedLayerGroupID {
-                        self.selectedLayerGroupID = nil
-                        collapsedLayerGroupIDs.remove(selectedLayerGroupID)
-                        viewModel.ungroupLayerGroup(selectedLayerGroupID)
-                    } else {
-                        viewModel.removeActiveLayer()
-                    }
-                }
-
-                Spacer(minLength: 0)
-
-                layerActionButton(systemImage: "arrow.down.doc", tooltip: "向下合并") {
-                    viewModel.mergeActiveLayerDown()
-                }
-                .disabled(!viewModel.canMergeDown)
-
-                layerActionButton(systemImage: "square.stack.3d.down.right", tooltip: "合并可见图层") {
-                    viewModel.mergeVisibleLayers()
-                }
-                .disabled(!viewModel.canMergeVisible)
-            }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
     @ViewBuilder
@@ -4278,9 +4243,9 @@ struct RightInspectorView: View {
         }
     }
 
-    private var tipShapeSection: some View {
+    private func tipShapeSection(previewHeight: CGFloat) -> some View {
         VStack(alignment: .leading, spacing: topInspectorSectionSpacing) {
-            tipDesignCanvas
+            tipDesignCanvas(previewHeight: previewHeight)
 
             HStack(spacing: topInspectorControlSpacing) {
                 compactToolButton(
@@ -4999,7 +4964,7 @@ struct RightInspectorView: View {
         focusedLayerNameFieldID = nil
     }
 
-    private var tipDesignCanvas: some View {
+    private func tipDesignCanvas(previewHeight: CGFloat) -> some View {
         GeometryReader { proxy in
             let presentation = CanvasPresentationBuilder.makePresentation(
                 canvasSize: CanvasSize(width: tipMaskResolution, height: tipMaskResolution),
@@ -5077,7 +5042,7 @@ struct RightInspectorView: View {
                 )
             }
         }
-        .frame(height: 168)
+        .frame(height: previewHeight)
         .clipShape(RoundedRectangle(cornerRadius: 10))
         .overlay(
             RoundedRectangle(cornerRadius: 10)
@@ -6992,7 +6957,6 @@ private struct NavigatorPreviewPanel: View {
                     }
             }
         }
-        .frame(height: 168)
         .clipShape(RoundedRectangle(cornerRadius: 10))
         .overlay(
             RoundedRectangle(cornerRadius: 10)
