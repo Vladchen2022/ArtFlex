@@ -196,9 +196,13 @@ final class WorkspaceViewModel: ObservableObject {
     @Published private(set) var canUndo = false
     @Published private(set) var canRedo = false
     @Published private(set) var visibleHistoryPreviewTargetCount: Int?
+    // Content edits and autosave scheduling are separate clocks. Rescheduling a
+    // backup (for example on app deactivation) must not invalidate a completed save.
+    private var documentEditRevision: UInt64 = 0
     @Published private(set) var hasUnsavedChanges = false {
         didSet {
             if hasUnsavedChanges {
+                documentEditRevision &+= 1
                 if !isSuppressingRecoveryAutosaveScheduling {
                     scheduleRecoveryAutosave()
                 }
@@ -390,6 +394,8 @@ final class WorkspaceViewModel: ObservableObject {
     private var shouldResumeTimelapseAfterSnapshotCompare = false
     private var isChoosingTimelapseDirectory = false
     private var isChoosingProjectToOpen = false
+    private var isChoosingProjectSaveLocation = false
+    private var isDocumentTransitionPending = false
     private var snapshotPreviewPreparationTasks: [UUID: Task<Void, Never>] = [:]
     private var frozenSnapshotPreviewPreparationTask: Task<Void, Never>?
     private let patternPlacementTextureCache: NSCache<NSUUID, PatternPlacementTextureCacheEntry> = {
@@ -868,6 +874,8 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func presentNewCanvasSheet() {
+        guard !isDocumentTransitionPending,
+              canBeginDocumentPersistence(action: "新建画布") else { return }
         isNewCanvasSheetPresented = true
     }
 
@@ -2151,19 +2159,31 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func importBrushTipImageFromDisk() {
-        guard let url = selectBrushTipImageURLFromDisk() else {
-            return
+        selectBrushTipImageURLFromDisk { [weak self] url in
+            if let url { _ = self?.importBrushTipImage(from: url) }
         }
-
-        importBrushTipImage(from: url)
     }
 
-    func selectBrushTipImageURLFromDisk() -> URL? {
-        guard let url = bootstrap.filePanelService.presentImageOpenPanel() else {
-            showStatus(.init(kind: .info, message: "已取消选择图片"))
-            return nil
+    private func documentScopedFileSelection<Value>(
+        _ action: @escaping (WorkspaceViewModel, Value?) -> Void
+    ) -> (Value?) -> Void {
+        let generation = documentRenderGeneration
+        return { [weak self] value in
+            guard let self, self.documentRenderGeneration == generation else { return }
+            action(self, value)
         }
-        return url
+    }
+
+    func selectBrushTipImageURLFromDisk(completion: @escaping (URL?) -> Void) {
+        bootstrap.filePanelService.presentImageOpenPanel(completion: documentScopedFileSelection { _, url in
+            completion(url)
+        })
+    }
+
+    func selectKritaBrushURLFromDisk(completion: @escaping (URL?) -> Void) {
+        bootstrap.filePanelService.presentKritaBrushOpenPanel(completion: documentScopedFileSelection { _, url in
+            completion(url)
+        })
     }
 
     @discardableResult
@@ -2255,12 +2275,9 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func importCompoundSecondaryTipImageFromDisk() {
-        guard let url = bootstrap.filePanelService.presentImageOpenPanel() else {
-            showStatus(.init(kind: .info, message: "已取消选择图片"))
-            return
-        }
-
-        _ = importCompoundSecondaryTipImage(from: url)
+        bootstrap.filePanelService.presentImageOpenPanel(completion: documentScopedFileSelection { owner, url in
+            if let url { _ = owner.importCompoundSecondaryTipImage(from: url) }
+        })
     }
 
     @discardableResult
@@ -2293,14 +2310,14 @@ final class WorkspaceViewModel: ObservableObject {
         return true
     }
 
-    func importTipImageLibraryItemsFromDisk() -> [BrushTipImageAssetID]? {
-        guard let urls = bootstrap.filePanelService.presentImageOpenPanelURLs(allowsMultipleSelection: true),
-              urls.isEmpty == false else {
-            showStatus(.init(kind: .info, message: "已取消选择图片"))
-            return nil
-        }
-
-        return importTipImageLibraryItems(from: urls)
+    func importTipImageLibraryItemsFromDisk(completion: @escaping ([BrushTipImageAssetID]?) -> Void) {
+        bootstrap.filePanelService.presentImageOpenPanelURLs(
+            allowsMultipleSelection: true,
+            completion: documentScopedFileSelection { owner, urls in
+                guard let urls, !urls.isEmpty else { completion(nil); return }
+                completion(owner.importTipImageLibraryItems(from: urls))
+            }
+        )
     }
 
     @discardableResult
@@ -3644,11 +3661,9 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     private func importReferenceImageIntoSlot(_ slotID: Int) {
-        guard let url = bootstrap.filePanelService.presentImageOpenPanel() else {
-            return
-        }
-
-        loadReferenceImage(from: url, into: slotID)
+        bootstrap.filePanelService.presentImageOpenPanel(completion: documentScopedFileSelection { owner, url in
+            if let url { owner.loadReferenceImage(from: url, into: slotID) }
+        })
     }
 
     @discardableResult
@@ -5204,20 +5219,25 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func appendPatternImportFilesFromPanel() {
-        guard let urls = bootstrap.filePanelService.presentImageOpenPanelURLs(allowsMultipleSelection: true) else {
-            return
-        }
-        appendPatternImportFiles(urls)
+        bootstrap.filePanelService.presentImageOpenPanelURLs(
+            allowsMultipleSelection: true,
+            completion: documentScopedFileSelection { owner, urls in
+                if let urls { owner.appendPatternImportFiles(urls) }
+            }
+        )
     }
 
     func appendPatternImportFolderFromPanel() {
-        guard let directoryURL = bootstrap.filePanelService.presentDirectorySelectionPanel(
+        bootstrap.filePanelService.presentDirectorySelectionPanel(
             title: "选择图案素材文件夹",
-            prompt: "加入"
-        ) else {
-            return
-        }
+            prompt: "加入",
+            completion: documentScopedFileSelection { owner, url in
+                if let url { owner.appendPatternImportFolder(at: url) }
+            }
+        )
+    }
 
+    private func appendPatternImportFolder(at directoryURL: URL) {
         let fileURLs = patternImportImageURLs(in: directoryURL)
         guard !fileURLs.isEmpty else {
             showStatus(.init(kind: .info, message: "所选文件夹中没有可导入的图片"))
@@ -5526,11 +5546,15 @@ final class WorkspaceViewModel: ObservableObject {
 
     func exportBrushLibrary() {
         let defaultName = workspace.document.metadata.name.isEmpty ? "ArtFlex-BrushLibrary" : workspace.document.metadata.name
-        guard let url = bootstrap.filePanelService.presentBrushLibraryExportPanel(defaultName: defaultName) else {
-            showStatus(.init(kind: .info, message: "已取消导出画笔库"))
-            return
-        }
+        bootstrap.filePanelService.presentBrushLibraryExportPanel(
+            defaultName: defaultName,
+            completion: documentScopedFileSelection { owner, url in
+                if let url { owner.exportBrushLibrary(to: url) }
+            }
+        )
+    }
 
+    private func exportBrushLibrary(to url: URL) {
         do {
             try bootstrap.brushLibraryPersistenceController.exportLibrary(
                 workspace.brushLibrary,
@@ -12966,18 +12990,16 @@ final class WorkspaceViewModel: ObservableObject {
 
     func exportPNG() {
         let documentName = workspace.document.metadata.name
-
-        guard let url = bootstrap.filePanelService.presentPNGExportPanel(defaultName: documentName) else {
-            showStatus(.init(kind: .info, message: "已取消 PNG 导出"))
-            return
-        }
-
-        do {
-            try exportPNG(to: url)
-            showStatus(.init(kind: .success, message: "已导出 PNG：\(url.lastPathComponent)"))
-        } catch {
-            showStatus(.init(kind: .error, message: error.localizedDescription))
-        }
+        bootstrap.filePanelService.presentPNGExportPanel(
+            defaultName: documentName,
+            completion: documentScopedFileSelection { owner, url in
+                guard let url else { return }
+                do {
+                    try owner.exportPNG(to: url)
+                    owner.showStatus(.init(kind: .success, message: "已导出 PNG：\(url.lastPathComponent)"))
+                } catch { owner.showStatus(.init(kind: .error, message: error.localizedDescription)) }
+            }
+        )
     }
 
     func presentRasterExportSheet() {
@@ -13465,15 +13487,17 @@ final class WorkspaceViewModel: ObservableObject {
             return
         }
 
-        let defaultDirectoryName = "\(workspace.document.metadata.name)-快照"
-        guard let directoryURL = bootstrap.filePanelService.presentDirectorySelectionPanel(
+        bootstrap.filePanelService.presentDirectorySelectionPanel(
             title: "选择快照导出文件夹",
-            prompt: "导出"
-        ) else {
-            showStatus(.init(kind: .info, message: "已取消导出快照"))
-            return
-        }
+            prompt: "导出",
+            completion: documentScopedFileSelection { owner, url in
+                if let url { owner.exportSavedSnapshots(to: url) }
+            }
+        )
+    }
 
+    private func exportSavedSnapshots(to directoryURL: URL) {
+        let defaultDirectoryName = "\(workspace.document.metadata.name)-快照"
         let exportEntries = savedSnapshots.enumerated().map { index, entry in
             (index: index, snapshot: entry.snapshot)
         }
@@ -13585,16 +13609,19 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func exportIdeationVariantsToDisk() {
+        guard ideationSession != nil else { return }
+        bootstrap.filePanelService.presentDirectorySelectionPanel(
+            title: "选择草图导出文件夹",
+            prompt: "导出",
+            completion: documentScopedFileSelection { owner, url in
+                if let url { owner.exportIdeationVariants(to: url) }
+            }
+        )
+    }
+
+    private func exportIdeationVariants(to directoryURL: URL) {
         guard let ideationSession else { return }
         let defaultDirectoryName = "\(workspace.document.metadata.name)-方案试探"
-
-        guard let directoryURL = bootstrap.filePanelService.presentDirectorySelectionPanel(
-            title: "选择草图导出文件夹",
-            prompt: "导出"
-        ) else {
-            showStatus(.init(kind: .info, message: "已取消导出草图"))
-            return
-        }
         let boxedExporter = WorkspaceUncheckedBox(bootstrap.pngExporter)
         let boxedSerializer = WorkspaceUncheckedBox(bootstrap.textureSerializer)
 
@@ -13642,23 +13669,51 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     @discardableResult
-    func saveProject() -> Bool {
-        guard !isProjectSaving else {
-            showStatus(.init(kind: .info, message: "工程正在保存，请稍候"))
+    // A true return means the request was accepted, not that data is on disk.
+    // Only completion(true) permits a destructive document transition.
+    func saveProject(completion: ((Bool) -> Void)? = nil) -> Bool {
+        guard !isProjectSaving, !isChoosingProjectSaveLocation else {
+            showStatus(.init(kind: .info, message: "正在选择保存位置或保存工程，请稍候"))
+            completion?(false)
             return false
         }
+        guard canBeginDocumentPersistence(action: "保存工程") else { completion?(false); return false }
         guard !timelapseRecorder.isBusy else {
-            pendingManualSaveAfterTimelapse = true
-            showStatus(.init(kind: .info, message: "录像帧写入完成后将立即保存工程"))
-            return true
+            pendingManualSaveAfterTimelapse = completion == nil
+            showStatus(.init(kind: .info, message: completion == nil
+                ? "录像帧写入完成后将立即保存工程" : "正在完成录像写入，请稍后再试"))
+            completion?(false)
+            return completion == nil
         }
         guard recoveryAutosaveWriteTask == nil else {
-            pendingManualSaveAfterRecoveryAutosave = true
-            showStatus(.init(kind: .info, message: "自动恢复写入完成后将立即保存工程"))
-            return true
+            pendingManualSaveAfterRecoveryAutosave = completion == nil
+            showStatus(.init(kind: .info, message: completion == nil
+                ? "自动恢复写入完成后将立即保存工程" : "正在完成自动恢复写入，请稍后再试"))
+            completion?(false)
+            return completion == nil
         }
-        guard let prepared = prepareProjectSave() else { return false }
+        if let url = currentProjectURL {
+            startProjectSave(to: url, completion: completion)
+        } else {
+            isChoosingProjectSaveLocation = true
+            let generation = documentRenderGeneration
+            bootstrap.filePanelService.presentProjectSavePanel(defaultName: workspace.document.metadata.name) { [weak self] url in
+                guard let self else { completion?(false); return }
+                self.isChoosingProjectSaveLocation = false
+                guard self.documentRenderGeneration == generation else { completion?(false); return }
+                guard let url else {
+                    self.showStatus(.init(kind: .info, message: "已取消工程保存，当前内容仍未保存"))
+                    completion?(false)
+                    return
+                }
+                self.startProjectSave(to: url, completion: completion)
+            }
+        }
+        return true
+    }
 
+    private func startProjectSave(to url: URL, completion: ((Bool) -> Void)?) {
+        guard let prepared = prepareProjectSave(to: url) else { completion?(false); return }
         isProjectSaving = true
         showStatus(.init(kind: .info, message: "正在保存工程：\(prepared.url.lastPathComponent)"))
         let persistenceBox = WorkspaceUncheckedBox(bootstrap.persistenceController)
@@ -13672,12 +13727,12 @@ final class WorkspaceViewModel: ObservableObject {
                     return try persistenceBox.value.writeCapturedProject(payload, to: prepared.url)
                 }
             }.value
-            guard let self else { return }
+            guard let self else { completion?(false); return }
             self.projectSaveTask = nil
+            let savedCurrentRevision = self.finishProjectSave(prepared, result: result)
             self.isProjectSaving = false
-            self.finishProjectSave(prepared, result: result)
+            completion?(savedCurrentRevision)
         }
-        return true
     }
 
     private func ensureDocumentResourceBudget(
@@ -13780,62 +13835,18 @@ final class WorkspaceViewModel: ObservableObject {
         return overflow ? Int.max : value
     }
 
-    @discardableResult
-    private func saveProjectSynchronously() -> Bool {
-        guard !isProjectSaving else {
-            showStatus(.init(kind: .info, message: "工程正在保存，请稍候"))
-            return false
-        }
-        guard recoveryAutosaveWriteTask == nil else {
-            showStatus(.init(kind: .info, message: "正在完成自动恢复写入，请稍候再退出"))
-            return false
-        }
-        guard !timelapseRecorder.isBusy else {
-            showStatus(.init(kind: .info, message: "正在完成录像帧写入，请稍候再退出或打开工程"))
-            return false
-        }
-        guard let prepared = prepareProjectSave() else { return false }
-        isProjectSaving = true
-        let result = Result {
-            let payload = try bootstrap.persistenceController.materializeProjectPayload(
-                from: prepared.capture
-            )
-            return try bootstrap.persistenceController.writeCapturedProject(payload, to: prepared.url)
-        }
-        isProjectSaving = false
-        finishProjectSave(prepared, result: result)
-        do {
-            _ = try result.get()
-            return true
-        } catch {
-            return false
-        }
-    }
-
     private struct PreparedProjectSave {
         var url: URL
         var capture: FrozenProjectCapture
-        var previousDocumentName: String
         var savedDocumentName: String
-        var changeGeneration: UInt64
+        var editRevision: UInt64
+        var documentGeneration: UInt64
     }
 
-    private func prepareProjectSave() -> PreparedProjectSave? {
+    private func prepareProjectSave(to url: URL) -> PreparedProjectSave? {
         guard canBeginDocumentPersistence(action: "保存工程") else {
             return nil
         }
-        let documentName = workspace.document.metadata.name
-        let url: URL
-        if let existingURL = currentProjectURL {
-            url = existingURL
-        } else {
-            guard let selectedURL = bootstrap.filePanelService.presentProjectSavePanel(defaultName: documentName) else {
-                showStatus(.init(kind: .info, message: "已取消工程保存"))
-                return nil
-            }
-            url = selectedURL
-        }
-
         guard resolveColorAdjustmentSessionIfNeeded(reason: .persistence) else {
             return nil
         }
@@ -13856,34 +13867,25 @@ final class WorkspaceViewModel: ObservableObject {
             return nil
         }
         pauseDrawingStatsTracking()
-        let previousDocumentName = bootstrap.workspaceStore.state.document.metadata.name
         let savedDocumentName = Self.projectDisplayName(for: url)
-        if savedDocumentName != previousDocumentName {
-            bootstrap.workspaceStore.updateDocument { document in
-                document.metadata.name = savedDocumentName
-            }
-        }
 
         do {
             let previewTexture = try? makeVisibleCompositeTexture(waitUntilCompleted: false)
-            let capture = try bootstrap.persistenceController.freezeProjectCapture(
+            var capture = try bootstrap.persistenceController.freezeProjectCapture(
                 referenceImages: try projectReferenceImagePayloads(),
                 savedSnapshots: persistentSavedSnapshotPayloads(),
                 previewTexture: previewTexture
             )
+            // The live document name/path change only after the archive is safely written.
+            capture.workspace.document.metadata.name = savedDocumentName
             return PreparedProjectSave(
                 url: url,
                 capture: capture,
-                previousDocumentName: previousDocumentName,
                 savedDocumentName: savedDocumentName,
-                changeGeneration: recoveryAutosaveGeneration
+                editRevision: documentEditRevision,
+                documentGeneration: documentRenderGeneration
             )
         } catch {
-            if savedDocumentName != previousDocumentName {
-                bootstrap.workspaceStore.updateDocument { document in
-                    document.metadata.name = previousDocumentName
-                }
-            }
             showStatus(.init(kind: .error, message: error.localizedDescription))
             return nil
         }
@@ -13892,15 +13894,17 @@ final class WorkspaceViewModel: ObservableObject {
     private func finishProjectSave(
         _ prepared: PreparedProjectSave,
         result: Result<ProjectWriteOutcome, Error>
-    ) {
+    ) -> Bool {
+        guard prepared.documentGeneration == documentRenderGeneration else { return false }
         do {
             let outcome = try result.get()
             let previewPNGData = outcome.previewPNGData
             currentProjectURL = prepared.url
+            bootstrap.workspaceStore.updateDocument { $0.metadata.name = prepared.savedDocumentName }
             let thumbnailApplied = previewPNGData.map {
                 bootstrap.filePanelService.applyProjectThumbnail($0, to: prepared.url)
             } ?? false
-            if recoveryAutosaveGeneration == prepared.changeGeneration {
+            if documentEditRevision == prepared.editRevision {
                 hasUnsavedChanges = false
                 try? bootstrap.persistenceController.discardRecoveryProject()
                 hasRecoveryProject = false
@@ -13920,15 +13924,10 @@ final class WorkspaceViewModel: ObservableObject {
                 kind: .success,
                 message: "已保存工程：\(prepared.url.lastPathComponent)\(suffix)"
             ))
+            return !hasUnsavedChanges
         } catch {
-            if prepared.savedDocumentName != prepared.previousDocumentName,
-               recoveryAutosaveGeneration == prepared.changeGeneration {
-                bootstrap.workspaceStore.updateDocument { document in
-                    document.metadata.name = prepared.previousDocumentName
-                }
-                refreshDocumentOverlayOnly()
-            }
             showStatus(.init(kind: .error, message: error.localizedDescription))
+            return false
         }
     }
 
@@ -13989,27 +13988,23 @@ final class WorkspaceViewModel: ObservableObject {
             return
         }
         guard !timelapseRecorder.isBusy else {
-            showStatus(.init(kind: .info, message: "正在完成录像帧写入，请稍候再(action)"))
+            showStatus(.init(kind: .info, message: "正在完成录像帧写入，请稍候再\(action)"))
             return
         }
 
-        switch confirmUnsavedChangesIfNeeded(
-            messageText: "当前画布有未保存内容",
-            informativeText: "打开其他工程前，要先保存当前内容吗？"
-        ) {
-        case .save:
-            guard saveProjectSynchronously() else { return }
-        case .discard:
-            break
-        case .cancel:
-            showStatus(.init(kind: .info, message: "已取消打开工程"))
-            return
+        continueAfterUnsavedChanges(detail: "打开其他工程前，要先保存当前内容吗？") { [weak self] allowed in
+            guard let self, allowed else { return }
+            self.loadProjectInBackground(from: url, isRecovery: isRecovery)
         }
+    }
 
+    private func loadProjectInBackground(from url: URL?, isRecovery: Bool) {
         let policy = bootstrap.documentResourceBudgetPolicy
         let currentResidentBytes = currentDocumentInteractiveResidentByteCount()
         let persistenceBox = WorkspaceUncheckedBox(bootstrap.persistenceController)
         isProjectOpening = true
+        let editRevision = documentEditRevision
+        let documentGeneration = documentRenderGeneration
         showStatus(.init(kind: .info, message: isRecovery ? "正在验证并恢复工程…" : "正在验证并打开工程…"))
 
         projectOpenTask?.cancel()
@@ -14056,6 +14051,11 @@ final class WorkspaceViewModel: ObservableObject {
             guard let self, !Task.isCancelled else { return }
             self.projectOpenTask = nil
             self.isProjectOpening = false
+            guard self.documentEditRevision == editRevision,
+                  self.documentRenderGeneration == documentGeneration else {
+                self.showStatus(.init(kind: .info, message: "打开期间当前画布发生变化，已保留当前工程；请重新打开"))
+                return
+            }
             do {
                 let opened = try result.get()
                 try self.applyOpenedProjectResult(
@@ -14070,54 +14070,7 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func openProject(from url: URL, isRecovery: Bool) {
-        guard canBeginDocumentPersistence(action: isRecovery ? "恢复工程" : "打开工程") else {
-            return
-        }
-        guard !isProjectSaving, recoveryAutosaveWriteTask == nil else {
-            showStatus(.init(kind: .info, message: "正在完成工程写入，请稍候再打开其他工程"))
-            return
-        }
-
-        switch confirmUnsavedChangesIfNeeded(
-            messageText: "当前画布有未保存内容",
-            informativeText: "打开其他工程前，要先保存当前内容吗？"
-        ) {
-        case .save:
-            guard saveProjectSynchronously() else { return }
-        case .discard:
-            break
-        case .cancel:
-            showStatus(.init(kind: .info, message: "已取消打开工程"))
-            return
-        }
-
-        do {
-            let policy = bootstrap.documentResourceBudgetPolicy
-            let currentResidentBytes = currentDocumentInteractiveResidentByteCount()
-            let result = try bootstrap.persistenceController.openProject(from: url) { inspection in
-                let assessment = policy.assess(
-                    canvasSize: inspection.workspace.document.canvasSize,
-                    paintLayerCount: inspection.workspace.document.paintLayers.count,
-                    maskCount: inspection.workspace.document.paintLayers.filter { $0.mask != nil }.count,
-                    savedSnapshotCount: inspection.savedSnapshotCount,
-                    referenceImageBytes: inspection.referenceArchiveBytes,
-                    referenceImageResidentBytes: inspection.estimatedReferenceResidentBytes
-                )
-                guard assessment.isSupported else {
-                    throw PersistenceError.invalidProject(
-                        assessment.rejectionReason ?? "工程超出当前设备的安全资源范围"
-                    )
-                }
-                let (peak, overflow) = assessment.footprint.estimatedSavePeakBytes
-                    .addingReportingOverflow(currentResidentBytes)
-                guard !overflow, peak <= policy.maximumSavePeakBytes else {
-                    throw PersistenceError.invalidProject("打开工程时，新旧文档同时驻留会超过安全内存峰值")
-                }
-            }
-            try applyOpenedProjectResult(result, sourceURL: url, isRecovery: isRecovery)
-        } catch {
-            showStatus(.init(kind: .error, message: error.localizedDescription))
-        }
+        beginProjectOpen(from: url, isRecovery: isRecovery)
     }
 
     private func applyOpenedProjectResult(
@@ -14178,11 +14131,7 @@ final class WorkspaceViewModel: ObservableObject {
         restoreProjectReferenceImages(result.referenceImages)
         restorePersistentSavedSnapshots(result.savedSnapshots)
         currentProjectURL = isRecovery || result.storageFormat == .legacyJSON ? nil : sourceURL
-        if !isRecovery,
-           result.storageFormat == .archiveV2,
-           let previewPNGData = result.previewPNGData {
-            _ = bootstrap.filePanelService.applyProjectThumbnail(previewPNGData, to: sourceURL)
-        }
+        // Opening is read-only. Finder metadata is updated only after a successful save.
         hasUnsavedChanges = isRecovery
         persistBrushLibrary()
         syncTimelapseDocumentContext()
@@ -14358,7 +14307,7 @@ final class WorkspaceViewModel: ObservableObject {
             return
         }
         recoveryAutosaveWaitingForTimelapse = false
-        guard !isProjectSaving, projectSaveTask == nil else {
+        guard !isProjectSaving, !isChoosingProjectSaveLocation, projectSaveTask == nil else {
             scheduleRecoveryAutosave(delay: .seconds(15))
             return
         }
@@ -14492,6 +14441,14 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     private func canBeginDocumentPersistence(action: String) -> Bool {
+        guard !isProjectSaving, !isChoosingProjectSaveLocation else {
+            showStatus(.init(kind: .info, message: "工程正在保存，请稍候再\(action)"))
+            return false
+        }
+        guard !bootstrap.filePanelService.isPresentingDialog else {
+            showStatus(.init(kind: .info, message: "请先完成或取消当前文件窗口，再\(action)"))
+            return false
+        }
         guard !isProjectOpening else {
             showStatus(.init(kind: .info, message: "工程正在打开，请稍候"))
             return false
@@ -14584,6 +14541,8 @@ final class WorkspaceViewModel: ObservableObject {
         resolutionDPI: Int,
         decisionOverride: NewCanvasCreationDecision?
     ) {
+        guard !isDocumentTransitionPending,
+              canBeginDocumentPersistence(action: "新建画布") else { return }
         let capacity = canvasCapacityPolicy.assess(canvasSize)
         guard capacity.isSupported else {
             showStatus(.init(
@@ -14597,11 +14556,22 @@ final class WorkspaceViewModel: ObservableObject {
         guard resolveCurveAdjustmentSessionIfNeeded(reason: .documentOpen) else { return }
         resolveTransformSession(reason: .documentOpen)
 
-        switch decisionOverride ?? confirmNewCanvasCreationIfNeeded() {
+        guard let decision = decisionOverride else {
+            continueAfterUnsavedChanges(detail: "创建新画布前，要先保存当前内容吗？") { [weak self] allowed in
+                guard let self, allowed else { return }
+                self.createNewCanvas(name: name, canvasSize: canvasSize, resolutionDPI: resolutionDPI, decisionOverride: .discard)
+            }
+            return
+        }
+        switch decision {
         case .cancel:
             return
         case .save:
-            guard saveProjectSynchronously() else { return }
+            saveProject { [weak self] saved in
+                guard let self, saved else { return }
+                self.createNewCanvas(name: name, canvasSize: canvasSize, resolutionDPI: resolutionDPI, decisionOverride: .discard)
+            }
+            return
         case .discard:
             _ = flushBrushEditingBoundary(reason: "createNewCanvas.discard")
             break
@@ -14770,37 +14740,18 @@ final class WorkspaceViewModel: ObservableObject {
         case cancel
     }
 
-    enum UnsavedChangesDecision {
-        case save
-        case discard
-        case cancel
-    }
-
-    private func confirmNewCanvasCreationIfNeeded() -> NewCanvasCreationDecision {
-        switch confirmUnsavedChangesIfNeeded(
-            messageText: "当前画布有未保存内容",
-            informativeText: "创建新画布前，要先保存当前内容吗？"
-        ) {
-        case .save:
-            return .save
-        case .discard:
-            return .discard
-        case .cancel:
-            return .cancel
-        }
-    }
-
     private enum BrushLibraryImportMode {
         case replace
         case append
     }
 
     private func importBrushLibrary(mode: BrushLibraryImportMode) {
-        guard let url = bootstrap.filePanelService.presentBrushLibraryImportPanel() else {
-            showStatus(.init(kind: .info, message: "已取消导入画笔库"))
-            return
-        }
+        bootstrap.filePanelService.presentBrushLibraryImportPanel(completion: documentScopedFileSelection { owner, url in
+            if let url { owner.importBrushLibrary(from: url, mode: mode) }
+        })
+    }
 
+    private func importBrushLibrary(from url: URL, mode: BrushLibraryImportMode) {
         do {
             let imported = try bootstrap.brushLibraryPersistenceController.importLibrary(from: url)
             _ = applyImportedBrushLibraryResources(
@@ -15156,63 +15107,63 @@ final class WorkspaceViewModel: ObservableObject {
         return true
     }
 
-    func confirmCloseOrQuitIfNeeded() -> Bool {
+    func confirmCloseOrQuitIfNeeded(completion: @escaping (Bool) -> Void) {
+        guard canBeginDocumentPersistence(action: "退出") else { completion(false); return }
         guard !isRasterExporting else {
             showStatus(.init(kind: .info, message: "正在选择导出位置或写入图片，请完成或取消后再退出"))
-            return false
+            completion(false); return
         }
         pauseDrawingStatsTracking()
         guard resolveColorAdjustmentSessionIfNeeded(reason: .closeOrQuit) else {
-            return false
+            completion(false); return
         }
         guard resolveCurveAdjustmentSessionIfNeeded(reason: .closeOrQuit) else {
-            return false
+            completion(false); return
         }
         _ = flushBrushEditingBoundary(reason: "closeTimelapse")
         timelapseRecorder.stopRecording()
         guard !timelapseRecorder.isBusy else {
             showStatus(.init(kind: .info, message: "正在完成录像写入或导出，请稍候再退出"))
-            return false
+            completion(false); return
         }
-        switch confirmUnsavedChangesIfNeeded(
-            messageText: "当前画布有未保存内容",
-            informativeText: "退出前，要先保存当前内容吗？"
-        ) {
-        case .save:
-            return saveProjectSynchronously()
-        case .discard:
-            return true
-        case .cancel:
-            return false
-        }
+        continueAfterUnsavedChanges(detail: "退出前，要先保存当前内容吗？", completion: completion)
     }
 
-    private func confirmUnsavedChangesIfNeeded(
-        messageText: String,
-        informativeText: String
-    ) -> UnsavedChangesDecision {
+    private func continueAfterUnsavedChanges(detail: String, completion: @escaping (Bool) -> Void) {
+        guard !isDocumentTransitionPending,
+              !isProjectSaving, !isChoosingProjectSaveLocation,
+              recoveryAutosaveWriteTask == nil,
+              !bootstrap.filePanelService.isPresentingDialog else {
+            showStatus(.init(kind: .info, message: "请等待当前文件操作完成；当前工程已保留"))
+            completion(false)
+            return
+        }
         let hasPendingAdjustment =
             colorAdjustmentSession?.hasPendingCommittedEffect == true ||
             curveAdjustmentSession?.hasPendingCommittedEffect == true
         guard hasUnsavedChanges || hasPendingAdjustment || straightLineState.phase == .pending else {
-            return .discard
+            completion(true)
+            return
         }
-
-        let alert = NSAlert()
-        alert.alertStyle = .warning
-        alert.messageText = messageText
-        alert.informativeText = informativeText
-        alert.addButton(withTitle: "保存")
-        alert.addButton(withTitle: "放弃")
-        alert.addButton(withTitle: "取消")
-
-        switch alert.runModal() {
-        case .alertFirstButtonReturn:
-            return .save
-        case .alertSecondButtonReturn:
-            return .discard
-        default:
-            return .cancel
+        isDocumentTransitionPending = true
+        let generation = documentRenderGeneration
+        let finish: (Bool) -> Void = { [weak self] allowed in
+            guard let self else { completion(false); return }
+            self.isDocumentTransitionPending = false
+            completion(allowed && self.documentRenderGeneration == generation)
+        }
+        bootstrap.filePanelService.presentUnsavedChangesConfirmation(
+            message: "当前画布有未保存内容", detail: detail
+        ) { [weak self] response in
+            guard let self, self.documentRenderGeneration == generation else { finish(false); return }
+            switch response {
+            case .alertFirstButtonReturn:
+                self.saveProject(completion: finish)
+            case .alertSecondButtonReturn:
+                finish(true)
+            default:
+                finish(false)
+            }
         }
     }
 

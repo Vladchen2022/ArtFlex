@@ -231,7 +231,7 @@ struct WorkspaceViewModelSafetyTests {
 
     @Test
     @MainActor
-    func openingLegacyProjectRequiresSaveAsWhileV2PackageKeepsItsSaveURL() throws {
+    func openingLegacyProjectRequiresSaveAsWhileV2PackageKeepsItsSaveURL() async throws {
         let harness = try BrushEditingBoundaryHarness(canvasSize: .init(width: 8, height: 8))
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("ArtFlex-LegacySaveAs-\(UUID().uuidString)", isDirectory: true)
@@ -247,6 +247,10 @@ struct WorkspaceViewModelSafetyTests {
         let initialRenderGeneration = harness.viewModel.documentRenderGeneration
         let initialStrokeResetToken = harness.viewModel.strokeResetToken
         harness.viewModel.openProject(from: legacyURL, isRecovery: false)
+        for _ in 0..<500 where harness.viewModel.isProjectOpening {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(!harness.viewModel.isProjectOpening)
 
         #expect(!harness.viewModel.hasUnsavedChanges)
         #expect(harness.viewModel.projectSaveIndicatorState == .notYetSaved)
@@ -262,6 +266,10 @@ struct WorkspaceViewModelSafetyTests {
         let legacyRenderGeneration = harness.viewModel.documentRenderGeneration
         let legacyStrokeResetToken = harness.viewModel.strokeResetToken
         harness.viewModel.openProject(from: packageURL, isRecovery: false)
+        for _ in 0..<500 where harness.viewModel.isProjectOpening {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(!harness.viewModel.isProjectOpening)
 
         #expect(!harness.viewModel.hasUnsavedChanges)
         #expect(harness.viewModel.projectSaveIndicatorState == .saved)

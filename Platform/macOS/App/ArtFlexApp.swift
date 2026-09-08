@@ -212,6 +212,9 @@ final class ArtFlexApplicationDelegate: NSObject, NSApplicationDelegate, NSWindo
         }
     }
     private var isApprovingTermination = false
+    private var isTerminationRequestPending = false
+    private var isWindowCloseRequestPending = false
+    private weak var approvedClosingWindow: NSWindow?
     private var isCanvasReady = false
     private var externalProjectOpenRequests = ExternalProjectOpenRequestBuffer()
 
@@ -257,11 +260,10 @@ final class ArtFlexApplicationDelegate: NSObject, NSApplicationDelegate, NSWindo
     }
 
     func applicationDidBecomeActive(_ notification: Notification) {
-        NSApp.windows.forEach {
+        NSApp.windows.filter { $0.identifier?.rawValue == "main" }.forEach {
             Self.applyWindowChrome(to: $0)
-            if isReferenceImageFloatingPanel($0) == false {
-                $0.delegate = self
-            }
+            // Do not replace the system file panel / editor sheet's delegate.
+            $0.delegate = self
         }
     }
 
@@ -274,12 +276,17 @@ final class ArtFlexApplicationDelegate: NSObject, NSApplicationDelegate, NSWindo
             return .terminateNow
         }
 
-        if viewModel.confirmCloseOrQuitIfNeeded() {
-            isApprovingTermination = true
-            return .terminateNow
+        guard !isTerminationRequestPending else { return .terminateLater }
+        isTerminationRequestPending = true
+        // Reply only after AppKit has received terminateLater, including the no-change case.
+        DispatchQueue.main.async { [self] in
+            viewModel.confirmCloseOrQuitIfNeeded { [self] allowed in
+                isTerminationRequestPending = false
+                isApprovingTermination = allowed
+                sender.reply(toApplicationShouldTerminate: allowed)
+            }
         }
-
-        return .terminateCancel
+        return .terminateLater
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
@@ -290,12 +297,26 @@ final class ArtFlexApplicationDelegate: NSObject, NSApplicationDelegate, NSWindo
         if isApprovingTermination {
             return true
         }
+        if approvedClosingWindow === sender {
+            approvedClosingWindow = nil
+            return true
+        }
 
         guard let viewModel else {
             return true
         }
 
-        return viewModel.confirmCloseOrQuitIfNeeded()
+        guard !isWindowCloseRequestPending, !isTerminationRequestPending else { return false }
+        isWindowCloseRequestPending = true
+        DispatchQueue.main.async { [self, weak sender] in
+            viewModel.confirmCloseOrQuitIfNeeded { [self] allowed in
+                isWindowCloseRequestPending = false
+                guard allowed, let sender else { return }
+                approvedClosingWindow = sender
+                sender.performClose(nil)
+            }
+        }
+        return false
     }
 
     func windowDidResignKey(_ notification: Notification) {

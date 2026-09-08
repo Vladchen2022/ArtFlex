@@ -413,16 +413,14 @@ struct CompoundBrushBuilderSheet: View {
     }
 
     private func importKritaBrush() {
-        let panel=NSOpenPanel()
-        panel.title="导入 Krita 像素笔刷 · PNG 双笔尖 / Overlay"
-        panel.allowedContentTypes=[UTType(filenameExtension:"kpp") ?? .data]
-        panel.allowsMultipleSelection=false;panel.canChooseDirectories=false
-        guard panel.runModal() == .OK,let url=panel.url else {return}
-        do {
-            let imported=try KritaMaskedBrushImporter.load(url:url)
-            replaceDraft(imported.brush);editorPage="压力"
-            importMessage="\(imported.name)\n\n"+imported.notes.joined(separator:"\n")+"\n\n只修改了编辑草稿。请调整试笔大小，满意后另存为新笔刷。"
-        } catch { importMessage=error.localizedDescription }
+        viewModel.selectKritaBrushURLFromDisk { url in
+            guard let url else { return }
+            do {
+                let imported=try KritaMaskedBrushImporter.load(url:url)
+                replaceDraft(imported.brush);editorPage="压力"
+                importMessage="\(imported.name)\n\n"+imported.notes.joined(separator:"\n")+"\n\n只修改了编辑草稿。请调整试笔大小，满意后另存为新笔刷。"
+            } catch { importMessage=error.localizedDescription }
+        }
     }
 
     private var v2OverallPage: some View {
@@ -1942,10 +1940,10 @@ struct CompoundBrushBuilderSheet: View {
                 }
                 Spacer()
                 Button("导入") {
-                    if let ids = viewModel.importTipImageLibraryItemsFromDisk(),
-                       ids.count == 1,
-                       let first = ids.first {
-                        setPendingSelection(first, for: target)
+                    viewModel.importTipImageLibraryItemsFromDisk { ids in
+                        if let ids, ids.count == 1, let first = ids.first {
+                            setPendingSelection(first, for: target)
+                        }
                     }
                 }
                 Button("取消") { tipLibraryTarget = nil; addingVariant = false }

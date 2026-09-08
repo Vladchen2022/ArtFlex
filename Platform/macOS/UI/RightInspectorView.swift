@@ -4345,14 +4345,13 @@ struct RightInspectorView: View {
                     iconSize: topInspectorControlIconSize,
                     cornerRadius: topInspectorControlCornerRadius
                 ) {
-                    guard let url = viewModel.selectBrushTipImageURLFromDisk(),
-                          let image = NSImage(contentsOf: url) else {
-                        return
+                    viewModel.selectBrushTipImageURLFromDisk { url in
+                        guard let url, let image = NSImage(contentsOf: url) else { return }
+                        brushTipImportCandidate = BrushTipImportCandidate(
+                            image: image,
+                            sourceLabel: url.deletingPathExtension().lastPathComponent
+                        )
                     }
-                    brushTipImportCandidate = BrushTipImportCandidate(
-                        image: image,
-                        sourceLabel: url.deletingPathExtension().lastPathComponent
-                    )
                 }
 
                 compactToolButton(
@@ -5532,11 +5531,10 @@ struct RightInspectorView: View {
     }
 
     private func importTipImageViaLibrarySheet(for target: TipImageLibrarySheetTarget) {
-        guard let importedIDs = viewModel.importTipImageLibraryItemsFromDisk() else {
-            return
-        }
-        if importedIDs.count == 1, let importedID = importedIDs.first {
-            setPendingTipImageLibrarySelection(importedID, for: target)
+        viewModel.importTipImageLibraryItemsFromDisk { importedIDs in
+            if let importedIDs, importedIDs.count == 1, let importedID = importedIDs.first {
+                setPendingTipImageLibrarySelection(importedID, for: target)
+            }
         }
     }
 
