@@ -435,7 +435,10 @@ private struct QuickColorPickerSVSquare: View {
 
     @MainActor
     private func updateDisplayImage(size: Int, panel: ColorPanelState) async {
-        displayImage = await prepareSharedColorPickerSVImage(size: size, panel: panel)
+        let image = await prepareSharedColorPickerSVImage(size: size, panel: panel)
+        // A replaced .task may finish after its successor. It must not clear the new image.
+        guard !Task.isCancelled else { return }
+        displayImage = image
     }
 }
 

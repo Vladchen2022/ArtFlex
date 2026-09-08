@@ -97,8 +97,7 @@ struct QuickColorPickerHUDTests {
     @Test
     @MainActor
     func svImageCacheKeepsMultiplePickerSizesWarm() throws {
-        let cache = ColorPickerDisplayImageCache.shared
-        cache.removeAllSVImagesForTesting()
+        let cache = ColorPickerDisplayImageCache(svCache: ControlledSVImageCache())
         var buildCount = 0
         var panel = ColorPanelState.stageOneDefault
         panel.pickerHue = 143
@@ -118,24 +117,103 @@ struct QuickColorPickerHUDTests {
     @Test
     @MainActor
     func hudSVImageCanBePreparedBeforePresentation() async throws {
-        let cache = ColorPickerDisplayImageCache.shared
-        cache.removeAllSVImagesForTesting()
+        let cache = ColorPickerDisplayImageCache(svCache: ControlledSVImageCache())
         var panel = ColorPanelState.stageOneDefault
         panel.pickerHue = 271
 
-        #expect(cachedSharedColorPickerSVImage(
+        #expect(cache.cachedSVImage(
             size: QuickColorPickerLayout.svRasterSize,
             panel: panel
         ) == nil)
 
-        _ = try #require(await prepareSharedColorPickerSVImage(
+        let image = try #require(await cache.prepareSVImage(
             size: QuickColorPickerLayout.svRasterSize,
             panel: panel
         ))
 
-        #expect(cachedSharedColorPickerSVImage(
+        #expect(cache.cachedSVImage(
             size: QuickColorPickerLayout.svRasterSize,
             panel: panel
-        ) != nil)
+        ) === image)
     }
+
+    @Test
+    @MainActor
+    func preparedImageRemainsCorrectEvenWhenEveryCacheInsertionIsEvicted() async throws {
+        let cache = ColorPickerDisplayImageCache(svCache: ControlledSVImageCache(discardInsertions: true))
+        var panel = ColorPanelState.stageOneDefault
+        panel.pickerHue = 123
+        panel.lightingStrength = 42
+        let expected = try #require(makeColorPickerSVImage(size: 32, panel: panel))
+        let prepared = try #require(await cache.prepareSVImage(size: 32, panel: panel))
+        #expect(cache.cachedSVImage(size: 32, panel: panel) == nil)
+        #expect(imageBytes(prepared) == imageBytes(expected))
+        let rebuilt = try #require(await cache.prepareSVImage(size: 32, panel: panel))
+        #expect(imageBytes(rebuilt) == imageBytes(prepared))
+    }
+
+    @Test
+    @MainActor
+    func nativeCacheEvictionRebuildsWithoutInvalidatingTheDisplayedImage() async throws {
+        let storage = NSCache<NSString, CGImage>()
+        let cache = ColorPickerDisplayImageCache(svCache: storage)
+        let panel = ColorPanelState.stageOneDefault
+        let displayed = try #require(await cache.prepareSVImage(size: 64, panel: panel))
+        let originalBytes = try #require(imageBytes(displayed))
+        storage.removeAllObjects()
+        #expect(cache.cachedSVImage(size: 64, panel: panel) == nil)
+        let rebuilt = try #require(await cache.prepareSVImage(size: 64, panel: panel))
+        #expect(imageBytes(displayed) == originalBytes)
+        #expect(imageBytes(rebuilt) == originalBytes)
+    }
+
+    @Test
+    @MainActor
+    func independentCachesAndDifferentColorsCannotInvalidateEachOther() async throws {
+        let firstStorage = ControlledSVImageCache()
+        let first = ColorPickerDisplayImageCache(svCache: firstStorage)
+        let second = ColorPickerDisplayImageCache(svCache: ControlledSVImageCache())
+        var panel = ColorPanelState.stageOneDefault
+        panel.pickerHue = 60
+        let warm = try #require(await first.prepareSVImage(size: 64, panel: panel))
+        let other = try #require(await second.prepareSVImage(size: 64, panel: panel))
+        firstStorage.removeAllObjects()
+        #expect(first.cachedSVImage(size: 64, panel: panel) == nil)
+        #expect(second.cachedSVImage(size: 64, panel: panel) === other)
+        #expect(imageBytes(warm) == imageBytes(other))
+        panel.pickerHue = 180
+        let changed = try #require(await second.prepareSVImage(size: 64, panel: panel))
+        #expect(imageBytes(changed) != imageBytes(other))
+    }
+
+    @Test(arguments: [false, true])
+    @MainActor
+    func cancelledPreparationDoesNotReturnOrInstallAnImage(warmCache: Bool) async throws {
+        let cache = ColorPickerDisplayImageCache(svCache: ControlledSVImageCache())
+        let panel = ColorPanelState.stageOneDefault
+        if warmCache { _ = try #require(await cache.prepareSVImage(size: 32, panel: panel)) }
+        // Cancel before the task gets a MainActor turn, independent of thread/frame timing.
+        let pending = Task { @MainActor in await cache.prepareSVImage(size: 32, panel: panel) }
+        pending.cancel()
+        #expect(await pending.value == nil)
+        #expect((cache.cachedSVImage(size: 32, panel: panel) != nil) == warmCache)
+    }
+
+    private func imageBytes(_ image: CGImage) -> Data? { image.dataProvider?.data as Data? }
+}
+
+/// Test-only deterministic retention/eviction. Production still uses Foundation's adaptive
+/// NSCache; tests of our keying/hit policy must not assume the OS promises retention.
+private final class ControlledSVImageCache: NSCache<NSString, CGImage>, @unchecked Sendable {
+    private let lock = NSLock()
+    private var images: [NSString: CGImage] = [:]
+    private let discardInsertions: Bool
+
+    init(discardInsertions: Bool = false) { self.discardInsertions = discardInsertions }
+
+    override func object(forKey key: NSString) -> CGImage? { lock.withLock { images[key] } }
+    override func setObject(_ obj: CGImage, forKey key: NSString, cost g: Int) {
+        lock.withLock { if !discardInsertions { images[key] = obj } }
+    }
+    override func removeAllObjects() { lock.withLock { images.removeAll() } }
 }

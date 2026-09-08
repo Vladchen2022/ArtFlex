@@ -63,13 +63,15 @@ final class ColorPickerDisplayImageCache {
         let height: Int
     }
 
-    private let svCache: NSCache<NSString, CGImage> = {
-        let cache = NSCache<NSString, CGImage>()
+    private let svCache: NSCache<NSString, CGImage>
+
+    init(svCache: NSCache<NSString, CGImage> = NSCache<NSString, CGImage>()) {
+        self.svCache = svCache
+        let cache = svCache
         cache.countLimit = 8
         cache.totalCostLimit = 8 * 1024 * 1024
         cache.name = "ArtFlex.ColorPickerSVImages"
-        return cache
-    }()
+    }
     private var hueCache: (key: HueKey, image: CGImage)?
     private var horizontalHueCache: (key: HorizontalHueKey, image: CGImage)?
 
@@ -94,6 +96,24 @@ final class ColorPickerDisplayImageCache {
         return image
     }
 
+    func prepareSVImage(size: Int, panel: ColorPanelState) async -> CGImage? {
+        guard !Task.isCancelled else { return nil }
+        if let cached = cachedSVImage(size: size, panel: panel) { return cached }
+
+        let renderTask = Task.detached(priority: .userInitiated) {
+            makeColorPickerSVImage(size: size, panel: panel) { Task.isCancelled }
+        }
+        let image = await withTaskCancellationHandler {
+            await renderTask.value
+        } onCancel: {
+            renderTask.cancel()
+        }
+        guard !Task.isCancelled, let image else { return nil }
+        storeSVImage(image, size: size, panel: panel)
+        // NSCache may immediately evict the entry. The caller must own the returned image.
+        return image
+    }
+
     private func svCacheKey(size: Int, panel: ColorPanelState) -> NSString {
         let key = SVKey(
             size: size,
@@ -106,12 +126,6 @@ final class ColorPickerDisplayImageCache {
         return "\(key.size):\(key.hue):\(key.lightness):\(key.saturation):\(key.lightingHue):\(key.lightingStrength)"
             as NSString
     }
-
-#if DEBUG
-    func removeAllSVImagesForTesting() {
-        svCache.removeAllObjects()
-    }
-#endif
 
     func hueImage(height: Int, width: Int, builder: () -> CGImage?) -> CGImage? {
         let key = HueKey(height: height, width: width)
@@ -148,23 +162,7 @@ func cachedSharedColorPickerSVImage(size: Int, panel: ColorPanelState) -> CGImag
 
 @MainActor
 func prepareSharedColorPickerSVImage(size: Int, panel: ColorPanelState) async -> CGImage? {
-    if let cached = cachedSharedColorPickerSVImage(size: size, panel: panel) {
-        return cached
-    }
-
-    let renderTask = Task.detached(priority: .userInitiated) {
-        makeColorPickerSVImage(size: size, panel: panel) {
-            Task.isCancelled
-        }
-    }
-    let image = await withTaskCancellationHandler {
-        await renderTask.value
-    } onCancel: {
-        renderTask.cancel()
-    }
-    guard !Task.isCancelled, let image else { return nil }
-    ColorPickerDisplayImageCache.shared.storeSVImage(image, size: size, panel: panel)
-    return image
+    await ColorPickerDisplayImageCache.shared.prepareSVImage(size: size, panel: panel)
 }
 
 func makeColorPickerSVImage(
