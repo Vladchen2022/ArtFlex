@@ -80,7 +80,8 @@ final class BrushV2Renderer {
     private let washPipeline: MTLComputePipelineState
     private let zeroTile: MTLTexture
     private let whiteTip: MTLTexture
-    private var tips: [Data: MTLTexture] = [:]
+    private let tips = NSCache<NSData, AnyObject>()
+    private(set) var failureGeneration: UInt64 = 0
 
     init(device: MTLDevice) throws {
         self.device = device
@@ -220,7 +221,9 @@ final class BrushV2Renderer {
         let tile = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rg16Float,
             width: 256, height: 256, mipmapped: false)
         tile.storageMode = .shared
-        let createdZeroTile = device.makeTexture(descriptor: tile)!
+        guard let createdZeroTile = device.makeTexture(descriptor: tile) else {
+            throw CanvasResourceError(message: "无法创建笔刷初始化纹理")
+        }
         zeroTile = createdZeroTile
         let zeros = [UInt8](repeating: 0, count: 256*256*4)
         zeros.withUnsafeBytes { createdZeroTile.replace(region: MTLRegionMake2D(0,0,256,256),
@@ -228,7 +231,12 @@ final class BrushV2Renderer {
         let white = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .r8Unorm,
             width: 1, height: 1, mipmapped: false)
         white.storageMode = .shared
-        whiteTip = device.makeTexture(descriptor: white)!
+        guard let createdWhiteTip = device.makeTexture(descriptor: white) else {
+            throw CanvasResourceError(message: "无法创建基础笔尖纹理")
+        }
+        whiteTip = createdWhiteTip
+        tips.totalCostLimit = 48 * 1024 * 1024
+        tips.countLimit = 256
         var pixel: UInt8 = 255
         whiteTip.replace(region: MTLRegionMake2D(0,0,1,1), mipmapLevel: 0, withBytes: &pixel, bytesPerRow: 1)
     }
@@ -241,7 +249,7 @@ final class BrushV2Renderer {
         if session.v2 == nil { session.v2 = BrushV2Session(device: device, width: target.width, height: target.height) }
         guard let state = session.v2,
               state.ensureFields(needsSecondary: stroke.brush.compoundBrush.enabled,
-                                 needsRange: config.clipsToRange) else { return nil }
+                                 needsRange: config.clipsToRange) else { failureGeneration &+= 1; return nil }
         let isOverlay = config.combination == .overlayMask
         let tips = [stroke.brush.compoundBrush.enabled ? stroke.brush.resolvedCompoundPrimaryTip : stroke.brush.primaryTipAsCompoundSecondary,
                     stroke.brush.compoundBrush.secondary, stroke.brush.primaryTipAsCompoundSecondary]
@@ -289,10 +297,10 @@ final class BrushV2Renderer {
         }
         guard let bounds else { return nil }
         guard initializeTiles(bounds: bounds, state: state, original: session.originalTexture,
-                              target: target, commandBuffer: commandBuffer) else { return nil }
+                              target: target, commandBuffer: commandBuffer) else { failureGeneration &+= 1; return nil }
         let textures=[state.a,state.b,state.range]
         for role in 0..<3 where !allStamps[role].isEmpty {
-            guard let pigment = textures[role] else { return nil }
+            guard let pigment = textures[role] else { failureGeneration &+= 1; return nil }
             let descriptor=MTLRenderPassDescriptor()
             descriptor.colorAttachments[0].texture=pigment
             descriptor.colorAttachments[0].loadAction = .load
@@ -323,10 +331,14 @@ final class BrushV2Renderer {
                 }
                 continue
             }
-            guard let encoder=commandBuffer.makeRenderCommandEncoder(descriptor:descriptor) else { continue }
+            guard let encoder=commandBuffer.makeRenderCommandEncoder(descriptor:descriptor) else {
+                failureGeneration &+= 1; return nil
+            }
             encoder.setRenderPipelineState(stampPipeline)
             for (texture, stamps) in batches {
-                guard let buffer=stamps.withUnsafeBytes({ device.makeBuffer(bytes:$0.baseAddress!,length:$0.count,options:.storageModeShared) }) else { continue }
+                guard let buffer=stamps.withUnsafeBytes({ device.makeBuffer(bytes:$0.baseAddress!,length:$0.count,options:.storageModeShared) }) else {
+                    encoder.endEncoding(); failureGeneration &+= 1; return nil
+                }
                 encoder.setVertexBuffer(buffer,offset:0,index:0)
                 encoder.setFragmentBuffer(buffer,offset:0,index:0)
                 encoder.setFragmentTexture(texture,index:0)
@@ -337,7 +349,10 @@ final class BrushV2Renderer {
         let material = materialProvider(bounds)
         let pass=MTLRenderPassDescriptor()
         pass.colorAttachments[0].texture=target; pass.colorAttachments[0].loadAction = .load; pass.colorAttachments[0].storeAction = .store
-        if let encoder=commandBuffer.makeRenderCommandEncoder(descriptor:pass) {
+        guard let encoder=commandBuffer.makeRenderCommandEncoder(descriptor:pass) else {
+            failureGeneration &+= 1; return nil
+        }
+        do {
             encoder.setRenderPipelineState(compositePipeline)
             encoder.setScissorRect(MTLScissorRect(x:bounds.originX,y:bounds.originY,width:bounds.width,height:bounds.height))
             let shape=stroke.selectionShape
@@ -370,9 +385,9 @@ final class BrushV2Renderer {
             left=min(left,max(0,Int(floor(s.center.x-r)))); top=min(top,max(0,Int(floor(s.center.y-r))))
             right=max(right,min(target.width,Int(ceil(s.center.x+r)))); bottom=max(bottom,min(target.height,Int(ceil(s.center.y+r))))
         }
-        guard right>left, bottom>top,
-              let buffer=stamps.withUnsafeBytes({device.makeBuffer(bytes:$0.baseAddress!,length:$0.count,options:.storageModeShared)}),
-              let encoder=commandBuffer.makeComputeCommandEncoder() else { return }
+        guard right>left, bottom>top else { return }
+        guard let buffer=stamps.withUnsafeBytes({device.makeBuffer(bytes:$0.baseAddress!,length:$0.count,options:.storageModeShared)}),
+              let encoder=commandBuffer.makeComputeCommandEncoder() else { failureGeneration &+= 1; return }
         var region=SIMD4<UInt32>(UInt32(left),UInt32(top),UInt32(right-left),UInt32(bottom-top))
         var count=UInt32(stamps.count)
         encoder.setComputePipelineState(washPipeline)
@@ -387,15 +402,14 @@ final class BrushV2Renderer {
 
     private func tipTexture(_ data: Data?) -> MTLTexture {
         guard let data, !data.isEmpty else { return whiteTip }
-        if let cached=tips[data] { return cached }
+        if let cached = tips.object(forKey: data as NSData) as? MTLTexture { return cached }
         let side=Int(Double(data.count).squareRoot())
         guard side*side==data.count else { return whiteTip }
         let d=MTLTextureDescriptor.texture2DDescriptor(pixelFormat:.r8Unorm,width:side,height:side,mipmapped:false)
         d.storageMode = .shared; d.usage = .shaderRead
-        guard let texture=device.makeTexture(descriptor:d) else { return whiteTip }
+        guard let texture=device.makeTexture(descriptor:d) else { failureGeneration &+= 1; return whiteTip }
         data.withUnsafeBytes { texture.replace(region:MTLRegionMake2D(0,0,side,side),mipmapLevel:0,withBytes:$0.baseAddress!,bytesPerRow:side) }
-        if tips.count>64 { tips.removeAll() }
-        tips[data]=texture
+        tips.setObject(texture, forKey: data as NSData, cost: data.count)
         return texture
     }
 

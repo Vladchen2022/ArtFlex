@@ -347,6 +347,14 @@ final class StageOneLayerSurfaceStore {
         maskTexturesByLayerID.removeAll()
     }
 
+    /// Adopts already validated resources without allocating a second set of surfaces.
+    func adoptContents(of prepared: StageOneLayerSurfaceStore) {
+        surfacesByLayerID = prepared.surfacesByLayerID
+        texturesBySurfaceID = prepared.texturesBySurfaceID
+        contentStateByLayerID = prepared.contentStateByLayerID
+        maskTexturesByLayerID = prepared.maskTexturesByLayerID
+    }
+
     func isKnownTransparent(layerID: LayerID) -> Bool {
         contentStateByLayerID[layerID] == .knownTransparent
     }

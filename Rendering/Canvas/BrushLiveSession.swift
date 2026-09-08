@@ -111,6 +111,10 @@ final class BrushCommitQueue {
         jobs.append(job)
     }
 
+    var first: BrushCommitJob? {
+        headIndex < jobs.count ? jobs[headIndex] : nil
+    }
+
     func dequeue() -> BrushCommitJob? {
         guard headIndex < jobs.count else { return nil }
         let job = jobs[headIndex]

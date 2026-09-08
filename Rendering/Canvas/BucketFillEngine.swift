@@ -76,8 +76,18 @@ final class BucketFillEngine: @unchecked Sendable {
         alphaLockEnabled: Bool,
         selectionShape: SelectionShape?,
         isKnownTransparent: Bool,
-        settings: FillSettings = .stageOneDefault
+        settings: FillSettings = .stageOneDefault,
+        cancellation: WorkCancellation? = nil
     ) throws -> BucketFillPlan? {
+        try cancellation?.check()
+
+        if settings.closeGapPixels > 0 || settings.expandPixels > 0 {
+            return try makeRefinedFillPlan(
+                layerID: layerID, destination: texture, reference: texture,
+                point: point, color: color, alphaLock: alphaLockEnabled,
+                selection: selectionShape, settings: settings, cancellation: cancellation
+            )
+        }
 
         let width = texture.width
         let height = texture.height
@@ -134,7 +144,7 @@ final class BucketFillEngine: @unchecked Sendable {
                 startY: startY,
                 color: color,
                 alphaLockEnabled: alphaLockEnabled,
-                tolerance: settings.normalizedTolerance
+                tolerance: settings.normalizedTolerance, cancellation: cancellation
             )
         }
 
@@ -266,6 +276,7 @@ final class BucketFillEngine: @unchecked Sendable {
         }
 
         while let seed = queue.popLast() {
+            try cancellation?.check()
             guard canFill(localX: seed.x, localY: seed.y) else { continue }
 
             var leftX = seed.x
@@ -458,10 +469,20 @@ final class BucketFillEngine: @unchecked Sendable {
         color: RGBAColor,
         alphaLockEnabled: Bool,
         selectionShape: SelectionShape?,
-        settings: FillSettings = .stageOneDefault
+        settings: FillSettings = .stageOneDefault,
+        cancellation: WorkCancellation? = nil
     ) throws -> BucketFillPlan? {
+        try cancellation?.check()
         guard destinationTexture.width == referenceTexture.width,
               destinationTexture.height == referenceTexture.height else { return nil }
+
+        if settings.closeGapPixels > 0 || settings.expandPixels > 0 {
+            return try makeRefinedFillPlan(
+                layerID: layerID, destination: destinationTexture, reference: referenceTexture,
+                point: point, color: color, alphaLock: alphaLockEnabled,
+                selection: selectionShape, settings: settings, cancellation: cancellation
+            )
+        }
 
         let markerColors = [
             RGBAColor(red: 1, green: 0, blue: 1, alpha: 1),
@@ -477,7 +498,7 @@ final class BucketFillEngine: @unchecked Sendable {
                 alphaLockEnabled: false,
                 selectionShape: selectionShape,
                 isKnownTransparent: false,
-                settings: settings
+                settings: settings, cancellation: cancellation
             )
         }
         guard let referencePlan, let referenceBefore = referencePlan.historySnapshot else { return nil }
@@ -496,6 +517,7 @@ final class BucketFillEngine: @unchecked Sendable {
         var changedPixelCount = 0
 
         for y in 0..<destinationBefore.height {
+            try cancellation?.check()
             for x in 0..<destinationBefore.width {
                 let destinationOffset = y * destinationBefore.bytesPerRow + x * 4
                 let referenceBeforeOffset = y * referenceBefore.texture.bytesPerRow + x * 4
@@ -542,6 +564,109 @@ final class BucketFillEngine: @unchecked Sendable {
             ),
             destinationX: referencePlan.destinationX,
             destinationY: referencePlan.destinationY
+        )
+    }
+
+    /// Optional line-art path. Closing changes only the temporary topology, never
+    /// the reference layer. The default zero/zero path retains the tiled flood fill.
+    private func makeRefinedFillPlan(
+        layerID: LayerID, destination: MTLTexture, reference: MTLTexture,
+        point: CanvasPoint, color: RGBAColor, alphaLock: Bool,
+        selection: SelectionShape?, settings: FillSettings, cancellation: WorkCancellation?
+    ) throws -> BucketFillPlan? {
+        let width = reference.width
+        let height = reference.height
+        let size = CanvasSize(width: width, height: height)
+        let sx = Int(point.x.rounded(.down)), sy = Int(point.y.rounded(.down))
+        guard sx >= 0, sy >= 0, sx < width, sy < height else { return nil }
+        let selectionBytes = makeSelectionMaskBytes(
+            for: selection, canvasSize: size, originX: 0, originY: 0, width: width, height: height
+        )
+        if let selectionBytes, selectionBytes[sy * width + sx] == 0 { return nil }
+        let snapshot = try serializer.snapshot(texture: reference)
+        var walls = try snapshot.pixelData.withUnsafeBytes { raw -> [UInt8] in
+            let bytes = raw.bindMemory(to: UInt8.self)
+            func pixel(_ x: Int, _ y: Int) -> PremultipliedSRGBAPixel {
+                let i = y * snapshot.bytesPerRow + x * 4
+                return .init(bgraBlue: bytes[i], green: bytes[i + 1], red: bytes[i + 2], alpha: bytes[i + 3])
+            }
+            let seed = pixel(sx, sy)
+            var result = [UInt8](repeating: 0, count: width * height)
+            for y in 0..<height {
+                try cancellation?.check()
+                for x in 0..<width {
+                    if !FillColorDistance.matches(pixel(x, y), seed, tolerance: settings.normalizedTolerance) {
+                        result[y * width + x] = 255
+                    }
+                }
+            }
+            return result
+        }
+        if settings.isContiguous, settings.closeGapPixels > 0 {
+            try cancellation?.check()
+            let wallShape = SelectionShape.mask(canvasWidth: width, canvasHeight: height, alphaBytes: walls)
+            if !wallShape.isEmpty,
+               let expanded = SelectionRefinement.expanded(wallShape, canvasSize: size, radiusPixels: settings.closeGapPixels),
+               let closed = SelectionRefinement.contracted(expanded, canvasSize: size, radiusPixels: settings.closeGapPixels),
+               let closedMask = closed.maskData {
+                let closedBytes = [UInt8](closedMask.alphaBytes)
+                // Preserve original boundaries at canvas edges (erosion has zero padding).
+                for i in walls.indices { walls[i] = max(walls[i], closedBytes[i]) }
+            }
+        }
+        if let selectionBytes {
+            for i in walls.indices where selectionBytes[i] == 0 { walls[i] = 255 }
+        }
+        guard walls[sy * width + sx] == 0 else {
+            throw CanvasResourceError(message: "落点附近空间不足，请减小闭合缺口数值后重试")
+        }
+        guard let region = try SmartSelectionSegmenter.segment(
+            originX: 0, originY: 0, width: width, height: height, seedPoint: point,
+            settings: .init(tolerance: 0, isAntiAliased: false, isContiguous: settings.isContiguous),
+            cancellation: cancellation,
+            pixelAt: { x, y in
+                let value = walls[y * width + x]
+                return .init(red: value, green: value, blue: value, alpha: 255)
+            }
+        ) else { return nil }
+        var fillShape = SelectionShape.mask(canvasWidth: width, canvasHeight: height, alphaBytes: region.alphaBytes)
+        try cancellation?.check()
+        if settings.expandPixels > 0,
+           let expanded = SelectionRefinement.expanded(fillShape, canvasSize: size, radiusPixels: settings.expandPixels) {
+            fillShape = expanded
+        }
+        guard let mask = fillShape.maskData else { return nil }
+        let coverage = [UInt8](mask.alphaBytes)
+        let x0 = max(0, Int(fillShape.bounds.minX)), y0 = max(0, Int(fillShape.bounds.minY))
+        let w = min(width, Int(fillShape.bounds.maxX.rounded(.up))) - x0
+        let h = min(height, Int(fillShape.bounds.maxY.rounded(.up))) - y0
+        guard w > 0, h > 0 else { return nil }
+        let before = try serializer.snapshot(texture: destination, originX: x0, originY: y0, width: w, height: h)
+        var output = [UInt8](before.pixelData)
+        var changed = false
+        for y in 0..<h {
+            try cancellation?.check()
+            for x in 0..<w {
+                let maskIndex = (y + y0) * width + x + x0
+                let amount = UInt8((Int(coverage[maskIndex]) * Int(selectionBytes?[maskIndex] ?? 255) + 127) / 255)
+                guard amount > 0 else { continue }
+                let i = y * before.bytesPerRow + x * 4
+                let old = PixelBGRA(blue: output[i], green: output[i + 1], red: output[i + 2], alpha: output[i + 3])
+                if alphaLock && old.alpha == 0 { continue }
+                let replacement = alphaLock ? makePremultipliedBGRA(color: color, preservingAlpha: old.alpha) : makePremultipliedBGRA(color: color)
+                let next = blendedPixel(from: old, to: replacement, coverage: amount)
+                guard old != next else { continue }
+                output[i] = next.blue; output[i + 1] = next.green
+                output[i + 2] = next.red; output[i + 3] = next.alpha
+                changed = true
+            }
+        }
+        guard changed else { return nil }
+        return BucketFillPlan(
+            layerID: layerID,
+            historySnapshot: .init(layerID: layerID, texture: before, originX: x0, originY: y0),
+            restoreSnapshot: .init(width: w, height: h, bytesPerRow: before.bytesPerRow, pixelData: Data(output)),
+            destinationX: x0, destinationY: y0
         )
     }
 
@@ -602,7 +727,8 @@ final class BucketFillEngine: @unchecked Sendable {
         startY: Int,
         color: RGBAColor,
         alphaLockEnabled: Bool,
-        tolerance: Float
+        tolerance: Float,
+        cancellation: WorkCancellation?
     ) throws -> BucketFillPlan? {
         let width = texture.width
         let height = texture.height
@@ -615,6 +741,7 @@ final class BucketFillEngine: @unchecked Sendable {
         }
 
         func loadTile(_ key: BucketFillTileKey) throws -> BucketFillTile {
+            try cancellation?.check()
             if let tile = tiles[key] {
                 return tile
             }
@@ -738,6 +865,7 @@ final class BucketFillEngine: @unchecked Sendable {
         }
 
         while let seed = queue.popLast() {
+            try cancellation?.check()
             guard try canFill(canvasX: seed.x, canvasY: seed.y) else { continue }
 
             var leftX = seed.x

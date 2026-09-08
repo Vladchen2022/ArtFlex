@@ -55,6 +55,7 @@ private struct RecentBrushAdjustmentSyncState: Equatable {
 }
 
 private struct TimelapseDocumentContext: Equatable {
+    let documentID: UUID
     let documentName: String
     let documentFileURL: URL?
 }
@@ -220,6 +221,9 @@ final class WorkspaceViewModel: ObservableObject {
     @Published var isRasterExportSheetPresented = false
     @Published private(set) var isRasterExporting = false
     @Published private(set) var rasterExportSourceBounds: RasterExportPixelBounds?
+    @Published private(set) var isPreparingRasterExportBounds = false
+    @Published private(set) var rasterExportBoundsError: String?
+    @Published private(set) var rasterExportError: String?
     @Published private(set) var patternImportSheetState = PatternImportSheetState()
     @Published private(set) var patternImportPreviewAsset: PatternImportPreviewAsset?
     @Published private(set) var patternImportCurrentEraseMaskData: Data?
@@ -300,6 +304,7 @@ final class WorkspaceViewModel: ObservableObject {
     private var brushTipDraftHistory = BrushTipDraftHistory()
     private var statusDismissTask: Task<Void, Never>?
     private var rasterExportTask: Task<Void, Never>?
+    private var rasterExportBoundsRequest: UUID?
     private var isAdjustingLayerOpacity = false
     private var activeLayerOpacityChangeDidMutate = false
     private var transformState = TransformInteractionState()
@@ -330,6 +335,9 @@ final class WorkspaceViewModel: ObservableObject {
     private var textureFillSeedSequence: UInt64 = 0
     private var bucketFillRequestID: UInt64 = 0
     private var bucketFillTask: Task<Void, Never>?
+    private var bucketFillCancellation: WorkCancellation?
+    private var isChoosingPaletteImage = false
+    var imagePaletteExtractor: ImagePaletteExtractor { bootstrap.imagePaletteExtractor }
     private var snapshotSaveRequestID: UInt64 = 0
     private var snapshotSaveTask: Task<Void, Never>?
     private var snapshotComparePreparationRequestID: UInt64 = 0
@@ -380,6 +388,8 @@ final class WorkspaceViewModel: ObservableObject {
     private var lastSyncedTimelapseDocumentContext: TimelapseDocumentContext?
     private var shouldResumeTimelapseAfterIdeation = false
     private var shouldResumeTimelapseAfterSnapshotCompare = false
+    private var isChoosingTimelapseDirectory = false
+    private var isChoosingProjectToOpen = false
     private var snapshotPreviewPreparationTasks: [UUID: Task<Void, Never>] = [:]
     private var frozenSnapshotPreviewPreparationTask: Task<Void, Never>?
     private let patternPlacementTextureCache: NSCache<NSUUID, PatternPlacementTextureCacheEntry> = {
@@ -548,7 +558,7 @@ final class WorkspaceViewModel: ObservableObject {
             guard let self else {
                 throw CocoaError(.userCancelled)
             }
-            return try self.makeVisibleCompositeTexture(waitUntilCompleted: false)
+            return try self.makeVisibleCompositeTexture(waitUntilCompleted: false, includesLiveBrushContent: true)
         }
         bootstrap.timelapseRecorder.shouldDeferCapture = { [weak self] in
             guard let self else { return true }
@@ -559,6 +569,7 @@ final class WorkspaceViewModel: ObservableObject {
                 || self.isRasterExporting
                 || self.pendingManualSaveAfterTimelapse
                 || self.recoveryAutosaveWaitingForTimelapse
+                || self.bootstrap.strokeEngine.hasPendingBrushWork
         }
         bootstrap.timelapseRecorder.onBecameIdle = { [weak self] in
             self?.resumePersistenceAfterTimelapseBecameIdle()
@@ -880,18 +891,30 @@ final class WorkspaceViewModel: ObservableObject {
         snapshotCompareSession != nil
     }
 
-    func chooseTimelapseOutputDirectory() {
-        guard let url = bootstrap.filePanelService.presentDirectorySelectionPanel(
-            title: "选择录像数据文件夹",
-            prompt: "选择文件夹"
-        ) else {
-            showStatus(.init(kind: .info, message: "已取消选择录像目录"))
+    func chooseTimelapseOutputDirectory(startAfterSelection: Bool = false) {
+        guard !timelapseRecorder.isRecording, !timelapseRecorder.isBusy else {
+            showStatus(.init(kind: .info, message: "请先停止录制并等待写入完成，再更换录像目录"))
             return
         }
-
-        timelapseRecorder.outputDirectory = url
-        syncTimelapseDocumentContext()
-        showStatus(.init(kind: .success, message: "已设置录像目录：\(url.lastPathComponent)"))
+        guard !isChoosingTimelapseDirectory else { return }
+        isChoosingTimelapseDirectory = true
+        bootstrap.filePanelService.presentDirectorySelectionPanel(
+            title: "选择录像数据文件夹",
+            prompt: "选择文件夹"
+        ) { [weak self] url in
+            guard let self else { return }
+            self.isChoosingTimelapseDirectory = false
+            guard let url else {
+                self.showStatus(.init(kind: .info, message: "已取消选择录像目录"))
+                return
+            }
+            self.timelapseRecorder.outputDirectory = url
+            self.syncTimelapseDocumentContext()
+            self.showStatus(.init(kind: .success, message: "已设置录像目录：\(url.lastPathComponent)"))
+            if startAfterSelection && !self.timelapseRecorder.isRecording {
+                self.toggleTimelapseRecording()
+            }
+        }
     }
 
     func toggleTimelapseRecording() {
@@ -905,18 +928,19 @@ final class WorkspaceViewModel: ObservableObject {
         }
 
         if timelapseRecorder.isRecording {
-            timelapseRecorder.stopRecording()
-            showStatus(.init(kind: .info, message: "已停止录制"))
+            _ = flushBrushEditingBoundary(reason: "stopTimelapse")
+            timelapseRecorder.stopRecording(suppressAutoStart: true)
+            showStatus(.init(kind: .info, message: timelapseRecorder.isBusy ? "已停止录制，正在保存最后画面" : "已停止录制"))
             return
         }
 
         if timelapseRecorder.outputDirectory == nil {
-            chooseTimelapseOutputDirectory()
-            if timelapseRecorder.outputDirectory == nil { return }
-            if timelapseRecorder.isRecording { return }
+            chooseTimelapseOutputDirectory(startAfterSelection: true)
+            return
         }
 
         do {
+            _ = flushBrushEditingBoundary(reason: "startTimelapse")
             let sessionDirectory = try timelapseRecorder.startRecording(
                 documentName: workspace.document.metadata.name,
                 documentFileURL: currentProjectURL
@@ -935,24 +959,26 @@ final class WorkspaceViewModel: ObservableObject {
         }
 
         let defaultName = "\(workspace.document.metadata.name)-timelapse"
-        guard let outputURL = bootstrap.filePanelService.presentVideoExportPanel(defaultName: defaultName) else {
-            showStatus(.init(kind: .info, message: "已取消导出视频"))
-            return
-        }
-
-        timelapseRecorder.exportCurrentSessionVideo(
-            to: outputURL,
-            fps: fps,
-            leadInSeconds: timelapseRecorder.exportLeadInSeconds,
-            tailHoldSeconds: timelapseRecorder.exportTailHoldSeconds
-        ) { [weak self] result in
+        bootstrap.filePanelService.presentVideoExportPanel(defaultName: defaultName) { [weak self] outputURL in
             guard let self else { return }
-            Task { @MainActor in
-                switch result {
-                case .success(let url):
-                    self.showStatus(.init(kind: .success, message: "已导出视频：\(url.lastPathComponent)"))
-                case .failure(let error):
-                    self.showStatus(.init(kind: .error, message: error.localizedDescription))
+            guard let outputURL else {
+                self.showStatus(.init(kind: .info, message: "已取消导出视频"))
+                return
+            }
+            self.timelapseRecorder.exportCurrentSessionVideo(
+                to: outputURL,
+                fps: fps,
+                leadInSeconds: self.timelapseRecorder.exportLeadInSeconds,
+                tailHoldSeconds: self.timelapseRecorder.exportTailHoldSeconds
+            ) { [weak self] result in
+                guard let self else { return }
+                Task { @MainActor in
+                    switch result {
+                    case .success(let url):
+                        self.showStatus(.init(kind: .success, message: "已导出视频：\(url.lastPathComponent)"))
+                    case .failure(let error):
+                        self.showStatus(.init(kind: .error, message: error.localizedDescription))
+                    }
                 }
             }
         }
@@ -960,7 +986,9 @@ final class WorkspaceViewModel: ObservableObject {
 
     func revealTimelapseSessionInFinder() {
         syncTimelapseDocumentContext()
-        guard let url = timelapseRecorder.currentSessionDirectory else {
+        let session = timelapseRecorder.currentSessionDirectory
+        let existingSession = session.flatMap { FileManager.default.fileExists(atPath: $0.path) ? $0 : nil }
+        guard let url = existingSession ?? timelapseRecorder.outputDirectory else {
             showStatus(.init(kind: .info, message: "当前还没有录像目录"))
             return
         }
@@ -3988,6 +4016,7 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func setColorPanelMode(_ mode: ColorPanelMode) {
+        imagePaletteExtractor.cancel()
         let selectedColor = workspace.toolSession.selectedColor
         bootstrap.workspaceStore.updateColorPanel { panel in
             panel.mode = mode
@@ -4029,6 +4058,7 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func syncColorPanelFromSelectedColor() {
+        imagePaletteExtractor.cancel()
         let selectedColor = workspace.toolSession.selectedColor
         let baseHSV = ColorBlocksEngine.rgbToHsv(selectedColor)
 
@@ -4044,6 +4074,7 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func refreshColorPanelBlocks() {
+        imagePaletteExtractor.cancel()
         bootstrap.workspaceStore.updateColorPanel { panel in
             guard panel.baseSource != .image else { return }
             panel.basePaletteHSV = ColorBlocksEngine.makeRandomBasePalette(
@@ -4056,56 +4087,42 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func loadColorPanelPaletteFromImage() {
-        guard let url = bootstrap.filePanelService.presentImageOpenPanel() else {
-            showStatus(.init(kind: .info, message: "已取消选择图片"))
-            return
+        guard !isChoosingPaletteImage else { return }
+        isChoosingPaletteImage = true
+        imagePaletteExtractor.cancel()
+        let documentID = bootstrap.workspaceStore.state.document.metadata.drawingStatsID
+        bootstrap.filePanelService.presentPaletteImageOpenPanel { [weak self] url in
+            guard let self else { return }
+            self.isChoosingPaletteImage = false
+            guard self.bootstrap.workspaceStore.state.document.metadata.drawingStatsID == documentID,
+                  let url else { return }
+            self.importColorPanelPalette(from: url)
         }
-
-        _ = importColorPanelPalette(from: url)
     }
 
     @discardableResult
     func importColorPanelPalette(fromPasteboard pasteboard: NSPasteboard = .general) -> Bool {
-        if let image = pasteboard.readObjects(forClasses: [NSImage.self], options: nil)?.first as? NSImage {
-            return importColorPanelPalette(from: image, sourceDescription: "剪贴板图片")
-        }
-
-        if let item = pasteboard.pasteboardItems?.first {
-            for type in [NSPasteboard.PasteboardType.png, .tiff] {
-                if let data = item.data(forType: type), let image = NSImage(data: data) {
-                    return importColorPanelPalette(from: image, sourceDescription: "剪贴板图片")
-                }
-            }
-
-            if let fileURLString = item.string(forType: .fileURL),
-               let fileURL = URL(string: fileURLString) {
-                return importColorPanelPalette(from: fileURL)
-            }
-        }
-
-        showStatus(.init(kind: .info, message: "剪贴板中没有可用图片"))
-        return false
+        imagePaletteExtractor.start(from: pasteboard, completion: paletteImportCompletion())
     }
 
     @discardableResult
     func importColorPanelPalette(from url: URL) -> Bool {
-        do {
-            let colors = try bootstrap.imagePaletteExtractor.extractPalette(from: url)
-            return applyImportedColorPanelPalette(colors, sourceName: url.deletingPathExtension().lastPathComponent)
-        } catch {
-            showStatus(.init(kind: .error, message: error.localizedDescription))
-            return false
-        }
+        imagePaletteExtractor.start(from: .file(url), name: url.deletingPathExtension().lastPathComponent,
+                                    completion: paletteImportCompletion())
+        return true
     }
 
     @discardableResult
-    func importColorPanelPalette(from image: NSImage, sourceDescription: String = "图片") -> Bool {
-        do {
-            let colors = try bootstrap.imagePaletteExtractor.extractPalette(from: image)
-            return applyImportedColorPanelPalette(colors, sourceName: sourceDescription)
-        } catch {
-            showStatus(.init(kind: .error, message: error.localizedDescription))
-            return false
+    func importColorPanelPalette(from providers: [NSItemProvider]) -> Bool {
+        imagePaletteExtractor.start(from: providers, completion: paletteImportCompletion())
+    }
+
+    private func paletteImportCompletion() -> ImagePaletteExtractor.Completion {
+        let documentID = bootstrap.workspaceStore.state.document.metadata.drawingStatsID
+        return { [weak self] colors, name in
+            guard let self,
+                  self.bootstrap.workspaceStore.state.document.metadata.drawingStatsID == documentID else { return }
+            self.applyImportedColorPanelPalette(colors, sourceName: name)
         }
     }
 
@@ -4120,6 +4137,12 @@ final class WorkspaceViewModel: ObservableObject {
             panel.baseName = sourceName
             panel.baseHSV = baseHSV
             panel.basePaletteHSV = paletteHSV
+            // Neutral controls show the extracted colors, not the previous palette's lighting treatment.
+            panel.blocksLightness = 50
+            panel.blocksSaturation = 50
+            panel.contrast = 50
+            panel.contrastHue = 0
+            panel.lightingStrength = 0
         }
         refreshLightweight()
         showStatus(.init(kind: .success, message: "已从图片提取色块"))
@@ -4292,6 +4315,7 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func resetColorPanel() {
+        imagePaletteExtractor.cancel()
         bootstrap.workspaceStore.updateColorPanel { state in
             if state.mode == .picker {
                 let selectedColor = workspace.toolSession.selectedColor
@@ -5528,27 +5552,23 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func setFillTolerance(_ tolerance: Float) {
-        fillSettings = FillSettings(
-            tolerance: tolerance,
-            isContiguous: fillSettings.isContiguous,
-            sampleSource: fillSettings.sampleSource
-        )
+        fillSettings.tolerance = tolerance.isFinite ? min(max(tolerance, 0), 1) : 0
     }
 
     func setFillContiguous(_ isContiguous: Bool) {
-        fillSettings = FillSettings(
-            tolerance: fillSettings.tolerance,
-            isContiguous: isContiguous,
-            sampleSource: fillSettings.sampleSource
-        )
+        fillSettings.isContiguous = isContiguous
     }
 
     func setFillSampleSource(_ source: FillSampleSource) {
-        fillSettings = FillSettings(
-            tolerance: fillSettings.tolerance,
-            isContiguous: fillSettings.isContiguous,
-            sampleSource: source
-        )
+        fillSettings.sampleSource = source
+    }
+
+    func setFillCloseGapPixels(_ value: Int) {
+        fillSettings.closeGapPixels = min(max(value, 0), 16)
+    }
+
+    func setFillExpandPixels(_ value: Int) {
+        fillSettings.expandPixels = min(max(value, 0), 8)
     }
 
     func resetFillSettings() {
@@ -5696,6 +5716,15 @@ final class WorkspaceViewModel: ObservableObject {
     func requestFillAtPoint(_ point: CanvasPoint) {
         ideationBranchActivityHandler?()
         guard !isBucketFillInProgress else { return }
+        if fillSettings.closeGapPixels > 0 || fillSettings.expandPixels > 0 {
+            guard ensureDocumentResourceBudget(
+                additionalWorkingBytes: workspace.document.canvasSize.width * workspace.document.canvasSize.height * 40,
+                action: "线稿填色"
+            ) else { return }
+        }
+        _ = flushBrushEditingBoundary(reason: "requestFillAtPoint.makePlan")
+        guard !bootstrap.strokeEngine.hasPendingBrushWork,
+              !bootstrap.strokeEngine.hasPendingBrushCommitJobs else { return }
         guard let layerID = bootstrap.interactionController.activeEditableLayerID() else {
             showStatus(.init(kind: .info, message: "当前图层已锁定"))
             return
@@ -5708,7 +5737,6 @@ final class WorkspaceViewModel: ObservableObject {
             return
         }
 
-        _ = flushBrushEditingBoundary(reason: "requestFillAtPoint.makePlan")
         let capturedRevision = canvasContentRevision
         let capturedColor = workspace.toolSession.selectedColor
         let capturedAlphaLock = layerTransparentPixelLockEnabled(layerID)
@@ -5730,6 +5758,8 @@ final class WorkspaceViewModel: ObservableObject {
         let textureBox = WorkspaceUncheckedBox(texture)
         let referenceTextureBox = referenceTexture.map(WorkspaceUncheckedBox.init)
         let capturedFillSettings = fillSettings
+        let cancellation = WorkCancellation()
+        bucketFillCancellation = cancellation
 
         bucketFillRequestID &+= 1
         let requestID = bucketFillRequestID
@@ -5748,7 +5778,7 @@ final class WorkspaceViewModel: ObservableObject {
                             color: capturedColor,
                             alphaLockEnabled: capturedAlphaLock,
                             selectionShape: capturedSelection,
-                            settings: capturedFillSettings
+                            settings: capturedFillSettings, cancellation: cancellation
                         )
                     } else {
                         try engineBox.value.makeFillPlan(
@@ -5759,7 +5789,7 @@ final class WorkspaceViewModel: ObservableObject {
                             alphaLockEnabled: capturedAlphaLock,
                             selectionShape: capturedSelection,
                             isKnownTransparent: capturedKnownTransparent,
-                            settings: capturedFillSettings
+                            settings: capturedFillSettings, cancellation: cancellation
                         )
                     }
                 }
@@ -5767,6 +5797,7 @@ final class WorkspaceViewModel: ObservableObject {
 
             guard let self, self.bucketFillRequestID == requestID else { return }
             self.bucketFillTask = nil
+            self.bucketFillCancellation = nil
             self.isBucketFillInProgress = false
             guard !Task.isCancelled else { return }
 
@@ -5790,6 +5821,16 @@ final class WorkspaceViewModel: ObservableObject {
                 self.showStatus(.init(kind: .error, message: error.localizedDescription))
             }
         }
+    }
+
+    func cancelBucketFill() {
+        bucketFillCancellation?.cancel()
+        bucketFillCancellation = nil
+        bucketFillTask?.cancel()
+        bucketFillTask = nil
+        bucketFillRequestID &+= 1
+        isBucketFillInProgress = false
+        showStatus(.init(kind: .info, message: "已取消填充，画布未改变"))
     }
 
     private func applyBucketFillPlan(
@@ -6223,147 +6264,53 @@ final class WorkspaceViewModel: ObservableObject {
             showStatus(.init(kind: .info, message: "请先拖出裁剪区域"))
             return
         }
-        ideationBranchActivityHandler?()
-
-        let sourceX = Int(cropBounds.minX)
-        let sourceY = Int(cropBounds.minY)
+        let sourceX = Int(cropBounds.minX), sourceY = Int(cropBounds.minY)
         let targetSize = CanvasSize(width: Int(cropBounds.size.x), height: Int(cropBounds.size.y))
-        let currentSize = workspace.document.canvasSize
         guard targetSize.width > 0, targetSize.height > 0 else { return }
-        guard sourceX != 0 || sourceY != 0 || targetSize != currentSize else {
+        guard sourceX != 0 || sourceY != 0 || targetSize != workspace.document.canvasSize else {
             showStatus(.init(kind: .info, message: "裁剪区域与当前画布相同"))
             return
         }
-
-        let overlapMinX = max(sourceX, 0)
-        let overlapMinY = max(sourceY, 0)
-        let overlapMaxX = min(sourceX + targetSize.width, currentSize.width)
-        let overlapMaxY = min(sourceY + targetSize.height, currentSize.height)
-        let copyWidth = max(overlapMaxX - overlapMinX, 0)
-        let copyHeight = max(overlapMaxY - overlapMinY, 0)
-        let sourceOrigin = MTLOrigin(x: overlapMinX, y: overlapMinY, z: 0)
-        let destinationOrigin = MTLOrigin(
-            x: overlapMinX - sourceX,
-            y: overlapMinY - sourceY,
-            z: 0
-        )
-        let copySize = MTLSize(width: copyWidth, height: copyHeight, depth: 1)
-
         _ = flushBrushEditingBoundary(reason: "canvasCrop")
-        let layerIDs = workspace.document.layers.map(\.id)
-        var cropCopies: [(source: MTLTexture, target: MTLTexture)] = []
-        cropCopies.reserveCapacity(layerIDs.count)
-        var croppedTextures: [LayerID: MTLTexture] = [:]
-        croppedTextures.reserveCapacity(layerIDs.count)
-
-        for layerID in layerIDs {
-            guard let sourceSurfaceID = bootstrap.layerSurfaceStore.surfaceID(for: layerID),
-                  let sourceTexture = bootstrap.layerSurfaceStore.texture(for: sourceSurfaceID),
-                  let targetTexture = bootstrap.layerSurfaceStore.makeTexture(
-                    width: targetSize.width,
-                    height: targetSize.height,
-                    metal: bootstrap.metalContext
-                  ) else {
-                showStatus(.init(kind: .error, message: "无法分配裁剪后的图层纹理"))
-                return
-            }
-            croppedTextures[layerID] = targetTexture
-            cropCopies.append((sourceTexture, targetTexture))
-        }
-
-        guard let commandBuffer = bootstrap.metalContext.commandQueue.makeCommandBuffer() else {
-            showStatus(.init(kind: .error, message: "无法创建画布裁剪任务"))
+        guard !bootstrap.strokeEngine.hasPendingBrushWork,
+              !bootstrap.strokeEngine.hasPendingBrushCommitJobs else {
+            showStatus(.init(kind: .error, message: "仍有笔触未完成，暂不能裁剪"))
             return
         }
-
-        guard checkpointHistoryIfPossible(
-            operationKind: "canvas.crop",
-            candidateChangedLayerIDs: layerIDs,
-            topologyOperation: true,
-            captureMode: .full
-        ) else {
-            return
-        }
-
-
-        for copy in cropCopies {
-            let clearDescriptor = MTLRenderPassDescriptor()
-            clearDescriptor.colorAttachments[0].texture = copy.target
-            clearDescriptor.colorAttachments[0].loadAction = .clear
-            clearDescriptor.colorAttachments[0].storeAction = .store
-            clearDescriptor.colorAttachments[0].clearColor = MTLClearColor(
-                red: 0,
-                green: 0,
-                blue: 0,
-                alpha: 0
+        guard ensureDocumentResourceBudget(
+            additionalWorkingBytes: targetSize.width * targetSize.height
+                * (workspace.document.paintLayers.count * 4 + workspace.document.paintLayers.filter { $0.mask != nil }.count),
+            action: "裁剪画布"
+        ) else { return }
+        do {
+            let prepared = try LayerSurfaceTransfer.prepare(
+                document: workspace.document, source: bootstrap.layerSurfaceStore,
+                metal: bootstrap.metalContext, targetSize: targetSize, originX: sourceX, originY: sourceY
             )
-            guard let clearEncoder = commandBuffer.makeRenderCommandEncoder(descriptor: clearDescriptor) else {
-                showStatus(.init(kind: .error, message: "无法清空扩展后的画布区域"))
-                return
+            let layerIDs = workspace.document.paintLayers.map(\.id)
+            guard checkpointHistoryIfPossible(
+                operationKind: "canvas.crop", candidateChangedLayerIDs: layerIDs,
+                topologyOperation: true, captureMode: .full
+            ) else { return }
+            ideationBranchActivityHandler?()
+            bootstrap.workspaceStore.updateDocument { document in
+                document.perspectiveGuide = document.perspectiveGuide?.cropped(originX: sourceX, originY: sourceY)
+                document.canvasSize = targetSize
             }
-            clearEncoder.endEncoding()
+            bootstrap.workspaceStore.updateSelection { $0 = .empty }
+            bootstrap.workspaceStore.updateViewport { $0 = .stageOneDefault }
+            bootstrap.layerSurfaceStore.adoptContents(of: prepared)
+            canvasCropState.cancel()
+            bootstrap.strokeEngine.resetBrushPipelineState()
+            clearRecentBrushAdjustmentState()
+            invalidateWholeLayerInteractionBoundsCache()
+            refresh()
+            noteCanvasContentChanged(changedLayerIDs: Set(layerIDs))
+            relayIdeationOperation(.applyCanvasCrop(cropBounds))
+            showStatus(.init(kind: .success, message: "已调整画布为 \(targetSize.width) × \(targetSize.height)，图层与蒙版均已保留"))
+        } catch {
+            showStatus(.init(kind: .error, message: error.localizedDescription))
         }
-
-        if copyWidth > 0, copyHeight > 0 {
-            guard let blitEncoder = commandBuffer.makeBlitCommandEncoder() else {
-                showStatus(.init(kind: .error, message: "无法创建画布裁剪任务"))
-                return
-            }
-
-            for copy in cropCopies {
-                blitEncoder.copy(
-                    from: copy.source,
-                    sourceSlice: 0,
-                    sourceLevel: 0,
-                    sourceOrigin: sourceOrigin,
-                    sourceSize: copySize,
-                    to: copy.target,
-                    destinationSlice: 0,
-                    destinationLevel: 0,
-                    destinationOrigin: destinationOrigin
-                )
-            }
-            blitEncoder.endEncoding()
-        }
-        commandBuffer.commit()
-        commandBuffer.waitUntilCompleted()
-        guard commandBuffer.status == .completed else {
-            showStatus(.init(kind: .error, message: commandBuffer.error?.localizedDescription ?? "画布裁剪失败"))
-            return
-        }
-
-        bootstrap.workspaceStore.updateDocument { document in
-            document.perspectiveGuide = document.perspectiveGuide?.cropped(
-                originX: sourceX,
-                originY: sourceY
-            )
-            document.canvasSize = targetSize
-        }
-        bootstrap.workspaceStore.updateSelection { selection in
-            selection = .empty
-        }
-        bootstrap.workspaceStore.updateViewport { viewport in
-            viewport = .stageOneDefault
-        }
-        bootstrap.layerSurfaceStore.reset()
-        bootstrap.layerSurfaceStore.prepareTextures(
-            for: bootstrap.workspaceStore.state.document,
-            metal: bootstrap.metalContext
-        )
-        for (layerID, croppedTexture) in croppedTextures {
-            guard let surfaceID = bootstrap.layerSurfaceStore.surfaceID(for: layerID) else { continue }
-            bootstrap.layerSurfaceStore.swapTexture(for: surfaceID, with: croppedTexture)
-            bootstrap.layerSurfaceStore.markContentUnknown(for: layerID)
-        }
-
-        canvasCropState.cancel()
-        bootstrap.strokeEngine.resetBrushPipelineState()
-        clearRecentBrushAdjustmentState()
-        invalidateWholeLayerInteractionBoundsCache()
-        refresh()
-        noteCanvasContentChanged(changedLayerIDs: Set(layerIDs))
-        relayIdeationOperation(.applyCanvasCrop(cropBounds))
-        showStatus(.init(kind: .success, message: "已调整画布为 \(targetSize.width) × \(targetSize.height)"))
     }
 
     func addLayer() {
@@ -9351,8 +9298,11 @@ final class WorkspaceViewModel: ObservableObject {
     // 每次开始新选区操作时递增，用于让过期的异步栅格化任务自动丢弃结果
     private var selectionEpoch: Int = 0
     private var activeRasterizationTask: Task<Void, Never>?
+    private var selectionWorkCancellation: WorkCancellation?
 
     private func cancelActiveRasterizationTask() {
+        selectionWorkCancellation?.cancel()
+        selectionWorkCancellation = nil
         activeRasterizationTask?.cancel()
         activeRasterizationTask = nil
         isRefiningSelection = false
@@ -9409,6 +9359,8 @@ final class WorkspaceViewModel: ObservableObject {
             let engineBox = WorkspaceUncheckedBox(bootstrap.magicWandSelectionEngine)
             isRefiningSelection = true
             showStatus(.init(kind: .info, message: "正在按点击颜色建立魔棒选区…"))
+            let cancellation = WorkCancellation()
+            selectionWorkCancellation = cancellation
 
             activeRasterizationTask = Task { [weak self] in
                 let result = await Task.detached(priority: .userInitiated) {
@@ -9416,7 +9368,8 @@ final class WorkspaceViewModel: ObservableObject {
                         try engineBox.value.select(
                             texture: textureBox.value,
                             at: point,
-                            settings: settings
+                            settings: settings,
+                            cancellation: cancellation
                         )
                     }
                 }.value
@@ -11885,6 +11838,10 @@ final class WorkspaceViewModel: ObservableObject {
 
     func handleKeyDown(_ event: NSEvent) -> Bool {
         let normalizedModifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        if event.keyCode == 53, isBucketFillInProgress {
+            cancelBucketFill()
+            return true
+        }
 
         // The momentary HUD must stay on the shortest possible event path. In particular,
         // do not make it wait behind tool/session-specific keyboard dispatch.
@@ -13024,7 +12981,9 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func presentRasterExportSheet() {
+        guard !isRasterExportSheetPresented else { return }
         guard canBeginDocumentPersistence(action: "导出") else { return }
+        rasterExportError = nil
         isRasterExportSheetPresented = true
         prepareRasterExportSourceBounds()
     }
@@ -13032,105 +12991,141 @@ final class WorkspaceViewModel: ObservableObject {
     func dismissRasterExportSheet() {
         guard !isRasterExporting else { return }
         isRasterExportSheetPresented = false
+        finishRasterExportPresentation()
+    }
+
+    func finishRasterExportPresentation() {
+        guard !isRasterExporting else { return }
+        rasterExportBoundsRequest = nil
         rasterExportSourceBounds = nil
+        isPreparingRasterExportBounds = false
+        rasterExportBoundsError = nil
     }
 
     private func prepareRasterExportSourceBounds() {
         rasterExportSourceBounds = nil
+        rasterExportBoundsError = nil
+        isPreparingRasterExportBounds = true
+        let request = UUID()
+        rasterExportBoundsRequest = request
         let documentRevision = documentChangeRevision
+        let documentID = workspace.document.metadata.drawingStatsID
         do {
-            let composite = try makeVisibleCompositeTexture(waitUntilCompleted: false)
+            let composite = try makeVisibleCompositeTexture(waitUntilCompleted: false, includesLiveBrushContent: true)
             let detector = WorkspaceUncheckedBox(bootstrap.layerContentBoundsDetector)
             let queue = WorkspaceUncheckedBox(bootstrap.metalContext.commandQueue)
             let texture = WorkspaceUncheckedBox(composite)
             Task { [weak self] in
                 let detected = await Task.detached(priority: .utility) {
-                    try? detector.value.detect(texture: texture.value, commandQueue: queue.value)
+                    Result { try detector.value.detect(texture: texture.value, commandQueue: queue.value) }
                 }.value
-                guard let self, self.documentChangeRevision == documentRevision else { return }
-                if case .bounds(let bounds) = detected {
-                    self.rasterExportSourceBounds = RasterExportPixelBounds(
-                        originX: max(0, Int(floor(bounds.minX))),
-                        originY: max(0, Int(floor(bounds.minY))),
-                        width: max(1, Int(ceil(bounds.maxX)) - Int(floor(bounds.minX))),
-                        height: max(1, Int(ceil(bounds.maxY)) - Int(floor(bounds.minY)))
-                    )
+                guard let self, self.rasterExportBoundsRequest == request,
+                      self.isRasterExportSheetPresented else { return }
+                self.isPreparingRasterExportBounds = false
+                guard self.documentChangeRevision == documentRevision,
+                      self.workspace.document.metadata.drawingStatsID == documentID else {
+                    self.rasterExportBoundsError = "画布已变化，请关闭后重新打开导出窗口"
+                    return
                 }
-            }
-        } catch {
-            rasterExportSourceBounds = nil
-        }
-    }
-
-    func exportRaster(options: RasterExportOptions) {
-        guard !isRasterExporting else { return }
-        do {
-            try options.validate()
-        } catch {
-            showStatus(.init(kind: .error, message: error.localizedDescription))
-            return
-        }
-        guard let url = bootstrap.filePanelService.presentRasterExportPanel(
-            defaultName: workspace.document.metadata.name,
-            format: options.format
-        ) else {
-            showStatus(.init(kind: .info, message: "已取消导出"))
-            return
-        }
-
-        let exporter = bootstrap.rasterExporter
-        isRasterExporting = true
-        showStatus(.init(kind: .info, message: "正在导出…"))
-        rasterExportTask = Task { @MainActor [weak self] in
-            // Let SwiftUI publish the busy state before the synchronous Metal
-            // snapshot boundary. Everything after that boundary is a Sendable
-            // value and must not occupy the main actor.
-            await Task.yield()
-            guard let self else { return }
-
-            let snapshot: LayerTextureSnapshot
-            let sourceBounds: RasterExportPixelBounds
-            do {
-                _ = self.flushBrushEditingBoundary(reason: "exportRaster")
-                let composite = try self.makeVisibleCompositeTexture(waitUntilCompleted: false)
-                switch options.scope {
-                case .fullCanvas:
-                    sourceBounds = RasterExportPixelBounds(
-                        originX: 0,
-                        originY: 0,
-                        width: composite.width,
-                        height: composite.height
-                    )
-                case .visibleContent:
-                    switch try self.bootstrap.layerContentBoundsDetector.detect(
-                        texture: composite,
-                        commandQueue: self.bootstrap.metalContext.commandQueue
-                    ) {
+                do {
+                    switch try detected.get() {
                     case .bounds(let bounds):
-                        sourceBounds = RasterExportPixelBounds(
+                        self.rasterExportSourceBounds = RasterExportPixelBounds(
                             originX: max(0, Int(floor(bounds.minX))),
                             originY: max(0, Int(floor(bounds.minY))),
                             width: max(1, Int(ceil(bounds.maxX)) - Int(floor(bounds.minX))),
                             height: max(1, Int(ceil(bounds.maxY)) - Int(floor(bounds.minY)))
                         )
                     case .empty:
-                        throw RasterExportError.noVisibleContent
+                        self.rasterExportBoundsError = RasterExportError.noVisibleContent.localizedDescription
                     }
+                } catch {
+                    self.rasterExportBoundsError = error.localizedDescription
                 }
-                snapshot = try self.bootstrap.textureSerializer.snapshot(texture: composite)
+            }
+        } catch {
+            isPreparingRasterExportBounds = false
+            rasterExportBoundsError = error.localizedDescription
+        }
+    }
+
+    func rasterExportValidationMessage(options: RasterExportOptions) -> String? {
+        do {
+            try options.validate()
+            let size = workspace.document.canvasSize
+            let bounds: RasterExportPixelBounds
+            if options.scope == .visibleContent {
+                if isPreparingRasterExportBounds { return "正在计算可见内容边界…" }
+                if let error = rasterExportBoundsError { return error }
+                guard let source = rasterExportSourceBounds else {
+                    return "可见内容边界尚未准备好，请重新打开导出窗口"
+                }
+                bounds = source
+            } else {
+                bounds = .init(originX: 0, originY: 0, width: size.width, height: size.height)
+            }
+            try bootstrap.rasterExporter.validateOutput(
+                canvasWidth: size.width, canvasHeight: size.height, sourceBounds: bounds, options: options
+            )
+            return nil
+        } catch { return error.localizedDescription }
+    }
+
+    func exportRaster(options: RasterExportOptions) {
+        guard isRasterExportSheetPresented, !isRasterExporting else { return }
+        if let error = rasterExportValidationMessage(options: options) {
+            rasterExportError = error
+            return
+        }
+        rasterExportError = nil
+        // Busy includes destination selection, preventing duplicate panels and document replacement.
+        isRasterExporting = true
+        let documentID = workspace.document.metadata.drawingStatsID
+        bootstrap.filePanelService.presentRasterExportPanel(
+            defaultName: workspace.document.metadata.name,
+            format: options.format
+        ) { [weak self] url in
+            guard let self else { return }
+            guard let url else {
+                self.isRasterExporting = false
+                return
+            }
+            guard self.workspace.document.metadata.drawingStatsID == documentID else {
+                self.isRasterExporting = false
+                self.rasterExportError = "工程已切换，请重新打开导出窗口"
+                return
+            }
+            self.performRasterExport(options: options, to: url)
+        }
+    }
+
+    private func performRasterExport(options: RasterExportOptions, to url: URL) {
+        let exporter = bootstrap.rasterExporter
+        showStatus(.init(kind: .info, message: "正在导出…"))
+        rasterExportTask = Task { @MainActor [weak self] in
+            await Task.yield()
+            guard let self else { return }
+            let composite: MTLTexture
+            do {
+                // Same visible-layer plan as recording; include the most recent adjustable stroke
+                // without forcing a synchronous history commit merely to export an image.
+                composite = try self.makeVisibleCompositeTexture(waitUntilCompleted: false, includesLiveBrushContent: true)
             } catch {
                 self.rasterExportTask = nil
                 self.isRasterExporting = false
+                self.rasterExportError = error.localizedDescription
                 self.showStatus(.init(kind: .error, message: error.localizedDescription))
                 return
             }
 
+            let texture = WorkspaceUncheckedBox(composite)
+            let serializer = WorkspaceUncheckedBox(self.bootstrap.textureSerializer)
             let exportResult = await Task.detached(priority: .userInitiated) {
                 Result {
-                    try exporter.export(
+                    let snapshot = try serializer.value.snapshot(texture: texture.value)
+                    return try exporter.export(
                         snapshot: snapshot,
                         options: options,
-                        sourceBounds: sourceBounds,
                         to: url
                     )
                 }
@@ -13141,11 +13136,13 @@ final class WorkspaceViewModel: ObservableObject {
             do {
                 let result = try exportResult.get()
                 self.isRasterExportSheetPresented = false
+                self.finishRasterExportPresentation()
                 self.showStatus(.init(
                     kind: .success,
                     message: "已导出 \(options.format.rawValue.uppercased())：\(result.pixelWidth)×\(result.pixelHeight)"
                 ))
             } catch {
+                self.rasterExportError = error.localizedDescription
                 self.showStatus(.init(kind: .error, message: error.localizedDescription))
             }
         }
@@ -13939,12 +13936,17 @@ final class WorkspaceViewModel: ObservableObject {
         guard canBeginDocumentPersistence(action: "打开工程") else {
             return
         }
-        guard let url = bootstrap.filePanelService.presentProjectOpenPanel() else {
-            showStatus(.init(kind: .info, message: "已取消打开工程"))
-            return
+        guard !isChoosingProjectToOpen else { return }
+        isChoosingProjectToOpen = true
+        bootstrap.filePanelService.presentProjectOpenPanel { [weak self] url in
+            guard let self else { return }
+            self.isChoosingProjectToOpen = false
+            guard let url else {
+                self.showStatus(.init(kind: .info, message: "已取消打开工程"))
+                return
+            }
+            self.beginProjectOpen(from: url, isRecovery: false)
         }
-
-        beginProjectOpen(from: url, isRecovery: false)
     }
 
     func openProjectFromExternalURL(_ url: URL) {
@@ -14527,6 +14529,9 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     private func resetTransientDocumentInteractionsForReplacement() {
+        isRasterExportSheetPresented = false
+        finishRasterExportPresentation()
+        imagePaletteExtractor.cancel()
         cancelBlockReferenceInteraction()
         blockReferenceWorkflow = .init()
         blockReferenceEditorState = .init()
@@ -14591,7 +14596,6 @@ final class WorkspaceViewModel: ObservableObject {
         guard resolveColorAdjustmentSessionIfNeeded(reason: .documentOpen) else { return }
         guard resolveCurveAdjustmentSessionIfNeeded(reason: .documentOpen) else { return }
         resolveTransformSession(reason: .documentOpen)
-        timelapseRecorder.stopRecording()
 
         switch decisionOverride ?? confirmNewCanvasCreationIfNeeded() {
         case .cancel:
@@ -14603,6 +14607,7 @@ final class WorkspaceViewModel: ObservableObject {
             break
         }
 
+        timelapseRecorder.stopRecording()
         resetTransientDocumentInteractionsForReplacement()
         resetSnapshotToolState(resumeTimelapseIfNeeded: false)
         perspectiveGuideMatchState = .init()
@@ -15152,11 +15157,21 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func confirmCloseOrQuitIfNeeded() -> Bool {
+        guard !isRasterExporting else {
+            showStatus(.init(kind: .info, message: "正在选择导出位置或写入图片，请完成或取消后再退出"))
+            return false
+        }
         pauseDrawingStatsTracking()
         guard resolveColorAdjustmentSessionIfNeeded(reason: .closeOrQuit) else {
             return false
         }
         guard resolveCurveAdjustmentSessionIfNeeded(reason: .closeOrQuit) else {
+            return false
+        }
+        _ = flushBrushEditingBoundary(reason: "closeTimelapse")
+        timelapseRecorder.stopRecording()
+        guard !timelapseRecorder.isBusy else {
+            showStatus(.init(kind: .info, message: "正在完成录像写入或导出，请稍候再退出"))
             return false
         }
         switch confirmUnsavedChangesIfNeeded(
@@ -15826,52 +15841,13 @@ final class WorkspaceViewModel: ObservableObject {
     func cloneWorkspaceForIdeation(
         from sourceWorkspace: WorkspaceState,
         sourceLayerSurfaceStore: StageOneLayerSurfaceStore
-    ) {
+    ) throws {
+        let prepared = try LayerSurfaceTransfer.prepare(
+            document: sourceWorkspace.document, source: sourceLayerSurfaceStore,
+            metal: bootstrap.metalContext
+        )
         bootstrap.workspaceStore.replaceState(sourceWorkspace)
-        bootstrap.layerSurfaceStore.reset()
-        bootstrap.layerSurfaceStore.prepareTextures(
-            for: sourceWorkspace.document,
-            metal: bootstrap.metalContext
-        )
-
-        var textureCopies: [(source: MTLTexture, destination: MTLTexture)] = []
-        var copiedLayerIDs: [LayerID] = []
-        for layer in sourceWorkspace.document.layers {
-            guard
-                let sourceSurfaceID = sourceLayerSurfaceStore.surfaceID(for: layer.id),
-                let sourceTexture = sourceLayerSurfaceStore.texture(for: sourceSurfaceID),
-                let destinationSurfaceID = bootstrap.layerSurfaceStore.surfaceID(for: layer.id),
-                let destinationTexture = bootstrap.layerSurfaceStore.texture(for: destinationSurfaceID)
-            else {
-                continue
-            }
-
-            textureCopies.append((source: sourceTexture, destination: destinationTexture))
-            copiedLayerIDs.append(layer.id)
-        }
-
-        let didBatchCopy = bootstrap.layerSurfaceStore.copyTextures(
-            textureCopies,
-            metal: bootstrap.metalContext
-        )
-        if !didBatchCopy {
-            for copy in textureCopies {
-                bootstrap.layerSurfaceStore.copyTexture(
-                    from: copy.source,
-                    to: copy.destination,
-                    metal: bootstrap.metalContext
-                )
-            }
-        }
-
-        for layerID in copiedLayerIDs {
-            if sourceLayerSurfaceStore.isKnownTransparent(layerID: layerID) {
-                bootstrap.layerSurfaceStore.markKnownTransparent(for: layerID)
-            } else {
-                bootstrap.layerSurfaceStore.markContentUnknown(for: layerID)
-            }
-        }
-
+        bootstrap.layerSurfaceStore.adoptContents(of: prepared)
         bootstrap.historyController.resetHistory()
         refresh()
     }
@@ -16020,7 +15996,10 @@ final class WorkspaceViewModel: ObservableObject {
         try makeVisibleCompositeTexture(waitUntilCompleted: true)
     }
 
-    private func makeVisibleCompositeTexture(waitUntilCompleted: Bool) throws -> MTLTexture {
+    private func makeVisibleCompositeTexture(
+        waitUntilCompleted: Bool,
+        includesLiveBrushContent: Bool = false
+    ) throws -> MTLTexture {
         let state = bootstrap.workspaceStore.state
         bootstrap.layerSurfaceStore.prepareTextures(
             for: state.document,
@@ -16033,7 +16012,8 @@ final class WorkspaceViewModel: ObservableObject {
         return try makeCompositeTexture(
             layers: visibleLayers,
             document: state.document,
-            waitUntilCompleted: waitUntilCompleted
+            waitUntilCompleted: waitUntilCompleted,
+            includesLiveBrushContent: includesLiveBrushContent
         )
     }
 
@@ -16070,7 +16050,8 @@ final class WorkspaceViewModel: ObservableObject {
     private func makeCompositeTexture(
         layers: [LayerRecord],
         document: ArtDocument,
-        waitUntilCompleted: Bool
+        waitUntilCompleted: Bool,
+        includesLiveBrushContent: Bool = false
     ) throws -> MTLTexture {
         guard let firstLayer = layers.first,
               let firstSurfaceID = bootstrap.layerSurfaceStore.surfaceID(for: firstLayer.id),
@@ -16083,7 +16064,13 @@ final class WorkspaceViewModel: ObservableObject {
             document: document,
             orderedLayers: layers,
             textureForLayer: { layerID in
-                bootstrap.layerSurfaceStore.surfaceID(for: layerID)
+                // Recent adjustable strokes intentionally remain outside the formal
+                // layer. Recording must include them without forcing a history commit.
+                if includesLiveBrushContent,
+                   let live = bootstrap.strokeEngine.displayTexture(for: layerID) {
+                    return live
+                }
+                return bootstrap.layerSurfaceStore.surfaceID(for: layerID)
                     .flatMap(bootstrap.layerSurfaceStore.texture(for:))
             },
             enabledMaskTextureForLayer: bootstrap.layerSurfaceStore.maskTexture(for:)
@@ -16229,8 +16216,11 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     private func syncTimelapseDocumentContext() {
+        // The published UI snapshot may still describe the previous document here.
+        let document = bootstrap.workspaceStore.state.document
         let context = TimelapseDocumentContext(
-            documentName: workspace.document.metadata.name,
+            documentID: document.metadata.drawingStatsID,
+            documentName: document.metadata.name,
             documentFileURL: currentProjectURL
         )
         guard context != lastSyncedTimelapseDocumentContext else { return }

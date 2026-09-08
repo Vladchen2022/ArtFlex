@@ -135,8 +135,8 @@ struct RasterExportOptions: Codable, Sendable, Equatable {
             height >= 1,
             // Double(Int.max) rounds to 2^63 on 64-bit platforms, which is
             // already outside Int and would trap during conversion.
-            width < Double(Int.max),
-            height < Double(Int.max)
+            width.rounded() < Double(Int.max),
+            height.rounded() < Double(Int.max)
         else {
             throw RasterExportError.invalidOutputDimensions
         }

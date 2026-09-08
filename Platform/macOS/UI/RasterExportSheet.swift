@@ -15,7 +15,7 @@ struct RasterExportSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("专业导出")
+            Text("导出图片")
                 .font(.title2.weight(.semibold))
 
             Form {
@@ -29,6 +29,11 @@ struct RasterExportSheet: View {
                 Picker("范围", selection: $scope) {
                     Text("完整画布").tag(RasterExportScope.fullCanvas)
                     Text("可见内容边界").tag(RasterExportScope.visibleContent)
+                }
+                if scope == .visibleContent {
+                    Text("按非透明像素裁切；可见的背景图层也会计入边界。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
 
                 Picker("背景", selection: $backgroundChoice) {
@@ -46,6 +51,11 @@ struct RasterExportSheet: View {
                 }
 
                 resizeControls
+                if resizeChoice == .exact {
+                    Text("指定宽高可能改变画面比例；保持比例请使用指定宽度或高度。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
 
                 HStack {
                     Text("DPI")
@@ -53,6 +63,9 @@ struct RasterExportSheet: View {
                     TextField("DPI", value: $dpi, format: .number.precision(.fractionLength(0)))
                         .frame(width: 90)
                 }
+                Text("DPI 只影响打印尺寸，不增加图像像素。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
 
                 if format == .jpeg {
                     HStack {
@@ -65,17 +78,27 @@ struct RasterExportSheet: View {
                 }
             }
             .formStyle(.grouped)
+            .frame(height: 360)
             .disabled(viewModel.isRasterExporting)
 
             Text(outputSummary)
                 .font(.caption)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(validationMessage == nil ? Color.secondary : Color.orange)
+
+            if let error = viewModel.rasterExportError {
+                Text(error)
+                    .font(.callout)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
+            }
 
             HStack {
                 Spacer()
                 Button("取消") {
                     viewModel.dismissRasterExportSheet()
                 }
+                .keyboardShortcut(.cancelAction)
                 .disabled(viewModel.isRasterExporting)
                 Button {
                     viewModel.exportRaster(options: resolvedOptions)
@@ -91,12 +114,14 @@ struct RasterExportSheet: View {
                     }
                 }
                 .keyboardShortcut(.defaultAction)
-                .disabled(validationError != nil || viewModel.isRasterExporting)
+                .disabled(validationMessage != nil || viewModel.isRasterExporting)
             }
         }
         .padding(22)
         .frame(width: 510)
         .interactiveDismissDisabled(viewModel.isRasterExporting)
+        .preferredColorScheme(.dark)
+        .onDisappear { viewModel.finishRasterExportPresentation() }
         .onAppear {
             width = viewModel.workspace.document.canvasSize.width
             height = viewModel.workspace.document.canvasSize.height
@@ -183,16 +208,12 @@ struct RasterExportSheet: View {
         }
     }
 
-    private var validationError: Error? {
-        do {
-            try resolvedOptions.validate()
-            return nil
-        } catch {
-            return error
-        }
+    private var validationMessage: String? {
+        viewModel.rasterExportValidationMessage(options: resolvedOptions)
     }
 
     private var outputSummary: String {
+        if let message = validationMessage { return message }
         do {
             let sourceWidth: Int
             let sourceHeight: Int
@@ -207,10 +228,7 @@ struct RasterExportSheet: View {
                 sourceWidth: sourceWidth,
                 sourceHeight: sourceHeight
             )
-            let suffix = scope == .visibleContent && viewModel.rasterExportSourceBounds == nil
-                ? " · 正在计算可见边界"
-                : ""
-            return "输出 \(dimensions.width) × \(dimensions.height) px · \(Int(dpi.rounded())) DPI\(suffix)"
+            return "输出 \(dimensions.width) × \(dimensions.height) px · \(Int(dpi.rounded())) DPI"
         } catch {
             return error.localizedDescription
         }

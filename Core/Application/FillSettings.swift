@@ -13,6 +13,8 @@ struct FillSettings: Codable, Sendable, Equatable {
     var tolerance: Float
     var isContiguous: Bool
     var sampleSource: FillSampleSource
+    var closeGapPixels: Int
+    var expandPixels: Int
 
     static let stageOneDefault = FillSettings(
         tolerance: 0,
@@ -23,17 +25,23 @@ struct FillSettings: Codable, Sendable, Equatable {
     init(
         tolerance: Float,
         isContiguous: Bool,
-        sampleSource: FillSampleSource
+        sampleSource: FillSampleSource,
+        closeGapPixels: Int = 0,
+        expandPixels: Int = 0
     ) {
         self.tolerance = Self.clampedTolerance(tolerance)
         self.isContiguous = isContiguous
         self.sampleSource = sampleSource
+        self.closeGapPixels = min(max(closeGapPixels, 0), 16)
+        self.expandPixels = min(max(expandPixels, 0), 8)
     }
 
     private enum CodingKeys: String, CodingKey {
         case tolerance
         case isContiguous
         case sampleSource
+        case closeGapPixels
+        case expandPixels
     }
 
     init(from decoder: Decoder) throws {
@@ -44,7 +52,9 @@ struct FillSettings: Codable, Sendable, Equatable {
             sampleSource: try container.decodeIfPresent(
                 FillSampleSource.self,
                 forKey: .sampleSource
-            ) ?? .automatic
+            ) ?? .automatic,
+            closeGapPixels: try container.decodeIfPresent(Int.self, forKey: .closeGapPixels) ?? 0,
+            expandPixels: try container.decodeIfPresent(Int.self, forKey: .expandPixels) ?? 0
         )
     }
 
@@ -53,6 +63,8 @@ struct FillSettings: Codable, Sendable, Equatable {
         try container.encode(Self.clampedTolerance(tolerance), forKey: .tolerance)
         try container.encode(isContiguous, forKey: .isContiguous)
         try container.encode(sampleSource, forKey: .sampleSource)
+        try container.encode(closeGapPixels, forKey: .closeGapPixels)
+        try container.encode(expandPixels, forKey: .expandPixels)
     }
 
     var normalizedTolerance: Float {

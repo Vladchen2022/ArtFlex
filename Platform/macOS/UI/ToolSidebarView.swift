@@ -22,7 +22,6 @@ struct ToolSidebarView: View {
     @State private var showsDrawingStatsPopover = false
     @State private var showsRecorderPopover = false
     @State private var showsGeneratorPopover = false
-    @State private var recorderExportFPS = 12.0
 
     private let groupEntries: [ToolSidebarEntry] =
         ToolSidebarGroup.orderedGroups.map { .group($0.id) }
@@ -403,15 +402,19 @@ struct ToolSidebarView: View {
                     ? "方案试探期间录像已暂停"
                     : (hostViewModel.timelapseRecorder.isRecording ? "录像工具（录制中）" : "录像工具（未录制）"))
         )
-        .popover(isPresented: $showsRecorderPopover, arrowEdge: .leading) {
+        // arrowEdge is the button's attachment edge, not the popover's edge.
+        // This entry sits at the bottom of the sidebar, so present above it.
+        .popover(isPresented: $showsRecorderPopover, arrowEdge: .top) {
+            let windowHeight = NSApp.mainWindow?.contentLayoutRect.height ?? 720
             RecorderSectionView(
                 viewModel: hostViewModel,
                 recorder: hostViewModel.timelapseRecorder,
-                exportFPS: $recorderExportFPS
+                dismissForFilePanel: { showsRecorderPopover = false }
             )
             .padding(12)
-            .frame(width: 320)
+            .frame(width: 320, height: min(620, max(260, windowHeight - 80)))
             .background(Color(red: 0.16, green: 0.16, blue: 0.17))
+            .preferredColorScheme(.dark)
         }
     }
 

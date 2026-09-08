@@ -89,8 +89,10 @@ final class RasterExporter: Sendable {
               sourceBounds.originY >= 0,
               sourceBounds.width > 0,
               sourceBounds.height > 0,
-              sourceBounds.originX + sourceBounds.width <= snapshot.width,
-              sourceBounds.originY + sourceBounds.height <= snapshot.height else {
+              sourceBounds.width <= snapshot.width,
+              sourceBounds.height <= snapshot.height,
+              sourceBounds.originX <= snapshot.width - sourceBounds.width,
+              sourceBounds.originY <= snapshot.height - sourceBounds.height else {
             throw RasterExportError.invalidSourcePixelData
         }
         let outputDimensions = try options.outputDimensions(
@@ -98,7 +100,7 @@ final class RasterExporter: Sendable {
             sourceHeight: sourceBounds.height
         )
         try validateExportWorkingSet(
-            snapshot: snapshot,
+            snapshotResidentBytes: snapshot.pixelData.count,
             sourceBounds: sourceBounds,
             width: outputDimensions.width,
             height: outputDimensions.height,
@@ -162,8 +164,25 @@ final class RasterExporter: Sendable {
         }
     }
 
+    /// Run the same budget check before opening the destination panel or allocating a readback.
+    func validateOutput(
+        canvasWidth: Int, canvasHeight: Int,
+        sourceBounds: RasterExportPixelBounds,
+        options: RasterExportOptions
+    ) throws {
+        let dimensions = try options.outputDimensions(
+            sourceWidth: sourceBounds.width, sourceHeight: sourceBounds.height
+        )
+        try validateExportWorkingSet(
+            snapshotResidentBytes: saturatedMultiply(saturatedMultiply(canvasWidth, canvasHeight), 4),
+            sourceBounds: sourceBounds,
+            width: dimensions.width, height: dimensions.height,
+            background: options.background
+        )
+    }
+
     private func validateExportWorkingSet(
-        snapshot: LayerTextureSnapshot,
+        snapshotResidentBytes: Int,
         sourceBounds: RasterExportPixelBounds,
         width: Int,
         height: Int,
@@ -183,7 +202,6 @@ final class RasterExporter: Sendable {
         let sourcePixelCount = saturatedMultiply(sourceBounds.width, sourceBounds.height)
         let sourceRasterBytes = saturatedMultiply(sourcePixelCount, Self.bytesPerPixel)
         let outputRasterBytes = saturatedMultiply(pixelCount, Self.bytesPerPixel)
-        let snapshotResidentBytes = snapshot.pixelData.count
 
         let needsResampling = sourceBounds.width != width || sourceBounds.height != height
         let resamplingPeakBytes: Int

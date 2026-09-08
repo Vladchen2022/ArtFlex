@@ -91,13 +91,14 @@ final class TimelapseRecorderController: ObservableObject {
             }
         }
     }
-    @Published var captureInterval: Double = 5
-    @Published var frameFormat: RecorderFrameFormat = .jpeg
-    @Published var qualityPercent: Double = 60
-    @Published var resolutionScale: RecorderResolutionScale = .half
-    @Published var autoStart = false
-    @Published var exportLeadInSeconds: Double = 0
-    @Published var exportTailHoldSeconds: Double = 2
+    @Published var captureInterval: Double = 5 { didSet { persistSettings() } }
+    @Published var frameFormat: RecorderFrameFormat = .jpeg { didSet { persistSettings() } }
+    @Published var qualityPercent: Double = 60 { didSet { persistSettings() } }
+    @Published var resolutionScale: RecorderResolutionScale = .half { didSet { persistSettings() } }
+    @Published var autoStart = false { didSet { persistSettings() } }
+    @Published var exportFPS: Double = 12 { didSet { persistSettings() } }
+    @Published var exportLeadInSeconds: Double = 0 { didSet { persistSettings() } }
+    @Published var exportTailHoldSeconds: Double = 2 { didSet { persistSettings() } }
     @Published private(set) var isRecording = false
     @Published private(set) var currentDocumentName = ""
     @Published private(set) var currentSessionDirectory: URL?
@@ -114,13 +115,17 @@ final class TimelapseRecorderController: ObservableObject {
     private let writerQueue = DispatchQueue(label: "ArtFlex.Recorder.Writer", qos: .utility)
     private let defaults: UserDefaults
     private static let outputDirectoryBookmarkKey = "ArtFlex.TimelapseRecorder.OutputDirectoryBookmark"
+    private static let settingsKey = "ArtFlex.TimelapseRecorder.Settings"
 
     private var captureTimer: Timer?
     private var pendingRevision: UInt64?
-    private var lastCapturedRevision: UInt64 = 0
+    private var lastCapturedRevision: UInt64?
     private var lastCaptureDate: Date?
     private var nextFrameIndex = 0
     private var currentDocumentFileURL: URL?
+    private var currentDocumentID: UUID?
+    private var reservedFrameIndices: [URL: Int] = [:]
+    private var autoStartSuspended = false
 
     /// Installed by the workspace so recording consumes the same visible composite
     /// as the canvas, export and eyedropper paths. The legacy layer fallback is kept
@@ -140,6 +145,20 @@ final class TimelapseRecorderController: ObservableObject {
         self.serializer = serializer
         self.defaults = defaults
         self.outputDirectory = Self.restoreOutputDirectory(from: defaults)
+        if let settings = defaults.dictionary(forKey: Self.settingsKey) {
+            func number(_ key: String, default fallback: Double, range: ClosedRange<Double>) -> Double {
+                guard let value = settings[key] as? Double, value.isFinite else { return fallback }
+                return min(max(value, range.lowerBound), range.upperBound)
+            }
+            captureInterval = number("interval", default: 5, range: 1...10)
+            qualityPercent = number("quality", default: 60, range: 20...100)
+            frameFormat = RecorderFrameFormat(rawValue: settings["format"] as? String ?? "") ?? .jpeg
+            resolutionScale = RecorderResolutionScale(rawValue: settings["scale"] as? String ?? "") ?? .half
+            autoStart = settings["autoStart"] as? Bool ?? false
+            exportFPS = number("fps", default: 12, range: 6...30)
+            exportLeadInSeconds = number("leadIn", default: 0, range: 0...5)
+            exportTailHoldSeconds = number("tailHold", default: 2, range: 0...5)
+        }
     }
 
     var outputDirectoryPath: String {
@@ -151,7 +170,7 @@ final class TimelapseRecorderController: ObservableObject {
     }
 
     var canExportVideo: Bool {
-        currentSessionDirectory != nil && savedFrameCount > 0 && !isExportingVideo && pendingJobCount == 0
+        currentSessionDirectory != nil && savedFrameCount > 0 && !isRecording && !isBusy
     }
 
     var isBusy: Bool {
@@ -159,8 +178,20 @@ final class TimelapseRecorderController: ObservableObject {
     }
 
     func syncCurrentDocument(documentName: String, documentFileURL: URL? = nil) {
+        let documentID = workspaceStore.state.document.metadata.drawingStatsID
+        let sameDocument = currentDocumentID == documentID
         currentDocumentName = documentName
         currentDocumentFileURL = documentFileURL
+        currentDocumentID = documentID
+        if !sameDocument { autoStartSuspended = false }
+        // Saving/renaming the active painting must not split an ongoing recording.
+        if sameDocument, isRecording,
+           currentSessionDirectory?.deletingLastPathComponent() == outputDirectory { return }
+        captureTimer?.invalidate()
+        captureTimer = nil
+        pendingRevision = nil
+        lastCapturedRevision = nil
+        lastCaptureDate = nil
         guard let outputDirectory else {
             currentSessionDirectory = nil
             savedFrameCount = 0
@@ -169,19 +200,25 @@ final class TimelapseRecorderController: ObservableObject {
         }
 
         do {
-            let directory = try makeSessionDirectory(
+            let directory = sessionDirectoryURL(
                 rootDirectory: outputDirectory,
                 documentName: documentName,
                 documentFileURL: documentFileURL
             )
+            guard directory != currentSessionDirectory else { return }
             currentSessionDirectory = directory
-            let frameURLs = try Self.sortedFrameURLs(in: directory)
+            lastExportedVideoURL = nil
+            lastFailureMessage = nil
+            droppedFrameCount = 0
+            let frameURLs = FileManager.default.fileExists(atPath: directory.path)
+                ? try Self.sortedFrameURLs(in: directory) : []
             savedFrameCount = frameURLs.count
-            nextFrameIndex = Self.nextFrameIndex(for: frameURLs)
+            nextFrameIndex = max(Self.nextFrameIndex(for: frameURLs), reservedFrameIndices[directory] ?? 0)
         } catch {
             currentSessionDirectory = nil
             savedFrameCount = 0
             nextFrameIndex = 0
+            lastFailureMessage = "无法读取录像目录：\(error.localizedDescription)"
         }
     }
 
@@ -196,33 +233,44 @@ final class TimelapseRecorderController: ObservableObject {
         guard outputDirectory != nil, let sessionDirectory = currentSessionDirectory else {
             throw CocoaError(.fileNoSuchFile)
         }
+        guard !isExportingVideo else { throw CocoaError(.fileWriteUnknown) }
+        try FileManager.default.createDirectory(at: sessionDirectory, withIntermediateDirectories: true)
 
         isRecording = true
-        pendingJobCount = 0
+        autoStartSuspended = false
         droppedFrameCount = 0
-        pendingRevision = nil
-        lastCapturedRevision = 0
+        pendingRevision = 0
+        lastCapturedRevision = nil
         lastCaptureDate = nil
         lastExportedVideoURL = nil
         lastFailureMessage = nil
         captureTimer?.invalidate()
         captureTimer = nil
+        capturePendingFrame(documentName: documentName)
         return sessionDirectory
     }
 
-    func stopRecording() {
+    func stopRecording(suppressAutoStart: Bool = false) {
         isRecording = false
+        if suppressAutoStart { autoStartSuspended = true }
         captureTimer?.invalidate()
         captureTimer = nil
-        pendingRevision = nil
+        // Capture an immutable composite now, before a caller replaces the document.
+        // One final job may exceed the normal queue limit; it must not be dropped.
+        capturePendingFrame(documentName: currentDocumentName, isFinalFrame: true)
     }
 
     func noteCanvasChanged(revision: UInt64, documentName: String, documentFileURL: URL? = nil) {
         guard outputDirectory != nil else { return }
 
         if !isRecording {
-            guard autoStart else { return }
-            _ = try? startRecording(documentName: documentName, documentFileURL: documentFileURL)
+            guard autoStart, !autoStartSuspended else { return }
+            do {
+                _ = try startRecording(documentName: documentName, documentFileURL: documentFileURL)
+            } catch {
+                autoStartSuspended = true
+                lastFailureMessage = "无法自动开始录像：\(error.localizedDescription)"
+            }
         }
 
         guard isRecording else { return }
@@ -238,7 +286,7 @@ final class TimelapseRecorderController: ObservableObject {
         tailHoldSeconds: Double,
         completion: @Sendable @escaping (Result<URL, Error>) -> Void
     ) {
-        guard let sessionDirectory = currentSessionDirectory else {
+        guard canExportVideo, let sessionDirectory = currentSessionDirectory else {
             completion(.failure(CocoaError(.fileNoSuchFile)))
             return
         }
@@ -255,7 +303,9 @@ final class TimelapseRecorderController: ObservableObject {
             DispatchQueue.main.async {
                 self.isExportingVideo = false
                 if case .success(let url) = result {
-                    self.lastExportedVideoURL = url
+                    if self.currentSessionDirectory == sessionDirectory {
+                        self.lastExportedVideoURL = url
+                    }
                 }
                 completion(result)
                 self.notifyIfIdle()
@@ -303,6 +353,15 @@ final class TimelapseRecorderController: ObservableObject {
         }
     }
 
+    private func persistSettings() {
+        defaults.set([
+            "interval": captureInterval, "format": frameFormat.rawValue,
+            "quality": qualityPercent, "scale": resolutionScale.rawValue,
+            "autoStart": autoStart, "fps": exportFPS,
+            "leadIn": exportLeadInSeconds, "tailHold": exportTailHoldSeconds
+        ], forKey: Self.settingsKey)
+    }
+
     private static func restoreOutputDirectory(from defaults: UserDefaults) -> URL? {
         if let bookmark = defaults.data(forKey: outputDirectoryBookmarkKey) {
             var isStale = false
@@ -323,8 +382,10 @@ final class TimelapseRecorderController: ObservableObject {
         return nil
     }
 
-    private func capturePendingFrame(documentName: String) {
-        if shouldDeferCapture?() == true {
+    private func capturePendingFrame(documentName: String, isFinalFrame: Bool = false) {
+        guard let revision = pendingRevision, revision != lastCapturedRevision,
+              let sessionDirectory = currentSessionDirectory else { return }
+        if !isFinalFrame && (shouldDeferCapture?() == true || pendingJobCount >= Self.maxPendingJobs) {
             captureTimer?.invalidate()
             captureTimer = Timer.scheduledTimer(withTimeInterval: 0.75, repeats: false) { [weak self] _ in
                 Task { @MainActor [weak self] in
@@ -335,13 +396,6 @@ final class TimelapseRecorderController: ObservableObject {
             }
             return
         }
-        guard
-            let revision = pendingRevision,
-            revision != lastCapturedRevision,
-            let sessionDirectory = currentSessionDirectory
-        else {
-            return
-        }
         guard Self.hasSafeDiskReserve(at: sessionDirectory) else {
             isRecording = false
             captureTimer?.invalidate()
@@ -349,11 +403,16 @@ final class TimelapseRecorderController: ObservableObject {
             pendingRevision = nil
             droppedFrameCount += 1
             lastFailureMessage = "磁盘可用空间低于 512 MB，已停止录像以保护工程保存"
+            autoStartSuspended = true
             return
         }
         guard
             let captureSource = makeCaptureSource(documentName: documentName)
         else {
+            isRecording = false
+            autoStartSuspended = true
+            pendingRevision = nil
+            lastFailureMessage = "无法获取当前画面，录像已停止；请重新开始录制"
             return
         }
 
@@ -365,13 +424,9 @@ final class TimelapseRecorderController: ObservableObject {
         let scale = resolutionScale
         let quality = qualityPercent
 
-        if pendingJobCount >= Self.maxPendingJobs {
-            droppedFrameCount += 1
-            return
-        }
-
         let frameIndex = nextFrameIndex
         nextFrameIndex += 1
+        reservedFrameIndices[sessionDirectory] = nextFrameIndex
         pendingJobCount += 1
 
         let outputURL = sessionDirectory.appendingPathComponent(
@@ -396,11 +451,18 @@ final class TimelapseRecorderController: ObservableObject {
 
             DispatchQueue.main.async {
                 self.pendingJobCount = max(0, self.pendingJobCount - 1)
-                if case .success = result {
-                    self.savedFrameCount += 1
-                    self.lastFailureMessage = nil
-                } else if case .failure(let error) = result {
-                    self.lastFailureMessage = "录像帧写入失败：\(error.localizedDescription)"
+                if self.currentSessionDirectory == sessionDirectory {
+                    if case .success = result {
+                        self.savedFrameCount += 1
+                    } else if case .failure(let error) = result {
+                        self.isRecording = false
+                        self.autoStartSuspended = true
+                        self.captureTimer?.invalidate()
+                        self.captureTimer = nil
+                        self.pendingRevision = nil
+                        self.droppedFrameCount += 1
+                        self.lastFailureMessage = "录像帧写入失败，已停止：\(error.localizedDescription)"
+                    }
                 }
                 self.notifyIfIdle()
             }
@@ -423,8 +485,10 @@ final class TimelapseRecorderController: ObservableObject {
 
     private func makeCaptureSource(documentName: String) -> RecorderCaptureSource? {
         let workspace = workspaceStore.state
-        if let compositeTextureProvider,
-           let texture = try? compositeTextureProvider() {
+        if let compositeTextureProvider {
+            // Never substitute a different compositor when the canonical one fails.
+            // The legacy fallback cannot represent masks, clipping or blend modes.
+            guard let texture = try? compositeTextureProvider() else { return nil }
             return RecorderCaptureSource(
                 documentName: documentName,
                 canvasSize: workspace.document.canvasSize,
@@ -457,7 +521,7 @@ final class TimelapseRecorderController: ObservableObject {
         )
     }
 
-    private func makeSessionDirectory(rootDirectory: URL, documentName: String, documentFileURL: URL?) throws -> URL {
+    private func sessionDirectoryURL(rootDirectory: URL, documentName: String, documentFileURL: URL?) -> URL {
         let safeName = documentName
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .replacingOccurrences(of: "/", with: "-")
@@ -467,11 +531,10 @@ final class TimelapseRecorderController: ObservableObject {
         if let documentFileURL {
             folderName = "\(baseName)-\(Self.shortPathHash(for: documentFileURL))"
         } else {
-            folderName = baseName
+            folderName = "\(baseName)-\(workspaceStore.state.document.metadata.drawingStatsID.uuidString.prefix(8).lowercased())"
         }
-        let sessionDirectory = rootDirectory.appendingPathComponent(folderName, isDirectory: true)
-        try FileManager.default.createDirectory(at: sessionDirectory, withIntermediateDirectories: true)
-        return sessionDirectory
+        // Merely opening a painting or inspecting this panel must not create folders.
+        return rootDirectory.appendingPathComponent(folderName, isDirectory: true)
     }
 
     nonisolated private static func shortPathHash(for url: URL) -> String {
@@ -485,13 +548,15 @@ final class TimelapseRecorderController: ObservableObject {
         serializer: LayerTextureSerializer,
         scale: RecorderResolutionScale
     ) throws -> CGImage {
-        let width = source.canvasSize.width
-        let height = source.canvasSize.height
+        let usesGPUDownsample = source.compositeTexture != nil && scale.divisor > 1
+        let divisor = usesGPUDownsample ? scale.divisor : 1
+        let width = max(1, source.canvasSize.width / divisor)
+        let height = max(1, source.canvasSize.height / divisor)
         let bytesPerPixel = 4
         let bytesPerRow = width * bytesPerPixel
         let mergedBytes: [UInt8]
         if let compositeTexture = source.compositeTexture {
-            let snapshot = try serializer.snapshot(texture: compositeTexture.value)
+            let snapshot = try serializer.downsampledSnapshot(texture: compositeTexture.value, divisor: divisor)
             mergedBytes = [UInt8](snapshot.pixelData)
         } else {
             var legacyMergedBytes = [UInt8](repeating: 0, count: bytesPerRow * height)
@@ -550,7 +615,7 @@ final class TimelapseRecorderController: ObservableObject {
             height: height
         )
 
-        guard scale.divisor > 1 else {
+        guard scale.divisor > 1, !usesGPUDownsample else {
             return fullImage
         }
 
@@ -621,9 +686,12 @@ final class TimelapseRecorderController: ObservableObject {
         format: RecorderFrameFormat,
         qualityPercent: Double
     ) throws {
+        let temporaryURL = fileURL.deletingLastPathComponent()
+            .appendingPathComponent(".recorder-\(UUID().uuidString).tmp")
+        defer { try? FileManager.default.removeItem(at: temporaryURL) }
         guard
             let destination = CGImageDestinationCreateWithURL(
-                fileURL as CFURL,
+                temporaryURL as CFURL,
                 format.utType.identifier as CFString,
                 1,
                 nil
@@ -647,6 +715,9 @@ final class TimelapseRecorderController: ObservableObject {
         if !CGImageDestinationFinalize(destination) {
             throw CocoaError(.fileWriteUnknown)
         }
+        // Only complete images become visible to the exporter. moveItem refuses
+        // to overwrite an existing frame, even if a second app uses this folder.
+        try FileManager.default.moveItem(at: temporaryURL, to: fileURL)
     }
 
     nonisolated private static func exportVideo(
@@ -669,7 +740,11 @@ final class TimelapseRecorderController: ObservableObject {
                 throw CocoaError(.fileReadCorruptFile)
             }
 
-            let writer = try AVAssetWriter(outputURL: outputURL, fileType: .mp4)
+            let temporaryURL = outputURL.deletingLastPathComponent()
+                .appendingPathComponent(".recorder-export-\(UUID().uuidString).mp4")
+            defer { try? FileManager.default.removeItem(at: temporaryURL) }
+            let writer = try AVAssetWriter(outputURL: temporaryURL, fileType: .mp4)
+            defer { if writer.status == .writing { writer.cancelWriting() } }
             let settings: [String: Any] = [
                 AVVideoCodecKey: AVVideoCodecType.h264,
                 AVVideoWidthKey: firstImage.width,
@@ -704,8 +779,13 @@ final class TimelapseRecorderController: ObservableObject {
             var presentationIndex = 0
 
             func appendFrame(url: URL) throws {
-                autoreleasepool {
+                try autoreleasepool {
+                    let deadline = ProcessInfo.processInfo.systemUptime + 30
                     while !input.isReadyForMoreMediaData {
+                        guard writer.status == .writing,
+                              ProcessInfo.processInfo.systemUptime < deadline else {
+                            throw writer.error ?? CocoaError(.fileWriteUnknown)
+                        }
                         Thread.sleep(forTimeInterval: 0.002)
                     }
 
@@ -718,11 +798,13 @@ final class TimelapseRecorderController: ObservableObject {
                             height: firstImage.height
                         )
                     else {
-                        return
+                        throw CocoaError(.fileReadCorruptFile)
                     }
 
                     let presentationTime = CMTimeMultiply(frameDuration, multiplier: Int32(presentationIndex))
-                    adaptor.append(pixelBuffer, withPresentationTime: presentationTime)
+                    guard adaptor.append(pixelBuffer, withPresentationTime: presentationTime) else {
+                        throw writer.error ?? CocoaError(.fileWriteUnknown)
+                    }
                     presentationIndex += 1
                 }
             }
@@ -744,10 +826,18 @@ final class TimelapseRecorderController: ObservableObject {
             writer.finishWriting {
                 semaphore.signal()
             }
-            semaphore.wait()
+            guard semaphore.wait(timeout: .now() + 60) == .success else {
+                writer.cancelWriting()
+                throw CocoaError(.fileWriteUnknown)
+            }
 
-            if let exportError = writer.error {
-                throw exportError
+            guard writer.status == .completed else {
+                throw writer.error ?? CocoaError(.fileWriteUnknown)
+            }
+            if FileManager.default.fileExists(atPath: outputURL.path) {
+                _ = try FileManager.default.replaceItemAt(outputURL, withItemAt: temporaryURL)
+            } else {
+                try FileManager.default.moveItem(at: temporaryURL, to: outputURL)
             }
 
             return outputURL
@@ -761,7 +851,10 @@ final class TimelapseRecorderController: ObservableObject {
         )
 
         return urls
-            .filter { ["jpg", "jpeg", "png"].contains($0.pathExtension.lowercased()) }
+            .filter {
+                $0.lastPathComponent.hasPrefix("frame_") &&
+                ["jpg", "jpeg", "png"].contains($0.pathExtension.lowercased())
+            }
             .sorted { $0.lastPathComponent < $1.lastPathComponent }
     }
 

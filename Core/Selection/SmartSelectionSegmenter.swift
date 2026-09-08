@@ -115,7 +115,8 @@ enum SmartSelectionSegmenter {
     static func segment(
         raster: SmartSelectionRaster,
         seedPoint: CanvasPoint,
-        settings: SmartSelectionSettings
+        settings: SmartSelectionSettings,
+        cancellation: WorkCancellation? = nil
     ) -> SmartSelectionSegmentationResult? {
         guard
             raster.width > 0,
@@ -134,7 +135,8 @@ enum SmartSelectionSegmenter {
                 width: raster.width,
                 height: raster.height,
                 seedPoint: seedPoint,
-                settings: settings
+                settings: settings,
+                cancellation: cancellation
             ) { x, y in
                 let offset = (y * raster.bytesPerRow) + (x * 4)
                 return PremultipliedSRGBAPixel(
@@ -154,8 +156,10 @@ enum SmartSelectionSegmenter {
         height: Int,
         seedPoint: CanvasPoint,
         settings: SmartSelectionSettings,
+        cancellation: WorkCancellation? = nil,
         pixelAt: (Int, Int) throws -> PremultipliedSRGBAPixel
     ) throws -> SmartSelectionSegmentationResult? {
+        try cancellation?.check()
         guard width > 0, height > 0 else { return nil }
         let seedX = Int(seedPoint.x.rounded(.down)) - originX
         let seedY = Int(seedPoint.y.rounded(.down)) - originY
@@ -254,6 +258,7 @@ enum SmartSelectionSegmenter {
             }
 
             while let seed = queue.popLast() {
+                try cancellation?.check()
                 let seedIndex = (seed.y * width) + seed.x
                 guard connected[seedIndex] == 0, try acceptedCoverage(seed.x, seed.y) > 0 else { continue }
                 var left = seed.x
@@ -289,6 +294,7 @@ enum SmartSelectionSegmenter {
             }
         } else {
             for y in 0..<height {
+                try cancellation?.check()
                 for x in 0..<width {
                     record(x, y, coverage(try pixelAt(x, y)))
                 }

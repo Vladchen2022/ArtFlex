@@ -104,7 +104,7 @@ final class IdeationSessionState: ObservableObject {
                 installsZoomKeyboardMonitor: false,
                 preparesInitialTextures: false
             )
-            branchViewModel.cloneWorkspaceForIdeation(
+            try branchViewModel.cloneWorkspaceForIdeation(
                 from: sourceWorkspace,
                 sourceLayerSurfaceStore: sourceLayerSurfaceStore
             )

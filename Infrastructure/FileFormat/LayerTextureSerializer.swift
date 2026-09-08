@@ -1,5 +1,6 @@
 import Foundation
 import Metal
+import MetalPerformanceShaders
 
 struct LayerTextureSnapshot: Codable, Sendable, Equatable {
     var width: Int
@@ -269,6 +270,31 @@ final class LayerTextureSerializer {
             width: texture.width,
             height: texture.height
         )
+    }
+
+    /// Downsample on the GPU before readback. A half-size recording transfers one
+    /// quarter of the pixels instead of copying the full canvas through CPU arrays.
+    func downsampledSnapshot(texture: MTLTexture, divisor: Int) throws -> LayerTextureSnapshot {
+        guard divisor > 1 else { return try snapshot(texture: texture) }
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: texture.pixelFormat,
+            width: max(1, texture.width / divisor), height: max(1, texture.height / divisor),
+            mipmapped: false
+        )
+        descriptor.storageMode = .private
+        descriptor.usage = [.shaderRead, .shaderWrite]
+        guard let target = metalContext.device.makeTexture(descriptor: descriptor),
+              let commandBuffer = metalContext.commandQueue.makeCommandBuffer() else {
+            throw CocoaError(.fileReadUnknown)
+        }
+        let scaler = MPSImageBilinearScale(device: metalContext.device)
+        scaler.encode(commandBuffer: commandBuffer, sourceTexture: texture, destinationTexture: target)
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+        guard commandBuffer.status == .completed else {
+            throw commandBuffer.error ?? CocoaError(.fileReadUnknown)
+        }
+        return try snapshot(texture: target)
     }
 
     /// Freezes live GPU resources with one private-to-private blit. The returned textures can be

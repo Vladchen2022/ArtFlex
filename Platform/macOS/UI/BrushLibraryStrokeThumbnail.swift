@@ -7,11 +7,20 @@ private enum BrushLibraryThumbnailLoader {
     static let queue = DispatchQueue(label: "ArtFlex.brush-library-thumbnails", qos: .utility)
 
     static func image(for brush: BrushSettings) async -> CGImage? {
-        await withCheckedContinuation { continuation in
-            queue.async {
-                let image = StageOneBrushPreviewRasterizer.libraryStrokePreviewImage(for: brush)
-                continuation.resume(returning: image)
+        let cancellation = WorkCancellation()
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                queue.async {
+                    guard !cancellation.isCancelled else {
+                        continuation.resume(returning: nil)
+                        return
+                    }
+                    let image = StageOneBrushPreviewRasterizer.libraryStrokePreviewImage(for: brush)
+                    continuation.resume(returning: cancellation.isCancelled ? nil : image)
+                }
             }
+        } onCancel: {
+            cancellation.cancel()
         }
     }
 }

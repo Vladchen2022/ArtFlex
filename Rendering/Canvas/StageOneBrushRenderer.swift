@@ -275,6 +275,15 @@ final class StageOneBrushRenderer {
     private var reusableUniformBufferBytes = 0
     private(set) var debugCustomTipResampleCount = 0
     private var v2Renderer: BrushV2Renderer?
+    private var resourceFailureGeneration: UInt64 = 0
+    var encodingFailureGeneration: UInt64 {
+        resourceFailureGeneration &+ (v2Renderer?.failureGeneration ?? 0)
+    }
+
+    private func checkedResource<T>(_ resource: T?) -> T? {
+        if resource == nil { resourceFailureGeneration &+= 1 }
+        return resource
+    }
 
     init(device: MTLDevice) throws {
         self.device = device
@@ -2133,8 +2142,8 @@ final class StageOneBrushRenderer {
             alphaDescriptor.storageMode = .private
 
             guard
-                let newOriginal = device.makeTexture(descriptor: originalDescriptor),
-                let newAlpha = device.makeTexture(descriptor: alphaDescriptor)
+                let newOriginal = checkedResource(device.makeTexture(descriptor: originalDescriptor)),
+                let newAlpha = checkedResource(device.makeTexture(descriptor: alphaDescriptor))
             else {
                 return nil
             }
@@ -2181,7 +2190,7 @@ final class StageOneBrushRenderer {
             )
             descriptor.usage = [.renderTarget, .shaderRead]
             descriptor.storageMode = .private
-            guard let created = device.makeTexture(descriptor: descriptor) else {
+            guard let created = checkedResource(device.makeTexture(descriptor: descriptor)) else {
                 return nil
             }
             secondaryTexture = created
@@ -2218,7 +2227,7 @@ final class StageOneBrushRenderer {
             )
             descriptor.usage = [.renderTarget, .shaderRead]
             descriptor.storageMode = .private
-            guard let created = device.makeTexture(descriptor: descriptor) else {
+            guard let created = checkedResource(device.makeTexture(descriptor: descriptor)) else {
                 return nil
             }
             primaryTexture = created
@@ -2257,7 +2266,7 @@ final class StageOneBrushRenderer {
             )
             descriptor.usage = [.renderTarget, .shaderRead]
             descriptor.storageMode = .private
-            guard let created = device.makeTexture(descriptor: descriptor) else {
+            guard let created = checkedResource(device.makeTexture(descriptor: descriptor)) else {
                 return nil
             }
             materialTexture = created
@@ -2287,7 +2296,7 @@ final class StageOneBrushRenderer {
         pass.colorAttachments[0].texture = material
         pass.colorAttachments[0].loadAction = .load
         pass.colorAttachments[0].storeAction = .store
-        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: pass) else { return material }
+        guard let encoder = checkedResource(commandBuffer.makeRenderCommandEncoder(descriptor: pass)) else { return material }
         encoder.setRenderPipelineState(paintMaterialPipelineState)
         encoder.setVertexBuffer(vertexBuffer, offset: 0, index: 0)
         encoder.setFragmentTexture(selectionMask, index: 0)
@@ -2458,7 +2467,7 @@ final class StageOneBrushRenderer {
         passDescriptor.colorAttachments[0].loadAction = .load
         passDescriptor.colorAttachments[0].storeAction = .store
 
-        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: passDescriptor) else {
+        guard let encoder = checkedResource(commandBuffer.makeRenderCommandEncoder(descriptor: passDescriptor)) else {
             return 0
         }
 
@@ -2530,7 +2539,7 @@ final class StageOneBrushRenderer {
     ) -> Int {
         if let config = stroke.brush.engineV2 {
             if v2Renderer == nil { v2Renderer = try? BrushV2Renderer(device: device) }
-            guard let v2Renderer else { return 0 }
+            guard let v2Renderer else { resourceFailureGeneration &+= 1; return 0 }
             // A stroke can begin completely outside the canvas. Retain a
             // session even before its first visible pixel so pen-up can flush
             // the pending segment that crosses into the canvas.
@@ -2694,7 +2703,7 @@ final class StageOneBrushRenderer {
         accumulationPassDescriptor.colorAttachments[0].storeAction = .store
 
         if !samples.isEmpty,
-           let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: accumulationPassDescriptor) {
+           let encoder = checkedResource(commandBuffer.makeRenderCommandEncoder(descriptor: accumulationPassDescriptor)) {
             let primaryMaskPipelineState: MTLRenderPipelineState
             if usesPressureDualTip {
                 primaryMaskPipelineState = compoundRangeMaskPipelineState
@@ -2749,7 +2758,7 @@ final class StageOneBrushRenderer {
             primaryTipPassDescriptor.colorAttachments[0].loadAction = .load
             primaryTipPassDescriptor.colorAttachments[0].storeAction = .store
 
-            if let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: primaryTipPassDescriptor) {
+            if let encoder = checkedResource(commandBuffer.makeRenderCommandEncoder(descriptor: primaryTipPassDescriptor)) {
                 encoder.setRenderPipelineState(
                     usesCompoundBuildUp
                         ? compoundSecondaryBuildUpMaskPipelineState
@@ -2800,7 +2809,7 @@ final class StageOneBrushRenderer {
             materialPassDescriptor.colorAttachments[0].loadAction = .load
             materialPassDescriptor.colorAttachments[0].storeAction = .store
 
-            if let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: materialPassDescriptor) {
+            if let encoder = checkedResource(commandBuffer.makeRenderCommandEncoder(descriptor: materialPassDescriptor)) {
                 encoder.setRenderPipelineState(paintMaterialPipelineState)
                 encoder.setVertexBuffer(vertexBuffer, offset: 0, index: 0)
                 let primaryCustomTipTexture =
@@ -2854,7 +2863,7 @@ final class StageOneBrushRenderer {
             secondaryPassDescriptor.colorAttachments[0].loadAction = .load
             secondaryPassDescriptor.colorAttachments[0].storeAction = .store
 
-            if let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: secondaryPassDescriptor) {
+            if let encoder = checkedResource(commandBuffer.makeRenderCommandEncoder(descriptor: secondaryPassDescriptor)) {
                 encoder.setRenderPipelineState(
                     usesCompoundBuildUp
                         ? compoundSecondaryBuildUpMaskPipelineState
@@ -2913,7 +2922,7 @@ final class StageOneBrushRenderer {
         compositePassDescriptor.colorAttachments[0].loadAction = .load
         compositePassDescriptor.colorAttachments[0].storeAction = .store
 
-        if let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: compositePassDescriptor) {
+        if let encoder = checkedResource(commandBuffer.makeRenderCommandEncoder(descriptor: compositePassDescriptor)) {
             encoder.setRenderPipelineState(opacityCapCompositePipelineState)
             encoder.setVertexBuffer(vertexBuffer, offset: 0, index: 0)
             encoder.setFragmentTexture(session.originalTexture, index: 0)
@@ -4081,7 +4090,7 @@ final class StageOneBrushRenderer {
         descriptor.usage = .shaderRead
         descriptor.storageMode = .shared
 
-        guard let texture = device.makeTexture(descriptor: descriptor) else {
+        guard let texture = checkedResource(device.makeTexture(descriptor: descriptor)) else {
             return nil
         }
 
@@ -4205,9 +4214,9 @@ final class StageOneBrushRenderer {
         outputTextureDescriptor.storageMode = .private
 
         guard
-            let inputBuffer,
-            let gatheredColorsTexture = device.makeTexture(descriptor: outputTextureDescriptor),
-            let computeEncoder = commandBuffer.makeComputeCommandEncoder()
+            let inputBuffer = checkedResource(inputBuffer),
+            let gatheredColorsTexture = checkedResource(device.makeTexture(descriptor: outputTextureDescriptor)),
+            let computeEncoder = checkedResource(commandBuffer.makeComputeCommandEncoder())
         else {
             return nil
         }
@@ -4256,7 +4265,7 @@ final class StageOneBrushRenderer {
         passDescriptor.colorAttachments[0].loadAction = .load
         passDescriptor.colorAttachments[0].storeAction = .store
 
-        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: passDescriptor) else {
+        guard let encoder = checkedResource(commandBuffer.makeRenderCommandEncoder(descriptor: passDescriptor)) else {
             return 0
         }
 
@@ -4423,7 +4432,7 @@ final class StageOneBrushRenderer {
         descriptor.storageMode = .shared
         descriptor.usage = .shaderRead
 
-        guard let texture = device.makeTexture(descriptor: descriptor) else {
+        guard let texture = checkedResource(device.makeTexture(descriptor: descriptor)) else {
             return nil
         }
 
@@ -4493,7 +4502,7 @@ final class StageOneBrushRenderer {
         guard
             let zeroAlphaTile = opacityCapZeroTile(pixelFormat: .r8Unorm),
             paintMaterialTexture == nil || opacityCapZeroTile(pixelFormat: .bgra8Unorm_srgb) != nil,
-            let encoder = commandBuffer.makeBlitCommandEncoder()
+            let encoder = checkedResource(commandBuffer.makeBlitCommandEncoder())
         else {
             return false
         }
@@ -4608,7 +4617,7 @@ final class StageOneBrushRenderer {
         )
         descriptor.usage = [.shaderRead]
         descriptor.storageMode = .shared
-        guard let texture = device.makeTexture(descriptor: descriptor) else {
+        guard let texture = checkedResource(device.makeTexture(descriptor: descriptor)) else {
             return nil
         }
         let bytesPerPixel = pixelFormat == .r8Unorm ? 1 : 4

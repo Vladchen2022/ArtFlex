@@ -360,8 +360,14 @@ enum ColorBlocksEngine {
 
         return basePalette.enumerated().map { index, color in
             var hsv = color
-            hsv.v = clamp(targetValue + (color.v - meanValue) * contrastFactor, 0.06, 0.98)
-            hsv.s = clamp(color.s, saturationBand.lowerBound, saturationBand.upperBound)
+            if state.baseSource == .image {
+                // Imported palettes use neutral-at-50 adjustments, preserving black, white and source saturation.
+                hsv.v = clamp(meanValue + (color.v - meanValue) * (contrastN * 2) + (lightnessN - 0.5) * 2, 0, 1)
+                hsv.s = clamp(color.s * (clamp(state.blocksSaturation / 100, 0, 1) * 2), 0, 1)
+            } else {
+                hsv.v = clamp(targetValue + (color.v - meanValue) * contrastFactor, 0.06, 0.98)
+                hsv.s = clamp(color.s, saturationBand.lowerBound, saturationBand.upperBound)
+            }
 
             if xN > 0 {
                 let seed = Float(index) * 37.17 + baseHue * 0.013
@@ -420,8 +426,7 @@ enum ColorBlocksEngine {
         let sortedByValue = mapped.sorted { $0.value > $1.value }
         var output: [RGBAColor] = []
 
-        for rowIndex in 0..<5 {
-            let start = rowIndex * 5
+        for start in stride(from: 0, to: sortedByValue.count, by: 5) {
             let end = min(start + 5, sortedByValue.count)
             let row = sortedByValue[start..<end].sorted { $0.hue < $1.hue }
             output.append(contentsOf: row.map(\.color))

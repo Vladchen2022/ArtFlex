@@ -29,8 +29,10 @@ final class MagicWandSelectionEngine: @unchecked Sendable {
     func select(
         texture: MTLTexture,
         at point: CanvasPoint,
-        settings: SmartSelectionSettings
+        settings: SmartSelectionSettings,
+        cancellation: WorkCancellation? = nil
     ) throws -> SmartSelectionSegmentationResult? {
+        try cancellation?.check()
         if !settings.isContiguous {
             let snapshot = try serializer.snapshot(
                 texture: texture,
@@ -39,11 +41,12 @@ final class MagicWandSelectionEngine: @unchecked Sendable {
                 width: texture.width,
                 height: texture.height
             )
-            return select(snapshot: snapshot, originX: 0, originY: 0, at: point, settings: settings)
+            return select(snapshot: snapshot, originX: 0, originY: 0, at: point, settings: settings, cancellation: cancellation)
         }
 
         var tiles: [TileKey: Tile] = [:]
         func loadTile(_ key: TileKey) throws -> Tile {
+            try cancellation?.check()
             if let existing = tiles[key] { return existing }
             let originX = key.x * tileLength
             let originY = key.y * tileLength
@@ -74,7 +77,8 @@ final class MagicWandSelectionEngine: @unchecked Sendable {
             width: texture.width,
             height: texture.height,
             seedPoint: point,
-            settings: settings
+            settings: settings,
+            cancellation: cancellation
         ) { x, y in
             let key = TileKey(x: x / tileLength, y: y / tileLength)
             let tile = try loadTile(key)
@@ -95,7 +99,8 @@ final class MagicWandSelectionEngine: @unchecked Sendable {
         originX: Int,
         originY: Int,
         at point: CanvasPoint,
-        settings: SmartSelectionSettings
+        settings: SmartSelectionSettings,
+        cancellation: WorkCancellation? = nil
     ) -> SmartSelectionSegmentationResult? {
         SmartSelectionSegmenter.segment(
             raster: SmartSelectionRaster(
@@ -107,7 +112,8 @@ final class MagicWandSelectionEngine: @unchecked Sendable {
                 premultipliedBGRABytes: snapshot.pixelData
             ),
             seedPoint: point,
-            settings: settings
+            settings: settings,
+            cancellation: cancellation
         )
     }
 }

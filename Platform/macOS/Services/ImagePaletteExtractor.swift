@@ -1,129 +1,231 @@
 import AppKit
+import Combine
 import CoreGraphics
 import Foundation
+import ImageIO
+import UniformTypeIdentifiers
 import simd
 
 @MainActor
-final class ImagePaletteExtractor {
-    func extractPalette(from url: URL, count: Int = 25) throws -> [RGBAColor] {
-        guard let image = NSImage(contentsOf: url) else {
-            throw NSError(domain: "ArtFlex.ImagePaletteExtractor", code: 1, userInfo: [
-                NSLocalizedDescriptionKey: "无法打开图片"
-            ])
-        }
+final class ImagePaletteExtractor: ObservableObject {
+    @Published private(set) var isExtracting = false
+    @Published private(set) var errorMessage: String?
+    private var request: WorkCancellation?
+    // One decoder at a time: rapid drops cannot allocate several large images in parallel.
+    private static let queue = DispatchQueue(label: "ArtFlex.palette-import", qos: .userInitiated)
 
-        return try extractPalette(from: image, count: count)
+    enum Source: Sendable {
+        case file(URL)
+        case encoded(Data)
     }
 
-    func extractPalette(from image: NSImage, count: Int = 25) throws -> [RGBAColor] {
-        let thumbnailSize = 220
-        let rect = CGRect(x: 0, y: 0, width: thumbnailSize, height: thumbnailSize)
+    typealias Completion = @MainActor @Sendable ([RGBAColor], String) -> Void
+
+    func cancel() {
+        request?.cancel()
+        request = nil
+        isExtracting = false
+        errorMessage = nil
+    }
+
+    private func beginRequest() -> WorkCancellation {
+        cancel()
+        let next = WorkCancellation()
+        request = next
+        isExtracting = true
+        return next
+    }
+
+    func start(from source: Source, name: String, completion: @escaping Completion) {
+        run(source, name: name, request: beginRequest(), completion: completion)
+    }
+
+    @discardableResult
+    func start(from pasteboard: NSPasteboard, completion: @escaping Completion) -> Bool {
+        // Prefer encoded bytes / file URLs. NSImage.tiffRepresentation may decode a full image on the UI thread.
+        if let url = (pasteboard.readObjects(forClasses: [NSURL.self], options: [
+            .urlReadingFileURLsOnly: true
+        ]) as? [URL])?.first {
+            start(from: .file(url), name: url.deletingPathExtension().lastPathComponent, completion: completion)
+            return true
+        }
+        for identifier in [UTType.png.identifier, UTType.tiff.identifier, UTType.jpeg.identifier, UTType.heic.identifier] {
+            if let data = pasteboard.data(forType: .init(identifier)) {
+                start(from: .encoded(data), name: "剪贴板图片", completion: completion)
+                return true
+            }
+        }
+        cancel()
+        errorMessage = "剪贴板中没有可读取的图片，原色板未改变"
+        return false
+    }
+
+    @discardableResult
+    func start(from providers: [NSItemProvider], completion: @escaping Completion) -> Bool {
+        if let provider = providers.first(where: { $0.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) }) {
+            let current = beginRequest()
+            provider.loadDataRepresentation(forTypeIdentifier: UTType.fileURL.identifier) { [weak self] data, error in
+                Task { @MainActor in
+                    guard let self, self.request === current else { return }
+                    guard let data, let url = URL(dataRepresentation: data, relativeTo: nil) else {
+                        self.finishFailure(error ?? Self.failure("无法读取拖入的图片文件"), request: current)
+                        return
+                    }
+                    self.run(.file(url), name: url.deletingPathExtension().lastPathComponent,
+                             request: current, completion: completion)
+                }
+            }
+            return true
+        }
+        for provider in providers {
+            let types = provider.registeredTypeIdentifiers
+            let preferred = [UTType.png.identifier, UTType.tiff.identifier, UTType.jpeg.identifier, UTType.heic.identifier]
+            guard let identifier = preferred.first(where: { types.contains($0) })
+                    ?? types.first(where: { UTType($0)?.conforms(to: .image) == true }) else { continue }
+            let current = beginRequest()
+            provider.loadDataRepresentation(forTypeIdentifier: identifier) { [weak self] data, error in
+                Task { @MainActor in
+                    guard let self, self.request === current else { return }
+                    guard let data else {
+                        self.finishFailure(error ?? Self.failure("无法读取拖入的图片"), request: current)
+                        return
+                    }
+                    self.run(.encoded(data), name: "拖入图片", request: current, completion: completion)
+                }
+            }
+            return true
+        }
+        return false
+    }
+
+    private func run(_ source: Source, name: String, request current: WorkCancellation, completion: @escaping Completion) {
+        Self.queue.async { [weak self] in
+            let result: Result<[RGBAColor], Error> = Result {
+                try current.check()
+                return try autoreleasepool {
+                    let samples = try Self.prepareSamples(from: source, cancellation: current)
+                    try current.check()
+                    let colors = Self.palette(from: samples, cancellation: current)
+                    try current.check()
+                    return colors
+                }
+            }
+            Task { @MainActor in
+                guard let self, self.request === current, !current.isCancelled else { return }
+                switch result {
+                case .success(let colors):
+                    self.request = nil
+                    self.isExtracting = false
+                    completion(colors, name)
+                case .failure(let error):
+                    self.finishFailure(error, request: current)
+                }
+            }
+        }
+    }
+
+    private func finishFailure(_ error: Error, request current: WorkCancellation) {
+        guard request === current else { return }
+        request = nil
+        isExtracting = false
+        errorMessage = "\(error.localizedDescription)，原色板未改变"
+    }
+
+    nonisolated private static func failure(_ message: String) -> NSError {
+        NSError(domain: "ArtFlex.ImagePaletteExtractor", code: 1,
+                userInfo: [NSLocalizedDescriptionKey: message])
+    }
+
+    nonisolated static func prepareSamples(from source: Source, cancellation: WorkCancellation) throws -> [SIMD3<Float>] {
+        try cancellation.check()
+        let imageSource: CGImageSource?
+        let options = [kCGImageSourceShouldCache: false] as CFDictionary
+        let accessedURL: URL?
+        switch source {
+        case .file(let url):
+            accessedURL = url.startAccessingSecurityScopedResource() ? url : nil
+            imageSource = CGImageSourceCreateWithURL(url as CFURL, options)
+        case .encoded(let data):
+            accessedURL = nil
+            imageSource = CGImageSourceCreateWithData(data as CFData, options)
+        }
+        defer { accessedURL?.stopAccessingSecurityScopedResource() }
+        guard let imageSource,
+              let image = CGImageSourceCreateThumbnailAtIndex(imageSource, 0, [
+                kCGImageSourceCreateThumbnailFromImageAlways: true,
+                kCGImageSourceCreateThumbnailWithTransform: true,
+                kCGImageSourceShouldCacheImmediately: true,
+                kCGImageSourceThumbnailMaxPixelSize: 220
+              ] as CFDictionary) else {
+            throw failure("无法解码图片，文件可能损坏或格式不受支持")
+        }
+        try cancellation.check()
+        // No full-resolution fallback. The sampling buffer is bounded by 220 × 220.
+        let width = image.width
+        let height = image.height
+        guard width > 0, height > 0, width <= 220, height <= 220 else { throw failure("图片尺寸无效") }
+        let rect = CGRect(x: 0, y: 0, width: width, height: height)
         guard
             let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
             let context = CGContext(
                 data: nil,
-                width: thumbnailSize,
-                height: thumbnailSize,
+                width: width,
+                height: height,
                 bitsPerComponent: 8,
-                bytesPerRow: thumbnailSize * 4,
+                bytesPerRow: width * 4,
                 space: colorSpace,
-                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue
             )
         else {
-            throw NSError(domain: "ArtFlex.ImagePaletteExtractor", code: 2, userInfo: [
-                NSLocalizedDescriptionKey: "无法创建图片采样上下文"
-            ])
+            throw failure("无法创建图片采样上下文")
         }
-
         context.interpolationQuality = .medium
-        context.setFillColor(NSColor.white.cgColor)
-        context.fill(rect)
-
-        if let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) {
-            context.draw(cgImage, in: rect)
-        } else {
-            let rep = NSBitmapImageRep(
-                bitmapDataPlanes: nil,
-                pixelsWide: thumbnailSize,
-                pixelsHigh: thumbnailSize,
-                bitsPerSample: 8,
-                samplesPerPixel: 4,
-                hasAlpha: true,
-                isPlanar: false,
-                colorSpaceName: .deviceRGB,
-                bytesPerRow: thumbnailSize * 4,
-                bitsPerPixel: 32
-            )
-            guard let rep else {
-                throw NSError(domain: "ArtFlex.ImagePaletteExtractor", code: 3, userInfo: [
-                    NSLocalizedDescriptionKey: "无法读取图片像素"
-                ])
-            }
-            NSGraphicsContext.saveGraphicsState()
-            NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
-            image.draw(in: rect)
-            NSGraphicsContext.restoreGraphicsState()
-            guard let fallbackImage = rep.cgImage else {
-                throw NSError(domain: "ArtFlex.ImagePaletteExtractor", code: 4, userInfo: [
-                    NSLocalizedDescriptionKey: "无法生成图片位图"
-                ])
-            }
-            context.draw(fallbackImage, in: rect)
-        }
-
+        context.clear(rect)
+        context.draw(image, in: rect)
         guard let data = context.data else {
-            throw NSError(domain: "ArtFlex.ImagePaletteExtractor", code: 5, userInfo: [
-                NSLocalizedDescriptionKey: "无法访问图片采样数据"
-            ])
+            throw failure("无法访问图片采样数据")
         }
-
-        let bytes = data.bindMemory(to: UInt8.self, capacity: thumbnailSize * thumbnailSize * 4)
-        let samples = samplePixels(from: bytes, width: thumbnailSize, height: thumbnailSize)
-        guard samples.count >= 80 else {
-            throw NSError(domain: "ArtFlex.ImagePaletteExtractor", code: 6, userInfo: [
-                NSLocalizedDescriptionKey: "图片中可用颜色过少"
-            ])
-        }
-
-        let palette = kmeans(samples: samples, k: count)
-        return ColorBlocksEngine.orderPaletteForGrid(palette)
+        let bytes = data.bindMemory(to: UInt8.self, capacity: width * height * 4)
+        let samples = samplePixels(from: bytes, width: width, height: height)
+        guard !samples.isEmpty else { throw failure("图片没有可见像素") }
+        return samples
     }
 
-    private func samplePixels(from bytes: UnsafePointer<UInt8>, width: Int, height: Int) -> [SIMD3<Float>] {
+    nonisolated static func palette(
+        from samples: [SIMD3<Float>], count: Int = 25, cancellation: WorkCancellation? = nil
+    ) -> [RGBAColor] {
+        guard !samples.isEmpty, cancellation?.isCancelled != true else { return [] }
+        return ColorBlocksEngine.orderPaletteForGrid(kmeans(samples: samples, k: min(max(count, 1), 64), cancellation: cancellation))
+    }
+
+    nonisolated private static func samplePixels(from bytes: UnsafePointer<UInt8>, width: Int, height: Int) -> [SIMD3<Float>] {
         let maxSamples = 12_000
         let total = width * height
-        let step = max(1, total / maxSamples)
+        let sampleCount = min(total, maxSamples)
         var samples: [SIMD3<Float>] = []
         samples.reserveCapacity(maxSamples)
 
-        for pixelIndex in stride(from: 0, to: total, by: step) {
+        for sampleIndex in 0..<sampleCount {
+            let pixelIndex = sampleIndex * total / sampleCount
             let base = pixelIndex * 4
-            let r = Float(bytes[base]) / 255
-            let g = Float(bytes[base + 1]) / 255
-            let b = Float(bytes[base + 2]) / 255
-            let maxValue = max(r, max(g, b))
-            let minValue = min(r, min(g, b))
-            if maxValue < 0.03 || minValue > 0.97 {
-                continue
-            }
-            let hsv = ColorBlocksEngine.rgbToHsv(RGBAColor(red: r, green: g, blue: b, alpha: 1))
-            if hsv.s < 0.03 {
-                continue
-            }
+            let alpha = Float(bytes[base + 3])
+            guard alpha >= 16 else { continue }
+            let r = min(Float(bytes[base]) / alpha, 1)
+            let g = min(Float(bytes[base + 1]) / alpha, 1)
+            let b = min(Float(bytes[base + 2]) / alpha, 1)
             samples.append(SIMD3<Float>(r, g, b))
-            if samples.count >= maxSamples {
-                break
-            }
         }
 
         return samples
     }
 
-    private func initKMeansPP(samples: [SIMD3<Float>], k: Int) -> [SIMD3<Float>] {
-        var centers: [SIMD3<Float>] = [samples.randomElement() ?? SIMD3<Float>(repeating: 0.5)]
+    nonisolated private static func initKMeansPP(samples: [SIMD3<Float>], k: Int, cancellation: WorkCancellation?) -> [SIMD3<Float>] {
+        var random = SeededGeneratorRandom(seed: 0x41525450414C4554)
+        var centers: [SIMD3<Float>] = [samples.randomElement(using: &random) ?? SIMD3<Float>(repeating: 0.5)]
         var distances = Array(repeating: Float.zero, count: samples.count)
 
         while centers.count < k {
+            guard cancellation?.isCancelled != true else { return [] }
             var sum: Float = 0
             for (index, sample) in samples.enumerated() {
                 var best = Float.greatestFiniteMagnitude
@@ -134,7 +236,7 @@ final class ImagePaletteExtractor {
                 sum += best
             }
 
-            var pick = Float.random(in: 0...max(sum, 0.0001))
+            var pick = random.nextFloat(in: 0...max(sum, 0.0001))
             var pickedIndex = 0
             for (index, distance) in distances.enumerated() {
                 pick -= distance
@@ -150,11 +252,13 @@ final class ImagePaletteExtractor {
         return centers
     }
 
-    private func kmeans(samples: [SIMD3<Float>], k: Int) -> [RGBAColor] {
-        var centers = initKMeansPP(samples: samples, k: k)
+    nonisolated private static func kmeans(samples: [SIMD3<Float>], k: Int, cancellation: WorkCancellation?) -> [RGBAColor] {
+        var centers = initKMeansPP(samples: samples, k: k, cancellation: cancellation)
+        guard centers.count == k else { return [] }
         var assignments = Array(repeating: 0, count: samples.count)
 
         for _ in 0..<10 {
+            guard cancellation?.isCancelled != true else { return [] }
             for (sampleIndex, sample) in samples.enumerated() {
                 var bestIndex = 0
                 var bestDistance = Float.greatestFiniteMagnitude
@@ -179,7 +283,7 @@ final class ImagePaletteExtractor {
 
             for cluster in 0..<k {
                 if sums[cluster].w == 0 {
-                    centers[cluster] = samples.randomElement() ?? centers[cluster]
+                    centers[cluster] = samples[(cluster * 499) % samples.count]
                 } else {
                     centers[cluster] = SIMD3<Float>(
                         sums[cluster].x / sums[cluster].w,
@@ -190,14 +294,18 @@ final class ImagePaletteExtractor {
             }
         }
 
-        let colors = centers.map {
-            RGBAColor(red: $0.x, green: $0.y, blue: $0.z, alpha: 1)
+        var populations = Array(repeating: 0, count: k)
+        for assignment in assignments { populations[assignment] += 1 }
+        // Do not spend most swatches on interpolation slivers between large flat areas.
+        let minimumPopulation = max(1, samples.count / 200)
+        let colors = centers.enumerated().filter { populations[$0.offset] >= minimumPopulation }.map { _, center in
+            RGBAColor(red: center.x, green: center.y, blue: center.z, alpha: 1)
         }
 
         return dedupe(colors: colors, targetCount: k)
     }
 
-    private func dedupe(colors: [RGBAColor], targetCount: Int) -> [RGBAColor] {
+    nonisolated private static func dedupe(colors: [RGBAColor], targetCount: Int) -> [RGBAColor] {
         var output: [RGBAColor] = []
         let minimumDistanceSquared: Float = pow(18.0 / 255.0, 2)
 
@@ -213,8 +321,9 @@ final class ImagePaletteExtractor {
             }
         }
 
-        while output.count < targetCount, !colors.isEmpty {
-            output.append(colors[output.count % colors.count])
+        let distinct = output
+        while output.count < targetCount, !distinct.isEmpty {
+            output.append(distinct[output.count % distinct.count])
         }
 
         return Array(output.prefix(targetCount))
