@@ -74,6 +74,7 @@ private struct BrushV2Composite {
 }
 
 final class BrushV2Renderer {
+    private let pipelineVariants: ColorRenderPipelineVariants
     private let device: MTLDevice
     private let stampPipeline: MTLRenderPipelineState
     private let compositePipeline: MTLRenderPipelineState
@@ -84,6 +85,8 @@ final class BrushV2Renderer {
     private(set) var failureGeneration: UInt64 = 0
 
     init(device: MTLDevice) throws {
+        let pipelineVariants = ColorRenderPipelineVariants(device: device)
+        self.pipelineVariants = pipelineVariants
         self.device = device
         let source = """
         #include <metal_stdlib>
@@ -212,12 +215,12 @@ final class BrushV2Renderer {
         stamp.colorAttachments[0].isBlendingEnabled = true
         stamp.colorAttachments[0].sourceRGBBlendFactor = .one
         stamp.colorAttachments[0].destinationRGBBlendFactor = .oneMinusSourceAlpha
-        stampPipeline = try device.makeRenderPipelineState(descriptor: stamp)
+        stampPipeline = try pipelineVariants.makeState(descriptor: stamp)
         let composite = MTLRenderPipelineDescriptor()
         composite.vertexFunction = library.makeFunction(name: "fullVertex")
         composite.fragmentFunction = library.makeFunction(name: "compositeFragment")
         composite.colorAttachments[0].pixelFormat = .bgra8Unorm_srgb
-        compositePipeline = try device.makeRenderPipelineState(descriptor: composite)
+        compositePipeline = try pipelineVariants.makeState(descriptor: composite)
         let tile = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rg16Float,
             width: 256, height: 256, mipmapped: false)
         tile.storageMode = .shared
@@ -334,7 +337,7 @@ final class BrushV2Renderer {
             guard let encoder=commandBuffer.makeRenderCommandEncoder(descriptor:descriptor) else {
                 failureGeneration &+= 1; return nil
             }
-            encoder.setRenderPipelineState(stampPipeline)
+            encoder.setRenderPipelineState(pipelineVariants.state(stampPipeline, for: descriptor.colorAttachments[0].texture?.pixelFormat ?? .bgra8Unorm_srgb))
             for (texture, stamps) in batches {
                 guard let buffer=stamps.withUnsafeBytes({ device.makeBuffer(bytes:$0.baseAddress!,length:$0.count,options:.storageModeShared) }) else {
                     encoder.endEncoding(); failureGeneration &+= 1; return nil
@@ -353,7 +356,7 @@ final class BrushV2Renderer {
             failureGeneration &+= 1; return nil
         }
         do {
-            encoder.setRenderPipelineState(compositePipeline)
+            encoder.setRenderPipelineState(pipelineVariants.state(compositePipeline, for: pass.colorAttachments[0].texture?.pixelFormat ?? .bgra8Unorm_srgb))
             encoder.setScissorRect(MTLScissorRect(x:bounds.originX,y:bounds.originY,width:bounds.width,height:bounds.height))
             let shape=stroke.selectionShape
             let selectionKind: UInt32 = selection != nil ? 1 : (shape?.kind == .rectangle ? 2 : (shape?.kind == .ellipse ? 3 : 0))

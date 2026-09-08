@@ -147,7 +147,7 @@ struct AppBootstrap {
     init(
         workspaceStore: WorkspaceStore = WorkspaceStore(),
         metalContext: MetalDeviceContext? = MetalDeviceContext(),
-        layerSurfaceStore: StageOneLayerSurfaceStore = StageOneLayerSurfaceStore(),
+        layerSurfaceStore: StageOneLayerSurfaceStore = StageOneLayerSurfaceStore(usesSparseStorage: true),
         brushLibraryPersistenceController: BrushLibraryPersistenceController? = nil,
         patternLibraryPersistenceController: PatternLibraryPersistenceController? = nil,
         textureFillLibraryPersistenceController: TextureFillLibraryPersistenceController? = nil,

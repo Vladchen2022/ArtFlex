@@ -54,20 +54,21 @@ struct DocumentResourceBudgetPolicy: Sendable, Equatable {
         referenceImageBytes: Int = 0,
         referenceImageResidentBytes: Int? = nil,
         historyResidentBytes: Int = 0,
-        additionalWorkingBytes: Int = 0
+        additionalWorkingBytes: Int = 0,
+        pixelFormat: ArtPixelFormat = .rgba8
     ) -> DocumentResourceAssessment {
         let pixelCount = Self.saturatingMultiply(canvasSize.width, canvasSize.height)
         let contentBytes = Self.saturatingMultiply(
             Self.saturatingMultiply(pixelCount, max(0, paintLayerCount)),
-            4
+            pixelFormat.encoding.bytesPerPixel
         )
         let maskBytes = Self.saturatingMultiply(pixelCount, max(0, maskCount))
         let liveLayerBytes = Self.saturatingAdd(contentBytes, maskBytes)
         let savedSnapshotBytes = Self.saturatingMultiply(
             Self.saturatingMultiply(pixelCount, max(0, savedSnapshotCount)),
-            4
+            pixelFormat.encoding.bytesPerPixel
         )
-        let transientBytes = Self.saturatingMultiply(pixelCount, estimatedTransientBytesPerPixel)
+        let transientBytes = Self.saturatingMultiply(pixelCount, estimatedTransientBytesPerPixel * (pixelFormat == .rgba16Float ? 2 : 1))
         let resolvedReferenceResidentBytes = max(
             0,
             referenceImageResidentBytes ?? referenceImageBytes
@@ -88,7 +89,7 @@ struct DocumentResourceBudgetPolicy: Sendable, Equatable {
             max(0, referenceImageBytes)
         )
         let largestAssetBytes = max(
-            Self.saturatingMultiply(pixelCount, 4),
+            Self.saturatingMultiply(pixelCount, pixelFormat.encoding.bytesPerPixel),
             max(0, referenceImageBytes)
         )
         let savePeakBytes = Self.saturatingAdd(

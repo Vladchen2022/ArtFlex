@@ -784,7 +784,7 @@ extension WorkspaceViewModel {
         }
         guard
             let surfaceID = layerSurfaceStore.surfaceID(for: layerID),
-            let texture = layerSurfaceStore.texture(for: surfaceID)
+            let texture = layerSurfaceStore.readTexture(for: surfaceID)
         else {
             return nil
         }

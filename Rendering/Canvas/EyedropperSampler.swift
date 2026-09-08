@@ -117,20 +117,19 @@ final class EyedropperSampler {
 
     func snapshotVisibleRegion(_ request: VisibleRegionRequest) throws -> LayerTextureSnapshot {
         let pixels = try compositedPixels(for: request)
-        var bytes = [UInt8](repeating: 0, count: request.width * request.height * 4)
-        for (index, pixel) in pixels.enumerated() {
-            let bgra = pixel.bgra8PremultipliedBytes
-            let offset = index * 4
-            bytes[offset] = bgra.blue
-            bytes[offset + 1] = bgra.green
-            bytes[offset + 2] = bgra.red
-            bytes[offset + 3] = bgra.alpha
+        let encoding: CanvasPixelEncoding = request.samplingLayers.contains { $0.texture.pixelFormat == .rgba16Float }
+            ? .premultipliedRGBA16FloatLinear : .premultipliedBGRA8SRGB
+        var bytes = Data(count: request.width * request.height * encoding.bytesPerPixel)
+        bytes.withUnsafeMutableBytes { output in
+            for (index, pixel) in pixels.enumerated() {
+                CanvasPixelCodec.write(pixel, into: output, offset: index * encoding.bytesPerPixel, encoding: encoding)
+            }
         }
         return LayerTextureSnapshot(
             width: request.width,
             height: request.height,
-            bytesPerRow: request.width * 4,
-            pixelData: Data(bytes)
+            bytesPerRow: request.width * encoding.bytesPerPixel,
+            pixelData: bytes, encoding: encoding
         )
     }
 
@@ -296,7 +295,7 @@ final class EyedropperSampler {
         layerSurfaceStore: StageOneLayerSurfaceStore
     ) -> MTLTexture? {
         guard document.layer(layerID)?.mask?.isEnabled == true,
-              let texture = layerSurfaceStore.maskTexture(for: layerID),
+              let texture = layerSurfaceStore.readMaskTexture(for: layerID),
               originX + width <= texture.width,
               originY + height <= texture.height else {
             return nil
@@ -330,7 +329,7 @@ final class EyedropperSampler {
 
         guard
             let surfaceID = layerSurfaceStore.surfaceID(for: layerID),
-            let texture = layerSurfaceStore.texture(for: surfaceID),
+            let texture = layerSurfaceStore.readTexture(for: surfaceID),
             originX + width <= texture.width,
             originY + height <= texture.height
         else {
@@ -348,22 +347,14 @@ final class EyedropperSampler {
         clipLayerMaskSnapshot: LayerTextureSnapshot?,
         into output: inout [LinearPremultipliedColor]
     ) {
-        let bytes = [UInt8](snapshot.pixelData)
         for y in 0..<snapshot.height {
             for x in 0..<snapshot.width {
-                let byteOffset = (y * snapshot.bytesPerRow) + (x * 4)
-                guard byteOffset + 3 < bytes.count else { continue }
                 let layerMaskAlpha = layerMaskSnapshot.map { maskValue(in: $0, x: x, y: y) } ?? 1
                 let clipAlpha = clipMaskSnapshot.map { alphaValue(in: $0, x: x, y: y) } ?? 1
                 let clipLayerMaskAlpha = clipLayerMaskSnapshot.map {
                     maskValue(in: $0, x: x, y: y)
                 } ?? 1
-                let layerColor = LinearPremultipliedColor(
-                    bgraBlue: bytes[byteOffset],
-                    green: bytes[byteOffset + 1],
-                    red: bytes[byteOffset + 2],
-                    alpha: bytes[byteOffset + 3]
-                ).applyingOpacity(
+                let layerColor = snapshot.linearPixel(x: x, y: y).applyingOpacity(
                     layerOpacity * layerMaskAlpha * clipAlpha * clipLayerMaskAlpha
                 )
                 let outputIndex = (y * snapshot.width) + x
@@ -439,9 +430,7 @@ final class EyedropperSampler {
     }
 
     private func alphaValue(in snapshot: LayerTextureSnapshot, x: Int, y: Int) -> Float {
-        let offset = (y * snapshot.bytesPerRow) + (x * 4) + 3
-        guard offset >= 0, offset < snapshot.pixelData.count else { return 0 }
-        return Float(snapshot.pixelData[offset]) / 255
+        snapshot.linearPixel(x: x, y: y).alpha
     }
 
     private func maskValue(in snapshot: LayerTextureSnapshot, x: Int, y: Int) -> Float {

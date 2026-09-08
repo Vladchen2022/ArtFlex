@@ -62,6 +62,7 @@ enum ColorAdjustmentRendererInitializationError: LocalizedError {
 }
 
 final class ColorAdjustmentRenderer {
+    private let pipelineVariants: ColorRenderPipelineVariants
     private let device: MTLDevice
     private let previewPipelineState: MTLRenderPipelineState
     private let fallbackMaskTexture: MTLTexture
@@ -70,6 +71,8 @@ final class ColorAdjustmentRenderer {
     private var reusableMaterialMaskData: Data?
 
     init(device: MTLDevice) throws {
+        let pipelineVariants = ColorRenderPipelineVariants(device: device)
+        self.pipelineVariants = pipelineVariants
         self.device = device
         let source = """
         #include <metal_stdlib>
@@ -612,7 +615,7 @@ final class ColorAdjustmentRenderer {
         descriptor.colorAttachments[0].isBlendingEnabled = false
 
         do {
-            previewPipelineState = try device.makeRenderPipelineState(descriptor: descriptor)
+            previewPipelineState = try pipelineVariants.makeState(descriptor: descriptor)
         } catch {
             throw ColorAdjustmentRendererInitializationError.pipelineState(error)
         }
@@ -769,7 +772,7 @@ final class ColorAdjustmentRenderer {
             )
         )
 
-        encoder.setRenderPipelineState(previewPipelineState)
+        encoder.setRenderPipelineState(pipelineVariants.state(previewPipelineState, for: descriptor.colorAttachments[0].texture?.pixelFormat ?? .bgra8Unorm_srgb))
         encoder.setVertexBytes(
             vertices,
             length: MemoryLayout<ColorAdjustmentVertex>.stride * vertices.count,

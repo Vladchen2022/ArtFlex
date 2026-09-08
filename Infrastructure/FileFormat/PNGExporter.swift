@@ -96,6 +96,21 @@ final class PNGExporter {
         let bytesPerRow = width * bytesPerPixel
         var outputBytes = [UInt8](repeating: 0, count: bytesPerRow * height)
 
+        if snapshot.encoding == .premultipliedRGBA16FloatLinear {
+            snapshot.pixelData.withUnsafeBytes { input in
+                for y in 0..<height {
+                    for x in 0..<width {
+                        let value = CanvasPixelCodec.read(input, offset: y * snapshot.bytesPerRow + x * 8,
+                            encoding: snapshot.encoding).composited(over: .white).bgra8PremultipliedBytes
+                        let i = y * bytesPerRow + x * 4
+                        outputBytes[i] = value.red; outputBytes[i + 1] = value.green
+                        outputBytes[i + 2] = value.blue; outputBytes[i + 3] = 255
+                    }
+                }
+            }
+            return outputBytes
+        }
+
         Self.flattenedOpaqueChannelLookup.withUnsafeBytes { lookupBuffer in
             snapshot.pixelData.withUnsafeBytes { sourceBuffer in
                 outputBytes.withUnsafeMutableBytes { destinationBuffer in

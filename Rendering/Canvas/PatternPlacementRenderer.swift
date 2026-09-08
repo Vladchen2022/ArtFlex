@@ -35,10 +35,13 @@ enum PatternPlacementRendererInitializationError: LocalizedError {
 }
 
 final class PatternPlacementRenderer {
+    private let pipelineVariants: ColorRenderPipelineVariants
     private let pipelineState: MTLRenderPipelineState
     private let samplerState: MTLSamplerState
 
     init(device: MTLDevice) throws {
+        let pipelineVariants = ColorRenderPipelineVariants(device: device)
+        self.pipelineVariants = pipelineVariants
         let source = """
         #include <metal_stdlib>
         using namespace metal;
@@ -117,7 +120,7 @@ final class PatternPlacementRenderer {
         attachment.destinationAlphaBlendFactor = .oneMinusSourceAlpha
 
         do {
-            pipelineState = try device.makeRenderPipelineState(descriptor: descriptor)
+            pipelineState = try pipelineVariants.makeState(descriptor: descriptor)
         } catch {
             throw PatternPlacementRendererInitializationError.pipelineState(error)
         }
@@ -195,7 +198,7 @@ final class PatternPlacementRenderer {
             return
         }
 
-        encoder.setRenderPipelineState(pipelineState)
+        encoder.setRenderPipelineState(pipelineVariants.state(pipelineState, for: renderPassDescriptor.colorAttachments[0].texture?.pixelFormat ?? .bgra8Unorm_srgb))
         encoder.setVertexBytes(
             vertices,
             length: MemoryLayout<PatternPlacementVertex>.stride * vertices.count,

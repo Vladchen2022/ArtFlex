@@ -275,7 +275,7 @@ final class MetalStrokeEngine: StrokeEngine {
             }
         }.min() ?? flushStartNs
         let liveAlphaLockTexture = layerSurfaceStore.surfaceID(for: session.layerID)
-            .flatMap(layerSurfaceStore.texture(for:))
+            .flatMap(layerSurfaceStore.readTexture(for:))
 
         var flushedPacketCount = 0
         debugLastFlushSmudgeFullSizeCopyCount = 0
@@ -581,7 +581,7 @@ final class MetalStrokeEngine: StrokeEngine {
         if let liveSession,
            liveSession.layerID == layerID,
            let sourceSurfaceID = layerSurfaceStore.surfaceID(for: layerID),
-           let sourceTexture = layerSurfaceStore.texture(for: sourceSurfaceID),
+           let sourceTexture = layerSurfaceStore.readTexture(for: sourceSurfaceID),
            liveSession.workingTexture.width == sourceTexture.width,
            liveSession.workingTexture.height == sourceTexture.height,
            liveSession.workingTexture.pixelFormat == sourceTexture.pixelFormat {
@@ -593,7 +593,7 @@ final class MetalStrokeEngine: StrokeEngine {
 
         guard
             let sourceSurfaceID = layerSurfaceStore.surfaceID(for: layerID),
-            let sourceTexture = layerSurfaceStore.texture(for: sourceSurfaceID),
+            let sourceTexture = layerSurfaceStore.readTexture(for: sourceSurfaceID),
             let workingTexture = layerSurfaceStore.makeTexture(
                 width: sourceTexture.width,
                 height: sourceTexture.height,
@@ -778,11 +778,11 @@ final class MetalStrokeEngine: StrokeEngine {
         }
 
         debugLastCommitSmudgeFullSizeCopyCount = 0
-        var replacements: [(LayerSurfaceID, MTLTexture, MTLTexture)] = []
+        var replacements: [(LayerSurfaceID, MTLTexture, MTLTexture?, PixelRegion?)] = []
         for job in jobs {
             guard
                 let surfaceID = layerSurfaceStore.surfaceID(for: job.layerID),
-                let texture = layerSurfaceStore.texture(for: surfaceID)
+                let texture = layerSurfaceStore.readTexture(for: surfaceID)
             else {
                 throw CanvasResourceError(message: "目标图层不可用；笔触尚未提交")
             }
@@ -793,7 +793,7 @@ final class MetalStrokeEngine: StrokeEngine {
                 staged = cached
                 commitScratchTexture = nil
             } else if let created = layerSurfaceStore.makeTexture(
-                width: texture.width, height: texture.height, metal: metalContext
+                width: texture.width, height: texture.height, pixelFormat: texture.pixelFormat, metal: metalContext
             ) {
                 staged = created
             } else {
@@ -832,7 +832,11 @@ final class MetalStrokeEngine: StrokeEngine {
             guard brushRenderer.encodingFailureGeneration == failureGeneration else {
                 throw CanvasResourceError(message: "笔触资源不足，未修改原图层；笔触已保留")
             }
-            replacements.append((surfaceID, staged, texture))
+            let region = job.renderedPixelBounds.map {
+                PixelRegion(originX: $0.originX, originY: $0.originY, width: $0.width, height: $0.height)
+            }
+            replacements.append((surfaceID, staged,
+                                 layerSurfaceStore.canRecycleTexture(for: surfaceID) ? texture : nil, region))
         }
 
         commandBuffer.commit()
@@ -842,8 +846,9 @@ final class MetalStrokeEngine: StrokeEngine {
         guard commandBuffer.status == .completed else {
             throw CanvasResourceError(message: commandBuffer.error?.localizedDescription ?? "GPU 笔触提交失败；原图层未修改")
         }
-        for (surfaceID, staged, previous) in replacements {
-            layerSurfaceStore.swapTexture(for: surfaceID, with: staged)
+        for (surfaceID, staged, previous, region) in replacements {
+            layerSurfaceStore.swapTexture(for: surfaceID, with: staged, changedRegion: region)
+            layerSurfaceStore.compactTexture(for: surfaceID)
             commitScratchTexture = previous
         }
     }
@@ -861,7 +866,7 @@ final class MetalStrokeEngine: StrokeEngine {
         let selectedRecentCommitRevisions = selectedRecentCommitRevisions(in: queueSnapshot)
         guard !selectedRecentCommitRevisions.isEmpty,
               let sourceSurfaceID = layerSurfaceStore.surfaceID(for: layerID),
-              let sourceTexture = layerSurfaceStore.texture(for: sourceSurfaceID) else {
+              let sourceTexture = layerSurfaceStore.readTexture(for: sourceSurfaceID) else {
             return nil
         }
 

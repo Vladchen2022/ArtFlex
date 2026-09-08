@@ -7,6 +7,15 @@ enum ProjectArchiveCompression: String, Codable, Sendable, Equatable {
 
 enum ProjectArchivePixelFormat: String, Codable, Sendable, Equatable {
     case premultipliedBGRA8SRGB
+    case premultipliedRGBA16FloatLinear
+
+    var encoding: CanvasPixelEncoding {
+        switch self {
+        case .premultipliedBGRA8SRGB: .premultipliedBGRA8SRGB
+        case .premultipliedRGBA16FloatLinear: .premultipliedRGBA16FloatLinear
+        case .grayscale8Unorm: .grayscale8
+        }
+    }
     case grayscale8Unorm
 }
 
@@ -97,7 +106,7 @@ struct ProjectArchiveCanvasSnapshotEntry: Codable, Sendable, Equatable {
 struct ProjectArchiveV2Manifest: Codable, Sendable, Equatable {
     static let formatIdentifier = "com.vladchen.artflex.project"
     static let currentFormatVersion = 2
-    static let currentReaderVersion = 2
+    static let currentReaderVersion = 3
     static let manifestFilename = "manifest.json"
     static let projectStatePath = "project.json"
     static let previewPath = "preview.png"
@@ -109,6 +118,7 @@ struct ProjectArchiveV2Manifest: Codable, Sendable, Equatable {
     var savedAt: Date
     var projectState: ProjectArchiveAssetDescriptor
     var preview: ProjectArchiveAssetDescriptor?
+    var retainedCrop: ProjectArchiveAssetDescriptor? = nil
     var layers: [ProjectArchiveLayerDescriptor]
     var referenceImages: [ProjectArchiveReferenceImageEntry]
     var savedSnapshots: [ProjectArchiveCanvasSnapshotEntry]
@@ -120,6 +130,7 @@ struct ProjectArchiveV2Manifest: Codable, Sendable, Equatable {
         case savedAt
         case projectState
         case preview
+        case retainedCrop
         case layers
         case referenceImages
         case savedSnapshots
@@ -135,7 +146,7 @@ struct ProjectArchiveV2Manifest: Codable, Sendable, Equatable {
     ) {
         self.formatIdentifier = Self.formatIdentifier
         self.formatVersion = Self.currentFormatVersion
-        self.minimumReaderVersion = Self.currentReaderVersion
+        self.minimumReaderVersion = 2
         self.savedAt = savedAt
         self.projectState = projectState
         self.preview = preview
@@ -152,6 +163,7 @@ struct ProjectArchiveV2Manifest: Codable, Sendable, Equatable {
         savedAt = try container.decode(Date.self, forKey: .savedAt)
         projectState = try container.decode(ProjectArchiveAssetDescriptor.self, forKey: .projectState)
         preview = try container.decodeIfPresent(ProjectArchiveAssetDescriptor.self, forKey: .preview)
+        retainedCrop = try container.decodeIfPresent(ProjectArchiveAssetDescriptor.self, forKey: .retainedCrop)
         layers = try container.decode([ProjectArchiveLayerDescriptor].self, forKey: .layers)
         referenceImages = try container.decodeIfPresent(
             [ProjectArchiveReferenceImageEntry].self,
@@ -422,10 +434,14 @@ final class ProjectArchiveV2Writer {
     ) throws -> ProjectArchiveV2Manifest {
         var projectState = payload.package
         projectState.layerSnapshots = []
+        let retainedCrop = try projectState.document.cropRetention?.validated(for: projectState.document)
+        let retainedCropData = try retainedCrop.map { try Self.makeEncoder().encode($0) }
+        projectState.document.cropRetention = nil
         let projectData = try Self.makeEncoder().encode(projectState)
         let estimatedUncompressedBytes = try validate(
             payload,
-            projectStateByteCount: projectData.count
+            projectStateByteCount: projectData.count,
+            retainedCropByteCount: retainedCropData?.count ?? 0
         )
 
         let parentURL = destinationURL.deletingLastPathComponent()
@@ -486,7 +502,7 @@ final class ProjectArchiveV2Writer {
                 switch layerSnapshot.resourceKind {
                 case .content:
                     resourceSuffix = "content.bgra"
-                    pixelFormat = .premultipliedBGRA8SRGB
+                    pixelFormat = layerSnapshot.texture.encoding == .premultipliedRGBA16FloatLinear ? .premultipliedRGBA16FloatLinear : .premultipliedBGRA8SRGB
                 case .mask:
                     resourceSuffix = "mask.r8"
                     pixelFormat = .grayscale8Unorm
@@ -562,13 +578,13 @@ final class ProjectArchiveV2Writer {
                         width: savedSnapshot.pixels.width,
                         height: savedSnapshot.pixels.height,
                         bytesPerRow: savedSnapshot.pixels.bytesPerRow,
-                        pixelFormat: .premultipliedBGRA8SRGB,
+                        pixelFormat: savedSnapshot.pixels.encoding == .premultipliedRGBA16FloatLinear ? .premultipliedRGBA16FloatLinear : .premultipliedBGRA8SRGB,
                         asset: asset
                     )
                 )
             }
 
-            let manifest = ProjectArchiveV2Manifest(
+            var manifest = ProjectArchiveV2Manifest(
                 savedAt: savedAt,
                 projectState: projectAsset,
                 preview: previewAsset,
@@ -576,6 +592,15 @@ final class ProjectArchiveV2Writer {
                 referenceImages: referenceEntries,
                 savedSnapshots: savedSnapshotEntries
             )
+            if payload.package.document.colorStandard.pixelFormat == .rgba16Float || savedSnapshotEntries.contains(where: { $0.pixelFormat == .premultipliedRGBA16FloatLinear }) { manifest.minimumReaderVersion = 3 }
+            if let retainedCropData {
+                let compressed = try ZlibCodec.compress(retainedCropData)
+                let asset = makeAssetDescriptor(relativePath: "retained-crop.json.zlib", compression: .zlib,
+                    storedData: compressed, uncompressedData: retainedCropData)
+                try write(compressed, descriptor: asset, into: stagingURL)
+                manifest.retainedCrop = asset
+                manifest.minimumReaderVersion = 3
+            }
             let manifestData = try Self.makeEncoder().encode(manifest)
             guard manifestData.count <= limits.maximumManifestBytes else {
                 throw ProjectArchiveV2Error.manifestTooLarge(manifestData.count)
@@ -614,7 +639,8 @@ final class ProjectArchiveV2Writer {
     @discardableResult
     private func validate(
         _ payload: ProjectArchivePayload,
-        projectStateByteCount: Int
+        projectStateByteCount: Int,
+        retainedCropByteCount: Int = 0
     ) throws -> Int {
         guard projectStateByteCount <= limits.maximumProjectStateBytes else {
             throw ProjectArchiveV2Error.assetTooLarge(
@@ -634,6 +660,7 @@ final class ProjectArchiveV2Writer {
             totalUncompressedBytes = sum
         }
         try reserve(projectStateByteCount, path: ProjectArchiveV2Manifest.projectStatePath)
+        try reserve(retainedCropByteCount, path: "retained-crop.json.zlib")
         if let previewPNGData = payload.previewPNGData {
             guard previewPNGData.count <= ProjectArchiveV2Manifest.maximumPreviewByteCount else {
                 throw ProjectArchiveV2Error.assetTooLarge(
@@ -663,7 +690,8 @@ final class ProjectArchiveV2Writer {
 
         for layerSnapshot in layerSnapshots {
             let texture = layerSnapshot.texture
-            let bytesPerPixel = layerSnapshot.resourceKind == .mask ? 1 : 4
+            let encoding: CanvasPixelEncoding = layerSnapshot.resourceKind == .mask ? .grayscale8 : payload.package.document.colorStandard.pixelFormat.encoding
+            let bytesPerPixel = encoding.bytesPerPixel
             let (expectedBytesPerRow, rowOverflow) = texture.width.multipliedReportingOverflow(by: bytesPerPixel)
             let (expectedByteCount, countOverflow) = texture.bytesPerRow.multipliedReportingOverflow(by: texture.height)
             guard
@@ -673,6 +701,7 @@ final class ProjectArchiveV2Writer {
                 layerSnapshot.originY >= 0,
                 texture.width > 0,
                 texture.height > 0,
+                texture.encoding == encoding,
                 texture.bytesPerRow == expectedBytesPerRow,
                 texture.pixelData.count == expectedByteCount
             else {
@@ -718,7 +747,7 @@ final class ProjectArchiveV2Writer {
         for savedSnapshot in payload.savedSnapshots {
             let descriptor = savedSnapshot.descriptor
             let (expectedBytesPerRow, rowOverflow) = descriptor.canvasSize.width
-                .multipliedReportingOverflow(by: 4)
+                .multipliedReportingOverflow(by: savedSnapshot.pixels.encoding.bytesPerPixel)
             let (expectedByteCount, countOverflow) = expectedBytesPerRow
                 .multipliedReportingOverflow(by: descriptor.canvasSize.height)
             guard snapshotIDs.insert(descriptor.id).inserted else {
@@ -856,6 +885,7 @@ final class ProjectArchiveV2Reader {
         }
 
         try reserve(manifest.projectState)
+        if let retainedCrop = manifest.retainedCrop { try reserve(retainedCrop) }
         if let preview = manifest.preview {
             guard preview.uncompressedByteCount <= ProjectArchiveV2Manifest.maximumPreviewByteCount else {
                 throw ProjectArchiveV2Error.assetTooLarge(
@@ -870,7 +900,7 @@ final class ProjectArchiveV2Reader {
             from: archiveURL,
             maximumUncompressedBytes: limits.maximumProjectStateBytes
         )
-        let package: ProjectPackage
+        var package: ProjectPackage
         do {
             package = try Self.makeDecoder().decode(ProjectPackage.self, from: projectData)
         } catch {
@@ -880,9 +910,10 @@ final class ProjectArchiveV2Reader {
             throw ProjectArchiveV2Error.projectStateContainsInlineLayerSnapshots
         }
         try validateCanvasSize(package.document.canvasSize)
+        try loadRetainedCrop(into: &package, manifest: manifest, from: archiveURL)
 
         for layer in manifest.layers {
-            try validate(layer, canvasSize: package.document.canvasSize)
+            try validate(layer, canvasSize: package.document.canvasSize, encoding: package.document.colorStandard.pixelFormat.encoding)
             try reserve(layer.asset)
         }
         let expectedResourceKeys = Self.expectedLayerResourceKeys(in: package.document)
@@ -949,6 +980,7 @@ final class ProjectArchiveV2Reader {
         }
 
         try reserveUncompressedBytes(manifest.projectState.uncompressedByteCount)
+        if let retainedCrop = manifest.retainedCrop { try reserveUncompressedBytes(retainedCrop.uncompressedByteCount) }
         if let preview = manifest.preview {
             guard preview.uncompressedByteCount <= ProjectArchiveV2Manifest.maximumPreviewByteCount else {
                 throw ProjectArchiveV2Error.assetTooLarge(
@@ -968,7 +1000,7 @@ final class ProjectArchiveV2Reader {
             from: archiveURL,
             maximumUncompressedBytes: limits.maximumProjectStateBytes
         )
-        let package: ProjectPackage
+        var package: ProjectPackage
         do {
             package = try Self.makeDecoder().decode(ProjectPackage.self, from: projectData)
         } catch {
@@ -978,9 +1010,10 @@ final class ProjectArchiveV2Reader {
             throw ProjectArchiveV2Error.projectStateContainsInlineLayerSnapshots
         }
         try validateCanvasSize(package.document.canvasSize)
+        try loadRetainedCrop(into: &package, manifest: manifest, from: archiveURL)
 
         for layer in manifest.layers {
-            try validate(layer, canvasSize: package.document.canvasSize)
+            try validate(layer, canvasSize: package.document.canvasSize, encoding: package.document.colorStandard.pixelFormat.encoding)
             try reserveUncompressedBytes(layer.asset.uncompressedByteCount)
             _ = try readAsset(
                 layer.asset,
@@ -1042,6 +1075,7 @@ final class ProjectArchiveV2Reader {
         }
 
         try reserveUncompressedBytes(manifest.projectState.uncompressedByteCount)
+        if let retainedCrop = manifest.retainedCrop { try reserveUncompressedBytes(retainedCrop.uncompressedByteCount) }
         let previewPNGData: Data?
         if let preview = manifest.preview {
             guard preview.uncompressedByteCount <= ProjectArchiveV2Manifest.maximumPreviewByteCount else {
@@ -1074,11 +1108,12 @@ final class ProjectArchiveV2Reader {
             throw ProjectArchiveV2Error.projectStateContainsInlineLayerSnapshots
         }
         try validateCanvasSize(package.document.canvasSize)
+        try loadRetainedCrop(into: &package, manifest: manifest, from: archiveURL)
 
         var layerSnapshots: [LayerHistorySnapshot] = []
         layerSnapshots.reserveCapacity(manifest.layers.count)
         for layer in manifest.layers {
-            try validate(layer, canvasSize: package.document.canvasSize)
+            try validate(layer, canvasSize: package.document.canvasSize, encoding: package.document.colorStandard.pixelFormat.encoding)
             try reserveUncompressedBytes(layer.asset.uncompressedByteCount)
             let pixelData = try readAsset(
                 layer.asset,
@@ -1093,7 +1128,7 @@ final class ProjectArchiveV2Reader {
                         width: layer.width,
                         height: layer.height,
                         bytesPerRow: layer.bytesPerRow,
-                        pixelData: pixelData
+                        pixelData: pixelData, encoding: layer.pixelFormat.encoding
                     ),
                     originX: layer.originX,
                     originY: layer.originY
@@ -1159,7 +1194,7 @@ final class ProjectArchiveV2Reader {
                         width: entry.width,
                         height: entry.height,
                         bytesPerRow: entry.bytesPerRow,
-                        pixelData: pixelData
+                        pixelData: pixelData, encoding: entry.pixelFormat.encoding
                     )
                 )
             )
@@ -1247,6 +1282,12 @@ final class ProjectArchiveV2Reader {
         }
 
         try validateAsset(manifest.projectState)
+        if let retainedCrop = manifest.retainedCrop {
+            guard retainedCrop.relativePath == "retained-crop.json.zlib", manifest.minimumReaderVersion >= 3 else {
+                throw ProjectArchiveV2Error.malformedManifest("保留裁剪资源路径或版本无效")
+            }
+            try validateAsset(retainedCrop)
+        }
         if let preview = manifest.preview {
             guard preview.relativePath == ProjectArchiveV2Manifest.previewPath else {
                 throw ProjectArchiveV2Error.invalidRelativePath(preview.relativePath)
@@ -1288,6 +1329,25 @@ final class ProjectArchiveV2Reader {
         }
     }
 
+    private func loadRetainedCrop(into package: inout ProjectPackage, manifest: ProjectArchiveV2Manifest, from url: URL) throws {
+        if let asset = manifest.retainedCrop {
+            guard package.document.cropRetention == nil else { throw ProjectArchiveV2Error.malformedProjectState("重复的裁剪保留数据") }
+            let data = try readAsset(asset, from: url, maximumUncompressedBytes: limits.maximumUncompressedAssetBytes)
+            package.document.cropRetention = try Self.makeDecoder().decode(CanvasCropRetention.self, from: data)
+        }
+        if let retention = package.document.cropRetention {
+            _ = try retention.validated(for: package.document)
+            var decodedPixelBytes = 0
+            for tile in retention.tiles {
+                let bytes = tile.region.width * tile.region.height * tile.encoding.bytesPerPixel
+                let (total, overflow) = decodedPixelBytes.addingReportingOverflow(bytes)
+                guard !overflow, total <= limits.maximumTotalUncompressedBytes else { throw ProjectArchiveV2Error.totalAssetSizeTooLarge }
+                decodedPixelBytes = total
+                _ = try NonDestructiveCanvasCrop.decode(tile)
+            }
+        }
+    }
+
     private func validateCanvasSize(_ canvasSize: CanvasSize) throws {
         let (pixelCount, overflow) = canvasSize.width.multipliedReportingOverflow(
             by: canvasSize.height
@@ -1306,12 +1366,10 @@ final class ProjectArchiveV2Reader {
 
     private func validate(
         _ layer: ProjectArchiveLayerDescriptor,
-        canvasSize: CanvasSize
+        canvasSize: CanvasSize, encoding: CanvasPixelEncoding
     ) throws {
-        let bytesPerPixel = layer.resourceKind == .mask ? 1 : 4
-        let expectedPixelFormat: ProjectArchivePixelFormat = layer.resourceKind == .mask
-            ? .grayscale8Unorm
-            : .premultipliedBGRA8SRGB
+        let expectedEncoding: CanvasPixelEncoding = layer.resourceKind == .mask ? .grayscale8 : encoding
+        let bytesPerPixel = expectedEncoding.bytesPerPixel
         let (expectedBytesPerRow, rowOverflow) = layer.width.multipliedReportingOverflow(by: bytesPerPixel)
         let (expectedByteCount, countOverflow) = layer.bytesPerRow.multipliedReportingOverflow(by: layer.height)
         let (maxX, xOverflow) = layer.originX.addingReportingOverflow(layer.width)
@@ -1329,7 +1387,7 @@ final class ProjectArchiveV2Reader {
             maxY <= canvasSize.height,
             layer.bytesPerRow == expectedBytesPerRow,
             layer.asset.uncompressedByteCount == expectedByteCount,
-            layer.pixelFormat == expectedPixelFormat
+            layer.pixelFormat.encoding == expectedEncoding
         else {
             throw ProjectArchiveV2Error.invalidLayerSnapshot(layer.layerID)
         }
@@ -1337,7 +1395,7 @@ final class ProjectArchiveV2Reader {
 
     private func validate(_ entry: ProjectArchiveCanvasSnapshotEntry) throws {
         let descriptor = entry.descriptor
-        let (expectedBytesPerRow, rowOverflow) = entry.width.multipliedReportingOverflow(by: 4)
+        let (expectedBytesPerRow, rowOverflow) = entry.width.multipliedReportingOverflow(by: entry.pixelFormat.encoding.bytesPerPixel)
         let (expectedByteCount, countOverflow) = entry.bytesPerRow.multipliedReportingOverflow(by: entry.height)
         guard
             !rowOverflow,
@@ -1350,7 +1408,7 @@ final class ProjectArchiveV2Reader {
             entry.height > 0,
             entry.bytesPerRow == expectedBytesPerRow,
             entry.asset.uncompressedByteCount == expectedByteCount,
-            entry.pixelFormat == .premultipliedBGRA8SRGB
+            entry.pixelFormat != .grayscale8Unorm
         else {
             throw ProjectArchiveV2Error.invalidSavedSnapshot(descriptor.id)
         }

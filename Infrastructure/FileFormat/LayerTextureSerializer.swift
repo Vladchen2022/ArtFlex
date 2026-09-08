@@ -7,6 +7,47 @@ struct LayerTextureSnapshot: Codable, Sendable, Equatable {
     var height: Int
     var bytesPerRow: Int
     var pixelData: Data
+    var encoding: CanvasPixelEncoding
+
+    func linearPixel(x: Int, y: Int) -> LinearPremultipliedColor {
+        let offset = y * bytesPerRow + x * encoding.bytesPerPixel
+        guard x >= 0, y >= 0, x < width, y < height,
+              offset >= 0, offset + encoding.bytesPerPixel <= pixelData.count else { return .clear }
+        return pixelData.withUnsafeBytes { CanvasPixelCodec.read($0, offset: offset, encoding: encoding) }
+    }
+
+    init(width: Int, height: Int, bytesPerRow: Int, pixelData: Data, encoding: CanvasPixelEncoding? = nil) {
+        self.width = width; self.height = height; self.bytesPerRow = bytesPerRow; self.pixelData = pixelData
+        self.encoding = encoding ?? (bytesPerRow == width ? .grayscale8 : .premultipliedBGRA8SRGB)
+    }
+
+    enum CodingKeys: String, CodingKey { case width, height, bytesPerRow, pixelData, encoding }
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(width: try values.decode(Int.self, forKey: .width), height: try values.decode(Int.self, forKey: .height),
+            bytesPerRow: try values.decode(Int.self, forKey: .bytesPerRow), pixelData: try values.decode(Data.self, forKey: .pixelData),
+            encoding: try values.decodeIfPresent(CanvasPixelEncoding.self, forKey: .encoding))
+    }
+
+    func converted(to target: CanvasPixelEncoding) throws -> LayerTextureSnapshot {
+        guard width > 0, height > 0, width <= Int.max / target.bytesPerPixel,
+              width <= Int.max / encoding.bytesPerPixel, bytesPerRow >= width * encoding.bytesPerPixel,
+              height <= Int.max / bytesPerRow, pixelData.count == bytesPerRow * height else { throw CocoaError(.fileReadCorruptFile) }
+        if encoding == target { return self }
+        let rowBytes = width * target.bytesPerPixel
+        guard height <= Int.max / rowBytes else { throw CocoaError(.fileReadCorruptFile) }
+        var data = Data(count: rowBytes * height)
+        try data.withUnsafeMutableBytes { output in
+            try pixelData.withUnsafeBytes { input in
+                for y in 0..<height { for x in 0..<width {
+                    let color = CanvasPixelCodec.read(input, offset: y * bytesPerRow + x * encoding.bytesPerPixel, encoding: encoding)
+                    guard color.red.isFinite, color.green.isFinite, color.blue.isFinite, color.alpha.isFinite else { throw CocoaError(.fileReadCorruptFile) }
+                    CanvasPixelCodec.write(color, into: output, offset: y * rowBytes + x * target.bytesPerPixel, encoding: target)
+                } }
+            }
+        }
+        return .init(width: width, height: height, bytesPerRow: rowBytes, pixelData: data, encoding: target)
+    }
 }
 
 struct LayerTextureRegionSnapshotRequest {
@@ -180,6 +221,8 @@ private final class LayerSerializerStagingPool {
         switch pixelFormat {
         case .r8Unorm:
             bytesPerPixel = 1
+        case .rgba16Float:
+            bytesPerPixel = 8
         case .bgra8Unorm, .bgra8Unorm_srgb:
             bytesPerPixel = 4
         default:
@@ -250,7 +293,9 @@ final class LayerTextureSerializer {
                 originY: originY,
                 width: width,
                 height: height
-            )
+            ),
+            encoding: texture.pixelFormat == .rgba16Float ? .premultipliedRGBA16FloatLinear
+                : texture.pixelFormat == .r8Unorm ? .grayscale8 : .premultipliedBGRA8SRGB
         )
     }
 
@@ -258,6 +303,8 @@ final class LayerTextureSerializer {
         switch pixelFormat {
         case .r8Unorm:
             return 1
+        case .rgba16Float:
+            return 8
         case .bgra8Unorm, .bgra8Unorm_srgb:
             return 4
         default:
@@ -344,6 +391,36 @@ final class LayerTextureSerializer {
         guard commandBuffer.status == .completed else {
             throw commandBuffer.error ?? CocoaError(.fileWriteUnknown)
         }
+        return clones
+    }
+
+    func cloneRegionsForDeferredSnapshot(_ sources: [(MTLTexture, PixelRegion)]) throws -> [MTLTexture] {
+        guard !sources.isEmpty else { return [] }
+        var clones: [MTLTexture] = []
+        // Validate and allocate before encoding, so an allocation error cannot abandon an active encoder.
+        for (source, region) in sources {
+            guard region.originX >= 0, region.originY >= 0, region.width > 0, region.height > 0,
+                  region.originX <= source.width - region.width,
+                  region.originY <= source.height - region.height else { throw CocoaError(.fileWriteUnknown) }
+            let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: source.pixelFormat,
+                width: region.width, height: region.height, mipmapped: false)
+            descriptor.storageMode = .private
+            descriptor.usage = [.shaderRead, .shaderWrite, .renderTarget]
+            guard let clone = metalContext.device.makeTexture(descriptor: descriptor) else { throw CocoaError(.fileWriteOutOfSpace) }
+            clones.append(clone)
+        }
+        guard let command = metalContext.commandQueue.makeCommandBuffer(),
+              let encoder = command.makeBlitCommandEncoder() else { throw CocoaError(.fileWriteUnknown) }
+        for ((source, region), clone) in zip(sources, clones) {
+            encoder.copy(from: source, sourceSlice: 0, sourceLevel: 0,
+                         sourceOrigin: .init(x: region.originX, y: region.originY, z: 0),
+                         sourceSize: .init(width: region.width, height: region.height, depth: 1),
+                         to: clone, destinationSlice: 0, destinationLevel: 0, destinationOrigin: .init(x: 0, y: 0, z: 0))
+        }
+        encoder.endEncoding()
+        command.commit()
+        command.waitUntilCompleted()
+        guard command.status == .completed else { throw command.error ?? CocoaError(.fileWriteUnknown) }
         return clones
     }
 
@@ -688,6 +765,15 @@ final class LayerTextureSerializer {
         destinationX: Int,
         destinationY: Int
     ) throws {
+        let targetEncoding: CanvasPixelEncoding = texture.pixelFormat == .rgba16Float ? .premultipliedRGBA16FloatLinear
+            : texture.pixelFormat == .r8Unorm ? .grayscale8 : .premultipliedBGRA8SRGB
+        if snapshot.encoding != targetEncoding {
+            // Precision loss must be explicit, not an accidental 8-bit render target.
+            guard targetEncoding == .premultipliedRGBA16FloatLinear else { throw CocoaError(.fileReadCorruptFile) }
+            try restore(snapshot: snapshot.converted(to: targetEncoding), into: texture,
+                        destinationX: destinationX, destinationY: destinationY)
+            return
+        }
         let auditEnabled = auditStore.isRecordingEnabled
         let startedAt = auditEnabled ? DispatchTime.now().uptimeNanoseconds : 0
         defer {
@@ -772,6 +858,21 @@ final class LayerTextureSerializer {
         _ items: [(snapshot: LayerTextureSnapshot, texture: MTLTexture, destinationX: Int, destinationY: Int)]
     ) throws {
         guard !items.isEmpty else { return }
+        // Validate and normalize before creating a command encoder. Never reinterpret 8-bit
+        // bytes as half floats or enqueue a partial batch before discovering malformed input.
+        let items = try items.map { item in
+            let encoding = CanvasPixelEncoding(metalPixelFormat: item.texture.pixelFormat)
+            guard item.snapshot.encoding == encoding || encoding == .premultipliedRGBA16FloatLinear else {
+                throw CocoaError(.fileReadCorruptFile)
+            }
+            let snapshot = try item.snapshot.converted(to: encoding)
+            guard snapshot.width > 0, snapshot.height > 0,
+                  snapshot.bytesPerRow >= snapshot.width * encoding.bytesPerPixel,
+                  snapshot.pixelData.count == snapshot.bytesPerRow * snapshot.height else {
+                throw CocoaError(.fileReadCorruptFile)
+            }
+            return (snapshot: snapshot, texture: item.texture, destinationX: item.destinationX, destinationY: item.destinationY)
+        }
         if items.contains(where: {
             Self.requiresTiledTransfer(
                 width: $0.snapshot.width,
@@ -868,6 +969,15 @@ final class LayerTextureSerializer {
     }
 
     func samplePixel(texture: MTLTexture, x: Int, y: Int) throws -> RGBAColor {
+        if texture.pixelFormat == .rgba16Float {
+            let pixel = try snapshot(texture: texture, originX: x, originY: y, width: 1, height: 1)
+            return pixel.pixelData.withUnsafeBytes { bytes in
+                let color = CanvasPixelCodec.read(bytes, offset: 0, encoding: .premultipliedRGBA16FloatLinear)
+                return RGBAColor(red: LinearPremultipliedColor.linearChannelToSRGB(color.red),
+                    green: LinearPremultipliedColor.linearChannelToSRGB(color.green),
+                    blue: LinearPremultipliedColor.linearChannelToSRGB(color.blue), alpha: color.alpha)
+            }
+        }
         let auditEnabled = auditStore.isRecordingEnabled
         let startedAt = auditEnabled ? DispatchTime.now().uptimeNanoseconds : 0
         defer {
@@ -1061,7 +1171,9 @@ final class LayerTextureSerializer {
             width: width,
             height: height,
             bytesPerRow: bytesPerRow,
-            pixelData: pixelData
+            pixelData: pixelData,
+            encoding: texture.pixelFormat == .rgba16Float ? .premultipliedRGBA16FloatLinear
+                : texture.pixelFormat == .r8Unorm ? .grayscale8 : .premultipliedBGRA8SRGB
         )
     }
 

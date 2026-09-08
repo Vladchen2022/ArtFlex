@@ -54,6 +54,7 @@ final class SmudgeEngine {
             radius: radius,
             bytes: bytes,
             bytesPerRow: snapshot.bytesPerRow,
+            encoding: snapshot.encoding,
             width: snapshot.width,
             height: snapshot.height,
             selectionShape: localSelectionShape
@@ -67,6 +68,7 @@ final class SmudgeEngine {
                 opacity: min(max(Double(stroke.brush.opacity), 0), 1),
                 bytes: &bytes,
                 bytesPerRow: snapshot.bytesPerRow,
+                encoding: snapshot.encoding,
                 width: snapshot.width,
                 height: snapshot.height,
                 selectionShape: localSelectionShape
@@ -77,6 +79,7 @@ final class SmudgeEngine {
                 radius: radius,
                 bytes: bytes,
                 bytesPerRow: snapshot.bytesPerRow,
+                encoding: snapshot.encoding,
                 width: snapshot.width,
                 height: snapshot.height,
                 selectionShape: localSelectionShape
@@ -139,6 +142,7 @@ final class SmudgeEngine {
         opacity: Double,
         bytes: inout [UInt8],
         bytesPerRow: Int,
+        encoding: CanvasPixelEncoding,
         width: Int,
         height: Int,
         selectionShape: SelectionShape?
@@ -165,13 +169,8 @@ final class SmudgeEngine {
                 let alpha = opacity * falloff * Double(carriedColor.alpha)
                 guard alpha > 0 else { continue }
 
-                let index = (y * bytesPerRow) + (x * 4)
-                let destination = LinearPremultipliedColor(
-                    bgraBlue: bytes[index],
-                    green: bytes[index + 1],
-                    red: bytes[index + 2],
-                    alpha: bytes[index + 3]
-                )
+                let index = (y * bytesPerRow) + (x * encoding.bytesPerPixel)
+                let destination = bytes.withUnsafeBytes { CanvasPixelCodec.read($0, offset: index, encoding: encoding) }
 
                 let source = LinearPremultipliedColor(
                     red: carriedColor.red * Float(alpha),
@@ -181,11 +180,7 @@ final class SmudgeEngine {
                 )
 
                 let composited = source.composited(over: destination)
-                let output = composited.bgra8PremultipliedBytes
-                bytes[index] = output.blue
-                bytes[index + 1] = output.green
-                bytes[index + 2] = output.red
-                bytes[index + 3] = output.alpha
+                bytes.withUnsafeMutableBytes { CanvasPixelCodec.write(composited, into: $0, offset: index, encoding: encoding) }
             }
         }
     }
@@ -195,6 +190,7 @@ final class SmudgeEngine {
         radius: Double,
         bytes: [UInt8],
         bytesPerRow: Int,
+        encoding: CanvasPixelEncoding,
         width: Int,
         height: Int,
         selectionShape: SelectionShape?
@@ -219,13 +215,8 @@ final class SmudgeEngine {
                 let distance = sqrt((dx * dx) + (dy * dy))
                 guard distance <= radius else { continue }
 
-                let index = (y * bytesPerRow) + (x * 4)
-                let pixel = LinearPremultipliedColor(
-                    bgraBlue: bytes[index],
-                    green: bytes[index + 1],
-                    red: bytes[index + 2],
-                    alpha: bytes[index + 3]
-                )
+                let index = (y * bytesPerRow) + (x * encoding.bytesPerPixel)
+                let pixel = bytes.withUnsafeBytes { CanvasPixelCodec.read($0, offset: index, encoding: encoding) }
 
                 accumulated.red += pixel.red
                 accumulated.green += pixel.green

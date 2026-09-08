@@ -51,7 +51,7 @@ final class BucketFillEngine: @unchecked Sendable {
     ) throws -> BucketFillPlan? {
         guard
             let surfaceID = layerSurfaceStore.surfaceID(for: layerID),
-            let texture = layerSurfaceStore.texture(for: surfaceID)
+            let texture = layerSurfaceStore.readTexture(for: surfaceID)
         else {
             return nil
         }
@@ -81,7 +81,7 @@ final class BucketFillEngine: @unchecked Sendable {
     ) throws -> BucketFillPlan? {
         try cancellation?.check()
 
-        if settings.closeGapPixels > 0 || settings.expandPixels > 0 {
+        if texture.pixelFormat == .rgba16Float || settings.closeGapPixels > 0 || settings.expandPixels > 0 {
             return try makeRefinedFillPlan(
                 layerID: layerID, destination: texture, reference: texture,
                 point: point, color: color, alphaLock: alphaLockEnabled,
@@ -476,7 +476,7 @@ final class BucketFillEngine: @unchecked Sendable {
         guard destinationTexture.width == referenceTexture.width,
               destinationTexture.height == referenceTexture.height else { return nil }
 
-        if settings.closeGapPixels > 0 || settings.expandPixels > 0 {
+        if destinationTexture.pixelFormat == .rgba16Float || referenceTexture.pixelFormat == .rgba16Float || settings.closeGapPixels > 0 || settings.expandPixels > 0 {
             return try makeRefinedFillPlan(
                 layerID: layerID, destination: destinationTexture, reference: referenceTexture,
                 point: point, color: color, alphaLock: alphaLockEnabled,
@@ -583,7 +583,7 @@ final class BucketFillEngine: @unchecked Sendable {
             for: selection, canvasSize: size, originX: 0, originY: 0, width: width, height: height
         )
         if let selectionBytes, selectionBytes[sy * width + sx] == 0 { return nil }
-        let snapshot = try serializer.snapshot(texture: reference)
+        let snapshot = try serializer.snapshot(texture: reference).converted(to: .premultipliedBGRA8SRGB)
         var walls = try snapshot.pixelData.withUnsafeBytes { raw -> [UInt8] in
             let bytes = raw.bindMemory(to: UInt8.self)
             func pixel(_ x: Int, _ y: Int) -> PremultipliedSRGBAPixel {
@@ -650,6 +650,26 @@ final class BucketFillEngine: @unchecked Sendable {
                 let maskIndex = (y + y0) * width + x + x0
                 let amount = UInt8((Int(coverage[maskIndex]) * Int(selectionBytes?[maskIndex] ?? 255) + 127) / 255)
                 guard amount > 0 else { continue }
+                if before.encoding == .premultipliedRGBA16FloatLinear {
+                    let old = before.linearPixel(x: x, y: y)
+                    if alphaLock && old.alpha == 0 { continue }
+                    let alpha = alphaLock ? old.alpha : color.alpha
+                    let replacement = LinearPremultipliedColor(
+                        red: LinearPremultipliedColor.srgbChannelToLinear(color.red) * alpha,
+                        green: LinearPremultipliedColor.srgbChannelToLinear(color.green) * alpha,
+                        blue: LinearPremultipliedColor.srgbChannelToLinear(color.blue) * alpha, alpha: alpha)
+                    let t = Float(amount) / 255
+                    let next = LinearPremultipliedColor(red: old.red + (replacement.red - old.red) * t,
+                        green: old.green + (replacement.green - old.green) * t,
+                        blue: old.blue + (replacement.blue - old.blue) * t,
+                        alpha: old.alpha + (replacement.alpha - old.alpha) * t)
+                    if next != old {
+                        output.withUnsafeMutableBytes { CanvasPixelCodec.write(next, into: $0,
+                            offset: y * before.bytesPerRow + x * before.encoding.bytesPerPixel, encoding: before.encoding) }
+                        changed = true
+                    }
+                    continue
+                }
                 let i = y * before.bytesPerRow + x * 4
                 let old = PixelBGRA(blue: output[i], green: output[i + 1], red: output[i + 2], alpha: output[i + 3])
                 if alphaLock && old.alpha == 0 { continue }
@@ -665,7 +685,7 @@ final class BucketFillEngine: @unchecked Sendable {
         return BucketFillPlan(
             layerID: layerID,
             historySnapshot: .init(layerID: layerID, texture: before, originX: x0, originY: y0),
-            restoreSnapshot: .init(width: w, height: h, bytesPerRow: before.bytesPerRow, pixelData: Data(output)),
+            restoreSnapshot: .init(width: w, height: h, bytesPerRow: before.bytesPerRow, pixelData: Data(output), encoding: before.encoding),
             destinationX: x0, destinationY: y0
         )
     }

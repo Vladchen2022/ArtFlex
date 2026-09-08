@@ -29,9 +29,12 @@ enum VisibleDeltaRendererInitializationError: LocalizedError {
 }
 
 final class VisibleDeltaRenderer {
+    private let pipelineVariants: ColorRenderPipelineVariants
     private let pipelineState: MTLRenderPipelineState
 
     init(device: MTLDevice) throws {
+        let pipelineVariants = ColorRenderPipelineVariants(device: device)
+        self.pipelineVariants = pipelineVariants
         let source = """
         #include <metal_stdlib>
         using namespace metal;
@@ -112,7 +115,7 @@ final class VisibleDeltaRenderer {
         descriptor.colorAttachments[0].isBlendingEnabled = false
 
         do {
-            pipelineState = try device.makeRenderPipelineState(descriptor: descriptor)
+            pipelineState = try pipelineVariants.makeState(descriptor: descriptor)
         } catch {
             throw VisibleDeltaRendererInitializationError.pipelineState(error)
         }
@@ -141,7 +144,7 @@ final class VisibleDeltaRenderer {
             )
         )
 
-        encoder.setRenderPipelineState(pipelineState)
+        encoder.setRenderPipelineState(pipelineVariants.state(pipelineState, for: renderPassDescriptor.colorAttachments[0].texture?.pixelFormat ?? .bgra8Unorm_srgb))
         encoder.setVertexBytes(
             vertices,
             length: MemoryLayout<VisibleDeltaVertex>.stride * vertices.count,

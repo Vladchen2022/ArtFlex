@@ -38,11 +38,14 @@ private struct SendableCurveAdjustmentCompletion: @unchecked Sendable {
 }
 
 final class CurveAdjustmentRenderer {
+    private let pipelineVariants: ColorRenderPipelineVariants
     private let device: MTLDevice
     private let pipelineState: MTLRenderPipelineState
     private let fallbackMaskTexture: MTLTexture
 
     init(device: MTLDevice) throws {
+        let pipelineVariants = ColorRenderPipelineVariants(device: device)
+        self.pipelineVariants = pipelineVariants
         self.device = device
 
         let shaderSource = """
@@ -194,7 +197,7 @@ final class CurveAdjustmentRenderer {
         descriptor.colorAttachments[0].pixelFormat = .bgra8Unorm_srgb
 
         do {
-            pipelineState = try device.makeRenderPipelineState(descriptor: descriptor)
+            pipelineState = try pipelineVariants.makeState(descriptor: descriptor)
         } catch {
             throw CurveAdjustmentRendererInitializationError.pipelineState(error)
         }
@@ -290,7 +293,7 @@ final class CurveAdjustmentRenderer {
         descriptor.colorAttachments[0].storeAction = .store
 
         guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: descriptor) else { return false }
-        encoder.setRenderPipelineState(pipelineState)
+        encoder.setRenderPipelineState(pipelineVariants.state(pipelineState, for: descriptor.colorAttachments[0].texture?.pixelFormat ?? .bgra8Unorm_srgb))
         if let effectRegion {
             encoder.setScissorRect(MTLScissorRect(
                 x: effectRegion.origin.x,

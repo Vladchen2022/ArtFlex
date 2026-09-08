@@ -2319,6 +2319,30 @@ struct WorkspaceViewModelPixelHistoryTests {
         #expect(try harness.color(atX: 18, y: 18, layerID: upperLayerID).blue > 0.8)
     }
 
+    @Test @MainActor
+    func nonDestructiveCropExpandsSavedOutsidePixelsWithoutLosingNewPainting() throws {
+        let harness = try PixelHistoryHarness(canvasSize: .init(width: 64, height: 64))
+        let layerID = harness.viewModel.workspace.document.activeLayerID
+        try fillOpaqueRect(in: harness, layerID: layerID, originX: 4, originY: 4, width: 4, height: 4,
+                           color: .init(red: 1, green: 0, blue: 0, alpha: 1))
+        harness.viewModel.selectTool(.canvasCrop)
+        harness.viewModel.beginCanvasCrop(at: .init(x: 16, y: 16), handleRadius: 1)
+        harness.viewModel.endCanvasCrop(at: .init(x: 48, y: 48))
+        harness.viewModel.applyCanvasCrop()
+        #expect(harness.viewModel.workspace.document.cropRetention?.tiles.isEmpty == false)
+        try fillOpaqueRect(in: harness, layerID: layerID, originX: 8, originY: 8, width: 4, height: 4,
+                           color: .init(red: 0, green: 0, blue: 1, alpha: 1))
+        harness.viewModel.expandRetainedCanvas()
+        #expect(harness.viewModel.workspace.document.canvasSize == .init(width: 64, height: 64))
+        #expect(try harness.color(atX: 5, y: 5, layerID: layerID).red > 0.99)
+        #expect(try harness.color(atX: 25, y: 25, layerID: layerID).blue > 0.99)
+        harness.viewModel.undo()
+        #expect(harness.viewModel.workspace.document.canvasSize == .init(width: 32, height: 32))
+        harness.viewModel.redo()
+        #expect(try harness.color(atX: 5, y: 5, layerID: layerID).red > 0.99)
+        #expect(try harness.color(atX: 25, y: 25, layerID: layerID).blue > 0.99)
+    }
+
     @Test
     @MainActor
     func canvasCropCanExpandEveryEdgeWithTransparentPaddingAndUndoRedo() throws {

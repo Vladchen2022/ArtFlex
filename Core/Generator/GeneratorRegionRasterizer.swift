@@ -17,9 +17,10 @@ enum GeneratorRegionRasterizer {
         height: Int,
         bytesPerRow: Int,
         bytes: inout [UInt8],
-        seed: UInt64? = nil
+        seed: UInt64? = nil,
+        encoding: CanvasPixelEncoding = .premultipliedBGRA8SRGB
     ) -> GeneratorRasterSummary {
-        guard width > 0, height > 0, bytesPerRow >= width * 4, bytes.count >= bytesPerRow * height else {
+        guard width > 0, height > 0, bytesPerRow >= width * encoding.bytesPerPixel, bytes.count >= bytesPerRow * height else {
             return .init(primitiveCount: 0, touchedPixelCount: 0)
         }
 
@@ -37,6 +38,7 @@ enum GeneratorRegionRasterizer {
         )
         var context = RasterContext(
             bytes: bytes,
+            encoding: encoding,
             width: width,
             height: height,
             bytesPerRow: bytesPerRow,
@@ -367,6 +369,7 @@ enum GeneratorRegionRasterizer {
 
 private struct RasterContext {
     var bytes: [UInt8]
+    var encoding: CanvasPixelEncoding
     var width: Int
     var height: Int
     var bytesPerRow: Int
@@ -460,13 +463,8 @@ private struct RasterContext {
     private mutating func blendPixel(x: Int, y: Int, opacity localOpacity: Float, colorScale: Float) {
         let alpha = min(max(localOpacity * opacity * baseColor.alpha, 0), 1)
         guard alpha > 0.001 else { return }
-        let index = y * bytesPerRow + x * 4
-        let destination = LinearPremultipliedColor(
-            bgraBlue: bytes[index],
-            green: bytes[index + 1],
-            red: bytes[index + 2],
-            alpha: bytes[index + 3]
-        )
+        let index = y * bytesPerRow + x * encoding.bytesPerPixel
+        let destination = bytes.withUnsafeBytes { CanvasPixelCodec.read($0, offset: index, encoding: encoding) }
         let adjusted = RGBAColor(
             red: min(max(baseColor.red * colorScale, 0), 1),
             green: min(max(baseColor.green * colorScale, 0), 1),
@@ -474,11 +472,8 @@ private struct RasterContext {
             alpha: alpha
         )
         let source = LinearPremultipliedColor(srgbPremultiplied: adjusted.premultiplied)
-        let output = source.composited(over: destination).bgra8PremultipliedBytes
-        bytes[index] = output.blue
-        bytes[index + 1] = output.green
-        bytes[index + 2] = output.red
-        bytes[index + 3] = output.alpha
+        let output = source.composited(over: destination)
+        bytes.withUnsafeMutableBytes { CanvasPixelCodec.write(output, into: $0, offset: index, encoding: encoding) }
         touchedPixels.insert(y * width + x)
     }
 

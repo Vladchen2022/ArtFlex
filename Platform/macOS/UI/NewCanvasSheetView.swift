@@ -41,6 +41,7 @@ struct NewCanvasSheetView: View {
     @State private var widthText = ""
     @State private var heightText = ""
     @State private var resolutionText = "\(defaultResolution)"
+    @State private var pixelFormat: ArtPixelFormat = .rgba8
 
     var body: some View {
         HStack(spacing: 0) {
@@ -135,6 +136,14 @@ struct NewCanvasSheetView: View {
 
             previewPanel
 
+            Picker("颜色精度", selection: $pixelFormat) {
+                Text("8 位 · 标准").tag(ArtPixelFormat.rgba8)
+                Text("16 位浮点 · 柔和渐变").tag(ArtPixelFormat.rgba16Float)
+            }
+            .foregroundStyle(.white)
+            Text(pixelFormat == .rgba16Float ? "图层像素占用约为 8 位的两倍；可导出 16 位 PNG / TIFF。" : "适合常规绘画，保持现有工程的颜色行为。")
+                .font(.caption).foregroundStyle(.white.opacity(0.65))
+
             Spacer(minLength: 0)
 
             HStack {
@@ -156,7 +165,8 @@ struct NewCanvasSheetView: View {
                 Button("创建") {
                     viewModel.createNewCanvas(
                         canvasSize: CanvasSize(width: currentWidth, height: currentHeight),
-                        resolutionDPI: currentResolution
+                        resolutionDPI: currentResolution,
+                        pixelFormat: pixelFormat
                     )
                 }
                 .buttonStyle(.plain)

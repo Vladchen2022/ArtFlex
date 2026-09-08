@@ -6,11 +6,55 @@ private enum LayerSurfaceContentState {
     case unknown
 }
 
+private final class LayerTextureResource {
+    let dense: MTLTexture?
+    let sparse: SparseLayerTexture?
+    var texture: MTLTexture { sparse?.texture ?? dense! }
+    init(_ texture: MTLTexture) { dense = texture; sparse = nil }
+    init(_ sparse: SparseLayerTexture) { self.sparse = sparse; dense = nil }
+}
+
 final class StageOneLayerSurfaceStore {
     private var surfacesByLayerID: [LayerID: LayerSurfaceRecord] = [:]
-    private var texturesBySurfaceID: [LayerSurfaceID: MTLTexture] = [:]
+    private var texturesBySurfaceID: [LayerSurfaceID: LayerTextureResource] = [:]
     private var contentStateByLayerID: [LayerID: LayerSurfaceContentState] = [:]
-    private var maskTexturesByLayerID: [LayerID: MTLTexture] = [:]
+    private var maskTexturesByLayerID: [LayerID: LayerTextureResource] = [:]
+    private var metalContext: MetalDeviceContext?
+    private var changes: [LayerResourceKey: LayerChangeJournal] = [:]
+    private var usesSparseStorage: Bool
+    private var sparseScanner: SparseTileScanner?
+    private var sparseScanCandidates: [LayerSurfaceID: Set<TileCoordinate>] = [:]
+    private(set) var contentPixelFormat: MTLPixelFormat = .bgra8Unorm_srgb
+    private(set) var lastResourceError: String?
+
+    init(usesSparseStorage: Bool = false) { self.usesSparseStorage = usesSparseStorage }
+
+    var allocatedPixelBytes: Int {
+        texturesBySurfaceID.values.reduce(0) { total, resource in
+            total + (resource.sparse?.allocatedBytes ?? resource.texture.allocatedSize)
+        } + maskTexturesByLayerID.values.reduce(0) { $0 + $1.texture.allocatedSize }
+    }
+
+    func sharedCopy() -> StageOneLayerSurfaceStore {
+        let result = StageOneLayerSurfaceStore(usesSparseStorage: usesSparseStorage)
+        result.adoptContents(of: self)
+        return result
+    }
+
+    func changeJournal(for key: LayerResourceKey) -> LayerChangeJournal {
+        if let journal = changes[key] { return journal }
+        let journal = LayerChangeJournal()
+        changes[key] = journal
+        return journal
+    }
+
+    private func recordChange(for key: LayerResourceKey, region: PixelRegion? = nil) {
+        var journal = changeJournal(for: key)
+        if let region, let record = surfacesByLayerID[key.layerID] {
+            journal.mark(region, canvasSize: .init(width: record.descriptor.width, height: record.descriptor.height))
+        } else { journal.markAll() }
+        changes[key] = journal
+    }
 #if DEBUG
     var debugPreventsTextureAllocation = false
 
@@ -21,7 +65,8 @@ final class StageOneLayerSurfaceStore {
 #endif
 
     func surfaceRecords(for document: ArtDocument) -> [LayerSurfaceRecord] {
-        document.layers.compactMap { layer in
+        contentPixelFormat = document.colorStandard.pixelFormat.encoding.metalPixelFormat
+        return document.layers.compactMap { layer in
             guard layer.isPaintLayer else { return nil }
             let effectiveVisibility = document.isLayerEffectivelyVisible(layer.id)
             let effectiveOpacity = document.effectiveLayerOpacity(layer.id)
@@ -57,7 +102,8 @@ final class StageOneLayerSurfaceStore {
                 clipTargetLayerID: layer.clipTargetLayerID,
                 descriptor: .stageOneCanvas(
                     width: document.canvasSize.width,
-                    height: document.canvasSize.height
+                    height: document.canvasSize.height,
+                    format: document.colorStandard.pixelFormat
                 )
             )
 
@@ -70,18 +116,28 @@ final class StageOneLayerSurfaceStore {
         for document: ArtDocument,
         metal: MetalDeviceContext
     ) {
+        metalContext = metal
         let records = surfaceRecords(for: document)
 
         for record in records where texturesBySurfaceID[record.surfaceID] == nil {
 #if DEBUG
             if debugPreventsTextureAllocation { continue }
 #endif
+            if usesSparseStorage, record.descriptor.width * record.descriptor.height >= 1024 * 1024,
+               let sparse = SparseLayerTexture(
+                size: .init(width: record.descriptor.width, height: record.descriptor.height),
+                format: contentPixelFormat, metal: metal
+            ) {
+                texturesBySurfaceID[record.surfaceID] = LayerTextureResource(sparse)
+                contentStateByLayerID[record.layerID] = .knownTransparent
+                continue
+            }
             guard let texture = makeTexture(for: record, metal: metal) else {
                 continue
             }
 
             clearTexture(texture, metal: metal)
-            texturesBySurfaceID[record.surfaceID] = texture
+            texturesBySurfaceID[record.surfaceID] = LayerTextureResource(texture)
             contentStateByLayerID[record.layerID] = .knownTransparent
         }
 
@@ -97,7 +153,7 @@ final class StageOneLayerSurfaceStore {
                 continue
             }
             clearTexture(texture, value: 1, metal: metal)
-            maskTexturesByLayerID[layer.id] = texture
+            maskTexturesByLayerID[layer.id] = LayerTextureResource(texture)
         }
 
         let validLayerIDs = Set(document.layers.filter(\.isPaintLayer).map(\.id))
@@ -106,10 +162,13 @@ final class StageOneLayerSurfaceStore {
         for layerID in removedLayerIDs {
             if let surfaceID = surfacesByLayerID[layerID]?.surfaceID {
                 texturesBySurfaceID.removeValue(forKey: surfaceID)
+                sparseScanCandidates.removeValue(forKey: surfaceID)
             }
             surfacesByLayerID.removeValue(forKey: layerID)
             contentStateByLayerID.removeValue(forKey: layerID)
             maskTexturesByLayerID.removeValue(forKey: layerID)
+            changes.removeValue(forKey: .init(layerID: layerID, kind: .content))
+            changes.removeValue(forKey: .init(layerID: layerID, kind: .mask))
         }
 
         let unmaskedLayerIDs = maskTexturesByLayerID.keys.filter { layerID in
@@ -122,16 +181,104 @@ final class StageOneLayerSurfaceStore {
     }
 
     func texture(for surfaceID: LayerSurfaceID) -> MTLTexture? {
-        texturesBySurfaceID[surfaceID]
+        writableTexture(for: surfaceID, region: nil)
+    }
+
+    /// Sampling, serialization and GPU-copy sources must use this accessor.
+    func readTexture(for surfaceID: LayerSurfaceID) -> MTLTexture? {
+        texturesBySurfaceID[surfaceID]?.texture
+    }
+
+    /// An old surface may become reusable scratch only when no branch owns it.
+    func canRecycleTexture(for surfaceID: LayerSurfaceID) -> Bool {
+        guard texturesBySurfaceID[surfaceID]?.sparse == nil else { return false }
+        return isKnownUniquelyReferenced(&texturesBySurfaceID[surfaceID])
+    }
+
+    /// Converts a completed result, never a still-writable scratch texture. Failure keeps the
+    /// exact dense result; an optimization must not reject a successfully rendered stroke.
+    func compactTexture(for surfaceID: LayerSurfaceID) {
+        guard usesSparseStorage, let metal = metalContext,
+              SparseLayerTexture.isSupported(by: metal.device),
+              let resource = texturesBySurfaceID[surfaceID],
+              resource.texture.width * resource.texture.height >= 1024 * 1024 else { return }
+        let texture = resource.texture
+        guard texture.pixelFormat == .bgra8Unorm_srgb || texture.pixelFormat == .rgba16Float else { return }
+        do {
+            if sparseScanner == nil { sparseScanner = try SparseTileScanner(metal: metal) }
+            let tile = metal.device.sparseTileSize(with: .type2D, pixelFormat: texture.pixelFormat, sampleCount: 1)
+            let occupied = try sparseScanner!.occupiedTiles(in: texture, tileSize: tile,
+                candidates: sparseScanCandidates.removeValue(forKey: surfaceID))
+            let denseBytes = texture.width * texture.height * (texture.pixelFormat == .rgba16Float ? 8 : 4)
+            guard max(occupied.count, 1) * metal.device.sparseTileSizeInBytes < denseBytes * 3 / 4 else { return }
+            if let sparse = resource.sparse, sparse.mappedTiles == occupied { return }
+            let sparse = try SparseLayerTexture.copying(texture, tiles: occupied, metal: metal)
+            texturesBySurfaceID[surfaceID] = LayerTextureResource(sparse)
+        } catch { lastResourceError = error.localizedDescription }
+    }
+
+    func readMaskTexture(for layerID: LayerID) -> MTLTexture? {
+        maskTexturesByLayerID[layerID]?.texture
+    }
+
+    func writableTexture(for surfaceID: LayerSurfaceID, region: PixelRegion?) -> MTLTexture? {
+        guard texturesBySurfaceID[surfaceID] != nil else { return nil }
+        sparseScanCandidates.removeValue(forKey: surfaceID)
+        do {
+            if !isKnownUniquelyReferenced(&texturesBySurfaceID[surfaceID]) {
+                texturesBySurfaceID[surfaceID] = try cloneResource(texturesBySurfaceID[surfaceID]!)
+            }
+            let resource = texturesBySurfaceID[surfaceID]!
+            let bounds = region ?? PixelRegion(originX: 0, originY: 0,
+                                                width: resource.texture.width, height: resource.texture.height)
+            try resource.sparse?.prepareForWrite(in: bounds)
+            if let layerID = surfacesByLayerID.first(where: { $0.value.surfaceID == surfaceID })?.key {
+                recordChange(for: .init(layerID: layerID, kind: .content), region: region)
+            }
+            return resource.texture
+        } catch {
+            lastResourceError = error.localizedDescription
+            return nil
+        }
+    }
+
+    private func cloneResource(_ resource: LayerTextureResource) throws -> LayerTextureResource {
+        if let sparse = resource.sparse { return LayerTextureResource(try sparse.cloned()) }
+        guard let metal = metalContext,
+              let clone = makeTexture(width: resource.texture.width, height: resource.texture.height,
+                                      pixelFormat: resource.texture.pixelFormat, metal: metal),
+              copyTextures([(resource.texture, clone)], metal: metal) else {
+            throw CanvasResourceError(message: "无法分离共享图层；其他方案及原像素未修改")
+        }
+        return LayerTextureResource(clone)
     }
 
     func swapTexture(
         for surfaceID: LayerSurfaceID,
-        with texture: MTLTexture
+        with texture: MTLTexture,
+        changedRegion: PixelRegion? = nil
     ) {
-        texturesBySurfaceID[surfaceID] = texture
+        sparseScanCandidates.removeValue(forKey: surfaceID)
+        if let old = texturesBySurfaceID[surfaceID]?.sparse,
+           let changedRegion, let metal = metalContext,
+           old.texture.pixelFormat == texture.pixelFormat,
+           old.texture.width == texture.width, old.texture.height == texture.height {
+            let tile = metal.device.sparseTileSize(with: .type2D, pixelFormat: texture.pixelFormat, sampleCount: 1)
+            let bounds = PixelRegion(originX: 0, originY: 0, width: texture.width, height: texture.height)
+            var candidates = old.mappedTiles
+            if let area = changedRegion.intersection(with: bounds) {
+                for y in (area.originY / tile.height)...((area.maxY - 1) / tile.height) {
+                    for x in (area.originX / tile.width)...((area.maxX - 1) / tile.width) {
+                        candidates.insert(.init(x: x, y: y))
+                    }
+                }
+            }
+            sparseScanCandidates[surfaceID] = candidates
+        }
+        texturesBySurfaceID[surfaceID] = LayerTextureResource(texture)
         if let layerID = surfacesByLayerID.first(where: { $0.value.surfaceID == surfaceID })?.key {
-            markContentUnknown(for: layerID)
+            contentStateByLayerID[layerID] = .unknown
+            recordChange(for: .init(layerID: layerID, kind: .content), region: changedRegion)
         }
     }
 
@@ -140,11 +287,22 @@ final class StageOneLayerSurfaceStore {
     }
 
     func maskTexture(for layerID: LayerID) -> MTLTexture? {
-        maskTexturesByLayerID[layerID]
+        guard maskTexturesByLayerID[layerID] != nil else { return nil }
+        do {
+            if !isKnownUniquelyReferenced(&maskTexturesByLayerID[layerID]) {
+                maskTexturesByLayerID[layerID] = try cloneResource(maskTexturesByLayerID[layerID]!)
+            }
+            recordChange(for: .init(layerID: layerID, kind: .mask))
+            return maskTexturesByLayerID[layerID]?.texture
+        } catch {
+            lastResourceError = error.localizedDescription
+            return nil
+        }
     }
 
     func setMaskTexture(_ texture: MTLTexture?, for layerID: LayerID) {
-        maskTexturesByLayerID[layerID] = texture
+        maskTexturesByLayerID[layerID] = texture.map(LayerTextureResource.init)
+        recordChange(for: .init(layerID: layerID, kind: .mask))
     }
 
     func removeMaskTexture(for layerID: LayerID) {
@@ -152,7 +310,7 @@ final class StageOneLayerSurfaceStore {
     }
 
     func fillMaskTexture(for layerID: LayerID, value: Float, metal: MetalDeviceContext) {
-        guard let texture = maskTexturesByLayerID[layerID] else { return }
+        guard let texture = maskTexture(for: layerID) else { return }
         clearTexture(texture, value: Double(min(max(value, 0), 1)), metal: metal)
     }
 
@@ -160,7 +318,7 @@ final class StageOneLayerSurfaceStore {
         guard
             let sourceSurfaceID = surfaceID(for: sourceLayerID),
             let destinationSurfaceID = surfaceID(for: destinationLayerID),
-            let sourceTexture = texture(for: sourceSurfaceID),
+            let sourceTexture = readTexture(for: sourceSurfaceID),
             let destinationTexture = texture(for: destinationSurfaceID)
         else {
             return
@@ -176,8 +334,8 @@ final class StageOneLayerSurfaceStore {
     }
 
     func copyMaskTexture(from sourceLayerID: LayerID, to destinationLayerID: LayerID, metal: MetalDeviceContext) {
-        guard let sourceTexture = maskTexturesByLayerID[sourceLayerID],
-              let destinationTexture = maskTexturesByLayerID[destinationLayerID] else {
+        guard let sourceTexture = readMaskTexture(for: sourceLayerID),
+              let destinationTexture = maskTexture(for: destinationLayerID) else {
             return
         }
         copyTexture(
@@ -345,14 +503,21 @@ final class StageOneLayerSurfaceStore {
         texturesBySurfaceID.removeAll()
         contentStateByLayerID.removeAll()
         maskTexturesByLayerID.removeAll()
+        changes.removeAll()
+        sparseScanCandidates.removeAll()
     }
 
     /// Adopts already validated resources without allocating a second set of surfaces.
     func adoptContents(of prepared: StageOneLayerSurfaceStore) {
+        sparseScanCandidates.removeAll()
         surfacesByLayerID = prepared.surfacesByLayerID
         texturesBySurfaceID = prepared.texturesBySurfaceID
         contentStateByLayerID = prepared.contentStateByLayerID
         maskTexturesByLayerID = prepared.maskTexturesByLayerID
+        metalContext = prepared.metalContext
+        contentPixelFormat = prepared.contentPixelFormat
+        changes = prepared.changes
+        usesSparseStorage = usesSparseStorage || prepared.usesSparseStorage
     }
 
     func isKnownTransparent(layerID: LayerID) -> Bool {
@@ -363,26 +528,28 @@ final class StageOneLayerSurfaceStore {
         contentStateByLayerID[layerID] = .knownTransparent
     }
 
-    func markContentUnknown(for layerID: LayerID) {
+    func markContentUnknown(for layerID: LayerID, recordsChange: Bool = true) {
         contentStateByLayerID[layerID] = .unknown
+        if recordsChange { recordChange(for: .init(layerID: layerID, kind: .content)) }
     }
 
-    func markContentUnknown<S: Sequence>(for layerIDs: S) where S.Element == LayerID {
+    func markContentUnknown<S: Sequence>(for layerIDs: S, recordsChange: Bool = true) where S.Element == LayerID {
         for layerID in layerIDs {
-            markContentUnknown(for: layerID)
+            markContentUnknown(for: layerID, recordsChange: recordsChange)
         }
     }
 
     func makeTexture(
         width: Int,
         height: Int,
-        pixelFormat: MTLPixelFormat = .bgra8Unorm_srgb,
+        pixelFormat: MTLPixelFormat? = nil,
         usage: MTLTextureUsage = [.shaderRead, .shaderWrite, .renderTarget],
         storageMode: MTLStorageMode = .private,
         metal: MetalDeviceContext
     ) -> MTLTexture? {
+        metalContext = metal
         let descriptor = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: pixelFormat,
+            pixelFormat: pixelFormat ?? contentPixelFormat,
             width: width,
             height: height,
             mipmapped: false

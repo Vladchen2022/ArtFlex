@@ -2,6 +2,11 @@ import Foundation
 
 enum ArtPixelFormat: String, Codable, Sendable {
     case rgba8
+    case rgba16Float
+
+    var encoding: CanvasPixelEncoding {
+        self == .rgba16Float ? .premultipliedRGBA16FloatLinear : .premultipliedBGRA8SRGB
+    }
 }
 
 enum ArtAlphaMode: String, Codable, Sendable {
@@ -22,6 +27,9 @@ struct ArtColorStandard: Codable, Sendable, Equatable {
         alphaMode: .premultiplied,
         colorSpace: .sRGB
     )
+
+    /// sRGB primaries, linear-light premultiplied half-float storage.
+    static let highPrecision = ArtColorStandard(pixelFormat: .rgba16Float, alphaMode: .premultiplied, colorSpace: .sRGB)
 }
 
 struct RGBAColor: Codable, Sendable, Equatable, Hashable {

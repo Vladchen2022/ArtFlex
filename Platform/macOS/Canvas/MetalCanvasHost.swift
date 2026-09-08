@@ -2980,7 +2980,7 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
                 else {
                     return nil
                 }
-                return layerSurfaceStore.texture(for: activeLayerSurfaceID)
+                return layerSurfaceStore.readTexture(for: activeLayerSurfaceID)
             }()
             let hasActivePreview = isTransforming
             let resolvedLinearGradientGeometry =
@@ -3015,8 +3015,8 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
             var resolvedTextureByLayerID: [LayerID: MTLTexture] = [:]
             for surface in snapshot.layerSurfaces where surface.isVisible {
                 let texture = surface.surfaceID == activeLayerSurfaceID
-                    ? (activeBrushDisplayTexture ?? layerSurfaceStore.texture(for: surface.surfaceID))
-                    : layerSurfaceStore.texture(for: surface.surfaceID)
+                    ? (activeBrushDisplayTexture ?? layerSurfaceStore.readTexture(for: surface.surfaceID))
+                    : layerSurfaceStore.readTexture(for: surface.surfaceID)
                 if let texture {
                     resolvedTextureByLayerID[surface.layerID] = texture
                 }
@@ -3043,7 +3043,7 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
                 document: snapshot.renderSnapshot.document,
                 allowsMissingTextures: true,
                 textureForLayer: { resolvedTextureByLayerID[$0] },
-                enabledMaskTextureForLayer: layerSurfaceStore.maskTexture(for:)
+                enabledMaskTextureForLayer: layerSurfaceStore.readMaskTexture(for:)
             ).entries) ?? []
             let canonicalInputByLayerID: [LayerID: CanvasLayerCompositeInput] = Dictionary(
                 uniqueKeysWithValues: canonicalEntries.map { ($0.layerID, $0.input) }
@@ -3197,7 +3197,7 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
                         )
                     }
                 } else if currentTransformPlan?.mode == .wholeLayer,
-                          let texture = layerSurfaceStore.texture(for: surfaceID) {
+                          let texture = layerSurfaceStore.readTexture(for: surfaceID) {
                     let fullBounds = CanvasRect(
                         origin: .init(x: 0, y: 0),
                         size: .init(x: Double(canvasSize.width), y: Double(canvasSize.height))
@@ -3709,7 +3709,7 @@ extension MetalCanvasCoordinator: TransformPreviewDelegate {
         guard
             let snapshot = sceneSnapshot,
             let activeLayerSurfaceID = snapshot.activeLayerSurfaceID,
-            let sourceTexture = layerSurfaceStore.texture(for: activeLayerSurfaceID)
+            let sourceTexture = layerSurfaceStore.readTexture(for: activeLayerSurfaceID)
         else {
             transformPreviewSession = nil
             preparedTransformSession = nil

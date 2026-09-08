@@ -102,6 +102,7 @@ final class PersistenceController {
     private let thumbnailEncoder = ProjectThumbnailEncoder()
     private let archiveReadLimits: ProjectArchiveReadLimits
     private let canvasCapacityPolicy: CanvasCapacityPolicy
+    private var incrementalRecoveryNeedsFullCapture = false
     let recoveryProjectURL: URL
     let versionBackupRootURL: URL
 
@@ -176,12 +177,12 @@ final class PersistenceController {
 
         for layer in state.document.paintLayers {
             guard let surfaceID = layerSurfaceStore.surfaceID(for: layer.id),
-                  let texture = layerSurfaceStore.texture(for: surfaceID) else {
+                  let texture = layerSurfaceStore.readTexture(for: surfaceID) else {
                 throw PersistenceError.missingLayerTexture(layer.id)
             }
             sources.append((layer, .content, texture))
             if layer.mask != nil {
-                guard let maskTexture = layerSurfaceStore.maskTexture(for: layer.id) else {
+                guard let maskTexture = layerSurfaceStore.readMaskTexture(for: layer.id) else {
                     throw PersistenceError.invalidProject("图层蒙版资源缺失")
                 }
                 sources.append((layer, .mask, maskTexture))
@@ -471,6 +472,59 @@ final class PersistenceController {
         }
     }
 
+    func freezeIncrementalRecovery(
+        referenceImages: [ProjectReferenceImagePayload] = [],
+        savedSnapshots: [PersistentCanvasSnapshotPayload] = []
+    ) throws -> FrozenRecoveryCapture {
+        let workspace = workspaceStore.state
+        let previous = try? IncrementalRecoveryArchive.manifest(at: recoveryProjectURL, limits: archiveReadLimits)
+        let compatible = !incrementalRecoveryNeedsFullCapture
+            && previous?.documentID == workspace.document.metadata.drawingStatsID
+            && previous?.canvasSize == workspace.document.canvasSize
+        let oldResources = compatible ? Dictionary(uniqueKeysWithValues: previous!.resources.map { ($0.key, $0) }) : [:]
+        var resources: [RecoveryResource] = []
+        var sources: [(MTLTexture, PixelRegion)] = []
+        var keys: [LayerResourceKey] = []
+        var placeholders: [LayerHistorySnapshot] = []
+        var byteCount = 0
+        for layer in workspace.document.paintLayers {
+            for kind in (layer.mask == nil ? [LayerHistoryResourceKind.content] : [.content, .mask]) {
+                let key = LayerResourceKey(layerID: layer.id, kind: kind)
+                let texture = kind == .mask ? layerSurfaceStore.readMaskTexture(for: layer.id)
+                    : layerSurfaceStore.surfaceID(for: layer.id).flatMap(layerSurfaceStore.readTexture(for:))
+                guard let texture else { throw PersistenceError.missingLayerTexture(layer.id) }
+                let encoding = CanvasPixelEncoding(metalPixelFormat: texture.pixelFormat)
+                let journal = layerSurfaceStore.changeJournal(for: key)
+                let old = oldResources[key].flatMap { $0.encoding == encoding ? $0 : nil }
+                let regions = journal.changedRegions(since: old?.cursor, canvasSize: workspace.document.canvasSize)
+                for region in regions {
+                    sources.append((texture, region))
+                    keys.append(key)
+                    byteCount += region.width * region.height * encoding.bytesPerPixel
+                }
+                resources.append(.init(key: key, cursor: journal.cursor, tiles: old?.tiles ?? [], pixelEncoding: encoding))
+                let bpp = encoding.bytesPerPixel
+                placeholders.append(.init(layerID: layer.id, resourceKind: kind,
+                    texture: .init(width: 1, height: 1, bytesPerRow: bpp, pixelData: Data(count: bpp), encoding: encoding)))
+            }
+        }
+        let clones = try serializer.cloneRegionsForDeferredSnapshot(sources)
+        return FrozenRecoveryCapture(
+            metadata: .init(package: .fromWorkspace(workspace, layerSnapshots: placeholders),
+                            referenceImages: referenceImages, savedSnapshots: savedSnapshots),
+            manifest: .init(canvasSize: workspace.document.canvasSize,
+                            documentID: workspace.document.metadata.drawingStatsID, resources: resources),
+            changedTiles: zip(sources.indices, clones).map { index, texture in
+                .init(key: keys[index], region: sources[index].1, texture: texture)
+            }, previousURL: compatible ? recoveryProjectURL : nil, copiedPixelBytes: byteCount)
+    }
+
+    func writeIncrementalRecovery(_ capture: FrozenRecoveryCapture, to url: URL) throws {
+        try IncrementalRecoveryArchive.write(capture, serializer: serializer, to: url, limits: archiveReadLimits)
+    }
+
+    func invalidateIncrementalRecoveryBase() { incrementalRecoveryNeedsFullCapture = true }
+
     func makeRecoveryStagingURL() throws -> URL {
         let root = recoveryProjectURL.deletingLastPathComponent()
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -517,6 +571,7 @@ final class PersistenceController {
         } else {
             try fileManager.moveItem(at: stagingURL, to: recoveryProjectURL)
         }
+        incrementalRecoveryNeedsFullCapture = false
     }
 
     func discardRecoveryStagingProject(at stagingURL: URL) {
@@ -584,6 +639,9 @@ final class PersistenceController {
     }
 
     func inspectProject(from fileURL: URL) throws -> ProjectOpenInspection {
+        if IncrementalRecoveryArchive.exists(at: fileURL) {
+            return try IncrementalRecoveryArchive.inspect(at: fileURL, limits: archiveReadLimits)
+        }
         if Self.shouldUseV2Archive(for: fileURL) {
             let inspection = try withV2PackageDirectory(for: fileURL) {
                 try archiveReader.inspect(from: $0)
@@ -625,7 +683,11 @@ final class PersistenceController {
     ) throws -> OpenProjectResult {
         let payload: ProjectArchivePayload
         let storageFormat: ProjectStorageFormat
-        if Self.shouldUseV2Archive(for: fileURL) {
+        if IncrementalRecoveryArchive.exists(at: fileURL) {
+            try preflight(inspectProject(from: fileURL))
+            payload = try IncrementalRecoveryArchive.read(at: fileURL, limits: archiveReadLimits)
+            storageFormat = .archiveV2
+        } else if Self.shouldUseV2Archive(for: fileURL) {
             try preflight(inspectProject(from: fileURL))
             payload = try withV2PackageDirectory(for: fileURL) {
                 try archiveReader.read(from: $0)
@@ -770,7 +832,7 @@ final class PersistenceController {
             throw PersistenceError.invalidProject("图层蒙版与蒙版像素数据不完整")
         }
 
-        let (expectedBytesPerRow, rowOverflow) = canvasSize.width.multipliedReportingOverflow(by: 4)
+        let (expectedBytesPerRow, rowOverflow) = canvasSize.width.multipliedReportingOverflow(by: document.colorStandard.pixelFormat.encoding.bytesPerPixel)
         let (_, countOverflow) = expectedBytesPerRow.multipliedReportingOverflow(
             by: canvasSize.height
         )
@@ -780,13 +842,15 @@ final class PersistenceController {
 
         for layerSnapshot in layerSnapshots {
             let texture = layerSnapshot.texture
-            let expectedSnapshotBytesPerRow = canvasSize.width * (layerSnapshot.resourceKind == .mask ? 1 : 4)
+            let encoding: CanvasPixelEncoding = layerSnapshot.resourceKind == .mask ? .grayscale8 : document.colorStandard.pixelFormat.encoding
+            let expectedSnapshotBytesPerRow = canvasSize.width * encoding.bytesPerPixel
             let expectedSnapshotByteCount = expectedSnapshotBytesPerRow * canvasSize.height
             guard
                 layerSnapshot.originX == 0,
                 layerSnapshot.originY == 0,
                 texture.width == canvasSize.width,
                 texture.height == canvasSize.height,
+                texture.encoding == encoding,
                 texture.bytesPerRow == expectedSnapshotBytesPerRow,
                 texture.pixelData.count == expectedSnapshotByteCount
             else {

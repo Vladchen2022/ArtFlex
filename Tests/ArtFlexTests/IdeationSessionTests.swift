@@ -5,6 +5,36 @@ import Testing
 @testable import ArtFlex
 
 struct IdeationSessionTests {
+    @Test @MainActor
+    func branchResourcesRemainSharedUntilWrittenAndBrushScratchCannotOverwriteBase() throws {
+        let harness = try IdeationHarness()
+        harness.viewModel.startIdeationSession()
+        let session = try #require(harness.viewModel.ideationSession)
+        let source = harness.bootstrap.layerSurfaceStore
+        let layerID = harness.viewModel.workspace.document.activeLayerID
+        let surfaceID = try #require(source.surfaceID(for: layerID))
+        let initial = try #require(source.readTexture(for: surfaceID))
+        let bytesBefore = try harness.bootstrap.textureSerializer.snapshot(texture: initial).pixelData
+        for branch in session.branches {
+            #expect(branch.viewModel.layerSurfaceStore.readTexture(for: surfaceID) === initial)
+        }
+        let branch = session.branches[0].viewModel
+        // Three commits exercise both allocation and scratch reuse, with propagation disabled.
+        branch.ideationOperationHandler = nil
+        for y in [12.0, 28.0, 44.0] {
+            branch.beginStrokeIfNeeded()
+            branch.applyStroke(samples: [.init(location: .init(x: 8, y: y), pressure: 1),
+                                          .init(location: .init(x: 50, y: y), pressure: 1)])
+            branch.endStroke()
+            _ = branch.flushBrushEditingBoundary(reason: "cow-test")
+        }
+        #expect(try harness.bootstrap.textureSerializer.snapshot(texture: initial).pixelData == bytesBefore)
+        #expect(branch.layerSurfaceStore.readTexture(for: surfaceID) !== initial)
+        for other in session.branches.dropFirst() {
+            #expect(other.viewModel.layerSurfaceStore.readTexture(for: surfaceID) === initial)
+        }
+    }
+
     @Test
     @MainActor
     func synchronizedIdeationCanSelectAllMainCanvasTools() async throws {

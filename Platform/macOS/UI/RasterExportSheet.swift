@@ -12,6 +12,7 @@ struct RasterExportSheet: View {
     @State private var height = 1080
     @State private var dpi = 300.0
     @State private var jpegQuality = 0.92
+    @State private var bitDepth: RasterExportBitDepth = .eight
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -25,6 +26,13 @@ struct RasterExportSheet: View {
                     Text("TIFF").tag(RasterExportFormat.tiff)
                 }
                 .pickerStyle(.segmented)
+
+                if format != .jpeg {
+                    Picker("颜色精度", selection: $bitDepth) {
+                        Text("8 位").tag(RasterExportBitDepth.eight)
+                        Text("16 位").tag(RasterExportBitDepth.sixteen)
+                    }
+                }
 
                 Picker("范围", selection: $scope) {
                     Text("完整画布").tag(RasterExportScope.fullCanvas)
@@ -125,8 +133,10 @@ struct RasterExportSheet: View {
         .onAppear {
             width = viewModel.workspace.document.canvasSize.width
             height = viewModel.workspace.document.canvasSize.height
+            bitDepth = viewModel.workspace.document.colorStandard.pixelFormat == .rgba16Float ? .sixteen : .eight
         }
         .onChange(of: format) { _, newFormat in
+            if newFormat == .jpeg { bitDepth = .eight }
             if !newFormat.supportsAlpha, backgroundChoice == .transparent {
                 backgroundChoice = .white
             }
@@ -181,7 +191,8 @@ struct RasterExportSheet: View {
             scope: scope,
             resize: resolvedResize,
             dpi: dpi,
-            jpegQuality: jpegQuality
+            jpegQuality: jpegQuality,
+            bitDepth: bitDepth
         )
     }
 

@@ -152,6 +152,9 @@ final class LayerMergeController {
         blitEncoder.endEncoding()
         commandBuffer.commit()
         commandBuffer.waitUntilCompleted()
+        guard commandBuffer.status == .completed else {
+            throw commandBuffer.error ?? CocoaError(.fileWriteUnknown)
+        }
     }
 
     private func clear(texture: MTLTexture) throws {
@@ -177,5 +180,8 @@ final class LayerMergeController {
         encoder.endEncoding()
         commandBuffer.commit()
         commandBuffer.waitUntilCompleted()
+        guard commandBuffer.status == .completed else {
+            throw commandBuffer.error ?? CocoaError(.fileWriteUnknown)
+        }
     }
 }

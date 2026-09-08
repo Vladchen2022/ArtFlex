@@ -106,6 +106,11 @@ final class RasterExporter: Sendable {
             height: outputDimensions.height,
             background: options.background
         )
+        if snapshot.encoding == .premultipliedRGBA16FloatLinear || options.resolvedBitDepth == .sixteen {
+            return try HighPrecisionRasterExporter.encode(snapshot: snapshot, sourceBounds: sourceBounds,
+                width: outputDimensions.width, height: outputDimensions.height, options: options,
+                maximumWorkingSetBytes: limits.maximumWorkingSetBytes)
+        }
         var bgraBytes = crop(snapshot: snapshot, to: sourceBounds)
 
         if outputDimensions.width != sourceBounds.width || outputDimensions.height != sourceBounds.height {
@@ -150,7 +155,7 @@ final class RasterExporter: Sendable {
     }
 
     private func validate(_ snapshot: LayerTextureSnapshot) throws {
-        let (minimumBytesPerRow, rowOverflow) = snapshot.width.multipliedReportingOverflow(by: 4)
+        let (minimumBytesPerRow, rowOverflow) = snapshot.width.multipliedReportingOverflow(by: snapshot.encoding.bytesPerPixel)
         let (minimumByteCount, countOverflow) = snapshot.bytesPerRow.multipliedReportingOverflow(by: snapshot.height)
         guard
             !rowOverflow,
@@ -295,10 +300,9 @@ final class RasterExporter: Sendable {
         var maxY = -1
 
         snapshot.pixelData.withUnsafeBytes { rawBuffer in
-            guard let source = rawBuffer.bindMemory(to: UInt8.self).baseAddress else { return }
             for y in 0..<snapshot.height {
-                let row = source.advanced(by: y * snapshot.bytesPerRow)
-                for x in 0..<snapshot.width where row[(x * 4) + 3] > 0 {
+                for x in 0..<snapshot.width where CanvasPixelCodec.read(rawBuffer,
+                    offset: y * snapshot.bytesPerRow + x * snapshot.encoding.bytesPerPixel, encoding: snapshot.encoding).alpha > 0 {
                     minX = min(minX, x)
                     minY = min(minY, y)
                     maxX = max(maxX, x)

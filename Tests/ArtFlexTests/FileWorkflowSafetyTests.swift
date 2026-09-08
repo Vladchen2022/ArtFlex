@@ -8,6 +8,17 @@ import Testing
 @MainActor
 struct FileWorkflowSafetyTests {
     @Test func temporaryHistoryPreviewCannotReplaceTheRecoveryProject() async throws {
+        func recoveryContents(_ url: URL) throws -> [String: Data] {
+            var isDirectory: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory) else { throw CocoaError(.fileNoSuchFile) }
+            if !isDirectory.boolValue { return ["": try Data(contentsOf: url)] }
+            let files = try #require(FileManager.default.enumerator(at: url, includingPropertiesForKeys: [.isRegularFileKey]))
+            var contents: [String: Data] = [:]
+            for case let file as URL in files where try file.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile == true {
+                contents[String(file.path.dropFirst(url.path.count))] = try Data(contentsOf: file)
+            }
+            return contents
+        }
         let h = try FileWorkflowHarness()
         defer { h.cleanUp() }
         h.viewModel.addLayer()
@@ -15,13 +26,13 @@ struct FileWorkflowSafetyTests {
         h.viewModel.debugPerformRecoveryAutosaveNowForTests()
         try await h.waitUntil { !h.viewModel.debugRecoveryAutosaveWriteInFlight }
         let recovery = h.bootstrap.persistenceController.recoveryProjectURL
-        let realBackup = try Data(contentsOf: recovery)
+        let realBackup = try recoveryContents(recovery)
         h.viewModel.prepareVisibleHistoryPresentation()
         h.viewModel.previewVisibleHistory(toAppliedEntryCount: 0)
         #expect(h.viewModel.workspace.document.layers.count == realLayerCount - 1)
         h.viewModel.debugPerformRecoveryAutosaveNowForTests()
         try await h.waitUntil { !h.viewModel.debugRecoveryAutosaveWriteInFlight }
-        #expect(try Data(contentsOf: recovery) == realBackup)
+        #expect(try recoveryContents(recovery) == realBackup)
         #expect(!h.viewModel.debugRecoveryAutosaveIsScheduled)
         #expect(try h.bootstrap.persistenceController.openProject(from: recovery).workspace.document.layers.count == realLayerCount)
         h.viewModel.cancelVisibleHistoryPreview()

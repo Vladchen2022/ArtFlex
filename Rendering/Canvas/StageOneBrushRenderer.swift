@@ -231,6 +231,7 @@ enum StageOneBrushRendererInitializationError: LocalizedError {
 }
 
 final class StageOneBrushRenderer {
+    private let pipelineVariants: ColorRenderPipelineVariants
     private let brushStrokeLogger = Logger(subsystem: "ArtFlex", category: "BrushStroke")
     private let device: MTLDevice
     private let brushPipelineState: MTLRenderPipelineState
@@ -286,6 +287,8 @@ final class StageOneBrushRenderer {
     }
 
     init(device: MTLDevice) throws {
+        let pipelineVariants = ColorRenderPipelineVariants(device: device)
+        self.pipelineVariants = pipelineVariants
         self.device = device
         let source = """
         #include <metal_stdlib>
@@ -1664,7 +1667,7 @@ final class StageOneBrushRenderer {
         attachment.destinationRGBBlendFactor = .oneMinusSourceAlpha
         attachment.destinationAlphaBlendFactor = .oneMinusSourceAlpha
         do {
-            self.brushPipelineState = try device.makeRenderPipelineState(descriptor: brushDescriptor)
+            self.brushPipelineState = try pipelineVariants.makeState(descriptor: brushDescriptor)
         } catch {
             throw StageOneBrushRendererInitializationError.pipelineState("brush", error)
         }
@@ -1684,7 +1687,7 @@ final class StageOneBrushRenderer {
         alphaLockBrushAttachment.destinationAlphaBlendFactor = .oneMinusSourceAlpha
         alphaLockBrushAttachment.writeMask = [.red, .green, .blue]
         do {
-            self.alphaLockBrushPipelineState = try device.makeRenderPipelineState(descriptor: alphaLockBrushDescriptor)
+            self.alphaLockBrushPipelineState = try pipelineVariants.makeState(descriptor: alphaLockBrushDescriptor)
         } catch {
             throw StageOneBrushRendererInitializationError.pipelineState("alphaLockBrush", error)
         }
@@ -1703,7 +1706,7 @@ final class StageOneBrushRenderer {
         eraserAttachment.destinationRGBBlendFactor = .oneMinusSourceAlpha
         eraserAttachment.destinationAlphaBlendFactor = .oneMinusSourceAlpha
         do {
-            self.eraserPipelineState = try device.makeRenderPipelineState(descriptor: eraserDescriptor)
+            self.eraserPipelineState = try pipelineVariants.makeState(descriptor: eraserDescriptor)
         } catch {
             throw StageOneBrushRendererInitializationError.pipelineState("eraser", error)
         }
@@ -1725,7 +1728,7 @@ final class StageOneBrushRenderer {
         smudgeAttachment.destinationRGBBlendFactor = .oneMinusSourceAlpha
         smudgeAttachment.destinationAlphaBlendFactor = .oneMinusSourceAlpha
         do {
-            self.smudgePipelineState = try device.makeRenderPipelineState(descriptor: smudgeDescriptor)
+            self.smudgePipelineState = try pipelineVariants.makeState(descriptor: smudgeDescriptor)
         } catch {
             throw StageOneBrushRendererInitializationError.pipelineState("smudge", error)
         }
@@ -1747,7 +1750,7 @@ final class StageOneBrushRenderer {
         smudgeFrozenTextureAttachment.destinationRGBBlendFactor = .oneMinusSourceAlpha
         smudgeFrozenTextureAttachment.destinationAlphaBlendFactor = .oneMinusSourceAlpha
         do {
-            self.smudgeFrozenTexturePipelineState = try device.makeRenderPipelineState(descriptor: smudgeFrozenTextureDescriptor)
+            self.smudgeFrozenTexturePipelineState = try pipelineVariants.makeState(descriptor: smudgeFrozenTextureDescriptor)
         } catch {
             throw StageOneBrushRendererInitializationError.pipelineState("smudgeFrozenTexture", error)
         }
@@ -1778,7 +1781,7 @@ final class StageOneBrushRenderer {
         opacityCapMaskAttachment.destinationRGBBlendFactor = .one
         opacityCapMaskAttachment.destinationAlphaBlendFactor = .one
         do {
-            self.opacityCapMaskPipelineState = try device.makeRenderPipelineState(descriptor: opacityCapMaskDescriptor)
+            self.opacityCapMaskPipelineState = try pipelineVariants.makeState(descriptor: opacityCapMaskDescriptor)
         } catch {
             throw StageOneBrushRendererInitializationError.pipelineState("opacityCapMask", error)
         }
@@ -1941,7 +1944,7 @@ final class StageOneBrushRenderer {
         opacityCapCompositeDescriptor.colorAttachments[0].pixelFormat = .bgra8Unorm_srgb
         opacityCapCompositeDescriptor.colorAttachments[0].isBlendingEnabled = false
         do {
-            self.opacityCapCompositePipelineState = try device.makeRenderPipelineState(descriptor: opacityCapCompositeDescriptor)
+            self.opacityCapCompositePipelineState = try pipelineVariants.makeState(descriptor: opacityCapCompositeDescriptor)
         } catch {
             throw StageOneBrushRendererInitializationError.pipelineState("opacityCapComposite", error)
         }
@@ -2255,11 +2258,11 @@ final class StageOneBrushRenderer {
            let cached = cachedPaintMaterialTexture,
            cached.width == texture.width,
            cached.height == texture.height,
-           cached.pixelFormat == .bgra8Unorm_srgb {
+           cached.pixelFormat == texture.pixelFormat {
             materialTexture = cached
         } else {
             let descriptor = MTLTextureDescriptor.texture2DDescriptor(
-                pixelFormat: .bgra8Unorm_srgb,
+                pixelFormat: texture.pixelFormat,
                 width: texture.width,
                 height: texture.height,
                 mipmapped: false
@@ -2297,7 +2300,7 @@ final class StageOneBrushRenderer {
         pass.colorAttachments[0].loadAction = .load
         pass.colorAttachments[0].storeAction = .store
         guard let encoder = checkedResource(commandBuffer.makeRenderCommandEncoder(descriptor: pass)) else { return material }
-        encoder.setRenderPipelineState(paintMaterialPipelineState)
+        encoder.setRenderPipelineState(pipelineVariants.state(paintMaterialPipelineState, for: pass.colorAttachments[0].texture?.pixelFormat ?? .bgra8Unorm_srgb))
         encoder.setVertexBuffer(vertexBuffer, offset: 0, index: 0)
         encoder.setFragmentTexture(selectionMask, index: 0)
         encoder.setFragmentTexture(alphaLockTexture ?? fallbackAlphaLockTexture, index: 1)
@@ -2481,7 +2484,7 @@ final class StageOneBrushRenderer {
                 : brushPipelineState
         }
 
-        encoder.setRenderPipelineState(pipelineState)
+        encoder.setRenderPipelineState(pipelineVariants.state(pipelineState, for: passDescriptor.colorAttachments[0].texture?.pixelFormat ?? .bgra8Unorm_srgb))
         encoder.setVertexBuffer(vertexBuffer, offset: 0, index: 0)
 
         let selectionShape = stroke.selectionShape?.clamped(
@@ -2714,7 +2717,7 @@ final class StageOneBrushRenderer {
             } else {
                 primaryMaskPipelineState = opacityCapMaskPipelineState
             }
-            encoder.setRenderPipelineState(primaryMaskPipelineState)
+            encoder.setRenderPipelineState(pipelineVariants.state(primaryMaskPipelineState, for: accumulationPassDescriptor.colorAttachments[0].texture?.pixelFormat ?? .bgra8Unorm_srgb))
             encoder.setVertexBuffer(vertexBuffer, offset: 0, index: 0)
             let primaryCustomTipTexture =
                 customTipTexture(for: primaryCustomTipMaskData(for: stroke), role: .primary) ?? defaultTipTexture
@@ -2759,11 +2762,11 @@ final class StageOneBrushRenderer {
             primaryTipPassDescriptor.colorAttachments[0].storeAction = .store
 
             if let encoder = checkedResource(commandBuffer.makeRenderCommandEncoder(descriptor: primaryTipPassDescriptor)) {
-                encoder.setRenderPipelineState(
+                encoder.setRenderPipelineState(pipelineVariants.state(
                     usesCompoundBuildUp
                         ? compoundSecondaryBuildUpMaskPipelineState
                         : compoundSecondaryMaskPipelineState
-                )
+                , for: primaryTipPassDescriptor.colorAttachments[0].texture?.pixelFormat ?? .bgra8Unorm_srgb))
                 encoder.setVertexBuffer(vertexBuffer, offset: 0, index: 0)
                 let primaryTip = stroke.brush.resolvedCompoundPrimaryTip
                 let primaryTipTexture = customTipTexture(
@@ -2810,7 +2813,7 @@ final class StageOneBrushRenderer {
             materialPassDescriptor.colorAttachments[0].storeAction = .store
 
             if let encoder = checkedResource(commandBuffer.makeRenderCommandEncoder(descriptor: materialPassDescriptor)) {
-                encoder.setRenderPipelineState(paintMaterialPipelineState)
+                encoder.setRenderPipelineState(pipelineVariants.state(paintMaterialPipelineState, for: materialPassDescriptor.colorAttachments[0].texture?.pixelFormat ?? .bgra8Unorm_srgb))
                 encoder.setVertexBuffer(vertexBuffer, offset: 0, index: 0)
                 let primaryCustomTipTexture =
                     customTipTexture(
@@ -2864,11 +2867,11 @@ final class StageOneBrushRenderer {
             secondaryPassDescriptor.colorAttachments[0].storeAction = .store
 
             if let encoder = checkedResource(commandBuffer.makeRenderCommandEncoder(descriptor: secondaryPassDescriptor)) {
-                encoder.setRenderPipelineState(
+                encoder.setRenderPipelineState(pipelineVariants.state(
                     usesCompoundBuildUp
                         ? compoundSecondaryBuildUpMaskPipelineState
                         : compoundSecondaryMaskPipelineState
-                )
+                , for: secondaryPassDescriptor.colorAttachments[0].texture?.pixelFormat ?? .bgra8Unorm_srgb))
                 encoder.setVertexBuffer(vertexBuffer, offset: 0, index: 0)
                 let compoundSecondaryTipTexture =
                     customTipTexture(
@@ -2923,7 +2926,7 @@ final class StageOneBrushRenderer {
         compositePassDescriptor.colorAttachments[0].storeAction = .store
 
         if let encoder = checkedResource(commandBuffer.makeRenderCommandEncoder(descriptor: compositePassDescriptor)) {
-            encoder.setRenderPipelineState(opacityCapCompositePipelineState)
+            encoder.setRenderPipelineState(pipelineVariants.state(opacityCapCompositePipelineState, for: compositePassDescriptor.colorAttachments[0].texture?.pixelFormat ?? .bgra8Unorm_srgb))
             encoder.setVertexBuffer(vertexBuffer, offset: 0, index: 0)
             encoder.setFragmentTexture(session.originalTexture, index: 0)
             encoder.setFragmentTexture(session.alphaTexture, index: 1)
@@ -4277,9 +4280,9 @@ final class StageOneBrushRenderer {
             return 0
         }
 
-        encoder.setRenderPipelineState(
+        encoder.setRenderPipelineState(pipelineVariants.state(
             frozenSourceTexture == nil ? smudgePipelineState : smudgeFrozenTexturePipelineState
-        )
+        , for: passDescriptor.colorAttachments[0].texture?.pixelFormat ?? .bgra8Unorm_srgb))
         encoder.setVertexBuffer(vertexBuffer, offset: 0, index: 0)
 
         let selectionMaskTexture = makeSelectionMaskTexture(
@@ -4501,14 +4504,14 @@ final class StageOneBrushRenderer {
     ) -> Bool {
         guard
             let zeroAlphaTile = opacityCapZeroTile(pixelFormat: .r8Unorm),
-            paintMaterialTexture == nil || opacityCapZeroTile(pixelFormat: .bgra8Unorm_srgb) != nil,
+            paintMaterialTexture == nil || opacityCapZeroTile(pixelFormat: workingTexture.pixelFormat) != nil,
             let encoder = checkedResource(commandBuffer.makeBlitCommandEncoder())
         else {
             return false
         }
         let zeroColorTile = paintMaterialTexture == nil
             ? nil
-            : opacityCapZeroTile(pixelFormat: .bgra8Unorm_srgb)
+            : opacityCapZeroTile(pixelFormat: workingTexture.pixelFormat)
         let tileSize = Self.opacityCapTileSize
         let tilesAcross = (workingTexture.width + tileSize - 1) / tileSize
         let firstTileX = dirtyRect.x / tileSize
@@ -4605,7 +4608,7 @@ final class StageOneBrushRenderer {
         if pixelFormat == .r8Unorm, let cachedOpacityCapZeroAlphaTile {
             return cachedOpacityCapZeroAlphaTile
         }
-        if pixelFormat == .bgra8Unorm_srgb, let cachedOpacityCapZeroColorTile {
+        if let cachedOpacityCapZeroColorTile, cachedOpacityCapZeroColorTile.pixelFormat == pixelFormat {
             return cachedOpacityCapZeroColorTile
         }
 
@@ -4620,7 +4623,7 @@ final class StageOneBrushRenderer {
         guard let texture = checkedResource(device.makeTexture(descriptor: descriptor)) else {
             return nil
         }
-        let bytesPerPixel = pixelFormat == .r8Unorm ? 1 : 4
+        let bytesPerPixel = CanvasPixelEncoding(metalPixelFormat: pixelFormat).bytesPerPixel
         let bytesPerRow = Self.opacityCapTileSize * bytesPerPixel
         let zeroBytes = Data(
             repeating: 0,

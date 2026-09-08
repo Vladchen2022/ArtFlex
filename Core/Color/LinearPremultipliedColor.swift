@@ -29,6 +29,14 @@ struct LinearPremultipliedColor: Sendable, Equatable {
         )
     }
 
+    /// Tool colors are straight sRGB. Decode before premultiplying in linear light.
+    init(srgb color: RGBAColor) {
+        let alpha = min(max(color.alpha, 0), 1)
+        self.init(red: Self.srgbChannelToLinear(color.red) * alpha,
+                  green: Self.srgbChannelToLinear(color.green) * alpha,
+                  blue: Self.srgbChannelToLinear(color.blue) * alpha, alpha: alpha)
+    }
+
     init(bgraBlue: UInt8, green: UInt8, red: UInt8, alpha: UInt8) {
         self.init(
             red: Self.srgbByteToLinearTable[Int(red)],

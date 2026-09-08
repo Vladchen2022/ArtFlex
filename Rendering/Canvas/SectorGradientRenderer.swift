@@ -165,6 +165,7 @@ private func normalizedSectorGradientBoundaryPoints(
 }
 
 final class SectorGradientRenderer {
+    private let pipelineVariants: ColorRenderPipelineVariants
     private let device: MTLDevice
     private let pipelineState: MTLRenderPipelineState
     private let alphaLockPipelineState: MTLRenderPipelineState
@@ -176,11 +177,15 @@ final class SectorGradientRenderer {
     private let vertexBufferPool: SectorGradientVertexBufferPool
 
     init(device: MTLDevice) {
+        let pipelineVariants = ColorRenderPipelineVariants(device: device)
+        self.pipelineVariants = pipelineVariants
         self.device = device
         self.vertexBufferPool = SectorGradientVertexBufferPool(device: device)
         let source = """
         #include <metal_stdlib>
         using namespace metal;
+
+        \(MetalColorFunctions.source)
 
         struct SectorGradientVertex {
             float2 position;
@@ -376,7 +381,7 @@ final class SectorGradientRenderer {
                 uniforms.paintJitterAmount,
                 uniforms.paintContrastAmount
             );
-            float3 premultiplied = jitteredColor * alpha;
+            float3 premultiplied = artflexSrgbToLinear(jitteredColor) * alpha;
             if (uniforms.usesAlphaLock > 0.5) {
                 return float4(premultiplied * lockedDestinationAlpha, alpha);
             }
@@ -405,7 +410,7 @@ final class SectorGradientRenderer {
         attachment.destinationAlphaBlendFactor = .oneMinusSourceAlpha
 
         do {
-            pipelineState = try device.makeRenderPipelineState(descriptor: descriptor)
+            pipelineState = try pipelineVariants.makeState(descriptor: descriptor)
         } catch {
             fatalError("Failed to create SectorGradientRenderer pipeline: \\(error)")
         }
@@ -425,7 +430,7 @@ final class SectorGradientRenderer {
         alphaLockAttachment.writeMask = [.red, .green, .blue]
 
         do {
-            alphaLockPipelineState = try device.makeRenderPipelineState(descriptor: alphaLockDescriptor)
+            alphaLockPipelineState = try pipelineVariants.makeState(descriptor: alphaLockDescriptor)
         } catch {
             fatalError("Failed to create SectorGradientRenderer alpha lock pipeline: \\(error)")
         }
@@ -538,7 +543,7 @@ final class SectorGradientRenderer {
             return
         }
 
-        encoder.setRenderPipelineState(alphaLockTexture == nil ? pipelineState : alphaLockPipelineState)
+        encoder.setRenderPipelineState(pipelineVariants.state(alphaLockTexture == nil ? pipelineState : alphaLockPipelineState, for: renderPassDescriptor.colorAttachments[0].texture?.pixelFormat ?? .bgra8Unorm_srgb))
         encoder.setVertexBuffer(vertexBufferLease.buffer, offset: 0, index: 0)
         encoder.setVertexBytes(&uniforms, length: MemoryLayout<SectorGradientUniforms>.stride, index: 1)
         encoder.setFragmentBytes(&uniforms, length: MemoryLayout<SectorGradientUniforms>.stride, index: 1)

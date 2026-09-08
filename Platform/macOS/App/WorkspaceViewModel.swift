@@ -2441,7 +2441,7 @@ final class WorkspaceViewModel: ObservableObject {
         guard
             let layerID = bootstrap.interactionController.activeEditableLayerID(),
             let surfaceID = layerSurfaceStore.surfaceID(for: layerID),
-            let texture = layerSurfaceStore.texture(for: surfaceID)
+            let texture = layerSurfaceStore.readTexture(for: surfaceID)
         else {
             return nil
         }
@@ -2494,7 +2494,7 @@ final class WorkspaceViewModel: ObservableObject {
             return bounds
         }
 
-        guard let texture = layerSurfaceStore.texture(for: surfaceID),
+        guard let texture = layerSurfaceStore.readTexture(for: surfaceID),
               let detected = try? bootstrap.layerContentBoundsDetector.detect(
                 texture: texture,
                 commandQueue: bootstrap.metalContext.commandQueue
@@ -2660,6 +2660,7 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     private func extractedMaskBytes(from snapshot: LayerTextureSnapshot) -> (bytes: [UInt8], width: Int, height: Int)? {
+        guard let snapshot = try? snapshot.converted(to: .premultipliedBGRA8SRGB) else { return nil }
         let width = snapshot.width
         let height = snapshot.height
         guard
@@ -3936,7 +3937,7 @@ final class WorkspaceViewModel: ObservableObject {
 
         let layerTextures: [(texture: MTLTexture, opacity: Float)] = snapshot.layerSurfaces.compactMap { surface in
             guard surface.isVisible,
-                  let texture = layerSurfaceStore.texture(for: surface.surfaceID)
+                  let texture = layerSurfaceStore.readTexture(for: surface.surfaceID)
             else { return nil }
             return (texture, surface.opacity)
         }
@@ -5697,7 +5698,7 @@ final class WorkspaceViewModel: ObservableObject {
         do {
             _ = flushBrushEditingBoundary(reason: "fillAtPoint.makePlan")
             guard let surfaceID = bootstrap.layerSurfaceStore.surfaceID(for: layerID),
-                  let destinationTexture = bootstrap.layerSurfaceStore.texture(for: surfaceID) else {
+                  let destinationTexture = bootstrap.layerSurfaceStore.readTexture(for: surfaceID) else {
                 showStatus(.init(kind: .error, message: "无法访问当前图层"))
                 return
             }
@@ -5758,7 +5759,7 @@ final class WorkspaceViewModel: ObservableObject {
         }
         guard
             let surfaceID = bootstrap.layerSurfaceStore.surfaceID(for: layerID),
-            let texture = bootstrap.layerSurfaceStore.texture(for: surfaceID)
+            let texture = bootstrap.layerSurfaceStore.readTexture(for: surfaceID)
         else {
             showStatus(.init(kind: .error, message: "无法访问当前图层"))
             return
@@ -5831,7 +5832,7 @@ final class WorkspaceViewModel: ObservableObject {
             guard
                 self.canvasContentRevision == capturedRevision,
                 self.bootstrap.layerSurfaceStore.surfaceID(for: layerID) == surfaceID,
-                let currentTexture = self.bootstrap.layerSurfaceStore.texture(for: surfaceID),
+                let currentTexture = self.bootstrap.layerSurfaceStore.readTexture(for: surfaceID),
                 ObjectIdentifier(currentTexture as AnyObject) == ObjectIdentifier(textureBox.value as AnyObject)
             else {
                 self.showStatus(.init(kind: .info, message: "画布已变化，已取消本次填充"))
@@ -6306,13 +6307,15 @@ final class WorkspaceViewModel: ObservableObject {
         }
         guard ensureDocumentResourceBudget(
             additionalWorkingBytes: targetSize.width * targetSize.height
-                * (workspace.document.paintLayers.count * 4 + workspace.document.paintLayers.filter { $0.mask != nil }.count),
+                * (workspace.document.paintLayers.count * workspace.document.colorStandard.pixelFormat.encoding.bytesPerPixel
+                   + workspace.document.paintLayers.filter { $0.mask != nil }.count),
             action: "裁剪画布"
         ) else { return }
         do {
-            let prepared = try LayerSurfaceTransfer.prepare(
+            let prepared = try NonDestructiveCanvasCrop.prepare(
                 document: workspace.document, source: bootstrap.layerSurfaceStore,
-                metal: bootstrap.metalContext, targetSize: targetSize, originX: sourceX, originY: sourceY
+                region: .init(originX: sourceX, originY: sourceY, width: targetSize.width, height: targetSize.height),
+                metal: bootstrap.metalContext, serializer: bootstrap.textureSerializer
             )
             let layerIDs = workspace.document.paintLayers.map(\.id)
             guard checkpointHistoryIfPossible(
@@ -6323,10 +6326,11 @@ final class WorkspaceViewModel: ObservableObject {
             bootstrap.workspaceStore.updateDocument { document in
                 document.perspectiveGuide = document.perspectiveGuide?.cropped(originX: sourceX, originY: sourceY)
                 document.canvasSize = targetSize
+                document.cropRetention = prepared.retention
             }
             bootstrap.workspaceStore.updateSelection { $0 = .empty }
             bootstrap.workspaceStore.updateViewport { $0 = .stageOneDefault }
-            bootstrap.layerSurfaceStore.adoptContents(of: prepared)
+            bootstrap.layerSurfaceStore.adoptContents(of: prepared.surfaces)
             canvasCropState.cancel()
             bootstrap.strokeEngine.resetBrushPipelineState()
             clearRecentBrushAdjustmentState()
@@ -6334,10 +6338,17 @@ final class WorkspaceViewModel: ObservableObject {
             refresh()
             noteCanvasContentChanged(changedLayerIDs: Set(layerIDs))
             relayIdeationOperation(.applyCanvasCrop(cropBounds))
-            showStatus(.init(kind: .success, message: "已调整画布为 \(targetSize.width) × \(targetSize.height)，图层与蒙版均已保留"))
+            showStatus(.init(kind: .success, message: "已调整画布为 \(targetSize.width) × \(targetSize.height)，框外像素已保留，可重新展开"))
         } catch {
             showStatus(.init(kind: .error, message: error.localizedDescription))
         }
+    }
+
+    func expandRetainedCanvas() {
+        guard let bounds = workspace.document.cropRetention?.fullBounds else { return }
+        canvasCropState.bounds = .init(origin: .init(x: Double(bounds.originX), y: Double(bounds.originY)),
+                                      size: .init(x: Double(bounds.width), y: Double(bounds.height)))
+        applyCanvasCrop()
     }
 
     func addLayer() {
@@ -6612,7 +6623,7 @@ final class WorkspaceViewModel: ObservableObject {
         guard
             let sourceSurfaceID = bootstrap.layerSurfaceStore.surfaceID(for: context.source.id),
             let destinationSurfaceID = bootstrap.layerSurfaceStore.surfaceID(for: context.destination.id),
-            let sourceTexture = bootstrap.layerSurfaceStore.texture(for: sourceSurfaceID),
+            let sourceTexture = bootstrap.layerSurfaceStore.readTexture(for: sourceSurfaceID),
             let destinationTexture = bootstrap.layerSurfaceStore.texture(for: destinationSurfaceID)
         else {
             showStatus(.init(kind: .error, message: "无法访问合并纹理"))
@@ -6629,6 +6640,10 @@ final class WorkspaceViewModel: ObservableObject {
         ) else { return }
 
         do {
+            let retained = try RetainedCropLayerOperations.merged(document: workspace.document,
+                layers: [context.destination, context.source], target: context.destination.id,
+                metal: bootstrap.metalContext, serializer: bootstrap.textureSerializer,
+                merger: bootstrap.layerMergeController)
             try bootstrap.layerMergeController.merge(
                 sourceTexture: sourceTexture,
                 sourceOpacity: workspace.document.effectiveLayerOpacity(context.source.id),
@@ -6636,7 +6651,7 @@ final class WorkspaceViewModel: ObservableObject {
                 sourceBlendMode: context.source.blendMode,
                 sourceClipsDestination: context.source.clipTargetLayerID == context.destination.id,
                 sourceMaskTexture: context.source.mask?.isEnabled == true
-                    ? bootstrap.layerSurfaceStore.maskTexture(for: context.source.id)
+                    ? bootstrap.layerSurfaceStore.readMaskTexture(for: context.source.id)
                     : nil,
                 sourceCurveAdjustmentLUTs: context.source.adjustment?.curveLUTs,
                 into: destinationTexture,
@@ -6644,7 +6659,7 @@ final class WorkspaceViewModel: ObservableObject {
                 destinationVisible: context.destination.isVisible,
                 destinationBlendMode: context.destination.blendMode,
                 destinationMaskTexture: context.destination.mask?.isEnabled == true
-                    ? bootstrap.layerSurfaceStore.maskTexture(for: context.destination.id)
+                    ? bootstrap.layerSurfaceStore.readMaskTexture(for: context.destination.id)
                     : nil
             )
 
@@ -6658,6 +6673,7 @@ final class WorkspaceViewModel: ObservableObject {
                     document.layers[destinationIndex].mask = nil
                     document.layers[destinationIndex].adjustment = nil
                 }
+                document.cropRetention = retained
             }
             bootstrap.layerSurfaceStore.removeMaskTexture(for: context.destination.id)
 
@@ -6689,17 +6705,17 @@ final class WorkspaceViewModel: ObservableObject {
         var enabledMaskTextureByLayerID: [LayerID: MTLTexture] = [:]
         for layer in context.visibleLayers {
             guard let surfaceID = bootstrap.layerSurfaceStore.surfaceID(for: layer.id),
-                  let texture = bootstrap.layerSurfaceStore.texture(for: surfaceID) else { continue }
+                  let texture = bootstrap.layerSurfaceStore.readTexture(for: surfaceID) else { continue }
             textureByLayerID[layer.id] = texture
             if layer.mask?.isEnabled == true,
-               let maskTexture = bootstrap.layerSurfaceStore.maskTexture(for: layer.id) {
+               let maskTexture = bootstrap.layerSurfaceStore.readMaskTexture(for: layer.id) {
                 enabledMaskTextureByLayerID[layer.id] = maskTexture
             }
         }
         let textureEntries: [CanvasLayerCompositeInput] = context.visibleLayers.compactMap { layer -> CanvasLayerCompositeInput? in
             guard
                 let surfaceID = bootstrap.layerSurfaceStore.surfaceID(for: layer.id),
-                let texture = bootstrap.layerSurfaceStore.texture(for: surfaceID)
+                let texture = bootstrap.layerSurfaceStore.readTexture(for: surfaceID)
             else {
                 return nil
             }
@@ -6733,6 +6749,10 @@ final class WorkspaceViewModel: ObservableObject {
         ) else { return }
 
         do {
+            let retained = try RetainedCropLayerOperations.merged(document: workspace.document,
+                layers: context.visibleLayers, target: context.target.id,
+                metal: bootstrap.metalContext, serializer: bootstrap.textureSerializer,
+                merger: bootstrap.layerMergeController)
             try bootstrap.layerMergeController.mergeVisible(
                 layers: textureEntries,
                 into: targetTexture
@@ -6748,6 +6768,7 @@ final class WorkspaceViewModel: ObservableObject {
                     document.layers[targetIndex].mask = nil
                     document.layers[targetIndex].adjustment = nil
                 }
+                document.cropRetention = retained
             }
             bootstrap.layerSurfaceStore.removeMaskTexture(for: context.target.id)
 
@@ -6856,9 +6877,18 @@ final class WorkspaceViewModel: ObservableObject {
             topologyOperation: true,
             captureMode: .topologyDelta(changedLayerIDs: [layerID])
         ) else { return }
+        let retained: CanvasCropRetention?
+        do {
+            retained = try RetainedCropLayerOperations.mask(document: workspace.document,
+                layerID: layerID, fill: revealsAll ? 255 : 0)
+        } catch {
+            showStatus(.init(kind: .error, message: error.localizedDescription))
+            return
+        }
         bootstrap.workspaceStore.updateDocument { document in
             guard let index = document.layers.firstIndex(where: { $0.id == layerID }) else { return }
             document.layers[index].mask = LayerMaskDescriptor(isEnabled: true)
+            document.cropRetention = retained
         }
         bootstrap.layerSurfaceStore.prepareTextures(for: bootstrap.workspaceStore.state.document, metal: bootstrap.metalContext)
         bootstrap.layerSurfaceStore.fillMaskTexture(
@@ -6916,6 +6946,7 @@ final class WorkspaceViewModel: ObservableObject {
             captureMode: .inPlaceChangedLayers([layerID])
         ) else { return }
         do {
+            let retained = try RetainedCropLayerOperations.mask(document: workspace.document, layerID: layerID)
             let snapshot = try bootstrap.textureSerializer.snapshot(texture: texture)
             let inverted = Data(snapshot.pixelData.map { 255 &- $0 })
             try bootstrap.textureSerializer.restore(
@@ -6927,6 +6958,7 @@ final class WorkspaceViewModel: ObservableObject {
                 ),
                 into: texture
             )
+            bootstrap.workspaceStore.updateDocument { $0.cropRetention = retained }
             noteCanvasContentChanged(changedLayerIDs: [layerID])
             refresh(invalidatedLayerIDs: [layerID])
             showStatus(.init(kind: .success, message: "已反相图层蒙版"))
@@ -6947,6 +6979,7 @@ final class WorkspaceViewModel: ObservableObject {
         bootstrap.workspaceStore.updateDocument { document in
             guard let index = document.layers.firstIndex(where: { $0.id == layerID }) else { return }
             document.layers[index].mask = nil
+            document.cropRetention?.tiles.removeAll { $0.key == LayerResourceKey(layerID: layerID, kind: .mask) }
         }
         bootstrap.layerSurfaceStore.removeMaskTexture(for: layerID)
         activeMaskEditingLayerID = nil
@@ -7200,7 +7233,7 @@ final class WorkspaceViewModel: ObservableObject {
         guard
             let layer = workspace.document.layers.first(where: { $0.id == layerID }),
             let surfaceID = bootstrap.layerSurfaceStore.surfaceID(for: layer.id),
-            let contentTexture = bootstrap.layerSurfaceStore.texture(for: surfaceID),
+            let contentTexture = bootstrap.layerSurfaceStore.readTexture(for: surfaceID),
             let colorSpace = CGColorSpace(name: CGColorSpace.sRGB)
         else {
             return nil
@@ -7233,7 +7266,7 @@ final class WorkspaceViewModel: ObservableObject {
         guard
             let layer = workspace.document.layers.first(where: { $0.id == layerID }),
             let surfaceID = bootstrap.layerSurfaceStore.surfaceID(for: layerID),
-            let contentTexture = bootstrap.layerSurfaceStore.texture(for: surfaceID)
+            let contentTexture = bootstrap.layerSurfaceStore.readTexture(for: surfaceID)
         else {
             return nil
         }
@@ -7310,7 +7343,7 @@ final class WorkspaceViewModel: ObservableObject {
         if !usesMaskedComposite {
             guard
                 bootstrap.layerSurfaceStore.surfaceID(for: layerID) == surfaceID,
-                let currentTexture = bootstrap.layerSurfaceStore.texture(for: surfaceID),
+                let currentTexture = bootstrap.layerSurfaceStore.readTexture(for: surfaceID),
                 ObjectIdentifier(currentTexture as AnyObject) == ObjectIdentifier(textureBox.value as AnyObject)
             else {
                 return nil
@@ -8835,7 +8868,7 @@ final class WorkspaceViewModel: ObservableObject {
 
         guard
             let surfaceID = bootstrap.layerSurfaceStore.surfaceID(for: layerID),
-            let texture = bootstrap.layerSurfaceStore.texture(for: surfaceID)
+            let texture = bootstrap.layerSurfaceStore.readTexture(for: surfaceID)
         else {
             showStatus(.init(kind: .error, message: "无法访问当前图层"))
             resetTextureFillGesture(reason: "beginMissingSurface")
@@ -10223,7 +10256,7 @@ final class WorkspaceViewModel: ObservableObject {
 
         guard
             let surfaceID = bootstrap.layerSurfaceStore.surfaceID(for: layerID),
-            let texture = bootstrap.layerSurfaceStore.texture(for: surfaceID)
+            let texture = bootstrap.layerSurfaceStore.readTexture(for: surfaceID)
         else {
             transformState.reset()
             setFreeTransformMeshWarpGrid(nil)
@@ -10700,7 +10733,7 @@ final class WorkspaceViewModel: ObservableObject {
         }
 
         guard
-            let texture = bootstrap.layerSurfaceStore.texture(for: key.surfaceID)
+            let texture = bootstrap.layerSurfaceStore.readTexture(for: key.surfaceID)
         else {
             return
         }
@@ -10770,7 +10803,7 @@ final class WorkspaceViewModel: ObservableObject {
            case .ready = wholeLayerInteractionBoundsCacheEntry {
             return
         }
-        guard let texture = bootstrap.layerSurfaceStore.texture(for: key.surfaceID),
+        guard let texture = bootstrap.layerSurfaceStore.readTexture(for: key.surfaceID),
               let detected = try? bootstrap.layerContentBoundsDetector.detect(
                 texture: texture,
                 commandQueue: bootstrap.metalContext.commandQueue
@@ -10929,7 +10962,7 @@ final class WorkspaceViewModel: ObservableObject {
                 width: payload.snapshot.width,
                 height: payload.snapshot.height,
                 bytesPerRow: payload.snapshot.bytesPerRow,
-                pixelData: Data(count: payload.snapshot.bytesPerRow * payload.snapshot.height)
+                pixelData: Data(count: payload.snapshot.bytesPerRow * payload.snapshot.height), encoding: payload.snapshot.encoding
             )
             try bootstrap.textureSerializer.restore(
                 snapshot: clearedSnapshot,
@@ -11185,6 +11218,7 @@ final class WorkspaceViewModel: ObservableObject {
         for payload: PixelClipboardPayload,
         destinationCanvasSize: CanvasSize
     ) -> (snapshot: LayerTextureSnapshot, destinationX: Int, destinationY: Int)? {
+        guard let converted = try? payload.snapshot.converted(to: workspace.document.colorStandard.pixelFormat.encoding) else { return nil }
         let destinationMinX = max(0, payload.originX)
         let destinationMinY = max(0, payload.originY)
         let destinationMaxX = min(destinationCanvasSize.width, payload.originX + payload.snapshot.width)
@@ -11201,7 +11235,7 @@ final class WorkspaceViewModel: ObservableObject {
 
         return (
             snapshot: Self.cropSnapshot(
-                payload.snapshot,
+                converted,
                 originX: sourceOffsetX,
                 originY: sourceOffsetY,
                 width: clippedWidth,
@@ -11224,7 +11258,7 @@ final class WorkspaceViewModel: ObservableObject {
         }
 
         var bytes = [UInt8](snapshot.pixelData)
-        let bytesPerPixel = 4
+        let bytesPerPixel = snapshot.encoding.bytesPerPixel
         selectionMaskRegion.withAlphaBytes { maskBytes in
             guard let maskBaseAddress = maskBytes.baseAddress else { return }
 
@@ -11234,6 +11268,12 @@ final class WorkspaceViewModel: ObservableObject {
                 for localX in 0..<snapshot.width {
                     let maskAlpha = maskBaseAddress[maskRow + localX]
                     let index = byteRow + (localX * bytesPerPixel)
+
+                    if snapshot.encoding == .premultipliedRGBA16FloatLinear {
+                        let color = snapshot.linearPixel(x: localX, y: localY).applyingOpacity(Float(maskAlpha) / 255)
+                        bytes.withUnsafeMutableBytes { CanvasPixelCodec.write(color, into: $0, offset: index, encoding: snapshot.encoding) }
+                        continue
+                    }
 
                     switch maskAlpha {
                     case 0:
@@ -11257,7 +11297,7 @@ final class WorkspaceViewModel: ObservableObject {
             width: snapshot.width,
             height: snapshot.height,
             bytesPerRow: snapshot.bytesPerRow,
-            pixelData: Data(bytes)
+            pixelData: Data(bytes), encoding: snapshot.encoding
         )
     }
 
@@ -11276,7 +11316,7 @@ final class WorkspaceViewModel: ObservableObject {
             return overlay
         }
 
-        let bytesPerPixel = 4
+        let bytesPerPixel = base.encoding.bytesPerPixel
         var output = [UInt8](base.pixelData)
         let overlayBytes = [UInt8](overlay.pixelData)
 
@@ -11291,6 +11331,15 @@ final class WorkspaceViewModel: ObservableObject {
                     guard maskAlpha > 0 else { continue }
 
                     let index = byteRow + (x * bytesPerPixel)
+                    if base.encoding == .premultipliedRGBA16FloatLinear {
+                        let a = base.linearPixel(x: x, y: y), b = overlay.linearPixel(x: x, y: y)
+                        let t = Float(maskAlpha) / 255
+                        let color = LinearPremultipliedColor(red: a.red + (b.red - a.red) * t,
+                            green: a.green + (b.green - a.green) * t, blue: a.blue + (b.blue - a.blue) * t,
+                            alpha: a.alpha + (b.alpha - a.alpha) * t)
+                        output.withUnsafeMutableBytes { CanvasPixelCodec.write(color, into: $0, offset: index, encoding: base.encoding) }
+                        continue
+                    }
                     if maskAlpha == 255 {
                         output[index] = overlayBytes[index]
                         output[index + 1] = overlayBytes[index + 1]
@@ -11315,7 +11364,7 @@ final class WorkspaceViewModel: ObservableObject {
             width: base.width,
             height: base.height,
             bytesPerRow: base.bytesPerRow,
-            pixelData: Data(output)
+            pixelData: Data(output), encoding: base.encoding
         )
     }
 
@@ -11354,12 +11403,11 @@ final class WorkspaceViewModel: ObservableObject {
         var maxY = -1
 
         snapshot.pixelData.withUnsafeBytes { rawBuffer in
-            let bytes = rawBuffer.bindMemory(to: UInt8.self)
             for y in 0..<height {
                 let rowStart = y * snapshot.bytesPerRow
                 for x in 0..<width {
-                    let alphaIndex = rowStart + (x * 4) + 3
-                    guard bytes[alphaIndex] > 0 else { continue }
+                    let color = CanvasPixelCodec.read(rawBuffer, offset: rowStart + x * snapshot.encoding.bytesPerPixel, encoding: snapshot.encoding)
+                    guard color.alpha > 0 else { continue }
                     minX = min(minX, x)
                     minY = min(minY, y)
                     maxX = max(maxX, x)
@@ -11387,7 +11435,7 @@ final class WorkspaceViewModel: ObservableObject {
         width: Int,
         height: Int
     ) -> LayerTextureSnapshot {
-        let bytesPerPixel = 4
+        let bytesPerPixel = snapshot.encoding.bytesPerPixel
         let croppedBytesPerRow = width * bytesPerPixel
         var croppedBytes = [UInt8](repeating: 0, count: croppedBytesPerRow * height)
 
@@ -11406,7 +11454,7 @@ final class WorkspaceViewModel: ObservableObject {
             width: width,
             height: height,
             bytesPerRow: croppedBytesPerRow,
-            pixelData: Data(croppedBytes)
+            pixelData: Data(croppedBytes), encoding: snapshot.encoding
         )
     }
 
@@ -11577,7 +11625,8 @@ final class WorkspaceViewModel: ObservableObject {
                         width: snapshot.width,
                         height: snapshot.height,
                         bytesPerRow: snapshot.bytesPerRow,
-                        bytes: &bytes
+                        bytes: &bytes,
+                        encoding: snapshot.encoding
                     )
                     return (summary, Data(bytes))
                 }.value
@@ -11604,7 +11653,7 @@ final class WorkspaceViewModel: ObservableObject {
                     width: snapshot.width,
                     height: snapshot.height,
                     bytesPerRow: snapshot.bytesPerRow,
-                    pixelData: result.1
+                    pixelData: result.1, encoding: snapshot.encoding
                 )
                 do {
                     try self.bootstrap.textureSerializer.restore(
@@ -13791,7 +13840,8 @@ final class WorkspaceViewModel: ObservableObject {
             referenceImageBytes: referenceBytes.archive,
             referenceImageResidentBytes: referenceBytes.resident,
             historyResidentBytes: bootstrap.historyController.residentByteCount,
-            additionalWorkingBytes: additionalWorkingBytes
+            additionalWorkingBytes: additionalWorkingBytes,
+            pixelFormat: workspace.document.colorStandard.pixelFormat
         )
         guard !assessment.isSupported else { return true }
 
@@ -13828,7 +13878,7 @@ final class WorkspaceViewModel: ObservableObject {
         )
         let paintBytes = saturatingMultiply(
             saturatingMultiply(pixels, by: workspace.document.paintLayers.count),
-            by: 4
+            by: workspace.document.colorStandard.pixelFormat.encoding.bytesPerPixel
         )
         let maskBytes = saturatingMultiply(
             pixels,
@@ -13846,7 +13896,8 @@ final class WorkspaceViewModel: ObservableObject {
             savedSnapshotCount: savedSnapshots.count,
             referenceImageBytes: referenceBytes.archive,
             referenceImageResidentBytes: referenceBytes.resident,
-            historyResidentBytes: bootstrap.historyController.residentByteCount
+            historyResidentBytes: bootstrap.historyController.residentByteCount,
+            pixelFormat: workspace.document.colorStandard.pixelFormat
         ).footprint.estimatedInteractiveResidentBytes
     }
 
@@ -14144,6 +14195,7 @@ final class WorkspaceViewModel: ObservableObject {
                     )
                 }
                 bootstrap.layerSurfaceStore.swapTexture(for: surfaceID, with: stagedLayer.texture)
+                bootstrap.layerSurfaceStore.compactTexture(for: surfaceID)
             case .mask:
                 bootstrap.layerSurfaceStore.setMaskTexture(stagedLayer.texture, for: stagedLayer.layerID)
             }
@@ -14182,7 +14234,7 @@ final class WorkspaceViewModel: ObservableObject {
             guard let texture = bootstrap.layerSurfaceStore.makeTexture(
                 width: canvasSize.width,
                 height: canvasSize.height,
-                pixelFormat: layerSnapshot.resourceKind == .mask ? .r8Unorm : .bgra8Unorm_srgb,
+                pixelFormat: layerSnapshot.texture.encoding.metalPixelFormat,
                 metal: bootstrap.metalContext
             ) else {
                 throw PersistenceError.invalidProject("无法为图层准备纹理")
@@ -14391,9 +14443,8 @@ final class WorkspaceViewModel: ObservableObject {
         }
 
         do {
-            // The main actor performs only one private-to-private Metal copy. Pixel readback,
-            // checksums, compression, and disk I/O continue on the utility task.
-            let capture = try bootstrap.persistenceController.freezeProjectCapture(
+            // Freeze changed regions only; unchanged compressed tiles are shared across generations.
+            let capture = try bootstrap.persistenceController.freezeIncrementalRecovery(
                 referenceImages: try projectReferenceImagePayloads(),
                 savedSnapshots: persistentSavedSnapshotPayloads()
             )
@@ -14404,14 +14455,7 @@ final class WorkspaceViewModel: ObservableObject {
             recoveryAutosaveWriteTask = Task { [weak self] in
                 let result = await Task.detached(priority: .utility) {
                     Result {
-                        let payload = try persistenceBox.value.materializeProjectPayload(
-                            from: capture
-                        )
-                        _ = try persistenceBox.value.writeCapturedProject(
-                            payload,
-                            to: stagingURL,
-                            recordsVersionBackup: false
-                        )
+                        try persistenceBox.value.writeIncrementalRecovery(capture, to: stagingURL)
                     }
                 }.value
 
@@ -14452,6 +14496,7 @@ final class WorkspaceViewModel: ObservableObject {
                 } catch {
                     persistenceBox.value.discardRecoveryStagingProject(at: stagingURL)
                     self.showStatus(.init(kind: .error, message: "自动恢复保存失败，已有副本保留；请手动保存工程：\(error.localizedDescription)"))
+                    persistenceBox.value.invalidateIncrementalRecoveryBase()
                     self.scheduleRecoveryAutosave(delay: .seconds(30))
                 }
             }
@@ -14549,12 +14594,14 @@ final class WorkspaceViewModel: ObservableObject {
     func createNewCanvas(
         name: String = "未命名",
         canvasSize: CanvasSize,
-        resolutionDPI: Int
+        resolutionDPI: Int,
+        pixelFormat: ArtPixelFormat = .rgba8
     ) {
         createNewCanvas(
             name: name,
             canvasSize: canvasSize,
             resolutionDPI: resolutionDPI,
+            pixelFormat: pixelFormat,
             decisionOverride: nil
         )
     }
@@ -14562,12 +14609,14 @@ final class WorkspaceViewModel: ObservableObject {
     func createNewCanvasDiscardingUnsavedChanges(
         name: String = "未命名",
         canvasSize: CanvasSize,
-        resolutionDPI: Int
+        resolutionDPI: Int,
+        pixelFormat: ArtPixelFormat = .rgba8
     ) {
         createNewCanvas(
             name: name,
             canvasSize: canvasSize,
             resolutionDPI: resolutionDPI,
+            pixelFormat: pixelFormat,
             decisionOverride: .discard
         )
     }
@@ -14576,6 +14625,7 @@ final class WorkspaceViewModel: ObservableObject {
         name: String,
         canvasSize: CanvasSize,
         resolutionDPI: Int,
+        pixelFormat: ArtPixelFormat,
         decisionOverride: NewCanvasCreationDecision?
     ) {
         guard !isDocumentTransitionPending,
@@ -14596,7 +14646,7 @@ final class WorkspaceViewModel: ObservableObject {
         guard let decision = decisionOverride else {
             continueAfterUnsavedChanges(detail: "创建新画布前，要先保存当前内容吗？") { [weak self] allowed in
                 guard let self, allowed else { return }
-                self.createNewCanvas(name: name, canvasSize: canvasSize, resolutionDPI: resolutionDPI, decisionOverride: .discard)
+                self.createNewCanvas(name: name, canvasSize: canvasSize, resolutionDPI: resolutionDPI, pixelFormat: pixelFormat, decisionOverride: .discard)
             }
             return
         }
@@ -14606,7 +14656,7 @@ final class WorkspaceViewModel: ObservableObject {
         case .save:
             saveProject { [weak self] saved in
                 guard let self, saved else { return }
-                self.createNewCanvas(name: name, canvasSize: canvasSize, resolutionDPI: resolutionDPI, decisionOverride: .discard)
+                self.createNewCanvas(name: name, canvasSize: canvasSize, resolutionDPI: resolutionDPI, pixelFormat: pixelFormat, decisionOverride: .discard)
             }
             return
         case .discard:
@@ -14633,6 +14683,7 @@ final class WorkspaceViewModel: ObservableObject {
                 resolutionDPI: resolutionDPI
             ),
             canvasSize: canvasSize,
+            colorStandard: pixelFormat == .rgba16Float ? .highPrecision : .stageOneDefault,
             layers: layers,
             activeLayerID: layers.last?.id ?? layers[0].id
         )
@@ -15631,7 +15682,6 @@ final class WorkspaceViewModel: ObservableObject {
         var wasCancelled = false
 
         snapshot.pixelData.withUnsafeBytes { rawBuffer in
-            let sourceBytes = rawBuffer.bindMemory(to: UInt8.self)
             for targetY in 0..<targetHeight {
                 if Task.isCancelled {
                     wasCancelled = true
@@ -15640,12 +15690,13 @@ final class WorkspaceViewModel: ObservableObject {
                 let sourceY = Swift.min((targetY * snapshot.height) / targetHeight, snapshot.height - 1)
                 for targetX in 0..<targetWidth {
                     let sourceX = Swift.min((targetX * snapshot.width) / targetWidth, snapshot.width - 1)
-                    let sourceOffset = (sourceY * snapshot.bytesPerRow) + (sourceX * bytesPerPixel)
+                    let sourceOffset = (sourceY * snapshot.bytesPerRow) + (sourceX * snapshot.encoding.bytesPerPixel)
                     let targetOffset = (targetY * targetBytesPerRow) + (targetX * bytesPerPixel)
-                    rgba[targetOffset] = sourceBytes[sourceOffset + 2]
-                    rgba[targetOffset + 1] = sourceBytes[sourceOffset + 1]
-                    rgba[targetOffset + 2] = sourceBytes[sourceOffset]
-                    rgba[targetOffset + 3] = sourceBytes[sourceOffset + 3]
+                    let color = CanvasPixelCodec.read(rawBuffer, offset: sourceOffset, encoding: snapshot.encoding).bgra8PremultipliedBytes
+                    rgba[targetOffset] = color.red
+                    rgba[targetOffset + 1] = color.green
+                    rgba[targetOffset + 2] = color.blue
+                    rgba[targetOffset + 3] = color.alpha
                 }
             }
         }
@@ -15687,7 +15738,6 @@ final class WorkspaceViewModel: ObservableObject {
         let bytesPerRow = targetWidth * bytesPerPixel
         var rgba = [UInt8](repeating: 0, count: targetHeight * bytesPerRow)
         snapshot.pixelData.withUnsafeBytes { rawBuffer in
-            let source = rawBuffer.bindMemory(to: UInt8.self)
             for targetY in 0..<targetHeight {
                 let canvasY = min(
                     canvasSize.height - 1,
@@ -15702,12 +15752,13 @@ final class WorkspaceViewModel: ObservableObject {
                     )
                     let sourceX = canvasX - originX
                     guard sourceX >= 0, sourceX < snapshot.width else { continue }
-                    let sourceOffset = sourceY * snapshot.bytesPerRow + sourceX * bytesPerPixel
+                    let sourceOffset = sourceY * snapshot.bytesPerRow + sourceX * snapshot.encoding.bytesPerPixel
                     let targetOffset = targetY * bytesPerRow + targetX * bytesPerPixel
-                    rgba[targetOffset] = source[sourceOffset + 2]
-                    rgba[targetOffset + 1] = source[sourceOffset + 1]
-                    rgba[targetOffset + 2] = source[sourceOffset]
-                    rgba[targetOffset + 3] = source[sourceOffset + 3]
+                    let color = CanvasPixelCodec.read(rawBuffer, offset: sourceOffset, encoding: snapshot.encoding).bgra8PremultipliedBytes
+                    rgba[targetOffset] = color.red
+                    rgba[targetOffset + 1] = color.green
+                    rgba[targetOffset + 2] = color.blue
+                    rgba[targetOffset + 3] = color.alpha
                 }
             }
         }
@@ -15794,10 +15845,10 @@ final class WorkspaceViewModel: ObservableObject {
 
     private func noteCanvasContentChanged(changedLayerIDs: Set<LayerID>? = nil) {
         if let changedLayerIDs {
-            bootstrap.layerSurfaceStore.markContentUnknown(for: changedLayerIDs)
+            bootstrap.layerSurfaceStore.markContentUnknown(for: changedLayerIDs, recordsChange: false)
         } else {
             bootstrap.layerSurfaceStore.markContentUnknown(
-                for: bootstrap.workspaceStore.state.document.layers.map(\.id)
+                for: bootstrap.workspaceStore.state.document.layers.map(\.id), recordsChange: false
             )
         }
         hasUnsavedChanges = true
@@ -15830,9 +15881,8 @@ final class WorkspaceViewModel: ObservableObject {
         from sourceWorkspace: WorkspaceState,
         sourceLayerSurfaceStore: StageOneLayerSurfaceStore
     ) throws {
-        let prepared = try LayerSurfaceTransfer.prepare(
-            document: sourceWorkspace.document, source: sourceLayerSurfaceStore,
-            metal: bootstrap.metalContext
+        let prepared = try LayerSurfaceTransfer.share(
+            document: sourceWorkspace.document, source: sourceLayerSurfaceStore
         )
         bootstrap.workspaceStore.replaceState(sourceWorkspace)
         bootstrap.layerSurfaceStore.adoptContents(of: prepared)
@@ -15970,7 +16020,7 @@ final class WorkspaceViewModel: ObservableObject {
             let bounds = job.renderedPixelBounds,
             !bounds.isEmpty,
             let surfaceID = bootstrap.layerSurfaceStore.surfaceID(for: job.layerID),
-            let texture = bootstrap.layerSurfaceStore.texture(for: surfaceID),
+            let texture = bootstrap.layerSurfaceStore.readTexture(for: surfaceID),
             bounds.originX >= 0,
             bounds.originY >= 0,
             bounds.originX + bounds.width <= texture.width,
@@ -16057,7 +16107,7 @@ final class WorkspaceViewModel: ObservableObject {
     ) throws -> MTLTexture {
         guard let firstLayer = layers.first,
               let firstSurfaceID = bootstrap.layerSurfaceStore.surfaceID(for: firstLayer.id),
-              let firstTexture = bootstrap.layerSurfaceStore.texture(for: firstSurfaceID)
+              let firstTexture = bootstrap.layerSurfaceStore.readTexture(for: firstSurfaceID)
         else {
             throw CocoaError(.fileReadCorruptFile)
         }
@@ -16073,9 +16123,9 @@ final class WorkspaceViewModel: ObservableObject {
                     return live
                 }
                 return bootstrap.layerSurfaceStore.surfaceID(for: layerID)
-                    .flatMap(bootstrap.layerSurfaceStore.texture(for:))
+                    .flatMap(bootstrap.layerSurfaceStore.readTexture(for:))
             },
-            enabledMaskTextureForLayer: bootstrap.layerSurfaceStore.maskTexture(for:)
+            enabledMaskTextureForLayer: bootstrap.layerSurfaceStore.readMaskTexture(for:)
         ).inputs
 
         let descriptor = MTLTextureDescriptor.texture2DDescriptor(
@@ -16298,19 +16348,16 @@ final class WorkspaceViewModel: ObservableObject {
         return workspaceSnapshot
     }
 
-    private func premultipliedPixel(from color: RGBAColor) -> EditablePixel {
-        let premultiplied = color.premultiplied
-        return EditablePixel(
-            blue: UInt8(clamping: Int((premultiplied.blue * 255).rounded())),
-            green: UInt8(clamping: Int((premultiplied.green * 255).rounded())),
-            red: UInt8(clamping: Int((premultiplied.red * 255).rounded())),
-            alpha: UInt8(clamping: Int((premultiplied.alpha * 255).rounded()))
+    private func premultipliedPixel(from color: RGBAColor) -> RGBAColor {
+        let linear = LinearPremultipliedColor(srgb: color)
+        return RGBAColor(
+            red: linear.red, green: linear.green, blue: linear.blue, alpha: linear.alpha
         )
     }
 
     private enum SelectionPixelOperation {
         case clear
-        case fill(EditablePixel)
+        case fill(RGBAColor)
     }
 
     private func renderInput(for operation: SelectionPixelOperation) -> (
@@ -16321,15 +16368,7 @@ final class WorkspaceViewModel: ObservableObject {
         case .clear:
             return (.clear, RGBAColor(red: 0, green: 0, blue: 0, alpha: 0))
         case .fill(let fillPixel):
-            return (
-                .fill,
-                RGBAColor(
-                    red: Float(fillPixel.red) / 255,
-                    green: Float(fillPixel.green) / 255,
-                    blue: Float(fillPixel.blue) / 255,
-                    alpha: Float(fillPixel.alpha) / 255
-                )
-            )
+            return (.fill, fillPixel)
         }
     }
 

@@ -23,6 +23,7 @@ private struct SelectionPixelOperationUniforms {
 }
 
 final class SelectionPixelOperationRenderer {
+    private let pipelineVariants: ColorRenderPipelineVariants
     private let device: MTLDevice
     private let clearPipelineState: MTLRenderPipelineState
     private let fillPipelineState: MTLRenderPipelineState
@@ -32,6 +33,8 @@ final class SelectionPixelOperationRenderer {
     private var reusableSelectionMaskTextureSize: SIMD2<Int>?
 
     init(device: MTLDevice) {
+        let pipelineVariants = ColorRenderPipelineVariants(device: device)
+        self.pipelineVariants = pipelineVariants
         self.device = device
         let source = """
         #include <metal_stdlib>
@@ -129,7 +132,7 @@ final class SelectionPixelOperationRenderer {
             colorAttachment.pixelFormat = .bgra8Unorm_srgb
             colorAttachment.isBlendingEnabled = true
             attachment(colorAttachment)
-            return try device.makeRenderPipelineState(descriptor: descriptor)
+            return try pipelineVariants.makeState(descriptor: descriptor)
         }
 
         do {
@@ -244,7 +247,7 @@ final class SelectionPixelOperationRenderer {
         } else {
             pipelineState = operationMode == .clear ? clearPipelineState : fillPipelineState
         }
-        encoder.setRenderPipelineState(pipelineState)
+        encoder.setRenderPipelineState(pipelineVariants.state(pipelineState, for: renderPassDescriptor.colorAttachments[0].texture?.pixelFormat ?? .bgra8Unorm_srgb))
         encoder.setBlendColor(
             red: 0,
             green: 0,

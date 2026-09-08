@@ -18,6 +18,11 @@ enum RasterExportFormat: String, Codable, Sendable, Equatable, CaseIterable {
     }
 }
 
+enum RasterExportBitDepth: Int, Codable, Sendable, CaseIterable {
+    case eight = 8
+    case sixteen = 16
+}
+
 enum RasterExportBackground: Codable, Sendable, Equatable {
     case transparent
     case white
@@ -44,6 +49,8 @@ struct RasterExportOptions: Codable, Sendable, Equatable {
     var resize: RasterExportResize
     var dpi: Double
     var jpegQuality: Double
+    var bitDepth: RasterExportBitDepth? = nil
+    var resolvedBitDepth: RasterExportBitDepth { bitDepth ?? .eight }
 
     init(
         format: RasterExportFormat = .png,
@@ -51,7 +58,8 @@ struct RasterExportOptions: Codable, Sendable, Equatable {
         scope: RasterExportScope = .fullCanvas,
         resize: RasterExportResize = .original,
         dpi: Double = 300,
-        jpegQuality: Double = 0.92
+        jpegQuality: Double = 0.92,
+        bitDepth: RasterExportBitDepth = .eight
     ) {
         self.format = format
         self.background = background
@@ -59,9 +67,13 @@ struct RasterExportOptions: Codable, Sendable, Equatable {
         self.resize = resize
         self.dpi = dpi
         self.jpegQuality = jpegQuality
+        self.bitDepth = bitDepth
     }
 
     func validate() throws {
+        if format == .jpeg && resolvedBitDepth == .sixteen {
+            throw RasterExportError.unsupportedBitDepth
+        }
         guard dpi.isFinite, (1...12_000).contains(dpi) else {
             throw RasterExportError.invalidDPI(dpi)
         }
@@ -148,6 +160,7 @@ struct RasterExportOptions: Codable, Sendable, Equatable {
 }
 
 enum RasterExportError: LocalizedError, Sendable, Equatable {
+    case unsupportedBitDepth
     case invalidSourceDimensions
     case invalidSourcePixelData
     case invalidOutputDimensions
@@ -172,6 +185,8 @@ enum RasterExportError: LocalizedError, Sendable, Equatable {
 
     var errorDescription: String? {
         switch self {
+        case .unsupportedBitDepth:
+            return "JPEG 不支持 16 位导出，请选择 PNG 或 TIFF"
         case .invalidSourceDimensions:
             return "导出源图像尺寸无效"
         case .invalidSourcePixelData:

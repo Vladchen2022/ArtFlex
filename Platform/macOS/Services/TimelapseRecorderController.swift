@@ -501,7 +501,7 @@ final class TimelapseRecorderController: ObservableObject {
             guard layer.isVisible, layer.opacity > 0 else { return nil }
             guard
                 let surfaceID = layerSurfaceStore.surfaceID(for: layer.id),
-                let texture = layerSurfaceStore.texture(for: surfaceID)
+                let texture = layerSurfaceStore.readTexture(for: surfaceID)
             else {
                 return nil
             }
@@ -556,12 +556,12 @@ final class TimelapseRecorderController: ObservableObject {
         let bytesPerRow = width * bytesPerPixel
         let mergedBytes: [UInt8]
         if let compositeTexture = source.compositeTexture {
-            let snapshot = try serializer.downsampledSnapshot(texture: compositeTexture.value, divisor: divisor)
+            let snapshot = try serializer.downsampledSnapshot(texture: compositeTexture.value, divisor: divisor).converted(to: .premultipliedBGRA8SRGB)
             mergedBytes = [UInt8](snapshot.pixelData)
         } else {
             var legacyMergedBytes = [UInt8](repeating: 0, count: bytesPerRow * height)
             for layer in source.layers {
-                let snapshot = try serializer.snapshot(texture: layer.texture.value)
+                let snapshot = try serializer.snapshot(texture: layer.texture.value).converted(to: .premultipliedBGRA8SRGB)
                 let layerBytes = [UInt8](snapshot.pixelData)
                 let effectiveOpacity = min(max(layer.opacity, 0), 1)
                 guard effectiveOpacity > 0 else { continue }

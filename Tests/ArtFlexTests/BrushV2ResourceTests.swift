@@ -44,6 +44,30 @@ struct BrushV2ResourceTests {
         }
     }
 
+    @Test func halfFloatTargetsSupportEveryCombinationWithoutChangingBrushIdentity() throws {
+        let metal = try #require(MetalDeviceContext())
+        let renderer = try StageOneBrushRenderer(device: metal.device)
+        for (name, brush) in try brushes() {
+            let low = try render(brush, side: 128, device: metal.device, renderer: renderer, queue: metal.commandQueue)
+            let high = try render(brush, side: 128, device: metal.device, renderer: renderer, queue: metal.commandQueue,
+                pixelFormat: .rgba16Float)
+            let a = LayerTextureSnapshot(width: 128, height: 128, bytesPerRow: 512, pixelData: Data(low.pixels))
+            let b = LayerTextureSnapshot(width: 128, height: 128, bytesPerRow: 1024,
+                pixelData: Data(high.pixels), encoding: .premultipliedRGBA16FloatLinear)
+            var error: Float = 0
+            var painted = 0
+            for y in 0..<128 { for x in 0..<128 {
+                let first = a.linearPixel(x: x, y: y), second = b.linearPixel(x: x, y: y)
+                if first.alpha > 0 || second.alpha > 0 {
+                    error += abs(first.alpha - second.alpha) + abs(first.red - second.red)
+                    painted += 1
+                }
+            } }
+            #expect(painted > 100, "\(name)")
+            #expect(error / Float(max(painted, 1)) < 0.015, "\(name)")
+        }
+    }
+
     @Test func optionalFieldsAreAllocatedOnceAndRetainedUntilStrokeEnds() throws {
         let device = try #require(MTLCreateSystemDefaultDevice())
         let created = BrushV2Session(device: device, width: 512, height: 512)
@@ -111,9 +135,9 @@ struct BrushV2ResourceTests {
     private func render(_ brush: BrushSettings, side: Int, device: MTLDevice,
                         renderer: StageOneBrushRenderer, queue: MTLCommandQueue,
                         preallocateAllFields: Bool = false, brushStages: [BrushSettings]? = nil,
-                        readsPixels: Bool = true) throws -> Measurement {
+                        readsPixels: Bool = true, pixelFormat: MTLPixelFormat = .bgra8Unorm_srgb) throws -> Measurement {
         let descriptor = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: .bgra8Unorm_srgb, width: side, height: side, mipmapped: false)
+            pixelFormat: pixelFormat, width: side, height: side, mipmapped: false)
         descriptor.storageMode = .shared
         descriptor.usage = [.shaderRead, .renderTarget]
         let target = try #require(device.makeTexture(descriptor: descriptor))
@@ -164,10 +188,11 @@ struct BrushV2ResourceTests {
         #expect(buffer.status == .completed)
         let state = try #require(session.v2)
         let pigmentBytes = [state.a, state.b, state.range].compactMap { $0 }.reduce(0) { $0 + $1.allocatedSize }
-        var pixels = [UInt8](repeating: 0, count: readsPixels ? side * side * 4 : 0)
+        let bpp = CanvasPixelEncoding(metalPixelFormat: pixelFormat).bytesPerPixel
+        var pixels = [UInt8](repeating: 0, count: readsPixels ? side * side * bpp : 0)
         if !pixels.isEmpty {
             pixels.withUnsafeMutableBytes {
-                target.getBytes($0.baseAddress!, bytesPerRow: side * 4,
+                target.getBytes($0.baseAddress!, bytesPerRow: side * bpp,
                                 from: MTLRegionMake2D(0, 0, side, side), mipmapLevel: 0)
             }
         }

@@ -62,6 +62,7 @@ enum TransformGPUCompositorInitializationError: LocalizedError {
 
 final class TransformGPUCompositor {
     private let device: MTLDevice
+    private let pipelineVariants: ColorRenderPipelineVariants
     private let extractPipelineState: MTLRenderPipelineState
     private let punchOutPipelineState: MTLRenderPipelineState
     private let samplerState: MTLSamplerState
@@ -69,6 +70,8 @@ final class TransformGPUCompositor {
 
     init(device: MTLDevice) throws {
         self.device = device
+        let pipelineVariants = ColorRenderPipelineVariants(device: device)
+        self.pipelineVariants = pipelineVariants
         let source = """
         #include <metal_stdlib>
         using namespace metal;
@@ -160,7 +163,7 @@ final class TransformGPUCompositor {
         extractDescriptor.colorAttachments[0].pixelFormat = .bgra8Unorm_srgb
         extractDescriptor.colorAttachments[0].isBlendingEnabled = false
         do {
-            extractPipelineState = try device.makeRenderPipelineState(descriptor: extractDescriptor)
+            extractPipelineState = try pipelineVariants.makeState(descriptor: extractDescriptor)
         } catch {
             throw TransformGPUCompositorInitializationError.pipelineState("extract", error)
         }
@@ -174,7 +177,7 @@ final class TransformGPUCompositor {
         punchOutDescriptor.colorAttachments[0].pixelFormat = .bgra8Unorm_srgb
         punchOutDescriptor.colorAttachments[0].isBlendingEnabled = false
         do {
-            punchOutPipelineState = try device.makeRenderPipelineState(descriptor: punchOutDescriptor)
+            punchOutPipelineState = try pipelineVariants.makeState(descriptor: punchOutDescriptor)
         } catch {
             throw TransformGPUCompositorInitializationError.pipelineState("punchOut", error)
         }
@@ -262,7 +265,7 @@ final class TransformGPUCompositor {
             )
 
             let vertices = fullScreenVertices()
-            encoder.setRenderPipelineState(extractPipelineState)
+            encoder.setRenderPipelineState(pipelineVariants.state(extractPipelineState, for: extractedTexture.pixelFormat))
             encoder.setVertexBytes(
                 vertices,
                 length: MemoryLayout<TransformQuadVertex>.stride * vertices.count,
@@ -292,7 +295,7 @@ final class TransformGPUCompositor {
                 bounds: sourceBounds,
                 canvasSize: canvasSize
             )
-            encoder.setRenderPipelineState(punchOutPipelineState)
+            encoder.setRenderPipelineState(pipelineVariants.state(punchOutPipelineState, for: baseTexture.pixelFormat))
             encoder.setVertexBytes(
                 vertices,
                 length: MemoryLayout<TransformQuadVertex>.stride * vertices.count,
@@ -335,7 +338,7 @@ final class TransformGPUCompositor {
             let targetTexture = makeTexture(
                 width: canvasSize.width,
                 height: canvasSize.height,
-                pixelFormat: .bgra8Unorm_srgb,
+                pixelFormat: session.extractedTexture.pixelFormat,
                 usage: [.shaderRead, .renderTarget]
             ),
             let commandBuffer = metal.commandQueue.makeCommandBuffer()

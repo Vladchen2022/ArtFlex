@@ -36,7 +36,7 @@ final class ExportController {
 
         guard
             let surfaceID = layerSurfaceStore.surfaceID(for: document.activeLayerID),
-            let texture = layerSurfaceStore.texture(for: surfaceID)
+            let texture = layerSurfaceStore.readTexture(for: surfaceID)
         else {
             throw ExportError.missingActiveLayer
         }

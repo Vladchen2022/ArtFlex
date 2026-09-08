@@ -79,6 +79,7 @@ struct ArtDocument: Codable, Sendable, Equatable {
     var activeLayerID: LayerID
     var perspectiveGuide: PerspectiveGuideState?
     var blockReferenceScene: BlockReferenceScene?
+    var cropRetention: CanvasCropRetention? = nil
 
     init(
         metadata: DocumentMetadata,
@@ -273,6 +274,7 @@ struct ArtDocument: Codable, Sendable, Equatable {
 
         let removedID = layers[activeIndex].id
         layers.remove(at: activeIndex)
+        cropRetention?.tiles.removeAll { $0.key.layerID == removedID }
         for index in layers.indices where layers[index].clipTargetLayerID == removedID {
             layers[index].clipTargetLayerID = nil
         }
@@ -297,6 +299,7 @@ struct ArtDocument: Codable, Sendable, Equatable {
         guard remainingPaintCount >= 1 else { return [] }
 
         layers.removeAll { removalIDs.contains($0.id) }
+        cropRetention?.tiles.removeAll { removalIDs.contains($0.key.layerID) }
         for index in layers.indices {
             if layers[index].parentID.map(removalIDs.contains) == true {
                 layers[index].parentID = nil
@@ -531,6 +534,13 @@ struct ArtDocument: Codable, Sendable, Equatable {
 
         let insertIndex = activeIndex + 1
         layers.insert(duplicated, at: insertIndex)
+        if let retained = cropRetention?.tiles.filter({ $0.key.layerID == source.id }) {
+            cropRetention?.tiles.append(contentsOf: retained.map { tile in
+                var copy = tile
+                copy.key.layerID = duplicated.id
+                return copy
+            })
+        }
         activeLayerID = duplicated.id
         return duplicated
     }

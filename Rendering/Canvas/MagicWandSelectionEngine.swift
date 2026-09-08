@@ -40,7 +40,7 @@ final class MagicWandSelectionEngine: @unchecked Sendable {
                 originY: 0,
                 width: texture.width,
                 height: texture.height
-            )
+            ).converted(to: .premultipliedBGRA8SRGB)
             return select(snapshot: snapshot, originX: 0, originY: 0, at: point, settings: settings, cancellation: cancellation)
         }
 
@@ -52,13 +52,16 @@ final class MagicWandSelectionEngine: @unchecked Sendable {
             let originY = key.y * tileLength
             let width = min(tileLength, texture.width - originX)
             let height = min(tileLength, texture.height - originY)
-            let snapshot = try serializer.snapshot(
+            let originalSnapshot = try serializer.snapshot(
                 texture: texture,
                 originX: originX,
                 originY: originY,
                 width: width,
                 height: height
             )
+            // Classification uses the established 8-bit tolerance scale. Only this temporary
+            // sample is converted; selected/filled document pixels retain their own precision.
+            let snapshot = try originalSnapshot.converted(to: .premultipliedBGRA8SRGB)
             let tile = Tile(
                 originX: originX,
                 originY: originY,
@@ -102,7 +105,8 @@ final class MagicWandSelectionEngine: @unchecked Sendable {
         settings: SmartSelectionSettings,
         cancellation: WorkCancellation? = nil
     ) -> SmartSelectionSegmentationResult? {
-        SmartSelectionSegmenter.segment(
+        guard let snapshot = try? snapshot.converted(to: .premultipliedBGRA8SRGB) else { return nil }
+        return SmartSelectionSegmenter.segment(
             raster: SmartSelectionRaster(
                 originX: originX,
                 originY: originY,

@@ -76,6 +76,7 @@ private struct CanvasCompositeTexturePoolKey: Equatable {
 }
 
 final class StageOneCanvasPresenter: @unchecked Sendable {
+    private let pipelineVariants: ColorRenderPipelineVariants
     private let device: MTLDevice
     private let pipelineState: MTLRenderPipelineState
     private let blendPipelineState: MTLRenderPipelineState
@@ -92,6 +93,8 @@ final class StageOneCanvasPresenter: @unchecked Sendable {
 #endif
 
     init(device: MTLDevice) throws {
+        let pipelineVariants = ColorRenderPipelineVariants(device: device)
+        self.pipelineVariants = pipelineVariants
         self.device = device
         self.curveAdjustmentRenderer = try CurveAdjustmentRenderer(device: device)
         let source = """
@@ -235,7 +238,7 @@ final class StageOneCanvasPresenter: @unchecked Sendable {
         attachment.destinationRGBBlendFactor = .oneMinusSourceAlpha
         attachment.destinationAlphaBlendFactor = .oneMinusSourceAlpha
         do {
-            pipelineState = try device.makeRenderPipelineState(descriptor: descriptor)
+            pipelineState = try pipelineVariants.makeState(descriptor: descriptor)
         } catch {
             throw StageOneCanvasPresenterInitializationError.pipelineState(error)
         }
@@ -245,7 +248,7 @@ final class StageOneCanvasPresenter: @unchecked Sendable {
         blendDescriptor.fragmentFunction = library.makeFunction(name: "canvasBlendFragment")
         blendDescriptor.colorAttachments[0].pixelFormat = .bgra8Unorm_srgb
         do {
-            blendPipelineState = try device.makeRenderPipelineState(descriptor: blendDescriptor)
+            blendPipelineState = try pipelineVariants.makeState(descriptor: blendDescriptor)
         } catch {
             throw StageOneCanvasPresenterInitializationError.pipelineState(error)
         }
@@ -256,7 +259,7 @@ final class StageOneCanvasPresenter: @unchecked Sendable {
         checkerboardDescriptor.fragmentFunction = library.makeFunction(name: "canvasCheckerboardFragment")
         checkerboardDescriptor.colorAttachments[0].pixelFormat = .bgra8Unorm_srgb
         do {
-            checkerboardPipelineState = try device.makeRenderPipelineState(descriptor: checkerboardDescriptor)
+            checkerboardPipelineState = try pipelineVariants.makeState(descriptor: checkerboardDescriptor)
         } catch {
             throw StageOneCanvasPresenterInitializationError.pipelineState(error)
         }
@@ -303,7 +306,7 @@ final class StageOneCanvasPresenter: @unchecked Sendable {
             return
         }
         if checkerboard {
-            encoder.setRenderPipelineState(checkerboardPipelineState)
+            encoder.setRenderPipelineState(pipelineVariants.state(checkerboardPipelineState, for: renderPassDescriptor.colorAttachments[0].texture?.pixelFormat ?? .bgra8Unorm_srgb))
             encoder.setVertexBuffer(canvasVertexBuffer, offset: 0, index: 0)
             encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
         }
@@ -321,7 +324,7 @@ final class StageOneCanvasPresenter: @unchecked Sendable {
             return false
         }
 
-        encoder.setRenderPipelineState(pipelineState)
+        encoder.setRenderPipelineState(pipelineVariants.state(pipelineState, for: renderPassDescriptor.colorAttachments[0].texture?.pixelFormat ?? .bgra8Unorm_srgb))
         encoder.setFragmentSamplerState(
             samplingMode == .nearest ? nearestSamplerState : linearSamplerState,
             index: 0
@@ -408,7 +411,7 @@ final class StageOneCanvasPresenter: @unchecked Sendable {
             pass.colorAttachments[0].loadAction = .dontCare
             pass.colorAttachments[0].storeAction = .store
             guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: pass) else { return false }
-            encoder.setRenderPipelineState(blendPipelineState)
+            encoder.setRenderPipelineState(pipelineVariants.state(blendPipelineState, for: pass.colorAttachments[0].texture?.pixelFormat ?? .bgra8Unorm_srgb))
             encoder.setVertexBuffer(canvasVertexBuffer, offset: 0, index: 0)
             encoder.setFragmentSamplerState(sampler, index: 0)
             encoder.setFragmentTexture(input.texture, index: 0)
@@ -432,7 +435,7 @@ final class StageOneCanvasPresenter: @unchecked Sendable {
         guard let finalEncoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor) else {
             return false
         }
-        finalEncoder.setRenderPipelineState(pipelineState)
+        finalEncoder.setRenderPipelineState(pipelineVariants.state(pipelineState, for: renderPassDescriptor.colorAttachments[0].texture?.pixelFormat ?? .bgra8Unorm_srgb))
         finalEncoder.setVertexBuffer(canvasVertexBuffer, offset: 0, index: 0)
         finalEncoder.setFragmentSamplerState(sampler, index: 0)
         finalEncoder.setFragmentTexture(backdrop, index: 0)
@@ -568,7 +571,7 @@ final class StageOneCanvasPresenter: @unchecked Sendable {
             CanvasPresenterVertex(position: ndcPoint(corners[1], canvasSize: canvasSize), texCoord: SIMD2(1, 0))
         ]
 
-        encoder.setRenderPipelineState(pipelineState)
+        encoder.setRenderPipelineState(pipelineVariants.state(pipelineState, for: renderPassDescriptor.colorAttachments[0].texture?.pixelFormat ?? .bgra8Unorm_srgb))
         encoder.setVertexBytes(
             vertices,
             length: MemoryLayout<CanvasPresenterVertex>.stride * vertices.count,
@@ -639,7 +642,7 @@ final class StageOneCanvasPresenter: @unchecked Sendable {
             return
         }
 
-        encoder.setRenderPipelineState(pipelineState)
+        encoder.setRenderPipelineState(pipelineVariants.state(pipelineState, for: renderPassDescriptor.colorAttachments[0].texture?.pixelFormat ?? .bgra8Unorm_srgb))
         encoder.setVertexBuffer(vertexBuffer, offset: 0, index: 0)
         encoder.setFragmentSamplerState(
             samplingMode == .nearest ? nearestSamplerState : linearSamplerState,

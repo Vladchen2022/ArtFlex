@@ -733,7 +733,13 @@ struct CanvasContainerView: View {
                             in: viewModel.workspace.document.canvasSize
                         ),
                         onApply: viewModel.applyCanvasCrop,
-                        onCancel: viewModel.cancelCanvasCrop
+                        onCancel: viewModel.cancelCanvasCrop,
+                        canExpand: viewModel.workspace.document.cropRetention.map {
+                            $0.fullBounds != PixelRegion(originX: 0, originY: 0,
+                                width: viewModel.workspace.document.canvasSize.width,
+                                height: viewModel.workspace.document.canvasSize.height)
+                        } ?? false,
+                        onExpand: viewModel.expandRetainedCanvas
                     )
                     .position(x: geometry.size.width / 2, y: 28)
                 }
@@ -1453,6 +1459,8 @@ private struct CanvasCropHUD: View {
     let bounds: CanvasRect?
     let onApply: () -> Void
     let onCancel: () -> Void
+    let canExpand: Bool
+    let onExpand: () -> Void
 
     var body: some View {
         HStack(spacing: 10) {
@@ -1464,6 +1472,16 @@ private struct CanvasCropHUD: View {
                 .font(.system(size: 12, weight: .semibold, design: .rounded))
                 .foregroundStyle(Color.white)
                 .frame(minWidth: 72)
+
+            Text("保留框外像素")
+                .font(.system(size: 10))
+                .foregroundStyle(Color.white.opacity(0.8))
+            if canExpand {
+                Button("展开保留区域", action: onExpand)
+                    .buttonStyle(.plain)
+                    .foregroundStyle(Color.white)
+                    .buttonTooltip("展开保留区域", help: "恢复裁剪框外的像素；保留裁剪后新画的内容")
+            }
 
             Button(action: onApply) {
                 Image(systemName: "checkmark")

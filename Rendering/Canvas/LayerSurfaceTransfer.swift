@@ -9,6 +9,23 @@ struct CanvasResourceError: LocalizedError {
 /// Prepares a complete replacement without changing the source store. Color and mask
 /// resources always travel together; groups carry metadata, never pixel textures.
 enum LayerSurfaceTransfer {
+    /// Validate first, then share immutable resources. Mutable access detaches in the store.
+    static func share(document: ArtDocument, source: StageOneLayerSurfaceStore) throws -> StageOneLayerSurfaceStore {
+        for layer in document.paintLayers {
+            guard let id = source.surfaceID(for: layer.id), let texture = source.readTexture(for: id),
+                  texture.width == document.canvasSize.width, texture.height == document.canvasSize.height else {
+                throw CanvasResourceError(message: "图层资源不完整，无法创建方案；原画稿未修改")
+            }
+            if layer.mask != nil {
+                guard let mask = source.readMaskTexture(for: layer.id),
+                      mask.width == texture.width, mask.height == texture.height else {
+                    throw CanvasResourceError(message: "图层蒙版不完整，无法创建方案；原画稿未修改")
+                }
+            }
+        }
+        return source.sharedCopy()
+    }
+
     static func prepare(
         document: ArtDocument,
         source: StageOneLayerSurfaceStore,
@@ -25,14 +42,14 @@ enum LayerSurfaceTransfer {
         var copies: [(source: MTLTexture, target: MTLTexture, clear: Double)] = []
         for layer in document.paintLayers {
             guard let sourceID = source.surfaceID(for: layer.id),
-                  let color = source.texture(for: sourceID),
+                  let color = source.readTexture(for: sourceID),
                   let targetID = result.surfaceID(for: layer.id),
-                  let target = result.makeTexture(width: size.width, height: size.height, metal: metal)
+                  let target = result.makeTexture(width: size.width, height: size.height, pixelFormat: color.pixelFormat, metal: metal)
             else { throw CanvasResourceError(message: "无法准备图层“\(layer.name)”；原画稿未修改") }
             result.swapTexture(for: targetID, with: target)
             copies.append((color, target, 0))
             if layer.mask != nil {
-                guard let mask = source.maskTexture(for: layer.id),
+                guard let mask = source.readMaskTexture(for: layer.id),
                       let targetMask = result.makeTexture(
                         width: size.width, height: size.height, pixelFormat: .r8Unorm,
                         usage: [.shaderRead, .shaderWrite, .renderTarget], storageMode: .private, metal: metal

@@ -436,7 +436,7 @@ final class HistoryController {
             var snapshotLayers: [(layer: LayerRecord, resourceKind: LayerHistoryResourceKind, texture: MTLTexture)] = []
             for layer in workspace.document.paintLayers where snapshotLayerIDs.contains(layer.id) {
                 guard let surfaceID = layerSurfaceStore.surfaceID(for: layer.id),
-                      let texture = layerSurfaceStore.texture(for: surfaceID) else {
+                      let texture = layerSurfaceStore.readTexture(for: surfaceID) else {
                     throw HistoryControllerError.missingCaptureResource(
                         layerID: layer.id,
                         resourceKind: .content
@@ -444,7 +444,7 @@ final class HistoryController {
                 }
                 snapshotLayers.append((layer: layer, resourceKind: .content, texture: texture))
                 if layer.mask != nil {
-                    guard let maskTexture = layerSurfaceStore.maskTexture(for: layer.id) else {
+                    guard let maskTexture = layerSurfaceStore.readMaskTexture(for: layer.id) else {
                         throw HistoryControllerError.missingCaptureResource(
                             layerID: layer.id,
                             resourceKind: .mask
@@ -549,7 +549,7 @@ final class HistoryController {
             guard snapshotLayerIDs.contains(snapshot.layerID) else { return nil }
             let key = "\(snapshot.layerID.rawValue.uuidString):\(snapshot.resourceKind.rawValue)"
             guard requiredKeys.contains(key), snapshotsByKey[key] == nil else { return nil }
-            let minimumBytesPerRow = snapshot.texture.width * (snapshot.resourceKind == .mask ? 1 : 4)
+            let minimumBytesPerRow = snapshot.texture.width * snapshot.texture.encoding.bytesPerPixel
             guard snapshot.texture.width > 0,
                   snapshot.texture.height > 0,
                   snapshot.texture.bytesPerRow >= minimumBytesPerRow,
@@ -771,9 +771,9 @@ final class HistoryController {
             let texture: MTLTexture?
             switch region.resourceKind {
             case .content:
-                texture = layerSurfaceStore.surfaceID(for: region.layerID).flatMap(layerSurfaceStore.texture(for:))
+                texture = layerSurfaceStore.surfaceID(for: region.layerID).flatMap(layerSurfaceStore.readTexture(for:))
             case .mask:
-                texture = layerSurfaceStore.maskTexture(for: region.layerID)
+                texture = layerSurfaceStore.readMaskTexture(for: region.layerID)
             }
             guard let texture else {
                 throw HistoryControllerError.missingCaptureResource(layerID: region.layerID, resourceKind: region.resourceKind)
@@ -797,9 +797,9 @@ final class HistoryController {
             switch layerSnapshot.resourceKind {
             case .content:
                 texture = layerSurfaceStore.surfaceID(for: layerSnapshot.layerID)
-                    .flatMap(layerSurfaceStore.texture(for:))
+                    .flatMap(layerSurfaceStore.readTexture(for:))
             case .mask:
-                texture = layerSurfaceStore.maskTexture(for: layerSnapshot.layerID)
+                texture = layerSurfaceStore.readMaskTexture(for: layerSnapshot.layerID)
             }
             guard let texture else {
                 throw HistoryControllerError.missingRestoreResource(
@@ -872,9 +872,7 @@ final class HistoryController {
                   snapshot.coversFullCanvas(workspace.document.canvasSize) else {
                 throw HistoryControllerError.dirtyRestoreTopologyMismatch
             }
-            let pixelFormat: MTLPixelFormat = snapshot.resourceKind == .mask
-                ? .r8Unorm
-                : .bgra8Unorm_srgb
+            let pixelFormat = snapshot.texture.encoding.metalPixelFormat
             guard let texture = layerSurfaceStore.makeTexture(
                 width: workspace.document.canvasSize.width,
                 height: workspace.document.canvasSize.height,
@@ -947,7 +945,7 @@ final class HistoryController {
         let fullSnapshotLayerCount = workspace.document.layers.count
         let candidateLayerIDs = auditContext.candidateChangedLayerIDs
         let assessment = assessEligibility(for: workspace, auditContext: auditContext)
-        let bytesPerLayer = max(0, workspace.document.canvasSize.width * workspace.document.canvasSize.height * 4)
+        let bytesPerLayer = max(0, workspace.document.canvasSize.width * workspace.document.canvasSize.height * workspace.document.colorStandard.pixelFormat.encoding.bytesPerPixel)
         let projectedFullEntryBytes = fullSnapshotLayerCount * bytesPerLayer
 
         let dirtyCandidateLayerCount: Int

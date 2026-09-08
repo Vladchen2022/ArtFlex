@@ -31,6 +31,7 @@ struct ProjectThumbnailEncoder {
         from snapshot: LayerTextureSnapshot,
         maximumDimension: Int = Self.maximumDimension
     ) throws -> Data {
+        let snapshot = try snapshot.converted(to: .premultipliedBGRA8SRGB)
         guard snapshot.width > 0,
               snapshot.height > 0,
               snapshot.bytesPerRow >= snapshot.width * 4,

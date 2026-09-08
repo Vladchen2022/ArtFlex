@@ -36,6 +36,7 @@ private extension TextureFillArrangement {
 }
 
 final class SelectionFillRenderer {
+    private let pipelineVariants: ColorRenderPipelineVariants
     private let device: MTLDevice
     private let pipelineState: MTLRenderPipelineState
     private let alphaLockPipelineState: MTLRenderPipelineState
@@ -46,10 +47,14 @@ final class SelectionFillRenderer {
     private var reusableMaterialTextureSize = 0
 
     init(device: MTLDevice) {
+        let pipelineVariants = ColorRenderPipelineVariants(device: device)
+        self.pipelineVariants = pipelineVariants
         self.device = device
         let source = """
         #include <metal_stdlib>
         using namespace metal;
+
+        \(MetalColorFunctions.source)
 
         struct SelectionFillVertex {
             float2 position;
@@ -327,7 +332,7 @@ final class SelectionFillRenderer {
             );
 
             float alpha = uniforms.color.a * maskAlpha;
-            float3 premultiplied = jitteredColor * alpha;
+            float3 premultiplied = artflexSrgbToLinear(jitteredColor) * alpha;
             if (uniforms.usesAlphaLock > 0.5) {
                 return float4(premultiplied * lockedDestinationAlpha, alpha);
             }
@@ -357,7 +362,7 @@ final class SelectionFillRenderer {
         attachment.destinationAlphaBlendFactor = .oneMinusSourceAlpha
 
         do {
-            pipelineState = try device.makeRenderPipelineState(descriptor: descriptor)
+            pipelineState = try pipelineVariants.makeState(descriptor: descriptor)
         } catch {
             fatalError("Failed to create SelectionFillRenderer pipeline: \(error)")
         }
@@ -377,7 +382,7 @@ final class SelectionFillRenderer {
         alphaLockAttachment.writeMask = [.red, .green, .blue]
 
         do {
-            alphaLockPipelineState = try device.makeRenderPipelineState(descriptor: alphaLockDescriptor)
+            alphaLockPipelineState = try pipelineVariants.makeState(descriptor: alphaLockDescriptor)
         } catch {
             fatalError("Failed to create SelectionFillRenderer alpha lock pipeline: \(error)")
         }
@@ -482,7 +487,7 @@ final class SelectionFillRenderer {
             return
         }
 
-        encoder.setRenderPipelineState(alphaLockTexture == nil ? pipelineState : alphaLockPipelineState)
+        encoder.setRenderPipelineState(pipelineVariants.state(alphaLockTexture == nil ? pipelineState : alphaLockPipelineState, for: renderPassDescriptor.colorAttachments[0].texture?.pixelFormat ?? .bgra8Unorm_srgb))
         encoder.setScissorRect(MTLScissorRect(
             x: minX,
             y: minY,

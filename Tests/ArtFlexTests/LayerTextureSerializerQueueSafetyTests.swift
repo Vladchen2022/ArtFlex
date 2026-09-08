@@ -4,6 +4,26 @@ import Testing
 @testable import ArtFlex
 
 struct LayerTextureSerializerQueueSafetyTests {
+    @Test func rejectedRegionalCaptureDoesNotLeaveAnActiveEncoderOrChangePixels() throws {
+        let metal = try #require(MetalDeviceContext())
+        let serializer = LayerTextureSerializer(metalContext: metal)
+        let store = StageOneLayerSurfaceStore()
+        let texture = try #require(store.makeTexture(width: 8, height: 8, metal: metal))
+        let original = opaqueRedSnapshot(width: 8, height: 8, red: 120)
+        try serializer.restore(snapshot: original, into: texture)
+        #expect(throws: (any Error).self) {
+            try serializer.cloneRegionsForDeferredSnapshot([
+                (texture, .init(originX: 0, originY: 0, width: 2, height: 2)),
+                (texture, .init(originX: Int.max, originY: 0, width: 4, height: 4))
+            ])
+        }
+        let clone = try #require(serializer.cloneRegionsForDeferredSnapshot([
+            (texture, .init(originX: 0, originY: 0, width: 8, height: 8))
+        ]).first)
+        #expect(try serializer.snapshot(texture: clone) == original)
+        #expect(try serializer.snapshot(texture: texture) == original)
+    }
+
     @Test
     func largeRegionReadbackUsesTheExistingTiledPathAndKeepsItsOffset() throws {
         let metal = try #require(MetalDeviceContext())
