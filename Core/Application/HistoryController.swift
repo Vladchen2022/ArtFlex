@@ -126,7 +126,7 @@ struct HistoryEligibilityAuditContext: Sendable {
 }
 
 final class HistoryController {
-    static let defaultMaxEntries = 24
+    static let defaultMaxEntries = 128
     static let defaultMaxResidentBytes = 768 * 1024 * 1024
 
     static func adaptiveMaxResidentBytes(recommendedMaxWorkingSetSize: UInt64?) -> Int {
@@ -146,14 +146,29 @@ final class HistoryController {
     private let metalContext: MetalDeviceContext
     private let maxEntries: Int
     private let maxResidentBytes: Int
+    private let diskCache: HistoryDiskCache?
+    private let hotEntryCount: Int
 
-    private var undoStack: [WorkspaceHistoryEntry] = []
-    private var redoStack: [WorkspaceHistoryEntry] = []
-    private var undoResidentBytes = 0
-    private var redoResidentBytes = 0
+    private struct StoredEntry {
+        var metadata: WorkspaceHistoryEntry
+        var pixels: HistoryPixelPayload
+        var workspace: WorkspaceState { metadata.workspace }
+        var mode: WorkspaceHistoryEntry.Mode { metadata.mode }
+        var visibleMetadata: VisibleHistoryEntryMetadata { metadata.visibleMetadata }
+        var approxByteCount: Int { metadata.approxByteCount }
+        func materialized() throws -> WorkspaceHistoryEntry {
+            var entry = metadata
+            entry.layerSnapshots = try pixels.read()
+            return entry
+        }
+    }
+
+    private var undoStack: [StoredEntry] = []
+    private var redoStack: [StoredEntry] = []
 #if DEBUG
     private(set) var debugAttemptedFullResetWithDirtyEntry = false
     var debugPreventsCheckpointCapture = false
+    var debugDiskCache: HistoryDiskCache? { diskCache }
 #endif
 
     init(
@@ -162,7 +177,9 @@ final class HistoryController {
         serializer: LayerTextureSerializer,
         metalContext: MetalDeviceContext,
         maxEntries: Int = HistoryController.defaultMaxEntries,
-        maxResidentBytes: Int = HistoryController.defaultMaxResidentBytes
+        maxResidentBytes: Int = HistoryController.defaultMaxResidentBytes,
+        diskCache: HistoryDiskCache? = nil,
+        hotEntryCount: Int = 8
     ) {
         self.workspaceStore = workspaceStore
         self.layerSurfaceStore = layerSurfaceStore
@@ -170,26 +187,34 @@ final class HistoryController {
         self.metalContext = metalContext
         self.maxEntries = maxEntries
         self.maxResidentBytes = maxResidentBytes
+        self.diskCache = diskCache
+        self.hotEntryCount = max(1, hotEntryCount)
     }
 
     var canUndo: Bool { !undoStack.isEmpty }
     var canRedo: Bool { !redoStack.isEmpty }
-    var residentByteCount: Int { undoResidentBytes + redoResidentBytes }
+    var residentByteCount: Int { (undoStack + redoStack).reduce(0) { $0 + $1.pixels.residentBytes } }
+    var diskByteCount: Int { (undoStack + redoStack).reduce(0) { $0 + $1.pixels.diskBytes } }
+    var diskEntryCount: Int { (undoStack + redoStack).filter { $0.pixels.diskBytes > 0 }.count }
+    var pendingDiskEntryCount: Int { (undoStack + redoStack).filter { $0.pixels.isPending }.count }
+    var storageWarning: String? { diskCache?.lastFailure }
 
     /// Releases oldest history first while keeping the newest restore point. This is used only
     /// after an OS memory-pressure notification; document pixels are never discarded.
     func relieveMemoryPressure(critical: Bool) {
+        if diskCache != nil {
+            maintainStorage(hotCount: 1, byteTarget: critical ? maxResidentBytes / 8 : maxResidentBytes / 3)
+            return
+        }
         let entryTarget = critical ? 2 : 6
         let byteTarget = critical ? maxResidentBytes / 8 : maxResidentBytes / 3
         trimForPressure(
             &undoStack,
-            residentBytes: &undoResidentBytes,
             entryTarget: entryTarget,
             byteTarget: byteTarget
         )
         trimForPressure(
             &redoStack,
-            residentBytes: &redoResidentBytes,
             entryTarget: critical ? 1 : 3,
             byteTarget: critical ? maxResidentBytes / 16 : maxResidentBytes / 6
         )
@@ -236,8 +261,9 @@ final class HistoryController {
             auditContext: auditContext,
             durationMetricKey: "HistoryController.captureCheckpoint"
         )
-        append(entry, to: &undoStack, residentBytes: &undoResidentBytes)
-        clear(&redoStack, residentBytes: &redoResidentBytes)
+        clear(&redoStack)
+        append(entry, to: &undoStack)
+        maintainStorage()
     }
 
     func captureCheckpoint(
@@ -256,23 +282,34 @@ final class HistoryController {
             auditContext: auditContext,
             durationMetricKey: "HistoryController.captureCheckpoint"
         )
-        append(entry, to: &undoStack, residentBytes: &undoResidentBytes)
-        clear(&redoStack, residentBytes: &redoResidentBytes)
+        clear(&redoStack)
+        append(entry, to: &undoStack)
+        maintainStorage()
     }
 
     func resetHistory() {
-        clear(&undoStack, residentBytes: &undoResidentBytes)
-        clear(&redoStack, residentBytes: &redoResidentBytes)
+        clear(&undoStack)
+        clear(&redoStack)
     }
 
     func captureCurrentEntry() throws -> WorkspaceHistoryEntry {
         try makeEntry()
     }
 
+    /// Check every cold entry before a multi-step UI preview starts. This does not inflate the
+    /// entire history into RAM and prevents a known broken cache halfway through a jump.
+    func validateNavigation(_ plan: VisibleHistoryNavigationPlan) throws {
+        let entries = plan.direction == .undo ? undoStack.suffix(plan.undoStepCount) : redoStack.suffix(plan.redoStepCount)
+        guard entries.count == plan.totalStepCount else { throw HistoryDiskError.unavailable }
+        for entry in entries { try entry.pixels.validateReadable() }
+    }
+
     func undo() throws -> Bool {
-        guard let previous = undoStack.last else {
+        guard let stored = undoStack.last else {
             return false
         }
+        // Disk validation must finish before capturing or changing any live document state.
+        let previous = try stored.materialized()
 
         var current = try makeEntryWithAudit(
             captureMode: currentEntryCaptureMode(for: previous),
@@ -285,15 +322,17 @@ final class HistoryController {
         )
         current.visibleMetadata = previous.visibleMetadata
         try restore(entry: previous)
-        _ = popLast(from: &undoStack, residentBytes: &undoResidentBytes)
-        append(current, to: &redoStack, residentBytes: &redoResidentBytes)
+        undoStack.removeLast().pixels.discard()
+        append(current, to: &redoStack)
+        maintainStorage()
         return true
     }
 
     func redo() throws -> Bool {
-        guard let next = redoStack.last else {
+        guard let stored = redoStack.last else {
             return false
         }
+        let next = try stored.materialized()
 
         var current = try makeEntryWithAudit(
             captureMode: currentEntryCaptureMode(for: next),
@@ -306,8 +345,9 @@ final class HistoryController {
         )
         current.visibleMetadata = next.visibleMetadata
         try restore(entry: next)
-        _ = popLast(from: &redoStack, residentBytes: &redoResidentBytes)
-        append(current, to: &undoStack, residentBytes: &undoResidentBytes)
+        redoStack.removeLast().pixels.discard()
+        append(current, to: &undoStack)
+        maintainStorage()
         return true
     }
 
@@ -1064,61 +1104,73 @@ final class HistoryController {
 
     private func append(
         _ entry: WorkspaceHistoryEntry,
-        to stack: inout [WorkspaceHistoryEntry],
-        residentBytes: inout Int
+        to stack: inout [StoredEntry]
     ) {
-        stack.append(entry)
-        residentBytes += entry.approxByteCount
-        trim(&stack, residentBytes: &residentBytes)
+        var metadata = entry
+        metadata.layerSnapshots = []
+        stack.append(StoredEntry(metadata: metadata, pixels: HistoryPixelPayload(entry.layerSnapshots, cache: diskCache)))
+        while stack.count > max(1, maxEntries) { stack.removeFirst().pixels.discard() }
     }
 
-    private func popLast(
-        from stack: inout [WorkspaceHistoryEntry],
-        residentBytes: inout Int
-    ) -> WorkspaceHistoryEntry? {
-        guard let entry = stack.popLast() else {
-            return nil
-        }
-        residentBytes = max(0, residentBytes - entry.approxByteCount)
-        return entry
-    }
-
-    private func clear(
-        _ stack: inout [WorkspaceHistoryEntry],
-        residentBytes: inout Int
-    ) {
+    private func clear(_ stack: inout [StoredEntry]) {
+        for entry in stack { entry.pixels.discard() }
         stack.removeAll()
-        residentBytes = 0
     }
 
-    private func trim(
-        _ stack: inout [WorkspaceHistoryEntry],
-        residentBytes: inout Int
-    ) {
-        while stack.count > maxEntries {
-            let removed = stack.removeFirst()
-            residentBytes = max(0, residentBytes - removed.approxByteCount)
+    private func maintainStorage(hotCount: Int? = nil, byteTarget: Int? = nil) {
+        let hot = hotCount ?? hotEntryCount
+        let target = max(0, byteTarget ?? maxResidentBytes)
+        if diskCache != nil {
+            // The stacks remain a contiguous sequence. Never evict a middle delta.
+            for stack in [undoStack, redoStack] {
+                for entry in stack.dropLast(hot) { entry.pixels.spill() }
+            }
+            var projected = (undoStack + redoStack).reduce(0) { $0 + $1.pixels.projectedResidentBytes }
+            for stack in [undoStack, redoStack] {
+                for entry in stack.dropLast() where projected > target {
+                    let bytes = entry.pixels.projectedResidentBytes
+                    if entry.pixels.spill() { projected -= bytes }
+                }
+            }
         }
-
-        while residentBytes > maxResidentBytes, stack.count > 1 {
-            let removed = stack.removeFirst()
-            residentBytes = max(0, residentBytes - removed.approxByteCount)
+        // Failed/unavailable disk writes retain RAM first. If it exceeds budget, fall back to
+        // the existing oldest-first pruning policy, always preserving a newest restore point.
+        func projectedBytes() -> Int {
+            (undoStack + redoStack).reduce(0) { $0 + $1.pixels.projectedResidentBytes }
+        }
+        while projectedBytes() > target, undoStack.count > 1 || redoStack.count > 1 {
+            if undoStack.count > 1 {
+                undoStack.removeFirst().pixels.discard()
+            } else {
+                redoStack.removeFirst().pixels.discard()
+            }
+            // Evicting an archived oldest entry frees disk budget. Retry cold RAM entries
+            // before pruning again, otherwise a full disk budget could erase the entire tail.
+            if diskCache != nil {
+                for stack in [undoStack, redoStack] {
+                    for entry in stack.dropLast() where projectedBytes() > target { entry.pixels.spill() }
+                }
+            }
+        }
+        // Background writes are not free memory yet. Bound the pending backlog too, so fast
+        // drawing or a slow/full disk cannot retain an unbounded queue of pixel snapshots.
+        let hardTarget = min(Int.max / 2, max(target, maxResidentBytes)) * 2
+        while residentByteCount > hardTarget, undoStack.count > 1 || redoStack.count > 1 {
+            if undoStack.count > 1 { undoStack.removeFirst().pixels.discard() }
+            else { redoStack.removeFirst().pixels.discard() }
         }
     }
 
     private func trimForPressure(
-        _ stack: inout [WorkspaceHistoryEntry],
-        residentBytes: inout Int,
+        _ stack: inout [StoredEntry],
         entryTarget: Int,
         byteTarget: Int
     ) {
         while stack.count > max(1, entryTarget) {
-            let removed = stack.removeFirst()
-            residentBytes = max(0, residentBytes - removed.approxByteCount)
+            stack.removeFirst().pixels.discard()
         }
-        while residentBytes > max(0, byteTarget), stack.count > 1 {
-            let removed = stack.removeFirst()
-            residentBytes = max(0, residentBytes - removed.approxByteCount)
+        while stack.reduce(0, { $0 + $1.pixels.residentBytes }) > max(0, byteTarget), stack.count > 1 {
+            stack.removeFirst().pixels.discard()
         }
     }
 }

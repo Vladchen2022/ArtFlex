@@ -27,6 +27,18 @@ struct VisibleHistoryPopover: View {
                 .font(.system(size: 10))
                 .foregroundStyle(.secondary)
 
+            TimelineView(.periodic(from: .now, by: 1)) { _ in
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(viewModel.historyStorageSummary)
+                    if let warning = viewModel.historyStorageWarning {
+                        Text(warning).foregroundStyle(.orange)
+                    }
+                }
+                .font(.system(size: 10))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            }
+
             Divider()
 
             if timeline.appliedEntries.isEmpty && timeline.redoEntries.isEmpty {
@@ -90,6 +102,9 @@ struct VisibleHistoryPopover: View {
                 .font(.system(size: 10))
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
+            Text("历史受内存及磁盘预算限制，关闭工程后清除；不替代保存和自动恢复。")
+                .font(.system(size: 9))
+                .foregroundStyle(.secondary)
         }
         .padding(14)
         .frame(width: 320)

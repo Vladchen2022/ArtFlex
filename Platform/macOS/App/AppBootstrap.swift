@@ -217,7 +217,9 @@ struct AppBootstrap {
             metalContext: metalContext,
             maxResidentBytes: HistoryController.adaptiveMaxResidentBytes(
                 recommendedMaxWorkingSetSize: metalContext.device.recommendedMaxWorkingSetSize
-            )
+            ),
+            diskCache: testPersistenceRoot.map { HistoryDiskCache(rootURL: $0.appendingPathComponent("UndoCache")) }
+                ?? HistoryCacheDirectory.makeCache()
         )
         self.filePanelService = FilePanelService()
         self.brushLibraryPersistenceController = brushLibraryPersistenceController ?? BrushLibraryPersistenceController(

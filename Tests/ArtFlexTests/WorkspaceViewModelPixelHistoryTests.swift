@@ -4,6 +4,102 @@ import Testing
 @testable import ArtFlex
 
 struct WorkspaceViewModelPixelHistoryTests {
+    @Test @MainActor
+    func historyShortcutKeepsPendingStrokeWhenCheckpointCaptureFails() throws {
+        let harness = try PixelHistoryHarness()
+        let layer = harness.viewModel.workspace.document.activeLayerID
+        let before = try harness.snapshot(layerID: layer)
+        harness.viewModel.beginStrokeIfNeeded()
+        harness.viewModel.applyStroke(samples: [.init(location: .init(x: 32, y: 32), pressure: 1)])
+        harness.viewModel.endStroke()
+        harness.bootstrap.historyController.debugPreventsCheckpointCapture = true
+        harness.viewModel.undo()
+        #expect(harness.bootstrap.strokeEngine.hasPendingBrushCommitJobs)
+        #expect(try harness.snapshot(layerID: layer) == before)
+        #expect(!harness.bootstrap.historyController.canUndo)
+        #expect(harness.viewModel.status?.kind == .error)
+        harness.bootstrap.historyController.debugPreventsCheckpointCapture = false
+        harness.viewModel.redo()
+        #expect(!harness.bootstrap.strokeEngine.hasPendingBrushCommitJobs)
+        #expect(try harness.alpha(atX: 32, y: 32, layerID: layer) > 0.05)
+    }
+
+    @Test @MainActor
+    func immediateRedoAfterMouseUpPreservesUnflushedNewStrokeAndClearsOldRedo() throws {
+        let harness = try PixelHistoryHarness()
+        let layer = harness.viewModel.workspace.document.activeLayerID
+        try harness.drawBrushStroke(on: layer, points: [.init(location: .init(x: 16, y: 20), pressure: 1)])
+        harness.viewModel.undo()
+        #expect(harness.bootstrap.historyController.canRedo)
+        harness.viewModel.beginStrokeIfNeeded()
+        harness.viewModel.applyStroke(samples: [.init(location: .init(x: 48, y: 40), pressure: 1)])
+        harness.viewModel.endStroke()
+        #expect(harness.bootstrap.strokeEngine.hasPendingBrushWork)
+        // No display frame or opportunistic flush between mouse-up and the shortcut.
+        harness.viewModel.redo()
+        #expect(!harness.bootstrap.historyController.canRedo)
+        #expect(try harness.alpha(atX: 48, y: 40, layerID: layer) > 0.05)
+        #expect(try harness.alpha(atX: 16, y: 20, layerID: layer) < 0.01)
+        harness.viewModel.undo()
+        #expect(try harness.alpha(atX: 48, y: 40, layerID: layer) < 0.01)
+        harness.viewModel.redo()
+        #expect(try harness.alpha(atX: 48, y: 40, layerID: layer) > 0.05)
+    }
+
+    @Test @MainActor
+    func immediateUndoAfterMouseUpKeepsNewStrokeInRedoHistory() throws {
+        let harness = try PixelHistoryHarness()
+        let layer = harness.viewModel.workspace.document.activeLayerID
+        harness.viewModel.beginStrokeIfNeeded()
+        harness.viewModel.applyStroke(samples: [.init(location: .init(x: 32, y: 32), pressure: 1)])
+        harness.viewModel.endStroke()
+        #expect(harness.bootstrap.strokeEngine.hasPendingBrushWork)
+        harness.viewModel.undo()
+        #expect(harness.bootstrap.historyController.canRedo)
+        #expect(try harness.alpha(atX: 32, y: 32, layerID: layer) < 0.01)
+        harness.viewModel.redo()
+        #expect(try harness.alpha(atX: 32, y: 32, layerID: layer) > 0.05)
+    }
+
+    @Test @MainActor
+    func diskFailureDuringHistoryPreviewDoesNotClaimSuccessfulRestore() throws {
+        let harness = try PixelHistoryHarness()
+        let layerID = harness.viewModel.workspace.document.activeLayerID
+        let cache = try #require(harness.bootstrap.historyController.debugDiskCache)
+        for x in 12..<24 {
+            try harness.bootstrap.historyController.captureCheckpoint()
+            try fillOpaqueRect(in: harness, layerID: layerID,
+                originX: x, originY: 12, width: 1, height: 32,
+                color: .init(red: 0.4, green: 0.2, blue: 0.1, alpha: 1))
+            cache.waitForPendingWrites()
+        }
+        let original = try harness.snapshot(layerID: layerID)
+        #expect(!harness.viewModel.hasUnsavedChanges)
+        harness.viewModel.prepareVisibleHistoryPresentation()
+        let originalCount = harness.viewModel.visibleHistoryTimeline.currentAppliedEntryCount
+        #expect(originalCount >= 12)
+        harness.viewModel.previewVisibleHistory(toAppliedEntryCount: 0)
+        cache.waitForPendingWrites()
+        #expect(harness.viewModel.visibleHistoryTimeline.currentAppliedEntryCount == 0)
+        let preview = try harness.snapshot(layerID: layerID)
+        let files = try FileManager.default.contentsOfDirectory(at: cache.directoryURL, includingPropertiesForKeys: nil)
+        #expect(!files.isEmpty)
+        let backups = try files.map { ($0, try Data(contentsOf: $0)) }
+        for file in files { try Data([0]).write(to: file) }
+        harness.viewModel.cancelVisibleHistoryPreview()
+        #expect(harness.viewModel.hasUnsavedChanges)
+        #expect(harness.viewModel.visibleHistoryPreviewTargetCount == 0)
+        #expect(harness.viewModel.visibleHistoryTimeline.currentAppliedEntryCount == 0)
+        #expect(try harness.snapshot(layerID: layerID) == preview)
+        #expect(harness.viewModel.status?.kind == .error)
+        for (file, data) in backups { try data.write(to: file) }
+        harness.viewModel.cancelVisibleHistoryPreview()
+        #expect(harness.viewModel.visibleHistoryPreviewTargetCount == nil)
+        #expect(harness.viewModel.visibleHistoryTimeline.currentAppliedEntryCount == originalCount)
+        #expect(try harness.snapshot(layerID: layerID) == original)
+        #expect(!harness.viewModel.hasUnsavedChanges)
+    }
+
     @Test
     @MainActor
     func adjustmentCommitPreservesPixelsAndSessionWhenUndoCaptureFails() throws {

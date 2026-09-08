@@ -12732,7 +12732,7 @@ final class WorkspaceViewModel: ObservableObject {
             cancelStraightLineInteraction()
             return
         }
-        _ = drainPendingBrushCommitsIfNeeded(resetLiveSession: true)
+        guard finishBrushWorkBeforeHistoryNavigation() else { return }
         if ideationUndoHandler?() == true {
             return
         }
@@ -12742,6 +12742,16 @@ final class WorkspaceViewModel: ObservableObject {
     var visibleHistoryTimeline: VisibleHistoryTimeline {
         bootstrap.historyController.visibleTimeline
     }
+
+    var historyStorageSummary: String {
+        let history = bootstrap.historyController
+        let memory = ByteCountFormatter.string(fromByteCount: Int64(history.residentByteCount), countStyle: .memory)
+        let disk = ByteCountFormatter.string(fromByteCount: Int64(history.diskByteCount), countStyle: .file)
+        let pending = history.pendingDiskEntryCount > 0 ? " · 正在转存 \(history.pendingDiskEntryCount) 步" : ""
+        return "像素历史：内存 \(memory) · 磁盘 \(disk)（\(history.diskEntryCount) 步）\(pending)"
+    }
+
+    var historyStorageWarning: String? { bootstrap.historyController.storageWarning }
 
     func prepareVisibleHistoryPresentation() {
         _ = flushBrushEditingBoundary(reason: "openVisibleHistory")
@@ -12784,11 +12794,16 @@ final class WorkspaceViewModel: ObservableObject {
         guard let originCount = visibleHistoryPreviewOriginCount else { return }
         if originCount != visibleHistoryTimeline.currentAppliedEntryCount,
            let plan = visibleHistoryTimeline.navigationPlan(toAppliedEntryCount: originCount) {
-            _ = performVisibleHistoryNavigation(
+            guard performVisibleHistoryNavigation(
                 plan,
                 marksDocumentDirty: false,
                 showsCompletionStatus: false
-            )
+            ) else {
+                // A failed disk read must never claim the original canvas was restored or
+                // reset its dirty marker. Keep the preview session available for retry.
+                hasUnsavedChanges = true
+                return
+            }
         }
         let wasDirty = visibleHistoryPreviewOriginWasDirty
         if let originSelection = visibleHistoryPreviewOriginSelection {
@@ -12836,13 +12851,15 @@ final class WorkspaceViewModel: ObservableObject {
     ) -> Bool {
         guard plan.totalStepCount > 0 else { return true }
 
-        _ = drainPendingBrushCommitsIfNeeded(resetLiveSession: true)
+        guard finishBrushWorkBeforeHistoryNavigation() else { return false }
         canvasCropState.cancel()
         guard resolveColorAdjustmentSessionIfNeeded(reason: .historyNavigation) else { return false }
         guard resolveCurveAdjustmentSessionIfNeeded(reason: .historyNavigation) else { return false }
         if resolveTransformSession(reason: .historyNavigation) { return false }
 
+        let startingAppliedCount = visibleHistoryTimeline.currentAppliedEntryCount
         do {
+            try bootstrap.historyController.validateNavigation(plan)
             var restoredPixelContent = false
             switch plan.direction {
             case .undo:
@@ -12880,6 +12897,13 @@ final class WorkspaceViewModel: ObservableObject {
             }
             return true
         } catch {
+            if visibleHistoryTimeline.currentAppliedEntryCount != startingAppliedCount {
+                bootstrap.layerSurfaceStore.markContentUnknown(for: bootstrap.workspaceStore.state.document.layers.map(\.id))
+                refresh()
+                scheduleNavigatorPreviewRefresh()
+                hasUnsavedChanges = true
+                visibleHistoryPreviewTargetCount = visibleHistoryTimeline.currentAppliedEntryCount
+            }
             showStatus(.init(kind: .error, message: error.localizedDescription))
             return false
         }
@@ -12942,7 +12966,7 @@ final class WorkspaceViewModel: ObservableObject {
             cancelStraightLineInteraction()
             return
         }
-        _ = drainPendingBrushCommitsIfNeeded(resetLiveSession: true)
+        guard finishBrushWorkBeforeHistoryNavigation() else { return }
         if ideationRedoHandler?() == true {
             return
         }
@@ -15835,6 +15859,10 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     private func drainPendingBrushCommitsIfNeeded(resetLiveSession: Bool) -> Bool {
+        // Mouse-up queues live events; the next display frame may not have encoded them yet.
+        // Resetting that live session after draining only commitQueue would discard the stroke.
+        _ = flushPendingBrushWorkAtEditingBoundaryIfNeeded()
+        guard !bootstrap.strokeEngine.hasPendingBrushWork else { return false }
         let hadPendingCommits = bootstrap.strokeEngine.hasPendingBrushCommitJobs
 
         if hadPendingCommits {
@@ -15861,6 +15889,16 @@ final class WorkspaceViewModel: ObservableObject {
         }
 
         return hadPendingCommits
+    }
+
+    private func finishBrushWorkBeforeHistoryNavigation() -> Bool {
+        _ = drainPendingBrushCommitsIfNeeded(resetLiveSession: true)
+        guard !bootstrap.strokeEngine.hasPendingBrushWork,
+              !bootstrap.strokeEngine.hasPendingBrushCommitJobs else {
+            showStatus(.init(kind: .error, message: "笔触尚未成功提交，已保留输入并取消历史跳转，请稍后重试"))
+            return false
+        }
+        return true
     }
 
     private func isBrushLikeTool(_ tool: ToolKind) -> Bool {

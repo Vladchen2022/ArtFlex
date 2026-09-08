@@ -3,6 +3,123 @@ import Testing
 @testable import ArtFlex
 
 struct HistoryControllerTests {
+    @Test @MainActor
+    func fullDiskBudgetEvictsOnlyOldestContiguousHistory() throws {
+        let harness = try BrushHistoryHarness(canvasSize: .init(width: 16, height: 16))
+        // Two layers = 2 KiB per checkpoint: two disk slots plus one resident slot.
+        let cache = HistoryDiskCache(rootURL: FileManager.default.temporaryDirectory.appendingPathComponent("ArtFlexHistoryTests"), maximumBytes: 4_096)
+        let history = HistoryController(workspaceStore: harness.workspaceStore,
+            layerSurfaceStore: harness.layerSurfaceStore, serializer: harness.serializer,
+            metalContext: harness.metalContext, maxResidentBytes: 2_048, diskCache: cache, hotEntryCount: 1)
+        for i in 0..<6 {
+            harness.workspaceStore.updateDocument { $0.metadata.name = "state-\(i)" }
+            try history.captureCheckpoint()
+            cache.waitForPendingWrites()
+        }
+        #expect(history.debugUndoCount == 3)
+        #expect(history.diskEntryCount == 2)
+        #expect(history.residentByteCount == 2_048)
+        #expect(cache.reservedByteCount <= 4_096)
+        #expect(try history.undo())
+        #expect(harness.workspaceStore.state.document.metadata.name == "state-5")
+    }
+
+    @Test @MainActor
+    func diskHistoryRetainsAndRestoresPixelsBeyondResidentBudget() throws {
+        let harness = try BrushHistoryHarness(canvasSize: .init(width: 64, height: 64))
+        let cache = HistoryDiskCache(rootURL: FileManager.default.temporaryDirectory.appendingPathComponent("ArtFlexHistoryTests"))
+        let history = HistoryController(workspaceStore: harness.workspaceStore,
+            layerSurfaceStore: harness.layerSurfaceStore, serializer: harness.serializer,
+            metalContext: harness.metalContext, maxEntries: 40, maxResidentBytes: 80_000,
+            diskCache: cache, hotEntryCount: 1)
+        let layerID = harness.workspaceStore.state.document.activeLayerID
+        var expected: [LayerTextureSnapshot] = []
+        func pixels() throws -> LayerTextureSnapshot {
+            let surface = try #require(harness.layerSurfaceStore.surfaceID(for: layerID))
+            return try harness.serializer.snapshot(texture: #require(harness.layerSurfaceStore.texture(for: surface)))
+        }
+        expected.append(try pixels())
+        for i in 0..<30 {
+            try harness.drawBrushStroke(history: history, layerID: layerID, points: [
+                .init(x: Double(5 + i), y: 12, pressure: 1),
+                .init(x: Double(6 + i), y: 45, pressure: 1)
+            ])
+            cache.waitForPendingWrites()
+            expected.append(try pixels())
+        }
+        #expect(history.debugUndoCount == 30)
+        #expect(history.diskEntryCount == 29)
+        #expect(history.residentByteCount <= 80_000)
+        for state in expected.dropLast().reversed() {
+            #expect(try history.undo())
+            cache.waitForPendingWrites()
+            #expect(try pixels() == state)
+        }
+        #expect(!history.canUndo)
+        for state in expected.dropFirst() {
+            #expect(try history.redo())
+            cache.waitForPendingWrites()
+            #expect(try pixels() == state)
+        }
+        #expect(!history.canRedo)
+        history.resetHistory()
+        cache.waitForPendingWrites()
+        #expect(history.residentByteCount == 0 && history.diskByteCount == 0)
+        #expect(cache.reservedByteCount == 0)
+        #expect(try FileManager.default.contentsOfDirectory(atPath: cache.directoryURL.path).isEmpty)
+    }
+
+    @Test @MainActor
+    func unreadableDiskHistoryDoesNotChangeWorkspacePixelsOrStacks() throws {
+        let harness = try BrushHistoryHarness(canvasSize: .init(width: 64, height: 64))
+        let cache = HistoryDiskCache(rootURL: FileManager.default.temporaryDirectory.appendingPathComponent("ArtFlexHistoryTests"))
+        let history = HistoryController(workspaceStore: harness.workspaceStore,
+            layerSurfaceStore: harness.layerSurfaceStore, serializer: harness.serializer,
+            metalContext: harness.metalContext, diskCache: cache, hotEntryCount: 1)
+        let layerID = harness.workspaceStore.state.document.activeLayerID
+        for x in [8, 28] {
+            try harness.drawBrushStroke(history: history, layerID: layerID, points: [
+                .init(x: Double(x), y: 10, pressure: 1), .init(x: Double(x + 8), y: 30, pressure: 1)
+            ])
+        }
+        cache.waitForPendingWrites()
+        let url = try #require(FileManager.default.contentsOfDirectory(at: cache.directoryURL,
+            includingPropertiesForKeys: nil).first)
+        let saved = try Data(contentsOf: url)
+        try Data([0]).write(to: url)
+        #expect(try history.undo()) // newest in-memory checkpoint is still usable
+        let workspace = harness.workspaceStore.state
+        let surface = try #require(harness.layerSurfaceStore.surfaceID(for: layerID))
+        let pixels = try harness.serializer.snapshot(texture: #require(harness.layerSurfaceStore.texture(for: surface)))
+        #expect(throws: HistoryDiskError.self) { try history.undo() }
+        #expect(history.debugUndoCount == 1 && history.debugRedoCount == 1)
+        #expect(harness.workspaceStore.state == workspace)
+        #expect(try harness.serializer.snapshot(texture: #require(harness.layerSurfaceStore.texture(for: surface))) == pixels)
+        // Fixing the temporary read failure allows retry: the history handle was not popped.
+        try saved.write(to: url)
+        #expect(try history.undo())
+    }
+
+    @Test @MainActor
+    func diskBackedRedoBranchIsDeletedAfterNewCheckpoint() throws {
+        let harness = try BrushHistoryHarness(canvasSize: .init(width: 16, height: 16))
+        let cache = HistoryDiskCache(rootURL: FileManager.default.temporaryDirectory.appendingPathComponent("ArtFlexHistoryTests"))
+        let history = HistoryController(workspaceStore: harness.workspaceStore,
+            layerSurfaceStore: harness.layerSurfaceStore, serializer: harness.serializer,
+            metalContext: harness.metalContext, diskCache: cache, hotEntryCount: 1)
+        for _ in 0..<5 { try history.captureCheckpoint(); cache.waitForPendingWrites() }
+        for _ in 0..<4 { #expect(try history.undo()); cache.waitForPendingWrites() }
+        #expect(history.diskEntryCount > 0)
+        try history.captureCheckpoint()
+        cache.waitForPendingWrites()
+        #expect(!history.canRedo)
+        #expect(history.debugUndoCount == 2)
+        #expect(history.diskEntryCount == 1)
+        history.resetHistory()
+        cache.waitForPendingWrites()
+        #expect(cache.reservedByteCount == 0)
+    }
+
     @Test
     func historyNavigationPreservesTransientToolSettings() {
         var restored = WorkspaceState.stageOneDefault
@@ -233,7 +350,7 @@ struct HistoryControllerTests {
         let retainedByBudget = HistoryController.defaultMaxResidentBytes / dirtyEntryBytes
         let retainedByPolicy = min(HistoryController.defaultMaxEntries, retainedByBudget)
 
-        #expect(HistoryController.defaultMaxEntries == 24)
+        #expect(HistoryController.defaultMaxEntries == 128)
         #expect(HistoryController.defaultMaxResidentBytes == 768 * 1024 * 1024)
         #expect(retainedByPolicy >= 20)
     }
