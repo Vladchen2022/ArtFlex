@@ -15,19 +15,27 @@ extension BlockReferenceParameterPanel {
                 navigationButton("平移", .pan)
                 navigationButton("远近", .zoom)
             }
-            .disabled(scene.display.isFrozen && viewModel.blockReferenceWorkflow.inspectionCamera == nil)
-            Text("选择上方操作后直接拖动画布。⌥ 拖动环绕，⌥⇧ 拖动平移；触控板双指平移，捏合远近。")
+            Text("中键环绕 · Shift＋中键平移 · 滚轮缩放\n触控板双指环绕，Shift＋双指平移，捏合缩放。")
                 .font(.system(size: 11)).foregroundStyle(.secondary)
             HStack {
                 Button("正面") { viewModel.setBlockReferenceStandardView(yaw: -90, pitch: 0) }
                 Button("侧面") { viewModel.setBlockReferenceStandardView(yaw: 0, pitch: 0) }
                 Button("顶面") { viewModel.setBlockReferenceStandardView(yaw: -90, pitch: 89.9) }
                 Button("斜视") { viewModel.setBlockReferenceStandardView(yaw: -45, pitch: 30) }
-            }.disabled(scene.display.isFrozen && viewModel.blockReferenceWorkflow.inspectionCamera == nil)
+            }
             HStack {
                 Button("对准所选") { viewModel.frameBlockReferenceCamera(selectedOnly: true) }
+                    .disabled(viewModel.selectedBlockReferenceObjectIDs.isEmpty)
                 Button("显示全部") { viewModel.frameBlockReferenceCamera(selectedOnly: false) }
-            }.disabled(scene.display.isFrozen || viewModel.blockReferenceWorkflow.inspectionCamera != nil)
+            }
+            DisclosureGroup("Blender 观察快捷键") {
+                Text("Ctrl＋中键：缩放\nCtrl＋Shift＋中键：前后移动视点\n小键盘 1 / 3 / 7：前 / 右 / 顶视图\nCtrl＋1 / 3 / 7：后 / 左 / 底视图\n小键盘 2 / 4 / 6 / 8：15° 环绕\nCtrl＋2 / 4 / 6 / 8：平移\nShift＋4 / 6：旋转观察画面\n小键盘 5：透视 / 正交；9：反面\n小键盘 ＋ / −：缩放；.：对准所选\nHome 或 Shift＋C：显示全部\n临时观察中 Esc 或小键盘 0：返回原构图\n无中键时：Option＋左键模拟中键，或选上方按钮后左键拖动。")
+                    .font(.system(size: 11)).foregroundStyle(.secondary)
+            }
+            if scene.display.isFrozen {
+                Text("构图已锁定：观察会自动保留原视角，不会移动体块或覆盖构图。")
+                    .font(.system(size: 11)).foregroundStyle(.orange)
+            }
             Text("这里调整 3D 相机；主画布缩放不会改变模型透视。")
                 .font(.system(size: 11)).foregroundStyle(.secondary)
         }.buttonStyle(.bordered).controlSize(.small)

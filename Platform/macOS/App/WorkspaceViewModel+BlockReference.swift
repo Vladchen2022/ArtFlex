@@ -306,7 +306,7 @@ extension WorkspaceViewModel {
 
         blockReferenceWorkflow = BlockReferenceWorkflowState()
         blockReferenceEditorState.instruction = blockReferenceScene?.display.isFrozen == true
-            ? "构图已锁定。可以查看设置；需要修改时请明确解锁。"
+            ? "构图已锁定；中键或双指可临时观察，Esc 返回原构图。修改体块需解锁。"
             : "从体块库选择素材，在画布放置；Esc 取消。"
     }
 
@@ -1502,9 +1502,7 @@ extension WorkspaceViewModel {
     }
 
     func resetBlockReferenceCamera() {
-        _ = updateBlockReferenceDocument(operationKind: "blockReference.resetCamera") { scene in
-            scene?.camera = .stageOneDefault
-        }
+        changeBlockReferenceObservationCamera(operationKind: "blockReference.resetCamera") { $0 = .stageOneDefault }
     }
 
     func setBlockReferenceCameraYaw(_ value: Double) {
@@ -1528,9 +1526,7 @@ extension WorkspaceViewModel {
     }
 
     func setBlockReferenceOrthographic(_ enabled: Bool) {
-        _ = updateBlockReferenceDocument(operationKind: "blockReference.projection") { scene in
-            scene?.camera.isOrthographic = enabled
-        }
+        changeBlockReferenceObservationCamera(operationKind: "blockReference.projection") { $0.isOrthographic = enabled }
     }
 
     func beginBlockReferenceNumericTransform(_ kind: BlockReferenceNumericTransformKind) {
@@ -1684,12 +1680,10 @@ extension WorkspaceViewModel {
     }
 
     func beginBlockReferenceCameraNavigation(_ mode: BlockReferenceNavigationMode) {
-        if blockReferenceCameraNavigationMode == .zoom {
-            commitPendingBlockReferenceCameraZoom()
-        }
+        if isBlockReferenceCameraNavigating { endBlockReferenceCameraNavigation() }
+        prepareBlockReferenceObservation()
         guard let scene = blockReferenceScene,
-              scene.display.isVisible,
-              !scene.display.isFrozen || blockReferenceWorkflow.inspectionCamera != nil else { return }
+              scene.display.isVisible else { return }
         blockReferenceCameraNavigationMode = mode
         blockReferenceCameraNavigationStart = scene.camera
         blockReferenceCameraPreview = nil
@@ -1705,6 +1699,7 @@ extension WorkspaceViewModel {
     ) {
         guard blockReferenceCameraNavigationMode == mode,
               let start = blockReferenceCameraNavigationStart,
+              deltaX.isFinite, deltaY.isFinite,
               abs(deltaX) + abs(deltaY) > 0.01 else { return }
         var camera = start
         switch mode {
@@ -1721,12 +1716,19 @@ extension WorkspaceViewModel {
             let worldUnitsPerScreenPoint = verticalWorldSpan
                 / canvasHeight
                 / max(screenScale, 0.000_001)
+            let radians = -workspace.viewport.rotationDegrees * .pi / 180
+            var x = deltaX * cos(radians) - deltaY * sin(radians)
+            let y = deltaX * sin(radians) + deltaY * cos(radians)
+            if workspace.viewport.isHorizontallyFlipped { x = -x }
             camera.target = start.target
-                - basis.right * (deltaX * worldUnitsPerScreenPoint)
-                + basis.up * (deltaY * worldUnitsPerScreenPoint)
+                - basis.right * (x * worldUnitsPerScreenPoint)
+                + basis.up * (y * worldUnitsPerScreenPoint)
         case .zoom:
-            camera.distance = start.distance * exp(deltaY * 0.012)
+            camera.distance = start.distance * exp(min(max(deltaY * 0.012, -20), 20))
+        case .dolly:
+            camera.target = start.target + blockCameraBasis(start).forward * (-deltaY * start.distance * 0.005)
         }
+        camera.normalize()
         blockReferenceCameraRenderState.updateNavigation(camera: camera)
         blockReferenceCameraPreview = camera
     }
@@ -1766,6 +1768,7 @@ extension WorkspaceViewModel {
 
     func zoomBlockReferenceCamera(by multiplier: Double) {
         guard multiplier.isFinite, multiplier > 0 else { return }
+        prepareBlockReferenceObservation()
         if isBlockReferenceCameraNavigating,
            blockReferenceCameraNavigationMode != .zoom {
             endBlockReferenceCameraNavigation()
@@ -1777,8 +1780,7 @@ extension WorkspaceViewModel {
             camera = preview
         } else {
             guard let scene = blockReferenceScene,
-                  scene.display.isVisible,
-                  !scene.display.isFrozen || blockReferenceWorkflow.inspectionCamera != nil else { return }
+                  scene.display.isVisible else { return }
             camera = scene.camera
             blockReferenceCameraNavigationMode = .zoom
             blockReferenceCameraNavigationStart = scene.camera
@@ -1814,7 +1816,7 @@ extension WorkspaceViewModel {
             objects = scene.objects.filter(\.isVisible)
         }
         guard !objects.isEmpty else {
-            resetBlockReferenceCamera()
+            if !selectedOnly { resetBlockReferenceCamera() }
             return
         }
         let vertices = objects.flatMap { blockObjectFaces($0).flatMap(\.vertices) }
@@ -1831,33 +1833,28 @@ extension WorkspaceViewModel {
         }
         let center = (minimum + maximum) * 0.5
         let radius = max((maximum - minimum).length * 0.5, 20)
-        _ = updateBlockReferenceDocument(operationKind: "blockReference.frameCamera") { stored in
-            stored?.camera.target = center
-            let fovScale = max(tan((stored?.camera.fieldOfViewDegrees ?? 42) * .pi / 360), 0.1)
-            stored?.camera.distance = radius / fovScale * 1.35
+        changeBlockReferenceObservationCamera(operationKind: "blockReference.frameCamera") { camera in
+            camera.target = center
+            let fovScale = max(tan(camera.fieldOfViewDegrees * .pi / 360), 0.1)
+            let size = workspace.document.canvasSize
+            let aspect = Double(max(size.width, 1)) / Double(max(size.height, 1))
+            camera.distance = radius / (fovScale * min(aspect, 1)) * 1.35
+            camera.principalPointNormalized = CanvasPoint(x: 0.5, y: 0.5)
         }
     }
 
     func setBlockReferenceCameraView(yaw: Double, pitch: Double) {
-        _ = updateBlockReferenceDocument(operationKind: "blockReference.cameraView") { scene in
-            scene?.camera.yawDegrees = yaw
-            scene?.camera.pitchDegrees = pitch
-            scene?.camera.rollDegrees = 0
-            scene?.camera.principalPointNormalized = CanvasPoint(x: 0.5, y: 0.5)
-            scene?.camera.isOrthographic = true
+        changeBlockReferenceObservationCamera(operationKind: "blockReference.cameraView") { camera in
+            camera.yawDegrees = yaw
+            camera.pitchDegrees = pitch
+            camera.rollDegrees = 0
+            camera.principalPointNormalized = CanvasPoint(x: 0.5, y: 0.5)
+            camera.isOrthographic = true
         }
     }
 
     func handleBlockReferenceKeyDown(_ event: NSEvent) -> Bool {
         guard workspace.toolSession.activeTool == .blockReference else { return false }
-        if blockReferenceScene?.display.isFrozen == true {
-            if event.keyCode == 53 {
-                cancelBlockReferenceInteraction()
-                returnToBlockReferenceComposition()
-                return true
-            }
-            return false
-        }
         let modifiers = event.modifierFlags.intersection([.command, .option, .control, .shift])
         let key = blockReferenceShortcutKey(for: event)
 
@@ -1912,6 +1909,16 @@ extension WorkspaceViewModel {
             return false
         }
 
+        if handleBlockReferenceNavigationKey(event) { return true }
+        if blockReferenceScene?.display.isFrozen == true {
+            if event.keyCode == 53 {
+                cancelBlockReferenceInteraction()
+                returnToBlockReferenceComposition()
+                return true
+            }
+            return false
+        }
+
         if modifiers == [.option] {
             switch key {
             case "g": clearSelectedBlockReferenceTransform(.move); return true
@@ -1945,33 +1952,9 @@ extension WorkspaceViewModel {
             isolateSelectedBlockReferenceObjects()
             return true
         }
-        if modifiers == [.shift], key == "c" {
-            resetBlockReferenceCamera()
-            frameBlockReferenceCamera(selectedOnly: false)
-            return true
-        }
-
         guard modifiers.isDisjoint(with: [.command, .option, .control]) else { return false }
 
         switch event.keyCode {
-        case 83:
-            setBlockReferenceCameraView(yaw: -90, pitch: 0)
-            return true
-        case 85:
-            setBlockReferenceCameraView(yaw: 0, pitch: 0)
-            return true
-        case 89:
-            setBlockReferenceCameraView(yaw: -90, pitch: 89.9)
-            return true
-        case 87:
-            setBlockReferenceOrthographic(!(blockReferenceScene?.camera.isOrthographic ?? false))
-            return true
-        case 65:
-            frameBlockReferenceCamera(selectedOnly: true)
-            return true
-        case 115:
-            frameBlockReferenceCamera(selectedOnly: false)
-            return true
         case 51, 117:
             guard blockReferenceEditorState.selectedObjectID != nil else { return false }
             deleteSelectedBlockReferenceObject()
@@ -2131,15 +2114,7 @@ extension WorkspaceViewModel {
         _ transform: (inout BlockReferenceCamera) -> Void
     ) {
         let operationKind = isAdjustingBlockReferenceParameters ? nil : "blockReference.parameters"
-        _ = updateBlockReferenceDocument(
-            operationKind: operationKind,
-            normalizesScene: false
-        ) { scene in
-            guard var value = scene else { return }
-            transform(&value.camera)
-            value.camera.normalize()
-            scene = value
-        }
+        changeBlockReferenceObservationCamera(operationKind: operationKind, transform)
     }
 
     private func updateSelectedBlockReferenceObject(_ transform: (inout BlockReferenceObject) -> Void) {

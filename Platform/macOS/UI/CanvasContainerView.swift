@@ -549,7 +549,6 @@ struct CanvasContainerView: View {
                 if viewModel.workspace.toolSession.activeTool == .blockReference,
                    let blockScene = viewModel.blockReferenceScene,
                    blockScene.display.isVisible,
-                   (!blockScene.display.isFrozen || viewModel.blockReferenceWorkflow.inspectionCamera != nil),
                    !viewModel.blockReferenceEditorState.perspectiveMatch.isActive,
                    !viewModel.isPanModeActive {
                     BlockReferenceGestureOverlay(
@@ -581,13 +580,15 @@ struct CanvasContainerView: View {
                         onNavigationEnded: viewModel.endBlockReferenceCameraNavigation,
                         onZoom: viewModel.zoomBlockReferenceCamera,
                         onHover: { point in
-                            viewModel.updateBlockReferenceGizmoHover(
+                            guard !blockScene.display.isFrozen else { return false }
+                            return viewModel.updateBlockReferenceGizmoHover(
                                 at: point,
                                 screenScale: viewportTransform.actualDisplayScale
                             )
                         },
                         contextMenuItems: { point in
-                            blockReferenceContextMenuItems(at: point)
+                            guard !blockScene.display.isFrozen else { return [] }
+                            return blockReferenceContextMenuItems(at: point)
                         },
                         gizmoAdjustment: viewModel.blockReferenceEditorState.gizmoAdjustment,
                         gizmoPopupPoint: viewModel.blockReferenceEditorState.gizmoAdjustment.flatMap {

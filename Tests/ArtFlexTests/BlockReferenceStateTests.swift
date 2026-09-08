@@ -805,17 +805,12 @@ struct BlockReferenceStateTests {
         }
         view.onNavigationEnded = { didEnd = true }
 
-        let down = try #require(NSEvent.mouseEvent(
-            with: .otherMouseDown,
-            location: CGPoint(x: 100, y: 100),
-            modifierFlags: [.shift],
-            timestamp: 1,
-            windowNumber: window.windowNumber,
-            context: nil,
-            eventNumber: 1,
-            clickCount: 1,
-            pressure: 1
-        ))
+        // NSEvent.mouseEvent reports buttonNumber 0 even for .otherMouseDown.
+        // Construct an actual center-button event; do not post it to the system.
+        let middleDown = try #require(CGEvent(mouseEventSource: nil, mouseType: .otherMouseDown,
+            mouseCursorPosition: CGPoint(x: 100, y: 100), mouseButton: .center))
+        middleDown.flags = .maskShift
+        let down = try #require(NSEvent(cgEvent: middleDown))
         let dragged = try #require(NSEvent.mouseEvent(
             with: .otherMouseDragged,
             location: CGPoint(x: 145, y: 130),

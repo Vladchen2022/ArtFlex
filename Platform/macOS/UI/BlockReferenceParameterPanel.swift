@@ -225,7 +225,6 @@ struct BlockReferenceParameterPanel: View {
             case .camera:
                 cameraWorkflowControls(scene)
                 DisclosureGroup("精确相机参数") { cameraControls(scene.camera) }
-                    .disabled(scene.display.isFrozen || viewModel.blockReferenceWorkflow.inspectionCamera != nil)
                 DisclosureGroup("匹配图片透视") { perspectiveMatchControls }
                     .disabled(scene.display.isFrozen)
                 DisclosureGroup("透视辅助线") { perspectiveLineControls(scene) }

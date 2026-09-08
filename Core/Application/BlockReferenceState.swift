@@ -312,6 +312,7 @@ enum BlockReferenceNavigationMode: Sendable, Equatable {
     case orbit
     case pan
     case zoom
+    case dolly
 }
 
 struct BlockDimensions: Codable, Sendable, Equatable {

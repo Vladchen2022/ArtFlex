@@ -802,6 +802,9 @@ final class BlockReferenceInteractionView: NSView, NSTextFieldDelegate {
     private var isPrimaryDragging = false
     private var navigationMode: BlockReferenceNavigationMode?
     private var navigationStartLocation: CGPoint?
+    private var scrollNavigationMode: BlockReferenceNavigationMode?
+    private var scrollNavigationDelta = CGPoint.zero
+    private var scrollEndTask: Task<Void, Never>?
     private var pointerTrackingArea: NSTrackingArea?
     private var gizmoEditorContainer: NSView?
     private var gizmoAxisLabel: NSTextField?
@@ -982,9 +985,12 @@ final class BlockReferenceInteractionView: NSView, NSTextFieldDelegate {
     }
 
     override func mouseDown(with event: NSEvent) {
+        finishScrollNavigation()
         window?.makeFirstResponder(self)
         onModifiersChanged?(event.modifierFlags)
-        if let mode = primaryNavigationMode ?? (event.modifierFlags.contains(.option) ? (event.modifierFlags.contains(.shift) ? .pan : .orbit) : nil) {
+        let emulatedMode = event.modifierFlags.contains(.option)
+            ? Self.navigationMode(for: event.modifierFlags) : nil
+        if let mode = emulatedMode ?? primaryNavigationMode {
             primaryNavigating = true
             navigationMode = mode
             navigationStartLocation = convert(event.locationInWindow, from: nil)
@@ -1017,15 +1023,10 @@ final class BlockReferenceInteractionView: NSView, NSTextFieldDelegate {
     }
 
     override func otherMouseDown(with event: NSEvent) {
-        let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-        let mode: BlockReferenceNavigationMode
-        if modifiers.contains(.control) {
-            mode = .zoom
-        } else if modifiers.contains(.shift) {
-            mode = .pan
-        } else {
-            mode = .orbit
-        }
+        guard event.buttonNumber == 2 else { super.otherMouseDown(with: event); return }
+        finishScrollNavigation()
+        window?.makeFirstResponder(self)
+        let mode = Self.navigationMode(for: event.modifierFlags)
         navigationMode = mode
         navigationStartLocation = convert(event.locationInWindow, from: nil)
         onNavigationBegan?(mode)
@@ -1054,18 +1055,57 @@ final class BlockReferenceInteractionView: NSView, NSTextFieldDelegate {
     }
 
     override func scrollWheel(with event: NSEvent) {
-        if event.hasPreciseScrollingDeltas && !event.modifierFlags.contains(.option) {
-            onNavigationBegan?(.pan)
-            onNavigationChanged?(.pan, event.scrollingDeltaX, event.scrollingDeltaY)
-            onNavigationEnded?()
+        guard navigationMode == nil else { return }
+        if event.hasPreciseScrollingDeltas {
+            // NSEvent scrolling is Y-up; this view and drag callbacks are Y-down.
+            updateScrollNavigation(deltaX: event.scrollingDeltaX, deltaY: -event.scrollingDeltaY,
+                modifiers: event.modifierFlags)
             return
         }
-        let sensitivity = event.hasPreciseScrollingDeltas ? 0.015 : 0.11
-        onZoom?(exp(-event.scrollingDeltaY * sensitivity))
+        finishScrollNavigation()
+        let amount: Double = min(max(-Double(event.scrollingDeltaY) * 0.11, -20), 20)
+        onZoom?(exp(amount))
     }
 
     override func magnify(with event: NSEvent) {
+        finishScrollNavigation()
         onZoom?(1 / min(max(1 + event.magnification, 0.1), 10))
+    }
+
+    static func navigationMode(for modifiers: NSEvent.ModifierFlags) -> BlockReferenceNavigationMode {
+        if modifiers.contains([.control, .shift]) { return .dolly }
+        if modifiers.contains(.control) { return .zoom }
+        return modifiers.contains(.shift) ? .pan : .orbit
+    }
+
+    func updateScrollNavigation(deltaX: Double, deltaY: Double, modifiers: NSEvent.ModifierFlags) {
+        guard deltaX.isFinite, deltaY.isFinite, abs(deltaX) + abs(deltaY) > 0 else { return }
+        let mode = Self.navigationMode(for: modifiers)
+        if scrollNavigationMode != mode {
+            finishScrollNavigation()
+            scrollNavigationMode = mode
+            scrollNavigationDelta = .zero
+            onNavigationBegan?(mode)
+        }
+        scrollNavigationDelta.x += deltaX
+        scrollNavigationDelta.y += deltaY
+        onNavigationChanged?(mode, scrollNavigationDelta.x, scrollNavigationDelta.y)
+        // Keep trackpad momentum in one camera transaction, not one undo per event.
+        scrollEndTask?.cancel()
+        scrollEndTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .milliseconds(180))
+            guard !Task.isCancelled else { return }
+            self?.finishScrollNavigation()
+        }
+    }
+
+    func finishScrollNavigation() {
+        scrollEndTask?.cancel()
+        scrollEndTask = nil
+        guard scrollNavigationMode != nil else { return }
+        scrollNavigationMode = nil
+        scrollNavigationDelta = .zero
+        onNavigationEnded?()
     }
 
     private func canvasPoint(for event: NSEvent) -> CanvasPoint {

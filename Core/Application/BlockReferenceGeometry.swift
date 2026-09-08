@@ -103,10 +103,9 @@ func blockCameraBasis(_ camera: BlockReferenceCamera) -> BlockCameraBasis {
     ).normalized(fallback: BlockVector3(x: 1, y: -1, z: 0.6).normalized())
     let position = camera.target + fromTarget * camera.distance
     let forward = (camera.target - position).normalized(fallback: BlockVector3(x: -1, y: 1, z: -0.6).normalized())
-    var right = forward.cross(.unitZ).normalized(fallback: .unitX)
-    if abs(forward.dot(.unitZ)) > 0.995 {
-        right = forward.cross(.unitY).normalized(fallback: .unitX)
-    }
+    // Derive the turntable horizontal axis from yaw, including at the poles.
+    // Switching the reference up axis near a top view caused a visible 90° jump.
+    var right = BlockVector3(x: -sin(yaw), y: cos(yaw), z: 0)
     var up = right.cross(forward).normalized(fallback: .unitZ)
     let roll = camera.rollDegrees * .pi / 180
     if abs(roll) > 0.000_000_1 {

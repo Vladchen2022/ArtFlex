@@ -53,14 +53,8 @@ extension WorkspaceViewModel {
         }
     }
     func setBlockReferenceStandardView(yaw: Double, pitch: Double) {
-        if var camera = blockReferenceWorkflow.inspectionCamera {
-            camera.yawDegrees = yaw; camera.pitchDegrees = pitch
-            blockReferenceWorkflow.inspectionCamera = camera
-        } else if blockReferenceScene?.display.isFrozen == false {
-            _ = updateBlockReferenceDocument(operationKind: "blockReference.cameraView") {
-                $0?.camera.yawDegrees = yaw; $0?.camera.pitchDegrees = pitch
-            }
-        }
+        setBlockReferenceCameraView(yaw: yaw, pitch: pitch)
+        if yaw == -45, pitch == 30 { setBlockReferenceOrthographic(false) }
     }
     func beginBlockReferenceModulePlacement(_ kind: BlockReferenceModuleKind) {
         guard let scene = blockReferenceScene, !scene.display.isFrozen else { return }
@@ -141,6 +135,7 @@ extension WorkspaceViewModel {
 
     func setBlockReferenceNavigationTool(_ mode: BlockReferenceNavigationMode?) {
         cancelBlockReferenceInteraction()
+        if mode != nil { prepareBlockReferenceObservation() }
         blockReferenceEditorState.mode = .select
         blockReferenceWorkflow.navigationMode = mode
     }
@@ -160,6 +155,7 @@ extension WorkspaceViewModel {
         blockReferenceCameraZoomCommitTask = nil
         blockReferenceCameraRenderState.cancelNavigation()
         blockReferenceCameraNavigationMode = nil
+        blockReferenceCameraNavigationStart = nil
         isBlockReferenceCameraNavigating = false
         blockReferenceWorkflow.inspectionCamera = nil
         blockReferenceWorkflow.navigationMode = nil

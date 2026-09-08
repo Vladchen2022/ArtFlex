@@ -671,6 +671,8 @@ final class WorkspaceViewModel: ObservableObject {
                 return event
             }
             if self.workspace.toolSession.activeTool == .blockReference,
+               NSApp.keyWindow?.isMainWindow == true,
+               NSApp.keyWindow?.attachedSheet == nil,
                !Self.isEditingTextInKeyWindow,
                self.handleBlockReferenceKeyDown(event) {
                 return nil
