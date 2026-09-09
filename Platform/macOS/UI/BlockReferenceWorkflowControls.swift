@@ -63,6 +63,9 @@ extension BlockReferenceParameterPanel {
                 .accessibilityLabel("绘画参考透明度")
             Text("建模透明度与绘画透明度分别记忆。")
                 .font(.system(size: 11)).foregroundStyle(.secondary)
+            BlockReferencePlacementPicker(viewModel: viewModel, placement: scene.display.paintingPlacement)
+            Text("置后时，参考位于背景层之上、绘画图层之下。建模时始终置前。")
+                .font(.system(size: 11)).foregroundStyle(.secondary)
             DisclosureGroup("简单光向") {
                 Text("水平方向")
                 Slider(value: Binding(get: { scene.display.lightAzimuth },
@@ -97,13 +100,34 @@ struct BlockReferencePaintingBar: View {
                         Button(preset.rawValue) { viewModel.setBlockReferenceDisplayPreset(preset) }
                     }
                 }
+                BlockReferencePlacementPicker(viewModel: viewModel, placement: scene.display.paintingPlacement)
                 Button("返回体块编辑") { viewModel.selectTool(.blockReference) }
             }
             .font(.system(size: 12)).buttonStyle(.borderless)
             .padding(10).foregroundStyle(.white)
             .background(.black.opacity(0.8), in: RoundedRectangle(cornerRadius: 10))
-            .frame(maxWidth: 560)
+            .frame(maxWidth: 660)
             .environment(\.colorScheme, .dark)
         }
+    }
+}
+
+private struct BlockReferencePlacementPicker: View {
+    @ObservedObject var viewModel: WorkspaceViewModel
+    let placement: BlockReferencePaintingPlacement
+
+    var body: some View {
+        Picker("绘画参考层位", selection: Binding(
+            get: { placement },
+            set: viewModel.setBlockReferencePaintingPlacement
+        )) {
+            ForEach(BlockReferencePaintingPlacement.allCases, id: \.self) { placement in
+                Text(placement.displayName).tag(placement)
+            }
+        }
+        .pickerStyle(.segmented)
+        .labelsHidden()
+        .frame(width: 112)
+        .accessibilityLabel("绘画参考层位")
     }
 }

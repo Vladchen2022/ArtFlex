@@ -176,7 +176,7 @@ func blockReferenceMetalBufferCapacity(requiredByteCount: Int) -> Int {
 }
 
 @MainActor
-private final class BlockReferenceMetalSolidRenderer {
+final class BlockReferenceMetalSolidRenderer {
     private let context: MetalDeviceContext
     private let facePipeline: MTLRenderPipelineState
     private let edgePipeline: MTLRenderPipelineState
@@ -287,19 +287,30 @@ private final class BlockReferenceMetalSolidRenderer {
               view.bounds.width > 0,
               view.bounds.height > 0 else { return }
 
-        let geometry = makeGeometry(
-            scene: scene,
-            editorState: editorState,
-            selectedObjectIDs: selectedObjectIDs,
-            transform: transform,
-            viewportSize: view.bounds.size
-        )
-        guard !geometry.faces.isEmpty || !geometry.edges.isEmpty else {
-            clear(renderPass: renderPass, drawable: drawable)
-            return
-        }
-
         guard let commandBuffer = context.commandQueue.makeCommandBuffer() else { return }
+        if encode(scene: scene, editorState: editorState, selectedObjectIDs: selectedObjectIDs,
+                  transform: transform, viewportSize: view.bounds.size,
+                  into: renderPass, commandBuffer: commandBuffer) {
+            commandBuffer.present(drawable)
+        }
+        commandBuffer.commit()
+    }
+
+    /// Shared geometry and depth pass for the overlay and the display-only canvas underlay.
+    /// The caller owns submission so the canvas samples this texture on the same GPU queue.
+    func encode(
+        scene: BlockReferenceScene,
+        editorState: BlockReferenceEditorState,
+        selectedObjectIDs: Set<UUID>,
+        transform: CanvasViewportTransform,
+        viewportSize: CGSize,
+        into renderPass: MTLRenderPassDescriptor,
+        commandBuffer: MTLCommandBuffer
+    ) -> Bool {
+        prepareGeometrySource(scene: scene, editorState: editorState)
+        let geometry = makeGeometry(scene: scene, editorState: editorState,
+                                    selectedObjectIDs: selectedObjectIDs,
+                                    transform: transform, viewportSize: viewportSize)
         inFlightBufferSemaphore.wait()
         let slotIndex = nextBufferSlotIndex
         nextBufferSlotIndex = (nextBufferSlotIndex + 1) % bufferSlots.count
@@ -317,9 +328,11 @@ private final class BlockReferenceMetalSolidRenderer {
             label: "Block Reference Edge Vertices"
         )
         bufferSlots[slotIndex] = slot
-        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPass) else {
+        guard (geometry.faces.isEmpty || faceBuffer != nil),
+              (geometry.edges.isEmpty || edgeBuffer != nil),
+              let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPass) else {
             inFlightBufferSemaphore.signal()
-            return
+            return false
         }
         commandBuffer.label = "Block Reference Solid"
         encoder.label = "Block Reference Solid Depth Pass"
@@ -343,8 +356,7 @@ private final class BlockReferenceMetalSolidRenderer {
         commandBuffer.addCompletedHandler { [inFlightBufferSemaphore] _ in
             inFlightBufferSemaphore.signal()
         }
-        commandBuffer.present(drawable)
-        commandBuffer.commit()
+        return true
     }
 
     private func upload(
@@ -366,14 +378,6 @@ private final class BlockReferenceMetalSolidRenderer {
             buffer.contents().copyMemory(from: source, byteCount: byteCount)
         }
         return buffer
-    }
-
-    private func clear(renderPass: MTLRenderPassDescriptor, drawable: CAMetalDrawable) {
-        guard let commandBuffer = context.commandQueue.makeCommandBuffer(),
-              let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPass) else { return }
-        encoder.endEncoding()
-        commandBuffer.present(drawable)
-        commandBuffer.commit()
     }
 
     private func makeGeometry(

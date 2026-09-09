@@ -692,6 +692,13 @@ enum BlockReferenceDisplayMode: String, Codable, CaseIterable, Sendable, Equatab
     }
 }
 
+enum BlockReferencePaintingPlacement: String, Codable, Sendable, CaseIterable {
+    case inFront
+    case behindPainting
+
+    var displayName: String { self == .inFront ? "置前" : "置后" }
+}
+
 struct BlockReferenceDisplaySettings: Codable, Sendable, Equatable {
     var opacity: Float
     var showsFaces: Bool
@@ -701,10 +708,15 @@ struct BlockReferenceDisplaySettings: Codable, Sendable, Equatable {
     var mode: BlockReferenceDisplayMode
     var showsPerspectiveGuides: Bool
     var paintingOpacity: Float = 0.35
+    var paintingPlacement: BlockReferencePaintingPlacement = .inFront
     var lightAzimuth: Double = -122
     var lightElevation: Double = 57
 
     var effectiveOpacity: Float { isFrozen ? paintingOpacity : opacity }
+
+    func drawsBehindPainting(activeTool: ToolKind) -> Bool {
+        isVisible && isFrozen && paintingPlacement == .behindPainting && activeTool != .blockReference
+    }
     var lightDirection: BlockVector3 {
         if lightAzimuth == -122 && lightElevation == 57 { return BlockVector3(x: -0.35, y: -0.55, z: 1).normalized() }
         let a = lightAzimuth * .pi / 180, e = lightElevation * .pi / 180
@@ -729,7 +741,7 @@ struct BlockReferenceDisplaySettings: Codable, Sendable, Equatable {
         case isFrozen
         case mode
         case showsPerspectiveGuides
-        case paintingOpacity, lightAzimuth, lightElevation
+        case paintingOpacity, paintingPlacement, lightAzimuth, lightElevation
     }
 
     init(
@@ -761,6 +773,7 @@ struct BlockReferenceDisplaySettings: Codable, Sendable, Equatable {
             ?? .wireframe
         showsPerspectiveGuides = try container.decodeIfPresent(Bool.self, forKey: .showsPerspectiveGuides) ?? false
         paintingOpacity = try container.decodeIfPresent(Float.self, forKey: .paintingOpacity) ?? opacity
+        paintingPlacement = try container.decodeIfPresent(BlockReferencePaintingPlacement.self, forKey: .paintingPlacement) ?? .inFront
         lightAzimuth = try container.decodeIfPresent(Double.self, forKey: .lightAzimuth) ?? -122
         lightElevation = try container.decodeIfPresent(Double.self, forKey: .lightElevation) ?? 57
         normalize()

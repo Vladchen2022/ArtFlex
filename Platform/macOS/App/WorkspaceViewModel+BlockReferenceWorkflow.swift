@@ -177,6 +177,12 @@ extension WorkspaceViewModel {
         }
     }
 
+    func setBlockReferencePaintingPlacement(_ placement: BlockReferencePaintingPlacement) {
+        _ = updateBlockReferenceDocument(operationKind: "blockReference.paintingPlacement") {
+            $0?.display.paintingPlacement = placement
+        }
+    }
+
     func setBlockReferenceLight(azimuth: Double? = nil, elevation: Double? = nil) {
         _ = updateBlockReferenceDocument(operationKind: isAdjustingBlockReferenceParameters ? nil : "blockReference.light") { scene in
             if let azimuth { scene?.display.lightAzimuth = azimuth }

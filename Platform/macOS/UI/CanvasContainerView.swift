@@ -293,7 +293,10 @@ struct CanvasContainerView: View {
                         onAdjustBrushSize: { delta in
                             viewModel.adjustBrushSize(by: delta)
                         },
-                        outsideCanvasBrushInputRelay: outsideCanvasBrushInputRelay
+                        outsideCanvasBrushInputRelay: outsideCanvasBrushInputRelay,
+                        paintingReferenceScene: viewModel.blockReferenceScene.flatMap {
+                            $0.display.drawsBehindPainting(activeTool: viewModel.workspace.toolSession.activeTool) ? $0 : nil
+                        }
                     )
                     .id(viewModel.documentRenderGeneration)
                     .frame(
@@ -465,6 +468,7 @@ struct CanvasContainerView: View {
 
                 if let blockScene = viewModel.blockReferenceScene,
                    blockScene.display.isVisible,
+                   !blockScene.display.drawsBehindPainting(activeTool: viewModel.workspace.toolSession.activeTool),
                    !viewModel.blockReferenceEditorState.perspectiveMatch.isActive {
                     BlockReferenceOverlay(
                         scene: blockScene,

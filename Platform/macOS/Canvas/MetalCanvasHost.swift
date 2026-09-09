@@ -235,6 +235,7 @@ struct MetalCanvasHost: NSViewRepresentable {
     let isLuminosityPreviewEnabled: Bool
     let onAdjustBrushSize: (Float) -> Void
     let outsideCanvasBrushInputRelay: OutsideCanvasBrushInputRelay?
+    var paintingReferenceScene: BlockReferenceScene? = nil
     private let brushFeelLogger = Logger(subsystem: "ArtFlex", category: "BrushFeel")
 
     func makeCoordinator() -> MetalCanvasCoordinator {
@@ -349,6 +350,8 @@ struct MetalCanvasHost: NSViewRepresentable {
         let previousMeshWarpGrid = context.coordinator.meshWarpGrid
         let previousDisplaySamplingMode = context.coordinator.displaySamplingMode
         let previousDrawsTransparencyCheckerboard = context.coordinator.drawsTransparencyCheckerboard
+        let previousPaintingReferenceScene = context.coordinator.paintingReferenceScene
+        context.coordinator.paintingReferenceScene = paintingReferenceScene
         context.coordinator.sceneSnapshot = sceneSnapshot
         context.coordinator.transformSelectionShape = transformSelectionShape
         context.coordinator.activeTool = activeTool
@@ -414,6 +417,7 @@ struct MetalCanvasHost: NSViewRepresentable {
                 previousGradientDistortionAmount != gradientDistortionAmount ||
                 previousDisplaySamplingMode != displaySamplingMode ||
                 previousDrawsTransparencyCheckerboard != drawsTransparencyCheckerboard ||
+                previousPaintingReferenceScene != paintingReferenceScene ||
                 previousLuminosityPreview != isLuminosityPreviewEnabled ||
                 previousCanvasSize != sceneSnapshot.renderSnapshot.document.canvasSize ||
                 previousViewportRotation != viewportRotationDegrees ||
@@ -2625,6 +2629,10 @@ final class StrokeCaptureMTKView: MTKView {
 
 @MainActor
 final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDelegate {
+    var paintingReferenceScene: BlockReferenceScene?
+    private var paintingReferenceUnderlay: BlockReferenceCanvasUnderlay?
+    private let paintingReferenceLayerID = LayerID()
+    private let paintingReferenceSurfaceID = LayerSurfaceID()
     private let metalContext: MetalDeviceContext
     private let layerSurfaceStore: StageOneLayerSurfaceStore
     private let canvasPresenter: StageOneCanvasPresenter?
@@ -3057,11 +3065,35 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
                 layerID: LayerID,
                 input: CanvasLayerCompositeInput
             )
-            let orderedVisibleLayers: [VisibleLayerEntry] = snapshot.layerSurfaces.compactMap { surface in
+            var orderedVisibleLayers: [VisibleLayerEntry] = snapshot.layerSurfaces.compactMap { surface in
                 guard surface.isVisible, let input = canonicalInputByLayerID[surface.layerID] else {
                     return nil
                 }
                 return (surface.surfaceID, surface.layerID, input)
+            }
+            if let reference = paintingReferenceScene {
+                if paintingReferenceUnderlay == nil {
+                    paintingReferenceUnderlay = try? BlockReferenceCanvasUnderlay(context: metalContext)
+                }
+                let displayScale = (view as? StrokeCaptureMTKView)?.viewportRenderScale ?? 1
+                guard let texture = paintingReferenceUnderlay?.texture(
+                    scene: reference, canvasSize: canvasSize,
+                    width: drawable.texture.width, height: drawable.texture.height,
+                    viewportSize: CGSize(width: view.bounds.width * displayScale,
+                                         height: view.bounds.height * displayScale),
+                    commandBuffer: commandBuffer
+                ) else {
+                    commandBuffer.commit()
+                    onRenderingFailure("无法绘制置后的体块参考，已保留上一帧。")
+                    return
+                }
+                let index = BlockReferencePaintingPlan.insertionIndex(
+                    document: snapshot.renderSnapshot.document,
+                    visibleLayerIDs: orderedVisibleLayers.map(\.layerID))
+                orderedVisibleLayers.insert((paintingReferenceSurfaceID, paintingReferenceLayerID,
+                    CanvasLayerCompositeInput(texture: texture, opacity: reference.display.paintingOpacity)), at: index)
+            } else {
+                paintingReferenceUnderlay = nil
             }
             func compositeInputs(_ entries: [VisibleLayerEntry]) -> [CanvasLayerCompositeInput] {
                 entries.map(\.input)
