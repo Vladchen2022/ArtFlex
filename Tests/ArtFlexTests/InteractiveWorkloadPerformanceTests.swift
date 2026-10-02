@@ -51,6 +51,7 @@ struct InteractiveWorkloadPerformanceTests {
                 }
                 func ms(_ start: UInt64) -> Double { Double(DispatchTime.now().uptimeNanoseconds - start) / 1_000_000 }
                 for sample in 0..<6 {
+                    viewModel.debugSetCommittedSelectionShapeForTests(nil)
                     audit.reset()
                     viewModel.selectTool(.brush)
                     let beforeGPU = metal.device.currentAllocatedSize
