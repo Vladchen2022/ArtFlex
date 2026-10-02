@@ -1,0 +1,1169 @@
+{
+  "commit": "db8f4b9",
+  "workload": [
+    {
+      "side": 2048,
+      "format": 81,
+      "warm_samples_each": 5,
+      "stats": {
+        "stroke_ms": {
+          "before_median": 3.044833,
+          "after_median": 3.16725
+        },
+        "commit_ms": {
+          "before_median": 2.277834,
+          "after_median": 1.316583
+        },
+        "undo_ms": {
+          "before_median": 1.496416,
+          "after_median": 1.17125
+        },
+        "redo_ms": {
+          "before_median": 1.465541,
+          "after_median": 1.163167
+        },
+        "save_ms": {
+          "before_median": 253.638875,
+          "after_median": 153.493208
+        },
+        "save_prepare_ms": {
+          "before_median": 0.526166,
+          "after_median": 0.608417
+        },
+        "save_readback_ms": {
+          "before_median": 18.869875,
+          "after_median": 47.949917
+        },
+        "save_write_ms": {
+          "before_median": 221.079209,
+          "after_median": 93.86875
+        },
+        "gpu_live_stroke": {
+          "before_median": 95158272,
+          "after_median": 95371264
+        },
+        "history_resident_bytes": {
+          "before_median": 180200,
+          "after_median": 180200
+        }
+      }
+    },
+    {
+      "side": 2048,
+      "format": 115,
+      "warm_samples_each": 5,
+      "stats": {
+        "stroke_ms": {
+          "before_median": 3.458375,
+          "after_median": 2.80075
+        },
+        "commit_ms": {
+          "before_median": 2.317542,
+          "after_median": 1.530042
+        },
+        "undo_ms": {
+          "before_median": 1.683584,
+          "after_median": 1.41675
+        },
+        "redo_ms": {
+          "before_median": 1.711333,
+          "after_median": 1.494958
+        },
+        "save_ms": {
+          "before_median": 489.591,
+          "after_median": 287.306167
+        },
+        "save_prepare_ms": {
+          "before_median": 0.617916,
+          "after_median": 0.551875
+        },
+        "save_readback_ms": {
+          "before_median": 60.409583,
+          "after_median": 116.892042
+        },
+        "save_write_ms": {
+          "before_median": 415.940917,
+          "after_median": 159.356625
+        },
+        "gpu_live_stroke": {
+          "before_median": 179224576,
+          "after_median": 112885760
+        },
+        "history_resident_bytes": {
+          "before_median": 324360,
+          "after_median": 324360
+        }
+      }
+    },
+    {
+      "side": 4096,
+      "format": 81,
+      "warm_samples_each": 5,
+      "stats": {
+        "stroke_ms": {
+          "before_median": 4.46575,
+          "after_median": 2.972083
+        },
+        "commit_ms": {
+          "before_median": 2.9435,
+          "after_median": 1.34225
+        },
+        "undo_ms": {
+          "before_median": 2.729167,
+          "after_median": 2.306875
+        },
+        "redo_ms": {
+          "before_median": 2.640458,
+          "after_median": 2.51775
+        },
+        "save_ms": {
+          "before_median": 947.873375,
+          "after_median": 552.01675
+        },
+        "save_prepare_ms": {
+          "before_median": 0.721125,
+          "after_median": 0.708042
+        },
+        "save_readback_ms": {
+          "before_median": 109.416,
+          "after_median": 232.735208
+        },
+        "save_write_ms": {
+          "before_median": 821.3015,
+          "after_median": 308.167875
+        },
+        "gpu_live_stroke": {
+          "before_median": 305823744,
+          "after_median": 238960640
+        },
+        "history_resident_bytes": {
+          "before_median": 180200,
+          "after_median": 180200
+        }
+      }
+    },
+    {
+      "side": 4096,
+      "format": 115,
+      "warm_samples_each": 5,
+      "stats": {
+        "stroke_ms": {
+          "before_median": 8.848125,
+          "after_median": 5.232209
+        },
+        "commit_ms": {
+          "before_median": 4.547167,
+          "after_median": 1.668208
+        },
+        "undo_ms": {
+          "before_median": 4.786416,
+          "after_median": 4.531125
+        },
+        "redo_ms": {
+          "before_median": 4.044208,
+          "after_median": 4.936917
+        },
+        "save_ms": {
+          "before_median": 1858.854792,
+          "after_median": 1077.387833
+        },
+        "save_prepare_ms": {
+          "before_median": 0.688083,
+          "after_median": 0.697416
+        },
+        "save_readback_ms": {
+          "before_median": 264.343458,
+          "after_median": 497.414459
+        },
+        "save_write_ms": {
+          "before_median": 1559.540708,
+          "after_median": 562.783958
+        },
+        "gpu_live_stroke": {
+          "before_median": 582909952,
+          "after_median": 449347584
+        },
+        "history_resident_bytes": {
+          "before_median": 324360,
+          "after_median": 324360
+        }
+      }
+    }
+  ],
+  "brush": [
+    {
+      "run": 1,
+      "format": "rgba8",
+      "sparse": false,
+      "liveTargetBytes": 67108864,
+      "liveMs": 9.900875,
+      "commitMs": 1.684209
+    },
+    {
+      "run": 1,
+      "format": "rgba8",
+      "sparse": true,
+      "liveTargetBytes": 131072,
+      "liveMs": 1.901792,
+      "commitMs": 0.5155
+    },
+    {
+      "run": 1,
+      "format": "rgba16Float",
+      "sparse": false,
+      "liveTargetBytes": 134217728,
+      "liveMs": 7.306167,
+      "commitMs": 3.665375
+    },
+    {
+      "run": 1,
+      "format": "rgba16Float",
+      "sparse": true,
+      "liveTargetBytes": 196608,
+      "liveMs": 2.314,
+      "commitMs": 0.485667
+    },
+    {
+      "run": 2,
+      "format": "rgba8",
+      "sparse": false,
+      "liveTargetBytes": 67108864,
+      "liveMs": 10.33625,
+      "commitMs": 1.772917
+    },
+    {
+      "run": 2,
+      "format": "rgba8",
+      "sparse": true,
+      "liveTargetBytes": 131072,
+      "liveMs": 1.199334,
+      "commitMs": 0.485958
+    },
+    {
+      "run": 2,
+      "format": "rgba16Float",
+      "sparse": false,
+      "liveTargetBytes": 134217728,
+      "liveMs": 7.150625,
+      "commitMs": 3.327167
+    },
+    {
+      "run": 2,
+      "format": "rgba16Float",
+      "sparse": true,
+      "liveTargetBytes": 196608,
+      "liveMs": 2.288,
+      "commitMs": 0.48425
+    },
+    {
+      "run": 3,
+      "format": "rgba8",
+      "sparse": false,
+      "liveTargetBytes": 67108864,
+      "liveMs": 9.9465,
+      "commitMs": 1.761
+    },
+    {
+      "run": 3,
+      "format": "rgba8",
+      "sparse": true,
+      "liveTargetBytes": 131072,
+      "liveMs": 1.474958,
+      "commitMs": 0.516334
+    },
+    {
+      "run": 3,
+      "format": "rgba16Float",
+      "sparse": false,
+      "liveTargetBytes": 134217728,
+      "liveMs": 7.253833,
+      "commitMs": 3.982125
+    },
+    {
+      "run": 3,
+      "format": "rgba16Float",
+      "sparse": true,
+      "liveTargetBytes": 196608,
+      "liveMs": 2.173042,
+      "commitMs": 0.612458
+    }
+  ],
+  "render": [
+    {
+      "run": 1,
+      "cache": "on",
+      "composite_CPU-ms": [
+        0.401416,
+        0.0195,
+        0.014917,
+        0.010792,
+        0.019792,
+        0.010041,
+        0.010583,
+        0.009625
+      ],
+      "composite_GPU-ms": [
+        0.25312500656582415,
+        0.024708337150514126,
+        0.024666660465300083,
+        0.02508332545403391,
+        0.024124994524754584,
+        0.02387499262113124,
+        0.02474999928381294,
+        0.023999993572942913
+      ],
+      "blocks_unchanged-CPU-ms": [
+        10.332375,
+        0.135291,
+        0.109625,
+        0.020958,
+        0.023625,
+        0.01875,
+        0.017166,
+        0.016709
+      ],
+      "blocks_one-edited-CPU-ms": [
+        0.368167,
+        0.261125,
+        0.257959,
+        0.267417,
+        0.261334,
+        0.281291,
+        0.270625,
+        0.263375
+      ],
+      "blocks_orbit-CPU-ms": [
+        0.682166,
+        0.633084,
+        0.594375,
+        0.602625,
+        0.575708,
+        0.583209,
+        0.581125,
+        0.622042
+      ]
+    },
+    {
+      "run": 1,
+      "cache": "off",
+      "composite_CPU-ms": [
+        0.437917,
+        0.097792,
+        0.111375,
+        0.1135,
+        0.1145,
+        0.102708,
+        0.11625,
+        0.09025
+      ],
+      "composite_GPU-ms": [
+        0.2597499988041818,
+        0.25437500153202564,
+        0.2530000056140125,
+        0.25850000383798033,
+        0.25116666802205145,
+        0.2570000069681555,
+        0.2696250012377277,
+        0.25187499704770744
+      ],
+      "blocks_unchanged-CPU-ms": [
+        9.617333,
+        0.661709,
+        0.649708,
+        0.564333,
+        0.603917,
+        0.561833,
+        0.56825,
+        0.586875
+      ],
+      "blocks_one-edited-CPU-ms": [
+        1.462834,
+        1.408833,
+        1.446708,
+        1.403917,
+        1.399125,
+        1.470084,
+        1.426041,
+        1.391166
+      ],
+      "blocks_orbit-CPU-ms": [
+        0.567875,
+        0.573041,
+        0.574417,
+        0.584333,
+        0.587875,
+        0.590709,
+        0.573542,
+        0.561458
+      ]
+    },
+    {
+      "run": 2,
+      "cache": "on",
+      "composite_CPU-ms": [
+        0.397417,
+        0.015917,
+        0.018417,
+        0.0105,
+        0.013084,
+        0.011542,
+        0.014791,
+        0.009292
+      ],
+      "composite_GPU-ms": [
+        0.25099999038502574,
+        0.02487500023562461,
+        0.024375010980293155,
+        0.026249996153637767,
+        0.024374996428377926,
+        0.02520834095776081,
+        0.024291672161780298,
+        0.024375010980293155
+      ],
+      "blocks_unchanged-CPU-ms": [
+        7.749667,
+        0.124958,
+        0.112959,
+        0.025291,
+        0.023875,
+        0.019125,
+        0.017292,
+        0.016958
+      ],
+      "blocks_one-edited-CPU-ms": [
+        0.34825,
+        0.279917,
+        0.249625,
+        0.254041,
+        0.288458,
+        0.250333,
+        0.243791,
+        0.239583
+      ],
+      "blocks_orbit-CPU-ms": [
+        0.606458,
+        0.6745,
+        0.651625,
+        0.632709,
+        0.693791,
+        0.619709,
+        0.669542,
+        0.634083
+      ]
+    },
+    {
+      "run": 2,
+      "cache": "off",
+      "composite_CPU-ms": [
+        0.480583,
+        0.110708,
+        0.1125,
+        0.112292,
+        0.090375,
+        0.099708,
+        0.114209,
+        0.129041
+      ],
+      "composite_GPU-ms": [
+        0.3267499996582046,
+        0.2528750046622008,
+        0.25295832892879844,
+        0.3005833277711645,
+        0.25445832579862326,
+        0.2512500068405643,
+        0.25174999609589577,
+        0.2519999979995191
+      ],
+      "blocks_unchanged-CPU-ms": [
+        7.614041,
+        0.714333,
+        0.661,
+        0.569208,
+        0.558167,
+        0.562708,
+        0.559,
+        0.551417
+      ],
+      "blocks_one-edited-CPU-ms": [
+        1.441084,
+        1.395458,
+        1.495209,
+        1.397792,
+        1.391542,
+        1.399916,
+        1.403708,
+        1.4025
+      ],
+      "blocks_orbit-CPU-ms": [
+        0.55325,
+        0.615708,
+        0.612042,
+        0.674584,
+        0.594375,
+        0.601583,
+        0.650959,
+        0.631083
+      ]
+    },
+    {
+      "run": 3,
+      "cache": "on",
+      "composite_CPU-ms": [
+        0.506834,
+        0.022333,
+        0.01975,
+        0.020583,
+        0.013625,
+        0.014042,
+        0.011167,
+        0.011291
+      ],
+      "composite_GPU-ms": [
+        0.33404165878891945,
+        0.025250003091059625,
+        0.02408333239145577,
+        0.024541659513488412,
+        0.024375010980293155,
+        0.02462499833200127,
+        0.024833338102325797,
+        0.024291672161780298
+      ],
+      "blocks_unchanged-CPU-ms": [
+        8.92375,
+        0.167416,
+        0.111792,
+        0.024667,
+        0.021875,
+        0.017542,
+        0.017,
+        0.0415
+      ],
+      "blocks_one-edited-CPU-ms": [
+        0.50475,
+        0.353209,
+        0.277,
+        0.285167,
+        0.265833,
+        0.246792,
+        0.244416,
+        0.238291
+      ],
+      "blocks_orbit-CPU-ms": [
+        0.622333,
+        0.658042,
+        0.585625,
+        0.582583,
+        0.786292,
+        0.689292,
+        0.591708,
+        0.594333
+      ]
+    },
+    {
+      "run": 3,
+      "cache": "off",
+      "composite_CPU-ms": [
+        0.4135,
+        0.104541,
+        0.116916,
+        0.113125,
+        0.102625,
+        0.124833,
+        0.119167,
+        0.104667
+      ],
+      "composite_GPU-ms": [
+        0.26149999757763,
+        0.2520416601328179,
+        0.2541249996284023,
+        0.25262500275857747,
+        0.25229166203644127,
+        0.25533333246130496,
+        0.25295832892879844,
+        0.29837500187568367
+      ],
+      "blocks_unchanged-CPU-ms": [
+        9.86825,
+        0.764708,
+        0.709042,
+        0.576917,
+        0.576875,
+        0.568166,
+        0.583042,
+        0.571792
+      ],
+      "blocks_one-edited-CPU-ms": [
+        1.663583,
+        1.442209,
+        1.43475,
+        1.422917,
+        1.392,
+        1.406875,
+        1.472667,
+        1.4145
+      ],
+      "blocks_orbit-CPU-ms": [
+        0.567791,
+        0.5595,
+        0.56325,
+        0.620166,
+        0.56325,
+        0.654625,
+        0.57375,
+        0.572042
+      ]
+    }
+  ],
+  "methodology": {
+    "machine": "Apple M4 Max, 128 GiB",
+    "configuration": "Release + DEBUG",
+    "workload": "24 samples per primary baseline/after run; exclude sample 0 for each size/format; five warm samples per comparison",
+    "render": "Same final db8f4b9 binary, caches enabled versus ARTFLEX_DISABLE_RENDER_CACHES=1; three serial runs per setting, discard each first frame (21 warm samples). Intermediate results at 5497082 retained separately.",
+    "brush": "Three standalone serial runs at 5497082; actual working allocations including sparse heap tiles. Final changes only affect selection history and 3D cache bookkeeping.",
+    "limitations": [
+      "GPU benchmark runs were serial; baseline initial isolated brush/render fixtures were scheduled concurrently by test framework and their time values are not used as before/after claims.",
+      "save_readback_ms metric changed semantics to include encoding; compare save_ms for total latency.",
+      "App hardware pen-to-photon latency and process-wide peak memory reduction are not measured by the working-target resource fixture.",
+      "Primary 4096 rgba16Float redo median regressed; independent confirmation run retained separately."
+    ]
+  },
+  "intermediate_workload": [
+    {
+      "side": 2048,
+      "format": 81,
+      "warm_samples_each": 5,
+      "stats": {
+        "stroke_ms": {
+          "before_median": 3.044833,
+          "after_median": 2.653584
+        },
+        "commit_ms": {
+          "before_median": 2.277834,
+          "after_median": 1.25975
+        },
+        "undo_ms": {
+          "before_median": 1.496416,
+          "after_median": 1.113167
+        },
+        "redo_ms": {
+          "before_median": 1.465541,
+          "after_median": 1.107875
+        },
+        "save_ms": {
+          "before_median": 253.638875,
+          "after_median": 150.130583
+        },
+        "save_prepare_ms": {
+          "before_median": 0.526166,
+          "after_median": 0.508875
+        },
+        "save_readback_ms": {
+          "before_median": 18.869875,
+          "after_median": 47.678042
+        },
+        "save_write_ms": {
+          "before_median": 221.079209,
+          "after_median": 92.210625
+        },
+        "gpu_live_stroke": {
+          "before_median": 95158272,
+          "after_median": 95371264
+        },
+        "history_resident_bytes": {
+          "before_median": 180200,
+          "after_median": 180200
+        }
+      }
+    },
+    {
+      "side": 2048,
+      "format": 115,
+      "warm_samples_each": 5,
+      "stats": {
+        "stroke_ms": {
+          "before_median": 3.458375,
+          "after_median": 2.98425
+        },
+        "commit_ms": {
+          "before_median": 2.317542,
+          "after_median": 1.330583
+        },
+        "undo_ms": {
+          "before_median": 1.683584,
+          "after_median": 1.360375
+        },
+        "redo_ms": {
+          "before_median": 1.711333,
+          "after_median": 1.423375
+        },
+        "save_ms": {
+          "before_median": 489.591,
+          "after_median": 287.238958
+        },
+        "save_prepare_ms": {
+          "before_median": 0.617916,
+          "after_median": 0.516542
+        },
+        "save_readback_ms": {
+          "before_median": 60.409583,
+          "after_median": 117.5855
+        },
+        "save_write_ms": {
+          "before_median": 415.940917,
+          "after_median": 157.589542
+        },
+        "gpu_live_stroke": {
+          "before_median": 179224576,
+          "after_median": 112885760
+        },
+        "history_resident_bytes": {
+          "before_median": 324360,
+          "after_median": 324360
+        }
+      }
+    },
+    {
+      "side": 4096,
+      "format": 81,
+      "warm_samples_each": 5,
+      "stats": {
+        "stroke_ms": {
+          "before_median": 4.46575,
+          "after_median": 3.698333
+        },
+        "commit_ms": {
+          "before_median": 2.9435,
+          "after_median": 1.291875
+        },
+        "undo_ms": {
+          "before_median": 2.729167,
+          "after_median": 2.282875
+        },
+        "redo_ms": {
+          "before_median": 2.640458,
+          "after_median": 2.556375
+        },
+        "save_ms": {
+          "before_median": 947.873375,
+          "after_median": 550.332042
+        },
+        "save_prepare_ms": {
+          "before_median": 0.721125,
+          "after_median": 0.612458
+        },
+        "save_readback_ms": {
+          "before_median": 109.416,
+          "after_median": 228.072708
+        },
+        "save_write_ms": {
+          "before_median": 821.3015,
+          "after_median": 308.474042
+        },
+        "gpu_live_stroke": {
+          "before_median": 305823744,
+          "after_median": 238960640
+        },
+        "history_resident_bytes": {
+          "before_median": 180200,
+          "after_median": 180200
+        }
+      }
+    },
+    {
+      "side": 4096,
+      "format": 115,
+      "warm_samples_each": 5,
+      "stats": {
+        "stroke_ms": {
+          "before_median": 8.848125,
+          "after_median": 3.810792
+        },
+        "commit_ms": {
+          "before_median": 4.547167,
+          "after_median": 1.5805
+        },
+        "undo_ms": {
+          "before_median": 4.786416,
+          "after_median": 4.104042
+        },
+        "redo_ms": {
+          "before_median": 4.044208,
+          "after_median": 4.769875
+        },
+        "save_ms": {
+          "before_median": 1858.854792,
+          "after_median": 1084.741875
+        },
+        "save_prepare_ms": {
+          "before_median": 0.688083,
+          "after_median": 0.667625
+        },
+        "save_readback_ms": {
+          "before_median": 264.343458,
+          "after_median": 499.48575
+        },
+        "save_write_ms": {
+          "before_median": 1559.540708,
+          "after_median": 565.802958
+        },
+        "gpu_live_stroke": {
+          "before_median": 582909952,
+          "after_median": 449347584
+        },
+        "history_resident_bytes": {
+          "before_median": 324360,
+          "after_median": 324360
+        }
+      }
+    }
+  ],
+  "intermediate_render": [
+    {
+      "run": 1,
+      "cache": "on",
+      "composite_CPU-ms": [
+        0.424084,
+        0.014834,
+        0.017875,
+        0.01075,
+        0.015834,
+        0.011917,
+        0.009875,
+        0.009542
+      ],
+      "composite_GPU-ms": [
+        0.25100000493694097,
+        0.025666668079793453,
+        0.02541666617617011,
+        0.024833338102325797,
+        0.025000001187436283,
+        0.025041677872650325,
+        0.024374996428377926,
+        0.0237500062212348
+      ],
+      "blocks_unchanged-CPU-ms": [
+        8.123958,
+        0.114791,
+        0.11325,
+        0.0345,
+        0.057416,
+        0.017375,
+        0.018416,
+        0.037333
+      ],
+      "blocks_one-edited-CPU-ms": [
+        0.375375,
+        0.274,
+        0.249167,
+        0.24875,
+        0.257959,
+        0.270458,
+        0.25875,
+        0.30775
+      ],
+      "blocks_orbit-CPU-ms": [
+        0.603083,
+        0.6025,
+        0.594209,
+        0.581333,
+        0.609917,
+        0.620208,
+        0.630209,
+        0.660917
+      ]
+    },
+    {
+      "run": 1,
+      "cache": "off",
+      "composite_CPU-ms": [
+        0.43325,
+        0.1095,
+        0.114917,
+        0.113833,
+        0.108583,
+        0.105375,
+        0.102875,
+        0.122667
+      ],
+      "composite_GPU-ms": [
+        0.2599166618892923,
+        0.25404166080988944,
+        0.2593749959487468,
+        0.2606250054668635,
+        0.25275000371038914,
+        0.2545000024838373,
+        0.2531249920139089,
+        0.25224999990314245
+      ],
+      "blocks_unchanged-CPU-ms": [
+        7.93725,
+        0.757458,
+        0.636584,
+        0.571916,
+        0.560083,
+        0.560083,
+        0.555709,
+        0.548916
+      ],
+      "blocks_one-edited-CPU-ms": [
+        1.472584,
+        1.395708,
+        1.386041,
+        1.403834,
+        1.445334,
+        1.656917,
+        1.727375,
+        1.496542
+      ],
+      "blocks_orbit-CPU-ms": [
+        0.614375,
+        0.557875,
+        0.558917,
+        0.576417,
+        0.606625,
+        0.613792,
+        0.576666,
+        0.564291
+      ]
+    },
+    {
+      "run": 2,
+      "cache": "on",
+      "composite_CPU-ms": [
+        0.445416,
+        0.016,
+        0.022417,
+        0.012208,
+        0.015,
+        0.014166,
+        0.010084,
+        0.009792
+      ],
+      "composite_GPU-ms": [
+        0.25800000003073364,
+        0.02495833905413747,
+        0.02529166522435844,
+        0.025124987587332726,
+        0.02474999928381294,
+        0.024708337150514126,
+        0.024791675969026983,
+        0.025333341909572482
+      ],
+      "blocks_unchanged-CPU-ms": [
+        9.307458,
+        0.135542,
+        0.109083,
+        0.022542,
+        0.022292,
+        0.037625,
+        0.021,
+        0.01625
+      ],
+      "blocks_one-edited-CPU-ms": [
+        0.364958,
+        0.2645,
+        0.277875,
+        0.290333,
+        0.3105,
+        0.269,
+        0.276,
+        0.279333
+      ],
+      "blocks_orbit-CPU-ms": [
+        0.647042,
+        0.626667,
+        0.671792,
+        0.682542,
+        0.675125,
+        0.626666,
+        0.626,
+        0.681625
+      ]
+    },
+    {
+      "run": 2,
+      "cache": "off",
+      "composite_CPU-ms": [
+        0.434875,
+        0.098208,
+        0.108375,
+        0.168958,
+        0.1155,
+        0.10425,
+        0.107959,
+        0.113166
+      ],
+      "composite_GPU-ms": [
+        0.257874999078922,
+        0.6182500073919073,
+        0.25549999554641545,
+        0.2510416670702398,
+        0.26612498913891613,
+        0.2500000118743628,
+        0.2535833336878568,
+        0.2519166737329215
+      ],
+      "blocks_unchanged-CPU-ms": [
+        13.64875,
+        0.693959,
+        0.72075,
+        0.591667,
+        0.58425,
+        0.600958,
+        0.569542,
+        0.584208
+      ],
+      "blocks_one-edited-CPU-ms": [
+        1.530542,
+        1.501583,
+        1.478917,
+        1.427375,
+        1.420916,
+        1.489958,
+        1.400625,
+        1.386958
+      ],
+      "blocks_orbit-CPU-ms": [
+        0.560417,
+        0.558667,
+        0.558584,
+        0.563458,
+        0.59275,
+        0.567792,
+        0.557167,
+        0.563417
+      ]
+    },
+    {
+      "run": 3,
+      "cache": "on",
+      "composite_CPU-ms": [
+        0.512458,
+        0.013833,
+        0.010792,
+        0.010083,
+        0.011709,
+        0.012,
+        0.009375,
+        0.009292
+      ],
+      "composite_GPU-ms": [
+        0.32449999707750976,
+        0.025125002139247954,
+        0.03429166099522263,
+        0.02279167529195547,
+        0.024125009076669812,
+        0.02587500785011798,
+        0.025541667127981782,
+        0.02595833211671561
+      ],
+      "blocks_unchanged-CPU-ms": [
+        13.219583,
+        0.124417,
+        0.111875,
+        0.021167,
+        0.022333,
+        0.017959,
+        0.019167,
+        0.031084
+      ],
+      "blocks_one-edited-CPU-ms": [
+        0.418958,
+        0.362708,
+        0.261334,
+        0.270208,
+        0.263167,
+        0.2585,
+        0.27125,
+        0.243541
+      ],
+      "blocks_orbit-CPU-ms": [
+        0.712208,
+        0.755625,
+        0.688,
+        0.67525,
+        0.629083,
+        0.589916,
+        0.619125,
+        0.589125
+      ]
+    },
+    {
+      "run": 3,
+      "cache": "off",
+      "composite_CPU-ms": [
+        0.378041,
+        0.1005,
+        0.117459,
+        0.139875,
+        0.136125,
+        0.113916,
+        0.141791,
+        0.126041
+      ],
+      "composite_GPU-ms": [
+        0.2607500064186752,
+        0.44450000859797,
+        0.2820416702888906,
+        0.2572499943198636,
+        0.2530000056140125,
+        0.25095834280364215,
+        0.25004167400766164,
+        0.24862500140443444
+      ],
+      "blocks_unchanged-CPU-ms": [
+        12.363083,
+        0.659541,
+        0.717042,
+        0.71475,
+        0.741292,
+        0.624708,
+        0.590083,
+        0.58575
+      ],
+      "blocks_one-edited-CPU-ms": [
+        1.544542,
+        1.626541,
+        1.733875,
+        1.56975,
+        1.43125,
+        1.495791,
+        1.586875,
+        1.506708
+      ],
+      "blocks_orbit-CPU-ms": [
+        0.595291,
+        0.555584,
+        0.591,
+        0.555875,
+        0.5825,
+        0.599041,
+        0.610208,
+        0.618375
+      ]
+    }
+  ],
+  "intermediate_commit": "5497082",
+  "render_summary": {
+    "composite_CPU-ms": {
+      "off": 0.112292,
+      "on": 0.013625
+    },
+    "composite_GPU-ms": {
+      "off": 0.25295832892879844,
+      "on": 0.024541659513488412
+    },
+    "blocks_unchanged-CPU-ms": {
+      "off": 0.576875,
+      "on": 0.023625
+    },
+    "blocks_one-edited-CPU-ms": {
+      "off": 1.406875,
+      "on": 0.261334
+    },
+    "blocks_orbit-CPU-ms": {
+      "off": 0.587875,
+      "on": 0.622042
+    }
+  }
+}
