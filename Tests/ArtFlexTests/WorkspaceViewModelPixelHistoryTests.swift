@@ -55,7 +55,7 @@ struct WorkspaceViewModelPixelHistoryTests {
     }
 
     @Test @MainActor
-    func localSparseSelectionMatchesDenseIncludingEdgesAlphaLockHistoryAndFailures() throws {
+    func localSparseSelectionMatchesDenseIncludingEdgesAlphaLockHistoryAndFailures() async throws {
         guard let device = MetalDeviceContext()?.device, SparseLayerTexture.isSupported(by: device) else { return }
         for standard in [ArtColorStandard.stageOneDefault, .highPrecision] {
             let sparse = try PixelHistoryHarness(canvasSize: .init(width: 1025, height: 1025), colorStandard: standard, usesSparseStorage: true)
@@ -85,6 +85,22 @@ struct WorkspaceViewModelPixelHistoryTests {
             #expect(try pixels(dense) == after)
             #expect(sparse.bootstrap.layerSurfaceStore.readTexture(for: surface)?.heap?.type == .sparse)
             #expect(try sparse.bootstrap.textureSerializer.snapshot(texture: #require(branch.readTexture(for: surface))) == branchBefore)
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent("ArtFlex-SparseEdit-\(UUID().uuidString)")
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: root) }
+            let url = root.appendingPathComponent("roundtrip.artflex")
+            sparse.bootstrap.filePanelService.selectURLsForTesting = { _, finish in finish([url]) }
+            var saved: Bool?
+            #expect(sparse.viewModel.saveProject { saved = $0 })
+            for _ in 0..<1000 {
+                if saved != nil { break }
+                try await Task.sleep(for: .milliseconds(10))
+            }
+            #expect(saved == true)
+            let reopened = try sparse.bootstrap.persistenceController.openProject(from: url)
+            #expect(reopened.layerSnapshots.first { $0.layerID == id && $0.resourceKind == .content }?.texture == after)
+            let expectedMask = try sparse.bootstrap.textureSerializer.snapshot(texture: #require(sparse.bootstrap.layerSurfaceStore.readMaskTexture(for: id)))
+            #expect(reopened.layerSnapshots.first { $0.layerID == id && $0.resourceKind == .mask }?.texture == expectedMask)
             for h in [sparse, dense] {
                 h.viewModel.undo(); #expect(try pixels(h) == before)
                 h.viewModel.redo(); #expect(try pixels(h) == after)
