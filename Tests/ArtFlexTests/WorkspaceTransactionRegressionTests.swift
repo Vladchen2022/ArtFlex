@@ -7,6 +7,225 @@ import Testing
 @Suite(.serialized)
 @MainActor
 struct WorkspaceTransactionRegressionTests {
+    @Test func savedPixelsBecomeCleanAfterUndoingTransformWithSelectionHistoryInBetween() async throws {
+        let h = try TransactionHarness()
+        defer { h.cleanUp() }
+        try h.paintFixturePatch()
+        h.viewModel.hasUnsavedChanges = true
+        try await h.saveProject(named: "before-selection-transform")
+        let savedPixels = try h.snapshot()
+
+        h.makeRectangleSelection()
+        try await h.waitUntil { h.viewModel.workspace.selection.committedShape?.maskData != nil }
+        #expect(!h.viewModel.hasUnsavedChanges)
+        h.viewModel.selectTool(.freeTransform)
+        h.viewModel.beginSelectionTransform(at: .init(x: 20, y: 20), mode: .move)
+        h.viewModel.updateSelectionTransform(to: .init(x: 32, y: 20))
+        h.viewModel.commitSelectionTransform(at: .init(x: 32, y: 20))
+        h.viewModel.applySelectionTransform()
+        try await h.waitUntil { !h.viewModel.isApplyingTransformCommit }
+        #expect(h.viewModel.hasUnsavedChanges)
+        #expect(try h.snapshot() != savedPixels)
+
+        h.viewModel.undo()
+        try await h.waitUntil { !h.viewModel.isHistoryNavigating }
+        #expect(try h.snapshot() == savedPixels)
+        #expect(h.viewModel.workspace.selection.committedShape != nil)
+        #expect(!h.viewModel.hasUnsavedChanges)
+        h.viewModel.redo()
+        try await h.waitUntil { !h.viewModel.isHistoryNavigating }
+        #expect(h.viewModel.hasUnsavedChanges)
+        h.viewModel.undo()
+        try await h.waitUntil { !h.viewModel.isHistoryNavigating }
+        #expect(!h.viewModel.hasUnsavedChanges)
+
+        h.viewModel.selectTool(.brush)
+        h.viewModel.undo()
+        try await h.waitUntil { !h.viewModel.isHistoryNavigating }
+        #expect(h.viewModel.workspace.selection.committedShape == nil)
+        #expect(!h.viewModel.hasUnsavedChanges)
+        h.viewModel.redo()
+        try await h.waitUntil { !h.viewModel.isHistoryNavigating }
+        #expect(h.viewModel.workspace.selection.committedShape != nil)
+        #expect(try h.snapshot() == savedPixels)
+        #expect(!h.viewModel.hasUnsavedChanges)
+    }
+
+    @Test func selectionHistoryAndItsNewBranchCannotClearUnsavedContent() async throws {
+        let h = try TransactionHarness()
+        defer { h.cleanUp() }
+        try await h.saveProject(named: "before-dirty-selection")
+        h.viewModel.setActiveLayerOpacity(0.65)
+        h.makeRectangleSelection()
+        try await h.waitUntil { h.viewModel.workspace.selection.committedShape?.maskData != nil }
+        h.viewModel.undo()
+        try await h.waitUntil { !h.viewModel.isHistoryNavigating }
+        #expect(h.viewModel.hasUnsavedChanges)
+        h.viewModel.redo()
+        try await h.waitUntil { !h.viewModel.isHistoryNavigating }
+        #expect(h.viewModel.hasUnsavedChanges)
+        h.viewModel.undo()
+        try await h.waitUntil { !h.viewModel.isHistoryNavigating }
+        h.viewModel.selectAllCanvas()
+        #expect(!h.viewModel.canRedo)
+        #expect(h.viewModel.hasUnsavedChanges)
+        #expect(h.opacity == 0.65)
+        h.viewModel.undo()
+        try await h.waitUntil { !h.viewModel.isHistoryNavigating }
+        #expect(h.viewModel.hasUnsavedChanges)
+        h.viewModel.undo()
+        try await h.waitUntil { !h.viewModel.isHistoryNavigating }
+        #expect(h.opacity == 1)
+        #expect(!h.viewModel.hasUnsavedChanges)
+    }
+
+    @Test func selectionCreatedWhileSaveIsPendingRemainsEquivalentToTheSavedContent() async throws {
+        let h = try TransactionHarness()
+        defer { h.cleanUp() }
+        try h.paintFixturePatch()
+        h.viewModel.hasUnsavedChanges = true
+        try #require(h.beginSave(named: "selection-during-save"))
+        #expect(h.viewModel.isProjectSaving)
+        // Save completion runs on MainActor, so this checkpoint necessarily
+        // happens after capture and before the saved point is accepted.
+        h.makeRectangleSelection()
+        try await h.waitUntil {
+            !h.viewModel.isProjectSaving && h.viewModel.workspace.selection.committedShape?.maskData != nil
+        }
+        #expect(!h.viewModel.hasUnsavedChanges)
+        let opened = try h.bootstrap.persistenceController.openProject(
+            from: h.root.appendingPathComponent("selection-during-save.artflex"))
+        #expect(opened.workspace.selection.committedShape == nil)
+        #expect(h.viewModel.workspace.selection.committedShape != nil)
+
+        h.viewModel.setActiveLayerOpacity(0.65)
+        h.viewModel.undo()
+        try await h.waitUntil { !h.viewModel.isHistoryNavigating }
+        #expect(h.opacity == 1)
+        #expect(!h.viewModel.hasUnsavedChanges)
+        h.viewModel.undo()
+        try await h.waitUntil { !h.viewModel.isHistoryNavigating }
+        #expect(!h.viewModel.hasUnsavedChanges)
+        h.viewModel.redo()
+        try await h.waitUntil { !h.viewModel.isHistoryNavigating }
+        #expect(!h.viewModel.hasUnsavedChanges)
+    }
+
+    @Test func selectionHistoryKeepsLayerTexturesAndRefreshesOutlinesWithoutPixelSnapshots() async throws {
+        let h = try TransactionHarness()
+        defer { h.cleanUp() }
+        try h.paintFixturePatch()
+        h.viewModel.hasUnsavedChanges = false
+        let layers = h.viewModel.workspace.document.paintLayers
+        let textures = try layers.map { layer in
+            let id = try #require(h.bootstrap.layerSurfaceStore.surfaceID(for: layer.id))
+            return try #require(h.bootstrap.layerSurfaceStore.readTexture(for: id))
+        }
+        let pixels = try h.bootstrap.textureSerializer.snapshotBatch(textures: textures)
+        let residentPixels = h.bootstrap.historyController.residentByteCount
+        let savedContent = h.bootstrap.historyController.currentContentStateID
+        h.makeRectangleSelection()
+        try await h.waitUntil { h.viewModel.workspace.selection.committedShape?.maskData != nil }
+        let rectangle = try #require(h.viewModel.workspace.selection.committedShape)
+        let revision = h.viewModel.selectionRevision
+        #expect(h.bootstrap.historyController.residentByteCount == residentPixels)
+        #expect(h.bootstrap.historyController.currentContentStateID == savedContent)
+        #expect(h.viewModel.visibleHistoryTimeline.appliedEntries.last?.displayName == "选区操作")
+        #expect(h.viewModel.sceneSnapshot.selectionShape == rectangle)
+        #expect(h.viewModel.selectionOverlayProxy.displayShape == rectangle)
+
+        h.viewModel.undo()
+        try await h.waitUntil { !h.viewModel.isHistoryNavigating }
+        #expect(h.viewModel.workspace.selection.committedShape == nil)
+        #expect(h.viewModel.sceneSnapshot.selectionShape == nil)
+        #expect(h.viewModel.selectionOverlayProxy.displayShape == nil)
+        #expect(h.viewModel.selectionRevision > revision)
+        let undoRevision = h.viewModel.selectionRevision
+        h.viewModel.redo()
+        try await h.waitUntil { !h.viewModel.isHistoryNavigating }
+        #expect(h.viewModel.sceneSnapshot.selectionShape == rectangle)
+        #expect(h.viewModel.selectionOverlayProxy.displayShape == rectangle)
+        #expect(h.viewModel.selectionRevision > undoRevision)
+        #expect(!h.viewModel.hasUnsavedChanges)
+
+        h.viewModel.selectAllCanvas()
+        let allCanvas = h.viewModel.workspace.selection.committedShape
+        h.viewModel.prepareVisibleHistoryPresentation()
+        h.viewModel.previewVisibleHistory(toAppliedEntryCount: 0)
+        try await h.waitUntil { !h.viewModel.isHistoryNavigating }
+        #expect(h.viewModel.sceneSnapshot.selectionShape == nil)
+        #expect(h.viewModel.selectionOverlayProxy.displayShape == nil)
+        h.viewModel.cancelVisibleHistoryPreview()
+        try await h.waitUntil { !h.viewModel.isHistoryNavigating }
+        #expect(h.viewModel.sceneSnapshot.selectionShape == allCanvas)
+        #expect(h.viewModel.selectionOverlayProxy.displayShape == allCanvas)
+        #expect(!h.viewModel.hasUnsavedChanges)
+        #expect(h.bootstrap.historyController.currentContentStateID == savedContent)
+        #expect(h.bootstrap.historyController.residentByteCount == residentPixels)
+        for (index, layer) in layers.enumerated() {
+            let id = try #require(h.bootstrap.layerSurfaceStore.surfaceID(for: layer.id))
+            let texture = try #require(h.bootstrap.layerSurfaceStore.readTexture(for: id))
+            #expect(texture === textures[index])
+            #expect(try h.bootstrap.textureSerializer.snapshot(texture: texture) == pixels[index])
+        }
+    }
+
+    @Test func clearingSelectionKeepsSavedContentCleanAndRejectsFailedHistoryCapture() async throws {
+        let h = try TransactionHarness()
+        defer { h.cleanUp() }
+        try h.paintFixturePatch()
+        h.viewModel.hasUnsavedChanges = true
+        try await h.saveProject(named: "before-selection-clear")
+        h.makeRectangleSelection()
+        try await h.waitUntil { h.viewModel.workspace.selection.committedShape?.maskData != nil }
+        let selection = h.viewModel.workspace.selection
+        let texture = try h.texture()
+        let pixels = try h.snapshot()
+        let timeline = h.viewModel.visibleHistoryTimeline
+        let stateID = h.bootstrap.historyController.currentStateID
+        let contentID = h.bootstrap.historyController.currentContentStateID
+        let residentPixels = h.bootstrap.historyController.residentByteCount
+#if DEBUG
+        h.bootstrap.historyController.debugPreventsCheckpointCapture = true
+        defer { h.bootstrap.historyController.debugPreventsCheckpointCapture = false }
+        h.viewModel.clearSelection()
+        #expect(h.viewModel.status?.kind == .error)
+        #expect(h.viewModel.workspace.selection == selection)
+        #expect(h.viewModel.sceneSnapshot.selectionShape == selection.committedShape)
+        #expect(h.viewModel.selectionOverlayProxy.displayShape == selection.committedShape)
+        #expect(h.viewModel.visibleHistoryTimeline == timeline)
+        #expect(h.bootstrap.historyController.currentStateID == stateID)
+        #expect(h.bootstrap.historyController.currentContentStateID == contentID)
+        #expect(!h.viewModel.hasUnsavedChanges)
+        h.bootstrap.historyController.debugPreventsCheckpointCapture = false
+#endif
+        h.viewModel.clearSelection()
+        #expect(h.viewModel.workspace.selection.committedShape == nil)
+        #expect(h.viewModel.sceneSnapshot.selectionShape == nil)
+        #expect(h.viewModel.selectionOverlayProxy.displayShape == nil)
+        #expect(h.viewModel.visibleHistoryTimeline.currentAppliedEntryCount == timeline.currentAppliedEntryCount + 1)
+        #expect(h.bootstrap.historyController.currentStateID != stateID)
+        #expect(h.bootstrap.historyController.currentContentStateID == contentID)
+        #expect(h.bootstrap.historyController.residentByteCount == residentPixels)
+        #expect(!h.viewModel.hasUnsavedChanges)
+
+        h.viewModel.undo()
+        try await h.waitUntil { !h.viewModel.isHistoryNavigating }
+        #expect(h.viewModel.workspace.selection.committedShape == selection.committedShape)
+        #expect(h.viewModel.selectionOverlayProxy.displayShape == selection.committedShape)
+        #expect(h.bootstrap.historyController.currentContentStateID == contentID)
+        #expect(!h.viewModel.hasUnsavedChanges)
+        h.viewModel.redo()
+        try await h.waitUntil { !h.viewModel.isHistoryNavigating }
+        #expect(h.viewModel.workspace.selection.committedShape == nil)
+        #expect(h.viewModel.selectionOverlayProxy.displayShape == nil)
+        #expect(h.bootstrap.historyController.currentContentStateID == contentID)
+        #expect(!h.viewModel.hasUnsavedChanges)
+        #expect(h.bootstrap.historyController.residentByteCount == residentPixels)
+        #expect(try h.texture() === texture)
+        #expect(try h.snapshot() == pixels)
+    }
+
     @Test func generatorCompletedAfterMetadataUndoCannotPublishIntoTheRestoredState() async throws {
         let h = try TransactionHarness()
         defer { h.cleanUp() }
@@ -23,6 +242,7 @@ struct WorkspaceTransactionRegressionTests {
         h.viewModel.undo()
         let timeline = h.viewModel.visibleHistoryTimeline
         let stateID = h.bootstrap.historyController.currentStateID
+        let contentStateID = h.bootstrap.historyController.currentContentStateID
         #expect(h.opacity == 1)
         #expect(h.viewModel.canRedo)
         #expect(h.viewModel.hasUnsavedChanges)
@@ -35,6 +255,7 @@ struct WorkspaceTransactionRegressionTests {
         #expect(h.contentCursor == cursor)
         #expect(h.viewModel.visibleHistoryTimeline == timeline)
         #expect(h.bootstrap.historyController.currentStateID == stateID)
+        #expect(h.bootstrap.historyController.currentContentStateID == contentStateID)
         #expect(h.viewModel.hasUnsavedChanges)
         h.viewModel.redo()
         #expect(h.opacity == 0.7)
@@ -53,6 +274,7 @@ struct WorkspaceTransactionRegressionTests {
         let cursor = h.contentCursor
         let timeline = h.viewModel.visibleHistoryTimeline
         let stateID = h.bootstrap.historyController.currentStateID
+        let contentStateID = h.bootstrap.historyController.currentContentStateID
         #expect(h.viewModel.canRedo)
 
         h.bootstrap.textureSerializer.debugRejectsRestoreCompletion = true
@@ -65,6 +287,7 @@ struct WorkspaceTransactionRegressionTests {
         #expect(h.contentCursor == cursor)
         #expect(h.viewModel.visibleHistoryTimeline == timeline)
         #expect(h.bootstrap.historyController.currentStateID == stateID)
+        #expect(h.bootstrap.historyController.currentContentStateID == contentStateID)
         #expect(h.viewModel.canRedo)
         #expect(!h.viewModel.hasUnsavedChanges)
 
@@ -104,6 +327,7 @@ struct WorkspaceTransactionRegressionTests {
         let cursor = h.contentCursor
         let timeline = h.viewModel.visibleHistoryTimeline
         let stateID = h.bootstrap.historyController.currentStateID
+        let contentStateID = h.bootstrap.historyController.currentContentStateID
         let wasDirty = h.viewModel.hasUnsavedChanges
 
         h.bootstrap.historyController.debugPreventsCheckpointCapture = true
@@ -121,6 +345,7 @@ struct WorkspaceTransactionRegressionTests {
         #expect(h.contentCursor == cursor)
         #expect(h.viewModel.visibleHistoryTimeline == timeline)
         #expect(h.bootstrap.historyController.currentStateID == stateID)
+        #expect(h.bootstrap.historyController.currentContentStateID == contentStateID)
         #expect(h.viewModel.hasUnsavedChanges == wasDirty)
 
         h.bootstrap.historyController.debugPreventsCheckpointCapture = false
@@ -244,6 +469,19 @@ private struct TransactionHarness {
             try await Task.sleep(for: .milliseconds(10))
         }
         try #require(predicate(), "Transaction completion timed out: \(viewModel.status?.message ?? "no status")")
+    }
+
+    func beginSave(named name: String) -> Bool {
+        let url = root.appendingPathComponent("\(name).artflex")
+        bootstrap.filePanelService.selectURLsForTesting = { _, finish in finish([url]) }
+        return viewModel.saveProject()
+    }
+
+    func saveProject(named name: String) async throws {
+        try #require(beginSave(named: name))
+        try await waitUntil { !viewModel.isProjectSaving }
+        try #require(FileManager.default.fileExists(atPath: root.appendingPathComponent("\(name).artflex").path))
+        try #require(!viewModel.hasUnsavedChanges)
     }
 
     func cleanUp() { try? FileManager.default.removeItem(at: root) }

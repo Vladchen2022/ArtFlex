@@ -191,7 +191,7 @@ final class WorkspaceViewModel: ObservableObject {
     }
     private struct SavedHistoryPoint {
         var generation: UInt64
-        var stateID: UUID
+        var contentStateID: UUID
         var document: ArtDocument
         var externalRevision: UInt64
     }
@@ -217,7 +217,7 @@ final class WorkspaceViewModel: ObservableObject {
 
     private func captureSavedHistoryPoint() -> SavedHistoryPoint {
         SavedHistoryPoint(generation: documentRenderGeneration,
-            stateID: bootstrap.historyController.currentStateID,
+            contentStateID: bootstrap.historyController.currentContentStateID,
             document: documentForSavedPoint(), externalRevision: externalProjectRevision)
     }
 
@@ -231,7 +231,7 @@ final class WorkspaceViewModel: ObservableObject {
     private func reconcileSavedHistoryPoint() {
         if let point = savedHistoryPoint,
            point.generation == documentRenderGeneration,
-           point.stateID == bootstrap.historyController.currentStateID,
+           point.contentStateID == bootstrap.historyController.currentContentStateID,
            point.externalRevision == externalProjectRevision,
            point.document == documentForSavedPoint() {
             documentLifecycle.setDirty(false)
@@ -9831,7 +9831,10 @@ final class WorkspaceViewModel: ObservableObject {
 
         let hadSelection = workspace.selection.displayRect != nil
         if hadSelection {
-            guard checkpointHistoryIfPossible() else { return }
+            _ = flushBrushEditingBoundary(reason: "clearSelection")
+            guard checkpointSelectionChangeIfPossible(
+                previousCommittedShape: workspace.selection.committedShape
+            ) else { return }
         }
         activeLassoRawPoints = []
         activeLassoPreviewPoints = []
@@ -12478,6 +12481,11 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     private func refreshDocumentOverlayOnly() {
+        if workspace.selection != bootstrap.workspaceStore.state.selection {
+            // Workspace-only selection history still needs its scene, mask
+            // revision and outline refreshed, without rebuilding layer textures.
+            refreshLightweight(reason: "history.selection")
+        }
         refreshPerspectiveGuideOnly()
         let existingObjectIDs = Set(workspace.document.blockReferenceScene?.objects.map(\.id) ?? [])
         blockReferenceEditorState.selectedObjectIDs.formIntersection(existingObjectIDs)
@@ -16432,7 +16440,8 @@ final class WorkspaceViewModel: ObservableObject {
         showStatus(.init(kind: .success, message: "绘画里程碑：\(milestone.title)"))
     }
 
-    private func checkpointSelectionChangeIfPossible(previousCommittedShape: SelectionShape?) {
+    @discardableResult
+    private func checkpointSelectionChangeIfPossible(previousCommittedShape: SelectionShape?) -> Bool {
         var workspaceSnapshot = workspace
         workspaceSnapshot.selection.committedShape = previousCommittedShape
         workspaceSnapshot.selection.inProgressShape = nil
@@ -16440,11 +16449,20 @@ final class WorkspaceViewModel: ObservableObject {
         workspaceSnapshot.selection.activeKind = nil
 
         do {
-            try bootstrap.historyController.captureCheckpoint(workspaceOverride: workspaceSnapshot)
+            try bootstrap.historyController.captureCheckpoint(
+                workspaceOverride: workspaceSnapshot,
+                captureMode: .workspaceOnly,
+                affectsDocumentContent: false,
+                auditContext: .init(operationKind: "selection.change",
+                    candidateChangedLayerIDs: [], candidateChangedLayerIDsKnown: true,
+                    comparisonWorkspace: workspace)
+            )
             canUndo = bootstrap.historyController.canUndo
             canRedo = bootstrap.historyController.canRedo
+            return true
         } catch {
             showStatus(.init(kind: .error, message: error.localizedDescription))
+            return false
         }
     }
 

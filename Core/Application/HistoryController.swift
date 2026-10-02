@@ -82,6 +82,7 @@ struct WorkspaceHistoryEntry: Sendable, Equatable {
     var preservesCommonLayerTexturesAcrossTopologyChange: Bool
     var visibleMetadata: VisibleHistoryEntryMetadata
     var stateID: UUID = UUID()
+    var contentStateID: UUID = UUID()
 }
 
 enum HistoryCaptureMode {
@@ -237,6 +238,9 @@ final class HistoryController {
     private let hotEntryCount: Int
     private let readAheadCache: HistoryReadAheadCache
     private(set) var currentStateID = UUID()
+    // Selection history advances navigation identity without changing the saved
+    // document content. Keep these clocks separate for undo/redo save points.
+    private(set) var currentContentStateID = UUID()
 
     private struct StoredEntry {
         var metadata: WorkspaceHistoryEntry
@@ -342,6 +346,7 @@ final class HistoryController {
     func captureCheckpoint(
         workspaceOverride: WorkspaceState? = nil,
         captureMode: HistoryCaptureMode = .full,
+        affectsDocumentContent: Bool = true,
         auditContext: HistoryEligibilityAuditContext? = nil
     ) throws {
 #if DEBUG
@@ -357,6 +362,7 @@ final class HistoryController {
         clear(&redoStack)
         append(entry, to: &undoStack)
         currentStateID = UUID()
+        if affectsDocumentContent { currentContentStateID = UUID() }
         maintainStorage()
     }
 
@@ -364,6 +370,7 @@ final class HistoryController {
         workspaceOverride: WorkspaceState? = nil,
         captureMode: HistoryCaptureMode = .full,
         providedLayerSnapshots: [LayerHistorySnapshot],
+        affectsDocumentContent: Bool = true,
         auditContext: HistoryEligibilityAuditContext? = nil
     ) throws {
 #if DEBUG
@@ -380,6 +387,7 @@ final class HistoryController {
         clear(&redoStack)
         append(entry, to: &undoStack)
         currentStateID = UUID()
+        if affectsDocumentContent { currentContentStateID = UUID() }
         maintainStorage()
     }
 
@@ -432,6 +440,7 @@ final class HistoryController {
         clear(&undoStack)
         clear(&redoStack)
         currentStateID = UUID()
+        currentContentStateID = UUID()
     }
 
     func captureCurrentEntry() throws -> WorkspaceHistoryEntry {
@@ -493,6 +502,7 @@ final class HistoryController {
             append(current, to: &undoStack)
         }
         currentStateID = target.stateID
+        currentContentStateID = target.contentStateID
         maintainStorage()
         return true
     }
@@ -635,7 +645,8 @@ final class HistoryController {
                 actionKey: "generic.checkpoint",
                 affectedLayerIDs: Array(snapshotLayerIDs)
             ),
-            stateID: currentStateID
+            stateID: currentStateID,
+            contentStateID: currentContentStateID
         )
     }
 
@@ -794,6 +805,7 @@ final class HistoryController {
         }
         resetHistory()
         currentStateID = entry.stateID
+        currentContentStateID = entry.contentStateID
     }
 
     private func restoreWorkspaceOnly(
