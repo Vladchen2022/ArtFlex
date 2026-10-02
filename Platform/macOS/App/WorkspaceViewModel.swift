@@ -15686,13 +15686,19 @@ final class WorkspaceViewModel: ObservableObject {
         topologyOperation: Bool = false,
         additionalOperationKinds: [String] = [],
         captureMode: HistoryCaptureMode = .full,
-        workspaceOverride: WorkspaceState? = nil
+        workspaceOverride: WorkspaceState? = nil,
+        pixelRegion: PixelRegion? = nil
     ) -> Bool {
         _ = flushBrushEditingBoundary(reason: "checkpointHistoryIfPossible")
         do {
+            let snapshots: [LayerHistorySnapshot]
+            if let pixelRegion, case .inPlaceChangedLayers(let ids) = captureMode, ids.count == 1 {
+                snapshots = try bootstrap.historyController.snapshots(for: ids[0], region: pixelRegion)
+            } else { snapshots = [] }
             try bootstrap.historyController.captureCheckpoint(
                 workspaceOverride: workspaceOverride,
                 captureMode: captureMode,
+                providedLayerSnapshots: snapshots,
                 auditContext: HistoryEligibilityAuditContext(
                     operationKind: operationKind,
                     candidateChangedLayerIDs: candidateChangedLayerIDs,
@@ -15867,10 +15873,10 @@ final class WorkspaceViewModel: ObservableObject {
             candidateChangedLayerIDsKnown: true,
             comparisonWorkspace: captureHistoryEligibilityComparisonWorkspace()
         )
-        if let dirtySnapshot = try makeBrushCommitHistorySnapshot(for: job) {
+        if let dirtySnapshots = try makeBrushCommitHistorySnapshots(for: job) {
             try bootstrap.historyController.captureCheckpoint(
                 captureMode: captureMode,
-                providedLayerSnapshots: [dirtySnapshot],
+                providedLayerSnapshots: dirtySnapshots,
                 auditContext: auditContext
             )
         } else {
@@ -15881,9 +15887,9 @@ final class WorkspaceViewModel: ObservableObject {
         }
     }
 
-    private func makeBrushCommitHistorySnapshot(
+    private func makeBrushCommitHistorySnapshots(
         for job: BrushCommitJob
-    ) throws -> LayerHistorySnapshot? {
+    ) throws -> [LayerHistorySnapshot]? {
         guard
             job.packets.last.map({ isBrushLikeTool($0.tool) }) == true,
             let bounds = job.renderedPixelBounds,
@@ -15898,19 +15904,8 @@ final class WorkspaceViewModel: ObservableObject {
             return nil
         }
 
-        let snapshot = try bootstrap.textureSerializer.snapshot(
-            texture: texture,
-            originX: bounds.originX,
-            originY: bounds.originY,
-            width: bounds.width,
-            height: bounds.height
-        )
-        return LayerHistorySnapshot(
-            layerID: job.layerID,
-            texture: snapshot,
-            originX: bounds.originX,
-            originY: bounds.originY
-        )
+        return try bootstrap.historyController.snapshots(for: job.layerID,
+            region: .init(originX: bounds.originX, originY: bounds.originY, width: bounds.width, height: bounds.height))
     }
 
     func makeVisibleCompositeTexture() throws -> MTLTexture {
@@ -16580,7 +16575,8 @@ final class WorkspaceViewModel: ObservableObject {
             operationKind: historyOperationKind,
             candidateChangedLayerIDs: [layerID],
             additionalOperationKinds: ["applyPixelOperation"],
-            captureMode: pixelOperationCaptureMode
+            captureMode: pixelOperationCaptureMode,
+            pixelRegion: PixelRegion(originX: minX, originY: minY, width: maxX - minX, height: maxY - minY)
         ) else { return false }
         if auditEnabled {
             let historyCheckpointMs = Double(DispatchTime.now().uptimeNanoseconds - historyCheckpointStartNs) / 1_000_000

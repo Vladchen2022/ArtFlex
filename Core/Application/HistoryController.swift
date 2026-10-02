@@ -287,6 +287,30 @@ final class HistoryController {
         maintainStorage()
     }
 
+    /// Captures a complete set of resources for a local pixel edit. A mask must be
+    /// included even when unchanged, or validation would fall back to whole-layer history.
+    func snapshots(for layerID: LayerID, region: PixelRegion) throws -> [LayerHistorySnapshot] {
+        guard let layer = workspaceStore.state.document.layer(layerID),
+              let texture = layerSurfaceStore.surfaceID(for: layerID).flatMap(layerSurfaceStore.readTexture(for:)) else {
+            throw HistoryControllerError.missingCaptureResource(layerID: layerID, resourceKind: .content)
+        }
+        var resources: [(LayerHistoryResourceKind, MTLTexture)] = [(.content, texture)]
+        if layer.mask != nil {
+            guard let mask = layerSurfaceStore.readMaskTexture(for: layerID) else {
+                throw HistoryControllerError.missingCaptureResource(layerID: layerID, resourceKind: .mask)
+            }
+            resources.append((.mask, mask))
+        }
+        let requests = resources.map { _, texture in
+            LayerTextureRegionSnapshotRequest(texture: texture, originX: region.originX,
+                originY: region.originY, width: region.width, height: region.height)
+        }
+        return try zip(resources, serializer.snapshotRegions(requests)).map { resource, pixels in
+            LayerHistorySnapshot(layerID: layerID, resourceKind: resource.0, texture: pixels,
+                originX: region.originX, originY: region.originY)
+        }
+    }
+
     func resetHistory() {
         clear(&undoStack)
         clear(&redoStack)

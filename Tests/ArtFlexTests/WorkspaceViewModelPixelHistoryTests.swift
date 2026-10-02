@@ -5,6 +5,44 @@ import Testing
 
 struct WorkspaceViewModelPixelHistoryTests {
     @Test @MainActor
+    func maskedLocalBrushAndSelectionKeepRegionalHistoryAndExactRoundTrips() throws {
+        for standard in [ArtColorStandard.stageOneDefault, .highPrecision] {
+            let h = try PixelHistoryHarness(canvasSize: .init(width: 512, height: 512), colorStandard: standard)
+            let id = h.viewModel.workspace.document.activeLayerID
+            h.viewModel.addMaskToActiveLayer()
+            h.viewModel.stopEditingLayerMask()
+            let store = h.bootstrap.layerSurfaceStore
+            store.fillMaskTexture(for: id, value: 0.5, metal: h.bootstrap.metalContext)
+            let mask = try h.bootstrap.textureSerializer.snapshot(texture: #require(store.readMaskTexture(for: id)))
+            h.bootstrap.historyController.resetHistory()
+            let blank = try h.snapshot(layerID: id)
+            h.viewModel.setBrushSize(8)
+            try h.drawBrushStroke(on: id, points: [.init(location: .init(x: 40, y: 40), pressure: 1)])
+            _ = h.viewModel.flushBrushEditingBoundary(reason: "regional.masked.brush")
+            let brush = try h.snapshot(layerID: id)
+            #expect(brush != blank)
+            #expect(try #require(h.bootstrap.historyController.debugUndoEntryApproxByteCounts.last) < 100_000)
+            h.viewModel.undo()
+            #expect(try h.snapshot(layerID: id) == blank)
+            h.viewModel.redo()
+            #expect(try h.snapshot(layerID: id) == brush)
+            h.makeRectangleSelection(minX: 250, minY: 250, maxX: 270, maxY: 270)
+            h.viewModel.fillSelectionContents()
+            let filled = try h.snapshot(layerID: id)
+            #expect(filled != brush)
+            #expect(try #require(h.bootstrap.historyController.debugUndoEntryApproxByteCounts.last) < 10_000)
+            for _ in 0..<3 {
+                h.viewModel.undo()
+                #expect(try h.snapshot(layerID: id) == brush)
+                h.viewModel.redo()
+                #expect(try h.snapshot(layerID: id) == filled)
+                #expect(try h.bootstrap.textureSerializer.snapshot(texture: #require(store.readMaskTexture(for: id))) == mask)
+                #expect(try #require(h.bootstrap.historyController.debugUndoEntryApproxByteCounts.last) < 10_000)
+            }
+        }
+    }
+
+    @Test @MainActor
     func gradientFailuresPreserveDraftSharedPixelsRedoAndChangeJournal() async throws {
         for standard in [ArtColorStandard.stageOneDefault, .highPrecision] {
             for sector in [false, true] {
