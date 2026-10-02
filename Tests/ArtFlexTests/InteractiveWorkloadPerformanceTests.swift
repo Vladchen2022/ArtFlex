@@ -38,6 +38,7 @@ struct InteractiveWorkloadPerformanceTests {
                 let bootstrap = try AppBootstrap(workspaceStore: store, metalContext: metal, layerSurfaceStore: surfaces,
                     persistenceRecoveryRootURL: root.appendingPathComponent("Recovery"))
                 let viewModel = WorkspaceViewModel(bootstrap: bootstrap, installsZoomKeyboardMonitor: false)
+                viewModel.debugUsesDenseSelectionStaging = ProcessInfo.processInfo.environment["ARTFLEX_FORCE_DENSE_SELECTION"] == "1"
                 viewModel.setBrushSize(32)
                 viewModel.setBrushSizeJitterAmount(0)
                 viewModel.setPaintJitterAmount(0)

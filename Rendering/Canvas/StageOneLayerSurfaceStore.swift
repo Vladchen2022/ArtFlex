@@ -6,7 +6,7 @@ private enum LayerSurfaceContentState {
     case unknown
 }
 
-private final class LayerTextureResource {
+fileprivate final class LayerTextureResource {
     let dense: MTLTexture?
     let sparse: SparseLayerTexture?
     var texture: MTLTexture { sparse?.texture ?? dense! }
@@ -15,6 +15,86 @@ private final class LayerTextureResource {
 }
 
 final class StageOneLayerSurfaceStore {
+    /// Owns unpublished pixels and their sparse heap until a synchronous edit commits.
+    final class StagedPixelEdit {
+        fileprivate let source: LayerTextureResource
+        fileprivate let sourceTexture: MTLTexture
+        fileprivate let result: LayerTextureResource
+        fileprivate let surfaceID: LayerSurfaceID
+        fileprivate let region: PixelRegion
+        var texture: MTLTexture { result.texture }
+        var allocatedBytes: Int { result.sparse?.allocatedBytes ?? texture.allocatedSize }
+        fileprivate init(source: LayerTextureResource, result: LayerTextureResource,
+                         surfaceID: LayerSurfaceID, region: PixelRegion) {
+            self.source = source; self.sourceTexture = source.texture; self.result = result
+            self.surfaceID = surfaceID; self.region = region
+        }
+    }
+
+    func preparePixelEdit(for surfaceID: LayerSurfaceID, region: PixelRegion,
+                          allowsSparse: Bool = true) throws -> StagedPixelEdit {
+        guard let source = texturesBySurfaceID[surfaceID], let metal = metalContext else {
+            throw CanvasResourceError(message: "无法访问像素编辑源图层")
+        }
+#if DEBUG
+        if debugPreventsTextureAllocation { throw CanvasResourceError(message: "无法分配像素编辑资源") }
+#endif
+        let texture = source.texture
+        let canvas = CanvasSize(width: texture.width, height: texture.height)
+        guard let bounds = PixelRegion.canvasBounds(for: canvas), bounds.intersection(with: region) == region else {
+            throw CanvasResourceError(message: "像素编辑区域超出画布")
+        }
+        var result: LayerTextureResource?
+        // Large/global edits retain the existing dense path. Local edits copy only occupied
+        // native tiles plus the write area, without changing canvas coordinates or shaders.
+        if allowsSparse, usesSparseStorage, texture.width * texture.height >= 1024 * 1024,
+           region.width * region.height < texture.width * texture.height / 4,
+           SparseLayerTexture.isSupported(by: metal.device) {
+            let tile = metal.device.sparseTileSize(with: .type2D, pixelFormat: texture.pixelFormat, sampleCount: 1)
+            var required: Set<TileCoordinate>
+            if let sparse = source.sparse { required = sparse.mappedTiles }
+            else {
+                if sparseScanner == nil { sparseScanner = try SparseTileScanner(metal: metal) }
+                required = try sparseScanner!.occupiedTiles(in: texture, tileSize: tile)
+            }
+            for y in (region.originY / tile.height)...((region.maxY - 1) / tile.height) {
+                for x in (region.originX / tile.width)...((region.maxX - 1) / tile.width) {
+                    required.insert(.init(x: x, y: y))
+                }
+            }
+            let denseBytes = texture.width * texture.height * (texture.pixelFormat == .rgba16Float ? 8 : 4)
+            if required.count * metal.device.sparseTileSizeInBytes < denseBytes * 3 / 4 {
+                result = LayerTextureResource(try SparseLayerTexture.copying(texture, tiles: required, metal: metal))
+            }
+        }
+        if result == nil {
+            guard let copy = makeTexture(width: texture.width, height: texture.height,
+                pixelFormat: texture.pixelFormat, metal: metal), copyTextures([(texture, copy)], metal: metal) else {
+                throw CanvasResourceError(message: "无法准备像素编辑；原像素未修改")
+            }
+            result = LayerTextureResource(copy)
+        }
+        return StagedPixelEdit(source: source, result: result!, surfaceID: surfaceID, region: region)
+    }
+
+    func canPublish(_ edit: StagedPixelEdit) -> Bool {
+        texturesBySurfaceID[edit.surfaceID] === edit.source && edit.source.texture === edit.sourceTexture
+    }
+
+    @discardableResult
+    func publish(_ edit: StagedPixelEdit) -> Bool {
+        guard canPublish(edit) else { return false }
+        if let sparse = edit.result.sparse {
+            texturesBySurfaceID[edit.surfaceID] = edit.result
+            sparseScanCandidates[edit.surfaceID] = sparse.mappedTiles
+            if let id = surfacesByLayerID.first(where: { $0.value.surfaceID == edit.surfaceID })?.key {
+                contentStateByLayerID[id] = .unknown
+                recordChange(for: .init(layerID: id, kind: .content), region: edit.region)
+            }
+        } else { swapTexture(for: edit.surfaceID, with: edit.texture, changedRegion: edit.region) }
+        return true
+    }
+
     private var surfacesByLayerID: [LayerID: LayerSurfaceRecord] = [:]
     private var texturesBySurfaceID: [LayerSurfaceID: LayerTextureResource] = [:]
     private var contentStateByLayerID: [LayerID: LayerSurfaceContentState] = [:]

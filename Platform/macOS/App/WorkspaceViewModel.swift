@@ -442,6 +442,7 @@ final class WorkspaceViewModel: ObservableObject {
     private var strokePacketCount = 0
     private var activePaintVariationSeed: UInt32 = 0
     private var lastLayerMaskStrokeSample: CanvasStrokeSample?
+    private var maskStrokeHistoryAccepted = false
     var colorAdjustmentSession: ColorAdjustmentSession?
     var curveAdjustmentSession: CurveAdjustmentSession?
     var brightnessAdjustmentEditorMode: BrightnessAdjustmentEditorMode = .colorParameters
@@ -463,6 +464,7 @@ final class WorkspaceViewModel: ObservableObject {
     var debugPixelOperationHistoryCaptureModeOverride: HistoryCaptureMode?
     var debugFillAtPointHistoryCaptureModeOverride: HistoryCaptureMode?
     var debugPreventsPixelEditPreparation = false
+    var debugUsesDenseSelectionStaging = false
     var debugRejectsPixelEditCompletion = false
     var debugRejectsGradientCompletion = false
     private(set) var debugGradientCompletionCount = 0
@@ -821,6 +823,7 @@ final class WorkspaceViewModel: ObservableObject {
         if tool != .brush, tool != .eraser {
             activeMaskEditingLayerID = nil
             lastLayerMaskStrokeSample = nil
+            maskStrokeHistoryAccepted = false
         }
         if previousTool == .freeTransform, tool != .freeTransform, freeTransformUsesImplicitSelection {
             freeTransformUsesImplicitSelection = false
@@ -5892,11 +5895,11 @@ final class WorkspaceViewModel: ObservableObject {
             canUndo = bootstrap.historyController.canUndo
             canRedo = bootstrap.historyController.canRedo
         } else {
-            checkpointHistoryIfPossible(
+            guard checkpointHistoryIfPossible(
                 operationKind: "fillAtPoint",
                 candidateChangedLayerIDs: [layerID],
                 captureMode: captureMode
-            )
+            ) else { return }
         }
 
         try bootstrap.bucketFillEngine.apply(fillPlan, layerSurfaceStore: bootstrap.layerSurfaceStore)
@@ -6424,7 +6427,7 @@ final class WorkspaceViewModel: ObservableObject {
     ) {
         let layerID = workspace.document.activeLayerID
         guard workspace.document.layer(layerID)?.isAdjustmentLayer == true else { return }
-        beginAdjustmentLayerHistoryGestureIfNeeded(layerID: layerID)
+        guard beginAdjustmentLayerHistoryGestureIfNeeded(layerID: layerID) else { return }
         bootstrap.workspaceStore.updateDocument { document in
             guard let index = document.layers.firstIndex(where: { $0.id == layerID }),
                   case .curves(var parameters)? = document.layers[index].adjustment else { return }
@@ -6454,13 +6457,13 @@ final class WorkspaceViewModel: ObservableObject {
         noteCanvasContentChanged(changedLayerIDs: [])
     }
 
-    private func beginAdjustmentLayerHistoryGestureIfNeeded(layerID: LayerID) {
+    private func beginAdjustmentLayerHistoryGestureIfNeeded(layerID: LayerID) -> Bool {
         if adjustmentLayerCheckpointLayerID != layerID {
-            _ = checkpointHistoryIfPossible(
+            guard checkpointHistoryIfPossible(
                 operationKind: "layer.curveAdjustment.edit",
                 candidateChangedLayerIDs: [layerID],
                 captureMode: .inPlaceChangedLayers([layerID])
-            )
+            ) else { return false }
             adjustmentLayerCheckpointLayerID = layerID
         }
         adjustmentLayerCheckpointResetTask?.cancel()
@@ -6470,6 +6473,7 @@ final class WorkspaceViewModel: ObservableObject {
             self?.adjustmentLayerCheckpointLayerID = nil
             self?.adjustmentLayerCheckpointResetTask = nil
         }
+        return true
     }
 
     func addLayer(toGroup groupID: LayerID) {
@@ -6855,6 +6859,7 @@ final class WorkspaceViewModel: ObservableObject {
         if workspace.document.activeLayerID != layerID {
             activeMaskEditingLayerID = nil
             lastLayerMaskStrokeSample = nil
+            maskStrokeHistoryAccepted = false
             guard resolveColorAdjustmentSessionIfNeeded(reason: .layerChange) else { return }
             guard resolveCurveAdjustmentSessionIfNeeded(reason: .layerChange) else { return }
             resolveTransformSession(reason: .layerChange)
@@ -6926,6 +6931,7 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func stopEditingLayerMask() {
+        maskStrokeHistoryAccepted = false
         activeMaskEditingLayerID = nil
         lastLayerMaskStrokeSample = nil
         showStatus(.init(kind: .info, message: "已返回图层内容编辑"))
@@ -7002,7 +7008,7 @@ final class WorkspaceViewModel: ObservableObject {
 
     func setLayerBlendMode(_ layerID: LayerID, blendMode: LayerBlendMode) {
         guard workspace.document.layer(layerID)?.blendMode != blendMode else { return }
-        checkpointHistoryIfPossible(captureMode: .metadataOnly)
+        guard checkpointHistoryIfPossible(captureMode: .metadataOnly) else { return }
         bootstrap.workspaceStore.updateDocument { document in
             document.setLayerBlendMode(layerID, blendMode: blendMode)
         }
@@ -7011,7 +7017,7 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func toggleLayerClipping(_ layerID: LayerID) {
-        checkpointHistoryIfPossible(captureMode: .metadataOnly)
+        guard checkpointHistoryIfPossible(captureMode: .metadataOnly) else { return }
         var changed = false
         bootstrap.workspaceStore.updateDocument { document in
             changed = document.toggleLayerClipping(layerID)
@@ -7027,7 +7033,7 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func toggleLayerReference(_ layerID: LayerID) {
-        checkpointHistoryIfPossible(captureMode: .metadataOnly)
+        guard checkpointHistoryIfPossible(captureMode: .metadataOnly) else { return }
         bootstrap.workspaceStore.updateDocument { document in
             document.toggleLayerReference(layerID)
         }
@@ -7037,7 +7043,7 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func moveLayers(_ layerIDs: Set<LayerID>, toGroup groupID: LayerID?) {
-        checkpointHistoryIfPossible(captureMode: .metadataOnly)
+        guard checkpointHistoryIfPossible(captureMode: .metadataOnly) else { return }
         var changed = false
         bootstrap.workspaceStore.updateDocument { document in
             changed = document.setParent(layerIDs, groupID: groupID)
@@ -7050,7 +7056,7 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func setLayerVisibility(_ layerID: LayerID, isVisible: Bool) {
-        checkpointHistoryIfPossible(captureMode: .metadataOnly)
+        guard checkpointHistoryIfPossible(captureMode: .metadataOnly) else { return }
         bootstrap.workspaceStore.updateDocument { document in
             document.setLayerVisibility(layerID, isVisible: isVisible)
         }
@@ -7059,7 +7065,7 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func toggleLayerLock(_ layerID: LayerID) {
-        checkpointHistoryIfPossible(captureMode: .metadataOnly)
+        guard checkpointHistoryIfPossible(captureMode: .metadataOnly) else { return }
         bootstrap.workspaceStore.updateDocument { document in
             document.toggleLayerLock(layerID)
         }
@@ -7073,7 +7079,7 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func toggleLayerTransparentPixelLock(_ layerID: LayerID) {
-        checkpointHistoryIfPossible(captureMode: .metadataOnly)
+        guard checkpointHistoryIfPossible(captureMode: .metadataOnly) else { return }
         bootstrap.workspaceStore.updateDocument { document in
             document.toggleLayerTransparentPixelLock(layerID)
         }
@@ -7125,9 +7131,9 @@ final class WorkspaceViewModel: ObservableObject {
             return
         }
         if isAdjustingLayerOpacity, !activeLayerOpacityChangeDidMutate {
-            checkpointHistoryIfPossible(captureMode: .metadataOnly)
+            guard checkpointHistoryIfPossible(captureMode: .metadataOnly) else { return }
         } else if !isAdjustingLayerOpacity {
-            checkpointHistoryIfPossible(captureMode: .metadataOnly)
+            guard checkpointHistoryIfPossible(captureMode: .metadataOnly) else { return }
         }
         bootstrap.workspaceStore.updateDocument { document in
             document.setLayerOpacity(activeLayerID, opacity: opacity)
@@ -7157,7 +7163,7 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func moveActiveLayerUp() {
-        checkpointHistoryIfPossible(captureMode: .metadataOnly)
+        guard checkpointHistoryIfPossible(captureMode: .metadataOnly) else { return }
         var moved = false
         bootstrap.workspaceStore.updateDocument { document in
             moved = document.moveActiveLayerUp()
@@ -7175,7 +7181,7 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func moveActiveLayerDown() {
-        checkpointHistoryIfPossible(captureMode: .metadataOnly)
+        guard checkpointHistoryIfPossible(captureMode: .metadataOnly) else { return }
         var moved = false
         bootstrap.workspaceStore.updateDocument { document in
             moved = document.moveActiveLayerDown()
@@ -7193,7 +7199,7 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func moveLayer(_ layerID: LayerID, toDisplayIndex displayIndex: Int) {
-        checkpointHistoryIfPossible(captureMode: .metadataOnly)
+        guard checkpointHistoryIfPossible(captureMode: .metadataOnly) else { return }
         var moved = false
         bootstrap.workspaceStore.updateDocument { document in
             let targetDocumentIndex = max(0, min(document.layers.count - 1, (document.layers.count - 1) - displayIndex))
@@ -7207,7 +7213,7 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func moveLayer(_ layerID: LayerID, toDisplayInsertionIndex insertionIndex: Int) {
-        checkpointHistoryIfPossible(captureMode: .metadataOnly)
+        guard checkpointHistoryIfPossible(captureMode: .metadataOnly) else { return }
         var moved = false
         bootstrap.workspaceStore.updateDocument { document in
             moved = document.moveLayer(layerID, toDisplayInsertionIndex: insertionIndex)
@@ -7225,7 +7231,7 @@ final class WorkspaceViewModel: ObservableObject {
             return
         }
 
-        checkpointHistoryIfPossible(captureMode: .metadataOnly)
+        guard checkpointHistoryIfPossible(captureMode: .metadataOnly) else { return }
         var renamed = false
         bootstrap.workspaceStore.updateDocument { document in
             renamed = document.renameLayer(layerID, to: trimmedName)
@@ -9775,7 +9781,7 @@ final class WorkspaceViewModel: ObservableObject {
 
         let hadSelection = workspace.selection.displayRect != nil
         if hadSelection {
-            checkpointHistoryIfPossible()
+            guard checkpointHistoryIfPossible() else { return }
         }
         activeLassoRawPoints = []
         activeLassoPreviewPoints = []
@@ -10288,7 +10294,7 @@ final class WorkspaceViewModel: ObservableObject {
         }
 
         let historyCheckpointStart = DispatchTime.now().uptimeNanoseconds
-        checkpointHistoryIfPossible()
+        guard checkpointHistoryIfPossible() else { return }
         let historyCheckpointDurationMs = Double(DispatchTime.now().uptimeNanoseconds - historyCheckpointStart) / 1_000_000
         transformLogger.debug("[apply] historyCheckpointMs=\(historyCheckpointDurationMs, privacy: .public)")
         isApplyingTransformCommit = true
@@ -10966,12 +10972,12 @@ final class WorkspaceViewModel: ObservableObject {
                 return
             }
 
-            checkpointHistoryIfPossible(
+            guard checkpointHistoryIfPossible(
                 operationKind: "pixel.cut",
                 candidateChangedLayerIDs: [layerID],
                 additionalOperationKinds: ["pixelClipboard"],
                 captureMode: .inPlaceChangedLayers([layerID])
-            )
+            ) else { return }
 
             let clearedSnapshot = LayerTextureSnapshot(
                 width: payload.snapshot.width,
@@ -11659,11 +11665,11 @@ final class WorkspaceViewModel: ObservableObject {
                     return
                 }
 
-                self.checkpointHistoryIfPossible(
+                guard self.checkpointHistoryIfPossible(
                     operationKind: "generator.\(generator.kind.rawValue)",
                     candidateChangedLayerIDs: [layerID],
                     captureMode: .inPlaceChangedLayers([layerID])
-                )
+                ) else { return }
                 let updatedSnapshot = LayerTextureSnapshot(
                     width: snapshot.width,
                     height: snapshot.height,
@@ -11809,7 +11815,7 @@ final class WorkspaceViewModel: ObservableObject {
             return false
         }
 
-        checkpointHistoryIfPossible()
+        guard checkpointHistoryIfPossible() else { return false }
         let resolvedToolSession = resolvedToolSessionForCanvasStrokes()
 
         let stroke = StrokeDescriptor(
@@ -12576,7 +12582,8 @@ final class WorkspaceViewModel: ObservableObject {
            workspace.document.layer(layerID)?.mask != nil,
            workspace.toolSession.activeTool == .brush || workspace.toolSession.activeTool == .eraser {
             lastLayerMaskStrokeSample = nil
-            _ = checkpointHistoryIfPossible(
+            maskStrokeHistoryAccepted = false
+            maskStrokeHistoryAccepted = checkpointHistoryIfPossible(
                 operationKind: "layerMask.stroke",
                 candidateChangedLayerIDs: [layerID],
                 captureMode: .inPlaceChangedLayers([layerID])
@@ -12638,7 +12645,10 @@ final class WorkspaceViewModel: ObservableObject {
            layerID == workspace.document.activeLayerID,
            workspace.document.layer(layerID)?.mask != nil,
            workspace.toolSession.activeTool == .brush || workspace.toolSession.activeTool == .eraser {
+            guard maskStrokeHistoryAccepted else { return }
+            maskStrokeHistoryAccepted = false
             lastLayerMaskStrokeSample = nil
+            maskStrokeHistoryAccepted = false
             strokePacketCount = 0
             noteCanvasContentChanged(changedLayerIDs: [layerID])
             refresh(invalidatedLayerIDs: [layerID])
@@ -12671,10 +12681,11 @@ final class WorkspaceViewModel: ObservableObject {
               layerID == workspace.document.activeLayerID,
               workspace.document.layer(layerID)?.mask != nil,
               workspace.toolSession.activeTool == .brush || workspace.toolSession.activeTool == .eraser,
-              let maskTexture = bootstrap.layerSurfaceStore.maskTexture(for: layerID),
               !samples.isEmpty else {
             return false
         }
+        guard maskStrokeHistoryAccepted,
+              let maskTexture = bootstrap.layerSurfaceStore.maskTexture(for: layerID) else { return true }
         var continuousSamples = samples
         if let lastLayerMaskStrokeSample,
            continuousSamples.first != lastLayerMaskStrokeSample {
@@ -16291,12 +16302,12 @@ final class WorkspaceViewModel: ObservableObject {
             return false
         }
 
-        checkpointHistoryIfPossible(
+        guard checkpointHistoryIfPossible(
             operationKind: historyOperationKind,
             candidateChangedLayerIDs: [layerID],
             additionalOperationKinds: ["textureFillSolidRenderer"],
             captureMode: .inPlaceChangedLayers([layerID])
-        )
+        ) else { return false }
 
         guard let commandBuffer = bootstrap.metalContext.commandQueue.makeCommandBuffer() else {
             showStatus(.init(kind: .error, message: "无法创建纹理填充命令缓冲"))
@@ -16403,12 +16414,12 @@ final class WorkspaceViewModel: ObservableObject {
             return false
         }
 
-        checkpointHistoryIfPossible(
+        guard checkpointHistoryIfPossible(
             operationKind: historyOperationKind,
             candidateChangedLayerIDs: [layerID],
             additionalOperationKinds: ["lassoFillRenderer"],
             captureMode: .inPlaceChangedLayers([layerID])
-        )
+        ) else { return false }
 
         guard let commandBuffer = bootstrap.metalContext.commandQueue.makeCommandBuffer() else {
             showStatus(.init(kind: .error, message: "无法创建填充命令缓冲"))
@@ -16504,14 +16515,29 @@ final class WorkspaceViewModel: ObservableObject {
 
         // Keep the source immutable, including alpha-lock sampling, until the edit is accepted.
         let stagingStartNs = auditEnabled ? DispatchTime.now().uptimeNanoseconds : 0
-        guard let resultTexture = makePixelEditTextureCopy(from: texture) else {
+        let region = PixelRegion(originX: minX, originY: minY, width: maxX - minX, height: maxY - minY)
+        var allowsSparse = true
+#if DEBUG
+        guard !debugPreventsPixelEditPreparation else {
             showStatus(.init(kind: .error, message: "无法准备选区操作，画布未改变"))
             return false
         }
+        allowsSparse = !debugUsesDenseSelectionStaging
+#endif
+        let workingBytes = texture.width * texture.height * (texture.pixelFormat == .rgba16Float ? 8 : 4)
+        guard ensureDocumentResourceBudget(additionalWorkingBytes: workingBytes, action: "准备像素编辑") else { return false }
+        let stagedEdit: StageOneLayerSurfaceStore.StagedPixelEdit
+        do {
+            stagedEdit = try bootstrap.layerSurfaceStore.preparePixelEdit(for: surfaceID, region: region, allowsSparse: allowsSparse)
+        } catch {
+            showStatus(.init(kind: .error, message: error.localizedDescription))
+            return false
+        }
+        let resultTexture = stagedEdit.texture
         if auditEnabled {
             PerformanceAuditStore.shared.recordDuration("WorkspaceViewModel.applyPixelOperation.stagingCopy",
                 ms: Double(DispatchTime.now().uptimeNanoseconds - stagingStartNs) / 1_000_000)
-            PerformanceAuditStore.shared.recordInt("WorkspaceViewModel.applyPixelOperation.stagingBytes", value: resultTexture.allocatedSize)
+            PerformanceAuditStore.shared.recordInt("WorkspaceViewModel.applyPixelOperation.stagingBytes", value: stagedEdit.allocatedBytes)
         }
         let alphaLockTexture = (layerTransparentPixelLockEnabled(layerID) || preservesExistingAlpha) ? texture : nil
 
@@ -16570,6 +16596,10 @@ final class WorkspaceViewModel: ObservableObject {
             PerformanceAuditStore.shared.recordDuration("WorkspaceViewModel.applyPixelOperation.restore", ms: 0)
         }
 
+        guard bootstrap.layerSurfaceStore.canPublish(stagedEdit) else {
+            showStatus(.init(kind: .error, message: "选区操作的源图层已改变，已取消提交"))
+            return false
+        }
         let historyCheckpointStartNs = auditEnabled ? DispatchTime.now().uptimeNanoseconds : 0
         guard checkpointHistoryIfPossible(
             operationKind: historyOperationKind,
@@ -16583,10 +16613,11 @@ final class WorkspaceViewModel: ObservableObject {
             PerformanceAuditStore.shared.recordDuration("WorkspaceViewModel.applyPixelOperation.historyCheckpoint", ms: historyCheckpointMs)
         }
 
-        bootstrap.layerSurfaceStore.swapTexture(
-            for: surfaceID, with: resultTexture,
-            changedRegion: PixelRegion(originX: minX, originY: minY, width: maxX - minX, height: maxY - minY)
-        )
+        // No suspension or live texture mutation occurs between the version check and publish.
+        guard bootstrap.layerSurfaceStore.publish(stagedEdit) else {
+            showStatus(.init(kind: .error, message: "选区操作的源图层已改变，未替换像素"))
+            return false
+        }
         bootstrap.layerSurfaceStore.compactTexture(for: surfaceID)
         layerThumbnailCache.removeValue(forKey: layerID)
         let uiConfirmStartNs = auditEnabled ? DispatchTime.now().uptimeNanoseconds : 0

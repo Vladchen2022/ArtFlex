@@ -4,6 +4,31 @@ import Testing
 @testable import ArtFlex
 
 struct SparseLayerTextureTests {
+    @Test func abandonedAndStaleStagingNeverMutateSharedLayers() throws {
+        let metal = try #require(MetalDeviceContext())
+        var doc = ArtDocument.stageOneDefault()
+        doc.canvasSize = .init(width: 2048, height: 2048)
+        let store = StageOneLayerSurfaceStore(usesSparseStorage: true)
+        store.prepareTextures(for: doc, metal: metal)
+        let id = try #require(store.surfaceID(for: doc.activeLayerID))
+        let original = try #require(store.readTexture(for: id))
+        let branch = store.sharedCopy()
+        let region = PixelRegion(originX: 250, originY: 250, width: 64, height: 64)
+        let edit = try store.preparePixelEdit(for: id, region: region)
+        #expect(store.readTexture(for: id) === original)
+        #expect(branch.readTexture(for: id) === original)
+        #expect(store.canPublish(edit))
+        if SparseLayerTexture.isSupported(by: metal.device) {
+            #expect(edit.allocatedBytes < 2048 * 2048)
+        }
+        let replacement = try store.preparePixelEdit(for: id, region: region, allowsSparse: false)
+        #expect(store.publish(replacement))
+        #expect(!store.canPublish(edit))
+        #expect(!store.publish(edit))
+        #expect(store.readTexture(for: id) === replacement.texture)
+        #expect(branch.readTexture(for: id) === original)
+    }
+
     @Test func compactionUsesActualOccupiedTilesAndPreservesEdgePixels() throws {
         let metal = try #require(MetalDeviceContext())
         guard SparseLayerTexture.isSupported(by: metal.device) else { return }

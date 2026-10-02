@@ -5,6 +5,111 @@ import Testing
 
 struct WorkspaceViewModelPixelHistoryTests {
     @Test @MainActor
+    func rejectedHistoryCannotApplyLineLassoOrLayerMetadata() throws {
+        let h = try PixelHistoryHarness()
+        let id = h.viewModel.workspace.document.activeLayerID
+        h.makeLassoSelection([.init(x: 8, y: 8), .init(x: 40, y: 8), .init(x: 40, y: 40), .init(x: 8, y: 40), .init(x: 8, y: 8)])
+        let before = try h.snapshot(layerID: id)
+        let document = h.viewModel.workspace.document
+        let selection = h.viewModel.workspace.selection
+        let timeline = h.bootstrap.historyController.visibleTimeline
+        h.bootstrap.historyController.debugPreventsCheckpointCapture = true
+        #expect(!h.viewModel.applyStraightLine(pointA: .init(x: 10, y: 10), pointB: .init(x: 40, y: 40)))
+        h.viewModel.fillLassoContents()
+        h.viewModel.setLayerVisibility(id, isVisible: false)
+        h.viewModel.toggleLayerLock(id)
+        h.viewModel.toggleLayerTransparentPixelLock(id)
+        h.viewModel.renameLayer(id, to: "Rejected")
+        h.viewModel.clearSelection()
+        _ = h.viewModel.flushBrushEditingBoundary(reason: "history.rejected.direct")
+        #expect(try h.snapshot(layerID: id) == before)
+        #expect(h.viewModel.workspace.document == document)
+        #expect(h.viewModel.workspace.selection == selection)
+        #expect(h.bootstrap.historyController.visibleTimeline == timeline)
+    }
+
+    @Test @MainActor
+    func maskGestureRejectsPacketsWhenInitialHistoryFailsAndNextGestureCanRetry() throws {
+        let h = try PixelHistoryHarness()
+        let id = h.viewModel.workspace.document.activeLayerID
+        h.viewModel.addMaskToActiveLayer()
+        h.viewModel.setSelectedColor(.init(red: 0, green: 0, blue: 0, alpha: 1))
+        func mask() throws -> LayerTextureSnapshot {
+            try h.bootstrap.textureSerializer.snapshot(texture: #require(h.bootstrap.layerSurfaceStore.readMaskTexture(for: id)))
+        }
+        let before = try mask()
+        let timeline = h.bootstrap.historyController.visibleTimeline
+        h.bootstrap.historyController.debugPreventsCheckpointCapture = true
+        h.viewModel.beginStrokeIfNeeded()
+        h.viewModel.applyStroke(samples: [.init(location: .init(x: 20, y: 20), pressure: 1)])
+        h.viewModel.endStroke()
+        #expect(try mask() == before)
+        #expect(h.bootstrap.historyController.visibleTimeline == timeline)
+        h.bootstrap.historyController.debugPreventsCheckpointCapture = false
+        h.viewModel.beginStrokeIfNeeded()
+        h.viewModel.applyStroke(samples: [.init(location: .init(x: 20, y: 20), pressure: 1)])
+        h.viewModel.endStroke()
+        #expect(try mask() != before)
+        h.viewModel.undo()
+        #expect(try mask() == before)
+    }
+
+    @Test @MainActor
+    func localSparseSelectionMatchesDenseIncludingEdgesAlphaLockHistoryAndFailures() throws {
+        guard let device = MetalDeviceContext()?.device, SparseLayerTexture.isSupported(by: device) else { return }
+        for standard in [ArtColorStandard.stageOneDefault, .highPrecision] {
+            let sparse = try PixelHistoryHarness(canvasSize: .init(width: 1025, height: 1025), colorStandard: standard, usesSparseStorage: true)
+            let dense = try PixelHistoryHarness(canvasSize: .init(width: 1025, height: 1025), colorStandard: standard, usesSparseStorage: true)
+            dense.viewModel.debugUsesDenseSelectionStaging = true
+            for h in [sparse, dense] {
+                h.viewModel.addMaskToActiveLayer()
+                h.viewModel.stopEditingLayerMask()
+                h.viewModel.setSelectedColor(.init(red: 0.7, green: 0.2, blue: 0.4, alpha: 0.7))
+                // Cross native tile boundaries and include the final partial tile.
+                h.makeRectangleSelection(minX: 245, minY: 250, maxX: 1025, maxY: 300)
+                h.viewModel.fillSelectionContents()
+                h.viewModel.toggleLayerTransparentPixelLock(h.viewModel.workspace.document.activeLayerID)
+                h.viewModel.setSelectedColor(.init(red: 0.2, green: 0.7, blue: 0.3, alpha: 0.5))
+                h.makeRectangleSelection(minX: 253, minY: 253, maxX: 1025, maxY: 310)
+            }
+            func pixels(_ h: PixelHistoryHarness) throws -> LayerTextureSnapshot { try h.snapshot(layerID: h.viewModel.workspace.document.activeLayerID) }
+            let before = try pixels(sparse)
+            #expect(try pixels(dense) == before)
+            let id = sparse.viewModel.workspace.document.activeLayerID
+            let surface = try #require(sparse.bootstrap.layerSurfaceStore.surfaceID(for: id))
+            let branch = sparse.bootstrap.layerSurfaceStore.sharedCopy()
+            let branchBefore = try sparse.bootstrap.textureSerializer.snapshot(texture: #require(branch.readTexture(for: surface)))
+            for h in [sparse, dense] { h.viewModel.fillSelectionContents() }
+            let after = try pixels(sparse)
+            #expect(after != before)
+            #expect(try pixels(dense) == after)
+            #expect(sparse.bootstrap.layerSurfaceStore.readTexture(for: surface)?.heap?.type == .sparse)
+            #expect(try sparse.bootstrap.textureSerializer.snapshot(texture: #require(branch.readTexture(for: surface))) == branchBefore)
+            for h in [sparse, dense] {
+                h.viewModel.undo(); #expect(try pixels(h) == before)
+                h.viewModel.redo(); #expect(try pixels(h) == after)
+                h.viewModel.deleteSelectionContents()
+            }
+            #expect(try pixels(sparse) == pixels(dense))
+            sparse.viewModel.undo()
+            let timeline = sparse.bootstrap.historyController.visibleTimeline
+            let failureBaseline = try pixels(sparse)
+            let cursor = sparse.bootstrap.layerSurfaceStore.changeJournal(for: .init(layerID: id, kind: .content)).cursor
+            for failure in 0..<4 {
+                sparse.viewModel.debugPreventsPixelEditPreparation = failure == 0
+                sparse.bootstrap.selectionPixelOperationRenderer.debugPreventsEncoding = failure == 1
+                sparse.viewModel.debugRejectsPixelEditCompletion = failure == 2
+                sparse.bootstrap.historyController.debugPreventsCheckpointCapture = failure == 3
+                sparse.viewModel.fillSelectionContents()
+                #expect(sparse.viewModel.status?.kind == .error)
+                #expect(try pixels(sparse) == failureBaseline)
+                #expect(sparse.bootstrap.historyController.visibleTimeline == timeline)
+                #expect(sparse.bootstrap.layerSurfaceStore.changeJournal(for: .init(layerID: id, kind: .content)).cursor == cursor)
+            }
+        }
+    }
+
+    @Test @MainActor
     func maskedLocalBrushAndSelectionKeepRegionalHistoryAndExactRoundTrips() throws {
         for standard in [ArtColorStandard.stageOneDefault, .highPrecision] {
             let h = try PixelHistoryHarness(canvasSize: .init(width: 512, height: 512), colorStandard: standard)
@@ -3276,7 +3381,7 @@ private struct PixelHistoryHarness {
     let bootstrap: AppBootstrap
     let viewModel: WorkspaceViewModel
 
-    init(canvasSize: CanvasSize = .init(width: 64, height: 64), colorStandard: ArtColorStandard = .stageOneDefault) throws {
+    init(canvasSize: CanvasSize = .init(width: 64, height: 64), colorStandard: ArtColorStandard = .stageOneDefault, usesSparseStorage: Bool = false) throws {
         guard let metalContext = MetalDeviceContext() else {
             throw PixelHistoryHarnessError.metalUnavailable
         }
@@ -3288,7 +3393,7 @@ private struct PixelHistoryHarness {
         let bootstrap = try AppBootstrap(
             workspaceStore: workspaceStore,
             metalContext: metalContext,
-            layerSurfaceStore: StageOneLayerSurfaceStore()
+            layerSurfaceStore: StageOneLayerSurfaceStore(usesSparseStorage: usesSparseStorage)
         )
         let viewModel = WorkspaceViewModel(bootstrap: bootstrap, installsZoomKeyboardMonitor: false)
         self.bootstrap = bootstrap
