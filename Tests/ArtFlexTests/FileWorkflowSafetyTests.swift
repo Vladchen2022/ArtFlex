@@ -7,6 +7,22 @@ import Testing
 @Suite(.serialized)
 @MainActor
 struct FileWorkflowSafetyTests {
+    @Test func discardConfirmationCannotDropEditsMadeWhilePromptWasOpen() throws {
+        let h = try FileWorkflowHarness()
+        defer { h.cleanUp() }
+        h.makeDirty()
+        var respond: ((NSApplication.ModalResponse) -> Void)?
+        h.bootstrap.filePanelService.confirmForTesting = { respond = $0 }
+        var allowed: Bool?
+        h.viewModel.confirmCloseOrQuitIfNeeded { allowed = $0 }
+        h.viewModel.setActiveLayerOpacity(0.25)
+        respond?(.alertSecondButtonReturn)
+        #expect(allowed == false)
+        #expect(h.viewModel.hasUnsavedChanges)
+        let document = h.viewModel.workspace.document
+        #expect(document.layer(document.activeLayerID)?.opacity == 0.25)
+    }
+
     @Test func rejectedGPUCapturePreservesExistingArchiveAndDirtyState() async throws {
         let h = try FileWorkflowHarness()
         defer { h.cleanUp() }

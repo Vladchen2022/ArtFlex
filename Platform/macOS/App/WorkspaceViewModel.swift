@@ -1,28 +1,9 @@
 import ArtFlexPolicies
+import ArtFlexLifecycle
 import AppKit
 import SwiftUI
 import os
 @preconcurrency import Metal
-
-func resolvedRecoveryAutosaveDeadline(
-    now: ContinuousClock.Instant,
-    delay: Duration,
-    forcedDeadline: ContinuousClock.Instant?,
-    scheduledDeadline: ContinuousClock.Instant? = nil
-) -> ContinuousClock.Instant {
-    let requestedDeadline = now.advanced(by: delay)
-    guard let forcedDeadline, forcedDeadline > now else {
-        // An expired maximum-deferral deadline is a signal to try autosaving now,
-        // not a deadline that should be reused for every retry. Reusing it creates
-        // an immediate task loop whenever the document is temporarily unsafe.
-        // Keep an already scheduled retry from being postponed by every new stroke.
-        if let scheduledDeadline, scheduledDeadline > now {
-            return min(requestedDeadline, scheduledDeadline)
-        }
-        return requestedDeadline
-    }
-    return min(requestedDeadline, forcedDeadline)
-}
 
 private func emitSelectionTraceViewModel(_ message: String) {
     appendSelectionTrace(message)
@@ -199,23 +180,10 @@ final class WorkspaceViewModel: ObservableObject {
     @Published private(set) var visibleHistoryPreviewTargetCount: Int?
     // Content edits and autosave scheduling are separate clocks. Rescheduling a
     // backup (for example on app deactivation) must not invalidate a completed save.
-    private var documentEditRevision: UInt64 = 0
-    @Published private(set) var hasUnsavedChanges = false {
-        didSet {
-            if hasUnsavedChanges {
-                documentEditRevision &+= 1
-                if !isSuppressingRecoveryAutosaveScheduling {
-                    scheduleRecoveryAutosave()
-                }
-            } else {
-                recoveryAutosaveInvalidationGeneration &+= 1
-                recoveryAutosaveGeneration &+= 1
-                recoveryAutosaveTask?.cancel()
-                recoveryAutosaveTask = nil
-                recoveryAutosaveForcedDeadline = nil
-                recoveryAutosaveScheduledDeadline = nil
-            }
-        }
+    private var documentEditRevision: UInt64 { documentLifecycle.version.editRevision }
+    var hasUnsavedChanges: Bool {
+        get { documentLifecycle.isDirty }
+        set { documentLifecycle.setDirty(newValue) }
     }
     private var visibleHistoryPreviewOriginCount: Int?
     private var visibleHistoryPreviewOriginWasDirty = false
@@ -244,7 +212,7 @@ final class WorkspaceViewModel: ObservableObject {
     /// Advances only when the entire document and its GPU surface graph are replaced.
     /// Canvas hosts use this identity to discard coordinators that still retain the
     /// previous document's surface IDs or drawable state.
-    @Published private(set) var documentRenderGeneration: UInt64 = 0
+    var documentRenderGeneration: UInt64 { documentLifecycle.version.generation }
     @Published private(set) var isGeneratorRegionSelectionArmed = false
     @Published private(set) var isGeneratorStrokeModeEnabled = false
     @Published private(set) var activeMaskEditingLayerID: LayerID?
@@ -276,7 +244,7 @@ final class WorkspaceViewModel: ObservableObject {
     @Published private(set) var isRefiningSelection = false
     @Published private(set) var isSavingSnapshot = false
     @Published private(set) var isPreparingSnapshotCompare = false
-    @Published private(set) var isProjectOpening = false
+    var isProjectOpening: Bool { projectOpenCoordinator.isOpening }
     @Published private(set) var isLuminosityPreviewEnabled = false
     @Published private(set) var isFreeTransformDragging = false
     @Published private(set) var activeFreeTransformInteractionMode: FreeTransformInteractionMode?
@@ -379,7 +347,10 @@ final class WorkspaceViewModel: ObservableObject {
     @Published private(set) var referenceImagePreviousPickedColor: RGBAColor?
     @Published private(set) var referenceImageLoadingSlotIDs: Set<Int> = []
     @Published private(set) var isReferenceImageFloatingPanelPresented = false
-    private var currentProjectURL: URL?
+    private var currentProjectURL: URL? {
+        get { documentLifecycle.projectURL }
+        set { documentLifecycle.projectURL = newValue }
+    }
 
     var projectSaveIndicatorState: ProjectSaveIndicatorState {
         if isProjectSaving {
@@ -394,9 +365,6 @@ final class WorkspaceViewModel: ObservableObject {
     private var shouldResumeTimelapseAfterIdeation = false
     private var shouldResumeTimelapseAfterSnapshotCompare = false
     private var isChoosingTimelapseDirectory = false
-    private var isChoosingProjectToOpen = false
-    private var isChoosingProjectSaveLocation = false
-    private var isDocumentTransitionPending = false
     private var snapshotPreviewPreparationTasks: [UUID: Task<Void, Never>] = [:]
     private var frozenSnapshotPreviewPreparationTask: Task<Void, Never>?
     private let patternPlacementTextureCache: NSCache<NSUUID, PatternPlacementTextureCacheEntry> = {
@@ -408,24 +376,39 @@ final class WorkspaceViewModel: ObservableObject {
     }()
     private var memoryPressureSource: DispatchSourceMemoryPressure?
     private var referenceImageUpgradeTasks: [Int: Task<Void, Never>] = [:]
-    private var recoveryAutosaveTask: Task<Void, Never>?
-    private var recoveryAutosaveWriteTask: Task<Void, Never>?
     private lazy var projectSaveCoordinator: ProjectSaveCoordinator = {
         let coordinator = ProjectSaveCoordinator(persistenceController: bootstrap.persistenceController)
         coordinator.onStateChange = { [weak self] in self?.objectWillChange.send() }
         return coordinator
     }()
-    private var projectOpenTask: Task<Void, Never>?
-    private var pendingManualSaveAfterRecoveryAutosave = false
-    private var pendingManualSaveAfterTimelapse = false
-    private var recoveryAutosaveWaitingForTimelapse = false
-    private var recoveryAutosaveGeneration: UInt64 = 0
-    /// Changes only when a completed capture must no longer be installed, not for new strokes.
-    private var recoveryAutosaveInvalidationGeneration: UInt64 = 0
-    private var recoveryAutosaveForcedDeadline: ContinuousClock.Instant?
-    private var recoveryAutosaveScheduledDeadline: ContinuousClock.Instant?
-    private var isSuppressingRecoveryAutosaveScheduling = false
-    private static let recoveryAutosaveMaximumDeferral: Duration = .seconds(120)
+    private lazy var documentLifecycle: DocumentLifecycleCoordinator = {
+        let lifecycle = DocumentLifecycleCoordinator()
+        lifecycle.onStateChange = { [weak self] in self?.objectWillChange.send() }
+        lifecycle.onDirtyStateChange = { [weak self] dirty in self?.recoveryCoordinator.dirtyStateChanged(dirty) }
+        return lifecycle
+    }()
+    private lazy var projectOpenCoordinator: ProjectOpenCoordinator = {
+        let coordinator = ProjectOpenCoordinator()
+        coordinator.onStateChange = { [weak self] in self?.objectWillChange.send() }
+        return coordinator
+    }()
+    private lazy var recoveryCoordinator: RecoveryAutosaveCoordinator = {
+        let coordinator = RecoveryAutosaveCoordinator(persistence: bootstrap.persistenceController, lifecycle: documentLifecycle)
+        coordinator.schedule.onDeadline = { [weak self] generation in self?.performRecoveryAutosave(generation: generation) }
+        coordinator.onWriteFinished = { [weak self] result in
+            guard let self else { return }
+            switch result {
+            case .success(let installed): if installed { self.hasRecoveryProject = true }
+            case .failure(let error): self.showStatus(.init(kind: .error,
+                message: "自动恢复保存失败，已有副本保留；请手动保存工程：\(error.localizedDescription)"))
+            }
+            if self.recoveryCoordinator.manualSaveAfterWrite {
+                self.recoveryCoordinator.manualSaveAfterWrite = false
+                _ = self.saveProject()
+            }
+        }
+        return coordinator
+    }()
     private var deferredGradientAction: DeferredGradientAction?
     private let selectionTraceLogger = Logger(subsystem: "ArtFlex", category: "SelectionTrace")
     private let brushStrokeLogger = Logger(subsystem: "ArtFlex", category: "BrushStroke")
@@ -480,21 +463,14 @@ final class WorkspaceViewModel: ObservableObject {
         refresh(reason: "debugSetCommittedSelectionShapeForTests")
     }
 
-    func debugPerformRecoveryAutosaveNowForTests() {
-        recoveryAutosaveTask?.cancel()
-        recoveryAutosaveTask = nil
-        recoveryAutosaveGeneration &+= 1
-        performRecoveryAutosave(generation: recoveryAutosaveGeneration)
+    func debugPerformRecoveryAutosaveNowForTests() { recoveryCoordinator.schedule.fireNowForTesting() }
+    func debugExpireRecoveryAutosaveDeadlineForTests() { recoveryCoordinator.schedule.expireDeadlineForTesting() }
+    var debugRecoveryAutosaveBeforeInstall: (() -> Void)? {
+        get { recoveryCoordinator.beforeInstall }
+        set { recoveryCoordinator.beforeInstall = newValue }
     }
-
-    func debugExpireRecoveryAutosaveDeadlineForTests() {
-        recoveryAutosaveForcedDeadline = ContinuousClock().now.advanced(by: .seconds(-1))
-    }
-
-    var debugRecoveryAutosaveBeforeInstall: (() -> Void)?
-
-    var debugRecoveryAutosaveWriteInFlight: Bool { recoveryAutosaveWriteTask != nil }
-    var debugRecoveryAutosaveIsScheduled: Bool { recoveryAutosaveTask != nil }
+    var debugRecoveryAutosaveWriteInFlight: Bool { recoveryCoordinator.isWriting }
+    var debugRecoveryAutosaveIsScheduled: Bool { recoveryCoordinator.schedule.isScheduled }
 #endif
 
     private static let textureFillMinimumSliceDistance: Double = 2.5
@@ -578,11 +554,11 @@ final class WorkspaceViewModel: ObservableObject {
             guard let self else { return true }
             return self.isProjectSaving
                 || self.isProjectOpening
-                || self.recoveryAutosaveWriteTask != nil
+                || self.recoveryCoordinator.isWriting
                 || self.snapshotSaveTask != nil
                 || self.isRasterExporting
-                || self.pendingManualSaveAfterTimelapse
-                || self.recoveryAutosaveWaitingForTimelapse
+                || self.recoveryCoordinator.manualSaveAfterTimelapse
+                || self.recoveryCoordinator.waitingForTimelapse
                 || self.bootstrap.strokeEngine.hasPendingBrushWork
         }
         bootstrap.timelapseRecorder.onBecameIdle = { [weak self] in
@@ -616,7 +592,6 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     deinit {
-        projectOpenTask?.cancel()
         memoryPressureSource?.cancel()
     }
 
@@ -885,7 +860,7 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func presentNewCanvasSheet() {
-        guard !isDocumentTransitionPending,
+        guard !documentLifecycle.isTransitionPending,
               canBeginDocumentPersistence(action: "新建画布") else { return }
         isNewCanvasSheetPresented = true
     }
@@ -13756,21 +13731,21 @@ final class WorkspaceViewModel: ObservableObject {
     // A true return means the request was accepted, not that data is on disk.
     // Only completion(true) permits a destructive document transition.
     func saveProject(completion: ((Bool) -> Void)? = nil) -> Bool {
-        guard !isProjectSaving, !isChoosingProjectSaveLocation else {
+        guard !isProjectSaving, !documentLifecycle.isChoosingSaveLocation else {
             showStatus(.init(kind: .info, message: "正在选择保存位置或保存工程，请稍候"))
             completion?(false)
             return false
         }
         guard canBeginDocumentPersistence(action: "保存工程") else { completion?(false); return false }
         guard !timelapseRecorder.isBusy else {
-            pendingManualSaveAfterTimelapse = completion == nil
+            recoveryCoordinator.manualSaveAfterTimelapse = completion == nil
             showStatus(.init(kind: .info, message: completion == nil
                 ? "录像帧写入完成后将立即保存工程" : "正在完成录像写入，请稍后再试"))
             completion?(false)
             return completion == nil
         }
-        guard recoveryAutosaveWriteTask == nil else {
-            pendingManualSaveAfterRecoveryAutosave = completion == nil
+        guard !recoveryCoordinator.isWriting else {
+            recoveryCoordinator.manualSaveAfterWrite = completion == nil
             showStatus(.init(kind: .info, message: completion == nil
                 ? "自动恢复写入完成后将立即保存工程" : "正在完成自动恢复写入，请稍后再试"))
             completion?(false)
@@ -13779,11 +13754,11 @@ final class WorkspaceViewModel: ObservableObject {
         if let url = currentProjectURL {
             startProjectSave(to: url, completion: completion)
         } else {
-            isChoosingProjectSaveLocation = true
+            documentLifecycle.isChoosingSaveLocation = true
             let generation = documentRenderGeneration
             bootstrap.filePanelService.presentProjectSavePanel(defaultName: workspace.document.metadata.name) { [weak self] url in
                 guard let self else { completion?(false); return }
-                self.isChoosingProjectSaveLocation = false
+                self.documentLifecycle.isChoosingSaveLocation = false
                 guard self.documentRenderGeneration == generation else { completion?(false); return }
                 guard let url else {
                     self.showStatus(.init(kind: .info, message: "已取消工程保存，当前内容仍未保存"))
@@ -13973,13 +13948,13 @@ final class WorkspaceViewModel: ObservableObject {
         do {
             let outcome = try result.get()
             let previewPNGData = outcome.previewPNGData
-            currentProjectURL = prepared.url
+            let savedCurrentRevision = documentLifecycle.acceptSave(
+                of: .init(generation: prepared.documentGeneration, editRevision: prepared.editRevision), to: prepared.url)
             bootstrap.workspaceStore.updateDocument { $0.metadata.name = prepared.savedDocumentName }
             let thumbnailApplied = previewPNGData.map {
                 bootstrap.filePanelService.applyProjectThumbnail($0, to: prepared.url)
             } ?? false
-            if documentEditRevision == prepared.editRevision {
-                hasUnsavedChanges = false
+            if savedCurrentRevision {
                 try? bootstrap.persistenceController.discardRecoveryProject()
                 hasRecoveryProject = false
             }
@@ -14009,11 +13984,11 @@ final class WorkspaceViewModel: ObservableObject {
         guard canBeginDocumentPersistence(action: "打开工程") else {
             return
         }
-        guard !isChoosingProjectToOpen else { return }
-        isChoosingProjectToOpen = true
+        guard !documentLifecycle.isChoosingOpenLocation else { return }
+        documentLifecycle.isChoosingOpenLocation = true
         bootstrap.filePanelService.presentProjectOpenPanel { [weak self] url in
             guard let self else { return }
-            self.isChoosingProjectToOpen = false
+            self.documentLifecycle.isChoosingOpenLocation = false
             guard let url else {
                 self.showStatus(.init(kind: .info, message: "已取消打开工程"))
                 return
@@ -14040,11 +14015,7 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func discardAutosavedProject() {
-        recoveryAutosaveInvalidationGeneration &+= 1
-        recoveryAutosaveGeneration &+= 1
-        recoveryAutosaveTask?.cancel()
-        recoveryAutosaveTask = nil
-        recoveryAutosaveScheduledDeadline = nil
+        recoveryCoordinator.invalidate(resetDeadline: false)
         do {
             try bootstrap.persistenceController.discardRecoveryProject()
             hasRecoveryProject = false
@@ -14057,7 +14028,7 @@ final class WorkspaceViewModel: ObservableObject {
     private func beginProjectOpen(from url: URL?, isRecovery: Bool) {
         let action = isRecovery ? "恢复工程" : "打开工程"
         guard canBeginDocumentPersistence(action: action) else { return }
-        guard !isProjectSaving, recoveryAutosaveWriteTask == nil else {
+        guard !isProjectSaving, !recoveryCoordinator.isWriting else {
             showStatus(.init(kind: .info, message: "正在完成工程写入，请稍候再打开其他工程"))
             return
         }
@@ -14073,73 +14044,20 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     private func loadProjectInBackground(from url: URL?, isRecovery: Bool) {
-        let policy = bootstrap.documentResourceBudgetPolicy
-        let currentResidentBytes = currentDocumentInteractiveResidentByteCount()
-        let persistenceBox = WorkspaceUncheckedBox(bootstrap.persistenceController)
-        isProjectOpening = true
-        let editRevision = documentEditRevision
-        let documentGeneration = documentRenderGeneration
         showStatus(.init(kind: .info, message: isRecovery ? "正在验证并恢复工程…" : "正在验证并打开工程…"))
-
-        projectOpenTask?.cancel()
-        projectOpenTask = Task { [weak self] in
-            let result = await Task.detached(priority: .userInitiated) {
-                Result<(URL, OpenProjectResult), Error> {
-                    let preflight: (ProjectOpenInspection) throws -> Void = { inspection in
-                        let assessment = policy.assess(
-                            canvasSize: inspection.workspace.document.canvasSize,
-                            paintLayerCount: inspection.workspace.document.paintLayers.count,
-                            maskCount: inspection.workspace.document.paintLayers.filter { $0.mask != nil }.count,
-                            savedSnapshotCount: inspection.savedSnapshotCount,
-                            referenceImageBytes: inspection.referenceArchiveBytes,
-                            referenceImageResidentBytes: inspection.estimatedReferenceResidentBytes,
-                            pixelFormat: inspection.workspace.document.colorStandard.pixelFormat
-                        )
-                        guard assessment.isSupported else {
-                            throw PersistenceError.invalidProject(
-                                assessment.rejectionReason ?? "工程超出当前设备的安全资源范围"
-                            )
-                        }
-                        let (transitionPeak, overflow) = assessment.footprint.estimatedSavePeakBytes
-                            .addingReportingOverflow(currentResidentBytes)
-                        guard !overflow, transitionPeak <= policy.maximumSavePeakBytes else {
-                            throw PersistenceError.invalidProject(
-                                "打开工程时，新旧文档同时驻留会超过安全内存峰值"
-                            )
-                        }
-                    }
-
-                    if isRecovery {
-                        let opened = try persistenceBox.value.openBestAvailableRecoveryProject(
-                            preflight: preflight
-                        )
-                        return (opened.url, opened.result)
-                    }
-                    guard let url else { throw CocoaError(.fileNoSuchFile) }
-                    return (
-                        url,
-                        try persistenceBox.value.openProject(from: url, preflight: preflight)
-                    )
-                }
-            }.value
-
-            guard let self, !Task.isCancelled else { return }
-            self.projectOpenTask = nil
-            self.isProjectOpening = false
-            guard self.documentEditRevision == editRevision,
-                  self.documentRenderGeneration == documentGeneration else {
+        projectOpenCoordinator.start(from: url, isRecovery: isRecovery,
+            persistence: bootstrap.persistenceController, policy: bootstrap.documentResourceBudgetPolicy,
+            currentResidentBytes: currentDocumentInteractiveResidentByteCount(), lifecycle: documentLifecycle
+        ) { [weak self] result in
+            guard let self else { return }
+            switch result {
+            case .documentChanged:
                 self.showStatus(.init(kind: .info, message: "打开期间当前画布发生变化，已保留当前工程；请重新打开"))
-                return
-            }
-            do {
-                let opened = try result.get()
-                try self.applyOpenedProjectResult(
-                    opened.1,
-                    sourceURL: opened.0,
-                    isRecovery: isRecovery
-                )
-            } catch {
+            case .failed(let error):
                 self.showStatus(.init(kind: .error, message: error.localizedDescription))
+            case .loaded(let sourceURL, let opened):
+                do { try self.applyOpenedProjectResult(opened, sourceURL: sourceURL, isRecovery: isRecovery) }
+                catch { self.showStatus(.init(kind: .error, message: error.localizedDescription)) }
             }
         }
     }
@@ -14336,38 +14254,7 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     private func scheduleRecoveryAutosave(delay: Duration = .seconds(30)) {
-        let clock = ContinuousClock()
-        let now = clock.now
-        if recoveryAutosaveForcedDeadline == nil {
-            recoveryAutosaveForcedDeadline = now.advanced(
-                by: Self.recoveryAutosaveMaximumDeferral
-            )
-        }
-        let deadline = resolvedRecoveryAutosaveDeadline(
-            now: now,
-            delay: delay,
-            forcedDeadline: recoveryAutosaveForcedDeadline,
-            scheduledDeadline: recoveryAutosaveScheduledDeadline
-        )
-        recoveryAutosaveScheduledDeadline = deadline
-        recoveryAutosaveGeneration &+= 1
-        let generation = recoveryAutosaveGeneration
-        recoveryAutosaveTask?.cancel()
-        recoveryAutosaveTask = Task { [weak self] in
-            do {
-                try await clock.sleep(until: deadline)
-            } catch {
-                return
-            }
-            guard
-                let self,
-                self.hasUnsavedChanges,
-                self.recoveryAutosaveGeneration == generation
-            else { return }
-            self.recoveryAutosaveTask = nil
-            self.recoveryAutosaveScheduledDeadline = nil
-            self.performRecoveryAutosave(generation: generation)
-        }
+        recoveryCoordinator.schedule.schedule(delay: delay)
     }
 
     func applicationDidResignActiveForPersistence() {
@@ -14385,19 +14272,19 @@ final class WorkspaceViewModel: ObservableObject {
             return
         }
         guard !timelapseRecorder.isBusy else {
-            recoveryAutosaveWaitingForTimelapse = true
+            recoveryCoordinator.waitingForTimelapse = true
             return
         }
-        recoveryAutosaveWaitingForTimelapse = false
-        guard !isProjectSaving, !isChoosingProjectSaveLocation else {
+        recoveryCoordinator.waitingForTimelapse = false
+        guard !isProjectSaving, !documentLifecycle.isChoosingSaveLocation else {
             scheduleRecoveryAutosave(delay: .seconds(15))
             return
         }
-        guard recoveryAutosaveWriteTask == nil else {
+        guard !recoveryCoordinator.isWriting else {
             scheduleRecoveryAutosave(delay: .seconds(15))
             return
         }
-        guard !isProjectOpening, !isDocumentTransitionPending,
+        guard !isProjectOpening, !documentLifecycle.isTransitionPending,
               !bootstrap.filePanelService.isPresentingDialog,
               !DocumentPersistencePolicy.blocksAutomaticCapture(persistenceEditingActivity) else {
             scheduleRecoveryAutosave(delay: .seconds(15))
@@ -14406,7 +14293,7 @@ final class WorkspaceViewModel: ObservableObject {
 
         if bootstrap.strokeEngine.hasPendingBrushCommitJobs {
             let now = ContinuousClock().now
-            if let forcedDeadline = recoveryAutosaveForcedDeadline,
+            if let forcedDeadline = recoveryCoordinator.schedule.forcedDeadline,
                now < forcedDeadline {
                 scheduleRecoveryAutosave(delay: .seconds(15))
                 return
@@ -14416,9 +14303,9 @@ final class WorkspaceViewModel: ObservableObject {
             // post-stroke adjustment. Once maximum autosave deferral expires,
             // commit them at this idle boundary so recovery can represent the
             // visible canvas instead of retrying forever.
-            isSuppressingRecoveryAutosaveScheduling = true
+            recoveryCoordinator.suppressScheduling = true
             _ = flushBrushEditingBoundary(reason: "recoveryAutosave.maximumDeferral")
-            isSuppressingRecoveryAutosaveScheduling = false
+            recoveryCoordinator.suppressScheduling = false
             guard !bootstrap.strokeEngine.hasPendingBrushCommitJobs else {
                 scheduleRecoveryAutosave(delay: .seconds(15))
                 return
@@ -14431,58 +14318,7 @@ final class WorkspaceViewModel: ObservableObject {
                 referenceImages: try projectReferenceImagePayloads(),
                 savedSnapshots: persistentSavedSnapshotPayloads()
             )
-            let stagingURL = try bootstrap.persistenceController.makeRecoveryStagingURL()
-            let persistenceBox = WorkspaceUncheckedBox(bootstrap.persistenceController)
-            let invalidationGeneration = recoveryAutosaveInvalidationGeneration
-
-            recoveryAutosaveWriteTask = Task { [weak self] in
-                let result = await Task.detached(priority: .utility) {
-                    Result {
-                        try persistenceBox.value.writeIncrementalRecovery(capture, to: stagingURL)
-                    }
-                }.value
-
-                guard let self else {
-                    persistenceBox.value.discardRecoveryStagingProject(at: stagingURL)
-                    return
-                }
-                self.recoveryAutosaveWriteTask = nil
-#if DEBUG
-                self.debugRecoveryAutosaveBeforeInstall?()
-#endif
-                defer {
-                    if self.pendingManualSaveAfterRecoveryAutosave {
-                        self.pendingManualSaveAfterRecoveryAutosave = false
-                        _ = self.saveProject()
-                    }
-                }
-
-                guard
-                    self.hasUnsavedChanges,
-                    self.recoveryAutosaveInvalidationGeneration == invalidationGeneration
-                else {
-                    persistenceBox.value.discardRecoveryStagingProject(at: stagingURL)
-                    return
-                }
-
-                do {
-                    try result.get()
-                    try persistenceBox.value.installRecoveryProject(from: stagingURL)
-                    self.hasRecoveryProject = true
-                    self.recoveryAutosaveForcedDeadline = ContinuousClock().now.advanced(
-                        by: Self.recoveryAutosaveMaximumDeferral
-                    )
-                    if self.recoveryAutosaveGeneration != generation {
-                        // Preserve this complete recovery point, then catch up to newer edits.
-                        self.scheduleRecoveryAutosave()
-                    }
-                } catch {
-                    persistenceBox.value.discardRecoveryStagingProject(at: stagingURL)
-                    self.showStatus(.init(kind: .error, message: "自动恢复保存失败，已有副本保留；请手动保存工程：\(error.localizedDescription)"))
-                    persistenceBox.value.invalidateIncrementalRecoveryBase()
-                    self.scheduleRecoveryAutosave(delay: .seconds(30))
-                }
-            }
+            try recoveryCoordinator.write(capture, scheduleGeneration: generation)
         } catch {
             showStatus(.init(kind: .error, message: "无法准备自动恢复副本；请手动保存工程：\(error.localizedDescription)"))
             scheduleRecoveryAutosave(delay: .seconds(30))
@@ -14490,13 +14326,13 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     private func resumePersistenceAfterTimelapseBecameIdle() {
-        if pendingManualSaveAfterTimelapse {
-            pendingManualSaveAfterTimelapse = false
+        if recoveryCoordinator.manualSaveAfterTimelapse {
+            recoveryCoordinator.manualSaveAfterTimelapse = false
             _ = saveProject()
             return
         }
-        if recoveryAutosaveWaitingForTimelapse {
-            recoveryAutosaveWaitingForTimelapse = false
+        if recoveryCoordinator.waitingForTimelapse {
+            recoveryCoordinator.waitingForTimelapse = false
             scheduleRecoveryAutosave(delay: .zero)
         }
     }
@@ -14526,7 +14362,7 @@ final class WorkspaceViewModel: ObservableObject {
             showStatus(.init(kind: .info, message: "请先取消历史预览或应用此状态，再\(action)"))
             return false
         }
-        guard !isProjectSaving, !isChoosingProjectSaveLocation else {
+        guard !isProjectSaving, !documentLifecycle.isChoosingSaveLocation else {
             showStatus(.init(kind: .info, message: "工程正在保存，请稍候再\(action)"))
             return false
         }
@@ -14617,7 +14453,7 @@ final class WorkspaceViewModel: ObservableObject {
         pixelFormat: ArtPixelFormat,
         decisionOverride: NewCanvasCreationDecision?
     ) {
-        guard !isDocumentTransitionPending,
+        guard !documentLifecycle.isTransitionPending,
               canBeginDocumentPersistence(action: "新建画布") else { return }
         let capacity = canvasCapacityPolicy.assess(canvasSize, pixelFormat: pixelFormat)
         guard capacity.isSupported else {
@@ -14715,19 +14551,14 @@ final class WorkspaceViewModel: ObservableObject {
     /// textures. A normal redraw revision is insufficient because an existing Metal
     /// view can retain surface identifiers from the former document.
     private func publishDocumentReplacementRenderState() {
-        recoveryAutosaveInvalidationGeneration &+= 1
-        recoveryAutosaveGeneration &+= 1
-        recoveryAutosaveTask?.cancel()
-        recoveryAutosaveTask = nil
-        recoveryAutosaveScheduledDeadline = nil
-        recoveryAutosaveForcedDeadline = nil
+        recoveryCoordinator.invalidate()
         bootstrap.strokeEngine.resetBrushPipelineState()
         clearRecentBrushAdjustmentState()
         invalidateWholeLayerInteractionBoundsCache()
         documentChangeRevision &+= 1
         canvasContentRevision = documentChangeRevision
         strokeResetToken &+= 1
-        documentRenderGeneration &+= 1
+        documentLifecycle.didReplaceDocument()
     }
 
     private func seedDefaultBackgroundLayerIfNeeded(for document: ArtDocument) {
@@ -15207,9 +15038,9 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     private func continueAfterUnsavedChanges(detail: String, completion: @escaping (Bool) -> Void) {
-        guard !isDocumentTransitionPending,
-              !isProjectSaving, !isChoosingProjectSaveLocation,
-              recoveryAutosaveWriteTask == nil,
+        guard !documentLifecycle.isTransitionPending,
+              !isProjectSaving, !documentLifecycle.isChoosingSaveLocation,
+              !recoveryCoordinator.isWriting,
               !bootstrap.filePanelService.isPresentingDialog else {
             showStatus(.init(kind: .info, message: "请等待当前文件操作完成；当前工程已保留"))
             completion(false)
@@ -15222,26 +15053,24 @@ final class WorkspaceViewModel: ObservableObject {
             completion(true)
             return
         }
-        isDocumentTransitionPending = true
-        let generation = documentRenderGeneration
-        let finish: (Bool) -> Void = { [weak self] allowed in
-            guard let self else { completion(false); return }
-            self.isDocumentTransitionPending = false
-            completion(allowed && self.documentRenderGeneration == generation)
-        }
-        bootstrap.filePanelService.presentUnsavedChangesConfirmation(
-            message: "当前画布有未保存内容", detail: detail
-        ) { [weak self] response in
-            guard let self, self.documentRenderGeneration == generation else { finish(false); return }
-            switch response {
-            case .alertFirstButtonReturn:
+        documentLifecycle.confirmTransition(
+            hasPendingEdits: hasPendingAdjustment || straightLineState.phase == .pending,
+            isBusy: false,
+            presentDecision: { reply in
+                bootstrap.filePanelService.presentUnsavedChangesConfirmation(
+                    message: "当前画布有未保存内容", detail: detail
+                ) { response in
+                    switch response {
+                    case .alertFirstButtonReturn: reply(.save)
+                    case .alertSecondButtonReturn: reply(.discard)
+                    default: reply(.cancel)
+                    }
+                }
+            },
+            save: { [weak self] finish in
+                guard let self else { finish(false); return }
                 self.saveProject(completion: finish)
-            case .alertSecondButtonReturn:
-                finish(true)
-            default:
-                finish(false)
-            }
-        }
+            }, completion: completion)
     }
 
     nonisolated static func projectDisplayName(for url: URL) -> String {
