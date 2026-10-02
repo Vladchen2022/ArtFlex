@@ -351,6 +351,8 @@ final class LayerTextureSerializer {
     /// read on a utility task while painting continues on the original layer textures.
     func cloneBatchForDeferredSnapshot(textures: [MTLTexture]) throws -> [MTLTexture] {
         guard !textures.isEmpty else { return [] }
+        let auditEnabled = auditStore.isRecordingEnabled
+        let start = auditEnabled ? DispatchTime.now().uptimeNanoseconds : 0
         var clones: [MTLTexture] = []
         clones.reserveCapacity(textures.count)
         for source in textures {
@@ -387,7 +389,12 @@ final class LayerTextureSerializer {
         }
         encoder.endEncoding()
         commandBuffer.commit()
+        let waitStart = auditEnabled ? DispatchTime.now().uptimeNanoseconds : 0
         commandBuffer.waitUntilCompleted()
+        if auditEnabled {
+            auditStore.recordDuration("SaveCapture.prepare", ms: Double(waitStart - start) / 1_000_000)
+            auditStore.recordDuration("SaveCapture.wait", ms: Double(DispatchTime.now().uptimeNanoseconds - waitStart) / 1_000_000)
+        }
         guard commandBuffer.status == .completed else {
             throw commandBuffer.error ?? CocoaError(.fileWriteUnknown)
         }
