@@ -1,0 +1,250 @@
+import AppKit
+import Foundation
+import Metal
+import Testing
+@testable import ArtFlex
+
+@Suite(.serialized)
+@MainActor
+struct WorkspaceTransactionRegressionTests {
+    @Test func generatorCompletedAfterMetadataUndoCannotPublishIntoTheRestoredState() async throws {
+        let h = try TransactionHarness()
+        defer { h.cleanUp() }
+        h.viewModel.setActiveLayerOpacity(0.7)
+        h.viewModel.hasUnsavedChanges = false
+        let pixels = try h.snapshot()
+        let texture = try h.texture()
+        let cursor = h.contentCursor
+
+        // Both actions run in one MainActor turn. Publication cannot interleave,
+        // even if the small background rasterization finishes immediately.
+        h.viewModel.applyGeneratorToActiveLayer()
+        #expect(h.viewModel.status?.message.hasPrefix("正在生成") == true)
+        h.viewModel.undo()
+        let timeline = h.viewModel.visibleHistoryTimeline
+        let stateID = h.bootstrap.historyController.currentStateID
+        #expect(h.opacity == 1)
+        #expect(h.viewModel.canRedo)
+        #expect(h.viewModel.hasUnsavedChanges)
+
+        try await h.waitUntil {
+            h.viewModel.status?.message.contains("过期生成结果") == true
+        }
+        #expect(try h.snapshot() == pixels)
+        #expect(try h.texture() === texture)
+        #expect(h.contentCursor == cursor)
+        #expect(h.viewModel.visibleHistoryTimeline == timeline)
+        #expect(h.bootstrap.historyController.currentStateID == stateID)
+        #expect(h.viewModel.hasUnsavedChanges)
+        h.viewModel.redo()
+        #expect(h.opacity == 0.7)
+        #expect(!h.viewModel.hasUnsavedChanges)
+    }
+
+#if DEBUG
+    @Test func failedGeneratorRestorePreservesPixelsHistoryAndRedoThenAllowsRetry() async throws {
+        let h = try TransactionHarness()
+        defer { h.cleanUp() }
+        h.viewModel.setActiveLayerOpacity(0.7)
+        h.viewModel.undo()
+        h.viewModel.hasUnsavedChanges = false
+        let pixels = try h.snapshot()
+        let texture = try h.texture()
+        let cursor = h.contentCursor
+        let timeline = h.viewModel.visibleHistoryTimeline
+        let stateID = h.bootstrap.historyController.currentStateID
+        #expect(h.viewModel.canRedo)
+
+        h.bootstrap.textureSerializer.debugRejectsRestoreCompletion = true
+        defer { h.bootstrap.textureSerializer.debugRejectsRestoreCompletion = false }
+        h.viewModel.applyGeneratorToActiveLayer()
+        try await h.waitUntil { h.viewModel.status?.kind == .error }
+
+        #expect(try h.snapshot() == pixels)
+        #expect(try h.texture() === texture)
+        #expect(h.contentCursor == cursor)
+        #expect(h.viewModel.visibleHistoryTimeline == timeline)
+        #expect(h.bootstrap.historyController.currentStateID == stateID)
+        #expect(h.viewModel.canRedo)
+        #expect(!h.viewModel.hasUnsavedChanges)
+
+        h.bootstrap.textureSerializer.debugRejectsRestoreCompletion = false
+        h.viewModel.redo()
+        #expect(h.opacity == 0.7)
+        h.viewModel.undo()
+        h.viewModel.applyGeneratorToActiveLayer()
+        try await h.waitUntil {
+            h.viewModel.status?.kind == .success &&
+                h.viewModel.status?.message.contains("生成器") == true
+        }
+        #expect(try h.snapshot() != pixels)
+        #expect(h.viewModel.visibleHistoryTimeline.currentAppliedEntryCount == timeline.currentAppliedEntryCount + 1)
+        #expect(!h.viewModel.canRedo)
+        #expect(h.viewModel.hasUnsavedChanges)
+    }
+
+    @Test func failedTransformHistoryCaptureKeepsDraftAndOriginalPixelsForRetry() async throws {
+        let h = try TransactionHarness()
+        defer { h.cleanUp() }
+        try h.paintFixturePatch()
+        h.makeRectangleSelection()
+        // A geometry-only selection is still awaiting its exact raster mask.
+        // Finish that independent job before injecting a history failure.
+        try await h.waitUntil { h.viewModel.workspace.selection.committedShape?.maskData != nil }
+        h.viewModel.selectTool(.freeTransform)
+        h.viewModel.beginSelectionTransform(at: .init(x: 20, y: 20), mode: .move)
+        h.viewModel.updateSelectionTransform(to: .init(x: 32, y: 20))
+        h.viewModel.commitSelectionTransform(at: .init(x: 32, y: 20))
+        #expect(h.viewModel.isTransformingSelection)
+        #expect(!h.viewModel.freeTransformPreview.isIdentity)
+        let draft = h.viewModel.freeTransformPreview
+        let selection = h.viewModel.workspace.selection.committedShape
+        let pixels = try h.snapshot()
+        let texture = try h.texture()
+        let cursor = h.contentCursor
+        let timeline = h.viewModel.visibleHistoryTimeline
+        let stateID = h.bootstrap.historyController.currentStateID
+        let wasDirty = h.viewModel.hasUnsavedChanges
+
+        h.bootstrap.historyController.debugPreventsCheckpointCapture = true
+        defer { h.bootstrap.historyController.debugPreventsCheckpointCapture = false }
+        h.viewModel.applySelectionTransform()
+        #expect(h.viewModel.isApplyingTransformCommit)
+        try await h.waitUntil { !h.viewModel.isApplyingTransformCommit }
+
+        #expect(h.viewModel.status?.kind == .error)
+        #expect(h.viewModel.isTransformingSelection)
+        #expect(h.viewModel.freeTransformPreview == draft)
+        #expect(h.viewModel.workspace.selection.committedShape == selection)
+        #expect(try h.snapshot() == pixels)
+        #expect(try h.texture() === texture)
+        #expect(h.contentCursor == cursor)
+        #expect(h.viewModel.visibleHistoryTimeline == timeline)
+        #expect(h.bootstrap.historyController.currentStateID == stateID)
+        #expect(h.viewModel.hasUnsavedChanges == wasDirty)
+
+        h.bootstrap.historyController.debugPreventsCheckpointCapture = false
+        h.viewModel.applySelectionTransform()
+        try await h.waitUntil { !h.viewModel.isApplyingTransformCommit }
+        #expect(!h.viewModel.isTransformingSelection)
+        #expect(h.viewModel.freeTransformPreview.isIdentity)
+        #expect(try h.snapshot() != pixels)
+        #expect(h.viewModel.visibleHistoryTimeline.currentAppliedEntryCount == timeline.currentAppliedEntryCount + 1)
+        h.viewModel.undo()
+        #expect(try h.snapshot() == pixels)
+    }
+#endif
+
+    @Test(arguments: [false, true])
+    func editingDuringOrAfterLongHistoryPreviewCannotBeDiscardedByCancel(waitForPreview: Bool) async throws {
+        let h = try TransactionHarness()
+        defer { h.cleanUp() }
+        for opacity in [Float(0.8), 0.6, 0.4] { h.viewModel.setActiveLayerOpacity(opacity) }
+        h.viewModel.hasUnsavedChanges = false
+        let pixels = try h.snapshot()
+        h.viewModel.prepareVisibleHistoryPresentation()
+        h.viewModel.previewVisibleHistory(toAppliedEntryCount: 0)
+        #expect(h.viewModel.isHistoryNavigating)
+        if waitForPreview {
+            try await h.waitUntil { !h.viewModel.isHistoryNavigating }
+            #expect(h.viewModel.visibleHistoryTimeline.currentAppliedEntryCount == 0)
+        }
+
+        // Editing either an in-flight preparation or an accepted preview must
+        // abandon its origin. Cancelling later cannot restore an obsolete point.
+        h.viewModel.setActiveLayerOpacity(0.2)
+        let editedTimeline = h.viewModel.visibleHistoryTimeline
+        let editedState = h.bootstrap.historyController.currentStateID
+        #expect(!h.viewModel.isHistoryNavigating)
+        #expect(h.viewModel.visibleHistoryPreviewTargetCount == nil)
+        #expect(h.viewModel.hasUnsavedChanges)
+        h.viewModel.cancelVisibleHistoryPreview()
+        #expect(h.opacity == 0.2)
+        #expect(h.viewModel.hasUnsavedChanges)
+
+        // Complete a fresh navigation to the beginning and back. For the
+        // in-flight case this is another long asynchronous jump, exercising
+        // cancellation-generation isolation from the old task.
+        h.viewModel.navigateVisibleHistory(toAppliedEntryCount: 0)
+        try await h.waitUntil { !h.viewModel.isHistoryNavigating }
+        h.viewModel.navigateVisibleHistory(toAppliedEntryCount: editedTimeline.currentAppliedEntryCount)
+        try await h.waitUntil { !h.viewModel.isHistoryNavigating }
+        h.viewModel.cancelVisibleHistoryPreview()
+        #expect(h.opacity == 0.2)
+        #expect(h.bootstrap.historyController.currentStateID == editedState)
+        #expect(h.viewModel.visibleHistoryTimeline == editedTimeline)
+        #expect(h.viewModel.hasUnsavedChanges)
+        #expect(try h.snapshot() == pixels)
+    }
+}
+
+@MainActor
+private struct TransactionHarness {
+    let bootstrap: AppBootstrap
+    let viewModel: WorkspaceViewModel
+    let root: URL
+
+    init() throws {
+        _ = NSApplication.shared
+        let metal = try #require(MetalDeviceContext())
+        let store = WorkspaceStore()
+        store.updateDocument { $0.canvasSize = .init(width: 64, height: 64) }
+        root = FileManager.default.temporaryDirectory.appendingPathComponent("ArtFlex-Transaction-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        bootstrap = try AppBootstrap(workspaceStore: store, metalContext: metal,
+            layerSurfaceStore: StageOneLayerSurfaceStore(),
+            persistenceRecoveryRootURL: root.appendingPathComponent("Recovery"))
+        viewModel = WorkspaceViewModel(bootstrap: bootstrap, installsZoomKeyboardMonitor: false)
+    }
+
+    var layerID: LayerID { viewModel.workspace.document.activeLayerID }
+    var opacity: Float? { viewModel.workspace.document.layer(layerID)?.opacity }
+    var contentCursor: LayerChangeCursor {
+        bootstrap.layerSurfaceStore.changeJournal(for: .init(layerID: layerID, kind: .content)).cursor
+    }
+
+    func texture() throws -> MTLTexture {
+        let surfaceID = try #require(bootstrap.layerSurfaceStore.surfaceID(for: layerID))
+        return try #require(bootstrap.layerSurfaceStore.readTexture(for: surfaceID))
+    }
+
+    func snapshot() throws -> LayerTextureSnapshot {
+        try bootstrap.textureSerializer.snapshot(texture: texture())
+    }
+
+    func paintFixturePatch() throws {
+        let surfaceID = try #require(bootstrap.layerSurfaceStore.surfaceID(for: layerID))
+        let region = PixelRegion(originX: 12, originY: 12, width: 12, height: 12)
+        let texture = try #require(bootstrap.layerSurfaceStore.writableTexture(for: surfaceID, region: region))
+        var bytes = Data(count: 12 * 12 * 4)
+        bytes.withUnsafeMutableBytes { output in
+            for offset in stride(from: 0, to: output.count, by: 4) {
+                CanvasPixelCodec.write(.init(red: 0.25, green: 0.5, blue: 0.75, alpha: 1),
+                    into: output, offset: offset, encoding: .premultipliedBGRA8SRGB)
+            }
+        }
+        try bootstrap.textureSerializer.restore(
+            snapshot: .init(width: 12, height: 12, bytesPerRow: 48, pixelData: bytes),
+            into: texture, destinationX: 12, destinationY: 12)
+        bootstrap.layerSurfaceStore.markContentUnknown(for: layerID)
+    }
+
+    func makeRectangleSelection() {
+        let start = CanvasPoint(x: 8, y: 8)
+        let end = CanvasPoint(x: 32, y: 32)
+        viewModel.selectTool(.rectangleSelection)
+        viewModel.beginSelection(kind: .rectangle, at: start, modifiers: [])
+        viewModel.updateSelection(to: end, modifiers: [])
+        viewModel.commitSelection(at: end, modifiers: [])
+    }
+
+    func waitUntil(_ predicate: () -> Bool) async throws {
+        for _ in 0..<1_000 {
+            if predicate() { return }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        try #require(predicate(), "Transaction completion timed out: \(viewModel.status?.message ?? "no status")")
+    }
+
+    func cleanUp() { try? FileManager.default.removeItem(at: root) }
+}

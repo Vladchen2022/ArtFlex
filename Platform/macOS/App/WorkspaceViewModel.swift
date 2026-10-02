@@ -15975,7 +15975,7 @@ final class WorkspaceViewModel: ObservableObject {
         }
         hasUnsavedChanges = true
         documentChangeRevision &+= 1
-        canvasContentRevision = documentChangeRevision
+        canvasContentRevision &+= 1
         luminosityReferenceSourceRevision &+= 1
         scheduleLuminosityCaptureIfNeeded()
         scheduleNavigatorPreviewRefresh()
