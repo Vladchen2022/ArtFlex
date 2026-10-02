@@ -6,7 +6,7 @@ import Testing
 struct ProjectSaveCoordinatorTests {
     private func request() -> ProjectSaveRequest {
         .init(url: URL(fileURLWithPath: "/unused/test.artflex"),
-              capture: .init(workspace: .stageOneDefault, layerResources: [], referenceImages: [], savedSnapshots: [], previewTexture: nil),
+              capture: .init(workspace: .stageOneDefault, layerDescriptors: [], referenceImages: [], savedSnapshots: [], hasPreviewTexture: false, textureBatch: .init(textures: [])),
               savedDocumentName: "test", editRevision: 3, documentGeneration: 2)
     }
 

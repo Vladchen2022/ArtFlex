@@ -6,7 +6,7 @@ struct DocumentPersistencePolicyTests {
         let cases: [(PersistenceEditingActivity, PersistenceEditingBlocker)] = [
             (.historyPreview, .historyPreview), (.pixelCommit, .pixelCommit), (.transform, .transform),
             (.snapshotOrExport, .snapshotOrExport), (.pattern, .pattern), (.gradient, .gradient),
-            (.crop, .crop), (.gesture, .gesture)
+            (.gesture, .gesture)
         ]
         for (activity, reason) in cases {
             #expect(DocumentPersistencePolicy.manualBlocker(for: activity) == reason)
@@ -22,5 +22,7 @@ struct DocumentPersistencePolicyTests {
         #expect(DocumentPersistencePolicy.manualBlocker(for: []) == nil)
         #expect(!DocumentPersistencePolicy.blocksAutomaticCapture([]))
         #expect(DocumentPersistencePolicy.manualBlocker(for: [.crop, .gradient, .historyPreview]) == .historyPreview)
+        #expect(DocumentPersistencePolicy.manualBlocker(for: .crop) == .crop)
+        #expect(!DocumentPersistencePolicy.blocksAutomaticCapture(.crop))
     }
 }

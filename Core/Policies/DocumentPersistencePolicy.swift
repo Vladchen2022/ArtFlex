@@ -36,6 +36,9 @@ public enum DocumentPersistencePolicy {
     /// Autosave must not confirm an in-progress tool on the user's behalf.
     /// Retained, completed brush jobs have a separate maximum-deferral rule in the caller.
     public static func blocksAutomaticCapture(_ activity: PersistenceEditingActivity) -> Bool {
-        manualBlocker(for: activity) != nil || !activity.intersection([.adjustment, .pendingLine, .brushInput]).isEmpty
+        // Crop bounds live only in the UI overlay. Preserve autosave of the accepted canvas
+        // while the user considers a crop; do not extend the unsaved interval unnecessarily.
+        let captureActivity = activity.subtracting(.crop)
+        return manualBlocker(for: captureActivity) != nil || !captureActivity.intersection([.adjustment, .pendingLine, .brushInput]).isEmpty
     }
 }

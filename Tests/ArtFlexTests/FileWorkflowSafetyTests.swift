@@ -7,7 +7,32 @@ import Testing
 @Suite(.serialized)
 @MainActor
 struct FileWorkflowSafetyTests {
-    @Test func manualAndAutomaticSaveWaitForCropOrTextureGesture() async throws {
+    @Test func rejectedGPUCapturePreservesExistingArchiveAndDirtyState() async throws {
+        let h = try FileWorkflowHarness()
+        defer { h.cleanUp() }
+        h.makeDirty()
+        let output = h.root.appendingPathComponent("original-safe.artflex")
+        h.select(output)
+        #expect(h.viewModel.saveProject())
+        try await h.waitUntil { !h.viewModel.isProjectSaving }
+        let before = try Data(contentsOf: output)
+        h.viewModel.setActiveLayerOpacity(0.3)
+        h.bootstrap.textureSerializer.debugRejectsDeferredCloneCompletion = true
+        var responses: [Bool] = []
+        #expect(h.viewModel.saveProject { responses.append($0) })
+        try await h.waitUntil { !responses.isEmpty }
+        #expect(responses == [false])
+        #expect(h.viewModel.hasUnsavedChanges)
+        #expect(h.viewModel.status?.kind == .error)
+        #expect(try Data(contentsOf: output) == before)
+        h.bootstrap.textureSerializer.debugRejectsDeferredCloneCompletion = false
+        #expect(h.viewModel.saveProject())
+        try await h.waitUntil { !h.viewModel.isProjectSaving }
+        #expect(!h.viewModel.hasUnsavedChanges)
+        #expect(try Data(contentsOf: output) != before)
+    }
+
+    @Test func cropRecoveryKeepsAcceptedCanvasWhileTextureGestureWaits() async throws {
         for crop in [true, false] {
             let h = try FileWorkflowHarness()
             defer { h.cleanUp() }
@@ -22,8 +47,16 @@ struct FileWorkflowSafetyTests {
                 h.viewModel.updateSelection(to: .init(x: 6, y: 1))
             }
             h.viewModel.debugPerformRecoveryAutosaveNowForTests()
-            #expect(!h.viewModel.debugRecoveryAutosaveWriteInFlight)
-            #expect(h.viewModel.debugRecoveryAutosaveIsScheduled)
+            if crop {
+                #expect(h.viewModel.debugRecoveryAutosaveWriteInFlight)
+                try await h.waitUntil { !h.viewModel.debugRecoveryAutosaveWriteInFlight }
+                let recovery = try h.bootstrap.persistenceController.openProject(from: h.bootstrap.persistenceController.recoveryProjectURL)
+                #expect(recovery.workspace.document.canvasSize == .init(width: 8, height: 8))
+                #expect(h.viewModel.canvasCropState.bounds != nil)
+            } else {
+                #expect(!h.viewModel.debugRecoveryAutosaveWriteInFlight)
+                #expect(h.viewModel.debugRecoveryAutosaveIsScheduled)
+            }
             var saved: Bool?
             #expect(!h.viewModel.saveProject { saved = $0 })
             #expect(saved == false)

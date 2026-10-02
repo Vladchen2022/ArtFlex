@@ -54,6 +54,29 @@ struct FrozenProjectCapture: @unchecked Sendable {
     var previewTexture: MTLTexture?
 }
 
+/// Workspace metadata is captured synchronously; GPU copies are already submitted.
+/// Only the save worker converts this into readable frozen resources.
+struct QueuedProjectCapture: Sendable {
+    var workspace: WorkspaceState
+    var layerDescriptors: [(layer: LayerRecord, kind: LayerHistoryResourceKind)]
+    var referenceImages: [ProjectReferenceImagePayload]
+    var savedSnapshots: [PersistentCanvasSnapshotPayload]
+    var hasPreviewTexture: Bool
+    var textureBatch: DeferredTextureCloneBatch
+
+    func waitUntilReady() throws -> FrozenProjectCapture {
+        let textures = try textureBatch.waitUntilReady()
+        guard textures.count == layerDescriptors.count + (hasPreviewTexture ? 1 : 0) else {
+            throw PersistenceError.invalidProject("冻结图层数量不一致")
+        }
+        return FrozenProjectCapture(workspace: workspace,
+            layerResources: zip(layerDescriptors, textures).map { descriptor, texture in
+                .init(layer: descriptor.layer, resourceKind: descriptor.kind, texture: texture)
+            }, referenceImages: referenceImages, savedSnapshots: savedSnapshots,
+            previewTexture: hasPreviewTexture ? textures.last : nil)
+    }
+}
+
 struct ProjectWriteOutcome: Sendable, Equatable {
     var previewPNGData: Data?
     var versionBackupURL: URL?
@@ -164,13 +187,23 @@ final class PersistenceController {
         )
     }
 
-    /// Copies the live document into immutable private Metal textures. This GPU-only boundary is
-    /// short; pixel readback and archive encoding can happen later without racing new brush work.
+    /// Synchronous compatibility path for callers that immediately need readable frozen resources.
     func freezeProjectCapture(
         referenceImages: [ProjectReferenceImagePayload] = [],
         savedSnapshots: [PersistentCanvasSnapshotPayload] = [],
         previewTexture: MTLTexture? = nil
     ) throws -> FrozenProjectCapture {
+        try enqueueProjectCapture(referenceImages: referenceImages, savedSnapshots: savedSnapshots,
+                                  previewTexture: previewTexture).waitUntilReady()
+    }
+
+    /// Called on the editing thread before later canvas writes can be enqueued. Private copies
+    /// stay on the same Metal queue; the returned capture must be completed before archive writes.
+    func enqueueProjectCapture(
+        referenceImages: [ProjectReferenceImagePayload] = [],
+        savedSnapshots: [PersistentCanvasSnapshotPayload] = [],
+        previewTexture: MTLTexture? = nil
+    ) throws -> QueuedProjectCapture {
         let state = workspaceStore.state
         var sources: [(layer: LayerRecord, resourceKind: LayerHistoryResourceKind, texture: MTLTexture)] = []
         sources.reserveCapacity(state.document.paintLayers.count * 2)
@@ -193,20 +226,14 @@ final class PersistenceController {
         if let previewTexture {
             texturesToFreeze.append(previewTexture)
         }
-        let frozenTextures = try serializer.cloneBatchForDeferredSnapshot(textures: texturesToFreeze)
-        let frozenLayerTextures = frozenTextures.prefix(sources.count)
-        return FrozenProjectCapture(
+        let pendingTextures = try serializer.enqueueCloneBatchForDeferredSnapshot(textures: texturesToFreeze)
+        return QueuedProjectCapture(
             workspace: state,
-            layerResources: zip(sources, frozenLayerTextures).map { source, texture in
-                FrozenProjectLayerResource(
-                    layer: source.layer,
-                    resourceKind: source.resourceKind,
-                    texture: texture
-                )
-            },
+            layerDescriptors: sources.map { ($0.layer, $0.resourceKind) },
             referenceImages: referenceImages,
             savedSnapshots: savedSnapshots,
-            previewTexture: previewTexture == nil ? nil : frozenTextures.last
+            hasPreviewTexture: previewTexture != nil,
+            textureBatch: pendingTextures
         )
     }
 

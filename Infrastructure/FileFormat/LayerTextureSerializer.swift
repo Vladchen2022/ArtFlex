@@ -238,6 +238,9 @@ final class LayerTextureSerializer {
     private let metalContext: MetalDeviceContext
     private let stagingPool: LayerSerializerStagingPool
     private let auditStore: PerformanceAuditStore
+#if DEBUG
+    var debugRejectsDeferredCloneCompletion = false
+#endif
 
     init(
         metalContext: MetalDeviceContext,
@@ -350,7 +353,13 @@ final class LayerTextureSerializer {
     /// Freezes live GPU resources with one private-to-private blit. The returned textures can be
     /// read on a utility task while painting continues on the original layer textures.
     func cloneBatchForDeferredSnapshot(textures: [MTLTexture]) throws -> [MTLTexture] {
-        guard !textures.isEmpty else { return [] }
+        try enqueueCloneBatchForDeferredSnapshot(textures: textures).waitUntilReady()
+    }
+
+    /// Submit at the editing boundary, on the same queue used by subsequent canvas writes.
+    /// Waiting and error validation may then happen on the save worker, before any readback.
+    func enqueueCloneBatchForDeferredSnapshot(textures: [MTLTexture]) throws -> DeferredTextureCloneBatch {
+        guard !textures.isEmpty else { return .init(textures: []) }
         let auditEnabled = auditStore.isRecordingEnabled
         let start = auditEnabled ? DispatchTime.now().uptimeNanoseconds : 0
         var clones: [MTLTexture] = []
@@ -388,17 +397,24 @@ final class LayerTextureSerializer {
             )
         }
         encoder.endEncoding()
+        let lifetime = MetalCloneSourceLifetime(textures)
+        commandBuffer.addCompletedHandler { _ in withExtendedLifetime(lifetime) {} }
         commandBuffer.commit()
-        let waitStart = auditEnabled ? DispatchTime.now().uptimeNanoseconds : 0
-        commandBuffer.waitUntilCompleted()
         if auditEnabled {
-            auditStore.recordDuration("SaveCapture.prepare", ms: Double(waitStart - start) / 1_000_000)
-            auditStore.recordDuration("SaveCapture.wait", ms: Double(DispatchTime.now().uptimeNanoseconds - waitStart) / 1_000_000)
+            auditStore.recordDuration("SaveCapture.prepare", ms: Double(DispatchTime.now().uptimeNanoseconds - start) / 1_000_000)
         }
-        guard commandBuffer.status == .completed else {
-            throw commandBuffer.error ?? CocoaError(.fileWriteUnknown)
+#if DEBUG
+        let rejectsCompletion = debugRejectsDeferredCloneCompletion
+#else
+        let rejectsCompletion = false
+#endif
+        let pending = DeferredTextureCloneBatch(textures: clones, commandBuffer: commandBuffer,
+            auditStore: auditEnabled ? auditStore : nil, rejectsCompletion: rejectsCompletion)
+        // CPU writes to shared/managed sources do not obey the Metal queue's ordering.
+        if textures.contains(where: { $0.storageMode != .private }) {
+            return try .init(textures: pending.waitUntilReady())
         }
-        return clones
+        return pending
     }
 
     func cloneRegionsForDeferredSnapshot(_ sources: [(MTLTexture, PixelRegion)]) throws -> [MTLTexture] {

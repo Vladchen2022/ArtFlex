@@ -13910,6 +13910,14 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     private func prepareProjectSave(to url: URL) -> ProjectSaveRequest? {
+        let audit = PerformanceAuditStore.shared
+        let recording = audit.isRecordingEnabled
+        let start = recording ? DispatchTime.now().uptimeNanoseconds : 0
+        defer {
+            if recording {
+                audit.recordDuration("ProjectSave.prepareOnMain", ms: Double(DispatchTime.now().uptimeNanoseconds - start) / 1_000_000)
+            }
+        }
         guard canBeginDocumentPersistence(action: "保存工程") else {
             return nil
         }
@@ -13937,7 +13945,7 @@ final class WorkspaceViewModel: ObservableObject {
 
         do {
             let previewTexture = try? makeVisibleCompositeTexture(waitUntilCompleted: false)
-            var capture = try bootstrap.persistenceController.freezeProjectCapture(
+            var capture = try bootstrap.persistenceController.enqueueProjectCapture(
                 referenceImages: try projectReferenceImagePayloads(),
                 savedSnapshots: persistentSavedSnapshotPayloads(),
                 previewTexture: previewTexture
