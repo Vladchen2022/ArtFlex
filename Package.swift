@@ -17,14 +17,16 @@ let package = Package(
         )
     ],
     targets: [
+        .target(name: "ArtFlexPolicies", path: "Core/Policies"),
         .testTarget(
             name: "ArtFlexTests",
-            dependencies: ["ArtFlex"],
+            dependencies: ["ArtFlex", "ArtFlexPolicies"],
             path: "Tests/ArtFlexTests"
         ),
         .executableTarget(
             name: "ArtFlex",
             dependencies: [
+                "ArtFlexPolicies",
                 .product(name: "Euclid", package: "Euclid")
             ],
             path: ".",
@@ -35,6 +37,7 @@ let package = Package(
                 "CURRENT_STATUS.md",
                 "DECISIONS.md",
                 "Docs",
+                "Core/Policies",
                 "HANDOFF.md",
                 "HANDOFF_TEXTURE_FILL_2026-07-13.md",
                 "LICENSE",

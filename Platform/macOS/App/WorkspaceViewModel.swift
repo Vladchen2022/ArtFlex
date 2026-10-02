@@ -1,3 +1,4 @@
+import ArtFlexPolicies
 import AppKit
 import SwiftUI
 import os
@@ -14388,23 +14389,9 @@ final class WorkspaceViewModel: ObservableObject {
             scheduleRecoveryAutosave(delay: .seconds(15))
             return
         }
-        guard
-            !isApplyingPatternPlacementCommit,
-            !isApplyingGradientCommit,
-            !isApplyingTransformCommit,
-            !isBucketFillInProgress,
-            !isSavingSnapshot,
-            !isPreparingSnapshotCompare,
-            !isRasterExporting,
-            !isTransformingSelection,
-            patternPlacementPhase.draft == nil,
-            linearGradientState.phase == .idle,
-            sectorGradientState.phase == .idle,
-            straightLineState.phase != .pending,
-            colorAdjustmentSession == nil,
-            curveAdjustmentSession == nil,
-            !bootstrap.strokeEngine.hasPendingBrushWork
-        else {
+        guard !isProjectOpening, !isDocumentTransitionPending,
+              !bootstrap.filePanelService.isPresentingDialog,
+              !DocumentPersistencePolicy.blocksAutomaticCapture(persistenceEditingActivity) else {
             scheduleRecoveryAutosave(delay: .seconds(15))
             return
         }
@@ -14506,8 +14493,28 @@ final class WorkspaceViewModel: ObservableObject {
         }
     }
 
+    private var persistenceEditingActivity: PersistenceEditingActivity {
+        var activity: PersistenceEditingActivity = []
+        if visibleHistoryPreviewOriginCount != nil { activity.insert(.historyPreview) }
+        if isApplyingPatternPlacementCommit || isApplyingGradientCommit || isApplyingTransformCommit || isBucketFillInProgress {
+            activity.insert(.pixelCommit)
+        }
+        if isTransformingSelection { activity.insert(.transform) }
+        if isSavingSnapshot || isPreparingSnapshotCompare || isRasterExporting { activity.insert(.snapshotOrExport) }
+        if patternPlacementPhase.draft != nil { activity.insert(.pattern) }
+        if linearGradientState.phase != .idle || sectorGradientState.phase != .idle { activity.insert(.gradient) }
+        if canvasCropState.bounds != nil { activity.insert(.crop) }
+        if textureFillGestureState != nil || !activeLassoRawPoints.isEmpty || polygonSelectionState.phase == .building {
+            activity.insert(.gesture)
+        }
+        if colorAdjustmentSession != nil || curveAdjustmentSession != nil { activity.insert(.adjustment) }
+        if straightLineState.phase == .pending { activity.insert(.pendingLine) }
+        if bootstrap.strokeEngine.hasPendingBrushWork { activity.insert(.brushInput) }
+        return activity
+    }
+
     private func canBeginDocumentPersistence(action: String) -> Bool {
-        guard visibleHistoryPreviewOriginCount == nil else {
+        guard !persistenceEditingActivity.contains(.historyPreview) else {
             showStatus(.init(kind: .info, message: "请先取消历史预览或应用此状态，再\(action)"))
             return false
         }
@@ -14523,33 +14530,19 @@ final class WorkspaceViewModel: ObservableObject {
             showStatus(.init(kind: .info, message: "工程正在打开，请稍候"))
             return false
         }
-        guard
-            !isApplyingPatternPlacementCommit,
-            !isApplyingGradientCommit,
-            !isApplyingTransformCommit,
-            !isBucketFillInProgress
-        else {
-            showStatus(.init(kind: .info, message: "正在完成画布操作，请稍后再\(action)"))
-            return false
-        }
-        guard !isTransformingSelection else {
-            showStatus(.init(kind: .info, message: "请先确认或取消自由变形，再\(action)"))
-            return false
-        }
-        guard !isSavingSnapshot, !isPreparingSnapshotCompare, !isRasterExporting else {
-            showStatus(.init(kind: .info, message: "正在完成快照或导出，请稍后再\(action)"))
-            return false
-        }
-        guard patternPlacementPhase.draft == nil else {
-            showStatus(.init(kind: .info, message: "请先确认或取消图案放置，再\(action)"))
-            return false
-        }
-        guard linearGradientState.phase == .idle, sectorGradientState.phase == .idle else {
-            showStatus(.init(kind: .info, message: "请先应用或取消渐变，再\(action)"))
-            return false
-        }
-        guard canvasCropState.bounds == nil else {
-            showStatus(.init(kind: .info, message: "请先应用或取消画布裁剪，再\(action)"))
+        if let blocker = DocumentPersistencePolicy.manualBlocker(for: persistenceEditingActivity) {
+            let message: String
+            switch blocker {
+            case .historyPreview: message = "请先取消历史预览或应用此状态，再\(action)"
+            case .pixelCommit: message = "正在完成画布操作，请稍后再\(action)"
+            case .transform: message = "请先确认或取消自由变形，再\(action)"
+            case .snapshotOrExport: message = "正在完成快照或导出，请稍后再\(action)"
+            case .pattern: message = "请先确认或取消图案放置，再\(action)"
+            case .gradient: message = "请先应用或取消渐变，再\(action)"
+            case .crop: message = "请先应用或取消画布裁剪，再\(action)"
+            case .gesture: message = "请先完成或取消当前绘图手势，再\(action)"
+            }
+            showStatus(.init(kind: .info, message: message))
             return false
         }
         return true

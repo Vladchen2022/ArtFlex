@@ -7,6 +7,38 @@ import Testing
 @Suite(.serialized)
 @MainActor
 struct FileWorkflowSafetyTests {
+    @Test func manualAndAutomaticSaveWaitForCropOrTextureGesture() async throws {
+        for crop in [true, false] {
+            let h = try FileWorkflowHarness()
+            defer { h.cleanUp() }
+            h.makeDirty()
+            if crop {
+                h.viewModel.selectTool(.canvasCrop)
+                h.viewModel.beginCanvasCrop(at: .init(x: 1, y: 1), handleRadius: 1)
+                h.viewModel.endCanvasCrop(at: .init(x: 6, y: 6))
+            } else {
+                h.viewModel.selectTool(.textureFill)
+                _ = h.viewModel.handleSelectionMouseDown(at: .init(x: 1, y: 1), modifiers: [])
+                h.viewModel.updateSelection(to: .init(x: 6, y: 1))
+            }
+            h.viewModel.debugPerformRecoveryAutosaveNowForTests()
+            #expect(!h.viewModel.debugRecoveryAutosaveWriteInFlight)
+            #expect(h.viewModel.debugRecoveryAutosaveIsScheduled)
+            var saved: Bool?
+            #expect(!h.viewModel.saveProject { saved = $0 })
+            #expect(saved == false)
+            #expect(h.viewModel.hasUnsavedChanges)
+            if crop { h.viewModel.cancelCanvasCrop() }
+            h.viewModel.selectTool(.brush)
+            let output = h.root.appendingPathComponent("after-cancel.artflex")
+            h.select(output)
+            saved = nil
+            #expect(h.viewModel.saveProject { saved = $0 })
+            try await h.waitUntil { saved != nil }
+            #expect(saved == true)
+        }
+    }
+
     @Test func editsDuringSaveRemainDirtyAndArchiveKeepsCapturedRevision() async throws {
         let h = try FileWorkflowHarness()
         defer { h.cleanUp() }
