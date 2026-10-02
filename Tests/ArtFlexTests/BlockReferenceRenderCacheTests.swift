@@ -17,7 +17,11 @@ struct BlockReferenceRenderCacheTests {
         let transform = CanvasViewportTransform(canvasSize: .init(width: 800, height: 600), viewport: .stageOneDefault,
             availableWidth: 800, availableHeight: 600)
         func render() -> (Data, Data) {
-            renderer.debugGeometryBytes(scene: scene, transform: transform, viewportSize: CGSize(width: 800, height: 600))
+            let bytes = renderer.debugGeometryBytes(scene: scene, transform: transform, viewportSize: CGSize(width: 800, height: 600))
+            let accounting = renderer.debugProjectionCacheAccounting
+            #expect(accounting.recordedBytes == accounting.residentBytes)
+            #expect((0...32 * 1024 * 1024).contains(accounting.recordedBytes))
+            return bytes
         }
         let original = render()
         #expect(!original.0.isEmpty)
@@ -97,6 +101,9 @@ struct BlockReferenceRenderCacheTests {
             let repeated = cached.debugGeometryBytes(scene: scene, editorState: editor, selectedObjectIDs: selected,
                 transform: transform, viewportSize: CGSize(width: 800, height: 600))
             #expect(a.0 == repeated.0 && a.1 == repeated.1)
+            let accounting = cached.debugProjectionCacheAccounting
+            #expect(accounting.recordedBytes == accounting.residentBytes)
+            #expect((0...32 * 1024 * 1024).contains(accounting.recordedBytes))
         }
     }
 }

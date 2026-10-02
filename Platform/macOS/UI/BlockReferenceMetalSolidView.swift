@@ -273,6 +273,9 @@ final class BlockReferenceMetalSolidRenderer {
     private(set) var cacheStatistics = BlockReferenceRenderCacheStatistics()
 #if DEBUG
     var debugDisablesRenderCaches = false
+    var debugProjectionCacheAccounting: (recordedBytes: Int, residentBytes: Int) {
+        (objectProjectionCacheBytes, objectProjectionCache.values.reduce(0) { $0 + $1.byteCount })
+    }
 #endif
     private var bufferSlots = Array(repeating: BlockReferenceMetalBufferSlot(), count: 3)
     private var nextBufferSlotIndex = 0
@@ -535,7 +538,8 @@ final class BlockReferenceMetalSolidRenderer {
                 isDraft: renderedObject.isDraft, isSelected: isSelected,
                 isActive: isSelected && objectID == editorState.selectedObjectID,
                 selectedFaceIndex: editorState.selectedFaceIndex, style: renderedObject.style, accent: accent)
-            if permitsCaching, let cached = objectProjectionCache[objectID], cached.key == key {
+            let previousProjection = permitsCaching ? objectProjectionCache[objectID] : nil
+            if let cached = previousProjection, cached.key == key {
                 faceVertices.append(contentsOf: cached.faces)
                 edgeVertices.append(contentsOf: cached.edges)
                 cacheStatistics.objectProjectionHits += 1
@@ -629,11 +633,14 @@ final class BlockReferenceMetalSolidRenderer {
             faceVertices.append(contentsOf: projectedObject.faces)
             edgeVertices.append(contentsOf: projectedObject.edges)
             if permitsCaching {
-                objectProjectionCacheBytes -= objectProjectionCache.removeValue(forKey: objectID)?.byteCount ?? 0
+                let previousBytes = previousProjection?.byteCount ?? 0
                 let cached = BlockReferenceObjectProjection(key: key, faces: projectedObject.faces, edges: projectedObject.edges)
-                if cached.byteCount <= 32 * 1024 * 1024 - objectProjectionCacheBytes {
+                if cached.byteCount <= 32 * 1024 * 1024 - objectProjectionCacheBytes + previousBytes {
                     objectProjectionCache[objectID] = cached
-                    objectProjectionCacheBytes += cached.byteCount
+                    objectProjectionCacheBytes += cached.byteCount - previousBytes
+                } else if previousProjection != nil {
+                    objectProjectionCache.removeValue(forKey: objectID)
+                    objectProjectionCacheBytes -= previousBytes
                 }
             }
         }
