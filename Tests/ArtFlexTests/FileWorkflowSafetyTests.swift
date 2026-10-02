@@ -7,6 +7,27 @@ import Testing
 @Suite(.serialized)
 @MainActor
 struct FileWorkflowSafetyTests {
+    @Test func editsDuringSaveRemainDirtyAndArchiveKeepsCapturedRevision() async throws {
+        let h = try FileWorkflowHarness()
+        defer { h.cleanUp() }
+        h.makeDirty()
+        let output = h.root.appendingPathComponent("captured-revision.artflex")
+        h.select(output)
+        var results: [Bool] = []
+        #expect(h.viewModel.saveProject { results.append($0) })
+        h.viewModel.setActiveLayerOpacity(0.3)
+        try await h.waitUntil { !results.isEmpty }
+        #expect(results == [false])
+        #expect(h.viewModel.hasUnsavedChanges)
+        let saved = try h.bootstrap.persistenceController.openProject(from: output)
+        #expect(saved.workspace.document.layer(saved.workspace.document.activeLayerID)?.opacity == 0.8)
+        #expect(h.viewModel.workspace.document.layer(h.viewModel.workspace.document.activeLayerID)?.opacity == 0.3)
+        // Toolbar saves have no callback, but must still update name and dirty state.
+        #expect(h.viewModel.saveProject())
+        try await h.waitUntil { !h.viewModel.isProjectSaving }
+        #expect(!h.viewModel.hasUnsavedChanges)
+    }
+
     @Test func cancelledQuitCanRetryAndOnlyTerminatesAfterSuccessfulSave() async throws {
         let h = try FileWorkflowHarness()
         defer { h.cleanUp() }

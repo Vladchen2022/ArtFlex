@@ -220,7 +220,7 @@ final class WorkspaceViewModel: ObservableObject {
     private var visibleHistoryPreviewOriginWasDirty = false
     private var visibleHistoryPreviewOriginSelection: SelectionState?
     @Published private(set) var hasRecoveryProject = false
-    @Published private(set) var isProjectSaving = false
+    var isProjectSaving: Bool { projectSaveCoordinator.isSaving }
     @Published var isNewCanvasSheetPresented = false
     @Published var isRasterExportSheetPresented = false
     @Published private(set) var isRasterExporting = false
@@ -409,7 +409,11 @@ final class WorkspaceViewModel: ObservableObject {
     private var referenceImageUpgradeTasks: [Int: Task<Void, Never>] = [:]
     private var recoveryAutosaveTask: Task<Void, Never>?
     private var recoveryAutosaveWriteTask: Task<Void, Never>?
-    private var projectSaveTask: Task<Void, Never>?
+    private lazy var projectSaveCoordinator: ProjectSaveCoordinator = {
+        let coordinator = ProjectSaveCoordinator(persistenceController: bootstrap.persistenceController)
+        coordinator.onStateChange = { [weak self] in self?.objectWillChange.send() }
+        return coordinator
+    }()
     private var projectOpenTask: Task<Void, Never>?
     private var pendingManualSaveAfterRecoveryAutosave = false
     private var pendingManualSaveAfterTimelapse = false
@@ -13793,25 +13797,13 @@ final class WorkspaceViewModel: ObservableObject {
 
     private func startProjectSave(to url: URL, completion: ((Bool) -> Void)?) {
         guard let prepared = prepareProjectSave(to: url) else { completion?(false); return }
-        isProjectSaving = true
         showStatus(.init(kind: .info, message: "正在保存工程：\(prepared.url.lastPathComponent)"))
-        let persistenceBox = WorkspaceUncheckedBox(bootstrap.persistenceController)
-        let captureBox = WorkspaceUncheckedBox(prepared.capture)
-        projectSaveTask = Task { [weak self] in
-            let result = await Task.detached(priority: .utility) {
-                Result {
-                    let payload = try persistenceBox.value.materializeProjectPayload(
-                        from: captureBox.value
-                    )
-                    return try persistenceBox.value.writeCapturedProject(payload, to: prepared.url)
-                }
-            }.value
+        let accepted = projectSaveCoordinator.start(prepared) { [weak self] result in
             guard let self else { completion?(false); return }
-            self.projectSaveTask = nil
             let savedCurrentRevision = self.finishProjectSave(prepared, result: result)
-            self.isProjectSaving = false
             completion?(savedCurrentRevision)
         }
+        if !accepted { completion?(false) }
     }
 
     private func ensureDocumentResourceBudget(
@@ -13916,15 +13908,7 @@ final class WorkspaceViewModel: ObservableObject {
         return overflow ? Int.max : value
     }
 
-    private struct PreparedProjectSave {
-        var url: URL
-        var capture: FrozenProjectCapture
-        var savedDocumentName: String
-        var editRevision: UInt64
-        var documentGeneration: UInt64
-    }
-
-    private func prepareProjectSave(to url: URL) -> PreparedProjectSave? {
+    private func prepareProjectSave(to url: URL) -> ProjectSaveRequest? {
         guard canBeginDocumentPersistence(action: "保存工程") else {
             return nil
         }
@@ -13959,7 +13943,7 @@ final class WorkspaceViewModel: ObservableObject {
             )
             // The live document name/path change only after the archive is safely written.
             capture.workspace.document.metadata.name = savedDocumentName
-            return PreparedProjectSave(
+            return ProjectSaveRequest(
                 url: url,
                 capture: capture,
                 savedDocumentName: savedDocumentName,
@@ -13973,7 +13957,7 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     private func finishProjectSave(
-        _ prepared: PreparedProjectSave,
+        _ prepared: ProjectSaveRequest,
         result: Result<ProjectWriteOutcome, Error>
     ) -> Bool {
         guard prepared.documentGeneration == documentRenderGeneration else { return false }
@@ -14396,7 +14380,7 @@ final class WorkspaceViewModel: ObservableObject {
             return
         }
         recoveryAutosaveWaitingForTimelapse = false
-        guard !isProjectSaving, !isChoosingProjectSaveLocation, projectSaveTask == nil else {
+        guard !isProjectSaving, !isChoosingProjectSaveLocation else {
             scheduleRecoveryAutosave(delay: .seconds(15))
             return
         }
