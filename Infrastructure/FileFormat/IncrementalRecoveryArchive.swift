@@ -39,6 +39,27 @@ struct FrozenRecoveryCapture: @unchecked Sendable {
     var copiedPixelBytes: Int
 }
 
+/// Regional copies are submitted at the editing boundary; only the recovery worker waits.
+struct QueuedRecoveryCapture: Sendable {
+    var metadata: ProjectArchivePayload
+    var manifest: IncrementalRecoveryManifest
+    var tileDescriptors: [(key: LayerResourceKey, region: PixelRegion)]
+    var textureBatch: DeferredTextureCloneBatch
+    var previousURL: URL?
+    var copiedPixelBytes: Int
+
+    func waitUntilReady() throws -> FrozenRecoveryCapture {
+        let textures = try textureBatch.waitUntilReady()
+        guard textures.count == tileDescriptors.count else {
+            throw PersistenceError.invalidProject("自动恢复冻结区域数量不一致")
+        }
+        return .init(metadata: metadata, manifest: manifest,
+            changedTiles: zip(tileDescriptors, textures).map { descriptor, texture in
+                .init(key: descriptor.key, region: descriptor.region, texture: texture)
+            }, previousURL: previousURL, copiedPixelBytes: copiedPixelBytes)
+    }
+}
+
 /// Recovery generations are self-contained. Immutable compressed tiles are hard-linked between
 /// generations, never referenced by a mutable chain; deleting an older generation is safe.
 enum IncrementalRecoveryArchive {

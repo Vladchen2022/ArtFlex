@@ -30,7 +30,8 @@ final class MagicWandSelectionEngine: @unchecked Sendable {
         texture: MTLTexture,
         at point: CanvasPoint,
         settings: SmartSelectionSettings,
-        cancellation: WorkCancellation? = nil
+        cancellation: WorkCancellation? = nil,
+        pixelClassifier: ((Int, Int, PremultipliedSRGBAPixel) -> Bool)? = nil
     ) throws -> SmartSelectionSegmentationResult? {
         try cancellation?.check()
         if !settings.isContiguous {
@@ -45,6 +46,7 @@ final class MagicWandSelectionEngine: @unchecked Sendable {
         }
 
         var tiles: [TileKey: Tile] = [:]
+        var sourceReadbackBytes = 0
         func loadTile(_ key: TileKey) throws -> Tile {
             try cancellation?.check()
             if let existing = tiles[key] { return existing }
@@ -61,6 +63,7 @@ final class MagicWandSelectionEngine: @unchecked Sendable {
             )
             // Classification uses the established 8-bit tolerance scale. Only this temporary
             // sample is converted; selected/filled document pixels retain their own precision.
+            sourceReadbackBytes += originalSnapshot.pixelData.count
             let snapshot = try originalSnapshot.converted(to: .premultipliedBGRA8SRGB)
             let tile = Tile(
                 originX: originX,
@@ -74,27 +77,35 @@ final class MagicWandSelectionEngine: @unchecked Sendable {
             return tile
         }
 
-        return try SmartSelectionSegmenter.segment(
+        var result = try SmartSelectionSegmenter.segment(
             originX: 0,
             originY: 0,
             width: texture.width,
             height: texture.height,
             seedPoint: point,
             settings: settings,
-            cancellation: cancellation
+            cancellation: cancellation,
+            boundedResult: true
         ) { x, y in
             let key = TileKey(x: x / tileLength, y: y / tileLength)
             let tile = try loadTile(key)
             let localX = x - tile.originX
             let localY = y - tile.originY
             let offset = (localY * tile.bytesPerRow) + (localX * 4)
-            return PremultipliedSRGBAPixel(
+            let pixel = PremultipliedSRGBAPixel(
                 bgraBlue: tile.bytes[offset],
                 green: tile.bytes[offset + 1],
                 red: tile.bytes[offset + 2],
                 alpha: tile.bytes[offset + 3]
             )
+            if let pixelClassifier {
+                let value: UInt8 = pixelClassifier(x, y, pixel) ? 0 : 255
+                return .init(red: value, green: value, blue: value, alpha: 255)
+            }
+            return pixel
         }
+        result?.sourceReadbackByteCount = sourceReadbackBytes
+        return result
     }
 
     func select(
@@ -117,7 +128,8 @@ final class MagicWandSelectionEngine: @unchecked Sendable {
             ),
             seedPoint: point,
             settings: settings,
-            cancellation: cancellation
+            cancellation: cancellation,
+            boundedResult: true
         )
     }
 }

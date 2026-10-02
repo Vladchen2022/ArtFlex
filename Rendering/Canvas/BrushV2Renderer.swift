@@ -245,9 +245,11 @@ final class BrushV2Renderer {
     }
 
     func encode(stroke: StrokeDescriptor, streams: [[StampSample]],
-                session: OpacityCapSessionResources, target: MTLTexture,
+                session: OpacityCapSessionResources, target originalTarget: MTLTexture,
                 commandBuffer: MTLCommandBuffer, selection: MTLTexture?, alphaLock: MTLTexture?, preservesAlpha: Bool,
+                prepareTargetForWrite: ((BrushPixelBounds) -> MTLTexture?)? = nil,
                 materialProvider: (BrushPixelBounds) -> MTLTexture?) -> BrushPixelBounds? {
+        var target = originalTarget
         guard let config = stroke.brush.engineV2 else { return nil }
         if session.v2 == nil { session.v2 = BrushV2Session(device: device, width: target.width, height: target.height) }
         guard let state = session.v2,
@@ -299,6 +301,10 @@ final class BrushV2Renderer {
             }
         }
         guard let bounds else { return nil }
+        if let prepareTargetForWrite {
+            guard let prepared = prepareTargetForWrite(bounds) else { failureGeneration &+= 1; return nil }
+            target = prepared
+        }
         guard initializeTiles(bounds: bounds, state: state, original: session.originalTexture,
                               target: target, commandBuffer: commandBuffer) else { failureGeneration &+= 1; return nil }
         let textures=[state.a,state.b,state.range]

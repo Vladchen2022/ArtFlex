@@ -18,7 +18,8 @@ enum GeneratorRegionRasterizer {
         bytesPerRow: Int,
         bytes: inout [UInt8],
         seed: UInt64? = nil,
-        encoding: CanvasPixelEncoding = .premultipliedBGRA8SRGB
+        encoding: CanvasPixelEncoding = .premultipliedBGRA8SRGB,
+        cancellation: WorkCancellation? = nil
     ) -> GeneratorRasterSummary {
         guard width > 0, height > 0, bytesPerRow >= width * encoding.bytesPerPixel, bytes.count >= bytesPerRow * height else {
             return .init(primitiveCount: 0, touchedPixelCount: 0)
@@ -46,7 +47,7 @@ enum GeneratorRegionRasterizer {
             originY: originY,
             targetShape: targetShape,
             baseColor: color,
-            opacity: min(max(settings.opacity, 0.05), 1)
+            opacity: min(max(settings.opacity, 0.05), 1), cancellation: cancellation
         )
 
         let primitiveCount: Int
@@ -110,6 +111,7 @@ enum GeneratorRegionRasterizer {
         let count = min(max(Int(sqrt(max(bounds.size.x * bounds.size.y, 1)) * Double(0.16 + settings.density * 0.42)), 8), 180)
         var rendered = 0
         for _ in 0..<count {
+            if context.cancellation?.isCancelled == true { break }
             guard let start = randomPoint(in: bounds, shape: context.targetShape, random: &random) else { continue }
             let length = shortEdge * (0.16 + settings.density * 0.5 + random.float(in: -0.05...0.1))
             let points = wanderingPath(
@@ -154,6 +156,7 @@ enum GeneratorRegionRasterizer {
         let blotCount = min(max(Int(4 + settings.density * 22), 4), 28)
         var rendered = 0
         for _ in 0..<blotCount {
+            if context.cancellation?.isCancelled == true { break }
             guard let center = randomPoint(in: bounds, shape: context.targetShape, random: &random) else { continue }
             let baseRadius = max(2, shortEdge * random.float(in: 0.018...0.075) * (0.75 + settings.density))
             let satellites = min(max(Int(5 + settings.branch * 13), 5), 18)
@@ -188,6 +191,7 @@ enum GeneratorRegionRasterizer {
         let count = min(max(Int(12 + settings.density * 76), 12), 90)
         var rendered = 0
         for _ in 0..<count {
+            if context.cancellation?.isCancelled == true { break }
             guard let center = randomPoint(in: bounds, shape: context.targetShape, random: &random) else { continue }
             let radius = max(2, shortEdge * random.float(in: 0.012...0.055) * (0.65 + settings.density))
             let vertices = 3 + Int(random.next() % 4)
@@ -224,6 +228,7 @@ enum GeneratorRegionRasterizer {
         let stackCount = min(max(Int(4 + settings.density * 18), 4), 24)
         var rendered = 0
         for _ in 0..<stackCount {
+            if context.cancellation?.isCancelled == true { break }
             guard let center = randomPoint(in: bounds, shape: context.targetShape, random: &random) else { continue }
             let angle = random.float(in: 0...(Float.pi * 2))
             let direction = CanvasPoint(x: Double(cos(angle)), y: Double(sin(angle)))
@@ -268,6 +273,7 @@ enum GeneratorRegionRasterizer {
         let clusterCount = min(max(Int(5 + settings.density * 24), 5), 30)
         var rendered = 0
         for _ in 0..<clusterCount {
+            if context.cancellation?.isCancelled == true { break }
             guard let center = randomPoint(in: bounds, shape: context.targetShape, random: &random) else { continue }
             let memberCount = min(max(Int(4 + settings.branch * 11), 4), 15)
             let spread = shortEdge * random.float(in: 0.018...0.065) * (0.6 + settings.drift)
@@ -301,6 +307,7 @@ enum GeneratorRegionRasterizer {
         let pathCount = min(max(Int(3 + settings.density * 17), 3), 20)
         var rendered = 0
         for _ in 0..<pathCount {
+            if context.cancellation?.isCancelled == true { break }
             guard let start = randomPoint(in: bounds, shape: context.targetShape, random: &random) else { continue }
             let length = longEdge * random.float(in: 0.18...0.52)
             let points = wanderingPath(
@@ -378,6 +385,7 @@ private struct RasterContext {
     var targetShape: SelectionShape?
     var baseColor: RGBAColor
     var opacity: Float
+    var cancellation: WorkCancellation? = nil
     var touchedPixels: Set<Int> = []
 
     mutating func drawPolyline(
@@ -424,6 +432,7 @@ private struct RasterContext {
 
         let hardness = 1 - min(max(softness, 0), 1)
         for y in minY...maxY {
+            if cancellation?.isCancelled == true { return }
             for x in minX...maxX {
                 let point = CanvasPoint(x: Double(originX + x) + 0.5, y: Double(originY + y) + 0.5)
                 guard targetShape?.contains(point) ?? true else { continue }
@@ -452,6 +461,7 @@ private struct RasterContext {
         guard minX <= maxX, minY <= maxY else { return }
 
         for y in minY...maxY {
+            if cancellation?.isCancelled == true { return }
             for x in minX...maxX {
                 let point = CanvasPoint(x: Double(originX + x) + 0.5, y: Double(originY + y) + 0.5)
                 guard (targetShape?.contains(point) ?? true), Self.polygon(polygon, contains: point) else { continue }

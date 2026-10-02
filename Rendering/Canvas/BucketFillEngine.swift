@@ -2,6 +2,7 @@ import Foundation
 import Metal
 
 struct BucketFillPlan: Sendable {
+    var referenceReadbackByteCount: Int = 0
     var layerID: LayerID
     var historySnapshot: LayerHistorySnapshot?
     var restoreSnapshot: LayerTextureSnapshot
@@ -16,6 +17,16 @@ final class BucketFillEngine: @unchecked Sendable {
     init(serializer: LayerTextureSerializer) {
         self.serializer = serializer
     }
+
+#if DEBUG
+    func debugMakeLegacyPrecisionFillPlan(layerID: LayerID, destination: MTLTexture,
+        reference: MTLTexture, point: CanvasPoint, color: RGBAColor, alphaLock: Bool,
+        selection: SelectionShape?, settings: FillSettings) throws -> BucketFillPlan? {
+        try makeRefinedFillPlan(layerID: layerID, destination: destination, reference: reference,
+            point: point, color: color, alphaLock: alphaLock, selection: selection,
+            settings: settings, cancellation: nil)
+    }
+#endif
 
     func fill(
         layerID: LayerID,
@@ -80,6 +91,13 @@ final class BucketFillEngine: @unchecked Sendable {
         cancellation: WorkCancellation? = nil
     ) throws -> BucketFillPlan? {
         try cancellation?.check()
+
+        if texture.pixelFormat == .rgba16Float, settings.isContiguous,
+           settings.closeGapPixels == 0, settings.expandPixels == 0 {
+            return try makeLocalHighPrecisionFillPlan(layerID: layerID, destination: texture, reference: texture,
+                point: point, color: color, alphaLock: alphaLockEnabled, selection: selectionShape,
+                settings: settings, cancellation: cancellation)
+        }
 
         if texture.pixelFormat == .rgba16Float || settings.closeGapPixels > 0 || settings.expandPixels > 0 {
             return try makeRefinedFillPlan(
@@ -476,6 +494,13 @@ final class BucketFillEngine: @unchecked Sendable {
         guard destinationTexture.width == referenceTexture.width,
               destinationTexture.height == referenceTexture.height else { return nil }
 
+        if (destinationTexture.pixelFormat == .rgba16Float || referenceTexture.pixelFormat == .rgba16Float),
+           settings.isContiguous, settings.closeGapPixels == 0, settings.expandPixels == 0 {
+            return try makeLocalHighPrecisionFillPlan(layerID: layerID, destination: destinationTexture,
+                reference: referenceTexture, point: point, color: color, alphaLock: alphaLockEnabled,
+                selection: selectionShape, settings: settings, cancellation: cancellation)
+        }
+
         if destinationTexture.pixelFormat == .rgba16Float || referenceTexture.pixelFormat == .rgba16Float || settings.closeGapPixels > 0 || settings.expandPixels > 0 {
             return try makeRefinedFillPlan(
                 layerID: layerID, destination: destinationTexture, reference: referenceTexture,
@@ -635,19 +660,62 @@ final class BucketFillEngine: @unchecked Sendable {
            let expanded = SelectionRefinement.expanded(fillShape, canvasSize: size, radiusPixels: settings.expandPixels) {
             fillShape = expanded
         }
+        return try makeMaskedFillPlan(layerID: layerID, destination: destination, fillShape: fillShape,
+            color: color, alphaLock: alphaLock, selection: selection, cancellation: cancellation)
+    }
+
+    /// Reuse the magic-wand tile provider and scanline connectivity, while the
+    /// classifier preserves FillSettings' floating-point tolerance exactly.
+    private func makeLocalHighPrecisionFillPlan(layerID: LayerID, destination: MTLTexture,
+        reference: MTLTexture, point: CanvasPoint, color: RGBAColor, alphaLock: Bool,
+        selection: SelectionShape?, settings: FillSettings, cancellation: WorkCancellation?) throws -> BucketFillPlan? {
+        let x = Int(point.x.rounded(.down)), y = Int(point.y.rounded(.down))
+        guard x >= 0, y >= 0, x < reference.width, y < reference.height else { return nil }
+        let seedPoint = CanvasPoint(x: Double(x) + 0.5, y: Double(y) + 0.5)
+        if let selection, !selection.contains(seedPoint) { return nil }
+        let seedSnapshot = try serializer.snapshot(texture: reference, originX: x, originY: y, width: 1, height: 1)
+            .converted(to: .premultipliedBGRA8SRGB)
+        let seed = seedSnapshot.pixelData.withUnsafeBytes { raw -> PremultipliedSRGBAPixel in
+            let b = raw.bindMemory(to: UInt8.self)
+            return .init(bgraBlue: b[0], green: b[1], red: b[2], alpha: b[3])
+        }
+        let engine = MagicWandSelectionEngine(serializer: serializer)
+        guard let selected = try engine.select(texture: reference, at: point,
+            settings: .init(tolerance: 0, isAntiAliased: false, isContiguous: true),
+            cancellation: cancellation, pixelClassifier: { px, py, pixel in
+                if let selection, !selection.contains(.init(x: Double(px) + 0.5, y: Double(py) + 0.5)) { return false }
+                return FillColorDistance.matches(pixel, seed, tolerance: settings.normalizedTolerance)
+            }) else { return nil }
+        let shape = SelectionShape.mask(canvasWidth: reference.width, canvasHeight: reference.height,
+            patch: .init(originX: selected.originX, originY: selected.originY,
+                width: selected.width, height: selected.height, alphaBytes: Data(selected.alphaBytes)))
+        var plan = try makeMaskedFillPlan(layerID: layerID, destination: destination, fillShape: shape,
+            color: color, alphaLock: alphaLock, selection: selection, cancellation: cancellation)
+        plan?.referenceReadbackByteCount = selected.sourceReadbackByteCount
+            + (reference.pixelFormat == .rgba16Float ? 8 : 4)
+        return plan
+    }
+
+    private func makeMaskedFillPlan(layerID: LayerID, destination: MTLTexture,
+                                    fillShape: SelectionShape, color: RGBAColor, alphaLock: Bool,
+                                    selection: SelectionShape?, cancellation: WorkCancellation?) throws -> BucketFillPlan? {
+        let width = destination.width, height = destination.height
         guard let mask = fillShape.maskData else { return nil }
-        let coverage = [UInt8](mask.alphaBytes)
         let x0 = max(0, Int(fillShape.bounds.minX)), y0 = max(0, Int(fillShape.bounds.minY))
         let w = min(width, Int(fillShape.bounds.maxX.rounded(.up))) - x0
         let h = min(height, Int(fillShape.bounds.maxY.rounded(.up))) - y0
         guard w > 0, h > 0 else { return nil }
+        let region = PixelRegion(originX: x0, originY: y0, width: w, height: h)
+        let coverage = [UInt8](mask.alphaBytes(in: region))
+        let selectionBytes = makeSelectionMaskBytes(for: selection,
+            canvasSize: .init(width: width, height: height), originX: x0, originY: y0, width: w, height: h)
         let before = try serializer.snapshot(texture: destination, originX: x0, originY: y0, width: w, height: h)
         var output = [UInt8](before.pixelData)
         var changed = false
         for y in 0..<h {
             try cancellation?.check()
             for x in 0..<w {
-                let maskIndex = (y + y0) * width + x + x0
+                let maskIndex = y * w + x
                 let amount = UInt8((Int(coverage[maskIndex]) * Int(selectionBytes?[maskIndex] ?? 255) + 127) / 255)
                 guard amount > 0 else { continue }
                 if before.encoding == .premultipliedRGBA16FloatLinear {
@@ -998,14 +1066,8 @@ final class BucketFillEngine: @unchecked Sendable {
         if let maskData = selectionShape.maskData,
            maskData.canvasWidth == canvasSize.width,
            maskData.canvasHeight == canvasSize.height {
-            return extractMaskRegionBytes(
-                from: maskData.alphaBytes,
-                canvasWidth: canvasSize.width,
-                originX: originX,
-                originY: originY,
-                width: width,
-                height: height
-            )
+            return [UInt8](maskData.alphaBytes(in: .init(originX: originX, originY: originY,
+                                                         width: width, height: height)))
         }
 
         var generated = [UInt8](repeating: 0, count: width * height)
@@ -1020,41 +1082,6 @@ final class BucketFillEngine: @unchecked Sendable {
             }
         }
         return generated
-    }
-
-    private func extractMaskRegionBytes(
-        from alphaBytes: Data,
-        canvasWidth: Int,
-        originX: Int,
-        originY: Int,
-        width: Int,
-        height: Int
-    ) -> [UInt8] {
-        var result = [UInt8](repeating: 0, count: width * height)
-        guard !result.isEmpty else { return result }
-
-        result.withUnsafeMutableBufferPointer { destinationBuffer in
-            alphaBytes.withUnsafeBytes { sourceRawBuffer in
-                guard
-                    let destinationBase = destinationBuffer.baseAddress,
-                    let sourceBase = sourceRawBuffer.baseAddress?.assumingMemoryBound(to: UInt8.self)
-                else {
-                    return
-                }
-
-                for row in 0..<height {
-                    let sourceOffset = ((originY + row) * canvasWidth) + originX
-                    let destinationOffset = row * width
-                    UnsafeMutableRawPointer(destinationBase.advanced(by: destinationOffset))
-                        .copyMemory(
-                            from: UnsafeRawPointer(sourceBase.advanced(by: sourceOffset)),
-                            byteCount: width
-                        )
-                }
-            }
-        }
-
-        return result
     }
 
     private func makePremultipliedBGRA(color: RGBAColor) -> PixelBGRA {

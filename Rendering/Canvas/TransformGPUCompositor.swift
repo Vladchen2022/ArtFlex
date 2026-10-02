@@ -32,11 +32,6 @@ private struct TransformExtractUniforms {
     var _padding: UInt32 = 0
 }
 
-private struct TransformPunchOutUniforms {
-    var hasMask: UInt32
-    var _padding: SIMD3<UInt32> = .zero
-}
-
 enum TransformGPUCompositorInitializationError: LocalizedError {
     case shaderLibrary(Error)
     case missingFunction(String)
@@ -67,6 +62,8 @@ final class TransformGPUCompositor {
     private let punchOutPipelineState: MTLRenderPipelineState
     private let samplerState: MTLSamplerState
     private let canvasPresenter: StageOneCanvasPresenter
+    private var previewTargetTexture: MTLTexture?
+    private var previewTargetQueue: ObjectIdentifier?
 
     init(device: MTLDevice) throws {
         self.device = device
@@ -91,11 +88,6 @@ final class TransformGPUCompositor {
             float2 sourceSizeNormalized;
             uint hasMask;
             uint padding;
-        };
-
-        struct TransformPunchOutUniforms {
-            uint hasMask;
-            uint3 padding;
         };
 
         vertex VertexOut transformQuadVertex(
@@ -128,19 +120,22 @@ final class TransformGPUCompositor {
             return sampled * mask;
         }
 
+        // Fractional selection cut: preserve the unselected coverage. The moved
+        // extracted pixels are then composed source-over. An unchanged transform
+        // bypasses both operations using the original texture (Krita also treats
+        // an unchanging transform as cancellation, not a cut/paste round trip).
         fragment float4 transformPunchOutFragment(
             VertexOut in [[stage_in]],
             texture2d<float> maskTexture [[texture(0)]],
+            texture2d<float> sourceTexture [[texture(1)]],
             sampler layerSampler [[sampler(0)]],
-            constant TransformPunchOutUniforms &uniforms [[buffer(0)]]
+            constant TransformExtractUniforms &uniforms [[buffer(0)]]
         ) {
-            if (uniforms.hasMask != 0) {
-                float mask = maskTexture.sample(layerSampler, in.texCoord).r;
-                if (mask <= 0.001) {
-                    discard_fragment();
-                }
-            }
-            return float4(0.0);
+            if (uniforms.hasMask == 0) return float4(0.0);
+            float mask = maskTexture.sample(layerSampler, in.texCoord).r;
+            if (mask <= 0.0) discard_fragment();
+            float2 sourceUV = uniforms.sourceOriginNormalized + in.texCoord * uniforms.sourceSizeNormalized;
+            return sourceTexture.sample(layerSampler, sourceUV) * (1.0 - mask);
         }
         """
 
@@ -246,12 +241,18 @@ final class TransformGPUCompositor {
         )
         blitEncoder.endEncoding()
 
-        if let extractedPass = renderPassDescriptor(
+        guard let extractedPass = renderPassDescriptor(
             for: extractedTexture,
             loadAction: .clear,
             clearColor: .init(red: 0, green: 0, blue: 0, alpha: 0)
         ),
-           let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: extractedPass) {
+              let extractedEncoder = commandBuffer.makeRenderCommandEncoder(descriptor: extractedPass) else {
+            commandBuffer.commit()
+            Task { @MainActor in completion(nil, nil) }
+            return
+        }
+        do {
+            let encoder = extractedEncoder
             var uniforms = TransformExtractUniforms(
                 sourceOriginNormalized: .init(
                     Float(sourceBounds.minX / Double(max(canvasSize.width, 1))),
@@ -285,12 +286,23 @@ final class TransformGPUCompositor {
             encoder.endEncoding()
         }
 
-        if let punchOutPass = renderPassDescriptor(
+        guard let punchOutPass = renderPassDescriptor(
             for: baseTexture,
             loadAction: .load
         ),
-           let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: punchOutPass) {
-            var uniforms = TransformPunchOutUniforms(hasMask: maskTexture == nil ? 0 : 1)
+              let punchOutEncoder = commandBuffer.makeRenderCommandEncoder(descriptor: punchOutPass) else {
+            commandBuffer.commit()
+            Task { @MainActor in completion(nil, nil) }
+            return
+        }
+        do {
+            let encoder = punchOutEncoder
+            var uniforms = TransformExtractUniforms(
+                sourceOriginNormalized: .init(Float(sourceBounds.minX / Double(canvasSize.width)),
+                                              Float(sourceBounds.minY / Double(canvasSize.height))),
+                sourceSizeNormalized: .init(Float(sourceBounds.size.x / Double(canvasSize.width)),
+                                            Float(sourceBounds.size.y / Double(canvasSize.height))),
+                hasMask: maskTexture == nil ? 0 : 1)
             let vertices = quadVertices(
                 bounds: sourceBounds,
                 canvasSize: canvasSize
@@ -304,10 +316,11 @@ final class TransformGPUCompositor {
             if let maskTexture {
                 encoder.setFragmentTexture(maskTexture, index: 0)
             }
+            encoder.setFragmentTexture(sourceTexture, index: 1)
             encoder.setFragmentSamplerState(samplerState, index: 0)
             encoder.setFragmentBytes(
                 &uniforms,
-                length: MemoryLayout<TransformPunchOutUniforms>.stride,
+                length: MemoryLayout<TransformExtractUniforms>.stride,
                 index: 0
             )
             encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
@@ -318,12 +331,73 @@ final class TransformGPUCompositor {
             baseTexture: baseTexture,
             extractedTexture: extractedTexture
         )
-        commandBuffer.addCompletedHandler { [boxedTextures] _ in
+        commandBuffer.addCompletedHandler { [boxedTextures] completed in
+            let succeeded = completed.status == .completed
             Task { @MainActor in
-                completion(boxedTextures.baseTexture, boxedTextures.extractedTexture)
+                completion(succeeded ? boxedTextures.baseTexture : nil, succeeded ? boxedTextures.extractedTexture : nil)
             }
         }
         commandBuffer.commit()
+    }
+
+    /// Encodes the *complete active layer*, before masks, opacity and blend mode
+    /// are applied by the canonical compositor. Preview and commit use this path.
+    /// Its private scratch target never aliases the source/extracted/base textures.
+    func encodeTransformedTexture(
+        session: TransformPreviewSession,
+        preview: FreeTransformPreview,
+        meshWarpGrid: MeshWarpGrid? = nil,
+        canvasSize: CanvasSize,
+        commandBuffer: MTLCommandBuffer,
+        reusesPreviewTarget: Bool = true
+    ) -> MTLTexture? {
+        if let original = session.unchangedSourceTexture(preview: preview, meshWarpGrid: meshWarpGrid) {
+            return original
+        }
+        let targetTexture: MTLTexture
+        if reusesPreviewTarget, let existing = previewTargetTexture,
+           previewTargetQueue == ObjectIdentifier(commandBuffer.commandQueue),
+           existing.width == canvasSize.width, existing.height == canvasSize.height,
+           existing.pixelFormat == session.extractedTexture.pixelFormat {
+            targetTexture = existing
+        } else {
+            guard let created = makeTexture(width: canvasSize.width, height: canvasSize.height,
+                pixelFormat: session.extractedTexture.pixelFormat, usage: [.shaderRead, .renderTarget]) else { return nil }
+            targetTexture = created
+            if reusesPreviewTarget {
+                previewTargetTexture = created
+                previewTargetQueue = ObjectIdentifier(commandBuffer.commandQueue)
+            }
+        }
+        let clearPass = renderPassDescriptor(for: targetTexture, loadAction: .clear)!
+        if session.mode == .selection {
+            guard let base = session.baseTexture,
+                  canvasPresenter.encode(layerTextures: [(texture: base, opacity: 1)],
+                    into: clearPass, commandBuffer: commandBuffer) else { return nil }
+        }
+        let overlayPass = renderPassDescriptor(for: targetTexture,
+            loadAction: session.mode == .selection ? .load : .clear)!
+        let encoded: Bool
+        if let meshWarpGrid {
+            encoded = canvasPresenter.encodeMeshPreview(texture: session.extractedTexture, opacity: 1,
+                canvasSize: canvasSize, grid: meshWarpGrid,
+                textureCoordinateBounds: meshWarpTextureCoordinateBounds(session: session,
+                    grid: meshWarpGrid, canvasSize: canvasSize), into: overlayPass, commandBuffer: commandBuffer)
+        } else {
+            encoded = canvasPresenter.encodePreview(texture: session.extractedTexture, opacity: 1,
+                canvasSize: canvasSize, bounds: session.operationBounds,
+                pivotBounds: session.interactionBounds ?? session.operationBounds, preview: preview,
+                into: overlayPass, commandBuffer: commandBuffer)
+        }
+        return encoded ? targetTexture : nil
+    }
+
+    /// Same-queue reuse is safe because each preview is consumed by composition
+    /// before the next command buffer can overwrite it. A committed texture must
+    /// instead have independent ownership and must never become this scratch target.
+    func discardPreviewTarget() {
+        previewTargetTexture = nil
+        previewTargetQueue = nil
     }
 
     func composeTransformedTexture(
@@ -334,77 +408,21 @@ final class TransformGPUCompositor {
         metal: MetalDeviceContext,
         completion: @escaping @MainActor (MTLTexture?) -> Void
     ) {
-        guard
-            let targetTexture = makeTexture(
-                width: canvasSize.width,
-                height: canvasSize.height,
-                pixelFormat: session.extractedTexture.pixelFormat,
-                usage: [.shaderRead, .renderTarget]
-            ),
-            let commandBuffer = metal.commandQueue.makeCommandBuffer()
-        else {
-            Task { @MainActor in
-                completion(nil)
-            }
+        guard let commandBuffer = metal.commandQueue.makeCommandBuffer() else {
+            Task { @MainActor in completion(nil) }
             return
         }
-
-        let clearPass = renderPassDescriptor(
-            for: targetTexture,
-            loadAction: .clear,
-            clearColor: .init(red: 0, green: 0, blue: 0, alpha: 0)
-        )!
-
-        if session.mode == .selection, let baseTexture = session.baseTexture {
-            guard canvasPresenter.encode(
-                layerTextures: [(texture: baseTexture, opacity: 1)],
-                into: clearPass,
-                commandBuffer: commandBuffer
-            ) else {
-                commandBuffer.commit()
-                Task { @MainActor in completion(nil) }
-                return
-            }
+        guard let texture = encodeTransformedTexture(session: session, preview: preview,
+            meshWarpGrid: meshWarpGrid, canvasSize: canvasSize, commandBuffer: commandBuffer,
+            reusesPreviewTarget: false) else {
+            commandBuffer.commit()
+            Task { @MainActor in completion(nil) }
+            return
         }
-
-        let overlayPass = renderPassDescriptor(
-            for: targetTexture,
-            loadAction: session.mode == .selection ? .load : .clear,
-            clearColor: .init(red: 0, green: 0, blue: 0, alpha: 0)
-        )!
-
-        if let meshWarpGrid {
-            canvasPresenter.encodeMeshPreview(
-                texture: session.extractedTexture,
-                opacity: 1,
-                canvasSize: canvasSize,
-                grid: meshWarpGrid,
-                textureCoordinateBounds: meshWarpTextureCoordinateBounds(
-                    session: session,
-                    grid: meshWarpGrid,
-                    canvasSize: canvasSize
-                ),
-                into: overlayPass,
-                commandBuffer: commandBuffer
-            )
-        } else {
-            canvasPresenter.encodePreview(
-                texture: session.extractedTexture,
-                opacity: 1,
-                canvasSize: canvasSize,
-                bounds: session.operationBounds,
-                pivotBounds: session.interactionBounds ?? session.operationBounds,
-                preview: preview,
-                into: overlayPass,
-                commandBuffer: commandBuffer
-            )
-        }
-
-        let boxedTexture = TransformTextureBox(targetTexture)
-        commandBuffer.addCompletedHandler { [boxedTexture] _ in
-            Task { @MainActor in
-                completion(boxedTexture.texture)
-            }
+        let boxedTexture = TransformTextureBox(texture)
+        commandBuffer.addCompletedHandler { [boxedTexture] completed in
+            let succeeded = completed.status == .completed
+            Task { @MainActor in completion(succeeded ? boxedTexture.texture : nil) }
         }
         commandBuffer.commit()
     }

@@ -7,6 +7,80 @@ import Testing
 @Suite(.serialized)
 @MainActor
 struct FileWorkflowSafetyTests {
+    @Test func savedDocumentUndoRegistersUnsavedContentAndRequestsConfirmation() async throws {
+        let h = try FileWorkflowHarness()
+        defer { h.cleanUp() }
+        h.makeDirty()
+        h.select(h.root.appendingPathComponent("undo-save-point.artflex"))
+        #expect(h.viewModel.saveProject())
+        try await h.waitUntil { !h.viewModel.isProjectSaving }
+        #expect(!h.viewModel.hasUnsavedChanges)
+        let version = h.viewModel.canvasContentRevision
+        h.viewModel.undo()
+        #expect(h.viewModel.hasUnsavedChanges)
+        #expect(h.viewModel.canvasContentRevision > version)
+        var prompted = false
+        h.bootstrap.filePanelService.confirmForTesting = { reply in
+            prompted = true
+            reply(.alertThirdButtonReturn)
+        }
+        var allowed: Bool?
+        h.viewModel.confirmCloseOrQuitIfNeeded { allowed = $0 }
+        #expect(prompted)
+        #expect(allowed == false)
+    }
+
+    @Test func undoDuringSaveCannotAcceptTheOlderVersionAsCurrent() async throws {
+        let h = try FileWorkflowHarness()
+        defer { h.cleanUp() }
+        h.makeDirty()
+        h.select(h.root.appendingPathComponent("undo-during-save.artflex"))
+        var saved: Bool?
+        #expect(h.viewModel.saveProject { saved = $0 })
+        h.viewModel.undo()
+        try await h.waitUntil { saved != nil }
+        #expect(saved == false)
+        #expect(h.viewModel.hasUnsavedChanges)
+        let opened = try h.bootstrap.persistenceController.openProject(from: h.root.appendingPathComponent("undo-during-save.artflex"))
+        #expect(opened.workspace.document.layer(opened.workspace.document.activeLayerID)?.opacity == 0.8)
+        #expect(h.viewModel.workspace.document.layer(h.viewModel.workspace.document.activeLayerID)?.opacity == 1)
+    }
+
+    @Test func redoToSavedPointClearsDirtyButNewBranchRemainsDirty() async throws {
+        let h = try FileWorkflowHarness()
+        defer { h.cleanUp() }
+        h.makeDirty()
+        h.select(h.root.appendingPathComponent("saved-point.artflex"))
+        #expect(h.viewModel.saveProject())
+        try await h.waitUntil { !h.viewModel.isProjectSaving }
+        h.viewModel.undo()
+        let undoneRevision = h.viewModel.canvasContentRevision
+        #expect(h.viewModel.hasUnsavedChanges)
+        h.viewModel.redo()
+        #expect(!h.viewModel.hasUnsavedChanges)
+        #expect(h.viewModel.canvasContentRevision > undoneRevision)
+        h.viewModel.undo()
+        h.viewModel.setActiveLayerOpacity(0.6)
+        #expect(h.viewModel.hasUnsavedChanges)
+        h.viewModel.redo()
+        #expect(h.viewModel.hasUnsavedChanges)
+        #expect(h.viewModel.workspace.document.layer(h.viewModel.workspace.document.activeLayerID)?.opacity == 0.6)
+    }
+
+    @Test func olderSaveCompletionStillRecordsItsHistorySavePoint() async throws {
+        let h = try FileWorkflowHarness()
+        defer { h.cleanUp() }
+        h.makeDirty()
+        h.select(h.root.appendingPathComponent("older-save-point.artflex"))
+        #expect(h.viewModel.saveProject())
+        h.viewModel.setActiveLayerOpacity(0.4)
+        try await h.waitUntil { !h.viewModel.isProjectSaving }
+        #expect(h.viewModel.hasUnsavedChanges)
+        h.viewModel.undo()
+        #expect(h.viewModel.workspace.document.layer(h.viewModel.workspace.document.activeLayerID)?.opacity == 0.8)
+        #expect(!h.viewModel.hasUnsavedChanges)
+    }
+
     @Test func discardConfirmationCannotDropEditsMadeWhilePromptWasOpen() throws {
         let h = try FileWorkflowHarness()
         defer { h.cleanUp() }

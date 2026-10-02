@@ -43,6 +43,99 @@ final class EyedropperSampler {
         self.serializer = serializer
     }
 
+    private var regionPresenter: StageOneCanvasPresenter?
+
+    struct GPUReadback: @unchecked Sendable {
+        let command: MTLCommandBuffer
+        let pixels: DeferredLayerRegionSnapshots
+        func read() throws -> LayerTextureSnapshot {
+            let snapshots = try pixels.read()
+            guard command.status == .completed, let first = snapshots.first else {
+                throw CanvasResourceError(message: "吸管 GPU 合成失败")
+            }
+            return first
+        }
+    }
+
+    /// Called on the editing actor. Only the small sample region is copied and
+    /// composited, using the same shader implementation as the canvas presenter.
+    func enqueueVisibleColor(at point: CanvasPoint, document: ArtDocument,
+        layerSurfaceStore: StageOneLayerSurfaceStore, metal: MetalDeviceContext,
+        settings: EyedropperSettings,
+        contentTextureForLayer: ((LayerID) -> MTLTexture?)? = nil,
+        displayTextureForLayer: ((LayerID) -> MTLTexture?)? = nil) throws -> GPUReadback {
+        let x = max(0, min(document.canvasSize.width - 1, Int(floor(point.x))))
+        let y = max(0, min(document.canvasSize.height - 1, Int(floor(point.y))))
+        let radius = settings.sampleSize.radius
+        let ox = max(0, x - radius), oy = max(0, y - radius)
+        let width = min(document.canvasSize.width - 1, x + radius) - ox + 1
+        let height = min(document.canvasSize.height - 1, y + radius) - oy + 1
+        let layers = resolveSamplingLayers(document: document, originX: ox, originY: oy,
+            width: width, height: height, source: settings.source, layerSurfaceStore: layerSurfaceStore,
+            contentTextureForLayer: contentTextureForLayer, displayTextureForLayer: displayTextureForLayer)
+        guard let command = metal.commandQueue.makeCommandBuffer(),
+              let blit = command.makeBlitCommandEncoder() else { throw CocoaError(.coderInvalidValue) }
+        command.label = "Eyedropper bounded GPU composition"
+        var crops: [ObjectIdentifier: MTLTexture] = [:]
+        func crop(_ source: MTLTexture?) throws -> MTLTexture? {
+            guard let source else { return nil }
+            let id = ObjectIdentifier(source)
+            if let existing = crops[id] { return existing }
+            let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: source.pixelFormat,
+                width: width, height: height, mipmapped: false)
+            descriptor.storageMode = .private
+            descriptor.usage = [.shaderRead, .renderTarget]
+            guard let texture = metal.device.makeTexture(descriptor: descriptor) else { throw CocoaError(.coderInvalidValue) }
+            blit.copy(from: source, sourceSlice: 0, sourceLevel: 0,
+                sourceOrigin: .init(x: ox, y: oy, z: 0), sourceSize: .init(width: width, height: height, depth: 1),
+                to: texture, destinationSlice: 0, destinationLevel: 0, destinationOrigin: .init(x: 0, y: 0, z: 0))
+            crops[id] = texture
+            return texture
+        }
+        let inputs: [CanvasLayerCompositeInput]
+        do {
+            inputs = try layers.map { layer in
+                CanvasLayerCompositeInput(texture: try crop(layer.texture)!, opacity: layer.effectiveOpacity,
+                    blendMode: layer.layer.blendMode, clipMaskTexture: try crop(layer.clipMaskTexture),
+                    clipLayerMaskTexture: try crop(layer.clipLayerMaskTexture), layerMaskTexture: try crop(layer.layerMaskTexture),
+                    curveAdjustmentLUTs: layer.layer.adjustment?.curveLUTs)
+            }
+        } catch { blit.endEncoding(); throw error }
+        blit.endEncoding()
+        // Float target avoids an extra 8-bit quantization before the sampling statistic.
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba16Float,
+            width: width, height: height, mipmapped: false)
+        descriptor.storageMode = .private
+        descriptor.usage = [.shaderRead, .renderTarget]
+        guard let target = metal.device.makeTexture(descriptor: descriptor) else { throw CocoaError(.coderInvalidValue) }
+        if regionPresenter == nil { regionPresenter = try StageOneCanvasPresenter(device: metal.device) }
+        let pass = MTLRenderPassDescriptor()
+        pass.colorAttachments[0].texture = target
+        pass.colorAttachments[0].loadAction = .clear
+        pass.colorAttachments[0].storeAction = .store
+        pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0)
+        // Empty documents still need a clear encoded before readback.
+        if !inputs.contains(where: { $0.opacity > 0 }) {
+            guard let encoder = command.makeRenderCommandEncoder(descriptor: pass) else { throw CocoaError(.coderInvalidValue) }
+            encoder.endEncoding()
+        } else if regionPresenter?.encode(layerInputs: inputs, samplingMode: .nearest,
+            into: pass, commandBuffer: command) != true { throw CocoaError(.coderInvalidValue) }
+        command.commit()
+        let pixels = try serializer.enqueueRegionSnapshots([.init(texture: target,
+            originX: 0, originY: 0, width: width, height: height)])
+        return .init(command: command, pixels: pixels)
+    }
+
+    func sampledColor(from snapshot: LayerTextureSnapshot, settings: EyedropperSettings) -> RGBAColor {
+        var pixels: [LinearPremultipliedColor] = []
+        pixels.reserveCapacity(snapshot.width * snapshot.height)
+        for y in 0..<snapshot.height {
+            for x in 0..<snapshot.width { pixels.append(snapshot.linearPixel(x: x, y: y)) }
+        }
+        return outputColor(from: aggregate(pixels, sampleSize: settings.sampleSize, statistic: settings.statistic),
+            preservesTransparency: settings.preservesTransparency)
+    }
+
     func sampleVisibleColor(
         at point: CanvasPoint,
         document: ArtDocument,

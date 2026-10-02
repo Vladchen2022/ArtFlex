@@ -66,7 +66,8 @@ struct BrushCommitJob: Sendable, Equatable {
 
 struct BrushLiveSession {
     let layerID: LayerID
-    let workingTexture: MTLTexture
+    let workingEdit: StageOneLayerSurfaceStore.WorkingPixelEdit
+    var workingTexture: MTLTexture { workingEdit.texture }
     var displayRevision: UInt64
     var committedRevision: UInt64
     var alphaLockTexture: MTLTexture?
@@ -135,4 +136,18 @@ final class BrushCommitQueue {
         jobs.removeFirst(headIndex)
         headIndex = 0
     }
+}
+
+/// Main-thread adapter around a background immutable history capture. `commit`
+/// may wait on that capture at forced boundaries, but must never wait for a
+/// main-actor task. Interactive drains call it only after `isReady`.
+final class BrushCommitCheckpointPreparation {
+    private let readiness: () -> Bool
+    private let publish: () throws -> Void
+    var isReady: Bool { readiness() }
+    init(isReady: @escaping () -> Bool, commit: @escaping () throws -> Void) {
+        self.readiness = isReady
+        self.publish = commit
+    }
+    func commit() throws { try publish() }
 }

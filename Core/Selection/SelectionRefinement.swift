@@ -195,23 +195,9 @@ enum SelectionRefinement {
             }
         }
 
-        // Selection masks remain full-canvas for compatibility with the Metal
-        // mask pipeline, but all expensive morphology work is restricted to ROI.
-        var result = [UInt8](repeating: 0, count: pixelCount.partialValue)
-        for localY in 0..<regionHeight {
-            let destinationStart = ((originY + localY) * canvasSize.width) + originX
-            let sourceStart = localY * regionWidth
-            result.replaceSubrange(
-                destinationStart..<(destinationStart + regionWidth),
-                with: regionResult[sourceStart..<(sourceStart + regionWidth)]
-            )
-        }
-
-        let refined = SelectionShape.mask(
-            canvasWidth: canvasSize.width,
-            canvasHeight: canvasSize.height,
-            alphaBytes: result
-        )
+        let refined = SelectionShape.mask(canvasWidth: canvasSize.width, canvasHeight: canvasSize.height,
+            patch: .init(originX: originX, originY: originY, width: regionWidth,
+                         height: regionHeight, alphaBytes: Data(regionResult)))
         return refined.isEmpty ? nil : refined
     }
 

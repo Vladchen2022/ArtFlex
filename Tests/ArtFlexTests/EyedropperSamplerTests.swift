@@ -4,6 +4,46 @@ import Testing
 @testable import ArtFlex
 
 struct EyedropperSamplerTests {
+    @Test @MainActor
+    func boundedGPUSamplingMatchesCanonicalCPUAcrossFormatsSourcesAndStatistics() async throws {
+        for standard in [ArtColorStandard.stageOneDefault, .highPrecision] {
+            for blend in [LayerBlendMode.normal, .multiply, .screen] {
+                var bottom = LayerRecord.stageOneDefault()
+                bottom.name = "Bottom"
+                var top = LayerRecord.stageOneDefault()
+                top.name = "Top"
+                top.blendMode = blend
+                top.opacity = 0.63
+                var document = makeDocument(canvasSize: .init(width: 13, height: 11),
+                    layers: [bottom, top], activeLayerID: top.id)
+                document.colorStandard = standard
+                let h = try EyedropperTestHarness(document: document)
+                try h.restore(snapshot: renderedColorSnapshot(width: 13, height: 11,
+                    color: .init(red: 0.15, green: 0.43, blue: 0.72, alpha: 0.8)), to: bottom.id)
+                try h.restore(snapshot: renderedColorSnapshot(width: 13, height: 11,
+                    color: .init(red: 0.83, green: 0.2, blue: 0.11, alpha: 0.6)), to: top.id)
+                for source in [EyedropperSampleSource.currentLayer, .allVisibleLayers, .displayedColor] {
+                    for statistic in [EyedropperSampleStatistic.average, .median] {
+                        var settings = EyedropperSettings.stageOneDefault
+                        settings.source = source
+                        settings.statistic = statistic
+                        settings.preservesTransparency = true
+                        let expected = try h.sample(at: .init(x: 0, y: 0), settings: settings)
+                        let ticket = try h.sampler.enqueueVisibleColor(at: .init(x: 0, y: 0), document: document,
+                            layerSurfaceStore: h.layerSurfaceStore, metal: h.metalContext, settings: settings)
+                        let snapshot = try await Task.detached { try ticket.read() }.value
+                        #expect(snapshot.width == 2 && snapshot.height == 2)
+                        let actual = h.sampler.sampledColor(from: snapshot, settings: settings)
+                        #expect(abs(actual.red - expected.red) < 0.008)
+                        #expect(abs(actual.green - expected.green) < 0.008)
+                        #expect(abs(actual.blue - expected.blue) < 0.008)
+                        #expect(abs(actual.alpha - expected.alpha) < 0.008)
+                    }
+                }
+            }
+        }
+    }
+
     @Test
     func defaultSettingsUseThreeByThreeAverageOfDisplayedColor() {
         let settings = EyedropperSettings.stageOneDefault

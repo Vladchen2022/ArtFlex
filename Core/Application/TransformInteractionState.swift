@@ -602,11 +602,11 @@ struct FreeTransformPreview: Sendable, Equatable {
     static let identity = FreeTransformPreview()
 
     var isIdentity: Bool {
-        translation.x.rounded() == 0 &&
-        translation.y.rounded() == 0 &&
-        abs(scaleX - 1) < 0.0001 &&
-        abs(scaleY - 1) < 0.0001 &&
-        abs(rotationRadians) < 0.0001
+        abs(translation.x) < 1e-8 &&
+        abs(translation.y) < 1e-8 &&
+        abs(scaleX - 1) < 1e-8 &&
+        abs(scaleY - 1) < 1e-8 &&
+        abs(rotationRadians) < 1e-8
     }
 }
 

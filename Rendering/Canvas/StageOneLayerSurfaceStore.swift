@@ -15,19 +15,21 @@ fileprivate final class LayerTextureResource {
 }
 
 final class StageOneLayerSurfaceStore {
-    /// Owns unpublished pixels and their sparse heap until a synchronous edit commits.
+    /// Owns unpublished pixels and their sparse heap until a validated edit commits.
     final class StagedPixelEdit {
         fileprivate let source: LayerTextureResource
         fileprivate let sourceTexture: MTLTexture
         fileprivate let result: LayerTextureResource
         fileprivate let surfaceID: LayerSurfaceID
         fileprivate let region: PixelRegion
+        fileprivate let sourceRevision: LayerChangeCursor?
         var texture: MTLTexture { result.texture }
         var allocatedBytes: Int { result.sparse?.allocatedBytes ?? texture.allocatedSize }
         fileprivate init(source: LayerTextureResource, result: LayerTextureResource,
-                         surfaceID: LayerSurfaceID, region: PixelRegion) {
+                         surfaceID: LayerSurfaceID, region: PixelRegion, sourceRevision: LayerChangeCursor?) {
             self.source = source; self.sourceTexture = source.texture; self.result = result
             self.surfaceID = surfaceID; self.region = region
+            self.sourceRevision = sourceRevision
         }
     }
 
@@ -74,11 +76,13 @@ final class StageOneLayerSurfaceStore {
             }
             result = LayerTextureResource(copy)
         }
-        return StagedPixelEdit(source: source, result: result!, surfaceID: surfaceID, region: region)
+        return StagedPixelEdit(source: source, result: result!, surfaceID: surfaceID, region: region,
+            sourceRevision: revision(for: surfaceID))
     }
 
     func canPublish(_ edit: StagedPixelEdit) -> Bool {
         texturesBySurfaceID[edit.surfaceID] === edit.source && edit.source.texture === edit.sourceTexture
+            && revision(for: edit.surfaceID) == edit.sourceRevision
     }
 
     @discardableResult
@@ -94,6 +98,133 @@ final class StageOneLayerSurfaceStore {
         } else { swapTexture(for: edit.surfaceID, with: edit.texture, changedRegion: edit.region) }
         return true
     }
+
+    /// An unpublished live target. Sparse residency follows actual rasterized bounds.
+    /// It never aliases the document's writable pixels.
+    final class WorkingPixelEdit {
+        fileprivate var resource: LayerTextureResource
+        fileprivate let metal: MetalDeviceContext
+        var texture: MTLTexture { resource.texture }
+        var allocatedBytes: Int { resource.sparse?.allocatedBytes ?? texture.allocatedSize }
+        fileprivate init(resource: LayerTextureResource, metal: MetalDeviceContext) {
+            self.resource = resource
+            self.metal = metal
+        }
+
+        func prepareWrite(in region: PixelRegion, commandBuffer: MTLCommandBuffer) throws -> MTLTexture {
+            if let sparse = resource.sparse {
+                let required = sparse.mappedTiles.union(sparse.tiles(intersecting: region))
+                let denseBytes = texture.width * texture.height * (texture.pixelFormat == .rgba16Float ? 8 : 4)
+                if required.count * metal.device.sparseTileSizeInBytes >= denseBytes * 3 / 4 {
+                    try materializeDense(commandBuffer: commandBuffer)
+                } else {
+                    try sparse.prepareForWrite(in: region, commandBuffer: commandBuffer)
+                }
+            }
+            return texture
+        }
+
+        func materializeDense(commandBuffer: MTLCommandBuffer) throws {
+            guard resource.sparse != nil else { return }
+            let copy = try StageOneLayerSurfaceStore.makeDenseCopy(of: texture, metal: metal,
+                                                                  commandBuffer: commandBuffer)
+            resource = LayerTextureResource(copy)
+        }
+    }
+
+    func makeWorkingPixelEdit(for surfaceID: LayerSurfaceID,
+                              commandBuffer: MTLCommandBuffer) throws -> WorkingPixelEdit {
+        guard let source = texturesBySurfaceID[surfaceID], let metal = metalContext else {
+            throw CanvasResourceError(message: "无法访问笔触源图层")
+        }
+#if DEBUG
+        if debugPreventsTextureAllocation { throw CanvasResourceError(message: "无法分配笔触资源") }
+#endif
+        let result: LayerTextureResource
+        let texture = source.texture
+        let denseBytes = texture.width * texture.height * (texture.pixelFormat == .rgba16Float ? 8 : 4)
+        if usesSparseStorage, let sparse = source.sparse,
+           max(sparse.mappedTiles.count, 1) * metal.device.sparseTileSizeInBytes < denseBytes * 3 / 4 {
+            result = LayerTextureResource(try SparseLayerTexture.copying(texture, tiles: sparse.mappedTiles,
+                metal: metal, commandBuffer: commandBuffer))
+        } else {
+            result = LayerTextureResource(try Self.makeDenseCopy(of: texture, metal: metal,
+                                                                 commandBuffer: commandBuffer))
+        }
+        return WorkingPixelEdit(resource: result, metal: metal)
+    }
+
+    /// Async preparation uses known residency only: no synchronous occupancy scan or GPU wait.
+    /// Unknown/dense sources and broad edits deliberately retain the dense path.
+    func preparePixelEdit(for surfaceID: LayerSurfaceID, region: PixelRegion,
+                          commandBuffer: MTLCommandBuffer,
+                          reusingDenseTexture: MTLTexture? = nil) throws -> StagedPixelEdit {
+        guard let source = texturesBySurfaceID[surfaceID], let metal = metalContext else {
+            throw CanvasResourceError(message: "无法访问笔触编辑源图层")
+        }
+#if DEBUG
+        if debugPreventsTextureAllocation { throw CanvasResourceError(message: "无法分配像素编辑资源") }
+#endif
+        let texture = source.texture
+        let canvas = CanvasSize(width: texture.width, height: texture.height)
+        guard let bounds = PixelRegion.canvasBounds(for: canvas), bounds.intersection(with: region) == region else {
+            throw CanvasResourceError(message: "笔触编辑区域超出画布")
+        }
+        var result: LayerTextureResource?
+        if usesSparseStorage, let sparse = source.sparse,
+           region.width * region.height < texture.width * texture.height / 4 {
+            let required = sparse.mappedTiles.union(sparse.tiles(intersecting: region))
+            let denseBytes = texture.width * texture.height * (texture.pixelFormat == .rgba16Float ? 8 : 4)
+            if max(required.count, 1) * metal.device.sparseTileSizeInBytes < denseBytes * 3 / 4 {
+                result = LayerTextureResource(try SparseLayerTexture.copying(texture, tiles: required,
+                    metal: metal, commandBuffer: commandBuffer))
+            }
+        }
+        if result == nil {
+            result = LayerTextureResource(try Self.makeDenseCopy(of: texture, metal: metal,
+                commandBuffer: commandBuffer, reusing: reusingDenseTexture))
+        }
+        return StagedPixelEdit(source: source, result: result!, surfaceID: surfaceID, region: region,
+            sourceRevision: revision(for: surfaceID))
+    }
+
+    private static func makeDenseCopy(of source: MTLTexture, metal: MetalDeviceContext,
+                                      commandBuffer: MTLCommandBuffer,
+                                      reusing candidate: MTLTexture? = nil) throws -> MTLTexture {
+        let result: MTLTexture
+        if let candidate, candidate !== source,
+           candidate.width == source.width, candidate.height == source.height,
+           candidate.pixelFormat == source.pixelFormat, candidate.heap?.type != .sparse {
+            result = candidate
+        } else {
+            let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: source.pixelFormat,
+                width: source.width, height: source.height, mipmapped: false)
+            descriptor.storageMode = .private
+            descriptor.usage = [.shaderRead, .shaderWrite, .renderTarget]
+            guard let created = metal.device.makeTexture(descriptor: descriptor) else {
+                throw CanvasResourceError(message: "无法分配笔触暂存；原图层和输入仍保留")
+            }
+            result = created
+        }
+        let lifetime = MetalCloneSourceLifetime([source, result])
+        commandBuffer.addCompletedHandler { _ in withExtendedLifetime(lifetime) {} }
+        guard let copy = commandBuffer.makeBlitCommandEncoder() else {
+            throw CanvasResourceError(message: "无法复制笔触源图层")
+        }
+        copy.copy(from: source, sourceSlice: 0, sourceLevel: 0,
+                  sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
+                  sourceSize: MTLSize(width: source.width, height: source.height, depth: 1),
+                  to: result, destinationSlice: 0, destinationLevel: 0,
+                  destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0))
+        copy.endEncoding()
+        return result
+    }
+
+    private func revision(for surfaceID: LayerSurfaceID) -> LayerChangeCursor? {
+        guard let layerID = surfacesByLayerID.first(where: { $0.value.surfaceID == surfaceID })?.key else { return nil }
+        return changeJournal(for: .init(layerID: layerID, kind: .content)).cursor
+    }
+
 
     private var surfacesByLayerID: [LayerID: LayerSurfaceRecord] = [:]
     private var texturesBySurfaceID: [LayerSurfaceID: LayerTextureResource] = [:]

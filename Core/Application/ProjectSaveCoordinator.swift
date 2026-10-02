@@ -27,7 +27,7 @@ final class ProjectSaveCoordinator {
             let audit = PerformanceAuditStore.shared
             let recording = audit.isRecordingEnabled
             let start = recording ? DispatchTime.now().uptimeNanoseconds : 0
-            let payload = try worker.controller.materializeProjectPayload(from: capture)
+            let payload = try worker.controller.materializeProjectPayload(from: capture, reuseEncodedLayers: true)
             let materialized = recording ? DispatchTime.now().uptimeNanoseconds : 0
             let result = try worker.controller.writeCapturedProject(payload, to: url)
             if recording {

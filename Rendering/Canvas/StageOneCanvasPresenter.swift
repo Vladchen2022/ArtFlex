@@ -50,6 +50,48 @@ struct CanvasLayerCompositeInput {
     var curveAdjustmentLUTs: CurveLUTs? = nil
 }
 
+/// The caller supplies revisions for every content/mask/clip dependency in the
+/// stable prefix. Texture identities alone cannot detect in-place pixel writes.
+struct CanvasCompositePrefixCacheHint {
+    var count: Int
+    var revisionTokens: [LayerChangeCursor]
+}
+
+private struct CanvasCompositeInputIdentity: Equatable {
+    var texture: ObjectIdentifier
+    var opacity: Float
+    var blendMode: LayerBlendMode
+    var clip: ObjectIdentifier?
+    var clipMask: ObjectIdentifier?
+    var mask: ObjectIdentifier?
+    var curves: CurveLUTs?
+    init(_ input: CanvasLayerCompositeInput) {
+        texture = ObjectIdentifier(input.texture)
+        opacity = input.opacity
+        blendMode = input.blendMode
+        clip = input.clipMaskTexture.map(ObjectIdentifier.init)
+        clipMask = input.clipLayerMaskTexture.map(ObjectIdentifier.init)
+        mask = input.layerMaskTexture.map(ObjectIdentifier.init)
+        curves = input.curveAdjustmentLUTs
+    }
+}
+
+private struct CanvasCompositePrefixKey: Equatable {
+    var inputs: [CanvasCompositeInputIdentity]
+    var revisions: [LayerChangeCursor]
+    var width: Int
+    var height: Int
+    var format: MTLPixelFormat
+    var sampling: CanvasDisplaySamplingMode
+    var queue: ObjectIdentifier
+}
+
+private struct CanvasCompositePrefixEntry {
+    var key: CanvasCompositePrefixKey
+    var texture: MTLTexture
+    var command: MTLCommandBuffer
+}
+
 private struct CanvasBlendUniforms {
     var layerOpacity: Float
     var blendMode: UInt32
@@ -88,8 +130,13 @@ final class StageOneCanvasPresenter: @unchecked Sendable {
     private let compositePoolLock = NSLock()
     private var compositeTexturePool: [CanvasCompositeTexturePair] = []
     private var compositeTexturePoolKey: CanvasCompositeTexturePoolKey?
+    private let prefixCacheLock = NSLock()
+    private var prefixCache: CanvasCompositePrefixEntry?
 #if DEBUG
     var debugPreventsCompositeTextureAllocation = false
+    var debugPreventsPrefixCacheAllocation = false
+    private(set) var debugPrefixCacheHits = 0
+    private(set) var debugPrefixCacheBuilds = 0
 #endif
 
     init(device: MTLDevice) throws {
@@ -350,9 +397,18 @@ final class StageOneCanvasPresenter: @unchecked Sendable {
     func encode(
         layerInputs: [CanvasLayerCompositeInput],
         samplingMode: CanvasDisplaySamplingMode = .linear,
+        cacheHint: CanvasCompositePrefixCacheHint? = nil,
         into renderPassDescriptor: MTLRenderPassDescriptor,
         commandBuffer: MTLCommandBuffer
     ) -> Bool {
+        if let cacheHint, let target = renderPassDescriptor.colorAttachments[0].texture,
+           let prefix = cachedPrefixTexture(inputs: layerInputs, hint: cacheHint,
+               target: target, samplingMode: samplingMode, commandBuffer: commandBuffer) {
+            // The prefix is a complete backdrop. Suffix blend/adjustment layers
+            // must still see that backdrop; they are never cached independently.
+            return encode(layerInputs: [.init(texture: prefix, opacity: 1)] + Array(layerInputs.dropFirst(cacheHint.count)),
+                samplingMode: samplingMode, into: renderPassDescriptor, commandBuffer: commandBuffer)
+        }
         let visibleInputs = layerInputs.filter { $0.opacity > 0 }
         guard !visibleInputs.isEmpty else { return true }
 
@@ -451,6 +507,65 @@ final class StageOneCanvasPresenter: @unchecked Sendable {
         return true
     }
 
+    func invalidateCompositePrefixCache() {
+        prefixCacheLock.lock()
+        prefixCache = nil
+        prefixCacheLock.unlock()
+    }
+
+    private func cachedPrefixTexture(inputs: [CanvasLayerCompositeInput], hint: CanvasCompositePrefixCacheHint,
+        target: MTLTexture, samplingMode: CanvasDisplaySamplingMode, commandBuffer: MTLCommandBuffer) -> MTLTexture? {
+        guard hint.count >= 2, hint.count <= inputs.count, !hint.revisionTokens.isEmpty else { return nil }
+        // Cache at most one drawable-sized image and decline oversized displays.
+        // This cache is optional; allocation failure always uses full composition.
+        let bytesPerPixel = target.pixelFormat == .rgba16Float ? 8 : 4
+        guard target.width * target.height * bytesPerPixel <= 64 * 1024 * 1024 else {
+            invalidateCompositePrefixCache()
+            return nil
+        }
+        let prefix = Array(inputs.prefix(hint.count))
+        guard prefix.contains(where: { $0.opacity > 0 }) else { return nil }
+        let key = CanvasCompositePrefixKey(inputs: prefix.map(CanvasCompositeInputIdentity.init),
+            revisions: hint.revisionTokens, width: target.width, height: target.height,
+            format: target.pixelFormat, sampling: samplingMode, queue: ObjectIdentifier(commandBuffer.commandQueue))
+        prefixCacheLock.lock()
+        if let cached = prefixCache, cached.key == key,
+           cached.command.status != .error,
+           cached.command === commandBuffer || cached.command.status == .committed ||
+                cached.command.status == .scheduled || cached.command.status == .completed {
+#if DEBUG
+            debugPrefixCacheHits += 1
+#endif
+            prefixCacheLock.unlock()
+            return cached.texture
+        }
+        prefixCacheLock.unlock()
+#if DEBUG
+        if debugPreventsPrefixCacheAllocation { return nil }
+#endif
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: target.pixelFormat,
+            width: target.width, height: target.height, mipmapped: false)
+        descriptor.storageMode = .private
+        descriptor.usage = [.shaderRead, .renderTarget]
+        guard let texture = device.makeTexture(descriptor: descriptor) else { return nil }
+        texture.label = "Stable layer prefix"
+        let pass = MTLRenderPassDescriptor()
+        pass.colorAttachments[0].texture = texture
+        pass.colorAttachments[0].loadAction = .clear
+        pass.colorAttachments[0].storeAction = .store
+        pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0)
+        guard encode(layerInputs: prefix, samplingMode: samplingMode, into: pass, commandBuffer: commandBuffer) else {
+            return nil
+        }
+        prefixCacheLock.lock()
+        prefixCache = .init(key: key, texture: texture, command: commandBuffer)
+#if DEBUG
+        debugPrefixCacheBuilds += 1
+#endif
+        prefixCacheLock.unlock()
+        return texture
+    }
+
     private func blendModeIndex(_ blendMode: LayerBlendMode) -> UInt32 {
         switch blendMode {
         case .normal: 0
@@ -539,6 +654,7 @@ final class StageOneCanvasPresenter: @unchecked Sendable {
         return true
     }
 
+    @discardableResult
     func encodePreview(
         texture: MTLTexture,
         opacity: Float,
@@ -549,9 +665,9 @@ final class StageOneCanvasPresenter: @unchecked Sendable {
         samplingMode: CanvasDisplaySamplingMode = .linear,
         into renderPassDescriptor: MTLRenderPassDescriptor,
         commandBuffer: MTLCommandBuffer
-    ) {
+    ) -> Bool {
         guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor) else {
-            return
+            return false
         }
 
         let corners = freeTransformCornerPoints(
@@ -561,7 +677,7 @@ final class StageOneCanvasPresenter: @unchecked Sendable {
         )
         guard corners.count == 4 else {
             encoder.endEncoding()
-            return
+            return false
         }
 
         let vertices = [
@@ -591,8 +707,10 @@ final class StageOneCanvasPresenter: @unchecked Sendable {
         )
         encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
         encoder.endEncoding()
+        return true
     }
 
+    @discardableResult
     func encodeMeshPreview(
         texture: MTLTexture,
         opacity: Float,
@@ -602,15 +720,15 @@ final class StageOneCanvasPresenter: @unchecked Sendable {
         samplingMode: CanvasDisplaySamplingMode = .linear,
         into renderPassDescriptor: MTLRenderPassDescriptor,
         commandBuffer: MTLCommandBuffer
-    ) {
+    ) -> Bool {
         guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor) else {
-            return
+            return false
         }
 
         let meshVertices = grid.tessellatedVertices()
         guard !meshVertices.isEmpty else {
             encoder.endEncoding()
-            return
+            return false
         }
         let vertices = meshVertices.map { vertex in
             CanvasPresenterVertex(
@@ -639,7 +757,7 @@ final class StageOneCanvasPresenter: @unchecked Sendable {
         }
         guard let vertexBuffer else {
             encoder.endEncoding()
-            return
+            return false
         }
 
         encoder.setRenderPipelineState(pipelineVariants.state(pipelineState, for: renderPassDescriptor.colorAttachments[0].texture?.pixelFormat ?? .bgra8Unorm_srgb))
@@ -658,6 +776,7 @@ final class StageOneCanvasPresenter: @unchecked Sendable {
         )
         encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: vertices.count)
         encoder.endEncoding()
+        return true
     }
 
     private func ndcPoint(

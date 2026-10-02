@@ -81,6 +81,7 @@ struct WorkspaceHistoryEntry: Sendable, Equatable {
     var mode: Mode
     var preservesCommonLayerTexturesAcrossTopologyChange: Bool
     var visibleMetadata: VisibleHistoryEntryMetadata
+    var stateID: UUID = UUID()
 }
 
 enum HistoryCaptureMode {
@@ -125,6 +126,92 @@ struct HistoryEligibilityAuditContext: Sendable {
     var additionalOperationKinds: [String] = []
 }
 
+
+/// Long jumps validate every cold source before changing the first visible state. Validation
+/// streams compressed chunks, preserving the existing no-partial-jump guarantee for known
+/// disk corruption without materializing the entire navigation range in RAM.
+struct HistoryNavigationValidation: Sendable {
+    fileprivate var sources: [HistoryPixelPayload]
+
+    func validate() async throws {
+        try Task.checkCancellation()
+        let sources = sources
+        let worker = Task.detached(priority: .userInitiated) {
+            try autoreleasepool {
+                for source in sources {
+                    try Task.checkCancellation()
+                    try source.validateReadable()
+                }
+            }
+        }
+        try await withTaskCancellationHandler {
+            try await worker.value
+            try Task.checkCancellation()
+        } onCancel: {
+            worker.cancel()
+        }
+    }
+}
+
+struct PreparedHistoryStep: Sendable {
+    fileprivate var direction: VisibleHistoryNavigationDirection
+    fileprivate var source: HistoryPixelPayload
+    fileprivate var expectedStateID: UUID
+    fileprivate var entry: WorkspaceHistoryEntry
+}
+
+/// Captured on the editing actor; the request owns immutable metadata and payload identity.
+/// It can be resolved on another executor without touching live workspace or stack state.
+struct HistoryStepPreparation: Sendable {
+    fileprivate var direction: VisibleHistoryNavigationDirection
+    fileprivate var source: HistoryPixelPayload
+    fileprivate var expectedStateID: UUID
+    fileprivate var metadata: WorkspaceHistoryEntry
+    fileprivate var readAhead: HistoryPreparedPixelRead?
+
+    var requiresBackgroundPreparation: Bool {
+        !source.hasResidentSnapshots && readAhead?.readyResult == nil
+    }
+
+    func prepare() async throws -> PreparedHistoryStep {
+        try Task.checkCancellation()
+        var entry = metadata
+        if let readAhead {
+            entry.layerSnapshots = try await readAhead.value()
+        } else if source.hasResidentSnapshots {
+            entry.layerSnapshots = try source.read()
+        } else {
+            let source = source
+            entry.layerSnapshots = try await Task.detached(priority: .userInitiated) {
+                try autoreleasepool { try source.read() }
+            }.value
+        }
+        try Task.checkCancellation()
+        return .init(direction: direction, source: source, expectedStateID: expectedStateID, entry: entry)
+    }
+
+    fileprivate func prepareSynchronously() throws -> PreparedHistoryStep {
+        var entry = metadata
+        entry.layerSnapshots = try readAhead?.read() ?? source.read()
+        return .init(direction: direction, source: source, expectedStateID: expectedStateID, entry: entry)
+    }
+}
+
+struct DeferredHistorySnapshots: Sendable {
+    var descriptors: [(layerID: LayerID, resourceKind: LayerHistoryResourceKind, region: PixelRegion)]
+    var pixels: DeferredLayerRegionSnapshots
+    var isReady: Bool { pixels.isReady }
+    func read() throws -> [LayerHistorySnapshot] {
+        let snapshots = try pixels.read()
+        guard snapshots.count == descriptors.count else { throw HistoryDiskError.unavailable }
+        return zip(descriptors, snapshots).map { descriptor, texture in
+            .init(layerID: descriptor.layerID, resourceKind: descriptor.resourceKind, texture: texture,
+                  originX: descriptor.region.originX, originY: descriptor.region.originY)
+        }
+    }
+    func notifyWhenReady(_ observer: @escaping @Sendable () -> Void) { pixels.notifyWhenReady(observer) }
+}
+
 final class HistoryController {
     static let defaultMaxEntries = 128
     static let defaultMaxResidentBytes = 768 * 1024 * 1024
@@ -148,6 +235,8 @@ final class HistoryController {
     private let maxResidentBytes: Int
     private let diskCache: HistoryDiskCache?
     private let hotEntryCount: Int
+    private let readAheadCache: HistoryReadAheadCache
+    private(set) var currentStateID = UUID()
 
     private struct StoredEntry {
         var metadata: WorkspaceHistoryEntry
@@ -189,19 +278,22 @@ final class HistoryController {
         self.maxResidentBytes = maxResidentBytes
         self.diskCache = diskCache
         self.hotEntryCount = max(1, hotEntryCount)
+        self.readAheadCache = HistoryReadAheadCache(maximumBytes: min(64 * 1024 * 1024, max(0, maxResidentBytes / 8)))
     }
 
     var canUndo: Bool { !undoStack.isEmpty }
     var canRedo: Bool { !redoStack.isEmpty }
-    var residentByteCount: Int { (undoStack + redoStack).reduce(0) { $0 + $1.pixels.residentBytes } }
+    var residentByteCount: Int { (undoStack + redoStack).reduce(readAheadByteCount) { $0 + $1.pixels.residentBytes } }
     var diskByteCount: Int { (undoStack + redoStack).reduce(0) { $0 + $1.pixels.diskBytes } }
     var diskEntryCount: Int { (undoStack + redoStack).filter { $0.pixels.diskBytes > 0 }.count }
     var pendingDiskEntryCount: Int { (undoStack + redoStack).filter { $0.pixels.isPending }.count }
     var storageWarning: String? { diskCache?.lastFailure }
+    var readAheadByteCount: Int { readAheadCache.reservedByteCount }
 
     /// Releases oldest history first while keeping the newest restore point. This is used only
     /// after an OS memory-pressure notification; document pixels are never discarded.
     func relieveMemoryPressure(critical: Bool) {
+        readAheadCache.clear()
         if diskCache != nil {
             maintainStorage(hotCount: 1, byteTarget: critical ? maxResidentBytes / 8 : maxResidentBytes / 3)
             return
@@ -261,8 +353,10 @@ final class HistoryController {
             auditContext: auditContext,
             durationMetricKey: "HistoryController.captureCheckpoint"
         )
+        readAheadCache.clear()
         clear(&redoStack)
         append(entry, to: &undoStack)
+        currentStateID = UUID()
         maintainStorage()
     }
 
@@ -282,8 +376,10 @@ final class HistoryController {
             auditContext: auditContext,
             durationMetricKey: "HistoryController.captureCheckpoint"
         )
+        readAheadCache.clear()
         clear(&redoStack)
         append(entry, to: &undoStack)
+        currentStateID = UUID()
         maintainStorage()
     }
 
@@ -311,9 +407,31 @@ final class HistoryController {
         }
     }
 
+    func enqueueSnapshots(for layerID: LayerID, region: PixelRegion) throws -> DeferredHistorySnapshots {
+        guard let layer = workspaceStore.state.document.layer(layerID),
+              let texture = layerSurfaceStore.surfaceID(for: layerID).flatMap(layerSurfaceStore.readTexture(for:)) else {
+            throw HistoryControllerError.missingCaptureResource(layerID: layerID, resourceKind: .content)
+        }
+        var resources: [(LayerHistoryResourceKind, MTLTexture)] = [(.content, texture)]
+        if layer.mask != nil {
+            guard let mask = layerSurfaceStore.readMaskTexture(for: layerID) else {
+                throw HistoryControllerError.missingCaptureResource(layerID: layerID, resourceKind: .mask)
+            }
+            resources.append((.mask, mask))
+        }
+        let requests = resources.map { _, texture in
+            LayerTextureRegionSnapshotRequest(texture: texture, originX: region.originX,
+                originY: region.originY, width: region.width, height: region.height)
+        }
+        return DeferredHistorySnapshots(descriptors: resources.map { (layerID, $0.0, region) },
+            pixels: try serializer.enqueueRegionSnapshots(requests))
+    }
+
     func resetHistory() {
+        readAheadCache.clear()
         clear(&undoStack)
         clear(&redoStack)
+        currentStateID = UUID()
     }
 
     func captureCurrentEntry() throws -> WorkspaceHistoryEntry {
@@ -322,59 +440,71 @@ final class HistoryController {
 
     /// Check every cold entry before a multi-step UI preview starts. This does not inflate the
     /// entire history into RAM and prevents a known broken cache halfway through a jump.
+    func makeNavigationValidation(_ plan: VisibleHistoryNavigationPlan) throws -> HistoryNavigationValidation {
+        let entries = plan.direction == .undo ? undoStack.suffix(plan.undoStepCount) : redoStack.suffix(plan.redoStepCount)
+        guard entries.count == plan.totalStepCount else { throw HistoryDiskError.unavailable }
+        return .init(sources: entries.map(\.pixels))
+    }
+
     func validateNavigation(_ plan: VisibleHistoryNavigationPlan) throws {
         let entries = plan.direction == .undo ? undoStack.suffix(plan.undoStepCount) : redoStack.suffix(plan.redoStepCount)
         guard entries.count == plan.totalStepCount else { throw HistoryDiskError.unavailable }
         for entry in entries { try entry.pixels.validateReadable() }
     }
 
-    func undo() throws -> Bool {
-        guard let stored = undoStack.last else {
-            return false
+    /// Captures identities on the editing thread; no file bytes are read here.
+    func makePreparation(direction: VisibleHistoryNavigationDirection) -> HistoryStepPreparation? {
+        let stored: StoredEntry?
+        switch direction {
+        case .undo: stored = undoStack.last
+        case .redo: stored = redoStack.last
+        case .none: return nil
         }
-        // Disk validation must finish before capturing or changing any live document state.
-        let previous = try stored.materialized()
+        guard let stored else { return nil }
+        let preferred = direction == .undo ? undoStack : redoStack
+        let other = direction == .undo ? redoStack : undoStack
+        readAheadCache.update(candidates: preferred.reversed().map(\.pixels) + other.reversed().map(\.pixels))
+        return .init(direction: direction, source: stored.pixels, expectedStateID: currentStateID,
+                     metadata: stored.metadata, readAhead: readAheadCache.preparedRead(for: stored.pixels))
+    }
 
+    /// Only publication and inverse pixel capture touch the live document. Target bytes have
+    /// already been read and verified, including cold-cache misses and long navigation steps.
+    @discardableResult
+    func applyPrepared(_ prepared: PreparedHistoryStep) throws -> Bool {
+        let stored = prepared.direction == .undo ? undoStack.last : redoStack.last
+        guard prepared.direction != .none, currentStateID == prepared.expectedStateID,
+              let stored, stored.pixels === prepared.source else { throw HistoryDiskError.unavailable }
+        let target = prepared.entry
         var current = try makeEntryWithAudit(
-            captureMode: currentEntryCaptureMode(for: previous),
-            providedLayerSnapshots: try currentLayerSnapshots(matchingRegionsIn: previous),
+            captureMode: currentEntryCaptureMode(for: target),
+            providedLayerSnapshots: try currentLayerSnapshots(matchingRegionsIn: target),
             auditContext: HistoryEligibilityAuditContext(
-                operationKind: "undo.currentEntryCapture",
-                candidateChangedLayerIDs: [],
-                candidateChangedLayerIDsKnown: false,
-                comparisonWorkspace: previous.workspace
-            )
-        )
-        current.visibleMetadata = previous.visibleMetadata
-        try restore(entry: previous)
-        undoStack.removeLast().pixels.discard()
-        append(current, to: &redoStack)
+                operationKind: prepared.direction == .undo ? "undo.currentEntryCapture" : "redo.currentEntryCapture",
+                candidateChangedLayerIDs: [], candidateChangedLayerIDsKnown: false,
+                comparisonWorkspace: target.workspace))
+        current.visibleMetadata = target.visibleMetadata
+        try restore(entry: target)
+        if prepared.direction == .undo {
+            undoStack.removeLast().pixels.discard()
+            append(current, to: &redoStack)
+        } else {
+            redoStack.removeLast().pixels.discard()
+            append(current, to: &undoStack)
+        }
+        currentStateID = target.stateID
         maintainStorage()
         return true
     }
 
-    func redo() throws -> Bool {
-        guard let stored = redoStack.last else {
-            return false
-        }
-        let next = try stored.materialized()
+    func undo() throws -> Bool {
+        guard let preparation = makePreparation(direction: .undo) else { return false }
+        return try applyPrepared(preparation.prepareSynchronously())
+    }
 
-        var current = try makeEntryWithAudit(
-            captureMode: currentEntryCaptureMode(for: next),
-            providedLayerSnapshots: try currentLayerSnapshots(matchingRegionsIn: next),
-            auditContext: HistoryEligibilityAuditContext(
-                operationKind: "redo.currentEntryCapture",
-                candidateChangedLayerIDs: [],
-                candidateChangedLayerIDsKnown: false,
-                comparisonWorkspace: next.workspace
-            )
-        )
-        current.visibleMetadata = next.visibleMetadata
-        try restore(entry: next)
-        redoStack.removeLast().pixels.discard()
-        append(current, to: &undoStack)
-        maintainStorage()
-        return true
+    func redo() throws -> Bool {
+        guard let preparation = makePreparation(direction: .redo) else { return false }
+        return try applyPrepared(preparation.prepareSynchronously())
     }
 
     static func mergedWorkspaceForHistoryNavigation(
@@ -504,7 +634,8 @@ final class HistoryController {
             visibleMetadata: VisibleHistoryEntryMetadata(
                 actionKey: "generic.checkpoint",
                 affectedLayerIDs: Array(snapshotLayerIDs)
-            )
+            ),
+            stateID: currentStateID
         )
     }
 
@@ -662,6 +793,7 @@ final class HistoryController {
             try restoreMetadataOnly(workspace: entry.workspace, expectedIdentitySignature: identitySignature)
         }
         resetHistory()
+        currentStateID = entry.stateID
     }
 
     private func restoreWorkspaceOnly(

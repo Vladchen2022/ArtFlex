@@ -177,22 +177,56 @@ struct ProjectArchiveV2Manifest: Codable, Sendable, Equatable {
     }
 }
 
+
+/// In-memory reuse never changes the archive format. Only compressed bytes are retained;
+/// decoded full-canvas snapshots remain transient worker resources.
+struct EncodedProjectLayerResource: Sendable, Equatable {
+    var template: LayerHistorySnapshot
+    var compressedPixels: Data
+    var uncompressedByteCount: Int
+    var sha256: String
+
+    init(snapshot: LayerHistorySnapshot) throws {
+        template = snapshot
+        template.texture.pixelData = Data()
+        compressedPixels = try ZlibCodec.compress(snapshot.texture.pixelData)
+        uncompressedByteCount = snapshot.texture.pixelData.count
+        sha256 = ProjectReferenceImageHash.sha256Hex(snapshot.texture.pixelData)
+    }
+
+    var key: LayerResourceKey { .init(layerID: template.layerID, kind: template.resourceKind) }
+
+    func materialized() throws -> LayerHistorySnapshot {
+        let data = try ZlibCodec.decompress(compressedPixels, expectedSize: uncompressedByteCount)
+        guard ProjectReferenceImageHash.sha256Hex(data) == sha256 else {
+            throw PersistenceError.invalidProject("图层缓存校验失败")
+        }
+        var snapshot = template
+        snapshot.texture.pixelData = data
+        return snapshot
+    }
+}
+
+
 struct ProjectArchivePayload: Sendable, Equatable {
     var package: ProjectPackage
     var referenceImages: [ProjectReferenceImagePayload]
     var savedSnapshots: [PersistentCanvasSnapshotPayload]
     var previewPNGData: Data?
+    var encodedLayerResources: [EncodedProjectLayerResource]
 
     init(
         package: ProjectPackage,
         referenceImages: [ProjectReferenceImagePayload] = [],
         savedSnapshots: [PersistentCanvasSnapshotPayload] = [],
-        previewPNGData: Data? = nil
+        previewPNGData: Data? = nil,
+        encodedLayerResources: [EncodedProjectLayerResource] = []
     ) {
         self.package = package
         self.referenceImages = referenceImages
         self.savedSnapshots = savedSnapshots
         self.previewPNGData = previewPNGData
+        self.encodedLayerResources = encodedLayerResources
     }
 }
 
@@ -494,9 +528,11 @@ final class ProjectArchiveV2Writer {
 
             var layerDescriptors: [ProjectArchiveLayerDescriptor] = []
             layerDescriptors.reserveCapacity(payload.package.layerSnapshots.count)
+            let encodedResources = Dictionary(uniqueKeysWithValues: payload.encodedLayerResources.map { ($0.key, $0) })
             for layerSnapshot in payload.package.layerSnapshots {
                 let pixelData = layerSnapshot.texture.pixelData
-                let compressedData = try ZlibCodec.compress(pixelData)
+                let reused = encodedResources[.init(layerID: layerSnapshot.layerID, kind: layerSnapshot.resourceKind)]
+                let compressedData = try reused?.compressedPixels ?? ZlibCodec.compress(pixelData)
                 let resourceSuffix: String
                 let pixelFormat: ProjectArchivePixelFormat
                 switch layerSnapshot.resourceKind {
@@ -508,12 +544,12 @@ final class ProjectArchiveV2Writer {
                     pixelFormat = .grayscale8Unorm
                 }
                 let relativePath = "layers/\(layerSnapshot.layerID.rawValue.uuidString.lowercased()).\(resourceSuffix).zlib"
-                let asset = makeAssetDescriptor(
-                    relativePath: relativePath,
-                    compression: .zlib,
-                    storedData: compressedData,
-                    uncompressedData: pixelData
-                )
+                let asset = reused.map {
+                    ProjectArchiveAssetDescriptor(relativePath: relativePath, compression: .zlib,
+                        storedByteCount: compressedData.count, uncompressedByteCount: $0.uncompressedByteCount,
+                        sha256: $0.sha256)
+                } ?? makeAssetDescriptor(relativePath: relativePath, compression: .zlib,
+                    storedData: compressedData, uncompressedData: pixelData)
                 try write(compressedData, descriptor: asset, into: stagingURL)
                 layerDescriptors.append(
                     ProjectArchiveLayerDescriptor(
@@ -688,8 +724,20 @@ final class ProjectArchiveV2Writer {
             throw ProjectArchiveV2Error.projectLayerSetMismatch
         }
 
+        let encodedKeys = payload.encodedLayerResources.map(\.key)
+        guard Set(encodedKeys).count == encodedKeys.count else { throw ProjectArchiveV2Error.projectLayerSetMismatch }
+        let encodedResources = Dictionary(uniqueKeysWithValues: payload.encodedLayerResources.map { ($0.key, $0) })
+        let snapshotKeys = Set(layerSnapshots.map { LayerResourceKey(layerID: $0.layerID, kind: $0.resourceKind) })
+        guard Set(encodedKeys).isSubset(of: snapshotKeys) else { throw ProjectArchiveV2Error.projectLayerSetMismatch }
         for layerSnapshot in layerSnapshots {
             let texture = layerSnapshot.texture
+            let encoded = encodedResources[.init(layerID: layerSnapshot.layerID, kind: layerSnapshot.resourceKind)]
+            if let encoded {
+                guard encoded.template == layerSnapshot, texture.pixelData.isEmpty,
+                      encoded.compressedPixels.count <= limits.maximumStoredAssetBytes else {
+                    throw ProjectArchiveV2Error.invalidLayerSnapshot(layerSnapshot.layerID)
+                }
+            }
             let encoding: CanvasPixelEncoding = layerSnapshot.resourceKind == .mask ? .grayscale8 : payload.package.document.colorStandard.pixelFormat.encoding
             let bytesPerPixel = encoding.bytesPerPixel
             let (expectedBytesPerRow, rowOverflow) = texture.width.multipliedReportingOverflow(by: bytesPerPixel)
@@ -703,12 +751,12 @@ final class ProjectArchiveV2Writer {
                 texture.height > 0,
                 texture.encoding == encoding,
                 texture.bytesPerRow == expectedBytesPerRow,
-                texture.pixelData.count == expectedByteCount
+                (encoded?.uncompressedByteCount ?? texture.pixelData.count) == expectedByteCount
             else {
                 throw ProjectArchiveV2Error.invalidLayerSnapshot(layerSnapshot.layerID)
             }
             try reserve(
-                texture.pixelData.count,
+                expectedByteCount,
                 path: "图层 \(layerSnapshot.layerID.rawValue.uuidString)"
             )
         }

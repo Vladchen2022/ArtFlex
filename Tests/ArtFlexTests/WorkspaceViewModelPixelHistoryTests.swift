@@ -5,6 +5,52 @@ import Testing
 
 struct WorkspaceViewModelPixelHistoryTests {
     @Test @MainActor
+    func lassoFillTransactionFailuresLeavePixelsHistoryAndRedoUntouched() throws {
+        for standard in [ArtColorStandard.stageOneDefault, .highPrecision] {
+            let h = try PixelHistoryHarness(colorStandard: standard)
+            let id = h.viewModel.workspace.document.activeLayerID
+            h.makeLassoSelection([.init(x: 8, y: 8), .init(x: 40, y: 8), .init(x: 40, y: 40), .init(x: 8, y: 40), .init(x: 8, y: 8)])
+            h.viewModel.fillLassoContents()
+            let painted = try h.snapshot(layerID: id)
+            h.viewModel.undo()
+            let before = try h.snapshot(layerID: id)
+            let timeline = h.bootstrap.historyController.visibleTimeline
+            let cursor = h.bootstrap.layerSurfaceStore.changeJournal(for: .init(layerID: id, kind: .content)).cursor
+            for failure in 0..<4 {
+                h.viewModel.debugPreventsPixelEditPreparation = failure == 0
+                h.bootstrap.selectionFillRenderer.debugPreventsEncoding = failure == 1
+                h.viewModel.debugRejectsPixelEditCompletion = failure == 2
+                h.bootstrap.historyController.debugPreventsCheckpointCapture = failure == 3
+                h.viewModel.fillLassoContents()
+                #expect(try h.snapshot(layerID: id) == before)
+                #expect(h.bootstrap.historyController.visibleTimeline == timeline)
+                #expect(h.bootstrap.layerSurfaceStore.changeJournal(for: .init(layerID: id, kind: .content)).cursor == cursor)
+            }
+            h.viewModel.debugPreventsPixelEditPreparation = false
+            h.bootstrap.selectionFillRenderer.debugPreventsEncoding = false
+            h.viewModel.debugRejectsPixelEditCompletion = false
+            h.bootstrap.historyController.debugPreventsCheckpointCapture = false
+            h.viewModel.redo()
+            #expect(try h.snapshot(layerID: id) == painted)
+        }
+    }
+
+    @Test @MainActor
+    func generatorCannotPublishAfterUndoChangesDocumentVersion() async throws {
+        let h = try PixelHistoryHarness()
+        let id = h.viewModel.workspace.document.activeLayerID
+        h.viewModel.setActiveLayerOpacity(0.8)
+        h.viewModel.applyGeneratorToActiveLayer()
+        h.viewModel.undo()
+        let before = try h.snapshot(layerID: id)
+        let timeline = h.bootstrap.historyController.visibleTimeline
+        try await Task.sleep(for: .milliseconds(200))
+        #expect(try h.snapshot(layerID: id) == before)
+        #expect(h.bootstrap.historyController.visibleTimeline == timeline)
+        #expect(h.viewModel.workspace.document.layer(id)?.opacity == 1)
+    }
+
+    @Test @MainActor
     func rejectedHistoryCannotApplyLineLassoOrLayerMetadata() throws {
         let h = try PixelHistoryHarness()
         let id = h.viewModel.workspace.document.activeLayerID
@@ -481,7 +527,7 @@ struct WorkspaceViewModelPixelHistoryTests {
     }
 
     @Test @MainActor
-    func diskFailureDuringHistoryPreviewDoesNotClaimSuccessfulRestore() throws {
+    func diskFailureDuringHistoryPreviewDoesNotClaimSuccessfulRestore() async throws {
         let harness = try PixelHistoryHarness()
         let layerID = harness.viewModel.workspace.document.activeLayerID
         let cache = try #require(harness.bootstrap.historyController.debugDiskCache)
@@ -498,6 +544,11 @@ struct WorkspaceViewModelPixelHistoryTests {
         let originalCount = harness.viewModel.visibleHistoryTimeline.currentAppliedEntryCount
         #expect(originalCount >= 12)
         harness.viewModel.previewVisibleHistory(toAppliedEntryCount: 0)
+        for _ in 0..<300 {
+            if !harness.viewModel.isHistoryNavigating { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(!harness.viewModel.isHistoryNavigating)
         cache.waitForPendingWrites()
         #expect(harness.viewModel.visibleHistoryTimeline.currentAppliedEntryCount == 0)
         let preview = try harness.snapshot(layerID: layerID)
@@ -506,6 +557,11 @@ struct WorkspaceViewModelPixelHistoryTests {
         let backups = try files.map { ($0, try Data(contentsOf: $0)) }
         for file in files { try Data([0]).write(to: file) }
         harness.viewModel.cancelVisibleHistoryPreview()
+        for _ in 0..<300 {
+            if !harness.viewModel.isHistoryNavigating { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(!harness.viewModel.isHistoryNavigating)
         #expect(harness.viewModel.hasUnsavedChanges)
         #expect(harness.viewModel.visibleHistoryPreviewTargetCount == 0)
         #expect(harness.viewModel.visibleHistoryTimeline.currentAppliedEntryCount == 0)
@@ -513,6 +569,11 @@ struct WorkspaceViewModelPixelHistoryTests {
         #expect(harness.viewModel.status?.kind == .error)
         for (file, data) in backups { try data.write(to: file) }
         harness.viewModel.cancelVisibleHistoryPreview()
+        for _ in 0..<300 {
+            if !harness.viewModel.isHistoryNavigating { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(!harness.viewModel.isHistoryNavigating)
         #expect(harness.viewModel.visibleHistoryPreviewTargetCount == nil)
         #expect(harness.viewModel.visibleHistoryTimeline.currentAppliedEntryCount == originalCount)
         #expect(try harness.snapshot(layerID: layerID) == original)
@@ -3327,7 +3388,7 @@ struct WorkspaceViewModelPixelHistoryTests {
 
     @Test
     @MainActor
-    func visibleHistoryPreviewCancelsBackToOriginalPixels() throws {
+    func visibleHistoryPreviewCancelsBackToOriginalPixels() async throws {
         let harness = try PixelHistoryHarness()
         let layerID = harness.viewModel.workspace.document.activeLayerID
         try harness.drawBrushStroke(
@@ -3340,6 +3401,11 @@ struct WorkspaceViewModelPixelHistoryTests {
         )
         harness.viewModel.prepareVisibleHistoryPresentation()
         harness.viewModel.cancelVisibleHistoryPreview()
+        for _ in 0..<300 {
+            if !harness.viewModel.isHistoryNavigating { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(!harness.viewModel.isHistoryNavigating)
         let paintOnlyHistoryCount = harness.viewModel.visibleHistoryTimeline.currentAppliedEntryCount
         harness.makeRectangleSelection(minX: 10, minY: 10, maxX: 54, maxY: 42)
         let originSelection = try #require(harness.viewModel.workspace.selection.committedShape)
@@ -3349,10 +3415,20 @@ struct WorkspaceViewModelPixelHistoryTests {
         #expect(try harness.alpha(atX: 48, y: 24, layerID: layerID) > 0)
 
         harness.viewModel.previewVisibleHistory(toAppliedEntryCount: paintOnlyHistoryCount - 1)
+        for _ in 0..<300 {
+            if !harness.viewModel.isHistoryNavigating { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(!harness.viewModel.isHistoryNavigating)
         #expect(try harness.alpha(atX: 48, y: 24, layerID: layerID) < 0.01)
         #expect(harness.viewModel.visibleHistoryPreviewTargetCount == paintOnlyHistoryCount - 1)
 
         harness.viewModel.cancelVisibleHistoryPreview()
+        for _ in 0..<300 {
+            if !harness.viewModel.isHistoryNavigating { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(!harness.viewModel.isHistoryNavigating)
         #expect(try harness.alpha(atX: 48, y: 24, layerID: layerID) > 0)
         #expect(harness.viewModel.visibleHistoryTimeline.currentAppliedEntryCount == originCount)
         #expect(harness.viewModel.visibleHistoryPreviewTargetCount == nil)

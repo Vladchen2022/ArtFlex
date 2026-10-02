@@ -2427,13 +2427,15 @@ final class StageOneBrushRenderer {
     @discardableResult
     func encodeStroke(
         stroke: StrokeDescriptor,
-        into texture: MTLTexture,
+        into originalTexture: MTLTexture,
         commandQueue: MTLCommandQueue,
         commandBuffer: MTLCommandBuffer,
         alphaLockTexture: MTLTexture? = nil,
         preservesAlphaWhenAlphaLocked: Bool = true,
-        samplingState: inout BrushStrokeSamplingState?
+        samplingState: inout BrushStrokeSamplingState?,
+        prepareTargetForWrite: ((BrushPixelBounds) -> MTLTexture?)? = nil
     ) -> Int {
+        var texture = originalTexture
         let samples = interpolatedPoints(for: stroke, samplingState: &samplingState)
         guard !samples.isEmpty else {
             return 0
@@ -2444,6 +2446,14 @@ final class StageOneBrushRenderer {
             texture: texture,
             samplingState: &samplingState
         )
+
+        if let prepareTargetForWrite, let bounds = samplingState?.renderedPixelBounds {
+            guard let prepared = prepareTargetForWrite(bounds) else {
+                resourceFailureGeneration &+= 1
+                return 0
+            }
+            texture = prepared
+        }
 
         if stroke.tool == .smudge {
             guard let smudgeGatheredColorsTexture = makeSmudgeGatheredColorsTexture(
@@ -2534,12 +2544,14 @@ final class StageOneBrushRenderer {
     func encodeOpacityCapStroke(
         stroke: StrokeDescriptor,
         session: OpacityCapSessionResources,
-        into texture: MTLTexture,
+        into originalTexture: MTLTexture,
         commandBuffer: MTLCommandBuffer,
         alphaLockTexture: MTLTexture? = nil,
         preservesAlphaWhenAlphaLocked: Bool = true,
-        samplingState: inout BrushStrokeSamplingState?
+        samplingState: inout BrushStrokeSamplingState?,
+        prepareTargetForWrite: ((BrushPixelBounds) -> MTLTexture?)? = nil
     ) -> Int {
+        var texture = originalTexture
         if let config = stroke.brush.engineV2 {
             if v2Renderer == nil { v2Renderer = try? BrushV2Renderer(device: device) }
             guard let v2Renderer else { resourceFailureGeneration &+= 1; return 0 }
@@ -2560,7 +2572,14 @@ final class StageOneBrushRenderer {
                 canvasSize: CanvasSize(width: texture.width, height: texture.height))
             if let bounds = v2Renderer.encode(stroke: stroke, streams: [a,b,range], session: session,
                 target: texture, commandBuffer: commandBuffer, selection: selection,
-                alphaLock: alphaLockTexture, preservesAlpha: preservesAlphaWhenAlphaLocked, materialProvider: { bounds in
+                alphaLock: alphaLockTexture, preservesAlpha: preservesAlphaWhenAlphaLocked,
+                prepareTargetForWrite: { bounds in
+                    if let prepareTargetForWrite {
+                        guard let prepared = prepareTargetForWrite(bounds) else { return nil }
+                        texture = prepared
+                    }
+                    return texture
+                }, materialProvider: { bounds in
                     self.encodeV2PaintMaterial(stroke: stroke, samples: a, session: session,
                         texture: texture, bounds: bounds, commandBuffer: commandBuffer,
                         selectionMask: selection, alphaLockTexture: alphaLockTexture)
@@ -2655,6 +2674,16 @@ final class StageOneBrushRenderer {
             secondaryDirtyRect
         ) else {
             return 0
+        }
+
+        if let prepareTargetForWrite {
+            let bounds = BrushPixelBounds(originX: dirtyRect.x, originY: dirtyRect.y,
+                                          width: dirtyRect.width, height: dirtyRect.height)
+            guard let prepared = prepareTargetForWrite(bounds) else {
+                resourceFailureGeneration &+= 1
+                return 0
+            }
+            texture = prepared
         }
 
         let compoundPrimaryTexture = usesPressureDualTip
@@ -4100,17 +4129,25 @@ final class StageOneBrushRenderer {
         if let maskData = selectionShape.maskData,
            maskData.canvasWidth == canvasSize.width,
            maskData.canvasHeight == canvasSize.height {
-            let didUploadMask = maskData.withAlphaBytes { buffer in
-                guard let baseAddress = buffer.baseAddress else { return false }
-                texture.replace(
-                    region: MTLRegionMake2D(0, 0, canvasSize.width, canvasSize.height),
-                    mipmapLevel: 0,
-                    withBytes: baseAddress,
-                    bytesPerRow: canvasSize.width
-                )
-                return true
+            // Preserve global shader coordinates, but do not materialize a
+            // second full-canvas CPU mask just to initialize its GPU texture.
+            let stripeHeight = min(canvasSize.height, 64)
+            let zeros = Data(count: canvasSize.width * stripeHeight)
+            zeros.withUnsafeBytes { buffer in
+                guard let base = buffer.baseAddress else { return }
+                for y in stride(from: 0, to: canvasSize.height, by: stripeHeight) {
+                    texture.replace(region: MTLRegionMake2D(0, y, canvasSize.width,
+                        min(stripeHeight, canvasSize.height - y)), mipmapLevel: 0,
+                        withBytes: base, bytesPerRow: canvasSize.width)
+                }
             }
-            guard didUploadMask else { return nil }
+            let patch = maskData.patch
+            if patch.width > 0, patch.height > 0 {
+                patch.alphaBytes.withUnsafeBytes { buffer in
+                    texture.replace(region: MTLRegionMake2D(patch.originX, patch.originY, patch.width, patch.height),
+                        mipmapLevel: 0, withBytes: buffer.baseAddress!, bytesPerRow: patch.width)
+                }
+            }
         } else {
             var generated = [UInt8](repeating: 0, count: canvasSize.width * canvasSize.height)
             let minX = max(Int(selectionShape.bounds.minX.rounded(.down)), 0)

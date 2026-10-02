@@ -1073,13 +1073,23 @@ struct MetalStrokeEngineQueueTests {
         #expect(engine.recentAdjustableBrushCommitCount(for: layerID) == 3)
         engine.resetBrushPipelineState()
 
-        let drainResult = try engine.opportunisticDrainPendingBrushCommitJobs(
+        var drainResult = try engine.opportunisticDrainPendingBrushCommitJobs(
             hadLiveBrushWorkThisFrame: false,
             maxJobs: 10,
             maxCpuMs: 5,
             retainedRecentBrushCommitJobs: 2
         ) { _ in }
 
+        #expect(drainResult.drainedJobs == 0)
+        // Interactive draining submits one unpublished result and never waits on
+        // Metal. Complete that work, then let the next drain publish it.
+        let fence = try #require(metalContext.commandQueue.makeCommandBuffer())
+        fence.commit()
+        fence.waitUntilCompleted()
+        drainResult = try engine.opportunisticDrainPendingBrushCommitJobs(
+            hadLiveBrushWorkThisFrame: false, maxJobs: 10, maxCpuMs: 5,
+            retainedRecentBrushCommitJobs: 2
+        ) { _ in }
         #expect(drainResult.drainedJobs == 1)
         #expect(drainResult.remainingQueueDepth == 2)
         #expect(engine.recentAdjustableBrushCommitCount(for: layerID) == 2)

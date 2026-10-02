@@ -37,6 +37,16 @@ final class RecoveryAutosaveCoordinator {
 
     @discardableResult
     func write(_ capture: FrozenRecoveryCapture, scheduleGeneration: UInt64) throws -> Bool {
+        try writeFrozen(scheduleGeneration: scheduleGeneration) { capture }
+    }
+
+    @discardableResult
+    func write(_ capture: QueuedRecoveryCapture, scheduleGeneration: UInt64) throws -> Bool {
+        try writeFrozen(scheduleGeneration: scheduleGeneration) { try capture.waitUntilReady() }
+    }
+
+    private func writeFrozen(scheduleGeneration: UInt64,
+        capture: @escaping @Sendable () throws -> FrozenRecoveryCapture) throws -> Bool {
         guard !isWriting else { return false }
         let stagingURL = try persistence.controller.makeRecoveryStagingURL()
         let persistence = persistence
@@ -44,7 +54,7 @@ final class RecoveryAutosaveCoordinator {
         let documentGeneration = lifecycle.version.generation
         writeTask = Task { [weak self] in
             let result = await Task.detached(priority: .utility) {
-                Result { try persistence.controller.writeIncrementalRecovery(capture, to: stagingURL) }
+                Result { try persistence.controller.writeIncrementalRecovery(try capture(), to: stagingURL) }
             }.value
             guard let self else {
                 persistence.controller.discardRecoveryStagingProject(at: stagingURL)

@@ -85,6 +85,7 @@ private struct HistoryDiskArchive: Sendable {
         guard try file.seekToEnd() == UInt64(byteCount) else { throw HistoryDiskError.invalidArchive }
         for resource in resources {
             for chunk in resource.chunks {
+                try Task.checkCancellation()
                 try file.seek(toOffset: chunk.offset)
                 guard let data = try file.read(upToCount: chunk.storedCount),
                       data.count == chunk.storedCount,
@@ -96,14 +97,17 @@ private struct HistoryDiskArchive: Sendable {
     }
 
     func read() throws -> [LayerHistorySnapshot] {
+        try Task.checkCancellation()
         let file = try FileHandle(forReadingFrom: url)
         defer { try? file.close() }
         guard try file.seekToEnd() == UInt64(byteCount) else { throw HistoryDiskError.invalidArchive }
         return try resources.map { resource in
+            try Task.checkCancellation()
             var result = resource.template
             var data = Data()
             data.reserveCapacity(resource.chunks.reduce(0) { $0 + $1.rawCount })
             for chunk in resource.chunks {
+                try Task.checkCancellation()
                 try file.seek(toOffset: chunk.offset)
                 guard let stored = try file.read(upToCount: chunk.storedCount),
                       stored.count == chunk.storedCount,
@@ -154,11 +158,21 @@ final class HistoryPixelPayload: @unchecked Sendable {
     var projectedResidentBytes: Int { lock.withLock { pending || snapshots == nil ? 0 : rawByteCount } }
     var diskBytes: Int { lock.withLock { archive?.byteCount ?? 0 } }
     var isPending: Bool { lock.withLock { pending } }
+    var hasResidentSnapshots: Bool { lock.withLock { snapshots != nil } }
+#if DEBUG
+    private var readCount = 0
+    private var readOnMainThread = false
+    var debugDiskReadCount: Int { lock.withLock { readCount } }
+    var debugReadOnMainThread: Bool { lock.withLock { readOnMainThread } }
+#endif
 
     func read() throws -> [LayerHistorySnapshot] {
         let state = lock.withLock { (snapshots, archive) }
         if let snapshots = state.0 { return snapshots }
         guard let archive = state.1 else { throw HistoryDiskError.unavailable }
+#if DEBUG
+        lock.withLock { readCount += 1; readOnMainThread = readOnMainThread || Thread.isMainThread }
+#endif
         do { return try archive.read() }
         catch { throw HistoryDiskError.invalidArchive }
     }
@@ -256,6 +270,98 @@ final class HistoryPixelPayload: @unchecked Sendable {
             }
             cache.release(released, file: nil)
             if !lock.withLock({ discarded }) { cache.recordFailure(error) }
+        }
+    }
+}
+
+/// A read owns only one immutable payload. Disk I/O, checksum validation and decompression
+/// run together on the utility executor and never hold the payload state lock.
+final class HistoryPreparedPixelRead: @unchecked Sendable {
+    private let condition = NSCondition()
+    private var completed: Result<[LayerHistorySnapshot], Error>?
+    private var task: Task<[LayerHistorySnapshot], Error>!
+
+    init(payload: HistoryPixelPayload) {
+        task = Task.detached(priority: .userInitiated) { [self, payload] in
+            let result = Result { try autoreleasepool { try payload.read() } }
+            complete(result)
+            return try result.get()
+        }
+    }
+
+    private func complete(_ result: Result<[LayerHistorySnapshot], Error>) {
+        condition.lock()
+        completed = result
+        condition.broadcast()
+        condition.unlock()
+    }
+
+    var readyResult: Result<[LayerHistorySnapshot], Error>? {
+        condition.lock()
+        defer { condition.unlock() }
+        return completed
+    }
+    func read() throws -> [LayerHistorySnapshot] {
+        condition.lock()
+        while completed == nil { condition.wait() }
+        let result = completed!
+        condition.unlock()
+        return try result.get()
+    }
+    func value() async throws -> [LayerHistorySnapshot] { try await task.value }
+    func cancel() { task.cancel() }
+}
+
+/// At most two decoded cold entries are retained, with a separate strict byte budget.
+/// Entries larger than that budget are still prepared asynchronously on demand, without caching.
+final class HistoryReadAheadCache: @unchecked Sendable {
+    private struct Entry {
+        var payload: HistoryPixelPayload
+        var read: HistoryPreparedPixelRead
+    }
+    private let lock = NSLock()
+    private let maximumBytes: Int
+    private var entries: [ObjectIdentifier: Entry] = [:]
+
+    init(maximumBytes: Int) { self.maximumBytes = max(0, maximumBytes) }
+    deinit { clear() }
+    var reservedByteCount: Int { lock.withLock { entries.values.reduce(0) { $0 + $1.payload.rawByteCount } } }
+
+    func update(candidates: [HistoryPixelPayload]) {
+        var selected: [HistoryPixelPayload] = []
+        var bytes = 0
+        var seen = Set<ObjectIdentifier>()
+        for payload in candidates where selected.count < 2 {
+            guard payload.residentBytes == 0, payload.rawByteCount > 0,
+                  seen.insert(ObjectIdentifier(payload)).inserted,
+                  payload.rawByteCount <= maximumBytes - bytes else { continue }
+            selected.append(payload)
+            bytes += payload.rawByteCount
+        }
+        lock.withLock {
+            let wanted = Set(selected.map(ObjectIdentifier.init))
+            for key in entries.keys.filter({ !wanted.contains($0) }) {
+                entries.removeValue(forKey: key)?.read.cancel()
+            }
+            for payload in selected {
+                let key = ObjectIdentifier(payload)
+                // A transient file error must be retryable after the user fixes disk/cache state.
+                if let result = entries[key]?.read.readyResult, case .failure = result {
+                    entries.removeValue(forKey: key)
+                }
+                if entries[key] == nil { entries[key] = Entry(payload: payload, read: .init(payload: payload)) }
+            }
+        }
+    }
+
+    func preparedRead(for payload: HistoryPixelPayload) -> HistoryPreparedPixelRead? {
+        lock.withLock { entries[ObjectIdentifier(payload)]?.read }
+    }
+
+    func clear() {
+        lock.withLock {
+            for entry in entries.values { entry.read.cancel() }
+            entries.removeAll()
         }
     }
 }

@@ -38,6 +38,23 @@ final class MetalStrokeEngine: StrokeEngine {
         let pendingCommitRevisions: [UInt64]
     }
 
+    private struct PendingCommit {
+        let job: BrushCommitJob
+        let command: MTLCommandBuffer
+        let edit: StageOneLayerSurfaceStore.StagedPixelEdit
+        let checkpoint: BrushCommitCheckpointPreparation?
+        let recyclableSource: MTLTexture?
+        let surfaceID: LayerSurfaceID
+    }
+
+    /// The host prepares immutable history asynchronously and publishes it only
+    /// after the matching GPU result and source version have both been checked.
+    var prepareInteractiveCheckpoint: ((BrushCommitJob) throws -> BrushCommitCheckpointPreparation)?
+    var onInteractiveCommitReady: (@Sendable () -> Void)?
+    private var pendingCommit: PendingCommit?
+    private(set) var debugLastCommitStagingBytes = 0
+    var debugLiveTargetAllocatedBytes: Int { liveSession?.workingEdit.allocatedBytes ?? 0 }
+
     private let metalContext: MetalDeviceContext
     private let layerSurfaceStore: StageOneLayerSurfaceStore
     private let brushRenderer: StageOneBrushRenderer
@@ -164,6 +181,10 @@ final class MetalStrokeEngine: StrokeEngine {
         hadLiveBrushWorkThisFrame: Bool,
         retainedRecentBrushCommitJobs: Int
     ) -> Bool {
+        if let pending = pendingCommit {
+            return (pending.command.status == .completed || pending.command.status == .error)
+                && (pending.checkpoint?.isReady ?? true)
+        }
         let now = DispatchTime.now().uptimeNanoseconds
         updateInteractiveState(now: now)
         let queueSnapshot = commitQueue.snapshot()
@@ -277,6 +298,11 @@ final class MetalStrokeEngine: StrokeEngine {
         let liveAlphaLockTexture = layerSurfaceStore.surfaceID(for: session.layerID)
             .flatMap(layerSurfaceStore.readTexture(for:))
 
+        let workingEdit = session.workingEdit
+        let prepareTarget: (BrushPixelBounds) -> MTLTexture? = { bounds in
+            try? workingEdit.prepareWrite(in: .init(originX: bounds.originX, originY: bounds.originY,
+                width: bounds.width, height: bounds.height), commandBuffer: commandBuffer)
+        }
         var flushedPacketCount = 0
         debugLastFlushSmudgeFullSizeCopyCount = 0
 
@@ -308,7 +334,8 @@ final class MetalStrokeEngine: StrokeEngine {
                         into: session.workingTexture,
                         commandBuffer: commandBuffer,
                         alphaLockTexture: stroke.alphaLockEnabled ? liveAlphaLockTexture : nil,
-                        samplingState: &streamSamplingState
+                        samplingState: &streamSamplingState,
+                        prepareTargetForWrite: prepareTarget
                     )
                 } else {
                     _ = brushRenderer.encodeStroke(
@@ -317,7 +344,8 @@ final class MetalStrokeEngine: StrokeEngine {
                         commandQueue: metalContext.commandQueue,
                         commandBuffer: commandBuffer,
                         alphaLockTexture: stroke.alphaLockEnabled ? liveAlphaLockTexture : nil,
-                        samplingState: &streamSamplingState
+                        samplingState: &streamSamplingState,
+                        prepareTargetForWrite: prepareTarget
                     )
                 }
                 if let streamSamplingState {
@@ -382,7 +410,8 @@ final class MetalStrokeEngine: StrokeEngine {
                             into: session.workingTexture,
                             commandBuffer: commandBuffer,
                             alphaLockTexture: lastStroke.alphaLockEnabled ? liveAlphaLockTexture : nil,
-                            samplingState: &flushSamplingState
+                            samplingState: &flushSamplingState,
+                            prepareTargetForWrite: prepareTarget
                         )
                     } else {
                         _ = brushRenderer.encodeStroke(
@@ -391,7 +420,8 @@ final class MetalStrokeEngine: StrokeEngine {
                             commandQueue: metalContext.commandQueue,
                             commandBuffer: commandBuffer,
                             alphaLockTexture: lastStroke.alphaLockEnabled ? liveAlphaLockTexture : nil,
-                            samplingState: &flushSamplingState
+                            samplingState: &flushSamplingState,
+                            prepareTargetForWrite: prepareTarget
                         )
                     }
                     if let bounds = flushSamplingState?.renderedPixelBounds {
@@ -450,10 +480,10 @@ final class MetalStrokeEngine: StrokeEngine {
             logger.debug("[brush-feel] usedSameFrameFlush=\(metrics.usedSameFrameFlush, privacy: .public)")
 
             commandBuffer.addCompletedHandler { [logger] _ in
-                let flushToPresentMs = Double(DispatchTime.now().uptimeNanoseconds - flushStartNs) / 1_000_000
-                let didProduceToPresentMs = Double(DispatchTime.now().uptimeNanoseconds - oldestEnqueueNs) / 1_000_000
-                logger.debug("[brush-feel] flushToPresentMs=\(flushToPresentMs, privacy: .public)")
-                logger.debug("[brush-feel] didProduceToPresentMs=\(didProduceToPresentMs, privacy: .public)")
+                let flushToGPUCompletionMs = Double(DispatchTime.now().uptimeNanoseconds - flushStartNs) / 1_000_000
+                let inputToGPUCompletionMs = Double(DispatchTime.now().uptimeNanoseconds - oldestEnqueueNs) / 1_000_000
+                logger.debug("[brush-feel] flushToGPUCompletionMs=\(flushToGPUCompletionMs, privacy: .public)")
+                logger.debug("[brush-feel] inputToGPUCompletionMs=\(inputToGPUCompletionMs, privacy: .public)")
             }
         }
 
@@ -591,31 +621,15 @@ final class MetalStrokeEngine: StrokeEngine {
             return .reusedExisting
         }
 
-        guard
-            let sourceSurfaceID = layerSurfaceStore.surfaceID(for: layerID),
-            let sourceTexture = layerSurfaceStore.readTexture(for: sourceSurfaceID),
-            let workingTexture = layerSurfaceStore.makeTexture(
-                width: sourceTexture.width,
-                height: sourceTexture.height,
-                pixelFormat: sourceTexture.pixelFormat,
-                metal: metalContext
-            )
-        else {
+        guard let sourceSurfaceID = layerSurfaceStore.surfaceID(for: layerID),
+              let command = metalContext.commandQueue.makeCommandBuffer(),
+              let workingEdit = try? layerSurfaceStore.makeWorkingPixelEdit(for: sourceSurfaceID,
+                                                                           commandBuffer: command) else {
             return nil
         }
-
-        layerSurfaceStore.copyTextureAsync(
-            from: sourceTexture,
-            to: workingTexture,
-            metal: metalContext
-        )
-
-        liveSession = BrushLiveSession(
-            layerID: layerID,
-            workingTexture: workingTexture,
-            displayRevision: nextCommitRevision,
-            committedRevision: nextCommitRevision
-        )
+        command.commit()
+        liveSession = BrushLiveSession(layerID: layerID, workingEdit: workingEdit,
+            displayRevision: nextCommitRevision, committedRevision: nextCommitRevision)
         liveSession?.lastInputUptimeNs = now
         return .created
     }
@@ -669,7 +683,7 @@ final class MetalStrokeEngine: StrokeEngine {
             value: commitQueue.count
         )
 
-        guard !shouldSkipForInteractiveFrame, maxJobs > 0 else {
+        guard (!shouldSkipForInteractiveFrame || pendingCommit != nil), maxJobs > 0 else {
             return BrushCommitDrainResult(
                 drainedJobs: 0,
                 skippedForInteractiveFrame: shouldSkipForInteractiveFrame,
@@ -679,53 +693,32 @@ final class MetalStrokeEngine: StrokeEngine {
 
         let drainStartNs = DispatchTime.now().uptimeNanoseconds
         var drainedJobs = 0
-        var lastCommittedRevisionForLiveLayer: UInt64?
         let protectedRecentBrushCommits = protectedRecentBrushCommitCount(
-            in: queueSnapshot,
-            retainedRecentBrushCommitJobs: retainedRecentBrushCommitJobs
-        )
+            in: queueSnapshot, retainedRecentBrushCommitJobs: retainedRecentBrushCommitJobs)
 
         while drainedJobs < maxJobs {
+            if pendingCommit != nil {
+                guard try finishPendingCommit(forced: mode == .forced) else { break }
+                drainedJobs += 1
+                if drainedJobs >= maxJobs || shouldSkipForInteractiveFrame { break }
+            }
             if case .interactiveBudget = mode,
-               protectedRecentBrushCommits > 0,
-               commitQueue.count <= protectedRecentBrushCommits {
-                break
-            }
-            guard let job = commitQueue.first else {
-                break
-            }
-            if checkpointedCommitRevision != job.commitRevision {
-                try beforeEachCommit(job)
-                checkpointedCommitRevision = job.commitRevision
-            }
-            // History checkpoints are captured before each commit. We must advance the
-            // texture one job at a time here so the next checkpoint sees the latest
-            // committed pixels rather than the original pre-drain texture.
-            try commit(
-                job: job,
-                selectedRecentCommitRevisions: selectedRecentCommitRevisions,
-                waitForCompletion: mode == .forced
-            )
-            _ = commitQueue.dequeue()
-            checkpointedCommitRevision = nil
-            if job.layerID == liveSession?.layerID {
-                lastCommittedRevisionForLiveLayer = job.commitRevision
-            }
-            drainedJobs += 1
-
-            if maxCpuNs != .max {
-                let elapsedNs = DispatchTime.now().uptimeNanoseconds - drainStartNs
-                if elapsedNs >= maxCpuNs {
-                    break
+               protectedRecentBrushCommits > 0, commitQueue.count <= protectedRecentBrushCommits { break }
+            guard let job = commitQueue.first else { break }
+            let preparation: BrushCommitCheckpointPreparation?
+            if case .interactiveBudget = mode, let prepareInteractiveCheckpoint {
+                preparation = try prepareInteractiveCheckpoint(job)
+            } else {
+                preparation = nil
+                if checkpointedCommitRevision != job.commitRevision {
+                    try beforeEachCommit(job)
+                    checkpointedCommitRevision = job.commitRevision
                 }
             }
-        }
-
-        if drainedJobs > 0 {
-            if let lastCommittedRevisionForLiveLayer {
-                liveSession?.committedRevision = lastCommittedRevisionForLiveLayer
-            }
-            invalidateRecentBrushPreviewCache()
+            pendingCommit = try prepareCommit(job: job,
+                selectedRecentCommitRevisions: selectedRecentCommitRevisions, checkpoint: preparation)
+            if case .interactiveBudget = mode { break }
+            if maxCpuNs != .max, DispatchTime.now().uptimeNanoseconds - drainStartNs >= maxCpuNs { break }
         }
 
         if RuntimeDiagnostics.brushHotPathLoggingEnabled {
@@ -748,110 +741,87 @@ final class MetalStrokeEngine: StrokeEngine {
         liveSession = session
     }
 
-    private func commit(
+    private func prepareCommit(
         job: BrushCommitJob,
         selectedRecentCommitRevisions: Set<UInt64>,
-        waitForCompletion: Bool
-    ) throws {
-        try commitBatch(
-            [job],
-            selectedRecentCommitRevisions: selectedRecentCommitRevisions,
-            waitForCompletion: waitForCompletion
-        )
-    }
-
-    private func commitBatch(
-        _ jobs: [BrushCommitJob],
-        selectedRecentCommitRevisions: Set<UInt64>,
-        waitForCompletion: Bool
-    ) throws {
-        let auditEnabled = PerformanceAuditStore.shared.isRecordingEnabled
-        let startNs = auditEnabled ? DispatchTime.now().uptimeNanoseconds : 0
-        defer {
-            if auditEnabled {
-                let ms = Double(DispatchTime.now().uptimeNanoseconds - startNs) / 1_000_000
-                PerformanceAuditStore.shared.recordDuration("MetalStrokeEngine.commit(job:)", ms: ms)
-            }
-        }
-        guard let commandBuffer = metalContext.commandQueue.makeCommandBuffer() else {
+        checkpoint: BrushCommitCheckpointPreparation?
+    ) throws -> PendingCommit {
+        guard let commandBuffer = metalContext.commandQueue.makeCommandBuffer(),
+              let surfaceID = layerSurfaceStore.surfaceID(for: job.layerID),
+              let texture = layerSurfaceStore.readTexture(for: surfaceID) else {
             throw CanvasResourceError(message: "无法创建笔触提交任务；笔触已保留，请重试保存")
         }
-
+        let previous = layerSurfaceStore.canRecycleTexture(for: surfaceID) ? texture : nil
+        let region = job.renderedPixelBounds.map {
+            PixelRegion(originX: $0.originX, originY: $0.originY, width: $0.width, height: $0.height)
+        } ?? PixelRegion(originX: 0, originY: 0, width: texture.width, height: texture.height)
+        let scratch = commitScratchTexture
+        commitScratchTexture = nil
+        let staged = try layerSurfaceStore.preparePixelEdit(for: surfaceID, region: region,
+            commandBuffer: commandBuffer, reusingDenseTexture: scratch)
+        debugLastCommitStagingBytes = staged.allocatedBytes
         debugLastCommitSmudgeFullSizeCopyCount = 0
-        var replacements: [(LayerSurfaceID, MTLTexture, MTLTexture?, PixelRegion?)] = []
-        for job in jobs {
-            guard
-                let surfaceID = layerSurfaceStore.surfaceID(for: job.layerID),
-                let texture = layerSurfaceStore.readTexture(for: surfaceID)
-            else {
-                throw CanvasResourceError(message: "目标图层不可用；笔触尚未提交")
-            }
-            let staged: MTLTexture
-            if let cached = commitScratchTexture,
-               cached.width == texture.width, cached.height == texture.height,
-               cached.pixelFormat == texture.pixelFormat {
-                staged = cached
-                commitScratchTexture = nil
-            } else if let created = layerSurfaceStore.makeTexture(
-                width: texture.width, height: texture.height, pixelFormat: texture.pixelFormat, metal: metalContext
-            ) {
-                staged = created
-            } else {
-                throw CanvasResourceError(message: "内存不足，无法安全提交笔触；原图层与待提交笔触均已保留")
-            }
-            guard let copy = commandBuffer.makeBlitCommandEncoder() else {
-                throw CanvasResourceError(message: "无法准备笔触目标；原图层未修改")
-            }
-            copy.copy(from: texture, sourceSlice: 0, sourceLevel: 0,
-                      sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
-                      sourceSize: MTLSize(width: texture.width, height: texture.height, depth: 1),
-                      to: staged, destinationSlice: 0, destinationLevel: 0,
-                      destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0))
-            copy.endEncoding()
-
-            let opacityMultiplier = selectedRecentCommitRevisions.contains(job.commitRevision)
-                ? recentBrushAdjustmentState?.opacity ?? 1
-                : 1
-            let brightnessAdjustment = selectedRecentCommitRevisions.contains(job.commitRevision)
-                ? recentBrushAdjustmentState?.brightness ?? 0
-                : 0
-            let saturationAdjustment = selectedRecentCommitRevisions.contains(job.commitRevision)
-                ? recentBrushAdjustmentState?.saturation ?? 0
-                : 0
-            let failureGeneration = brushRenderer.encodingFailureGeneration
-            try encode(
-                job: job,
-                into: staged,
-                commandBuffer: commandBuffer,
-                opacityMultiplier: opacityMultiplier,
-                brightnessAdjustment: brightnessAdjustment,
-                saturationAdjustment: saturationAdjustment,
-                requiresCompleteResources: true,
-                alphaLockSource: texture
-            )
-            guard brushRenderer.encodingFailureGeneration == failureGeneration else {
-                throw CanvasResourceError(message: "笔触资源不足，未修改原图层；笔触已保留")
-            }
-            let region = job.renderedPixelBounds.map {
-                PixelRegion(originX: $0.originX, originY: $0.originY, width: $0.width, height: $0.height)
-            }
-            replacements.append((surfaceID, staged,
-                                 layerSurfaceStore.canRecycleTexture(for: surfaceID) ? texture : nil, region))
+        let isSelected = selectedRecentCommitRevisions.contains(job.commitRevision)
+        let failureGeneration = brushRenderer.encodingFailureGeneration
+        try encode(job: job, into: staged.texture, commandBuffer: commandBuffer,
+                   opacityMultiplier: isSelected ? recentBrushAdjustmentState?.opacity ?? 1 : 1,
+                   brightnessAdjustment: isSelected ? recentBrushAdjustmentState?.brightness ?? 0 : 0,
+                   saturationAdjustment: isSelected ? recentBrushAdjustmentState?.saturation ?? 0 : 0,
+                   requiresCompleteResources: true, alphaLockSource: texture)
+        guard brushRenderer.encodingFailureGeneration == failureGeneration else {
+            throw CanvasResourceError(message: "笔触资源不足，未修改原图层；笔触已保留")
         }
-
+        if let ready = onInteractiveCommitReady {
+            commandBuffer.addCompletedHandler { _ in ready() }
+        }
+        let result = PendingCommit(job: job, command: commandBuffer, edit: staged,
+            checkpoint: checkpoint, recyclableSource: previous, surfaceID: surfaceID)
         commandBuffer.commit()
-        // A job is acknowledged only after the complete staged result is available.
-        // Interactive draining already excludes active strokes and the warm-idle period.
-        commandBuffer.waitUntilCompleted()
-        guard commandBuffer.status == .completed else {
-            throw CanvasResourceError(message: commandBuffer.error?.localizedDescription ?? "GPU 笔触提交失败；原图层未修改")
-        }
-        for (surfaceID, staged, previous, region) in replacements {
-            layerSurfaceStore.swapTexture(for: surfaceID, with: staged, changedRegion: region)
-            layerSurfaceStore.compactTexture(for: surfaceID)
-            commitScratchTexture = previous
+        return result
+    }
+
+    /// Only this owner thread publishes. GPU callbacks merely notify the host.
+    /// Forced boundaries wait on Metal and the same background capture ticket,
+    /// never on a main-actor continuation.
+    private func finishPendingCommit(forced: Bool) throws -> Bool {
+        guard let pending = pendingCommit else { return false }
+        if forced { pending.command.waitUntilCompleted() }
+        guard pending.command.status == .completed || pending.command.status == .error else { return false }
+        if !forced, let checkpoint = pending.checkpoint, !checkpoint.isReady { return false }
+        do {
+            guard pending.command.status == .completed else {
+                throw CanvasResourceError(message: pending.command.error?.localizedDescription ?? "GPU 笔触提交失败；原图层未修改")
+            }
+            guard layerSurfaceStore.canPublish(pending.edit) else {
+                throw CanvasResourceError(message: "笔触目标在提交期间已变化；未覆盖新内容，笔触输入仍保留")
+            }
+            if let checkpoint = pending.checkpoint, checkpointedCommitRevision != pending.job.commitRevision {
+                try checkpoint.commit()
+                checkpointedCommitRevision = pending.job.commitRevision
+            }
+            guard layerSurfaceStore.publish(pending.edit) else {
+                throw CanvasResourceError(message: "笔触目标已变化，无法发布")
+            }
+            if forced, pending.edit.texture.heap?.type != .sparse {
+                // Occupancy scanning is allowed at an explicit editing boundary,
+                // never in opportunistic frame work.
+                layerSurfaceStore.compactTexture(for: pending.surfaceID)
+            }
+            commitScratchTexture = pending.recyclableSource
+            _ = commitQueue.dequeue()
+            checkpointedCommitRevision = nil
+            if pending.job.layerID == liveSession?.layerID {
+                liveSession?.committedRevision = pending.job.commitRevision
+            }
+            pendingCommit = nil
+            invalidateRecentBrushPreviewCache()
+            return true
+        } catch {
+            pendingCommit = nil
+            throw error
         }
     }
+
 
     private func recentBrushPreviewTextureIfNeeded(for layerID: LayerID) -> MTLTexture? {
         guard let liveSession,
@@ -981,7 +951,7 @@ final class MetalStrokeEngine: StrokeEngine {
         var samplingStates: [BrushStrokeStreamID: BrushStrokeSamplingState] = [:]
         var opacityCapSessions: [BrushStrokeStreamID: OpacityCapSessionResources] = [:]
         let usesAlphaLock = job.packets.contains(where: \.alphaLockEnabled)
-        let alphaLockTexture = usesAlphaLock ? makeAlphaLockTextureCopy(from: alphaLockSource ?? texture) : nil
+        let alphaLockTexture = usesAlphaLock ? (alphaLockSource ?? makeAlphaLockTextureCopy(from: texture)) : nil
         if requiresCompleteResources, usesAlphaLock, alphaLockTexture == nil {
             throw CanvasResourceError(message: "无法准备透明像素锁定蒙版")
         }

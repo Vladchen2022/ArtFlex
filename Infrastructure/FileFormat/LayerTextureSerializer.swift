@@ -240,6 +240,7 @@ final class LayerTextureSerializer {
     private let auditStore: PerformanceAuditStore
 #if DEBUG
     var debugRejectsDeferredCloneCompletion = false
+    var debugRejectsRestoreCompletion = false
 #endif
 
     init(
@@ -418,7 +419,11 @@ final class LayerTextureSerializer {
     }
 
     func cloneRegionsForDeferredSnapshot(_ sources: [(MTLTexture, PixelRegion)]) throws -> [MTLTexture] {
-        guard !sources.isEmpty else { return [] }
+        try enqueueCloneRegionsForDeferredSnapshot(sources).waitUntilReady()
+    }
+
+    func enqueueCloneRegionsForDeferredSnapshot(_ sources: [(MTLTexture, PixelRegion)]) throws -> DeferredTextureCloneBatch {
+        guard !sources.isEmpty else { return .init(textures: []) }
         var clones: [MTLTexture] = []
         // Validate and allocate before encoding, so an allocation error cannot abandon an active encoder.
         for (source, region) in sources {
@@ -441,10 +446,82 @@ final class LayerTextureSerializer {
                          to: clone, destinationSlice: 0, destinationLevel: 0, destinationOrigin: .init(x: 0, y: 0, z: 0))
         }
         encoder.endEncoding()
+        let lifetime = MetalCloneSourceLifetime(sources.map { $0.0 })
+        command.addCompletedHandler { _ in withExtendedLifetime(lifetime) {} }
         command.commit()
-        command.waitUntilCompleted()
-        guard command.status == .completed else { throw command.error ?? CocoaError(.fileWriteUnknown) }
-        return clones
+#if DEBUG
+        let rejectsCompletion = debugRejectsDeferredCloneCompletion
+#else
+        let rejectsCompletion = false
+#endif
+        let pending = DeferredTextureCloneBatch(textures: clones, commandBuffer: command,
+            rejectsCompletion: rejectsCompletion)
+        // CPU writes to shared textures are not ordered by the canvas command queue.
+        if sources.contains(where: { $0.0.storageMode != .private }) {
+            return try .init(textures: pending.waitUntilReady())
+        }
+        return pending
+    }
+
+    /// Small regions use shared readback staging directly. Large regions freeze privately and
+    /// keep the existing bounded tiled transfer on the worker, never allocating a giant shared buffer.
+    func enqueueRegionSnapshots(_ requests: [LayerTextureRegionSnapshotRequest]) throws -> DeferredLayerRegionSnapshots {
+        guard !requests.isEmpty else { return .init { [] } }
+        for request in requests {
+            guard request.originX >= 0, request.originY >= 0, request.width > 0, request.height > 0,
+                  request.originX <= request.texture.width - request.width,
+                  request.originY <= request.texture.height - request.height else {
+                throw CocoaError(.fileReadCorruptFile)
+            }
+        }
+        if requests.contains(where: {
+            Self.requiresTiledTransfer(width: $0.width, height: $0.height, pixelFormat: $0.texture.pixelFormat)
+        }) {
+            let pending = try enqueueCloneRegionsForDeferredSnapshot(requests.map {
+                ($0.texture, PixelRegion(originX: $0.originX, originY: $0.originY, width: $0.width, height: $0.height))
+            })
+            return .init { [self] in try snapshotBatch(textures: pending.waitUntilReady()) }
+        }
+
+        var staging: [MTLTexture] = []
+        var transferredOwnership = false
+        defer { if !transferredOwnership { for texture in staging { stagingPool.checkin(texture) } } }
+        for request in requests {
+            guard let texture = stagingPool.checkout(width: request.width, height: request.height,
+                                                      pixelFormat: request.texture.pixelFormat) else {
+                throw CocoaError(.fileReadUnknown)
+            }
+            staging.append(texture)
+        }
+        guard let command = metalContext.commandQueue.makeCommandBuffer(),
+              let encoder = command.makeBlitCommandEncoder() else { throw CocoaError(.fileReadUnknown) }
+        for (request, destination) in zip(requests, staging) {
+            encoder.copy(from: request.texture, sourceSlice: 0, sourceLevel: 0,
+                sourceOrigin: .init(x: request.originX, y: request.originY, z: 0),
+                sourceSize: .init(width: request.width, height: request.height, depth: 1),
+                to: destination, destinationSlice: 0, destinationLevel: 0,
+                destinationOrigin: .init(x: 0, y: 0, z: 0))
+        }
+        encoder.endEncoding()
+        let lifetime = MetalCloneSourceLifetime(requests.map(\.texture))
+        command.addCompletedHandler { _ in withExtendedLifetime(lifetime) {} }
+        command.commit()
+#if DEBUG
+        let rejectsCompletion = debugRejectsDeferredCloneCompletion
+#else
+        let rejectsCompletion = false
+#endif
+        let pending = DeferredTextureCloneBatch(textures: staging, commandBuffer: command,
+                                                rejectsCompletion: rejectsCompletion)
+        // Shared sources can be written immediately by a caller outside Metal queue ordering.
+        if requests.contains(where: { $0.texture.storageMode != .private }) { _ = try pending.waitUntilReady() }
+        transferredOwnership = true
+        return .init { [self, staging] in
+            defer { for texture in staging { stagingPool.checkin(texture) } }
+            return try pending.waitUntilReady().map {
+                makeSnapshot(from: $0, originX: 0, originY: 0, width: $0.width, height: $0.height)
+            }
+        }
     }
 
     func snapshotBatch(textures: [MTLTexture]) throws -> [LayerTextureSnapshot] {
@@ -526,6 +603,9 @@ final class LayerTextureSerializer {
                 blitEncoder.endEncoding()
                 commandBuffer.commit()
                 commandBuffer.waitUntilCompleted()
+                guard commandBuffer.status == .completed else {
+                    throw commandBuffer.error ?? CocoaError(.fileReadUnknown)
+                }
             }
         } catch {
             for stagedTexture in stagedTextures {
@@ -637,6 +717,9 @@ final class LayerTextureSerializer {
         blitEncoder.endEncoding()
         commandBuffer.commit()
         commandBuffer.waitUntilCompleted()
+        guard commandBuffer.status == .completed else {
+            throw commandBuffer.error ?? CocoaError(.fileReadUnknown)
+        }
 
         return makeSnapshot(
             from: stagingTexture,
@@ -751,6 +834,9 @@ final class LayerTextureSerializer {
             blitEncoder.endEncoding()
             commandBuffer.commit()
             commandBuffer.waitUntilCompleted()
+            guard commandBuffer.status == .completed else {
+                throw commandBuffer.error ?? CocoaError(.fileReadUnknown)
+            }
         }
 
         for stagedRegion in stagedRegions {
@@ -875,6 +961,7 @@ final class LayerTextureSerializer {
         blitEncoder.endEncoding()
         commandBuffer.commit()
         commandBuffer.waitUntilCompleted()
+        try validateRestoreCompletion(commandBuffer)
     }
 
     func restoreBatch(
@@ -979,6 +1066,7 @@ final class LayerTextureSerializer {
             blitEncoder.endEncoding()
             commandBuffer.commit()
             commandBuffer.waitUntilCompleted()
+            try validateRestoreCompletion(commandBuffer)
         } catch {
             for stagingTexture in checkedOutTextures {
                 stagingPool.checkin(stagingTexture)
@@ -1070,6 +1158,9 @@ final class LayerTextureSerializer {
         blitEncoder.endEncoding()
         commandBuffer.commit()
         commandBuffer.waitUntilCompleted()
+        guard commandBuffer.status == .completed else {
+            throw commandBuffer.error ?? CocoaError(.fileReadUnknown)
+        }
 
         var bytes = [UInt8](repeating: 0, count: 4)
         stagingTexture.getBytes(
@@ -1262,9 +1353,16 @@ final class LayerTextureSerializer {
             blitEncoder.endEncoding()
             commandBuffer.commit()
             commandBuffer.waitUntilCompleted()
-            guard commandBuffer.status == .completed else {
-                throw commandBuffer.error ?? CocoaError(.fileReadCorruptFile)
-            }
+            try validateRestoreCompletion(commandBuffer)
         }
+    }
+
+    private func validateRestoreCompletion(_ command: MTLCommandBuffer) throws {
+        guard command.status == .completed else {
+            throw command.error ?? CocoaError(.fileWriteUnknown)
+        }
+#if DEBUG
+        guard !debugRejectsRestoreCompletion else { throw CocoaError(.fileWriteUnknown) }
+#endif
     }
 }

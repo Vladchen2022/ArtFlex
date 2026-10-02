@@ -94,6 +94,7 @@ struct VisibleHistoryPopover: View {
                         viewModel.applyVisibleHistoryPreview()
                         dismiss()
                     }
+                    .disabled(viewModel.isHistoryNavigating)
                     .buttonStyle(.borderedProminent)
                 }
             }

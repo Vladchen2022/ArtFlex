@@ -152,7 +152,84 @@ private struct BlockReferenceMetalGeometryCacheKey: Equatable {
     var placementObjects: [BlockReferenceObject]
 }
 
+private struct BlockReferenceObjectGeometryKey: Equatable {
+    var id: UUID
+    var kind: BlockPrimitiveKind
+    var position: BlockVector3
+    var rotation: BlockEulerRotation
+    var dimensions: BlockDimensions
+    var mesh: BlockReferenceCustomMesh?
+    var radialSegments: Int
+    init(_ object: BlockReferenceObject) {
+        id = object.id; kind = object.kind; position = object.position
+        rotation = object.rotation; dimensions = object.dimensions
+        mesh = object.customMesh; radialSegments = object.radialSegments
+    }
+}
+
+private struct BlockReferenceObjectGeometry {
+    var key: BlockReferenceObjectGeometryKey
+    var revision: UInt64
+    var faces: [BlockMeshFace]
+    var featureMasks: [Int: [Bool]]
+}
+
+private struct BlockReferenceRenderedObject {
+    var geometry: BlockReferenceObjectGeometry
+    var isDraft: Bool
+    var style: BlockReferenceObjectStyle
+}
+
+private struct BlockReferenceObjectProjectionKey: Equatable {
+    var geometryRevision: UInt64
+    var camera: BlockReferenceCamera
+    var section: BlockSectionSettings
+    var transform: CanvasViewportTransform
+    var viewportSize: CGSize
+    var nearDepth: Double
+    var farDepth: Double
+    var display: BlockReferenceDisplaySettings
+    var isDraft: Bool
+    var isSelected: Bool
+    var isActive: Bool
+    var selectedFaceIndex: Int?
+    var style: BlockReferenceObjectStyle
+    var accent: SIMD4<Float>
+}
+
+private struct BlockReferenceObjectProjection {
+    var key: BlockReferenceObjectProjectionKey
+    var faces: [BlockReferenceSolidVertex]
+    var edges: [BlockReferenceSolidVertex]
+    var byteCount: Int { (faces.count + edges.count) * MemoryLayout<BlockReferenceSolidVertex>.stride }
+}
+
+private struct BlockReferenceFrameGeometryKey: Equatable {
+    var sourceRevision: UInt64
+    var camera: BlockReferenceCamera
+    var section: BlockSectionSettings
+    var display: BlockReferenceDisplaySettings
+    var workingPlane: BlockWorkingPlane
+    var gridSpacing: Double
+    var constructionLines: [BlockConstructionLine]
+    var selectedObjectIDs: Set<UUID>
+    var selectedObjectID: UUID?
+    var selectedFaceIndex: Int?
+    var transform: CanvasViewportTransform
+    var viewportSize: CGSize
+    var accent: SIMD4<Float>
+}
+
+struct BlockReferenceRenderCacheStatistics: Equatable {
+    var objectGeometryBuilds = 0
+    var objectProjectionBuilds = 0
+    var objectProjectionHits = 0
+    var frameProjectionHits = 0
+    var uploadedVertexBytes = 0
+}
+
 private struct BlockReferenceMetalGeometrySource {
+    var objects: [BlockReferenceRenderedObject]
     var renderedFaces: [(face: BlockMeshFace, isDraft: Bool, style: BlockReferenceObjectStyle)]
     var featureMasks: [UUID: [Int: [Bool]]]
     var faceVertexCapacity: Int
@@ -164,6 +241,7 @@ private struct BlockReferenceMetalBufferSlot {
     var faceCapacity = 0
     var edgeBuffer: MTLBuffer?
     var edgeCapacity = 0
+    var geometryRevision: UInt64?
 }
 
 func blockReferenceMetalBufferCapacity(requiredByteCount: Int) -> Int {
@@ -184,6 +262,18 @@ final class BlockReferenceMetalSolidRenderer {
     private let edgeDepthState: MTLDepthStencilState
     private var geometryCacheKey: BlockReferenceMetalGeometryCacheKey?
     private var geometrySource: BlockReferenceMetalGeometrySource?
+    private var objectGeometryCache: [UUID: BlockReferenceObjectGeometry] = [:]
+    private var objectProjectionCache: [UUID: BlockReferenceObjectProjection] = [:]
+    private var objectProjectionCacheBytes = 0
+    private var nextObjectGeometryRevision: UInt64 = 0
+    private var geometrySourceRevision: UInt64 = 0
+    private var frameGeometryKey: BlockReferenceFrameGeometryKey?
+    private var frameGeometry: (faces: [BlockReferenceSolidVertex], edges: [BlockReferenceSolidVertex])?
+    private var frameGeometryRevision: UInt64 = 0
+    private(set) var cacheStatistics = BlockReferenceRenderCacheStatistics()
+#if DEBUG
+    var debugDisablesRenderCaches = false
+#endif
     private var bufferSlots = Array(repeating: BlockReferenceMetalBufferSlot(), count: 3)
     private var nextBufferSlotIndex = 0
     private let inFlightBufferSemaphore = DispatchSemaphore(value: 3)
@@ -315,18 +405,16 @@ final class BlockReferenceMetalSolidRenderer {
         let slotIndex = nextBufferSlotIndex
         nextBufferSlotIndex = (nextBufferSlotIndex + 1) % bufferSlots.count
         var slot = bufferSlots[slotIndex]
-        let faceBuffer = upload(
-            geometry.faces,
-            to: &slot.faceBuffer,
-            capacity: &slot.faceCapacity,
-            label: "Block Reference Face Vertices"
-        )
-        let edgeBuffer = upload(
-            geometry.edges,
-            to: &slot.edgeBuffer,
-            capacity: &slot.edgeCapacity,
-            label: "Block Reference Edge Vertices"
-        )
+        // Three in-flight slots each keep their last uploaded geometry. Once all
+        // slots contain this revision, an unchanged frame needs no CPU upload.
+        let needsUpload = slot.geometryRevision != frameGeometryRevision
+        let faceBuffer = needsUpload ? upload(geometry.faces, to: &slot.faceBuffer,
+            capacity: &slot.faceCapacity, label: "Block Reference Face Vertices") : slot.faceBuffer
+        let edgeBuffer = needsUpload ? upload(geometry.edges, to: &slot.edgeBuffer,
+            capacity: &slot.edgeCapacity, label: "Block Reference Edge Vertices") : slot.edgeBuffer
+        if (geometry.faces.isEmpty || faceBuffer != nil), (geometry.edges.isEmpty || edgeBuffer != nil) {
+            slot.geometryRevision = frameGeometryRevision
+        }
         bufferSlots[slotIndex] = slot
         guard (geometry.faces.isEmpty || faceBuffer != nil),
               (geometry.edges.isEmpty || edgeBuffer != nil),
@@ -367,6 +455,7 @@ final class BlockReferenceMetalSolidRenderer {
     ) -> MTLBuffer? {
         guard !vertices.isEmpty else { return nil }
         let byteCount = vertices.count * MemoryLayout<BlockReferenceSolidVertex>.stride
+        cacheStatistics.uploadedVertexBytes += byteCount
         if buffer == nil || capacity < byteCount {
             capacity = blockReferenceMetalBufferCapacity(requiredByteCount: byteCount)
             buffer = context.device.makeBuffer(length: capacity, options: .storageModeShared)
@@ -388,6 +477,22 @@ final class BlockReferenceMetalSolidRenderer {
         viewportSize: CGSize
     ) -> (faces: [BlockReferenceSolidVertex], edges: [BlockReferenceSolidVertex]) {
         guard let source = geometrySource else { return ([], []) }
+        let accent = blockReferenceAccentColor()
+        let frameKey = BlockReferenceFrameGeometryKey(sourceRevision: geometrySourceRevision,
+            camera: scene.camera, section: scene.section, display: scene.display,
+            workingPlane: scene.workingPlane, gridSpacing: scene.snap.gridSpacing,
+            constructionLines: scene.constructionLines, selectedObjectIDs: selectedObjectIDs,
+            selectedObjectID: editorState.selectedObjectID, selectedFaceIndex: editorState.selectedFaceIndex,
+            transform: transform, viewportSize: viewportSize, accent: accent)
+        var permitsCaching = true
+#if DEBUG
+        permitsCaching = !debugDisablesRenderCaches
+#endif
+        if permitsCaching, frameKey == frameGeometryKey, let frameGeometry {
+            cacheStatistics.frameProjectionHits += 1
+            return frameGeometry
+        }
+        frameGeometryRevision &+= 1
         let renderedFaces = source.renderedFaces
         let featureMasks = source.featureMasks
         let gridSegments = scene.display.isFrozen
@@ -417,87 +522,119 @@ final class BlockReferenceMetalSolidRenderer {
         let depthSpan = max(maximumDepth - minimumDepth, 1)
         let nearDepth = max(0.01, minimumDepth - depthSpan * 0.25)
         let farDepth = max(maximumDepth + depthSpan * 0.25, nearDepth + 1)
-        let accent = blockReferenceAccentColor()
-
         var faceVertices: [BlockReferenceSolidVertex] = []
         var edgeVertices: [BlockReferenceSolidVertex] = []
         faceVertices.reserveCapacity(source.faceVertexCapacity)
         edgeVertices.reserveCapacity(source.edgeVertexCapacity + gridSegments.count * 6)
-        for renderedFace in renderedFaces {
-            let face = renderedFace.face
-            let isDraft = renderedFace.isDraft
-            let style = renderedFace.style
-            let sectionClipped = blockReferenceClipFace(face.vertices, section: scene.section)
-            let nearClipChangedTopology = sectionClipped.contains { vertex in
-                (vertex - cameraBasis.position).dot(cameraBasis.forward) < nearDepth
+        for renderedObject in source.objects {
+            let objectID = renderedObject.geometry.key.id
+            let isSelected = !scene.display.isFrozen && selectedObjectIDs.contains(objectID)
+            let key = BlockReferenceObjectProjectionKey(geometryRevision: renderedObject.geometry.revision,
+                camera: scene.camera, section: scene.section, transform: transform, viewportSize: viewportSize,
+                nearDepth: nearDepth, farDepth: farDepth, display: scene.display,
+                isDraft: renderedObject.isDraft, isSelected: isSelected,
+                isActive: isSelected && objectID == editorState.selectedObjectID,
+                selectedFaceIndex: editorState.selectedFaceIndex, style: renderedObject.style, accent: accent)
+            if permitsCaching, let cached = objectProjectionCache[objectID], cached.key == key {
+                faceVertices.append(contentsOf: cached.faces)
+                edgeVertices.append(contentsOf: cached.edges)
+                cacheStatistics.objectProjectionHits += 1
+                continue
             }
-            let clipped = clip(
-                polygon: sectionClipped,
-                toNearDepth: nearDepth,
-                cameraBasis: cameraBasis
-            )
-            guard clipped.count >= 3 else { continue }
-            let projected = clipped.compactMap {
-                project(
-                    $0,
-                    camera: scene.camera,
-                    cameraBasis: cameraBasis,
-                    nearDepth: nearDepth,
-                    farDepth: farDepth,
-                    transform: transform,
-                    viewportSize: viewportSize
-                )
-            }
-            guard projected.count == clipped.count else { continue }
+            cacheStatistics.objectProjectionBuilds += 1
+            let projectedObject: (faces: [BlockReferenceSolidVertex], edges: [BlockReferenceSolidVertex]) = {
+                var faceVertices: [BlockReferenceSolidVertex] = []
+                var edgeVertices: [BlockReferenceSolidVertex] = []
+                for renderedFace in renderedObject.geometry.faces {
+                    let renderedFace = (face: renderedFace, isDraft: renderedObject.isDraft, style: renderedObject.style)
+                    let face = renderedFace.face
+                    let isDraft = renderedFace.isDraft
+                    let style = renderedFace.style
+                    let sectionClipped = blockReferenceClipFace(face.vertices, section: scene.section)
+                    let nearClipChangedTopology = sectionClipped.contains { vertex in
+                        (vertex - cameraBasis.position).dot(cameraBasis.forward) < nearDepth
+                    }
+                    let clipped = clip(
+                        polygon: sectionClipped,
+                        toNearDepth: nearDepth,
+                        cameraBasis: cameraBasis
+                    )
+                    guard clipped.count >= 3 else { continue }
+                    let projected = clipped.compactMap {
+                        project(
+                            $0,
+                            camera: scene.camera,
+                            cameraBasis: cameraBasis,
+                            nearDepth: nearDepth,
+                            farDepth: farDepth,
+                            transform: transform,
+                            viewportSize: viewportSize
+                        )
+                    }
+                    guard projected.count == clipped.count else { continue }
 
-            let isSelected = !scene.display.isFrozen && selectedObjectIDs.contains(face.objectID)
-            let isActive = isSelected && face.objectID == editorState.selectedObjectID
-            let isSelectedFace = isActive && face.faceIndex == editorState.selectedFaceIndex
-            if blockReferenceShouldRenderFaces(display: scene.display) {
-                let faceColor = blockReferenceFaceColor(
-                    normal: face.normal,
-                    light: scene.display.lightDirection,
-                    isDraft: isDraft,
-                    isSelected: isSelected,
-                    isActive: isActive,
-                    isSelectedFace: isSelectedFace,
-                    accent: accent,
-                    style: style
-                )
-                for index in 1..<(projected.count - 1) {
-                    faceVertices.append(solidVertex(projected[0], color: faceColor, viewportSize: viewportSize))
-                    faceVertices.append(solidVertex(projected[index], color: faceColor, viewportSize: viewportSize))
-                    faceVertices.append(solidVertex(projected[index + 1], color: faceColor, viewportSize: viewportSize))
-                }
-            }
+                    let isSelected = !scene.display.isFrozen && selectedObjectIDs.contains(face.objectID)
+                    let isActive = isSelected && face.objectID == editorState.selectedObjectID
+                    let isSelectedFace = isActive && face.faceIndex == editorState.selectedFaceIndex
+                    if blockReferenceShouldRenderFaces(display: scene.display) {
+                        let faceColor = blockReferenceFaceColor(
+                            normal: face.normal,
+                            light: scene.display.lightDirection,
+                            isDraft: isDraft,
+                            isSelected: isSelected,
+                            isActive: isActive,
+                            isSelectedFace: isSelectedFace,
+                            accent: accent,
+                            style: style
+                        )
+                        for index in 1..<(projected.count - 1) {
+                            faceVertices.append(solidVertex(projected[0], color: faceColor, viewportSize: viewportSize))
+                            faceVertices.append(solidVertex(projected[index], color: faceColor, viewportSize: viewportSize))
+                            faceVertices.append(solidVertex(projected[index + 1], color: faceColor, viewportSize: viewportSize))
+                        }
+                    }
 
-            guard scene.display.showsEdges else { continue }
-            let edgeColor = blockReferenceEdgeColor(
-                isDraft: isDraft,
-                isSelected: isSelected,
-                isActive: isActive,
-                accent: accent,
-                style: style
-            )
-            let lineWidth: Double = isActive || isDraft ? 1.9 : (isSelected ? 1.5 : 1)
-            let featureMask = featureMasks[face.objectID]?[face.faceIndex]
-            let preservesOriginalEdgeTopology = !scene.section.isEnabled && !nearClipChangedTopology
-            for index in projected.indices {
-                if !blockReferenceShouldRenderProjectedEdge(
-                    featureMask: featureMask,
-                    projectedEdgeIndex: index,
-                    preservesOriginalTopology: preservesOriginalEdgeTopology
-                ) {
-                    continue
+                    guard scene.display.showsEdges else { continue }
+                    let edgeColor = blockReferenceEdgeColor(
+                        isDraft: isDraft,
+                        isSelected: isSelected,
+                        isActive: isActive,
+                        accent: accent,
+                        style: style
+                    )
+                    let lineWidth: Double = isActive || isDraft ? 1.9 : (isSelected ? 1.5 : 1)
+                    let featureMask = featureMasks[face.objectID]?[face.faceIndex]
+                    let preservesOriginalEdgeTopology = !scene.section.isEnabled && !nearClipChangedTopology
+                    for index in projected.indices {
+                        if !blockReferenceShouldRenderProjectedEdge(
+                            featureMask: featureMask,
+                            projectedEdgeIndex: index,
+                            preservesOriginalTopology: preservesOriginalEdgeTopology
+                        ) {
+                            continue
+                        }
+                        appendEdgeQuad(
+                            from: projected[index],
+                            to: projected[(index + 1) % projected.count],
+                            lineWidth: lineWidth,
+                            color: edgeColor,
+                            viewportSize: viewportSize,
+                            to: &edgeVertices
+                        )
+                    }
                 }
-                appendEdgeQuad(
-                    from: projected[index],
-                    to: projected[(index + 1) % projected.count],
-                    lineWidth: lineWidth,
-                    color: edgeColor,
-                    viewportSize: viewportSize,
-                    to: &edgeVertices
-                )
+
+                return (faceVertices, edgeVertices)
+            }()
+            faceVertices.append(contentsOf: projectedObject.faces)
+            edgeVertices.append(contentsOf: projectedObject.edges)
+            if permitsCaching {
+                objectProjectionCacheBytes -= objectProjectionCache.removeValue(forKey: objectID)?.byteCount ?? 0
+                let cached = BlockReferenceObjectProjection(key: key, faces: projectedObject.faces, edges: projectedObject.edges)
+                if cached.byteCount <= 32 * 1024 * 1024 - objectProjectionCacheBytes {
+                    objectProjectionCache[objectID] = cached
+                    objectProjectionCacheBytes += cached.byteCount
+                }
             }
         }
 
@@ -534,6 +671,10 @@ final class BlockReferenceMetalSolidRenderer {
                 to: &edgeVertices
             )
         }
+        if permitsCaching {
+            frameGeometryKey = frameKey
+            frameGeometry = (faceVertices, edgeVertices)
+        }
         return (faceVertices, edgeVertices)
     }
 
@@ -548,6 +689,10 @@ final class BlockReferenceMetalSolidRenderer {
             numericTransform: editorState.numericTransform,
             placementObjects: editorState.placementObjects
         )
+        var permitsCaching = true
+#if DEBUG
+        permitsCaching = !debugDisablesRenderCaches
+#endif
         guard key != geometryCacheKey || geometrySource == nil else { return }
 
         var objects = scene.objects.filter {
@@ -569,15 +714,33 @@ final class BlockReferenceMetalSolidRenderer {
         }
 
         objects.append(contentsOf: editorState.placementObjects.map { ($0, true) })
-        let renderedFaces = objects.flatMap { object, isDraft in
-            blockObjectFaces(object).map { ($0, isDraft, object.style) }
+        let objectIDs = Set(objects.map { $0.0.id })
+        objectGeometryCache = objectGeometryCache.filter { objectIDs.contains($0.key) }
+        objectProjectionCache = objectProjectionCache.filter { objectIDs.contains($0.key) }
+        objectProjectionCacheBytes = objectProjectionCache.values.reduce(0) { $0 + $1.byteCount }
+        let renderedObjects: [BlockReferenceRenderedObject] = objects.map { object, isDraft in
+            let key = BlockReferenceObjectGeometryKey(object)
+            let geometry: BlockReferenceObjectGeometry
+            if permitsCaching, let cached = objectGeometryCache[object.id], cached.key == key {
+                geometry = cached
+            } else {
+                let faces = blockObjectFaces(object)
+                nextObjectGeometryRevision &+= 1
+                geometry = .init(key: key, revision: nextObjectGeometryRevision, faces: faces,
+                    featureMasks: blockReferenceFeatureEdgeMask(faces: faces))
+                objectGeometryCache[object.id] = geometry
+                cacheStatistics.objectGeometryBuilds += 1
+            }
+            return .init(geometry: geometry, isDraft: isDraft, style: object.style)
         }
-        let facesByObjectID = Dictionary(grouping: renderedFaces, by: { $0.0.objectID })
-        let featureMasks = Dictionary(uniqueKeysWithValues: objects.map { object, _ in
-            let faces = facesByObjectID[object.id]?.map(\.0) ?? []
-            return (object.id, blockReferenceFeatureEdgeMask(faces: faces))
+        let renderedFaces = renderedObjects.flatMap { object in
+            object.geometry.faces.map { ($0, object.isDraft, object.style) }
+        }
+        let featureMasks = Dictionary(uniqueKeysWithValues: renderedObjects.map {
+            ($0.geometry.key.id, $0.geometry.featureMasks)
         })
         let source = BlockReferenceMetalGeometrySource(
+            objects: renderedObjects,
             renderedFaces: renderedFaces.map { (face: $0.0, isDraft: $0.1, style: $0.2) },
             featureMasks: featureMasks,
             faceVertexCapacity: renderedFaces.reduce(into: 0) { capacity, renderedFace in
@@ -589,7 +752,18 @@ final class BlockReferenceMetalSolidRenderer {
         )
         geometryCacheKey = key
         geometrySource = source
+        geometrySourceRevision &+= 1
     }
+
+#if DEBUG
+    func debugGeometryBytes(scene: BlockReferenceScene, editorState: BlockReferenceEditorState = .init(),
+        selectedObjectIDs: Set<UUID> = [], transform: CanvasViewportTransform, viewportSize: CGSize) -> (Data, Data) {
+        prepareGeometrySource(scene: scene, editorState: editorState)
+        let geometry = makeGeometry(scene: scene, editorState: editorState, selectedObjectIDs: selectedObjectIDs,
+            transform: transform, viewportSize: viewportSize)
+        return (geometry.faces.withUnsafeBytes { Data($0) }, geometry.edges.withUnsafeBytes { Data($0) })
+    }
+#endif
 
     private func makeGridSegments(scene: BlockReferenceScene) -> [BlockReferenceGridSegment] {
         let spacing = max(scene.snap.gridSpacing, 1)

@@ -3523,12 +3523,16 @@ private func makeSelectionMaskImageSlice(
 
     var rgba = [UInt8](repeating: 0, count: croppedWidth * croppedHeight * 4)
 
-    maskData.withAlphaBytes { source in
+    let stride = croppedWidth + 2
+    let patch = maskData.alphaBytes(in: .init(originX: minX - 1, originY: minY - 1,
+        width: stride, height: croppedHeight + 2))
+    patch.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
+        let source = raw.bindMemory(to: UInt8.self)
         for y in 0..<croppedHeight {
             for x in 0..<croppedWidth {
                 let sourceX = x + minX
                 let sourceY = y + minY
-                let index = (sourceY * maskData.canvasWidth) + sourceX
+                let index = ((y + 1) * stride) + x + 1
                 let alpha = source[index]
                 let shouldDraw: UInt8
                 if edgeOnly {
@@ -3538,8 +3542,8 @@ private func makeSelectionMaskImageSlice(
                     } else {
                         let left = sourceX > 0 ? source[index - 1] : 0
                         let right = sourceX < width - 1 ? source[index + 1] : 0
-                        let up = sourceY > 0 ? source[index - maskData.canvasWidth] : 0
-                        let down = sourceY < height - 1 ? source[index + maskData.canvasWidth] : 0
+                        let up = sourceY > 0 ? source[index - stride] : 0
+                        let down = sourceY < height - 1 ? source[index + stride] : 0
                         let isEdge = left < edgeThreshold || right < edgeThreshold || up < edgeThreshold || down < edgeThreshold
                         let isVisibleDash = !dashesEdge || ((sourceX + sourceY) % 12) < 6
                         shouldDraw = isEdge && isVisibleDash ? 255 : 0

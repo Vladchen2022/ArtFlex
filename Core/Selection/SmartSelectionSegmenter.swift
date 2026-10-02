@@ -106,6 +106,8 @@ struct SmartSelectionSegmentationResult: Sendable, Equatable {
     var alphaBytes: [UInt8]
     var selectedPixelCount: Int
     var selectedBounds: CanvasRect
+    var workingStorageByteCount: Int = 0
+    var sourceReadbackByteCount: Int = 0
 }
 
 /// Seed-based fuzzy selector following the same model used by mature magic-wand
@@ -116,7 +118,8 @@ enum SmartSelectionSegmenter {
         raster: SmartSelectionRaster,
         seedPoint: CanvasPoint,
         settings: SmartSelectionSettings,
-        cancellation: WorkCancellation? = nil
+        cancellation: WorkCancellation? = nil,
+        boundedResult: Bool = false
     ) -> SmartSelectionSegmentationResult? {
         guard
             raster.width > 0,
@@ -136,7 +139,8 @@ enum SmartSelectionSegmenter {
                 height: raster.height,
                 seedPoint: seedPoint,
                 settings: settings,
-                cancellation: cancellation
+                cancellation: cancellation,
+                boundedResult: boundedResult
             ) { x, y in
                 let offset = (y * raster.bytesPerRow) + (x * 4)
                 return PremultipliedSRGBAPixel(
@@ -157,6 +161,7 @@ enum SmartSelectionSegmenter {
         seedPoint: CanvasPoint,
         settings: SmartSelectionSettings,
         cancellation: WorkCancellation? = nil,
+        boundedResult: Bool = false,
         pixelAt: (Int, Int) throws -> PremultipliedSRGBAPixel
     ) throws -> SmartSelectionSegmentationResult? {
         try cancellation?.check()
@@ -188,7 +193,8 @@ enum SmartSelectionSegmenter {
             return UInt8(clamping: Int((fraction * 255).rounded()))
         }
 
-        var alpha = [UInt8](repeating: 0, count: width * height)
+        let alpha = SelectionWorkBytes(width: width, height: height, paged: settings.isContiguous)
+        var stateStorageBytes = 0
         var selectedPixelCount = 0
         var minX = width
         var minY = height
@@ -212,8 +218,8 @@ enum SmartSelectionSegmenter {
             // 0 unknown, 1 rejected, 2 accepted. This mirrors the scanline
             // flood-fill structure already used by BucketFillEngine, while the
             // one-pixel neighbor expansion preserves diagonal edge continuity.
-            var eligibility = [UInt8](repeating: 0, count: width * height)
-            var connected = [UInt8](repeating: 0, count: width * height)
+            let eligibility = SelectionWorkBytes(width: width, height: height, paged: true)
+            let connected = SelectionWorkBytes(width: width, height: height, paged: true)
 
             func acceptedCoverage(_ x: Int, _ y: Int) throws -> UInt8 {
                 guard x >= 0, x < width, y >= 0, y < height else { return 0 }
@@ -289,9 +295,15 @@ enum SmartSelectionSegmenter {
                 try enqueueSegments(y: seed.y + 1, from: left - 1, through: right + 1)
             }
 
-            for index in alpha.indices where connected[index] == 0 {
-                alpha[index] = 0
+            if maxX >= minX, maxY >= minY {
+                for y in minY...maxY {
+                    for x in minX...maxX {
+                        let index = y * width + x
+                        if connected[index] == 0 { alpha[index] = 0 }
+                    }
+                }
             }
+            stateStorageBytes = eligibility.allocatedBytes + connected.allocatedBytes
         } else {
             for y in 0..<height {
                 try cancellation?.check()
@@ -302,17 +314,27 @@ enum SmartSelectionSegmenter {
         }
 
         guard selectedPixelCount > 0, maxX >= minX, maxY >= minY else { return nil }
+        let resultX = boundedResult ? minX : 0, resultY = boundedResult ? minY : 0
+        let resultWidth = boundedResult ? maxX - minX + 1 : width
+        let resultHeight = boundedResult ? maxY - minY + 1 : height
+        var resultBytes = [UInt8](repeating: 0, count: resultWidth * resultHeight)
+        for y in minY...maxY {
+            for x in minX...maxX {
+                resultBytes[(y - resultY) * resultWidth + x - resultX] = alpha[y * width + x]
+            }
+        }
         return SmartSelectionSegmentationResult(
-            originX: originX,
-            originY: originY,
-            width: width,
-            height: height,
-            alphaBytes: alpha,
+            originX: originX + resultX,
+            originY: originY + resultY,
+            width: resultWidth,
+            height: resultHeight,
+            alphaBytes: resultBytes,
             selectedPixelCount: selectedPixelCount,
             selectedBounds: CanvasRect(
                 origin: CanvasPoint(x: Double(originX + minX), y: Double(originY + minY)),
                 size: CanvasPoint(x: Double(maxX - minX + 1), y: Double(maxY - minY + 1))
-            )
+            ),
+            workingStorageByteCount: alpha.allocatedBytes + stateStorageBytes + resultBytes.count
         )
     }
 
@@ -356,5 +378,57 @@ enum SmartSelectionSegmenter {
             blue: UInt8(clamping: Int((blue * alpha * 255).rounded())),
             alpha: UInt8(clamping: Int((alpha * 255).rounded()))
         )
+    }
+}
+
+/// A paged byte grid keeps local flood-fill bookkeeping local. The established
+/// scanline traversal and alpha formulas above are shared with the dense output.
+private final class SelectionWorkBytes {
+    private final class Page {
+        var bytes = [UInt8](repeating: 0, count: 128 * 128)
+    }
+    private let width: Int
+    private let columns: Int
+    private let height: Int
+    private var dense: [UInt8]?
+    private var pages: [Int: Page] = [:]
+    var allocatedBytes: Int { dense?.count ?? pages.count * 128 * 128 }
+    init(width: Int, height: Int, paged: Bool) {
+        self.width = width
+        self.height = height
+        self.columns = (width + 127) / 128
+        self.dense = paged ? nil : [UInt8](repeating: 0, count: width * height)
+    }
+    subscript(index: Int) -> UInt8 {
+        get {
+            if let dense { return dense[index] }
+            let x = index % width, y = index / width
+            return pages[(y / 128) * columns + x / 128]?.bytes[(y % 128) * 128 + x % 128] ?? 0
+        }
+        set {
+            if dense != nil { dense![index] = newValue; return }
+            let x = index % width, y = index / width, key = (index / width / 128) * columns + (index % width) / 128
+            if let page = pages[key] { page.bytes[(y % 128) * 128 + x % 128] = newValue }
+            else if newValue != 0 {
+                let page = Page()
+                page.bytes[(y % 128) * 128 + x % 128] = newValue
+                pages[key] = page
+                if pages.count * 128 * 128 > width * height / 2 { promoteToDense() }
+            }
+        }
+    }
+    private func promoteToDense() {
+        var bytes = [UInt8](repeating: 0, count: width * height)
+        for (key, page) in pages {
+            let x0 = (key % columns) * 128, y0 = (key / columns) * 128
+            let count = min(128, width - x0)
+            for row in 0..<min(128, height - y0) {
+                let target = (y0 + row) * width + x0
+                bytes.replaceSubrange(target..<(target + count),
+                    with: page.bytes[(row * 128)..<(row * 128 + count)])
+            }
+        }
+        dense = bytes
+        pages.removeAll()
     }
 }

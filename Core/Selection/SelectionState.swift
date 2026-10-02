@@ -28,22 +28,142 @@ struct SelectionShapeComponent: Codable, Sendable, Equatable {
 struct SelectionMaskData: Codable, Sendable, Equatable {
     var canvasWidth: Int
     var canvasHeight: Int
-    var alphaBytes: Data
+    private(set) var storageRegion: PixelRegion?
+    private var storage: Data
+    var storedByteCount: Int { storage.count }
 
-    @inline(__always)
-    func withAlphaBytes<Result>(_ body: (UnsafeBufferPointer<UInt8>) -> Result) -> Result {
-        alphaBytes.withUnsafeBytes { rawBuffer in
-            body(rawBuffer.bindMemory(to: UInt8.self))
+    /// Legacy interchange view. Pixel/region consumers must use the bounded
+    /// helpers below so reading a small selection does not allocate the canvas.
+    var alphaBytes: Data {
+        get { alphaBytes(in: .init(originX: 0, originY: 0, width: canvasWidth, height: canvasHeight)) }
+        set { self = .init(canvasWidth: canvasWidth, canvasHeight: canvasHeight, alphaBytes: newValue) }
+    }
+
+    var patch: SelectionMaskCombiner.Patch {
+        guard let r = storageRegion else { return .init(originX: 0, originY: 0, width: 0, height: 0, alphaBytes: Data()) }
+        return .init(originX: r.originX, originY: r.originY, width: r.width, height: r.height, alphaBytes: storage)
+    }
+
+    init(canvasWidth: Int, canvasHeight: Int, alphaBytes: Data, knownBounds: CanvasRect? = nil) {
+        self.canvasWidth = canvasWidth
+        self.canvasHeight = canvasHeight
+        self.storageRegion = nil
+        self.storage = Data()
+        guard canvasWidth > 0, canvasHeight > 0,
+              !canvasWidth.multipliedReportingOverflow(by: canvasHeight).overflow,
+              alphaBytes.count == canvasWidth * canvasHeight else { return }
+        if let knownBounds {
+            let b = knownBounds.clamped(to: .init(width: canvasWidth, height: canvasHeight))
+            let x = max(0, Int(floor(b.minX))), y = max(0, Int(floor(b.minY)))
+            let w = min(canvasWidth, Int(ceil(b.maxX))) - x
+            let h = min(canvasHeight, Int(ceil(b.maxY))) - y
+            guard w > 0, h > 0 else { return }
+            var regionBytes = Data(count: w * h)
+            regionBytes.withUnsafeMutableBytes { dest in
+                alphaBytes.withUnsafeBytes { source in
+                    for row in 0..<h {
+                        dest.baseAddress!.advanced(by: row * w).copyMemory(
+                            from: source.baseAddress!.advanced(by: (y + row) * canvasWidth + x), byteCount: w)
+                    }
+                }
+            }
+            self = Self(canvasWidth: canvasWidth, canvasHeight: canvasHeight,
+                      patch: .init(originX: x, originY: y, width: w, height: h, alphaBytes: regionBytes))
+        } else {
+            self = Self(canvasWidth: canvasWidth, canvasHeight: canvasHeight,
+                      patch: .init(originX: 0, originY: 0, width: canvasWidth, height: canvasHeight, alphaBytes: alphaBytes))
         }
+    }
+
+    init(canvasWidth: Int, canvasHeight: Int, patch: SelectionMaskCombiner.Patch) {
+        self.canvasWidth = canvasWidth
+        self.canvasHeight = canvasHeight
+        self.storageRegion = nil
+        self.storage = Data()
+        guard canvasWidth > 0, canvasHeight > 0, patch.width > 0, patch.height > 0,
+              !patch.width.multipliedReportingOverflow(by: patch.height).overflow,
+              patch.alphaBytes.count == patch.width * patch.height else { return }
+        let x0 = max(0, patch.originX), y0 = max(0, patch.originY)
+        let x1 = min(canvasWidth, patch.originX + patch.width), y1 = min(canvasHeight, patch.originY + patch.height)
+        guard x1 > x0, y1 > y0 else { return }
+        var minX = x1, minY = y1, maxX = -1, maxY = -1
+        patch.alphaBytes.withUnsafeBytes { raw in
+            let bytes = raw.bindMemory(to: UInt8.self)
+            for y in y0..<y1 {
+                for x in x0..<x1 where bytes[(y - patch.originY) * patch.width + x - patch.originX] > 0 {
+                    minX = min(minX, x); minY = min(minY, y)
+                    maxX = max(maxX, x); maxY = max(maxY, y)
+                }
+            }
+        }
+        guard maxX >= minX, maxY >= minY else { return }
+        let region = PixelRegion(originX: minX, originY: minY, width: maxX - minX + 1, height: maxY - minY + 1)
+        storageRegion = region
+        if region.originX == patch.originX, region.originY == patch.originY,
+           region.width == patch.width, region.height == patch.height { storage = patch.alphaBytes; return }
+        storage = Data(count: region.width * region.height)
+        storage.withUnsafeMutableBytes { dest in
+            patch.alphaBytes.withUnsafeBytes { source in
+                for row in 0..<region.height {
+                    dest.baseAddress!.advanced(by: row * region.width).copyMemory(
+                        from: source.baseAddress!.advanced(by: (region.originY + row - patch.originY) * patch.width
+                            + region.originX - patch.originX), byteCount: region.width)
+                }
+            }
+        }
+    }
+
+    func alphaBytes(in region: PixelRegion) -> Data {
+        guard region.width > 0, region.height > 0,
+              !region.width.multipliedReportingOverflow(by: region.height).overflow else { return Data() }
+        if region == storageRegion { return storage }
+        var result = Data(count: region.width * region.height)
+        guard let stored = storageRegion, let overlap = stored.intersection(with: region) else { return result }
+        result.withUnsafeMutableBytes { dest in
+            storage.withUnsafeBytes { source in
+                for row in 0..<overlap.height {
+                    dest.baseAddress!.advanced(by: (overlap.originY + row - region.originY) * region.width
+                        + overlap.originX - region.originX).copyMemory(
+                        from: source.baseAddress!.advanced(by: (overlap.originY + row - stored.originY) * stored.width
+                            + overlap.originX - stored.originX), byteCount: overlap.width)
+                }
+            }
+        }
+        return result
+    }
+
+    func withAlphaBytes<Result>(_ body: (UnsafeBufferPointer<UInt8>) -> Result) -> Result {
+        alphaBytes.withUnsafeBytes { body($0.bindMemory(to: UInt8.self)) }
     }
 
     @inline(__always)
     func alphaByte(at index: Int) -> UInt8? {
-        guard index >= 0, index < alphaBytes.count else { return nil }
-        return withAlphaBytes { buffer in
-            guard let baseAddress = buffer.baseAddress else { return nil }
-            return baseAddress[index]
+        guard canvasWidth > 0, canvasHeight > 0, index >= 0,
+              index / canvasWidth < canvasHeight else { return nil }
+        let x = index % canvasWidth, y = index / canvasWidth
+        guard let r = storageRegion, x >= r.originX, x < r.maxX, y >= r.originY, y < r.maxY else { return 0 }
+        return storage.withUnsafeBytes { (raw: UnsafeRawBufferPointer) -> UInt8 in
+            raw[(y - r.originY) * r.width + x - r.originX]
         }
+    }
+
+    private enum CodingKeys: String, CodingKey { case canvasWidth, canvasHeight, alphaBytes }
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let width = try container.decode(Int.self, forKey: .canvasWidth)
+        let height = try container.decode(Int.self, forKey: .canvasHeight)
+        let bytes = try container.decode(Data.self, forKey: .alphaBytes)
+        guard width > 0, height > 0, !width.multipliedReportingOverflow(by: height).overflow,
+              bytes.count == width * height else {
+            throw DecodingError.dataCorruptedError(forKey: .alphaBytes, in: container, debugDescription: "Invalid selection mask dimensions")
+        }
+        self.init(canvasWidth: width, canvasHeight: height, alphaBytes: bytes)
+    }
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(canvasWidth, forKey: .canvasWidth)
+        try container.encode(canvasHeight, forKey: .canvasHeight)
+        try container.encode(alphaBytes, forKey: .alphaBytes)
     }
 }
 
@@ -231,21 +351,8 @@ struct SelectionShape: Codable, Sendable, Equatable {
             if maskData.canvasWidth == canvasSize.width, maskData.canvasHeight == canvasSize.height {
                 return self
             }
-            var targetBytes = [UInt8](repeating: 0, count: canvasSize.width * canvasSize.height)
-            let width = min(maskData.canvasWidth, canvasSize.width)
-            let height = min(maskData.canvasHeight, canvasSize.height)
-            maskData.withAlphaBytes { sourceBytes in
-                for y in 0..<height {
-                    for x in 0..<width {
-                        targetBytes[(y * canvasSize.width) + x] = sourceBytes[(y * maskData.canvasWidth) + x]
-                    }
-                }
-            }
-            let clampedMask = SelectionShape.mask(
-                canvasWidth: canvasSize.width,
-                canvasHeight: canvasSize.height,
-                alphaBytes: targetBytes
-            )
+            let clampedMask = SelectionShape.mask(canvasWidth: canvasSize.width,
+                canvasHeight: canvasSize.height, patch: maskData.patch)
             return SelectionShape(
                 kind: .mask,
                 bounds: clampedMask.bounds,
@@ -283,31 +390,11 @@ struct SelectionShape: Codable, Sendable, Equatable {
         if kind == .mask, let maskData {
             let shiftX = Int(deltaX.rounded())
             let shiftY = Int(deltaY.rounded())
-            var targetBytes = [UInt8](repeating: 0, count: maskData.canvasWidth * maskData.canvasHeight)
-            maskData.withAlphaBytes { sourceBytes in
-                for y in 0..<maskData.canvasHeight {
-                    for x in 0..<maskData.canvasWidth {
-                        let sourceIndex = (y * maskData.canvasWidth) + x
-                        guard sourceBytes[sourceIndex] > 0 else { continue }
-                        let destinationX = x + shiftX
-                        let destinationY = y + shiftY
-                        guard
-                            destinationX >= 0,
-                            destinationY >= 0,
-                            destinationX < maskData.canvasWidth,
-                            destinationY < maskData.canvasHeight
-                        else {
-                            continue
-                        }
-                        targetBytes[(destinationY * maskData.canvasWidth) + destinationX] = sourceBytes[sourceIndex]
-                    }
-                }
-            }
-            let translatedMask = SelectionShape.mask(
-                canvasWidth: maskData.canvasWidth,
-                canvasHeight: maskData.canvasHeight,
-                alphaBytes: targetBytes
-            )
+            var patch = maskData.patch
+            patch.originX += shiftX
+            patch.originY += shiftY
+            let translatedMask = SelectionShape.mask(canvasWidth: maskData.canvasWidth,
+                canvasHeight: maskData.canvasHeight, patch: patch)
             return SelectionShape(
                 kind: .mask,
                 bounds: translatedMask.bounds,
@@ -431,7 +518,7 @@ struct SelectionShape: Codable, Sendable, Equatable {
             maskData: SelectionMaskData(
                 canvasWidth: canvasWidth,
                 canvasHeight: canvasHeight,
-                alphaBytes: Data(alphaBytes)
+                alphaBytes: Data(alphaBytes), knownBounds: bounds
             )
         )
     }
@@ -454,9 +541,18 @@ struct SelectionShape: Codable, Sendable, Equatable {
             maskData: SelectionMaskData(
                 canvasWidth: canvasWidth,
                 canvasHeight: canvasHeight,
-                alphaBytes: alphaBytes
+                alphaBytes: alphaBytes, knownBounds: bounds
             )
         )
+    }
+
+    static func mask(canvasWidth: Int, canvasHeight: Int, patch: SelectionMaskCombiner.Patch) -> SelectionShape {
+        let mask = SelectionMaskData(canvasWidth: canvasWidth, canvasHeight: canvasHeight, patch: patch)
+        let bounds = mask.storageRegion.map {
+            CanvasRect(origin: .init(x: Double($0.originX), y: Double($0.originY)),
+                       size: .init(x: Double($0.width), y: Double($0.height)))
+        } ?? CanvasRect(origin: .init(x: 0, y: 0), size: .init(x: 0, y: 0))
+        return SelectionShape(kind: .mask, bounds: bounds, pathPoints: [], maskData: mask)
     }
 
     private static func maskBounds(alphaBytes: [UInt8], canvasWidth: Int, canvasHeight: Int) -> CanvasRect {

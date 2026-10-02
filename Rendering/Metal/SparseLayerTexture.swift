@@ -75,6 +75,40 @@ final class SparseLayerTexture {
         mappedTiles = required
     }
 
+    /// Encode growth on the caller's queue without waiting on the UI thread.
+    /// A replacement heap keeps already submitted readers and writes isolated.
+    func prepareForWrite(in region: PixelRegion, commandBuffer: MTLCommandBuffer) throws {
+        let required = mappedTiles.union(tiles(intersecting: region))
+        guard required != mappedTiles else { return }
+        let maximumTiles = ((size.width + tileSize.width - 1) / tileSize.width)
+            * ((size.height + tileSize.height - 1) / tileSize.height)
+        let newCapacity = min(maximumTiles, max(required.count, capacity * 2))
+        guard let pair = Self.allocate(size: size, format: format, capacity: newCapacity, metal: metal) else {
+            throw CanvasResourceError(message: "无法扩展笔触稀疏资源；输入仍保留")
+        }
+        try encodeInitialization(required, on: pair.texture, copying: texture,
+                                 copyTiles: mappedTiles, command: commandBuffer)
+        texture = pair.texture
+        heap = pair.heap
+        capacity = newCapacity
+        mappedTiles = required
+    }
+
+    static func copying(_ source: MTLTexture, tiles: Set<TileCoordinate>, metal: MetalDeviceContext,
+                        commandBuffer: MTLCommandBuffer) throws -> SparseLayerTexture {
+        guard let result = SparseLayerTexture(size: .init(width: source.width, height: source.height),
+                                             format: source.pixelFormat, metal: metal,
+                                             initialCapacity: max(tiles.count, 1)) else {
+            throw CanvasResourceError(message: "无法分配笔触稀疏资源")
+        }
+        if !tiles.isEmpty {
+            try result.encodeInitialization(tiles, on: result.texture, copying: source,
+                                            copyTiles: tiles, command: commandBuffer)
+            result.mappedTiles = tiles
+        }
+        return result
+    }
+
     static func copying(_ source: MTLTexture, tiles: Set<TileCoordinate>, metal: MetalDeviceContext) throws -> SparseLayerTexture {
         guard let result = SparseLayerTexture(size: .init(width: source.width, height: source.height),
                                              format: source.pixelFormat, metal: metal,
@@ -119,8 +153,23 @@ final class SparseLayerTexture {
 
     private func initialize(_ tiles: Set<TileCoordinate>, on target: MTLTexture,
                             copying source: MTLTexture?, copyTiles: Set<TileCoordinate>) throws {
-        guard let command = metal.commandQueue.makeCommandBuffer(),
-              let mapping = command.makeResourceStateCommandEncoder(),
+        guard let command = metal.commandQueue.makeCommandBuffer() else {
+            throw CanvasResourceError(message: "无法准备稀疏图层映射")
+        }
+        try encodeInitialization(tiles, on: target, copying: source, copyTiles: copyTiles, command: command)
+        command.commit()
+        command.waitUntilCompleted()
+        guard command.status == .completed else {
+            throw CanvasResourceError(message: command.error?.localizedDescription ?? "稀疏图层映射失败")
+        }
+    }
+
+    private func encodeInitialization(_ tiles: Set<TileCoordinate>, on target: MTLTexture,
+                                      copying source: MTLTexture?, copyTiles: Set<TileCoordinate>,
+                                      command: MTLCommandBuffer) throws {
+        let lifetime = MetalCloneSourceLifetime([target] + (source.map { [$0] } ?? []))
+        command.addCompletedHandler { _ in withExtendedLifetime(lifetime) {} }
+        guard let mapping = command.makeResourceStateCommandEncoder(),
               let updateMapping = mapping.updateTextureMapping(_:mode:region:mipLevel:slice:) else {
             throw CanvasResourceError(message: "无法准备稀疏图层映射")
         }
@@ -152,10 +201,5 @@ final class SparseLayerTexture {
             }
         }
         blit.endEncoding()
-        command.commit()
-        command.waitUntilCompleted()
-        guard command.status == .completed else {
-            throw CanvasResourceError(message: command.error?.localizedDescription ?? "稀疏图层映射失败")
-        }
     }
 }

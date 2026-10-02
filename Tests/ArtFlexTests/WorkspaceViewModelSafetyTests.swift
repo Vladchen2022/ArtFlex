@@ -593,18 +593,28 @@ struct WorkspaceViewModelSafetyTests {
 
     @Test
     @MainActor
-    func eyedropperCanReturnToPreviousToolAfterSuccessfulSample() throws {
+    func eyedropperCanReturnToPreviousToolAfterSuccessfulSample() async throws {
         let harness = try BrushEditingBoundaryHarness()
         harness.viewModel.selectTool(.smudge)
         harness.viewModel.selectTool(.eyedropper)
 
         harness.viewModel.sampleColor(at: .init(x: 10, y: 10))
+        for _ in 0..<200 {
+            if !harness.viewModel.isEyedropperSampling { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(!harness.viewModel.isEyedropperSampling)
         #expect(harness.viewModel.workspace.toolSession.activeTool == .eyedropper)
 
         harness.viewModel.selectTool(.smudge)
         harness.viewModel.selectTool(.eyedropper)
         harness.viewModel.setEyedropperReturnsToPreviousTool(true)
         harness.viewModel.sampleColor(at: .init(x: 10, y: 10))
+        for _ in 0..<200 {
+            if !harness.viewModel.isEyedropperSampling { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(!harness.viewModel.isEyedropperSampling)
 
         #expect(harness.viewModel.workspace.toolSession.activeTool == .smudge)
         #expect(harness.viewModel.workspace.toolSession.selectedColor.red > 0.99)
@@ -3998,7 +4008,7 @@ struct WorkspaceViewModelSafetyTests {
 
     @Test
     @MainActor
-    func canvasColorPickSamplesCurrentBrushDisplayTextureBeforeBrushCommit() throws {
+    func canvasColorPickSamplesCurrentBrushDisplayTextureBeforeBrushCommit() async throws {
         let harness = try BrushEditingBoundaryHarness()
         let activeLayerID = harness.viewModel.workspace.document.activeLayerID
         let sampleX = 96
@@ -4016,6 +4026,11 @@ struct WorkspaceViewModelSafetyTests {
 
         harness.viewModel.setSelectedColor(.init(red: 0.05, green: 0.85, blue: 0.2, alpha: 1))
         harness.viewModel.sampleColor(at: .init(x: Double(sampleX), y: Double(sampleY)))
+        for _ in 0..<200 {
+            if !harness.viewModel.isEyedropperSampling { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(!harness.viewModel.isEyedropperSampling)
 
         let sampledColor = harness.viewModel.workspace.toolSession.selectedColor
         #expect(sampledColor.red > 0.6)
@@ -4026,7 +4041,7 @@ struct WorkspaceViewModelSafetyTests {
 
     @Test
     @MainActor
-    func canvasColorPickBecomesOilPaintCandidateWithoutLoadingUntilRequested() throws {
+    func canvasColorPickBecomesOilPaintCandidateWithoutLoadingUntilRequested() async throws {
         let harness = try BrushEditingBoundaryHarness()
         let activeLayerID = harness.viewModel.workspace.document.activeLayerID
         let sampleX = 96
@@ -4050,6 +4065,11 @@ struct WorkspaceViewModelSafetyTests {
         ])
 
         harness.viewModel.sampleColor(at: .init(x: Double(sampleX), y: Double(sampleY)))
+        for _ in 0..<200 {
+            if !harness.viewModel.isEyedropperSampling { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(!harness.viewModel.isEyedropperSampling)
 
         let sampledColor = harness.viewModel.workspace.toolSession.selectedColor
         #expect(sampledColor.red > 0.6)

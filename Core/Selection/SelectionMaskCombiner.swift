@@ -18,6 +18,44 @@ enum SelectionMaskCombiner {
         var bounds: CanvasRect
     }
 
+    /// Same alpha algebra as combineCanvas, but retain and touch only the union,
+    /// base, or intersection required by the requested operation.
+    static func combineBounded(base: SelectionMaskData?, incoming: Patch,
+                               canvasWidth: Int, canvasHeight: Int,
+                               mode: SelectionCombineMode) -> SelectionShape {
+        let incomingMask = SelectionMaskData(canvasWidth: canvasWidth, canvasHeight: canvasHeight, patch: incoming)
+        let validBase = base.flatMap {
+            $0.canvasWidth == canvasWidth && $0.canvasHeight == canvasHeight ? $0 : nil
+        }
+        if mode == .replace || (mode == .add && validBase == nil) {
+            return .mask(canvasWidth: canvasWidth, canvasHeight: canvasHeight, patch: incomingMask.patch)
+        }
+        let region: PixelRegion?
+        switch mode {
+        case .replace: region = incomingMask.storageRegion
+        case .subtract: region = validBase?.storageRegion
+        case .intersect:
+            region = validBase?.storageRegion.flatMap { baseRegion in
+                incomingMask.storageRegion.flatMap { baseRegion.intersection(with: $0) }
+            }
+        case .add:
+            if let a = validBase?.storageRegion, let b = incomingMask.storageRegion {
+                let x = min(a.originX, b.originX), y = min(a.originY, b.originY)
+                region = .init(originX: x, originY: y, width: max(a.maxX, b.maxX) - x, height: max(a.maxY, b.maxY) - y)
+            } else { region = validBase?.storageRegion ?? incomingMask.storageRegion }
+        }
+        guard let region else {
+            return .mask(canvasWidth: canvasWidth, canvasHeight: canvasHeight,
+                         patch: .init(originX: 0, originY: 0, width: 0, height: 0, alphaBytes: Data()))
+        }
+        let old = validBase?.alphaBytes(in: region) ?? Data(count: region.width * region.height)
+        let new = incomingMask.alphaBytes(in: region)
+        let bytes = combine(base: [UInt8](old), incoming: [UInt8](new), mode: mode)
+        return .mask(canvasWidth: canvasWidth, canvasHeight: canvasHeight,
+                     patch: .init(originX: region.originX, originY: region.originY,
+                                  width: region.width, height: region.height, alphaBytes: Data(bytes)))
+    }
+
     static func combine(
         base: [UInt8]?,
         incoming: [UInt8],

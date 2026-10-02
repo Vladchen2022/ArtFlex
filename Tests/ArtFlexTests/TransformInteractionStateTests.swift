@@ -3,6 +3,12 @@ import CoreGraphics
 @testable import ArtFlex
 
 struct TransformInteractionStateTests {
+    @Test func subpixelTranslationIsNotAnIdentityTransform() {
+        #expect(!FreeTransformPreview(translation: .init(x: 0.4, y: 0)).isIdentity)
+        #expect(!FreeTransformPreview(translation: .init(x: 0, y: -0.2)).isIdentity)
+        #expect(FreeTransformPreview.identity.isIdentity)
+    }
+
     @Test
     func transformSessionAccumulatesOffsetsAcrossMultipleDrags() {
         var state = TransformInteractionState()

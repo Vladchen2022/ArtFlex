@@ -1,6 +1,62 @@
 import Foundation
 import Metal
 
+struct ProjectCaptureResourceToken: @unchecked Sendable {
+    var key: LayerResourceKey
+    var cursor: LayerChangeCursor
+    var source: MTLTexture
+}
+
+/// Source references are weak so an optimization cannot retain replaced GPU resources.
+private final class ProjectSavedResourceCache: @unchecked Sendable {
+    private final class Entry {
+        weak var source: (any MTLTexture)?
+        let cursor: LayerChangeCursor
+        let encoded: EncodedProjectLayerResource
+        var useOrder: UInt64
+        init(token: ProjectCaptureResourceToken, encoded: EncodedProjectLayerResource, useOrder: UInt64) {
+            source = token.source
+            cursor = token.cursor
+            self.encoded = encoded
+            self.useOrder = useOrder
+        }
+    }
+    private let lock = NSLock()
+    private let maximumBytes: Int
+    private var entries: [LayerResourceKey: Entry] = [:]
+    private var order: UInt64 = 0
+    init(maximumBytes: Int) { self.maximumBytes = max(0, maximumBytes) }
+    var residentBytes: Int { lock.withLock { entries.values.reduce(0) { $0 + $1.encoded.compressedPixels.count } } }
+
+    func resource(matching token: ProjectCaptureResourceToken) -> EncodedProjectLayerResource? {
+        lock.withLock {
+            guard let entry = entries[token.key], entry.cursor == token.cursor,
+                  entry.source === token.source else { return nil }
+            order &+= 1
+            entry.useOrder = order
+            return entry.encoded
+        }
+    }
+
+    func insert(_ encoded: EncodedProjectLayerResource, token: ProjectCaptureResourceToken) {
+        lock.withLock {
+            entries.removeValue(forKey: token.key)
+            guard encoded.compressedPixels.count <= maximumBytes else { return }
+            for key in entries.keys.filter({ entries[$0]?.source == nil }) { entries.removeValue(forKey: key) }
+            var bytes = entries.values.reduce(0) { $0 + $1.encoded.compressedPixels.count }
+            while bytes > maximumBytes - encoded.compressedPixels.count,
+                  let oldest = entries.min(by: { $0.value.useOrder < $1.value.useOrder }) {
+                bytes -= oldest.value.encoded.compressedPixels.count
+                entries.removeValue(forKey: oldest.key)
+            }
+            order &+= 1
+            entries[token.key] = Entry(token: token, encoded: encoded, useOrder: order)
+        }
+    }
+
+    func purge() { lock.withLock { entries.removeAll() } }
+}
+
 enum ProjectStorageFormat: Sendable, Equatable {
     case archiveV2
     case legacyJSON
@@ -52,6 +108,8 @@ struct FrozenProjectCapture: @unchecked Sendable {
     var referenceImages: [ProjectReferenceImagePayload]
     var savedSnapshots: [PersistentCanvasSnapshotPayload]
     var previewTexture: MTLTexture?
+    var reusedLayerResources: [EncodedProjectLayerResource] = []
+    var resourceTokens: [ProjectCaptureResourceToken] = []
 }
 
 /// Workspace metadata is captured synchronously; GPU copies are already submitted.
@@ -63,6 +121,8 @@ struct QueuedProjectCapture: Sendable {
     var savedSnapshots: [PersistentCanvasSnapshotPayload]
     var hasPreviewTexture: Bool
     var textureBatch: DeferredTextureCloneBatch
+    var reusedLayerResources: [EncodedProjectLayerResource] = []
+    var resourceTokens: [ProjectCaptureResourceToken] = []
 
     func waitUntilReady() throws -> FrozenProjectCapture {
         let textures = try textureBatch.waitUntilReady()
@@ -73,7 +133,8 @@ struct QueuedProjectCapture: Sendable {
             layerResources: zip(layerDescriptors, textures).map { descriptor, texture in
                 .init(layer: descriptor.layer, resourceKind: descriptor.kind, texture: texture)
             }, referenceImages: referenceImages, savedSnapshots: savedSnapshots,
-            previewTexture: hasPreviewTexture ? textures.last : nil)
+            previewTexture: hasPreviewTexture ? textures.last : nil,
+            reusedLayerResources: reusedLayerResources, resourceTokens: resourceTokens)
     }
 }
 
@@ -126,6 +187,9 @@ final class PersistenceController {
     private let archiveReadLimits: ProjectArchiveReadLimits
     private let canvasCapacityPolicy: CanvasCapacityPolicy
     private var incrementalRecoveryNeedsFullCapture = false
+    private let savedResourceCache: ProjectSavedResourceCache
+    var cachedSaveResourceByteCount: Int { savedResourceCache.residentBytes }
+    func purgeSaveResourceCache() { savedResourceCache.purge() }
     let recoveryProjectURL: URL
     let versionBackupRootURL: URL
 
@@ -136,8 +200,10 @@ final class PersistenceController {
         canvasCapacityPolicy: CanvasCapacityPolicy = .standard,
         recommendedMaxWorkingSetSize: UInt64? = nil,
         recoveryRootURL: URL? = nil,
-        versionBackupRootURL: URL? = nil
+        versionBackupRootURL: URL? = nil,
+        saveResourceCacheMaximumBytes: Int = 64 * 1024 * 1024
     ) {
+        self.savedResourceCache = ProjectSavedResourceCache(maximumBytes: saveResourceCacheMaximumBytes)
         self.workspaceStore = workspaceStore
         self.layerSurfaceStore = layerSurfaceStore
         self.serializer = serializer
@@ -194,7 +260,7 @@ final class PersistenceController {
         previewTexture: MTLTexture? = nil
     ) throws -> FrozenProjectCapture {
         try enqueueProjectCapture(referenceImages: referenceImages, savedSnapshots: savedSnapshots,
-                                  previewTexture: previewTexture).waitUntilReady()
+                                  previewTexture: previewTexture, allowsResourceReuse: false).waitUntilReady()
     }
 
     /// Called on the editing thread before later canvas writes can be enqueued. Private copies
@@ -202,7 +268,8 @@ final class PersistenceController {
     func enqueueProjectCapture(
         referenceImages: [ProjectReferenceImagePayload] = [],
         savedSnapshots: [PersistentCanvasSnapshotPayload] = [],
-        previewTexture: MTLTexture? = nil
+        previewTexture: MTLTexture? = nil,
+        allowsResourceReuse: Bool = true
     ) throws -> QueuedProjectCapture {
         let state = workspaceStore.state
         var sources: [(layer: LayerRecord, resourceKind: LayerHistoryResourceKind, texture: MTLTexture)] = []
@@ -222,6 +289,21 @@ final class PersistenceController {
             }
         }
 
+        let tokens = sources.map { source in
+            let key = LayerResourceKey(layerID: source.layer.id, kind: source.resourceKind)
+            return ProjectCaptureResourceToken(key: key, cursor: layerSurfaceStore.changeJournal(for: key).cursor,
+                                               source: source.texture)
+        }
+        var reused: [EncodedProjectLayerResource] = []
+        if allowsResourceReuse {
+            sources = zip(sources, tokens).compactMap { source, token in
+                if let encoded = savedResourceCache.resource(matching: token) {
+                    reused.append(encoded)
+                    return nil
+                }
+                return source
+            }
+        }
         var texturesToFreeze = sources.map(\.texture)
         if let previewTexture {
             texturesToFreeze.append(previewTexture)
@@ -233,12 +315,15 @@ final class PersistenceController {
             referenceImages: referenceImages,
             savedSnapshots: savedSnapshots,
             hasPreviewTexture: previewTexture != nil,
-            textureBatch: pendingTextures
+            textureBatch: pendingTextures,
+            reusedLayerResources: reused,
+            resourceTokens: tokens
         )
     }
 
     func materializeProjectPayload(
-        from capture: FrozenProjectCapture
+        from capture: FrozenProjectCapture,
+        reuseEncodedLayers: Bool = false
     ) throws -> ProjectArchivePayload {
         var frozenTextures = capture.layerResources.map(\.texture)
         if let previewTexture = capture.previewTexture {
@@ -246,12 +331,35 @@ final class PersistenceController {
         }
         let textureSnapshots = try serializer.snapshotBatch(textures: frozenTextures)
         let layerTextureSnapshots = textureSnapshots.prefix(capture.layerResources.count)
-        let layerSnapshots = zip(capture.layerResources, layerTextureSnapshots).map { item, textureSnapshot in
+        var layerSnapshots = zip(capture.layerResources, layerTextureSnapshots).map { item, textureSnapshot in
             LayerHistorySnapshot(
                 layerID: item.layer.id,
                 resourceKind: item.resourceKind,
                 texture: textureSnapshot
             )
+        }
+        var encodedResources: [EncodedProjectLayerResource] = []
+        if reuseEncodedLayers {
+            let tokens = Dictionary(uniqueKeysWithValues: capture.resourceTokens.map { ($0.key, $0) })
+            encodedResources = try layerSnapshots.map { snapshot in
+                let encoded = try EncodedProjectLayerResource(snapshot: snapshot)
+                if let token = tokens[encoded.key] { savedResourceCache.insert(encoded, token: token) }
+                return encoded
+            } + capture.reusedLayerResources
+            layerSnapshots = encodedResources.map(\.template)
+        } else {
+            layerSnapshots += try capture.reusedLayerResources.map { try $0.materialized() }
+        }
+        // The package order remains stable regardless of which resources were reused.
+        let order = capture.workspace.document.paintLayers.flatMap { layer in
+            (layer.mask == nil ? [LayerHistoryResourceKind.content] : [.content, .mask]).map {
+                LayerResourceKey(layerID: layer.id, kind: $0)
+            }
+        }
+        let positions = Dictionary(uniqueKeysWithValues: order.enumerated().map { ($0.element, $0.offset) })
+        layerSnapshots.sort {
+            positions[.init(layerID: $0.layerID, kind: $0.resourceKind), default: .max]
+                < positions[.init(layerID: $1.layerID, kind: $1.resourceKind), default: .max]
         }
         let previewPNGData: Data?
         if capture.previewTexture != nil, let previewSnapshot = textureSnapshots.last {
@@ -266,7 +374,8 @@ final class PersistenceController {
             ),
             referenceImages: capture.referenceImages,
             savedSnapshots: capture.savedSnapshots,
-            previewPNGData: previewPNGData
+            previewPNGData: previewPNGData,
+            encodedLayerResources: encodedResources
         )
     }
 
@@ -288,7 +397,14 @@ final class PersistenceController {
             encoder.dateEncodingStrategy = .iso8601
 
             // Legacy JSON remains writable for asset-free compatibility projects.
-            let data = try encoder.encode(payload.package)
+            var package = payload.package
+            if !payload.encodedLayerResources.isEmpty {
+                let decoded = try Dictionary(uniqueKeysWithValues: payload.encodedLayerResources.map { ($0.key, try $0.materialized()) })
+                package.layerSnapshots = package.layerSnapshots.map {
+                    decoded[.init(layerID: $0.layerID, kind: $0.resourceKind)] ?? $0
+                }
+            }
+            let data = try encoder.encode(package)
             try data.write(to: fileURL, options: .atomic)
         }
 
@@ -503,6 +619,13 @@ final class PersistenceController {
         referenceImages: [ProjectReferenceImagePayload] = [],
         savedSnapshots: [PersistentCanvasSnapshotPayload] = []
     ) throws -> FrozenRecoveryCapture {
+        try enqueueIncrementalRecovery(referenceImages: referenceImages, savedSnapshots: savedSnapshots).waitUntilReady()
+    }
+
+    func enqueueIncrementalRecovery(
+        referenceImages: [ProjectReferenceImagePayload] = [],
+        savedSnapshots: [PersistentCanvasSnapshotPayload] = []
+    ) throws -> QueuedRecoveryCapture {
         let workspace = workspaceStore.state
         let previous = try? IncrementalRecoveryArchive.manifest(at: recoveryProjectURL, limits: archiveReadLimits)
         let compatible = !incrementalRecoveryNeedsFullCapture
@@ -535,15 +658,15 @@ final class PersistenceController {
                     texture: .init(width: 1, height: 1, bytesPerRow: bpp, pixelData: Data(count: bpp), encoding: encoding)))
             }
         }
-        let clones = try serializer.cloneRegionsForDeferredSnapshot(sources)
-        return FrozenRecoveryCapture(
+        let pending = try serializer.enqueueCloneRegionsForDeferredSnapshot(sources)
+        return QueuedRecoveryCapture(
             metadata: .init(package: .fromWorkspace(workspace, layerSnapshots: placeholders),
                             referenceImages: referenceImages, savedSnapshots: savedSnapshots),
             manifest: .init(canvasSize: workspace.document.canvasSize,
                             documentID: workspace.document.metadata.drawingStatsID, resources: resources),
-            changedTiles: zip(sources.indices, clones).map { index, texture in
-                .init(key: keys[index], region: sources[index].1, texture: texture)
-            }, previousURL: compatible ? recoveryProjectURL : nil, copiedPixelBytes: byteCount)
+            tileDescriptors: sources.indices.map { (keys[$0], sources[$0].1) },
+            textureBatch: pending,
+            previousURL: compatible ? recoveryProjectURL : nil, copiedPixelBytes: byteCount)
     }
 
     func writeIncrementalRecovery(_ capture: FrozenRecoveryCapture, to url: URL) throws {
@@ -715,9 +838,14 @@ final class PersistenceController {
             payload = try IncrementalRecoveryArchive.read(at: fileURL, limits: archiveReadLimits)
             storageFormat = .archiveV2
         } else if Self.shouldUseV2Archive(for: fileURL) {
-            try preflight(inspectProject(from: fileURL))
-            payload = try withV2PackageDirectory(for: fileURL) {
-                try archiveReader.read(from: $0)
+            payload = try withV2PackageDirectory(for: fileURL) { packageURL in
+                let inspection = try archiveReader.inspect(from: packageURL)
+                try preflight(ProjectOpenInspection(workspace: inspection.workspace,
+                    savedSnapshotCount: inspection.savedSnapshotCount,
+                    referenceArchiveBytes: inspection.referenceArchiveBytes,
+                    estimatedReferenceResidentBytes: inspection.estimatedReferenceResidentBytes,
+                    totalUncompressedAssetBytes: inspection.totalUncompressedAssetBytes, storageFormat: .archiveV2))
+                return try archiveReader.read(from: packageURL)
             }
             storageFormat = .archiveV2
         } else {

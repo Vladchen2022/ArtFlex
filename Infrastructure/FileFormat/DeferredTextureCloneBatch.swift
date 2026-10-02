@@ -41,3 +41,55 @@ final class MetalCloneSourceLifetime: @unchecked Sendable {
         self.heaps = textures.compactMap(\.heap)
     }
 }
+
+/// Resolves one immutable GPU readback on a worker. Forced editing boundaries may drain it
+/// without waiting for a main-actor continuation; repeated consumers receive the same result.
+final class DeferredLayerRegionSnapshots: @unchecked Sendable {
+    private let condition = NSCondition()
+    private var result: Result<[LayerTextureSnapshot], Error>?
+    private var observers: [@Sendable () -> Void] = []
+
+    init(resolve: @escaping () throws -> [LayerTextureSnapshot]) {
+        let work = DeferredRegionSnapshotWork(resolve: resolve)
+        DispatchQueue.global(qos: .userInitiated).async { [self, work] in
+            let completed = Result { try autoreleasepool { try work.resolve() } }
+            condition.lock()
+            result = completed
+            let callbacks = observers
+            observers.removeAll()
+            condition.broadcast()
+            condition.unlock()
+            for callback in callbacks { callback() }
+        }
+    }
+
+    var isReady: Bool {
+        condition.lock()
+        defer { condition.unlock() }
+        return result != nil
+    }
+
+    func read() throws -> [LayerTextureSnapshot] {
+        condition.lock()
+        while result == nil { condition.wait() }
+        let completed = result!
+        condition.unlock()
+        return try completed.get()
+    }
+
+    func notifyWhenReady(_ observer: @escaping @Sendable () -> Void) {
+        condition.lock()
+        if result != nil {
+            condition.unlock()
+            observer()
+        } else {
+            observers.append(observer)
+            condition.unlock()
+        }
+    }
+}
+
+private final class DeferredRegionSnapshotWork: @unchecked Sendable {
+    let resolve: () throws -> [LayerTextureSnapshot]
+    init(resolve: @escaping () throws -> [LayerTextureSnapshot]) { self.resolve = resolve }
+}

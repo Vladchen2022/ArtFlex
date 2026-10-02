@@ -9,7 +9,7 @@ private final class TransformPreviewSessionBox: @unchecked Sendable {
     }
 }
 
-private final class TransformMaskTextureBox: @unchecked Sendable {
+private final class TransformPreviewTextureBox: @unchecked Sendable {
     let texture: MTLTexture?
 
     init(_ texture: MTLTexture?) {
@@ -38,8 +38,27 @@ struct TransformPreviewSession {
     let baseTexture: MTLTexture?
     let extractedTexture: MTLTexture
     let maskTexture: MTLTexture?
+    /// Immutable source retained for exact no-op/cancel semantics. Cutting and then
+    /// source-overing a fractional selection is not mathematically an identity.
+    var originalTexture: MTLTexture? = nil
     let preparedSignature: TransformPreviewPreparedSignature
     let revision: UInt64
+
+    func unchangedSourceTexture(preview: FreeTransformPreview, meshWarpGrid: MeshWarpGrid? = nil) -> MTLTexture? {
+        let unchanged: Bool
+        if let grid = meshWarpGrid {
+            let regular = MeshWarpGrid.regular(bounds: grid.sourceBounds, columns: grid.columns, rows: grid.rows)
+            unchanged = regular.controlPoints.count == grid.controlPoints.count &&
+                zip(regular.controlPoints, grid.controlPoints).allSatisfy { expected, actual in
+                    abs(expected.x - actual.x) < 1e-8 && abs(expected.y - actual.y) < 1e-8
+                }
+        } else {
+            unchanged = abs(preview.translation.x) < 1e-8 && abs(preview.translation.y) < 1e-8 &&
+                abs(preview.scaleX - 1) < 1e-8 && abs(preview.scaleY - 1) < 1e-8 &&
+                abs(preview.rotationRadians) < 1e-8
+        }
+        return unchanged ? (originalTexture ?? (mode == .wholeLayer ? extractedTexture : nil)) : nil
+    }
 }
 
 struct TransformPreviewPlan: Sendable, Equatable {
@@ -150,6 +169,7 @@ final class TransformPreviewSessionBuilder {
                 baseTexture: nil,
                 extractedTexture: sourceTexture,
                 maskTexture: nil,
+                originalTexture: sourceTexture,
                 preparedSignature: signature,
                 revision: canvasContentRevision
             )
@@ -165,7 +185,12 @@ final class TransformPreviewSessionBuilder {
             sourceBounds: plan.operationBounds,
             device: metal.device
         )
-        let boxedMaskTexture = TransformMaskTextureBox(maskTexture)
+        let boxedMaskTexture = TransformPreviewTextureBox(maskTexture)
+        let boxedSourceTexture = TransformPreviewTextureBox(sourceTexture)
+        guard !plan.needsMaskTexture || maskTexture != nil else {
+            Task { @MainActor in completion(nil) }
+            return
+        }
 
         compositor.buildSelectionTextures(
             sourceTexture: sourceTexture,
@@ -187,6 +212,7 @@ final class TransformPreviewSessionBuilder {
                 baseTexture: baseTexture,
                 extractedTexture: extractedTexture,
                 maskTexture: boxedMaskTexture.texture,
+                originalTexture: boxedSourceTexture.texture,
                 preparedSignature: signature,
                 revision: canvasContentRevision
             )

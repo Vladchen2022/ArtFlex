@@ -2635,6 +2635,7 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
     private let paintingReferenceSurfaceID = LayerSurfaceID()
     private let metalContext: MetalDeviceContext
     private let layerSurfaceStore: StageOneLayerSurfaceStore
+    private lazy var transformLayerCompositor = try? TransformGPUCompositor(device: metalContext.device)
     private let canvasPresenter: StageOneCanvasPresenter?
     private let canvasPresenterInitializationError: Error?
     private let transformPreviewBuilder: TransformPreviewSessionBuilder
@@ -3021,7 +3022,6 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
             let activeLayerOpacity = activeLayerSurfaceID.flatMap { surfaceID in
                 snapshot.layerSurfaces.first(where: { $0.surfaceID == surfaceID })?.opacity
             } ?? 1
-            let currentTransformPlan = currentTransformPreviewPlan()
             let previewEncodeStart = DispatchTime.now().uptimeNanoseconds
 
             var resolvedTextureByLayerID: [LayerID: MTLTexture] = [:]
@@ -3033,23 +3033,18 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
                     resolvedTextureByLayerID[surface.layerID] = texture
                 }
             }
-            if hasActivePreview,
-               let activeTexture = resolvedTextureByLayerID[activeLayerID] {
-                switch freeTransformActiveLayerPreviewStrategy(
-                    hasActivePreview: hasActivePreview,
-                    sessionMode: transformPreviewSession?.mode,
-                    hasBaseTexture: transformPreviewSession?.baseTexture != nil,
-                    plannedMode: currentTransformPlan?.mode
-                ) {
-                case .showOriginalLayer:
-                    resolvedTextureByLayerID[activeLayerID] = activeTexture
-                case .showBaseTexture:
-                    if let baseTexture = transformPreviewSession?.baseTexture {
-                        resolvedTextureByLayerID[activeLayerID] = baseTexture
-                    }
-                case .hideOriginalLayer:
-                    resolvedTextureByLayerID[activeLayerID] = nil
+            if hasActivePreview, let session = transformPreviewSession {
+                guard let texture = transformLayerCompositor?.encodeTransformedTexture(
+                    session: session, preview: effectivePreview,
+                    meshWarpGrid: freeTransformToolMode == .mesh ? meshWarpGrid : nil,
+                    canvasSize: canvasSize, commandBuffer: commandBuffer) else {
+                    commandBuffer.commit()
+                    onRenderingFailure("无法绘制变形预览，已保留上一帧。")
+                    return
                 }
+                resolvedTextureByLayerID[activeLayerID] = texture
+            } else if !hasActivePreview {
+                transformLayerCompositor?.discardPreviewTarget()
             }
             let canonicalEntries = (try? CanvasCompositeInputPlan.make(
                 document: snapshot.renderSnapshot.document,
@@ -3099,8 +3094,25 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
                 entries.map(\.input)
             }
             func encodeLayers(_ layers: [VisibleLayerEntry]) -> Bool {
+                var hint: CanvasCompositePrefixCacheHint?
+                if paintingReferenceScene == nil,
+                   let prefixCount = layers.firstIndex(where: { $0.layerID == activeLayerID }), prefixCount > 0,
+                   !layers.prefix(prefixCount).contains(where: {
+                       snapshot.renderSnapshot.document.layer($0.layerID)?.clipTargetLayerID == activeLayerID
+                   }) {
+                    var tokens: [LayerChangeCursor] = []
+                    for entry in layers.prefix(prefixCount) {
+                        tokens.append(layerSurfaceStore.changeJournal(for: .init(layerID: entry.layerID, kind: .content)).cursor)
+                        tokens.append(layerSurfaceStore.changeJournal(for: .init(layerID: entry.layerID, kind: .mask)).cursor)
+                        if let clip = snapshot.renderSnapshot.document.layer(entry.layerID)?.clipTargetLayerID {
+                            tokens.append(layerSurfaceStore.changeJournal(for: .init(layerID: clip, kind: .content)).cursor)
+                            tokens.append(layerSurfaceStore.changeJournal(for: .init(layerID: clip, kind: .mask)).cursor)
+                        }
+                    }
+                    hint = CanvasCompositePrefixCacheHint(count: prefixCount, revisionTokens: tokens)
+                }
                 guard canvasPresenter.encode(
-                    layerInputs: compositeInputs(layers), samplingMode: displaySamplingMode,
+                    layerInputs: compositeInputs(layers), samplingMode: displaySamplingMode, cacheHint: hint,
                     into: descriptor, commandBuffer: commandBuffer
                 ) else {
                     // Complete offscreen work and release its resources, but keep the last
@@ -3199,74 +3211,8 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
             }
             hasReportedCompositionFailure = false
 
-            if hasActivePreview, let surfaceID = activeLayerSurfaceID {
-                descriptor.colorAttachments[0].loadAction = .load
-                descriptor.colorAttachments[0].storeAction = .store
+            // The transformed layer participates in the same masks, opacity and stacking as its committed pixels.
 
-                if let session = transformPreviewSession {
-                    if freeTransformToolMode == .mesh, let meshWarpGrid {
-                        canvasPresenter.encodeMeshPreview(
-                            texture: session.extractedTexture,
-                            opacity: activeLayerOpacity,
-                            canvasSize: canvasSize,
-                            grid: meshWarpGrid,
-                            textureCoordinateBounds: meshWarpTextureCoordinateBounds(
-                                session: session,
-                                grid: meshWarpGrid,
-                                canvasSize: canvasSize
-                            ),
-                            samplingMode: displaySamplingMode,
-                            into: descriptor,
-                            commandBuffer: commandBuffer
-                        )
-                    } else {
-                        canvasPresenter.encodePreview(
-                            texture: session.extractedTexture,
-                            opacity: activeLayerOpacity,
-                            canvasSize: canvasSize,
-                            bounds: session.operationBounds,
-                            pivotBounds: session.interactionBounds ?? session.operationBounds,
-                            preview: effectivePreview,
-                            samplingMode: displaySamplingMode,
-                            into: descriptor,
-                            commandBuffer: commandBuffer
-                        )
-                    }
-                } else if currentTransformPlan?.mode == .wholeLayer,
-                          let texture = layerSurfaceStore.readTexture(for: surfaceID) {
-                    let fullBounds = CanvasRect(
-                        origin: .init(x: 0, y: 0),
-                        size: .init(x: Double(canvasSize.width), y: Double(canvasSize.height))
-                    )
-                    if freeTransformToolMode == .mesh, let meshWarpGrid {
-                        canvasPresenter.encodeMeshPreview(
-                            texture: texture,
-                            opacity: activeLayerOpacity,
-                            canvasSize: canvasSize,
-                            grid: meshWarpGrid,
-                            textureCoordinateBounds: meshWarpTextureCoordinateBounds(
-                                sourceBounds: meshWarpGrid.sourceBounds,
-                                textureDomainBounds: fullBounds
-                            ),
-                            samplingMode: displaySamplingMode,
-                            into: descriptor,
-                            commandBuffer: commandBuffer
-                        )
-                    } else {
-                        canvasPresenter.encodePreview(
-                            texture: texture,
-                            opacity: activeLayerOpacity,
-                            canvasSize: canvasSize,
-                            bounds: fullBounds,
-                            pivotBounds: currentTransformPlan?.interactionBounds ?? fullBounds,
-                            preview: effectivePreview,
-                            samplingMode: displaySamplingMode,
-                            into: descriptor,
-                            commandBuffer: commandBuffer
-                        )
-                    }
-                }
-            }
 
             if hasActivePreview || hasGradientPreview || hasPatternPlacementPreview {
                 previewTimingFrameCounter &+= 1
@@ -3324,6 +3270,14 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
             }
         }
 
+        if diagnosticsEnabled {
+            let submittedAt = CACurrentMediaTime()
+            drawable.addPresentedHandler { presented in
+                let timestamp = presented.presentedTime
+                guard timestamp > 0 else { return }
+                PerformanceAuditStore.shared.recordDuration("Canvas.submitToPresented", ms: (timestamp - submittedAt) * 1_000)
+            }
+        }
         commandBuffer.present(drawable)
         commandBuffer.commit()
         scheduleInteractiveBrushCommitDrain(hadLiveBrushWorkThisFrame: hadLiveBrushWorkThisFrame)
