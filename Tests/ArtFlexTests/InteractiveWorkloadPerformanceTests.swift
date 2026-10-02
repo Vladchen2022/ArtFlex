@@ -38,6 +38,10 @@ struct InteractiveWorkloadPerformanceTests {
                 let bootstrap = try AppBootstrap(workspaceStore: store, metalContext: metal, layerSurfaceStore: surfaces,
                     persistenceRecoveryRootURL: root.appendingPathComponent("Recovery"))
                 let viewModel = WorkspaceViewModel(bootstrap: bootstrap, installsZoomKeyboardMonitor: false)
+                viewModel.setBrushSize(32)
+                viewModel.setBrushSizeJitterAmount(0)
+                viewModel.setPaintJitterAmount(0)
+                viewModel.setSelectedColor(.init(red: 0.7, green: 0.2, blue: 0.1, alpha: 1))
                 bootstrap.filePanelService.selectURLsForTesting = { _, finish in finish([root.appendingPathComponent("workload.artflex")]) }
                 func flush() throws {
                     let command = try #require(metal.commandQueue.makeCommandBuffer())
@@ -51,7 +55,7 @@ struct InteractiveWorkloadPerformanceTests {
                     viewModel.selectTool(.brush)
                     let beforeGPU = metal.device.currentAllocatedSize
                     let start = DispatchTime.now().uptimeNanoseconds
-                    viewModel.beginStrokeIfNeeded()
+                    viewModel.beginStrokeIfNeeded(paintVariationSeed: 42)
                     for packet in 0..<8 {
                         viewModel.applyStroke(samples: (0..<3).map { point in
                             .init(location: .init(x: Double(80 + packet * 12 + point * 4),
@@ -91,6 +95,7 @@ struct InteractiveWorkloadPerformanceTests {
                     let row: [String: Any] = ["side": side, "format": standard.pixelFormat.encoding.metalPixelFormat.rawValue,
                         "sample": sample, "stroke_ms": strokeMs, "commit_ms": commitMs, "undo_ms": undoMs, "redo_ms": redoMs,
                         "selection_ms": fillAudit.latestDuration("WorkspaceViewModel.applyPixelOperation.total") ?? -1,
+                        "selection_history_ms": fillAudit.latestDuration("WorkspaceViewModel.applyPixelOperation.historyCheckpoint") ?? -1,
                         "selection_copy_ms": fillAudit.latestDuration("WorkspaceViewModel.applyPixelOperation.stagingCopy") ?? -1,
                         "selection_staging_bytes": fillAudit.latestInt("WorkspaceViewModel.applyPixelOperation.stagingBytes") ?? -1,
                         "save_ms": saveMs, "save_prepare_ms": measured.latestDuration("ProjectSave.prepareOnMain") ?? -1,
