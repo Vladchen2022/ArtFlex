@@ -5,6 +5,128 @@ import Testing
 
 struct WorkspaceViewModelPixelHistoryTests {
     @Test @MainActor
+    func gradientFailuresPreserveDraftSharedPixelsRedoAndChangeJournal() async throws {
+        for standard in [ArtColorStandard.stageOneDefault, .highPrecision] {
+            for sector in [false, true] {
+                let h = try PixelHistoryHarness(colorStandard: standard)
+                let layerID = h.viewModel.workspace.document.activeLayerID
+                try h.drawBrushStroke(on: layerID, points: [.init(location: .init(x: 20, y: 20), pressure: 1)])
+                _ = h.viewModel.flushBrushEditingBoundary(reason: "gradient.failure.baseline")
+                let redoPixels = try h.snapshot(layerID: layerID)
+                h.viewModel.undo()
+                let before = try h.snapshot(layerID: layerID)
+                let store = h.bootstrap.layerSurfaceStore
+                let surfaceID = try #require(store.surfaceID(for: layerID))
+                let original = try #require(store.readTexture(for: surfaceID))
+                let branch = store.sharedCopy()
+                let timeline = h.bootstrap.historyController.visibleTimeline
+                let cursor = store.changeJournal(for: .init(layerID: layerID, kind: .content)).cursor
+                for failure in 0..<4 {
+                    h.viewModel.selectTool(sector ? .sectorGradient : .linearGradient)
+                    h.viewModel.debugPreventsPixelEditPreparation = failure == 0
+                    h.bootstrap.linearGradientRenderer.debugPreventsEncoding = failure == 1
+                    h.bootstrap.sectorGradientRenderer.debugPreventsEncoding = failure == 1
+                    h.viewModel.debugRejectsGradientCompletion = failure == 2
+                    h.bootstrap.historyController.debugPreventsCheckpointCapture = failure == 3
+                    h.viewModel.beginGradientDrag(at: .init(x: 10, y: 16))
+                    h.viewModel.updateGradientDrag(to: .init(x: 30, y: 16))
+                    if sector {
+                        h.viewModel.updateGradientDrag(to: .init(x: 30, y: 40))
+                        h.viewModel.endGradientDrag(at: .init(x: 10, y: 40))
+                    } else {
+                        h.viewModel.endGradientDrag(at: .init(x: 30, y: 16))
+                        h.viewModel.selectTool(.brush)
+                    }
+                    try await h.waitForGradientCommitToFinish()
+                    #expect(h.viewModel.status?.kind == .error)
+                    #expect(try h.snapshot(layerID: layerID) == before)
+                    #expect(store.readTexture(for: surfaceID) === original)
+                    #expect(branch.readTexture(for: surfaceID) === original)
+                    #expect(h.bootstrap.historyController.visibleTimeline == timeline)
+                    #expect(store.changeJournal(for: .init(layerID: layerID, kind: .content)).cursor == cursor)
+                    #expect(sector ? h.viewModel.sectorGradientState.geometry != nil : h.viewModel.linearGradientState.phase == .editing)
+                    if sector { h.viewModel.cancelSectorGradientInteraction() }
+                    else { h.viewModel.cancelLinearGradientInteraction() }
+                    h.viewModel.debugPreventsPixelEditPreparation = false
+                    h.bootstrap.linearGradientRenderer.debugPreventsEncoding = false
+                    h.bootstrap.sectorGradientRenderer.debugPreventsEncoding = false
+                    h.viewModel.debugRejectsGradientCompletion = false
+                    h.bootstrap.historyController.debugPreventsCheckpointCapture = false
+                }
+                h.viewModel.redo()
+                #expect(try h.snapshot(layerID: layerID) == redoPixels)
+            }
+        }
+    }
+
+    @Test @MainActor
+    func gradientLayerSwitchAppliesToOriginalLayerAndFailureKeepsItSelected() async throws {
+        for fail in [false, true] {
+            let h = try PixelHistoryHarness()
+            let originalLayer = h.viewModel.workspace.document.activeLayerID
+            h.viewModel.addLayer()
+            let nextLayer = h.viewModel.workspace.document.activeLayerID
+            h.viewModel.selectLayer(originalLayer)
+            let before = try h.snapshot(layerID: originalLayer)
+            let otherBefore = try h.snapshot(layerID: nextLayer)
+            h.viewModel.selectTool(.linearGradient)
+            h.viewModel.beginGradientDrag(at: .init(x: 10, y: 16))
+            h.viewModel.updateGradientDrag(to: .init(x: 30, y: 16))
+            h.viewModel.endGradientDrag(at: .init(x: 30, y: 16))
+            h.bootstrap.historyController.debugPreventsCheckpointCapture = fail
+            h.viewModel.selectLayer(nextLayer)
+            #expect(h.viewModel.workspace.document.activeLayerID == originalLayer)
+            try await h.waitForGradientCommitToFinish()
+            #expect(h.viewModel.workspace.document.activeLayerID == (fail ? originalLayer : nextLayer))
+            #expect((try h.snapshot(layerID: originalLayer) == before) == fail)
+            #expect(try h.snapshot(layerID: nextLayer) == otherBefore)
+        }
+    }
+
+    @Test @MainActor
+    func cancellingQueuedGradientCannotPublishPixelsOrHistoryLater() async throws {
+        let h = try PixelHistoryHarness()
+        let layerID = h.viewModel.workspace.document.activeLayerID
+        let before = try h.snapshot(layerID: layerID)
+        let timeline = h.bootstrap.historyController.visibleTimeline
+        h.viewModel.selectTool(.linearGradient)
+        h.viewModel.beginGradientDrag(at: .init(x: 10, y: 16))
+        h.viewModel.updateGradientDrag(to: .init(x: 30, y: 16))
+        h.viewModel.endGradientDrag(at: .init(x: 30, y: 16))
+        h.viewModel.applyActiveGradientSession()
+        let completions = h.viewModel.debugGradientCompletionCount
+        h.viewModel.undo()
+        #expect(h.viewModel.linearGradientState.phase == .idle)
+        for _ in 0..<500 {
+            if h.viewModel.debugGradientCompletionCount > completions { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(h.viewModel.debugGradientCompletionCount == completions + 1)
+        #expect(try h.snapshot(layerID: layerID) == before)
+        #expect(h.bootstrap.historyController.visibleTimeline == timeline)
+    }
+
+    @Test @MainActor
+    func gradientHistoryFailureKeepsPixelsPreviewAndRequestedToolSwitch() async throws {
+        let harness = try PixelHistoryHarness()
+        let layerID = harness.viewModel.workspace.document.activeLayerID
+        let before = try harness.snapshot(layerID: layerID)
+        harness.viewModel.selectTool(.linearGradient)
+        harness.viewModel.beginGradientDrag(at: .init(x: 10, y: 16))
+        harness.viewModel.updateGradientDrag(to: .init(x: 30, y: 16))
+        harness.viewModel.endGradientDrag(at: .init(x: 30, y: 16))
+        let history = harness.bootstrap.historyController.visibleTimeline
+        harness.bootstrap.historyController.debugPreventsCheckpointCapture = true
+        harness.viewModel.selectTool(.brush)
+        try await harness.waitForGradientCommitToFinish()
+        #expect(try harness.snapshot(layerID: layerID) == before)
+        #expect(harness.viewModel.workspace.toolSession.activeTool == .linearGradient)
+        #expect(harness.viewModel.linearGradientState.phase == .editing)
+        #expect(harness.bootstrap.historyController.visibleTimeline == history)
+        #expect(harness.viewModel.status?.kind == .error)
+    }
+
+    @Test @MainActor
     func stagedPixelEditFailuresPreserveSharedLayersHistoryAndChangeJournal() throws {
         for standard in [ArtColorStandard.stageOneDefault, .highPrecision] {
             for usesTextureFill in [false, true] {

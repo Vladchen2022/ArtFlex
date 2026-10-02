@@ -25,6 +25,9 @@ private struct GradientGPUStop {
 }
 
 final class LinearGradientRenderer {
+#if DEBUG
+    var debugPreventsEncoding = false
+#endif
     private let pipelineVariants: ColorRenderPipelineVariants
     private let device: MTLDevice
     private let pipelineState: MTLRenderPipelineState
@@ -336,6 +339,7 @@ final class LinearGradientRenderer {
         self.fallbackAlphaLockTexture = fallbackAlphaTexture
     }
 
+    @discardableResult
     func encode(
         into renderPassDescriptor: MTLRenderPassDescriptor,
         commandBuffer: MTLCommandBuffer,
@@ -351,7 +355,10 @@ final class LinearGradientRenderer {
         distortionAmount: Float = 0,
         selectionShape: SelectionShape? = nil,
         alphaLockTexture: MTLTexture? = nil
-    ) {
+    ) -> Bool {
+#if DEBUG
+        guard !debugPreventsEncoding else { return false }
+#endif
         let vertices: [LinearGradientVertex] = [
             .init(position: SIMD2(0, 0)),
             .init(position: SIMD2(Float(canvasSize.width), 0)),
@@ -361,7 +368,8 @@ final class LinearGradientRenderer {
         let selectionMaskTexture = makeSelectionMaskTexture(
             for: selectionShape,
             canvasSize: canvasSize
-        ) ?? fallbackSelectionMaskTexture
+        )
+        guard selectionShape == nil || selectionMaskTexture != nil else { return false }
         var uniforms = LinearGradientUniforms(
             canvasSize: SIMD2(Float(canvasSize.width), Float(canvasSize.height)),
             pointA: SIMD2(Float(pointA.x), Float(pointA.y)),
@@ -384,7 +392,7 @@ final class LinearGradientRenderer {
         var gradientStopCount = UInt32(gradientStops.count)
 
         guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor) else {
-            return
+            return false
         }
 
         encoder.setRenderPipelineState(pipelineVariants.state(alphaLockTexture == nil ? pipelineState : alphaLockPipelineState, for: renderPassDescriptor.colorAttachments[0].texture?.pixelFormat ?? .bgra8Unorm_srgb))
@@ -400,10 +408,11 @@ final class LinearGradientRenderer {
             )
         }
         encoder.setFragmentBytes(&gradientStopCount, length: MemoryLayout<UInt32>.stride, index: 3)
-        encoder.setFragmentTexture(selectionMaskTexture, index: 0)
+        encoder.setFragmentTexture(selectionMaskTexture ?? fallbackSelectionMaskTexture, index: 0)
         encoder.setFragmentTexture(alphaLockTexture ?? fallbackAlphaLockTexture, index: 1)
         encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: vertices.count)
         encoder.endEncoding()
+        return true
     }
 
     func render(

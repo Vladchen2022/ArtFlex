@@ -165,6 +165,9 @@ private func normalizedSectorGradientBoundaryPoints(
 }
 
 final class SectorGradientRenderer {
+#if DEBUG
+    var debugPreventsEncoding = false
+#endif
     private let pipelineVariants: ColorRenderPipelineVariants
     private let device: MTLDevice
     private let pipelineState: MTLRenderPipelineState
@@ -476,6 +479,7 @@ final class SectorGradientRenderer {
         self.fallbackAlphaLockTexture = fallbackAlphaTexture
     }
 
+    @discardableResult
     func encode(
         into renderPassDescriptor: MTLRenderPassDescriptor,
         commandBuffer: MTLCommandBuffer,
@@ -491,21 +495,24 @@ final class SectorGradientRenderer {
         maskQuality: SectorGradientMaskQuality = .commit,
         selectionShape: SelectionShape? = nil,
         alphaLockTexture: MTLTexture? = nil
-    ) {
+    ) -> Bool {
+#if DEBUG
+        guard !debugPreventsEncoding else { return false }
+#endif
         _ = maskQuality
-        guard pathPoints.count >= 3, maxRadius > 0.5 else { return }
+        guard pathPoints.count >= 3, maxRadius > 0.5 else { return false }
 
         let vertexPositions = sectorGradientTriangleFanVertexPositions(
             center: center,
             pathPoints: pathPoints
         )
-        guard vertexPositions.count >= 3 else { return }
+        guard vertexPositions.count >= 3 else { return false }
 
         let vertices = vertexPositions.map {
             SectorGradientVertex(position: SIMD2(Float($0.x), Float($0.y)))
         }
         guard let vertexBufferLease = vertexBufferPool.lease(vertices: vertices) else {
-            return
+            return false
         }
         var shouldReleaseVertexBufferImmediately = true
         defer {
@@ -517,7 +524,8 @@ final class SectorGradientRenderer {
         let selectionMaskTexture = makeSelectionMaskTexture(
             for: selectionShape,
             canvasSize: canvasSize
-        ) ?? fallbackSelectionMaskTexture
+        )
+        guard selectionShape == nil || selectionMaskTexture != nil else { return false }
 
         var uniforms = SectorGradientUniforms(
             canvasSize: SIMD2(Float(canvasSize.width), Float(canvasSize.height)),
@@ -540,7 +548,7 @@ final class SectorGradientRenderer {
         var gradientStopCount = UInt32(gradientStops.count)
 
         guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor) else {
-            return
+            return false
         }
 
         encoder.setRenderPipelineState(pipelineVariants.state(alphaLockTexture == nil ? pipelineState : alphaLockPipelineState, for: renderPassDescriptor.colorAttachments[0].texture?.pixelFormat ?? .bgra8Unorm_srgb))
@@ -556,7 +564,7 @@ final class SectorGradientRenderer {
             )
         }
         encoder.setFragmentBytes(&gradientStopCount, length: MemoryLayout<UInt32>.stride, index: 3)
-        encoder.setFragmentTexture(selectionMaskTexture, index: 0)
+        encoder.setFragmentTexture(selectionMaskTexture ?? fallbackSelectionMaskTexture, index: 0)
         encoder.setFragmentTexture(alphaLockTexture ?? fallbackAlphaLockTexture, index: 1)
         encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: vertices.count)
         encoder.endEncoding()
@@ -565,6 +573,7 @@ final class SectorGradientRenderer {
             vertexBufferPool.release(vertexBufferLease)
         }
         shouldReleaseVertexBufferImmediately = false
+        return true
     }
 
 #if DEBUG

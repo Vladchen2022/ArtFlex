@@ -217,8 +217,14 @@ final class WorkspaceViewModel: ObservableObject {
     @Published private(set) var isGeneratorStrokeModeEnabled = false
     @Published private(set) var activeMaskEditingLayerID: LayerID?
     @Published private(set) var straightLineState = StraightLineInteractionState()
-    @Published private(set) var linearGradientState = LinearGradientInteractionState()
-    @Published private(set) var sectorGradientState = SectorGradientInteractionState()
+    private(set) var linearGradientState: LinearGradientInteractionState {
+        get { gradientSession.linear }
+        set { gradientSession.linear = newValue }
+    }
+    private(set) var sectorGradientState: SectorGradientInteractionState {
+        get { gradientSession.sector }
+        set { gradientSession.sector = newValue }
+    }
     @Published private(set) var gradientSettings = GradientSettings.currentColorToTransparent(.black)
     @Published private(set) var gradientFollowsSelectedColor = true
     @Published private(set) var polygonSelectionState = PolygonSelectionInteractionState()
@@ -236,7 +242,7 @@ final class WorkspaceViewModel: ObservableObject {
     @Published var isBlockReferenceCameraNavigating = false
     var blockReferenceCameraPreview: BlockReferenceCamera?
     let blockReferenceCameraRenderState = BlockReferenceCameraRenderState()
-    @Published private(set) var isApplyingGradientCommit = false
+    var isApplyingGradientCommit: Bool { gradientSession.isCommitting }
     @Published private(set) var isBucketFillInProgress = false
     @Published private(set) var fillSettings = FillSettings.stageOneDefault
     @Published private(set) var smartSelectionSettings = SmartSelectionSettings.stageOneDefault
@@ -409,7 +415,15 @@ final class WorkspaceViewModel: ObservableObject {
         }
         return coordinator
     }()
-    private var deferredGradientAction: DeferredGradientAction?
+    private lazy var gradientSession: GradientSessionController = {
+        let session = GradientSessionController()
+        session.onStateChange = { [weak self] in self?.objectWillChange.send() }
+        return session
+    }()
+    private var deferredGradientAction: DeferredGradientAction? {
+        get { gradientSession.deferredAction }
+        set { gradientSession.deferredAction = newValue }
+    }
     private let selectionTraceLogger = Logger(subsystem: "ArtFlex", category: "SelectionTrace")
     private let brushStrokeLogger = Logger(subsystem: "ArtFlex", category: "BrushStroke")
     private let transformLogger = Logger(subsystem: "ArtFlex", category: "Transform")
@@ -450,6 +464,8 @@ final class WorkspaceViewModel: ObservableObject {
     var debugFillAtPointHistoryCaptureModeOverride: HistoryCaptureMode?
     var debugPreventsPixelEditPreparation = false
     var debugRejectsPixelEditCompletion = false
+    var debugRejectsGradientCompletion = false
+    private(set) var debugGradientCompletionCount = 0
     private(set) var debugTimelapseDocumentContextSyncCount = 0
 
     func debugSetCommittedSelectionShapeForTests(_ shape: SelectionShape?) {
@@ -697,6 +713,10 @@ final class WorkspaceViewModel: ObservableObject {
         let normalizedTool = Self.normalizedAvailableTool(tool)
         let currentTool = workspace.toolSession.activeTool
         let shouldRevealBrushLibrary = normalizedTool == .brush
+        if isApplyingGradientCommit, normalizedTool != currentTool {
+            deferredGradientAction = .toolSwitch(normalizedTool)
+            return
+        }
         if currentTool == normalizedTool {
             if isGeneratorStrokeModeEnabled {
                 exitGeneratorMode(showFeedback: false)
@@ -748,6 +768,7 @@ final class WorkspaceViewModel: ObservableObject {
         if currentTool == .canvasCrop, normalizedTool != .canvasCrop {
             canvasCropState.cancel()
         }
+        if gradientSession.hasDraft { gradientSession.cancel() }
         performToolSelection(normalizedTool)
         if shouldRevealBrushLibrary {
             revealBrushLibraryPanel()
@@ -814,8 +835,7 @@ final class WorkspaceViewModel: ObservableObject {
         samePathCommittedDebugShape = nil
         samePathPreviewDebugShape = nil
         straightLineState = .init()
-        linearGradientState = .init()
-        sectorGradientState = .init()
+        gradientSession.cancel()
         polygonSelectionState = .init()
         if tool == .canvasCrop {
             canvasCropState.cancel()
@@ -6816,6 +6836,14 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func selectLayer(_ layerID: LayerID) {
+        if layerID != workspace.document.activeLayerID {
+            if isApplyingGradientCommit || gradientSession.shouldApplyBeforeLeaving(workspace.toolSession.activeTool) {
+                deferredGradientAction = .layerSwitch(layerID)
+                if !isApplyingGradientCommit { applyActiveGradientSession() }
+                return
+            }
+            if gradientSession.hasDraft { gradientSession.cancel() }
+        }
         if straightLineState.phase == .pending,
            !commitPendingStraightLine() {
             return
@@ -7522,63 +7550,70 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     private func shouldAutoApplyGradientBeforeSelectingTool(_ tool: ToolKind) -> Bool {
-        guard tool != workspace.toolSession.activeTool else { return false }
-        switch workspace.toolSession.activeTool {
-        case .linearGradient:
-            return shouldAutoApplyGradientForToolSwitch(phase: linearGradientState.phase)
-        case .sectorGradient:
-            return shouldAutoApplyGradientForToolSwitch(phase: sectorGradientState.phase)
-        default:
-            return false
-        }
+        tool != workspace.toolSession.activeTool && gradientSession.shouldApplyBeforeLeaving(workspace.toolSession.activeTool)
     }
 
-    private func handleDeferredGradientActionIfNeeded() {
-        guard let deferredGradientAction else { return }
-        self.deferredGradientAction = nil
-        switch deferredGradientAction {
-        case .toolSwitch(let tool):
-            performToolSelection(tool)
-        case .gradientDrag(let drag):
-            performDeferredGradientDrag(drag)
+    private func handleDeferredGradientAction(_ action: DeferredGradientAction?) {
+        switch action {
+        case .toolSwitch(let tool): performToolSelection(tool)
+        case .layerSwitch(let layer): selectLayer(layer)
+        case .gradientDrag(let drag): performDeferredGradientDrag(drag)
+        case nil: break
         }
     }
 
     private func commitGradientApplication(
         _ commandBuffer: MTLCommandBuffer,
         layerID: LayerID,
-        resetInteractionState: () -> Void,
+        sourceTexture: MTLTexture,
+        resultTexture: MTLTexture,
+        tool: ToolKind,
         successMessage: String,
-        failureMessage: String,
-        logTool: String? = nil,
-        startedAt: UInt64? = nil
+        failureMessage: String
     ) {
-        isApplyingGradientCommit = true
-        resetInteractionState()
+        guard let token = gradientSession.beginCommit(version: documentLifecycle.version, layerID: layerID, tool: tool) else { return }
+        let lifetime = MetalCloneSourceLifetime([sourceTexture, resultTexture])
+#if DEBUG
+        let rejectsCompletion = debugRejectsGradientCompletion
+#else
+        let rejectsCompletion = false
+#endif
         commandBuffer.addCompletedHandler { [weak self] completedBuffer in
             Task { @MainActor in
+                _ = lifetime
                 guard let self else { return }
-
-                self.bootstrap.strokeEngine.resetBrushPipelineState()
-                self.isApplyingGradientCommit = false
-                defer { self.handleDeferredGradientActionIfNeeded() }
-
-                guard completedBuffer.status == .completed else {
-                    let message = completedBuffer.error?.localizedDescription ?? failureMessage
-                    self.showStatus(.init(kind: .error, message: message))
+#if DEBUG
+                self.debugGradientCompletionCount += 1
+#endif
+                guard self.gradientSession.commit == token else { return }
+                var published = false
+                defer {
+                    let next = self.gradientSession.finish(token, succeeded: published)
+                    self.handleDeferredGradientAction(next)
+                }
+                guard completedBuffer.status == .completed, !rejectsCompletion else {
+                    self.showStatus(.init(kind: .error, message: completedBuffer.error?.localizedDescription ?? failureMessage))
                     return
                 }
-
+                guard self.documentLifecycle.version == token.version,
+                      self.workspace.document.activeLayerID == layerID,
+                      let surfaceID = self.bootstrap.layerSurfaceStore.surfaceID(for: layerID),
+                      self.bootstrap.layerSurfaceStore.readTexture(for: surfaceID) === sourceTexture else {
+                    self.showStatus(.init(kind: .info, message: "画布已发生变化，渐变尚未提交；请重新应用"))
+                    return
+                }
+                guard self.checkpointHistoryIfPossible(
+                    operationKind: tool == .linearGradient ? "linearGradient.apply" : "sectorGradient.apply",
+                    candidateChangedLayerIDs: [layerID], captureMode: .inPlaceChangedLayers([layerID])
+                ) else { return }
+                self.bootstrap.layerSurfaceStore.swapTexture(for: surfaceID, with: resultTexture)
+                self.bootstrap.layerSurfaceStore.compactTexture(for: surfaceID)
+                self.bootstrap.strokeEngine.resetBrushPipelineState()
                 self.layerThumbnailCache.removeValue(forKey: layerID)
                 self.noteCanvasContentChanged(changedLayerIDs: [layerID])
                 self.refresh(invalidatedLayerIDs: [layerID])
                 self.recordDrawingActivityIfNeeded()
-
-                if let logTool, let startedAt {
-                    let gpuMs = Double(DispatchTime.now().uptimeNanoseconds - startedAt) / 1_000_000
-                    self.transformLogger.debug("[gradient] applyGpuMs=\(gpuMs, privacy: .public) sessionTool=\(logTool, privacy: .public)")
-                }
-
+                published = true
                 self.showStatus(.init(kind: .success, message: successMessage))
             }
         }
@@ -7596,14 +7631,14 @@ final class WorkspaceViewModel: ObservableObject {
             return
         }
         guard let firstPoint = drag.points.first else { return }
-        beginGradientDrag(at: firstPoint, modifiers: drag.modifiers)
+        beginGradientDrag(at: firstPoint, modifiers: drag.modifiers.eventFlags)
         if drag.points.count >= 2 {
             let updatePoints = drag.didEnd ? Array(drag.points.dropFirst().dropLast()) : Array(drag.points.dropFirst())
             for point in updatePoints {
-                updateGradientDrag(to: point, modifiers: drag.modifiers)
+                updateGradientDrag(to: point, modifiers: drag.modifiers.eventFlags)
             }
             if drag.didEnd, let endPoint = drag.points.last {
-                endGradientDrag(at: endPoint, modifiers: drag.modifiers)
+                endGradientDrag(at: endPoint, modifiers: drag.modifiers.eventFlags)
             }
         }
     }
@@ -7619,7 +7654,7 @@ final class WorkspaceViewModel: ObservableObject {
             if drag.points.last != point {
                 drag.points.append(point)
             }
-            drag.modifiers = modifiers
+            drag.modifiers = .init(flags: modifiers)
             drag.didEnd = drag.didEnd || didEnd
             deferredGradientAction = .gradientDrag(drag)
             return
@@ -7628,7 +7663,7 @@ final class WorkspaceViewModel: ObservableObject {
             DeferredGradientDrag(
                 tool: tool,
                 points: [point],
-                modifiers: modifiers,
+                modifiers: .init(flags: modifiers),
                 didEnd: didEnd
             )
         )
@@ -7764,8 +7799,7 @@ final class WorkspaceViewModel: ObservableObject {
     func cancelLinearGradientInteraction() {
         guard workspace.toolSession.activeTool == .linearGradient else { return }
         guard linearGradientState.phase != .idle else { return }
-        deferredGradientAction = nil
-        linearGradientState = .init()
+        gradientSession.cancel()
         relayIdeationOperation(.cancelGradientSession)
         showStatus(.init(kind: .info, message: "已取消直线渐变"))
     }
@@ -7834,7 +7868,7 @@ final class WorkspaceViewModel: ObservableObject {
                 DeferredGradientDrag(
                     tool: .linearGradient,
                     points: [point],
-                    modifiers: modifiers,
+                    modifiers: .init(flags: modifiers),
                     didEnd: false
                 )
             )
@@ -8102,8 +8136,7 @@ final class WorkspaceViewModel: ObservableObject {
     func cancelSectorGradientInteraction() {
         guard workspace.toolSession.activeTool == .sectorGradient else { return }
         guard sectorGradientState.phase != .idle else { return }
-        deferredGradientAction = nil
-        sectorGradientState = .init()
+        gradientSession.cancel()
         relayIdeationOperation(.cancelGradientSession)
         showStatus(.init(kind: .info, message: "已取消扇形渐变"))
     }
@@ -8173,7 +8206,7 @@ final class WorkspaceViewModel: ObservableObject {
             return
         }
 
-        sectorGradientState = .init()
+        sectorGradientState.pathPoints = rawPoints
         applySectorGradient(geometry: geometry)
     }
 
@@ -11676,13 +11709,16 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     private func applyLinearGradient(geometry: LinearGradientGeometry) {
+        var submitted = false
+        defer { if !submitted { deferredGradientAction = nil } }
+        guard finishBrushWorkBeforePixelEdit(reason: "gradient.apply") else { return }
         guard let layerID = bootstrap.interactionController.activeEditableLayerID() else {
             showStatus(.init(kind: .info, message: "当前图层已锁定"))
             return
         }
 
         guard
-            let texture = bootstrap.layerSurfaceStore.surfaceID(for: layerID).flatMap(bootstrap.layerSurfaceStore.texture(for:))
+            let texture = bootstrap.layerSurfaceStore.surfaceID(for: layerID).flatMap(bootstrap.layerSurfaceStore.readTexture(for:))
         else {
             showStatus(.init(kind: .error, message: "无法访问当前图层"))
             return
@@ -11699,11 +11735,7 @@ final class WorkspaceViewModel: ObservableObject {
             return
         }
 
-        checkpointHistoryIfPossible(
-            operationKind: "linearGradient.apply",
-            candidateChangedLayerIDs: [layerID],
-            captureMode: .inPlaceChangedLayers([layerID])
-        )
+
 
         let pointD = geometry.pointD
         let minCanvasX = min(min(pointA.x, pointB.x), min(pointC.x, pointD.x))
@@ -11725,18 +11757,17 @@ final class WorkspaceViewModel: ObservableObject {
             return
         }
 
+        guard let resultTexture = makePixelEditTextureCopy(from: texture) else {
+            showStatus(.init(kind: .error, message: "无法准备渐变，画布未改变"))
+            return
+        }
         let renderPassDescriptor = MTLRenderPassDescriptor()
-        renderPassDescriptor.colorAttachments[0].texture = texture
+        renderPassDescriptor.colorAttachments[0].texture = resultTexture
         renderPassDescriptor.colorAttachments[0].loadAction = .load
         renderPassDescriptor.colorAttachments[0].storeAction = .store
 
-        let applyStart = DispatchTime.now().uptimeNanoseconds
-        let alphaLockTexture = makeAlphaLockTextureCopyIfNeeded(for: layerID, sourceTexture: texture)
-        guard alphaLockTexture != nil || !layerTransparentPixelLockEnabled(layerID) else {
-            showStatus(.init(kind: .error, message: "无法创建锁定透明像素遮罩"))
-            return
-        }
-        bootstrap.linearGradientRenderer.encode(
+        let alphaLockTexture = layerTransparentPixelLockEnabled(layerID) ? texture : nil
+        guard bootstrap.linearGradientRenderer.encode(
             into: renderPassDescriptor,
             commandBuffer: commandBuffer,
             canvasSize: workspace.document.canvasSize,
@@ -11751,17 +11782,21 @@ final class WorkspaceViewModel: ObservableObject {
             distortionAmount: workspace.toolSession.brush.jitterAmount,
             selectionShape: workspace.selection.committedShape,
             alphaLockTexture: alphaLockTexture
-        )
+        ) else {
+            showStatus(.init(kind: .error, message: "无法生成渐变，画布未改变"))
+            return
+        }
 
         commitGradientApplication(
             commandBuffer,
             layerID: layerID,
-            resetInteractionState: { self.linearGradientState = .init() },
+            sourceTexture: texture,
+            resultTexture: resultTexture,
+            tool: .linearGradient,
             successMessage: "已应用直线渐变",
-            failureMessage: "无法完成直线渐变提交",
-            logTool: "linear",
-            startedAt: applyStart
+            failureMessage: "无法完成直线渐变提交"
         )
+        submitted = isApplyingGradientCommit
     }
 
     func applyStraightLine(
@@ -11809,6 +11844,9 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     private func applySectorGradient(geometry: SectorGradientGeometry) {
+        var submitted = false
+        defer { if !submitted { deferredGradientAction = nil } }
+        guard finishBrushWorkBeforePixelEdit(reason: "gradient.apply") else { return }
         guard let layerID = bootstrap.interactionController.activeEditableLayerID() else {
             showStatus(.init(kind: .info, message: "当前图层已锁定"))
             return
@@ -11816,7 +11854,7 @@ final class WorkspaceViewModel: ObservableObject {
 
         guard
             let surfaceID = bootstrap.layerSurfaceStore.surfaceID(for: layerID),
-            let texture = bootstrap.layerSurfaceStore.texture(for: surfaceID)
+            let texture = bootstrap.layerSurfaceStore.readTexture(for: surfaceID)
         else {
             showStatus(.init(kind: .error, message: "无法访问当前图层"))
             return
@@ -11827,29 +11865,25 @@ final class WorkspaceViewModel: ObservableObject {
             return
         }
 
-        checkpointHistoryIfPossible(
-            operationKind: "sectorGradient.apply",
-            candidateChangedLayerIDs: [layerID],
-            captureMode: .inPlaceChangedLayers([layerID])
-        )
 
-        let alphaLockTexture = makeAlphaLockTextureCopyIfNeeded(for: layerID, sourceTexture: texture)
-        guard alphaLockTexture != nil || !layerTransparentPixelLockEnabled(layerID) else {
-            showStatus(.init(kind: .error, message: "无法创建锁定透明像素遮罩"))
-            return
-        }
+
+        let alphaLockTexture = layerTransparentPixelLockEnabled(layerID) ? texture : nil
 
         guard let commandBuffer = bootstrap.metalContext.commandQueue.makeCommandBuffer() else {
             showStatus(.init(kind: .error, message: "无法创建渐变命令缓冲"))
             return
         }
 
+        guard let resultTexture = makePixelEditTextureCopy(from: texture) else {
+            showStatus(.init(kind: .error, message: "无法准备渐变，画布未改变"))
+            return
+        }
         let renderPassDescriptor = MTLRenderPassDescriptor()
-        renderPassDescriptor.colorAttachments[0].texture = texture
+        renderPassDescriptor.colorAttachments[0].texture = resultTexture
         renderPassDescriptor.colorAttachments[0].loadAction = .load
         renderPassDescriptor.colorAttachments[0].storeAction = .store
 
-        bootstrap.sectorGradientRenderer.encode(
+        guard bootstrap.sectorGradientRenderer.encode(
             into: renderPassDescriptor,
             commandBuffer: commandBuffer,
             canvasSize: workspace.document.canvasSize,
@@ -11864,15 +11898,21 @@ final class WorkspaceViewModel: ObservableObject {
             maskQuality: .commit,
             selectionShape: workspace.selection.committedShape,
             alphaLockTexture: alphaLockTexture
-        )
+        ) else {
+            showStatus(.init(kind: .error, message: "无法生成渐变，画布未改变"))
+            return
+        }
 
         commitGradientApplication(
             commandBuffer,
             layerID: layerID,
-            resetInteractionState: { self.sectorGradientState = .init() },
+            sourceTexture: texture,
+            resultTexture: resultTexture,
+            tool: .sectorGradient,
             successMessage: "已应用扇形渐变",
             failureMessage: "无法完成扇形渐变提交"
         )
+        submitted = isApplyingGradientCommit
     }
 
     func eraseLassoContents() {
@@ -12750,6 +12790,12 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func undo() {
+        if gradientSession.hasDraft || isApplyingGradientCommit {
+            gradientSession.cancel()
+            relayIdeationOperation(.cancelGradientSession)
+            showStatus(.init(kind: .info, message: "已取消未提交的渐变"))
+            return
+        }
         if cancelPendingBlockReferenceEditForHistory() { return }
         let auditEnabled = PerformanceAuditStore.shared.isRecordingEnabled
         let startNs = auditEnabled ? DispatchTime.now().uptimeNanoseconds : 0
@@ -12984,6 +13030,12 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func redo() {
+        if gradientSession.hasDraft || isApplyingGradientCommit {
+            gradientSession.cancel()
+            relayIdeationOperation(.cancelGradientSession)
+            showStatus(.init(kind: .info, message: "已取消未提交的渐变"))
+            return
+        }
         if cancelPendingBlockReferenceEditForHistory() { return }
         let auditEnabled = PerformanceAuditStore.shared.isRecordingEnabled
         let startNs = auditEnabled ? DispatchTime.now().uptimeNanoseconds : 0
@@ -14401,8 +14453,7 @@ final class WorkspaceViewModel: ObservableObject {
         blockReferenceEditorState = .init()
         patternPlacementPhase = .idle
         straightLineState = .init()
-        linearGradientState = .init()
-        sectorGradientState = .init()
+        gradientSession.cancel()
         polygonSelectionState = .init()
         deferredGradientAction = nil
         canvasCropState.cancel()
@@ -19024,18 +19075,6 @@ private struct GeneratorStrokeSessionState {
             (partial ^ UInt64(byte)) &* 0xE703_7ED1_A0B4_28DB
         }
     }
-}
-
-private struct DeferredGradientDrag {
-    var tool: ToolKind
-    var points: [CanvasPoint]
-    var modifiers: NSEvent.ModifierFlags
-    var didEnd: Bool
-}
-
-private enum DeferredGradientAction {
-    case toolSwitch(ToolKind)
-    case gradientDrag(DeferredGradientDrag)
 }
 
 let straightLineDefaultThicknessDeadZoneScreenDistance: Double = 50
