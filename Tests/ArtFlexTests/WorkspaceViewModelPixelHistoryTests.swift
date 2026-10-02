@@ -5,6 +5,144 @@ import Testing
 
 struct WorkspaceViewModelPixelHistoryTests {
     @Test @MainActor
+    func stagedPixelEditFailuresPreserveSharedLayersHistoryAndChangeJournal() throws {
+        for standard in [ArtColorStandard.stageOneDefault, .highPrecision] {
+            for usesTextureFill in [false, true] {
+                let harness = try PixelHistoryHarness(colorStandard: standard)
+                let layerID = harness.viewModel.workspace.document.activeLayerID
+                try harness.drawBrushStroke(on: layerID, points: [.init(location: .init(x: 20, y: 20), pressure: 1)])
+                _ = harness.viewModel.flushBrushEditingBoundary(reason: "test.redoBaseline")
+                let redoPixels = try harness.snapshot(layerID: layerID)
+                harness.viewModel.undo()
+                if usesTextureFill { harness.viewModel.selectTool(.textureFill) }
+                else {
+                    harness.viewModel.selectTool(.rectangleSelection)
+                    harness.viewModel.debugSetCommittedSelectionShapeForTests(.init(kind: .rectangle,
+                        bounds: .init(origin: .init(x: 8, y: 8), size: .init(x: 32, y: 32)), pathPoints: []))
+                }
+                #expect(harness.bootstrap.historyController.canRedo)
+                let store = harness.bootstrap.layerSurfaceStore
+                let surfaceID = try #require(store.surfaceID(for: layerID))
+                let originalTexture = try #require(store.readTexture(for: surfaceID))
+                let shared = store.sharedCopy()
+                let before = try harness.snapshot(layerID: layerID)
+                let timeline = harness.bootstrap.historyController.visibleTimeline
+                let dirty = harness.viewModel.hasUnsavedChanges
+                let cursor = store.changeJournal(for: .init(layerID: layerID, kind: .content)).cursor
+                for failure in 0..<4 {
+                    if usesTextureFill {
+                        harness.beginTextureFill(at: .init(x: 8, y: 8))
+                        harness.updateTextureFill(to: .init(x: 40, y: 8))
+                        harness.updateTextureFill(to: .init(x: 40, y: 40))
+                    }
+                    harness.viewModel.debugPreventsPixelEditPreparation = failure == 0
+                    harness.bootstrap.selectionFillRenderer.debugPreventsEncoding = failure == 1
+                    harness.bootstrap.selectionPixelOperationRenderer.debugPreventsEncoding = failure == 1
+                    harness.viewModel.debugRejectsPixelEditCompletion = failure == 2
+                    harness.bootstrap.historyController.debugPreventsCheckpointCapture = failure == 3
+                    if usesTextureFill { harness.endTextureFill(at: .init(x: 8, y: 40)) }
+                    else { harness.viewModel.fillSelectionContents() }
+                    #expect(harness.viewModel.status?.kind == .error)
+                    #expect(try harness.snapshot(layerID: layerID) == before)
+                    #expect(store.readTexture(for: surfaceID) === originalTexture)
+                    #expect(shared.readTexture(for: surfaceID) === originalTexture)
+                    #expect(store.changeJournal(for: .init(layerID: layerID, kind: .content)).cursor == cursor)
+                    #expect(harness.bootstrap.historyController.visibleTimeline == timeline)
+                    #expect(harness.viewModel.hasUnsavedChanges == dirty)
+                    harness.viewModel.debugPreventsPixelEditPreparation = false
+                    harness.bootstrap.selectionFillRenderer.debugPreventsEncoding = false
+                    harness.bootstrap.selectionPixelOperationRenderer.debugPreventsEncoding = false
+                    harness.viewModel.debugRejectsPixelEditCompletion = false
+                    harness.bootstrap.historyController.debugPreventsCheckpointCapture = false
+                }
+                harness.viewModel.redo()
+                #expect(try harness.snapshot(layerID: layerID) == redoPixels)
+            }
+        }
+    }
+
+    @Test @MainActor
+    func stagedPixelEditPublishesOneUndoEntryAndKeepsSharedBranchUnchanged() throws {
+        for standard in [ArtColorStandard.stageOneDefault, .highPrecision] {
+            for usesTextureFill in [false, true] {
+                let harness = try PixelHistoryHarness(colorStandard: standard)
+                let layerID = harness.viewModel.workspace.document.activeLayerID
+                let surfaceID = try #require(harness.bootstrap.layerSurfaceStore.surfaceID(for: layerID))
+                let shared = harness.bootstrap.layerSurfaceStore.sharedCopy()
+                let sharedTexture = try #require(shared.readTexture(for: surfaceID))
+                let before = try harness.snapshot(layerID: layerID)
+                if usesTextureFill {
+                    harness.beginTextureFill(at: .init(x: 8, y: 8))
+                    harness.updateTextureFill(to: .init(x: 40, y: 8))
+                    harness.updateTextureFill(to: .init(x: 40, y: 40))
+                } else {
+                    harness.makeRectangleSelection(minX: 8, minY: 8, maxX: 40, maxY: 40)
+                }
+                let count = harness.bootstrap.historyController.visibleTimeline.appliedEntries.count
+                if usesTextureFill { harness.endTextureFill(at: .init(x: 8, y: 40)) }
+                else { harness.viewModel.fillSelectionContents() }
+                let after = try harness.snapshot(layerID: layerID)
+                #expect(after != before)
+                #expect(after.encoding == standard.pixelFormat.encoding)
+                #expect(harness.bootstrap.historyController.visibleTimeline.appliedEntries.count == count + 1)
+                #expect(try harness.bootstrap.textureSerializer.snapshot(texture: sharedTexture) == before)
+                harness.viewModel.undo()
+                #expect(try harness.snapshot(layerID: layerID) == before)
+                harness.viewModel.redo()
+                #expect(try harness.snapshot(layerID: layerID) == after)
+            }
+        }
+    }
+
+    @Test @MainActor
+    func textureFillFailurePreservesPixelsAndRedo() throws {
+        for failsHistory in [true, false] {
+            let harness = try PixelHistoryHarness()
+            let layerID = harness.viewModel.workspace.document.activeLayerID
+            try harness.drawBrushStroke(on: layerID, points: [.init(location: .init(x: 20, y: 20), pressure: 1)])
+            _ = harness.viewModel.flushBrushEditingBoundary(reason: "test.redoBaseline")
+            let redoPixels = try harness.snapshot(layerID: layerID)
+            harness.viewModel.undo()
+            let before = try harness.snapshot(layerID: layerID)
+            let timeline = harness.bootstrap.historyController.visibleTimeline
+            harness.beginTextureFill(at: .init(x: 8, y: 8))
+            harness.updateTextureFill(to: .init(x: 32, y: 8))
+            // A straight, zero-height shape exercises a real rejected final region.
+            if failsHistory { harness.updateTextureFill(to: .init(x: 32, y: 32)) }
+            harness.bootstrap.historyController.debugPreventsCheckpointCapture = failsHistory
+            harness.endTextureFill(at: failsHistory ? .init(x: 8, y: 32) : .init(x: 48, y: 8))
+            #expect(try harness.snapshot(layerID: layerID) == before)
+            #expect(harness.bootstrap.historyController.visibleTimeline == timeline)
+            #expect(harness.viewModel.status?.kind == .error)
+            #expect(harness.viewModel.selectionOverlayProxy.inProgressShape == nil)
+            harness.bootstrap.historyController.debugPreventsCheckpointCapture = false
+            harness.viewModel.redo()
+            #expect(try harness.snapshot(layerID: layerID) == redoPixels)
+        }
+    }
+
+    @Test @MainActor
+    func selectionPixelOperationDoesNotEditWhenHistoryCaptureFails() throws {
+        for clears in [false, true] {
+            let harness = try PixelHistoryHarness()
+            let layerID = harness.viewModel.workspace.document.activeLayerID
+            try fillOpaqueRect(in: harness, layerID: layerID, originX: 8, originY: 8,
+                width: 32, height: 32, color: .init(red: 1, green: 0, blue: 0, alpha: 1))
+            harness.makeRectangleSelection(minX: 8, minY: 8, maxX: 40, maxY: 40)
+            let before = try harness.snapshot(layerID: layerID)
+            let timeline = harness.bootstrap.historyController.visibleTimeline
+            let dirty = harness.viewModel.hasUnsavedChanges
+            harness.bootstrap.historyController.debugPreventsCheckpointCapture = true
+            if clears { harness.viewModel.deleteSelectionContents() }
+            else { harness.viewModel.fillSelectionContents() }
+            #expect(try harness.snapshot(layerID: layerID) == before)
+            #expect(harness.bootstrap.historyController.visibleTimeline == timeline)
+            #expect(harness.viewModel.hasUnsavedChanges == dirty)
+            #expect(harness.viewModel.status?.kind == .error)
+        }
+    }
+
+    @Test @MainActor
     func historyShortcutKeepsPendingStrokeWhenCheckpointCaptureFails() throws {
         let harness = try PixelHistoryHarness()
         let layer = harness.viewModel.workspace.document.activeLayerID
@@ -2978,13 +3116,14 @@ private struct PixelHistoryHarness {
     let bootstrap: AppBootstrap
     let viewModel: WorkspaceViewModel
 
-    init(canvasSize: CanvasSize = .init(width: 64, height: 64)) throws {
+    init(canvasSize: CanvasSize = .init(width: 64, height: 64), colorStandard: ArtColorStandard = .stageOneDefault) throws {
         guard let metalContext = MetalDeviceContext() else {
             throw PixelHistoryHarnessError.metalUnavailable
         }
         let workspaceStore = WorkspaceStore(state: .stageOneDefault)
         workspaceStore.updateDocument { document in
             document.canvasSize = canvasSize
+            document.colorStandard = colorStandard
         }
         let bootstrap = try AppBootstrap(
             workspaceStore: workspaceStore,
@@ -3059,7 +3198,7 @@ private struct PixelHistoryHarness {
     func color(atX x: Int, y: Int, layerID: LayerID) throws -> RGBAColor {
         guard
             let surfaceID = bootstrap.layerSurfaceStore.surfaceID(for: layerID),
-            let texture = bootstrap.layerSurfaceStore.texture(for: surfaceID)
+            let texture = bootstrap.layerSurfaceStore.readTexture(for: surfaceID)
         else {
             throw PixelHistoryHarnessError.textureUnavailable
         }
@@ -3069,7 +3208,7 @@ private struct PixelHistoryHarness {
     func snapshot(layerID: LayerID) throws -> LayerTextureSnapshot {
         guard
             let surfaceID = bootstrap.layerSurfaceStore.surfaceID(for: layerID),
-            let texture = bootstrap.layerSurfaceStore.texture(for: surfaceID)
+            let texture = bootstrap.layerSurfaceStore.readTexture(for: surfaceID)
         else {
             throw PixelHistoryHarnessError.textureUnavailable
         }

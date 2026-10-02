@@ -460,6 +460,8 @@ final class WorkspaceViewModel: ObservableObject {
     var debugCurveAdjustmentResolutionDecisionOverride: CurveAdjustmentResolutionDecision?
     var debugPixelOperationHistoryCaptureModeOverride: HistoryCaptureMode?
     var debugFillAtPointHistoryCaptureModeOverride: HistoryCaptureMode?
+    var debugPreventsPixelEditPreparation = false
+    var debugRejectsPixelEditCompletion = false
     private(set) var debugTimelapseDocumentContextSyncCount = 0
 
     func debugSetCommittedSelectionShapeForTests(_ shape: SelectionShape?) {
@@ -8865,7 +8867,7 @@ final class WorkspaceViewModel: ObservableObject {
             return false
         }
 
-        _ = flushBrushEditingBoundary(reason: "beginTextureFillGesture")
+        guard finishBrushWorkBeforePixelEdit(reason: "beginTextureFillGesture") else { return false }
 
         guard
             let surfaceID = bootstrap.layerSurfaceStore.surfaceID(for: layerID),
@@ -8873,6 +8875,12 @@ final class WorkspaceViewModel: ObservableObject {
         else {
             showStatus(.init(kind: .error, message: "无法访问当前图层"))
             resetTextureFillGesture(reason: "beginMissingSurface")
+            return false
+        }
+
+        guard let baseTexture = makePixelEditTextureCopy(from: texture) else {
+            showStatus(.init(kind: .error, message: "无法准备纹理填充，画布未改变"))
+            resetTextureFillGesture(reason: "beginCopyFailed")
             return false
         }
 
@@ -8890,7 +8898,7 @@ final class WorkspaceViewModel: ObservableObject {
                 anchorPoint: point,
                 sequence: textureFillSeedSequence
             ),
-            baseTexture: makeTextureFillReplayTextureCopy(from: texture),
+            baseTexture: baseTexture,
             rawEdgePoints: [point],
             tipSettings: tipSettings,
             brush: drawingBrush,
@@ -9018,7 +9026,11 @@ final class WorkspaceViewModel: ObservableObject {
             return false
         }
 
-        checkpointHistoryIfPossible(
+        guard let resultTexture = prepareTextureFillFinalResult(from: state) else {
+            showStatus(.init(kind: .error, message: "纹理填充未完成，画布和历史记录未改变"))
+            return false
+        }
+        guard checkpointHistoryIfPossible(
             operationKind: "textureFill.drag",
             candidateChangedLayerIDs: [state.layerID],
             additionalOperationKinds: ["textureFillSliceRenderer"],
@@ -9026,9 +9038,16 @@ final class WorkspaceViewModel: ObservableObject {
             workspaceOverride: workspaceSnapshotClearingSelection(
                 from: bootstrap.workspaceStore.state
             )
-        )
+        ) else { return false }
 
-        _ = rebuildTextureFillFinalResult(from: state)
+        // Rendering and history capture have succeeded. Publishing needs no further GPU work.
+        bootstrap.layerSurfaceStore.swapTexture(for: state.surfaceID, with: resultTexture)
+        bootstrap.layerSurfaceStore.compactTexture(for: state.surfaceID)
+        layerThumbnailCache.removeValue(forKey: state.layerID)
+        bootstrap.strokeEngine.resetBrushPipelineState()
+        clearRecentBrushAdjustmentState()
+        noteCanvasContentChanged(changedLayerIDs: [state.layerID])
+        refresh(invalidatedLayerIDs: [state.layerID])
         recordDrawingActivityIfNeeded()
         showStatus(.init(kind: .success, message: "已填充纹理区域"))
         return true
@@ -9052,50 +9071,22 @@ final class WorkspaceViewModel: ObservableObject {
         return true
     }
 
-    private func rebuildTextureFillFinalResult(from state: TextureFillGestureState) -> Bool {
-        guard
-            let liveTexture = bootstrap.layerSurfaceStore.texture(for: state.surfaceID),
-            let baseTexture = state.baseTexture,
-            let replayTexture = makeTextureFillReplayTextureCopy(from: baseTexture)
-        else {
-            return false
-        }
+    private func prepareTextureFillFinalResult(from state: TextureFillGestureState) -> MTLTexture? {
+        guard bootstrap.layerSurfaceStore.readTexture(for: state.surfaceID) != nil,
+              let baseTexture = state.baseTexture,
+              let replayTexture = makePixelEditTextureCopy(from: baseTexture) else { return nil }
 
-        if state.tipSettings.sourceSemantic == .importedImage,
-           state.tipSettings.customTipMaskData != nil,
-           applyTextureFillImportedFinalField(
-               replayTexture: replayTexture,
-               liveTexture: liveTexture,
-               state: state
-           ) {
-            layerThumbnailCache.removeValue(forKey: state.layerID)
-            bootstrap.strokeEngine.resetBrushPipelineState()
-            clearRecentBrushAdjustmentState()
-            noteCanvasContentChanged(changedLayerIDs: [state.layerID])
-            refresh(invalidatedLayerIDs: [state.layerID])
-            return true
+        let rendered: Bool
+        if state.tipSettings.sourceSemantic == .importedImage {
+            rendered = applyTextureFillImportedFinalField(replayTexture: replayTexture, state: state)
+        } else {
+            rendered = applyTextureFillBrushFinalField(replayTexture: replayTexture, state: state)
         }
-
-        if state.tipSettings.sourceSemantic != .importedImage,
-           applyTextureFillBrushFinalField(
-               replayTexture: replayTexture,
-               liveTexture: liveTexture,
-               state: state
-           ) {
-            layerThumbnailCache.removeValue(forKey: state.layerID)
-            bootstrap.strokeEngine.resetBrushPipelineState()
-            clearRecentBrushAdjustmentState()
-            noteCanvasContentChanged(changedLayerIDs: [state.layerID])
-            refresh(invalidatedLayerIDs: [state.layerID])
-            return true
-        }
-
-        return false
+        return rendered ? replayTexture : nil
     }
 
     private func applyTextureFillBrushFinalField(
         replayTexture: MTLTexture,
-        liveTexture: MTLTexture,
         state: TextureFillGestureState
     ) -> Bool {
         guard let materialAlphaBytes = StageOneBrushPreviewRasterizer.materialFieldAlphaBytes(
@@ -9106,7 +9097,6 @@ final class WorkspaceViewModel: ObservableObject {
         }
         return applyTextureFillMaterialFinalField(
             replayTexture: replayTexture,
-            liveTexture: liveTexture,
             state: state,
             materialTextureData: Data(materialAlphaBytes)
         )
@@ -9114,7 +9104,6 @@ final class WorkspaceViewModel: ObservableObject {
 
     private func applyTextureFillImportedFinalField(
         replayTexture: MTLTexture,
-        liveTexture: MTLTexture,
         state: TextureFillGestureState
     ) -> Bool {
         guard let stampMaskData = state.tipSettings.customTipMaskData else {
@@ -9122,7 +9111,6 @@ final class WorkspaceViewModel: ObservableObject {
         }
         return applyTextureFillMaterialFinalField(
             replayTexture: replayTexture,
-            liveTexture: liveTexture,
             state: state,
             materialTextureData: stampMaskData
         )
@@ -9130,7 +9118,6 @@ final class WorkspaceViewModel: ObservableObject {
 
     private func applyTextureFillMaterialFinalField(
         replayTexture: MTLTexture,
-        liveTexture: MTLTexture,
         state: TextureFillGestureState,
         materialTextureData: Data
     ) -> Bool {
@@ -9159,11 +9146,11 @@ final class WorkspaceViewModel: ObservableObject {
             width: maxX - minX,
             height: maxY - minY
         )
-        guard boundedMask.width > 0, boundedMask.height > 0, !boundedMask.alphaBytes.isEmpty else {
+        guard boundedMask.width > 0, boundedMask.height > 0, boundedMask.alphaBytes.contains(where: { $0 != 0 }) else {
             return false
         }
 
-        let alphaLockTexture = makeAlphaLockTextureCopyIfNeeded(for: state.layerID, sourceTexture: replayTexture)
+        let alphaLockTexture = layerTransparentPixelLockEnabled(state.layerID) ? state.baseTexture : nil
         guard alphaLockTexture != nil || !layerTransparentPixelLockEnabled(state.layerID) else {
             return false
         }
@@ -9176,7 +9163,7 @@ final class WorkspaceViewModel: ObservableObject {
         renderPassDescriptor.colorAttachments[0].loadAction = .load
         renderPassDescriptor.colorAttachments[0].storeAction = .store
 
-        bootstrap.selectionFillRenderer.encode(
+        guard bootstrap.selectionFillRenderer.encode(
             into: renderPassDescriptor,
             commandBuffer: commandBuffer,
             canvasSize: canvasSize,
@@ -9198,16 +9185,14 @@ final class WorkspaceViewModel: ObservableObject {
             materialSeed: state.sessionSeed,
             materialAngleRadians: textureFillMaterialAngle(from: state.rawEdgePoints),
             materialArrangement: state.tipSettings.arrangement
-        )
+        ) else { return false }
 
         commandBuffer.commit()
         commandBuffer.waitUntilCompleted()
         guard commandBuffer.status == .completed else { return false }
-        bootstrap.layerSurfaceStore.copyTexture(
-            from: replayTexture,
-            to: liveTexture,
-            metal: bootstrap.metalContext
-        )
+#if DEBUG
+        guard !debugRejectsPixelEditCompletion else { return false }
+#endif
         return true
     }
 
@@ -9330,7 +9315,25 @@ final class WorkspaceViewModel: ObservableObject {
         ).clamped(to: canvasSize)
     }
 
-    private func makeTextureFillReplayTextureCopy(from sourceTexture: MTLTexture) -> MTLTexture? {
+    private func finishBrushWorkBeforePixelEdit(reason: String) -> Bool {
+        _ = flushBrushEditingBoundary(reason: reason)
+        guard straightLineState.phase != .pending,
+              !bootstrap.strokeEngine.hasPendingBrushWork,
+              !bootstrap.strokeEngine.hasPendingBrushCommitJobs else {
+            showStatus(.init(kind: .error, message: "笔触尚未成功提交，已保留输入并取消像素编辑，请稍后重试"))
+            return false
+        }
+        return true
+    }
+
+    private func makePixelEditTextureCopy(from sourceTexture: MTLTexture) -> MTLTexture? {
+#if DEBUG
+        guard !debugPreventsPixelEditPreparation else { return nil }
+#endif
+        let workingBytes = sourceTexture.width * sourceTexture.height * (sourceTexture.pixelFormat == .rgba16Float ? 8 : 4)
+        guard ensureDocumentResourceBudget(additionalWorkingBytes: workingBytes, action: "准备像素编辑") else {
+            return nil
+        }
         guard let copyTexture = bootstrap.layerSurfaceStore.makeTexture(
             width: sourceTexture.width,
             height: sourceTexture.height,
@@ -9342,11 +9345,9 @@ final class WorkspaceViewModel: ObservableObject {
             return nil
         }
 
-        bootstrap.layerSurfaceStore.copyTexture(
-            from: sourceTexture,
-            to: copyTexture,
-            metal: bootstrap.metalContext
-        )
+        guard bootstrap.layerSurfaceStore.copyTextures(
+            [(sourceTexture, copyTexture)], metal: bootstrap.metalContext
+        ) else { return nil }
         return copyTexture
     }
 
@@ -16597,6 +16598,7 @@ final class WorkspaceViewModel: ObservableObject {
         successMessage: String,
         preservesExistingAlpha: Bool = false
     ) -> Bool {
+        guard finishBrushWorkBeforePixelEdit(reason: "selectionPixelOperation") else { return false }
         let auditEnabled = PerformanceAuditStore.shared.isRecordingEnabled
         let totalStartNs = auditEnabled ? DispatchTime.now().uptimeNanoseconds : 0
         guard let layerID = bootstrap.interactionController.activeEditableLayerID() else {
@@ -16606,7 +16608,7 @@ final class WorkspaceViewModel: ObservableObject {
 
         guard
             let surfaceID = bootstrap.layerSurfaceStore.surfaceID(for: layerID),
-            let texture = bootstrap.layerSurfaceStore.texture(for: surfaceID)
+            let texture = bootstrap.layerSurfaceStore.readTexture(for: surfaceID)
         else {
             showStatus(.init(kind: .error, message: "无法访问当前图层"))
             return false
@@ -16640,15 +16642,18 @@ final class WorkspaceViewModel: ObservableObject {
             PerformanceAuditStore.shared.recordDuration("WorkspaceViewModel.applyPixelOperation.snapshot", ms: 0)
         }
 
-        let alphaLockTexture = makeAlphaLockTextureCopyIfNeeded(
-            for: layerID,
-            sourceTexture: texture,
-            force: preservesExistingAlpha
-        )
-        guard alphaLockTexture != nil || (!layerTransparentPixelLockEnabled(layerID) && !preservesExistingAlpha) else {
-            showStatus(.init(kind: .error, message: "无法创建锁定透明像素遮罩"))
+        // Keep the source immutable, including alpha-lock sampling, until the edit is accepted.
+        let stagingStartNs = auditEnabled ? DispatchTime.now().uptimeNanoseconds : 0
+        guard let resultTexture = makePixelEditTextureCopy(from: texture) else {
+            showStatus(.init(kind: .error, message: "无法准备选区操作，画布未改变"))
             return false
         }
+        if auditEnabled {
+            PerformanceAuditStore.shared.recordDuration("WorkspaceViewModel.applyPixelOperation.stagingCopy",
+                ms: Double(DispatchTime.now().uptimeNanoseconds - stagingStartNs) / 1_000_000)
+            PerformanceAuditStore.shared.recordInt("WorkspaceViewModel.applyPixelOperation.stagingBytes", value: resultTexture.allocatedSize)
+        }
+        let alphaLockTexture = (layerTransparentPixelLockEnabled(layerID) || preservesExistingAlpha) ? texture : nil
 
         let pixelOperationCaptureMode: HistoryCaptureMode
 #if DEBUG
@@ -16657,31 +16662,19 @@ final class WorkspaceViewModel: ObservableObject {
         pixelOperationCaptureMode = .inPlaceChangedLayers([layerID])
 #endif
 
-        let historyCheckpointStartNs = auditEnabled ? DispatchTime.now().uptimeNanoseconds : 0
-        checkpointHistoryIfPossible(
-            operationKind: historyOperationKind,
-            candidateChangedLayerIDs: [layerID],
-            additionalOperationKinds: ["applyPixelOperation"],
-            captureMode: pixelOperationCaptureMode
-        )
-        if auditEnabled {
-            let historyCheckpointMs = Double(DispatchTime.now().uptimeNanoseconds - historyCheckpointStartNs) / 1_000_000
-            PerformanceAuditStore.shared.recordDuration("WorkspaceViewModel.applyPixelOperation.historyCheckpoint", ms: historyCheckpointMs)
-        }
-
         guard let commandBuffer = bootstrap.metalContext.commandQueue.makeCommandBuffer() else {
             showStatus(.init(kind: .error, message: "无法创建选区像素操作命令缓冲"))
             return false
         }
 
         let renderPassDescriptor = MTLRenderPassDescriptor()
-        renderPassDescriptor.colorAttachments[0].texture = texture
+        renderPassDescriptor.colorAttachments[0].texture = resultTexture
         renderPassDescriptor.colorAttachments[0].loadAction = .load
         renderPassDescriptor.colorAttachments[0].storeAction = .store
 
         let renderInput = renderInput(for: operation)
         let operationStartNs = auditEnabled ? DispatchTime.now().uptimeNanoseconds : 0
-        bootstrap.selectionPixelOperationRenderer.encode(
+        guard bootstrap.selectionPixelOperationRenderer.encode(
             into: renderPassDescriptor,
             commandBuffer: commandBuffer,
             canvasSize: CanvasSize(width: texture.width, height: texture.height),
@@ -16693,10 +16686,23 @@ final class WorkspaceViewModel: ObservableObject {
             operationMode: renderInput.mode,
             premultipliedFillColor: renderInput.premultipliedColor,
             alphaLockTexture: alphaLockTexture
-        )
+        ) else {
+            showStatus(.init(kind: .error, message: "无法生成选区操作，画布未改变"))
+            return false
+        }
 
         commandBuffer.commit()
         commandBuffer.waitUntilCompleted()
+        guard commandBuffer.status == .completed else {
+            showStatus(.init(kind: .error, message: "选区操作执行失败，画布未改变"))
+            return false
+        }
+#if DEBUG
+        guard !debugRejectsPixelEditCompletion else {
+            showStatus(.init(kind: .error, message: "选区操作执行失败，画布未改变"))
+            return false
+        }
+#endif
 
         if auditEnabled {
             let operationMs = Double(DispatchTime.now().uptimeNanoseconds - operationStartNs) / 1_000_000
@@ -16704,6 +16710,24 @@ final class WorkspaceViewModel: ObservableObject {
             PerformanceAuditStore.shared.recordDuration("WorkspaceViewModel.applyPixelOperation.restore", ms: 0)
         }
 
+        let historyCheckpointStartNs = auditEnabled ? DispatchTime.now().uptimeNanoseconds : 0
+        guard checkpointHistoryIfPossible(
+            operationKind: historyOperationKind,
+            candidateChangedLayerIDs: [layerID],
+            additionalOperationKinds: ["applyPixelOperation"],
+            captureMode: pixelOperationCaptureMode
+        ) else { return false }
+        if auditEnabled {
+            let historyCheckpointMs = Double(DispatchTime.now().uptimeNanoseconds - historyCheckpointStartNs) / 1_000_000
+            PerformanceAuditStore.shared.recordDuration("WorkspaceViewModel.applyPixelOperation.historyCheckpoint", ms: historyCheckpointMs)
+        }
+
+        bootstrap.layerSurfaceStore.swapTexture(
+            for: surfaceID, with: resultTexture,
+            changedRegion: PixelRegion(originX: minX, originY: minY, width: maxX - minX, height: maxY - minY)
+        )
+        bootstrap.layerSurfaceStore.compactTexture(for: surfaceID)
+        layerThumbnailCache.removeValue(forKey: layerID)
         let uiConfirmStartNs = auditEnabled ? DispatchTime.now().uptimeNanoseconds : 0
         refresh(invalidatedLayerIDs: [layerID])
         noteCanvasContentChanged(changedLayerIDs: [layerID])

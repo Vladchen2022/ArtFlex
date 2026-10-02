@@ -38,6 +38,9 @@ private extension TextureFillArrangement {
 final class SelectionFillRenderer {
     private let pipelineVariants: ColorRenderPipelineVariants
     private let device: MTLDevice
+#if DEBUG
+    var debugPreventsEncoding = false
+#endif
     private let pipelineState: MTLRenderPipelineState
     private let alphaLockPipelineState: MTLRenderPipelineState
     private let fallbackAlphaLockTexture: MTLTexture
@@ -409,6 +412,7 @@ final class SelectionFillRenderer {
 
     }
 
+    @discardableResult
     func encode(
         into renderPassDescriptor: MTLRenderPassDescriptor,
         commandBuffer: MTLCommandBuffer,
@@ -431,16 +435,19 @@ final class SelectionFillRenderer {
         materialSeed: UInt64 = 0,
         materialAngleRadians: Float = 0,
         materialArrangement: TextureFillArrangement = .directional
-    ) {
+    ) -> Bool {
+#if DEBUG
+        guard !debugPreventsEncoding else { return false }
+#endif
         let minX = max(selectionMaskOriginX, 0)
         let minY = max(selectionMaskOriginY, 0)
         let maxX = min(selectionMaskOriginX + selectionMaskWidth, canvasSize.width)
         let maxY = min(selectionMaskOriginY + selectionMaskHeight, canvasSize.height)
         guard minX < maxX, minY < maxY else {
-            return
+            return false
         }
         guard selectionMaskAlphaBytes.count == selectionMaskWidth * selectionMaskHeight else {
-            return
+            return false
         }
 
         let vertices: [SelectionFillVertex] = [
@@ -454,11 +461,11 @@ final class SelectionFillRenderer {
             width: selectionMaskWidth,
             height: selectionMaskHeight
         ) else {
-            return
+            return false
         }
         let materialTexture = materialTextureData.flatMap { makeMaterialTexture(maskData: $0) }
         if materialTextureData != nil, materialTexture == nil {
-            return
+            return false
         }
 
         let seedLow = Float(materialSeed & 0x00FF_FFFF) / Float(0x00FF_FFFF)
@@ -484,7 +491,7 @@ final class SelectionFillRenderer {
         )
 
         guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor) else {
-            return
+            return false
         }
 
         encoder.setRenderPipelineState(pipelineVariants.state(alphaLockTexture == nil ? pipelineState : alphaLockPipelineState, for: renderPassDescriptor.colorAttachments[0].texture?.pixelFormat ?? .bgra8Unorm_srgb))
@@ -502,6 +509,7 @@ final class SelectionFillRenderer {
         encoder.setFragmentTexture(materialTexture ?? fallbackAlphaLockTexture, index: 2)
         encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: vertices.count)
         encoder.endEncoding()
+        return true
     }
 
     private func makeSelectionMaskTexture(

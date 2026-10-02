@@ -25,6 +25,9 @@ private struct SelectionPixelOperationUniforms {
 final class SelectionPixelOperationRenderer {
     private let pipelineVariants: ColorRenderPipelineVariants
     private let device: MTLDevice
+#if DEBUG
+    var debugPreventsEncoding = false
+#endif
     private let clearPipelineState: MTLRenderPipelineState
     private let fillPipelineState: MTLRenderPipelineState
     private let alphaLockedPipelineState: MTLRenderPipelineState
@@ -185,6 +188,7 @@ final class SelectionPixelOperationRenderer {
         self.fallbackAlphaLockTexture = fallbackAlphaTexture
     }
 
+    @discardableResult
     func encode(
         into renderPassDescriptor: MTLRenderPassDescriptor,
         commandBuffer: MTLCommandBuffer,
@@ -197,16 +201,19 @@ final class SelectionPixelOperationRenderer {
         operationMode: SelectionPixelOperationRenderMode,
         premultipliedFillColor: RGBAColor,
         alphaLockTexture: MTLTexture? = nil
-    ) {
+    ) -> Bool {
+#if DEBUG
+        guard !debugPreventsEncoding else { return false }
+#endif
         let minX = max(selectionMaskOriginX, 0)
         let minY = max(selectionMaskOriginY, 0)
         let maxX = min(selectionMaskOriginX + selectionMaskWidth, canvasSize.width)
         let maxY = min(selectionMaskOriginY + selectionMaskHeight, canvasSize.height)
         guard minX < maxX, minY < maxY else {
-            return
+            return false
         }
         guard selectionMaskAlphaBytes.count == selectionMaskWidth * selectionMaskHeight else {
-            return
+            return false
         }
 
         let vertices: [SelectionPixelOperationVertex] = [
@@ -220,7 +227,7 @@ final class SelectionPixelOperationRenderer {
             width: selectionMaskWidth,
             height: selectionMaskHeight
         ) else {
-            return
+            return false
         }
 
         var uniforms = SelectionPixelOperationUniforms(
@@ -238,7 +245,7 @@ final class SelectionPixelOperationRenderer {
         )
 
         guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor) else {
-            return
+            return false
         }
 
         let pipelineState: MTLRenderPipelineState
@@ -267,6 +274,7 @@ final class SelectionPixelOperationRenderer {
         encoder.setFragmentTexture(alphaLockTexture ?? fallbackAlphaLockTexture, index: 1)
         encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: vertices.count)
         encoder.endEncoding()
+        return true
     }
 
     private func makeSelectionMaskTexture(
