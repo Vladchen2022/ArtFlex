@@ -10,6 +10,7 @@ struct RasterExportSheet: View {
     @State private var format: RasterExportFormat = .png
     @State private var scope: RasterExportScope = .fullCanvas
     @State private var backgroundChoice = ExportBackgroundChoice.white
+    @State private var restoredBackground = RasterExportBackground.white
     @State private var resizeChoice = ExportResizeChoice.original
     @State private var scale = 1.0
     @State private var width = 1920
@@ -77,6 +78,9 @@ struct RasterExportSheet: View {
                     }
                     Text("白色").tag(ExportBackgroundChoice.white)
                     Text("当前颜色").tag(ExportBackgroundChoice.currentColor)
+                    if case .custom = restoredBackground {
+                        Text("已存颜色").tag(ExportBackgroundChoice.savedColor)
+                    }
                 }
 
                 Picker("尺寸", selection: $resizeChoice) {
@@ -188,7 +192,9 @@ struct RasterExportSheet: View {
         switch options.background {
         case .transparent: backgroundChoice = options.format.supportsAlpha ? .transparent : .white
         case .white: backgroundChoice = .white
-        case .custom: backgroundChoice = .currentColor
+        case .custom:
+            restoredBackground = options.background
+            backgroundChoice = .savedColor
         }
         switch options.resize {
         case .original: resizeChoice = .original
@@ -262,6 +268,8 @@ struct RasterExportSheet: View {
             var color = viewModel.workspace.toolSession.selectedColor
             color.alpha = 1
             return .custom(color)
+        case .savedColor:
+            return restoredBackground
         }
     }
 
@@ -306,6 +314,7 @@ private enum ExportBackgroundChoice: String, CaseIterable, Identifiable {
     case transparent
     case white
     case currentColor
+    case savedColor
 
     var id: String { rawValue }
 }

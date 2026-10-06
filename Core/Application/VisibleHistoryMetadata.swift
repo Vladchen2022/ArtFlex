@@ -37,6 +37,10 @@ struct VisibleHistoryEntryMetadata: Identifiable, Codable, Sendable, Equatable {
             return "选区操作"
         case let key where key.contains("transform"):
             return "自由变形"
+        case "fill.adjust":
+            return "调整纹理填充"
+        case let key where key.hasPrefix("textureFill"):
+            return "纹理填充"
         case let key where key.contains("fill"):
             return "填充"
         case let key where key.contains("gradient"):
