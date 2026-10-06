@@ -296,7 +296,8 @@ struct CanvasContainerView: View {
                         outsideCanvasBrushInputRelay: outsideCanvasBrushInputRelay,
                         paintingReferenceScene: viewModel.blockReferenceScene.flatMap {
                             $0.display.drawsBehindPainting(activeTool: viewModel.workspace.toolSession.activeTool) ? $0 : nil
-                        }
+                        },
+                        blocksEditingInput: viewModel.selectionRefinementDraft != nil || viewModel.textureAdjustmentSettings != nil
                     )
                     .id(viewModel.documentRenderGeneration)
                     .allowsHitTesting(viewModel.selectionRefinementDraft == nil && viewModel.textureAdjustmentSettings == nil)

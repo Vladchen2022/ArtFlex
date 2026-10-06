@@ -2,6 +2,8 @@ import SwiftUI
 
 struct CanvasWorkflowBar: View {
     @ObservedObject var viewModel: WorkspaceViewModel
+    @State private var radiusText = "16"
+    @FocusState private var radiusFocused: Bool
 
     private var isSelectionTool: Bool {
         [.lassoSelection, .rectangleSelection, .ellipseSelection, .smartSelection, .polygonSelection].contains(viewModel.workspace.toolSession.activeTool)
@@ -14,8 +16,15 @@ struct CanvasWorkflowBar: View {
                     Text("\(draft.kind.title)预览").fontWeight(.semibold)
                     Slider(value: Binding(get: { Double(draft.radius) }, set: { viewModel.updateSelectionRefinementPreview(radius: Int($0)) }), in: 0...512, step: 1)
                         .frame(width: 140).accessibilityLabel("选区调整半径")
-                    TextField("像素", value: Binding(get: { draft.radius }, set: { viewModel.updateSelectionRefinementPreview(radius: $0) }), format: .number)
+                    TextField("像素", text: $radiusText)
+                        .focused($radiusFocused)
                         .frame(width: 45).accessibilityLabel("选区半径像素")
+                        .onAppear { radiusText = String(draft.radius) }
+                        .onChange(of: radiusText) { _, value in
+                            if let radius = Int(value), (0...512).contains(radius) { viewModel.updateSelectionRefinementPreview(radius: radius) }
+                        }
+                        .onChange(of: draft.radius) { _, value in if !radiusFocused { radiusText = String(value) } }
+                        .onSubmit { radiusFocused = false }
                     Text("px")
                     Toggle("覆盖显示", isOn: Binding(get: { draft.showsOverlay }, set: { _ in viewModel.toggleRefinementOverlay() }))
                     if draft.isComputing { ProgressView().controlSize(.small) }
@@ -29,10 +38,10 @@ struct CanvasWorkflowBar: View {
             } else if let settings = viewModel.textureAdjustmentSettings {
                 HStack(spacing: 8) {
                     Text("调整本次填充")
-                    textureSlider("尺寸", value: settings.materialScale, range: 0.1...4) { value in
+                    textureSlider("尺寸", value: settings.materialScale, range: 0.25...3) { value in
                         var copy = settings; copy.materialScale = value; viewModel.updateRecentTextureAdjustment(settings: copy)
                     }
-                    textureSlider("覆盖", value: settings.coverage, range: 0...1) { value in
+                    textureSlider("覆盖", value: settings.coverage, range: 0.1...1) { value in
                         var copy = settings; copy.coverage = value; viewModel.updateRecentTextureAdjustment(settings: copy)
                     }
                     Picker("排列", selection: Binding(get: { settings.arrangement }, set: { value in
@@ -46,8 +55,8 @@ struct CanvasWorkflowBar: View {
             } else if viewModel.workspace.toolSession.activeTool == .textureFill {
                 HStack(spacing: 8) {
                     Text("纹理填充")
-                    textureSlider("尺寸", value: viewModel.workspace.toolSession.textureFillTip.materialScale, range: 0.1...4, set: viewModel.setTextureFillMaterialScale)
-                    textureSlider("覆盖", value: viewModel.workspace.toolSession.textureFillTip.coverage, range: 0...1, set: viewModel.setTextureFillCoverage)
+                    textureSlider("尺寸", value: viewModel.workspace.toolSession.textureFillTip.materialScale, range: 0.25...3, set: viewModel.setTextureFillMaterialScale)
+                    textureSlider("覆盖", value: viewModel.workspace.toolSession.textureFillTip.coverage, range: 0.1...1, set: viewModel.setTextureFillCoverage)
                     if viewModel.canAdjustRecentTextureFill {
                         Button("调整本次填充") { viewModel.beginRecentTextureAdjustment() }.buttonStyle(.borderedProminent)
                     }

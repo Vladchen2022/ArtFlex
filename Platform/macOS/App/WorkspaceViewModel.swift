@@ -12052,6 +12052,7 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func handleKeyDown(_ event: NSEvent) -> Bool {
+        guard !Self.isEditingTextInKeyWindow else { return false }
         if selectionRefinementDraft != nil || textureAdjustmentSettings != nil {
             if event.keyCode == 53 {
                 cancelSelectionRefinementPreview()
@@ -12063,8 +12064,7 @@ final class WorkspaceViewModel: ObservableObject {
                 else { finishRecentTextureAdjustment(apply: true) }
                 return true
             }
-            // Text fields keep normal editing; canvas tool shortcuts cannot mutate a draft.
-            if !Self.isEditingTextInKeyWindow { return true }
+            return true
         }
 
         if event.keyCode == 53, isHistoryNavigating {
@@ -20158,8 +20158,7 @@ extension WorkspaceViewModel {
         selectionPreviewTask = Task { [weak self] in
             try? await Task.sleep(for: .milliseconds(100))
             guard let self, !Task.isCancelled else { return }
-            let result = await Task.detached(priority: .userInitiated) {
-                Result<SelectionShape?, Error> {
+            let result = await SelectionPreviewWorker.shared.evaluate {
                     if value == 0 { return source }
                     switch kind {
                     case .feather: return try self.featheredSelectionShape(source, canvasSize: size, radiusPixels: value)
@@ -20167,8 +20166,7 @@ extension WorkspaceViewModel {
                     case .contract: return SelectionRefinement.contracted(source, canvasSize: size, radiusPixels: value)
                     case .invert: return SelectionRefinement.inverted(source, canvasSize: size)
                     }
-                }
-            }.value
+            }
             guard !Task.isCancelled, self.selectionPreviewRequest == request,
                   self.selectionRefinementDraft?.generation == self.documentRenderGeneration else { return }
             self.selectionRefinementDraft?.isComputing = false

@@ -236,6 +236,7 @@ struct MetalCanvasHost: NSViewRepresentable {
     let onAdjustBrushSize: (Float) -> Void
     let outsideCanvasBrushInputRelay: OutsideCanvasBrushInputRelay?
     var paintingReferenceScene: BlockReferenceScene? = nil
+    var blocksEditingInput = false
     private let brushFeelLogger = Logger(subsystem: "ArtFlex", category: "BrushFeel")
 
     func makeCoordinator() -> MetalCanvasCoordinator {
@@ -320,6 +321,7 @@ struct MetalCanvasHost: NSViewRepresentable {
         view.enableSetNeedsDisplay = true
         view.isPaused = true
         view.framebufferOnly = false
+        view.blocksEditingInput = blocksEditingInput
         view.keyDownEventHandler = onKeyDown
         view.keyUpEventHandler = onKeyUp
         view.modifierFlagsChangedEventHandler = onModifierFlagsChanged
@@ -375,6 +377,7 @@ struct MetalCanvasHost: NSViewRepresentable {
         let previousLuminosityPreview = context.coordinator.isLuminosityPreviewEnabled
         context.coordinator.isLuminosityPreviewEnabled = isLuminosityPreviewEnabled
         if let view = nsView as? StrokeCaptureMTKView {
+            view.blocksEditingInput = blocksEditingInput
             outsideCanvasBrushInputRelay?.captureView = view
             view.contextMenuSelectionShape = isTransformingSelection ? nil : sceneSnapshot.selectionShape
             view.selectionRefinementRequestHandler = onRequestSelectionRefinement
@@ -869,6 +872,7 @@ final class StrokeCaptureMTKView: MTKView {
 
     weak var strokeDelegate: StrokeCaptureDelegate?
     weak var transformPreviewDelegate: TransformPreviewDelegate?
+    var blocksEditingInput = false
     var keyDownEventHandler: ((NSEvent) -> Bool)?
     var keyUpEventHandler: ((NSEvent) -> Bool)?
     var modifierFlagsChangedEventHandler: ((NSEvent.ModifierFlags) -> Bool)?
@@ -1212,6 +1216,7 @@ final class StrokeCaptureMTKView: MTKView {
     }
 
     override func mouseDown(with event: NSEvent) {
+        guard !blocksEditingInput else { return }
         let diagnosticsEnabled = RuntimeDiagnostics.brushHotPathLoggingEnabled
         let handlerStartNs = diagnosticsEnabled ? DispatchTime.now().uptimeNanoseconds : 0
         activeModifierFlags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
@@ -1764,6 +1769,7 @@ final class StrokeCaptureMTKView: MTKView {
     }
 
     override func keyDown(with event: NSEvent) {
+        if blocksEditingInput { _ = keyDownEventHandler?(event); return }
         guard !MenuKeyboardOwnership.shared.isTracking else {
             super.keyDown(with: event)
             return
@@ -1897,6 +1903,7 @@ final class StrokeCaptureMTKView: MTKView {
     }
 
     override func mouseEntered(with event: NSEvent) {
+        guard !blocksEditingInput else { return }
         activeModifierFlags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         hoverLocation = convert(event.locationInWindow, from: nil)
         if window?.firstResponder !== self {
