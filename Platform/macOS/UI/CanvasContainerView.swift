@@ -767,7 +767,8 @@ struct CanvasContainerView: View {
                 }
 
                 if viewModel.workspace.toolSession.activeTool.supportsOutsideCanvasSelectionStart,
-                   !viewModel.isPanModeActive {
+                   !viewModel.isPanModeActive,
+                   !viewModel.isWorkflowAdjustmentActive {
                     OutsideCanvasSelectionEventBridge(
                         transform: viewportTransform,
                         activeTool: viewModel.workspace.toolSession.activeTool,
@@ -805,7 +806,8 @@ struct CanvasContainerView: View {
                 }
 
                 if viewModel.workspace.toolSession.activeTool == .brush,
-                   !viewModel.isPanModeActive {
+                   !viewModel.isPanModeActive,
+                   !viewModel.isWorkflowAdjustmentActive {
                     OutsideCanvasBrushEventBridge(
                         transform: viewportTransform,
                         activeTool: viewModel.workspace.toolSession.activeTool,
@@ -1602,7 +1604,8 @@ private final class OutsideCanvasBrushEventView: NSView {
         localEventMonitor = NSEvent.addLocalMonitorForEvents(
             matching: [.leftMouseDown, .leftMouseDragged, .leftMouseUp]
         ) { [weak self] event in
-            self?.handleLocalEvent(event) ?? event
+            guard let self else { return event }
+            return self.handleLocalEvent(event)
         }
     }
 
@@ -1618,6 +1621,7 @@ private final class OutsideCanvasBrushEventView: NSView {
         switch event.type {
         case .leftMouseDown:
             guard !isCapturingOutsideStart else { return nil }
+            guard !CanvasControlEventExclusionView.contains(event) else { return event }
             let startsOutsideCanvas = outsideCanvasPoint(for: event) != nil
             let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
             guard shouldBeginOutsideCanvasBrushStroke(
@@ -1736,7 +1740,8 @@ private final class OutsideCanvasSelectionEventView: NSView {
         localEventMonitor = NSEvent.addLocalMonitorForEvents(
             matching: [.leftMouseDown, .leftMouseDragged, .leftMouseUp, .mouseMoved]
         ) { [weak self] event in
-            self?.handleLocalEvent(event) ?? event
+            guard let self else { return event }
+            return self.handleLocalEvent(event)
         }
     }
 
@@ -1753,6 +1758,7 @@ private final class OutsideCanvasSelectionEventView: NSView {
         switch event.type {
         case .leftMouseDown:
             guard !isCapturingOutsideStart else { return nil }
+            guard !CanvasControlEventExclusionView.contains(event) else { return event }
             guard let point = outsideCanvasPoint(for: event) else { return event }
             let modifiers = normalizedModifiers(for: event)
             isCapturingOutsideStart = true
@@ -1810,6 +1816,7 @@ private final class OutsideCanvasSelectionEventView: NSView {
             return nil
 
         case .mouseMoved:
+            guard !CanvasControlEventExclusionView.contains(event) else { return event }
             guard let point = outsideCanvasPoint(for: event) else { return event }
             NSCursor.crosshair.set()
             if activeTool == .polygonSelection {

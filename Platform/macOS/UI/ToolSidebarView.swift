@@ -68,6 +68,7 @@ struct ToolSidebarView: View {
         .frame(width: Self.standardWidth)
         .frame(maxHeight: .infinity)
         .background(Color(red: 0.13, green: 0.13, blue: 0.14))
+        .disabled(viewModel.isWorkflowAdjustmentActive)
     }
 
     private var generatorButton: some View {
@@ -445,7 +446,7 @@ struct ToolSidebarView: View {
         if hostViewModel.savedSnapshotCount >= 6 {
             return "已达到 6 张快照上限，再点会直接进入快照对比"
         }
-        return "快照保存（长按可打开快照对比 / 清空快照）"
+        return "快照保存（右侧箭头打开对比 / 清空，亦支持长按）"
     }
 }
 

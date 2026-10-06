@@ -90,6 +90,7 @@ final class WorkspaceViewModel: ObservableObject {
     private var recentTextureFill: RecentTextureFill?
     @Published var textureAdjustmentSettings: TextureFillTipSettings?
     @Published var canAdjustRecentTextureFill = false
+    private var textureAdjustmentInitialFill: RecentTextureFill?
     private var textureAdjustmentOriginal: MTLTexture?
     private var historyPreviewImageTask: Task<Void, Never>?
     private var savedHistoryEntryID: UUID?
@@ -7499,6 +7500,7 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func beginSelection(kind: SelectionShapeKind, at start: CanvasPoint, modifiers: NSEvent.ModifierFlags = []) {
+        guard !isWorkflowAdjustmentActive else { return }
         ideationBranchActivityHandler?()
         let combineMode = selectionCombineMode(for: kind, modifiers: modifiers)
         if RuntimeDiagnostics.selectionTraceLoggingEnabled, kind == .lasso {
@@ -8511,6 +8513,7 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func updateSelection(to point: CanvasPoint, modifiers: NSEvent.ModifierFlags = []) {
+        guard !isWorkflowAdjustmentActive else { return }
         ideationBranchActivityHandler?()
         let storeSelection = bootstrap.workspaceStore.state.selection
         let currentStart = storeSelection.anchorPoint ?? point
@@ -8578,6 +8581,7 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func updateSelection(to points: [CanvasPoint], modifiers: NSEvent.ModifierFlags = []) {
+        guard !isWorkflowAdjustmentActive else { return }
         guard points.isEmpty == false else { return }
         if workspace.toolSession.activeTool == .textureFill {
             updateTextureFillGesture(to: points)
@@ -8631,6 +8635,7 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func commitSelection(at end: CanvasPoint, modifiers: NSEvent.ModifierFlags = []) {
+        guard !isWorkflowAdjustmentActive else { return }
         ideationBranchActivityHandler?()
         let storeSelection = bootstrap.workspaceStore.state.selection
         let currentStart = storeSelection.anchorPoint ?? end
@@ -9661,8 +9666,9 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func handleSelectionMouseDown(at point: CanvasPoint, modifiers: NSEvent.ModifierFlags) -> SelectionMouseDownAction {
+        guard !isWorkflowAdjustmentActive else { return .idle }
         let normalized = modifiers.intersection(.deviceIndependentFlagsMask)
-        let hasModifier = normalized.contains(.shift) || normalized.contains(.option)
+        let hasModifier = normalized.contains(.shift) || normalized.contains(.option) || preferredSelectionCombineMode != .replace
 
         if workspace.toolSession.activeTool == .smartSelection {
             requestMagicWandSelection(at: point, modifiers: modifiers)
@@ -14093,18 +14099,18 @@ final class WorkspaceViewModel: ObservableObject {
         }
         guard canBeginDocumentPersistence(action: "保存工程") else { completion?(false); return false }
         guard !timelapseRecorder.isBusy else {
-            recoveryCoordinator.manualSaveAfterTimelapse = completion == nil
-            showStatus(.init(kind: .info, message: completion == nil
+            recoveryCoordinator.manualSaveAfterTimelapse = completion == nil && !asNewFile
+            showStatus(.init(kind: .info, message: completion == nil && !asNewFile
                 ? "录像帧写入完成后将立即保存工程" : "正在完成录像写入，请稍后再试"))
             completion?(false)
-            return completion == nil
+            return completion == nil && !asNewFile
         }
         guard !recoveryCoordinator.isWriting else {
-            recoveryCoordinator.manualSaveAfterWrite = completion == nil
-            showStatus(.init(kind: .info, message: completion == nil
+            recoveryCoordinator.manualSaveAfterWrite = completion == nil && !asNewFile
+            showStatus(.init(kind: .info, message: completion == nil && !asNewFile
                 ? "自动恢复写入完成后将立即保存工程" : "正在完成自动恢复写入，请稍后再试"))
             completion?(false)
-            return completion == nil
+            return completion == nil && !asNewFile
         }
         if !asNewFile, let url = currentProjectURL {
             startProjectSave(to: url, completion: completion)
@@ -14116,7 +14122,7 @@ final class WorkspaceViewModel: ObservableObject {
                 self.documentLifecycle.isChoosingSaveLocation = false
                 guard self.documentRenderGeneration == generation else { completion?(false); return }
                 guard let url else {
-                    self.showStatus(.init(kind: .info, message: "已取消工程保存，当前内容仍未保存"))
+                    self.showStatus(.init(kind: .info, message: "已取消工程保存"))
                     completion?(false)
                     return
                 }
@@ -20213,7 +20219,13 @@ extension WorkspaceViewModel {
               let original = bootstrap.layerSurfaceStore.readTexture(for: recent.state.surfaceID) else {
             discardRecentTextureFill(); return
         }
-        textureAdjustmentOriginal = original
+        // Sparse backing storage belongs to the surface resource, not the MTLTexture.
+        // Replacing that resource must not invalidate our cancel/undo baseline.
+        guard let copy = makePixelEditTextureCopy(from: original) else {
+            showStatus(.init(kind: .error, message: "无法准备纹理调整，原始填充未改变")); return
+        }
+        textureAdjustmentOriginal = copy
+        textureAdjustmentInitialFill = recent
         textureAdjustmentSettings = recent.state.tipSettings
     }
 
@@ -20228,7 +20240,9 @@ extension WorkspaceViewModel {
         bootstrap.layerSurfaceStore.swapTexture(for: recent.state.surfaceID, with: texture)
         recentTextureFill = recent
         textureAdjustmentSettings = settings
+        canvasContentRevision &+= 1
         refresh(invalidatedLayerIDs: [recent.state.layerID])
+        scheduleNavigatorPreviewRefresh()
     }
 
     func finishRecentTextureAdjustment(apply: Bool) {
@@ -20248,12 +20262,19 @@ extension WorkspaceViewModel {
             noteCanvasContentChanged(changedLayerIDs: [recent.state.layerID])
         } else {
             bootstrap.layerSurfaceStore.swapTexture(for: recent.state.surfaceID, with: original)
-            discardRecentTextureFill()
+            recentTextureFill = textureAdjustmentInitialFill
+            textureAdjustmentInitialFill = nil
+            textureAdjustmentOriginal = nil
+            textureAdjustmentSettings = nil
+            canAdjustRecentTextureFill = recentTextureFill != nil
+            canvasContentRevision &+= 1
         }
         refresh(invalidatedLayerIDs: [recent.state.layerID])
+        scheduleNavigatorPreviewRefresh()
     }
 
     private func discardRecentTextureFill() {
+        textureAdjustmentInitialFill = nil
         recentTextureFill = nil
         textureAdjustmentSettings = nil
         textureAdjustmentOriginal = nil
@@ -20261,10 +20282,13 @@ extension WorkspaceViewModel {
     }
 
     func isSavedHistoryEntry(_ id: UUID) -> Bool { savedHistoryEntryID == id }
-    var isInitialHistorySavepoint: Bool { savedHistoryWasInitial && savedHistoryPoint?.generation == documentRenderGeneration }
+    var isInitialHistorySavepoint: Bool {
+        savedHistoryWasInitial && savedHistoryPoint?.generation == documentRenderGeneration &&
+            savedHistoryPoint?.contentStateID == bootstrap.historyController.initialVisibleHistoryContentStateID
+    }
 
     func captureCurrentHistoryThumbnail() async {
-        guard !isHistoryNavigating,
+        guard !isHistoryNavigating, !isWorkflowAdjustmentActive,
               let entry = visibleHistoryTimeline.appliedEntries.last,
               historyPreviewImages[entry.id] == nil else { return }
         let generation = documentRenderGeneration

@@ -1389,6 +1389,7 @@ final class StrokeCaptureMTKView: MTKView {
     }
 
     override func mouseDragged(with event: NSEvent) {
+        guard !blocksEditingInput else { return }
         let diagnosticsEnabled = RuntimeDiagnostics.brushHotPathLoggingEnabled
         let handlerStartNs = diagnosticsEnabled ? DispatchTime.now().uptimeNanoseconds : 0
         activeModifierFlags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
@@ -1600,6 +1601,7 @@ final class StrokeCaptureMTKView: MTKView {
     }
 
     override func mouseUp(with event: NSEvent) {
+        guard !blocksEditingInput else { return }
         activeModifierFlags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         hoverLocation = convert(event.locationInWindow, from: nil)
         updateCursorIndicator()

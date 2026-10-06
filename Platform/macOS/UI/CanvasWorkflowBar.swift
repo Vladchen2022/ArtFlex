@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 struct CanvasWorkflowBar: View {
@@ -30,9 +31,10 @@ struct CanvasWorkflowBar: View {
                     if draft.isComputing { ProgressView().controlSize(.small) }
                     Button("取消") { viewModel.cancelSelectionRefinementPreview() }
                     Button("应用") { viewModel.applySelectionRefinementPreview() }
-                        .disabled(draft.isComputing || draft.error != nil).buttonStyle(.borderedProminent)
+                        .disabled(draft.isComputing || draft.error != nil || Int(radiusText).map { !(0...512).contains($0) } != false).buttonStyle(.borderedProminent)
                 }
                 .workflowCapsule()
+                if Int(radiusText).map({ (0...512).contains($0) }) != true { Text("请输入 0–512 的整数").foregroundStyle(.orange).workflowCapsule() }
                 if let error = draft.error { Text(error).foregroundStyle(.orange).workflowCapsule() }
                 if draft.preview == nil && !draft.isComputing { Text("当前预览为空选区").workflowCapsule() }
             } else if let settings = viewModel.textureAdjustmentSettings {
@@ -121,6 +123,7 @@ private extension View {
         padding(.horizontal, 10).padding(.vertical, 7)
             .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 9))
             .overlay(RoundedRectangle(cornerRadius: 9).stroke(.white.opacity(0.12)))
+            .background(CanvasControlEventExclusion())
     }
 }
 
@@ -140,5 +143,25 @@ struct MaskThumbnailButton: View {
         .buttonStyle(.plain).accessibilityLabel("编辑\(layer.name)蒙版")
         .help("点击编辑蒙版：白色显示，黑色隐藏")
         .task(id: viewModel.layerThumbnailRevision) { image = await viewModel.loadMaskThumbnail(for: layer.id) }
+    }
+}
+
+// Local event monitors run before normal hit testing. Identify the actual control
+// bounds so canvas-margin input never interprets a capsule click as a gesture.
+private struct CanvasControlEventExclusion: NSViewRepresentable {
+    func makeNSView(context: Context) -> CanvasControlEventExclusionView { CanvasControlEventExclusionView() }
+    func updateNSView(_ nsView: CanvasControlEventExclusionView, context: Context) {}
+}
+
+final class CanvasControlEventExclusionView: NSView {
+    private static let liveViews = NSHashTable<CanvasControlEventExclusionView>.weakObjects()
+    override init(frame: NSRect) { super.init(frame: frame); Self.liveViews.add(self) }
+    required init?(coder: NSCoder) { super.init(coder: coder); Self.liveViews.add(self) }
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+    static func contains(_ event: NSEvent) -> Bool {
+        liveViews.allObjects.contains { view in
+            view.window != nil && view.window === event.window && !view.isHiddenOrHasHiddenAncestor &&
+                view.bounds.contains(view.convert(event.locationInWindow, from: nil))
+        }
     }
 }

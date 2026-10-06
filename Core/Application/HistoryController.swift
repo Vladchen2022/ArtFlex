@@ -286,6 +286,8 @@ final class HistoryController {
     }
 
     var canUndo: Bool { !undoStack.isEmpty }
+    /// The baseline changes when the history budget evicts old restore points.
+    var initialVisibleHistoryContentStateID: UUID { undoStack.first?.metadata.contentStateID ?? currentContentStateID }
     var canRedo: Bool { !redoStack.isEmpty }
     var residentByteCount: Int { (undoStack + redoStack).reduce(readAheadByteCount) { $0 + $1.pixels.residentBytes } }
     var diskByteCount: Int { (undoStack + redoStack).reduce(0) { $0 + $1.pixels.diskBytes } }

@@ -59,6 +59,7 @@ struct MainToolbarView: View {
                     .frame(width: 20, height: 18)
             }
             .buttonStyle(.plain)
+            .disabled(editingViewModel.isWorkflowAdjustmentActive)
             .buttonTooltip("历史预览", help: "临时查看撤销与重做中的画布状态")
             .popover(isPresented: $isHistoryPresented, arrowEdge: .top) {
                 VisibleHistoryPopover(viewModel: editingViewModel)

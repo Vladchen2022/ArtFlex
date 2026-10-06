@@ -10,12 +10,14 @@ struct WorkspaceCommand: Identifiable {
 }
 
 extension WorkspaceViewModel {
+    var isWorkflowAdjustmentActive: Bool { selectionRefinementDraft != nil || textureAdjustmentSettings != nil }
+
     var searchableCommands: [WorkspaceCommand] {
         let selected = workspace.selection.committedShape != nil
         let draftBlocked = selectionRefinementDraft != nil || textureAdjustmentSettings != nil
         let noSelection: String? = isTransformingSelection ? "请先结束变形" : (!selected ? "需要先建立选区" : nil)
         let persistenceBlock: String? = draftBlocked ? "请先应用或取消调整" : (isProjectSaving ? "正在保存" : nil)
-        return [
+        let commands: [WorkspaceCommand] = [
             .init(id: "new", title: "新建画布", category: "文件", shortcut: "⌘N", unavailableReason: persistenceBlock, action: presentNewCanvasSheet),
             .init(id: "open", title: "打开工程", category: "文件", shortcut: "⌘O", unavailableReason: persistenceBlock, action: openProject),
             .init(id: "save", title: "保存工程", category: "文件", shortcut: "⌘S", unavailableReason: persistenceBlock, action: { self.saveProject() }),
@@ -43,6 +45,11 @@ extension WorkspaceViewModel {
             .init(id: "snapshot", title: "保存画布快照", category: "视图", action: requestSnapshotSavePrimaryAction),
             .init(id: "compare", title: "快照对比", category: "视图", unavailableReason: savedSnapshotCount == 0 ? "需要先保存快照" : nil, action: requestOpenSnapshotCompare)
         ]
+        return commands.map { command in
+            var result = command
+            if draftBlocked && !["undo", "redo"].contains(command.id) { result.unavailableReason = "请先应用或取消调整" }
+            return result
+        }
     }
 }
 
@@ -115,7 +122,7 @@ struct ArtFlexWorkspaceCommands: Commands {
         CommandGroup(after: .pasteboard) {
             Button("合并拷贝") { editor.copyMergedPixels() }.keyboardShortcut("c", modifiers: [.command, .shift])
             Button("删除选区内容") { editor.deleteSelectionOrActiveLayer() }.keyboardShortcut(.delete, modifiers: [])
-                .disabled(editor.isTransformingSelection)
+                .disabled(editor.isTransformingSelection || editor.isWorkflowAdjustmentActive)
             Divider()
             Button("应用变形") { editor.applySelectionTransform() }.disabled(!editor.isTransformingSelection)
             Button("取消变形") { editor.cancelSelectionTransform() }.disabled(!editor.isTransformingSelection)
@@ -123,16 +130,16 @@ struct ArtFlexWorkspaceCommands: Commands {
         }
         CommandMenu("图层") {
             category("图层")
-            Button("盖印图层") { editor.stampVisibleLayers() }.keyboardShortcut("e", modifiers: [.command, .option, .shift])
+            Button("盖印图层") { editor.stampVisibleLayers() }.keyboardShortcut("e", modifiers: [.command, .option, .shift]).disabled(editor.isWorkflowAdjustmentActive)
         }
         CommandMenu("选区") {
-            Button("取消选区") { editor.clearSelection() }.keyboardShortcut("d").disabled(editor.isTransformingSelection)
-            Button("填充选区内容") { editor.fillSelectionContents() }.keyboardShortcut("f", modifiers: [.command, .shift])
+            Button("取消选区") { editor.clearSelection() }.keyboardShortcut("d").disabled(editor.isTransformingSelection || editor.isWorkflowAdjustmentActive)
+            Button("填充选区内容") { editor.fillSelectionContents() }.keyboardShortcut("f", modifiers: [.command, .shift]).disabled(editor.isWorkflowAdjustmentActive || editor.workspace.selection.committedShape == nil)
             ForEach(editor.searchableCommands.filter { $0.category == "选区" && $0.id != "clearSelection" && $0.id != "fill" }) { command in
                 Button(command.title, action: command.action).disabled(command.unavailableReason != nil)
             }
-            Button("填充套索内容") { editor.fillLassoContents() }
-            Button("擦除套索内容") { editor.eraseLassoContents() }
+            Button("填充套索内容") { editor.fillLassoContents() }.disabled(editor.isWorkflowAdjustmentActive)
+            Button("擦除套索内容") { editor.eraseLassoContents() }.disabled(editor.isWorkflowAdjustmentActive)
         }
         CommandGroup(after: .toolbar) {
             Button("适合窗口") { editor.resetViewport() }.keyboardShortcut("0")
