@@ -83,6 +83,21 @@ swift test --filter StageOneBrushPreviewRasterizerTests
 swift test --filter BrushLibraryStateTests
 ```
 
+## macOS 应用打包
+
+完成 Release 构建后，用统一入口生成一个尚不存在的应用路径：
+
+```bash
+swift build -c release
+bash Platform/macOS/Distribution/package-app.sh "$(swift build -c release --show-bin-path)" .build/ArtFlex-new.app
+```
+
+脚本复制可执行文件和 SwiftPM 资源包，从现有 `AppIcon.png` 生成多尺寸 `AppIcon.icns`，放入应用主 `Contents/Resources`，再校验配置并执行本地签名。`CFBundleIconFile` 必须与这一文件对应，Finder 和退出后的 Dock 才能直接读取图标。运行时设置 `NSApp.applicationIconImage` 不能代替安装包配置。
+
+输出路径已存在时脚本拒绝覆盖。更新常用应用前先保存画稿、退出程序并备份旧应用，再安装新包。本地签名用于开发交付，不包含公证分发。
+
+正式安装位置为 `/Applications/ArtFlex.app`，Dock 应固定这一位置。`.build` 内的应用仅用于构建与验收，不能代替正式安装。首次安装且目标不存在时，可以把脚本的输出参数直接设为 `/Applications/ArtFlex.app`。
+
 ## 许可证
 
 本项目使用 [PolyForm Noncommercial License 1.0.0](LICENSE)。允许非商业用途使用、修改和分发；商业使用不在该许可证授权范围内。
