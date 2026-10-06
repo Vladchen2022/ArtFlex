@@ -108,7 +108,7 @@ struct VisibleHistoryPopover: View {
                 .foregroundStyle(.secondary)
         }
         .padding(14)
-        .frame(width: 320)
+        .frame(width: 370)
         .onAppear {
             viewModel.prepareVisibleHistoryPresentation()
             scrubPosition = Double(previewCount)
@@ -116,6 +116,9 @@ struct VisibleHistoryPopover: View {
         .onDisappear {
             pendingScrubTask?.cancel()
             viewModel.cancelVisibleHistoryPreview()
+        }
+        .task(id: "\(previewCount)-\(viewModel.isHistoryNavigating)") {
+            await viewModel.captureCurrentHistoryThumbnail()
         }
         .onChange(of: previewCount) { _, newValue in
             scrubPosition = Double(newValue)
@@ -144,8 +147,12 @@ struct VisibleHistoryPopover: View {
                     .foregroundStyle(isPreviewed ? Color.green : Color.secondary)
                     .frame(width: 18)
 
+                if let image = viewModel.historyPreviewImages[entry.id] {
+                    Image(decorative: image, scale: 1).resizable().scaledToFit()
+                        .frame(width: 48, height: 34).background(Color.gray.opacity(0.2))
+                }
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(entry.displayName)
+                    Text(entry.displayName + (viewModel.isSavedHistoryEntry(entry.id) ? " · 上次保存" : ""))
                         .font(.system(size: 11, weight: .semibold))
                         .lineLimit(1)
                     Text(entry.createdAt, style: .time)
@@ -185,7 +192,7 @@ struct VisibleHistoryPopover: View {
                 Image(systemName: previewCount == 0 ? "eye.fill" : "eye")
                     .foregroundStyle(previewCount == 0 ? Color.green : Color.secondary)
                     .frame(width: 18)
-                Text("初始状态")
+                Text(viewModel.isInitialHistorySavepoint ? "初始状态 · 上次保存" : "初始状态")
                     .font(.system(size: 11, weight: .semibold))
                 Spacer()
             }

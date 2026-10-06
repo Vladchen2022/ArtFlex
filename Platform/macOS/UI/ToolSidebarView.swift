@@ -168,8 +168,19 @@ struct ToolSidebarView: View {
                                     : Color.white.opacity(0.18)
                             )
                     )
-                    .padding(.trailing, snapshotCountBadgeTrailingPadding)
+                    .padding(.trailing, snapshotCountBadgeTrailingPadding + 23)
             }
+        }
+        .overlay(alignment: .trailing) {
+            Button {
+                showsSnapshotPopover = true
+            } label: {
+                Image(systemName: "chevron.down").font(.system(size: 10, weight: .bold))
+                    .frame(width: 24, height: sidebarButtonHeight)
+                    .background(Color.black.opacity(0.12), in: RoundedRectangle(cornerRadius: 6))
+            }
+            .buttonStyle(.plain).accessibilityLabel("查看快照与对比")
+            .help("打开快照对比与管理")
         }
         .buttonStyle(.plain)
         .help(snapshotButtonHelpText)

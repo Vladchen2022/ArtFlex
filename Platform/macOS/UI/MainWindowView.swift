@@ -39,6 +39,9 @@ struct MainWindowView: View {
             )
             .frame(width: 0, height: 0)
         )
+        .sheet(isPresented: Binding(get: { activeKeyboardTarget.isCommandSearchPresented }, set: { activeKeyboardTarget.isCommandSearchPresented = $0 })) {
+            CommandSearchSheet(viewModel: activeKeyboardTarget)
+        }
         .sheet(isPresented: $viewModel.isNewCanvasSheetPresented) {
             NewCanvasSheetView(viewModel: viewModel)
         }
@@ -187,6 +190,7 @@ private struct StandardWorkspaceShell: View {
 
                     if showsInspector {
                         RightInspectorView(viewModel: viewModel)
+                            .disabled(viewModel.selectionRefinementDraft != nil || viewModel.textureAdjustmentSettings != nil)
                             .frame(maxHeight: .infinity, alignment: .top)
                             .overlay(alignment: .leading) {
                                 Divider().overlay(Color.white.opacity(0.08))
@@ -214,6 +218,7 @@ private struct StandardWorkspaceShell: View {
                     .padding(.trailing, 12)
                     .popover(isPresented: $showsCompactInspector, arrowEdge: .top) {
                         RightInspectorView(viewModel: viewModel)
+                            .disabled(viewModel.selectionRefinementDraft != nil || viewModel.textureAdjustmentSettings != nil)
                             .frame(
                                 width: RightInspectorView.standardWidth,
                                 height: max(560, proxy.size.height - 90)

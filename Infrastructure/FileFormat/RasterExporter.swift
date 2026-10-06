@@ -276,7 +276,7 @@ final class RasterExporter: Sendable {
         }
     }
 
-    private func resolvedSourceBounds(
+    func resolvedSourceBounds(
         snapshot: LayerTextureSnapshot,
         scope: RasterExportScope
     ) throws -> RasterExportPixelBounds {

@@ -1,6 +1,7 @@
 import ArtFlexPolicies
 import ArtFlexLifecycle
 import AppKit
+import ImageIO
 import SwiftUI
 import os
 @preconcurrency import Metal
@@ -79,6 +80,21 @@ final class QuickColorPickerPresentationProxy: ObservableObject {
 
 @MainActor
 final class WorkspaceViewModel: ObservableObject {
+    @Published var paintingBlocker: PaintingBlocker?
+    @Published var selectionRefinementDraft: SelectionRefinementDraft?
+    @Published var preferredSelectionCombineMode: SelectionCombineMode = .replace
+    @Published var isCommandSearchPresented = false
+    @Published var historyPreviewImages: [UUID: CGImage] = [:]
+    private var selectionPreviewTask: Task<Void, Never>?
+    private var selectionPreviewRequest = UUID()
+    private var recentTextureFill: RecentTextureFill?
+    @Published var textureAdjustmentSettings: TextureFillTipSettings?
+    @Published var canAdjustRecentTextureFill = false
+    private var textureAdjustmentOriginal: MTLTexture?
+    private var historyPreviewImageTask: Task<Void, Never>?
+    private var savedHistoryEntryID: UUID?
+    private var savedHistoryWasInitial = false
+
     var canvasCapacityPolicy: CanvasCapacityPolicy {
         bootstrap.canvasCapacityPolicy
     }
@@ -194,6 +210,7 @@ final class WorkspaceViewModel: ObservableObject {
         var contentStateID: UUID
         var document: ArtDocument
         var externalRevision: UInt64
+        var entryID: UUID?
     }
     @Published private(set) var isHistoryNavigating = false
     private var historyNavigationTask: Task<Void, Never>?
@@ -213,12 +230,16 @@ final class WorkspaceViewModel: ObservableObject {
         return document
     }
 
-    private func rememberSavedHistoryPoint() { savedHistoryPoint = captureSavedHistoryPoint() }
+    private func rememberSavedHistoryPoint() {
+        savedHistoryPoint = captureSavedHistoryPoint()
+        savedHistoryEntryID = visibleHistoryTimeline.appliedEntries.last?.id
+        savedHistoryWasInitial = visibleHistoryTimeline.appliedEntries.isEmpty
+    }
 
     private func captureSavedHistoryPoint() -> SavedHistoryPoint {
         SavedHistoryPoint(generation: documentRenderGeneration,
             contentStateID: bootstrap.historyController.currentContentStateID,
-            document: documentForSavedPoint(), externalRevision: externalProjectRevision)
+            document: documentForSavedPoint(), externalRevision: externalProjectRevision, entryID: visibleHistoryTimeline.appliedEntries.last?.id)
     }
 
     private func noteHistoryNavigationChangedContent() {
@@ -335,6 +356,7 @@ final class WorkspaceViewModel: ObservableObject {
     private var brushTipDraftSnapshot: BrushTipDraftSnapshot?
     private var brushTipDraftHistory = BrushTipDraftHistory()
     private var statusDismissTask: Task<Void, Never>?
+    private var rasterExportPreviewSource: LayerTextureSnapshot?
     private var rasterExportTask: Task<Void, Never>?
     private var rasterExportBoundsRequest: UUID?
     private var isAdjustingLayerOpacity = false
@@ -770,6 +792,9 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func selectTool(_ tool: ToolKind) {
+        cancelSelectionRefinementPreview()
+        finishRecentTextureAdjustment(apply: false)
+        paintingBlocker = nil
         ideationBranchActivityHandler?()
         let normalizedTool = Self.normalizedAvailableTool(tool)
         let currentTool = workspace.toolSession.activeTool
@@ -6926,6 +6951,9 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func selectLayer(_ layerID: LayerID) {
+        cancelSelectionRefinementPreview()
+        finishRecentTextureAdjustment(apply: false)
+        paintingBlocker = nil
         if layerID != workspace.document.activeLayerID {
             if isApplyingGradientCommit || gradientSession.shouldApplyBeforeLeaving(workspace.toolSession.activeTool) {
                 deferredGradientAction = .layerSwitch(layerID)
@@ -9154,7 +9182,9 @@ final class WorkspaceViewModel: ObservableObject {
         noteCanvasContentChanged(changedLayerIDs: [state.layerID])
         refresh(invalidatedLayerIDs: [state.layerID])
         recordDrawingActivityIfNeeded()
-        showStatus(.init(kind: .success, message: "已填充纹理区域"))
+        recentTextureFill = RecentTextureFill(state: state, revision: documentChangeRevision)
+        canAdjustRecentTextureFill = true
+        showStatus(.init(kind: .success, message: "已填充纹理区域，可在上方调整本次填充"))
         return true
     }
 
@@ -9818,6 +9848,7 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func clearSelection() {
+        cancelSelectionRefinementPreview()
         switch transformState.clearBehavior() {
         case .apply:
             applySelectionTransform(clearSelectionAfterApply: true)
@@ -12021,6 +12052,21 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func handleKeyDown(_ event: NSEvent) -> Bool {
+        if selectionRefinementDraft != nil || textureAdjustmentSettings != nil {
+            if event.keyCode == 53 {
+                cancelSelectionRefinementPreview()
+                finishRecentTextureAdjustment(apply: false)
+                return true
+            }
+            if event.keyCode == 36 {
+                if selectionRefinementDraft != nil { applySelectionRefinementPreview() }
+                else { finishRecentTextureAdjustment(apply: true) }
+                return true
+            }
+            // Text fields keep normal editing; canvas tool shortcuts cannot mutate a draft.
+            if !Self.isEditingTextInKeyWindow { return true }
+        }
+
         if event.keyCode == 53, isHistoryNavigating {
             if visibleHistoryPreviewOriginCount != nil { cancelVisibleHistoryPreview() }
             else {
@@ -12572,6 +12618,7 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func applyStroke(samples: [CanvasStrokeSample]) {
+        guard paintingBlocker == nil, selectionRefinementDraft == nil, textureAdjustmentSettings == nil else { return }
         if !samples.isEmpty, isHistoryNavigating || visibleHistoryPreviewOriginCount != nil { abandonHistoryPreviewForEditing() }
         if !samples.isEmpty, generatorRequestID != nil { cancelActiveRasterizationTask() }
         if applyLayerMaskStrokeIfNeeded(samples: samples) {
@@ -12661,6 +12708,9 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func beginStrokeIfNeeded(paintVariationSeed seedOverride: UInt32? = nil) {
+        guard selectionRefinementDraft == nil, textureAdjustmentSettings == nil else { return }
+        guard checkPaintingTarget() else { return }
+        discardRecentTextureFill()
         let auditEnabled = PerformanceAuditStore.shared.isRecordingEnabled
         let startNs = auditEnabled ? DispatchTime.now().uptimeNanoseconds : 0
         defer {
@@ -12921,6 +12971,9 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func undo() {
+        if selectionRefinementDraft != nil { cancelSelectionRefinementPreview(); return }
+        if textureAdjustmentSettings != nil { finishRecentTextureAdjustment(apply: false); return }
+        discardRecentTextureFill()
         if gradientSession.hasDraft || isApplyingGradientCommit {
             gradientSession.cancel()
             relayIdeationOperation(.cancelGradientSession)
@@ -13271,6 +13324,9 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func redo() {
+        cancelSelectionRefinementPreview()
+        finishRecentTextureAdjustment(apply: false)
+        discardRecentTextureFill()
         if gradientSession.hasDraft || isApplyingGradientCommit {
             gradientSession.cancel()
             relayIdeationOperation(.cancelGradientSession)
@@ -13374,6 +13430,7 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func finishRasterExportPresentation() {
+        rasterExportPreviewSource = nil
         guard !isRasterExporting else { return }
         rasterExportBoundsRequest = nil
         rasterExportSourceBounds = nil
@@ -14028,7 +14085,7 @@ final class WorkspaceViewModel: ObservableObject {
     @discardableResult
     // A true return means the request was accepted, not that data is on disk.
     // Only completion(true) permits a destructive document transition.
-    func saveProject(completion: ((Bool) -> Void)? = nil) -> Bool {
+    func saveProject(asNewFile: Bool = false, completion: ((Bool) -> Void)? = nil) -> Bool {
         guard !isProjectSaving, !documentLifecycle.isChoosingSaveLocation else {
             showStatus(.init(kind: .info, message: "正在选择保存位置或保存工程，请稍候"))
             completion?(false)
@@ -14049,12 +14106,12 @@ final class WorkspaceViewModel: ObservableObject {
             completion?(false)
             return completion == nil
         }
-        if let url = currentProjectURL {
+        if !asNewFile, let url = currentProjectURL {
             startProjectSave(to: url, completion: completion)
         } else {
             documentLifecycle.isChoosingSaveLocation = true
             let generation = documentRenderGeneration
-            bootstrap.filePanelService.presentProjectSavePanel(defaultName: workspace.document.metadata.name) { [weak self] url in
+            bootstrap.filePanelService.presentProjectSavePanel(defaultName: workspace.document.metadata.name + (asNewFile ? "-副本" : "")) { [weak self] url in
                 guard let self else { completion?(false); return }
                 self.documentLifecycle.isChoosingSaveLocation = false
                 guard self.documentRenderGeneration == generation else { completion?(false); return }
@@ -14255,7 +14312,11 @@ final class WorkspaceViewModel: ObservableObject {
             let thumbnailApplied = previewPNGData.map {
                 bootstrap.filePanelService.applyProjectThumbnail($0, to: prepared.url)
             } ?? false
-            if let capturedPoint { savedHistoryPoint = capturedPoint }
+            if let capturedPoint {
+                savedHistoryPoint = capturedPoint
+                savedHistoryEntryID = capturedPoint.entryID
+                savedHistoryWasInitial = capturedPoint.entryID == nil
+            }
             reconcileSavedHistoryPoint()
             if !hasUnsavedChanges {
                 try? bootstrap.persistenceController.discardRecoveryProject()
@@ -14642,6 +14703,7 @@ final class WorkspaceViewModel: ObservableObject {
 
     private var persistenceEditingActivity: PersistenceEditingActivity {
         var activity: PersistenceEditingActivity = []
+        if selectionRefinementDraft != nil || textureAdjustmentSettings != nil { activity.insert(.gesture) }
         if visibleHistoryPreviewOriginCount != nil { activity.insert(.historyPreview) }
         if isApplyingPatternPlacementCommit || isApplyingGradientCommit || isApplyingTransformCommit || isBucketFillInProgress {
             activity.insert(.pixelCommit)
@@ -14661,6 +14723,10 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     private func canBeginDocumentPersistence(action: String) -> Bool {
+        guard selectionRefinementDraft == nil, textureAdjustmentSettings == nil else {
+            showStatus(.init(kind: .info, message: "请先应用或取消当前调整，再\(action)"))
+            return false
+        }
         guard !isHistoryNavigating else {
             showStatus(.init(kind: .info, message: "正在准备历史记录，请稍后再\(action)"))
             return false
@@ -14700,6 +14766,11 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     private func resetTransientDocumentInteractionsForReplacement() {
+        cancelSelectionRefinementPreview()
+        discardRecentTextureFill()
+        paintingBlocker = nil
+        historyPreviewImages = [:]
+
         isRasterExportSheetPresented = false
         finishRasterExportPresentation()
         imagePaletteExtractor.cancel()
@@ -15974,6 +16045,13 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     private func noteCanvasContentChanged(changedLayerIDs: Set<LayerID>? = nil) {
+        discardRecentTextureFill()
+        historyPreviewImageTask?.cancel()
+        historyPreviewImageTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(700))
+            guard let self, !Task.isCancelled, !self.isHistoryNavigating else { return }
+            await self.captureCurrentHistoryThumbnail()
+        }
         if let changedLayerIDs {
             bootstrap.layerSurfaceStore.markContentUnknown(for: changedLayerIDs, recordsChange: false)
         } else {
@@ -16948,7 +17026,7 @@ final class WorkspaceViewModel: ObservableObject {
         if normalized.contains(.shift) {
             return .add
         }
-        return .replace
+        return preferredSelectionCombineMode
     }
 
     private func selectionGeometryOptions(
@@ -19196,6 +19274,7 @@ final class WorkspaceViewModel: ObservableObject {
         @Published var isApplyingTransformCommit: Bool = false
         @Published var isTransformingSelection: Bool = false
         @Published var activeTool: ToolKind = .brush
+        @Published var isRefinementPreview = false
         @Published var smartSelectionDisplayMode: SmartSelectionDisplayMode = .tint
         @Published var transformPreviewOffset: CanvasPoint = .init(x: 0, y: 0)
         @Published var selectionMovePreviewOffset: CanvasPoint = .init(x: 0, y: 0)
@@ -19226,7 +19305,12 @@ final class WorkspaceViewModel: ObservableObject {
     // 选区变化时同步到 proxy（由 refreshLightweight 调用）
     private func syncSelectionOverlayProxy() {
         let state = bootstrap.workspaceStore.state
-        let sel = state.selection
+        var sel = state.selection
+        if let draft = selectionRefinementDraft {
+            sel.committedShape = draft.preview
+            sel.inProgressShape = nil
+        }
+        selectionOverlayProxy.isRefinementPreview = selectionRefinementDraft?.showsOverlay == true
         if selectionOverlayProxy.displayShape != sel.displayShape {
             selectionOverlayProxy.redrawRevision &+= 1
             selectionOverlayProxy.displayShape = sel.displayShape
@@ -19976,4 +20060,267 @@ private func bilinearSamplePremultipliedRGBA(
         lerp(top.2, bottom.2, ty),
         lerp(top.3, bottom.3, ty)
     )
+}
+
+// Interaction workflows reuse the existing document and rendering transactions.
+private struct RecentTextureFill {
+    var state: TextureFillGestureState
+    var revision: UInt64
+}
+
+extension WorkspaceViewModel {
+    var editingTargetTitle: String {
+        let layer = workspace.document.layer(workspace.document.activeLayerID)
+        let target = activeMaskEditingLayerID == layer?.id ? "蒙版" : "图层内容"
+        return "\(layer?.name ?? "未选择图层") · \(target)" + (workspace.selection.committedShape == nil ? "" : " · 选区内")
+    }
+
+    @discardableResult
+    func checkPaintingTarget() -> Bool {
+        guard let layer = workspace.document.layer(workspace.document.activeLayerID) else { return false }
+        var current: LayerRecord? = layer
+        var visited: Set<LayerID> = []
+        while let item = current, visited.insert(item.id).inserted {
+            if item.isLocked {
+                paintingBlocker = .init(message: "“\(item.name)”已锁定", action: .unlock, layerID: item.id)
+                return false
+            }
+            if !item.isVisible {
+                paintingBlocker = .init(message: "“\(item.name)”已隐藏", action: .show, layerID: item.id)
+                return false
+            }
+            current = item.parentID.flatMap { workspace.document.layer($0) }
+        }
+        if layer.isAdjustmentLayer && activeMaskEditingLayerID != layer.id {
+            paintingBlocker = .init(message: "调整层不能直接绘画", action: .newLayer)
+            return false
+        }
+        paintingBlocker = nil
+        return true
+    }
+
+    func resolvePaintingBlocker() {
+        guard let blocker = paintingBlocker else { return }
+        switch blocker.action {
+        case .unlock:
+            if let id = blocker.layerID, workspace.document.layer(id)?.isLocked == true { toggleLayerLock(id) }
+        case .show:
+            if let id = blocker.layerID { setLayerVisibility(id, isVisible: true) }
+        case .newLayer: addLayer()
+        }
+        _ = checkPaintingTarget()
+    }
+
+    func selectLayerContent(_ id: LayerID) {
+        selectLayer(id)
+        if workspace.document.activeLayerID == id { stopEditingLayerMask() }
+    }
+
+    func selectLayerMask(_ id: LayerID) {
+        selectLayer(id)
+        if workspace.document.activeLayerID == id { beginEditingActiveLayerMask() }
+    }
+
+    func loadMaskThumbnail(for id: LayerID) async -> CGImage? {
+        guard let texture = bootstrap.layerSurfaceStore.readMaskTexture(for: id) else { return nil }
+        let revision = layerThumbnailRevision
+        let box = WorkspaceUncheckedBox(texture)
+        let serializer = WorkspaceUncheckedBox(bootstrap.textureSerializer)
+        let image = await Task.detached(priority: .utility) { () -> CGImage? in
+            guard let snapshot = try? serializer.value.downsampledSnapshot(texture: box.value,
+                divisor: max(1, max(box.value.width, box.value.height) / 48)) else { return nil }
+            return Self.snapshotImage(from: snapshot, maxDimension: 40)
+        }.value
+        guard revision == layerThumbnailRevision, !Task.isCancelled else { return nil }
+        return image
+    }
+
+    func beginSelectionRefinementPreview(_ kind: SelectionRefinementKind) {
+        guard !isTransformingSelection, !isHistoryNavigating,
+              let source = workspace.selection.committedShape else { return }
+        _ = flushBrushEditingBoundary(reason: "selectionPreview")
+        cancelSelectionRefinementPreview()
+        selectionRefinementDraft = .init(source: source, generation: documentRenderGeneration, kind: kind, preview: source)
+        updateSelectionRefinementPreview(radius: 16)
+    }
+
+    func updateSelectionRefinementPreview(radius: Int) {
+        guard var draft = selectionRefinementDraft else { return }
+        draft.radius = min(max(radius, 0), 512)
+        draft.isComputing = true
+        draft.error = nil
+        selectionRefinementDraft = draft
+        selectionPreviewTask?.cancel()
+        let request = UUID()
+        selectionPreviewRequest = request
+        let source = draft.source, kind = draft.kind, value = draft.radius
+        let size = workspace.document.canvasSize
+        selectionPreviewTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(100))
+            guard let self, !Task.isCancelled else { return }
+            let result = await Task.detached(priority: .userInitiated) {
+                Result<SelectionShape?, Error> {
+                    if value == 0 { return source }
+                    switch kind {
+                    case .feather: return try self.featheredSelectionShape(source, canvasSize: size, radiusPixels: value)
+                    case .expand: return SelectionRefinement.expanded(source, canvasSize: size, radiusPixels: value)
+                    case .contract: return SelectionRefinement.contracted(source, canvasSize: size, radiusPixels: value)
+                    case .invert: return SelectionRefinement.inverted(source, canvasSize: size)
+                    }
+                }
+            }.value
+            guard !Task.isCancelled, self.selectionPreviewRequest == request,
+                  self.selectionRefinementDraft?.generation == self.documentRenderGeneration else { return }
+            self.selectionRefinementDraft?.isComputing = false
+            switch result {
+            case .success(let shape): self.selectionRefinementDraft?.preview = shape
+            case .failure(let error): self.selectionRefinementDraft?.error = error.localizedDescription
+            }
+            self.syncSelectionOverlayProxy()
+        }
+    }
+
+    func toggleRefinementOverlay() {
+        selectionRefinementDraft?.showsOverlay.toggle()
+        syncSelectionOverlayProxy()
+    }
+
+    func cancelSelectionRefinementPreview() {
+        guard selectionRefinementDraft != nil else { return }
+        selectionPreviewRequest = UUID()
+        selectionPreviewTask?.cancel()
+        selectionPreviewTask = nil
+        selectionRefinementDraft = nil
+        syncSelectionOverlayProxy()
+    }
+
+    func applySelectionRefinementPreview() {
+        guard let draft = selectionRefinementDraft, !draft.isComputing, draft.error == nil,
+              draft.generation == documentRenderGeneration,
+              workspace.selection.committedShape == draft.source else { return }
+        if draft.preview == draft.source { cancelSelectionRefinementPreview(); return }
+        guard checkpointSelectionChangeIfPossible(previousCommittedShape: draft.source) else { return }
+        bootstrap.workspaceStore.updateSelection { selection in
+            selection = .empty
+            selection.committedShape = draft.preview
+        }
+        cancelSelectionRefinementPreview()
+        refreshLightweight()
+        showStatus(.init(kind: .success, message: "已\(draft.kind.title)选区 \(draft.radius) px"))
+    }
+
+    func beginRecentTextureAdjustment() {
+        guard let recent = recentTextureFill, recent.revision == documentChangeRevision,
+              workspace.document.activeLayerID == recent.state.layerID,
+              let original = bootstrap.layerSurfaceStore.readTexture(for: recent.state.surfaceID) else {
+            discardRecentTextureFill(); return
+        }
+        textureAdjustmentOriginal = original
+        textureAdjustmentSettings = recent.state.tipSettings
+    }
+
+    func updateRecentTextureAdjustment(settings: TextureFillTipSettings, reroll: Bool = false) {
+        guard var recent = recentTextureFill, textureAdjustmentSettings != nil,
+              recent.revision == documentChangeRevision else { return }
+        recent.state.tipSettings = settings
+        if reroll { recent.state.sessionSeed &+= 1 }
+        guard let texture = prepareTextureFillFinalResult(from: recent.state) else {
+            showStatus(.init(kind: .error, message: "调整未完成，已保留上一次结果")); return
+        }
+        bootstrap.layerSurfaceStore.swapTexture(for: recent.state.surfaceID, with: texture)
+        recentTextureFill = recent
+        textureAdjustmentSettings = settings
+        refresh(invalidatedLayerIDs: [recent.state.layerID])
+    }
+
+    func finishRecentTextureAdjustment(apply: Bool) {
+        guard let recent = recentTextureFill, let original = textureAdjustmentOriginal else { return }
+        if apply {
+            guard let preview = bootstrap.layerSurfaceStore.readTexture(for: recent.state.surfaceID) else { return }
+            bootstrap.layerSurfaceStore.swapTexture(for: recent.state.surfaceID, with: original)
+            // Capture the completed fill once; slider previews never enter history.
+            guard checkpointHistoryIfPossible(operationKind: "fill.adjust", candidateChangedLayerIDs: [recent.state.layerID],
+                captureMode: .inPlaceChangedLayers([recent.state.layerID])) else {
+                bootstrap.layerSurfaceStore.swapTexture(for: recent.state.surfaceID, with: preview)
+                return
+            }
+            bootstrap.layerSurfaceStore.swapTexture(for: recent.state.surfaceID, with: preview)
+            textureAdjustmentSettings = nil
+            textureAdjustmentOriginal = nil
+            noteCanvasContentChanged(changedLayerIDs: [recent.state.layerID])
+        } else {
+            bootstrap.layerSurfaceStore.swapTexture(for: recent.state.surfaceID, with: original)
+            discardRecentTextureFill()
+        }
+        refresh(invalidatedLayerIDs: [recent.state.layerID])
+    }
+
+    private func discardRecentTextureFill() {
+        recentTextureFill = nil
+        textureAdjustmentSettings = nil
+        textureAdjustmentOriginal = nil
+        canAdjustRecentTextureFill = false
+    }
+
+    func isSavedHistoryEntry(_ id: UUID) -> Bool { savedHistoryEntryID == id }
+    var isInitialHistorySavepoint: Bool { savedHistoryWasInitial && savedHistoryPoint?.generation == documentRenderGeneration }
+
+    func captureCurrentHistoryThumbnail() async {
+        guard !isHistoryNavigating,
+              let entry = visibleHistoryTimeline.appliedEntries.last,
+              historyPreviewImages[entry.id] == nil else { return }
+        let generation = documentRenderGeneration
+        let count = visibleHistoryTimeline.currentAppliedEntryCount
+        let revision = documentChangeRevision
+        guard let image = await currentCanvasPreview(maxDimension: 120),
+              generation == documentRenderGeneration, revision == documentChangeRevision, !isHistoryNavigating,
+              count == visibleHistoryTimeline.currentAppliedEntryCount,
+              entry.id == visibleHistoryTimeline.appliedEntries.last?.id else { return }
+        let valid = Set(visibleHistoryTimeline.chronologicalEntries.map(\.id))
+        historyPreviewImages = historyPreviewImages.filter { valid.contains($0.key) }
+        historyPreviewImages[entry.id] = image
+    }
+
+    func currentCanvasPreview(maxDimension: Int) async -> CGImage? {
+        guard let texture = try? makeVisibleCompositeTexture(waitUntilCompleted: false, includesLiveBrushContent: true) else { return nil }
+        let serializer = WorkspaceUncheckedBox(bootstrap.textureSerializer)
+        let textureBox = WorkspaceUncheckedBox(texture)
+        return await Task.detached(priority: .utility) {
+            guard let snapshot = try? serializer.value.downsampledSnapshot(texture: textureBox.value, divisor: max(1, max(textureBox.value.width, textureBox.value.height) / maxDimension)) else { return nil }
+            return Self.snapshotImage(from: snapshot, maxDimension: maxDimension, colorSpace: CGColorSpace(name: CGColorSpace.sRGB)!)
+        }.value
+    }
+}
+
+
+extension WorkspaceViewModel {
+    func rasterExportPreview(options: RasterExportOptions) async -> CGImage? {
+        guard isRasterExportSheetPresented else { return nil }
+        let generation = documentRenderGeneration
+        let revision = documentChangeRevision
+        if rasterExportPreviewSource == nil {
+            guard let texture = try? makeVisibleCompositeTexture(waitUntilCompleted: false, includesLiveBrushContent: true) else { return nil }
+            let box = WorkspaceUncheckedBox(texture)
+            let serializer = WorkspaceUncheckedBox(bootstrap.textureSerializer)
+            let source = await Task.detached(priority: .utility) { try? serializer.value.snapshot(texture: box.value) }.value
+            guard !Task.isCancelled, isRasterExportSheetPresented, generation == documentRenderGeneration,
+                  revision == documentChangeRevision else { return nil }
+            rasterExportPreviewSource = source
+        }
+        guard let source = rasterExportPreviewSource else { return nil }
+        let exporter = bootstrap.rasterExporter
+        return await Task.detached(priority: .utility) {
+            do {
+                let bounds = try exporter.resolvedSourceBounds(snapshot: source, scope: options.scope)
+                let size = try options.outputDimensions(sourceWidth: bounds.width, sourceHeight: bounds.height)
+                let divisor = max(1, Double(max(size.width, size.height)) / 600)
+                var preview = options
+                preview.resize = .exact(width: max(1, Int(Double(size.width) / divisor)), height: max(1, Int(Double(size.height) / divisor)))
+                preview.bitDepth = .eight
+                let result = try exporter.encode(snapshot: source, options: preview, sourceBounds: bounds)
+                guard let imageSource = CGImageSourceCreateWithData(result.encodedData as CFData, nil) else { return nil as CGImage? }
+                return CGImageSourceCreateImageAtIndex(imageSource, 0, nil)
+            } catch { return nil }
+        }.value
+    }
 }

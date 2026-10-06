@@ -4583,7 +4583,12 @@ struct RightInspectorView: View {
                     }
                     .frame(width: 28, height: 28)
             } else {
-                layerThumbnailView(for: layer)
+                Button { viewModel.selectLayerContent(layer.id) } label: {
+                    layerThumbnailView(for: layer)
+                        .overlay(RoundedRectangle(cornerRadius: 5).stroke(
+                            isActive && viewModel.activeMaskEditingLayerID != layer.id ? Color.accentColor : .clear, lineWidth: 2))
+                }.buttonStyle(.plain).accessibilityLabel("编辑\(layer.name)内容")
+                if layer.mask != nil { MaskThumbnailButton(viewModel: viewModel, layer: layer) }
             }
 
             Circle()

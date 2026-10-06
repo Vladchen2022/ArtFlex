@@ -39,7 +39,6 @@ struct ArtFlexApp: App {
         }
         .commands {
             if let viewModel = launchState.viewModel {
-                let commandTargetViewModel = viewModel.ideationActiveBranchViewModel ?? viewModel
                 CommandGroup(replacing: .appSettings) {
                 Button("设置…") {
                     presentationState.presentSettingsSheet()
@@ -47,110 +46,8 @@ struct ArtFlexApp: App {
                 .keyboardShortcut(",", modifiers: [.command])
                 }
 
-                CommandGroup(replacing: .newItem) {
-                Button("新建文件") {
-                    viewModel.presentNewCanvasSheet()
-                }
-                .keyboardShortcut("n")
-                }
+                ArtFlexWorkspaceCommands(host: viewModel)
 
-                CommandGroup(after: .newItem) {
-                Button("清除选区") {
-                    commandTargetViewModel.clearSelection()
-                }
-                .keyboardShortcut("d")
-                .disabled(commandTargetViewModel.isTransformingSelection)
-
-                Button("删除选区内容") {
-                    commandTargetViewModel.deleteSelectionOrActiveLayer()
-                }
-                .keyboardShortcut(.delete, modifiers: [])
-                .disabled(commandTargetViewModel.isTransformingSelection)
-
-                Button("向下合并") {
-                    commandTargetViewModel.mergeActiveLayerDown()
-                }
-                .disabled(!commandTargetViewModel.canMergeDown)
-
-                Button("合并可见") {
-                    commandTargetViewModel.mergeVisibleLayers()
-                }
-                .disabled(!commandTargetViewModel.canMergeVisible)
-
-                Button("盖印图层") {
-                    commandTargetViewModel.stampVisibleLayers()
-                }
-                .keyboardShortcut("e", modifiers: [.command, .option, .shift])
-                .disabled(commandTargetViewModel.isTransformingSelection)
-
-                Button("合并拷贝") {
-                    commandTargetViewModel.copyMergedPixels()
-                }
-                .keyboardShortcut("c", modifiers: [.command, .shift])
-                .disabled(commandTargetViewModel.isTransformingSelection)
-
-                Button("应用变形") {
-                    commandTargetViewModel.applySelectionTransform()
-                }
-
-                Button("取消变形") {
-                    commandTargetViewModel.cancelSelectionTransform()
-                }
-
-                Button("填充选区内容") {
-                    commandTargetViewModel.fillSelectionContents()
-                }
-                .keyboardShortcut("f", modifiers: [.command, .shift])
-                .disabled(commandTargetViewModel.isTransformingSelection)
-
-                Button("填充套索内容") {
-                    commandTargetViewModel.fillLassoContents()
-                }
-                .disabled(commandTargetViewModel.isTransformingSelection)
-
-                Button("擦除套索内容") {
-                    commandTargetViewModel.eraseLassoContents()
-                }
-                .disabled(commandTargetViewModel.isTransformingSelection)
-
-                Button("撤销") {
-                    commandTargetViewModel.undo()
-                }
-                .keyboardShortcut("z")
-
-                Button("重做") {
-                    commandTargetViewModel.redo()
-                }
-                .keyboardShortcut("Z", modifiers: [.command, .shift])
-
-                Button("打开工程") {
-                    viewModel.openProject()
-                }
-                .keyboardShortcut("o")
-
-                Button("保存工程") {
-                    viewModel.saveProject()
-                }
-                .keyboardShortcut("s")
-
-                Button("导出图像") {
-                    viewModel.presentRasterExportSheet()
-                }
-                .keyboardShortcut("e")
-
-                Button("重置视图") {
-                    commandTargetViewModel.resetViewport()
-                }
-                .keyboardShortcut("0", modifiers: [.command])
-
-                Button("放大") {
-                    commandTargetViewModel.zoomIn()
-                }
-
-                Button("缩小") {
-                    commandTargetViewModel.zoomOut()
-                }
-                }
             }
         }
     }

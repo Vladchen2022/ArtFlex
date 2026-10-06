@@ -3,6 +3,10 @@ import SwiftUI
 struct RasterExportSheet: View {
     @ObservedObject var viewModel: WorkspaceViewModel
 
+    @AppStorage("ArtFlex.export.lastOptions.v1") private var lastOptions = Data()
+    @AppStorage("ArtFlex.export.presets.v1") private var savedPresets = Data()
+    @State private var presetName = ""
+    @State private var selectedPresetID: UUID?
     @State private var format: RasterExportFormat = .png
     @State private var scope: RasterExportScope = .fullCanvas
     @State private var backgroundChoice = ExportBackgroundChoice.white
@@ -19,6 +23,29 @@ struct RasterExportSheet: View {
             Text("导出图片")
                 .font(.title2.weight(.semibold))
 
+            HStack {
+                Menu("导出预设") {
+                    ForEach(presets) { preset in
+                        Button(preset.name) { restore(preset.options); selectedPresetID = preset.id; presetName = preset.name }
+                    }
+                    if presets.isEmpty { Text("还没有保存的预设") }
+                }
+                TextField("预设名称", text: $presetName).frame(width: 140)
+                Button("保存预设") {
+                    var values = presets
+                    let name = presetName.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if let index = values.firstIndex(where: { $0.name == name }) { values[index].options = resolvedOptions }
+                    else { values.append(NamedExportPreset(name: name, options: resolvedOptions)) }
+                    savedPresets = (try? JSONEncoder().encode(values)) ?? Data()
+                }.disabled(presetName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || validationMessage != nil || (presets.count >= 6 && !presets.contains(where: { $0.name == presetName })))
+                if let id = selectedPresetID {
+                    Button("删除预设") {
+                        savedPresets = (try? JSONEncoder().encode(presets.filter { $0.id != id })) ?? Data()
+                        selectedPresetID = nil
+                    }
+                }
+            }
+            HStack(alignment: .top, spacing: 16) {
             Form {
                 Picker("格式", selection: $format) {
                     Text("PNG").tag(RasterExportFormat.png)
@@ -88,6 +115,9 @@ struct RasterExportSheet: View {
             .formStyle(.grouped)
             .frame(height: 360)
             .disabled(viewModel.isRasterExporting)
+            .frame(width: 445)
+            ExportPreviewPanel(viewModel: viewModel, options: resolvedOptions)
+            }
 
             Text(outputSummary)
                 .font(.caption)
@@ -109,6 +139,7 @@ struct RasterExportSheet: View {
                 .keyboardShortcut(.cancelAction)
                 .disabled(viewModel.isRasterExporting)
                 Button {
+                    lastOptions = (try? JSONEncoder().encode(resolvedOptions)) ?? Data()
                     viewModel.exportRaster(options: resolvedOptions)
                 } label: {
                     if viewModel.isRasterExporting {
@@ -126,7 +157,7 @@ struct RasterExportSheet: View {
             }
         }
         .padding(22)
-        .frame(width: 510)
+        .frame(width: 775)
         .interactiveDismissDisabled(viewModel.isRasterExporting)
         .preferredColorScheme(.dark)
         .onDisappear { viewModel.finishRasterExportPresentation() }
@@ -134,12 +165,37 @@ struct RasterExportSheet: View {
             width = viewModel.workspace.document.canvasSize.width
             height = viewModel.workspace.document.canvasSize.height
             bitDepth = viewModel.workspace.document.colorStandard.pixelFormat == .rgba16Float ? .sixteen : .eight
+            if let options = try? JSONDecoder().decode(RasterExportOptions.self, from: lastOptions) { restore(options) }
         }
         .onChange(of: format) { _, newFormat in
             if newFormat == .jpeg { bitDepth = .eight }
             if !newFormat.supportsAlpha, backgroundChoice == .transparent {
                 backgroundChoice = .white
             }
+        }
+    }
+
+    private var presets: [NamedExportPreset] {
+        (try? JSONDecoder().decode([NamedExportPreset].self, from: savedPresets)) ?? []
+    }
+
+    private func restore(_ options: RasterExportOptions) {
+        format = options.format
+        scope = options.scope
+        dpi = options.dpi
+        jpegQuality = options.jpegQuality
+        bitDepth = options.format == .jpeg ? .eight : options.resolvedBitDepth
+        switch options.background {
+        case .transparent: backgroundChoice = options.format.supportsAlpha ? .transparent : .white
+        case .white: backgroundChoice = .white
+        case .custom: backgroundChoice = .currentColor
+        }
+        switch options.resize {
+        case .original: resizeChoice = .original
+        case .scale(let value): resizeChoice = .scale; scale = value
+        case .width(let value): resizeChoice = .width; width = value
+        case .height(let value): resizeChoice = .height; height = value
+        case .exact(let w, let h): resizeChoice = .exact; width = w; height = h
         }
     }
 

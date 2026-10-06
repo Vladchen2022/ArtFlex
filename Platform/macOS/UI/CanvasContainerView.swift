@@ -278,7 +278,7 @@ struct CanvasContainerView: View {
                             case .invert:
                                 viewModel.invertSelection()
                             case .expand, .contract, .feather:
-                                selectionRefinementDialogKind = kind
+                                viewModel.beginSelectionRefinementPreview(kind)
                             }
                         },
                         onApplyTransform: {
@@ -299,6 +299,7 @@ struct CanvasContainerView: View {
                         }
                     )
                     .id(viewModel.documentRenderGeneration)
+                    .allowsHitTesting(viewModel.selectionRefinementDraft == nil && viewModel.textureAdjustmentSettings == nil)
                     .frame(
                         width: presentation.documentDisplaySize.x,
                         height: presentation.documentDisplaySize.y
@@ -889,66 +890,8 @@ struct CanvasContainerView: View {
             } // CanvasViewportHost
         }
         .clipped()
-        .alert(selectionRefinementDialogTitle, isPresented: selectionRefinementDialogIsPresented) {
-            TextField(
-                "半径（像素）",
-                value: $selectionRefinementRadiusPixels,
-                format: .number
-            )
-            Button("取消", role: .cancel) {
-                selectionRefinementDialogKind = nil
-            }
-            Button("应用") {
-                let kind = selectionRefinementDialogKind
-                selectionRefinementRadiusPixels = min(max(selectionRefinementRadiusPixels, 1), 512)
-                selectionRefinementDialogKind = nil
-                switch kind {
-                case .expand:
-                    viewModel.expandSelection(radiusPixels: selectionRefinementRadiusPixels)
-                case .contract:
-                    viewModel.contractSelection(radiusPixels: selectionRefinementRadiusPixels)
-                case .feather:
-                    viewModel.featherSelection(radiusPixels: selectionRefinementRadiusPixels)
-                case .invert, .none:
-                    break
-                }
-            }
-        } message: {
-            Text(selectionRefinementDialogMessage)
-        }
-    }
-
-    private var selectionRefinementDialogIsPresented: Binding<Bool> {
-        Binding(
-            get: { selectionRefinementDialogKind != nil },
-            set: { isPresented in
-                if !isPresented {
-                    selectionRefinementDialogKind = nil
-                }
-            }
-        )
-    }
-
-    private var selectionRefinementDialogTitle: String {
-        switch selectionRefinementDialogKind {
-        case .expand: "扩展选区"
-        case .contract: "收缩选区"
-        case .feather: "羽化选区"
-        case .invert, .none: "调整选区"
-        }
-    }
-
-    private var selectionRefinementDialogMessage: String {
-        switch selectionRefinementDialogKind {
-        case .expand:
-            "输入 1–512 px。确认后选区边界向外扩展。"
-        case .contract:
-            "输入 1–512 px。确认后选区边界向内收缩。"
-        case .feather:
-            "输入 1–512 px。确认后选区边缘会变得柔和。"
-        case .invert, .none:
-            "输入调整像素值。"
-        }
+        .overlay(alignment: .top) { CanvasWorkflowBar(viewModel: viewModel) }
+        .overlay(alignment: .bottomLeading) { PaintingTargetFeedback(viewModel: viewModel) }
     }
 
     private func blockReferenceContextMenuItems(
@@ -1308,8 +1251,8 @@ private struct SelectionOverlayHost: View {
         let isTransforming = proxy.isTransformingSelection
         let isFreeTransform = proxy.activeTool == .freeTransform
         let isApplying = proxy.isApplyingTransformCommit
-        let usesSmartSelectionTint = proxy.activeTool == .smartSelection
-            && proxy.smartSelectionDisplayMode == .tint
+        let usesSmartSelectionTint = proxy.isRefinementPreview || (proxy.activeTool == .smartSelection
+            && proxy.smartSelectionDisplayMode == .tint)
 
         if proxy.isHiddenForTransientAdjustment || proxy.activeTool == .canvasCrop {
             EmptyView()
@@ -1324,7 +1267,7 @@ private struct SelectionOverlayHost: View {
                 showsDimMask: false,
                 showsSelectionTint: usesSmartSelectionTint,
                 previewOffset: .init(x: 0, y: 0),
-                prefersVectorDisplay: proxy.activeTool != .smartSelection,
+                prefersVectorDisplay: !proxy.isRefinementPreview && proxy.activeTool != .smartSelection,
                 smoothsLassoPath: false,
                 maskCacheNamespace: proxy.maskCacheNamespace,
                 maskCacheRevision: proxy.committedShapeRevision
@@ -1355,7 +1298,7 @@ private struct SelectionOverlayHost: View {
                 previewOffset: isTransforming
                     ? proxy.transformPreviewOffset
                     : proxy.selectionMovePreviewOffset,
-                prefersVectorDisplay: proxy.activeTool != .smartSelection
+                prefersVectorDisplay: !proxy.isRefinementPreview && proxy.activeTool != .smartSelection
                     && (shape.kind != .mask || !shape.components.isEmpty),
                 smoothsLassoPath: false,
                 maskCacheNamespace: proxy.maskCacheNamespace,

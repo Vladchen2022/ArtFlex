@@ -20,6 +20,10 @@ struct MainToolbarView: View {
                 hostViewModel.saveProject()
             }
             .disabled(hostViewModel.isProjectSaving)
+            Menu {
+                Button("另存为…") { hostViewModel.saveProject(asNewFile: true) }
+            } label: { Image(systemName: "chevron.down") }
+            .menuStyle(.borderlessButton).fixedSize().help("更多保存操作")
 
             if hostViewModel.hasRecoveryProject {
                 Menu {
@@ -64,6 +68,8 @@ struct MainToolbarView: View {
                 openSettings()
             }
 
+            Button { editingViewModel.isCommandSearchPresented = true } label: { Image(systemName: "magnifyingglass") }
+                .buttonStyle(.plain).accessibilityLabel("搜索命令").help("搜索命令 (Shift+Cmd+P)")
             divider
 
             compactSlider(
