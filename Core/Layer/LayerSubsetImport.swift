@@ -26,11 +26,12 @@ struct LayerSubsetImport {
     }
 
     static func prepare(source: ProjectArchivePayload, selected: Set<LayerID>, destination: ArtDocument, name: String) throws -> Self {
-        let sourceDocument = source.package.document
-        guard sourceDocument.canvasSize == destination.canvasSize, sourceDocument.colorStandard == destination.colorStandard else {
-            throw CanvasResourceError(message: "方案与主稿的尺寸或颜色格式不同，请先以独立文档打开方案")
+        guard source.package.document.colorStandard == destination.colorStandard else {
+            throw CanvasResourceError(message: "来源与目标的颜色精度或工作色彩空间不同，请先统一后再复制")
         }
-        let included = includedLayerIDs(in: sourceDocument, selected: selected)
+        let included = includedLayerIDs(in: source.package.document, selected: selected)
+        let source = try LayerImportCanvasAdapter.adapt(source, included: included, to: destination.canvasSize)
+        let sourceDocument = source.package.document
         guard !included.isEmpty else { throw CanvasResourceError(message: "请至少选择一个图层") }
         let ids = Dictionary(uniqueKeysWithValues: sourceDocument.layers.filter { included.contains($0.id) }.map { ($0.id, LayerID()) })
         let group = LayerRecord(id: LayerID(), name: name, kind: .group, isVisible: true, isLocked: false, locksTransparentPixels: false, opacity: 1)

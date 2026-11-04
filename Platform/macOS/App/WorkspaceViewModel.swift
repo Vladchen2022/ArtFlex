@@ -80,6 +80,12 @@ final class QuickColorPickerPresentationProxy: ObservableObject {
 
 @MainActor
 final class WorkspaceViewModel: ObservableObject {
+    var createDocumentInNewSession: ((String, CanvasSize, Int, ArtPixelFormat) -> Void)?
+    var openDocumentInNewSession: ((URL) -> Void)?
+    var isSessionActive = true
+    @Published var showsDualCanvas = false
+    nonisolated(unsafe) private var zoomKeyboardMonitor: Any?
+
     lazy var branches = WorkspaceBranchController(owner: self, bootstrap: bootstrap)
     @Published var editableLayerDraft: EditableLayerDraft?
     @Published var retainsEditableFillParameters = false
@@ -714,6 +720,7 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     deinit {
+        if let zoomKeyboardMonitor { NSEvent.removeMonitor(zoomKeyboardMonitor) }
         memoryPressureSource?.cancel()
     }
 
@@ -773,8 +780,8 @@ final class WorkspaceViewModel: ObservableObject {
     // 菜单快捷键会在系统事件队列里积压，松开按键后仍持续触发
     // addLocalMonitorForEvents 在事件到达菜单前拦截，返回 nil 消费掉事件
     private func setupZoomKeyboardMonitor() {
-        NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            guard let self else { return event }
+        zoomKeyboardMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self, self.isSessionActive else { return event }
             guard !MenuKeyboardOwnership.shared.isTracking else { return event }
             if NSApp.keyWindow?.identifier?.rawValue == "ReferenceImageFloatingPanel" {
                 return event
@@ -14454,6 +14461,7 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     private func beginProjectOpen(from url: URL?, isRecovery: Bool) {
+        if !isRecovery, let url, let openDocumentInNewSession { openDocumentInNewSession(url); return }
         let action = isRecovery ? "恢复工程" : "打开工程"
         guard canBeginDocumentPersistence(action: action) else { return }
         guard !isProjectSaving, !recoveryCoordinator.isWriting else {
@@ -14871,6 +14879,9 @@ final class WorkspaceViewModel: ObservableObject {
         resolutionDPI: Int,
         pixelFormat: ArtPixelFormat = .rgba8
     ) {
+        if let createDocumentInNewSession {
+            createDocumentInNewSession(name, canvasSize, resolutionDPI, pixelFormat); return
+        }
         createNewCanvas(
             name: name,
             canvasSize: canvasSize,
@@ -19701,6 +19712,7 @@ extension WorkspaceViewModel {
 // Branch orchestration lives in WorkspaceBranchController; these methods own document publication.
 extension WorkspaceViewModel {
     var branchDocumentVersion: DocumentVersion { documentLifecycle.version }
+    var documentFileURL: URL? { currentProjectURL }
 
     func branchRecoveryRoot(sessionID: UUID, index: Int) -> URL {
         bootstrap.persistenceController.recoveryProjectURL.deletingLastPathComponent()
@@ -19791,5 +19803,24 @@ extension WorkspaceViewModel {
         suspendTimelapseForIdeationIfNeeded()
         ideationSession = session
         showStatus(.init(kind: .success, message: "已载入保存的方案，主稿保持独立"))
+    }
+}
+
+// Session ownership stays outside the large editor; only editing boundaries live here.
+extension WorkspaceViewModel {
+    func prepareForDocumentTabSwitch() -> Bool {
+        guard canBeginDocumentPersistence(action: "切换文档"),
+              finishBrushWorkBeforePixelEdit(reason: "document.switch") else { return false }
+        bootstrap.persistenceController.purgeSaveResourceCache()
+        bootstrap.strokeEngine.purgeTransientPreviewTexturesIfIdle()
+        return true
+    }
+    func loadProjectForDocumentSession(from url: URL) { loadProjectInBackground(from: url, isRecovery: false) }
+    func finishDocumentSessionClose() {
+        recoveryCoordinator.invalidate()
+        cancelProjectOpen()
+        pauseDrawingStatsTracking()
+        closeReferenceImageFloatingPanel()
+        try? bootstrap.persistenceController.discardRecoveryProject()
     }
 }

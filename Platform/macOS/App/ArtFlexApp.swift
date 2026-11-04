@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import SwiftUI
 
 @main
@@ -15,21 +16,17 @@ struct ArtFlexApp: App {
 
     var body: some Scene {
         Window("ArtFlex", id: "main") {
-            if let viewModel = launchState.viewModel {
-                MainWindowView(
-                    viewModel: viewModel,
-                    presentationState: presentationState,
-                    onCanvasReady: {
-                        appDelegate.canvasDidBecomeReady(viewModel: viewModel)
-                    }
-                )
+            if let documents = launchState.documents {
+                DocumentSessionWorkspace(documents: documents, presentationState: presentationState,
+                    onCanvasReady: { appDelegate.canvasDidBecomeReady(viewModel: $0) })
                     .frame(minWidth: 960, minHeight: 700)
                     .onAppear {
-                        appDelegate.viewModel = viewModel
+                        appDelegate.documents = documents
+                        appDelegate.viewModel = documents.active
+                        let delegate = appDelegate
+                        documents.onActiveChange = { [weak delegate] in delegate?.viewModel = $0 }
                     }
-                    .onOpenURL { url in
-                        appDelegate.receiveExternalProjectOpenURL(url)
-                    }
+                    .onOpenURL { appDelegate.receiveExternalProjectOpenURL($0) }
             } else {
                 ArtFlexLaunchFailureView(
                     message: launchState.errorMessage ?? "ArtFlex 初始化失败"
@@ -49,7 +46,7 @@ struct ArtFlexApp: App {
                 .keyboardShortcut(",", modifiers: [.command])
                 }
 
-                ArtFlexWorkspaceCommands(host: viewModel)
+                ArtFlexWorkspaceCommands(host: viewModel, documents: launchState.documents)
 
             }
         }
@@ -58,7 +55,9 @@ struct ArtFlexApp: App {
 
 @MainActor
 private final class ArtFlexLaunchState: ObservableObject {
-    let viewModel: WorkspaceViewModel?
+    let documents: DocumentSessionController?
+    var viewModel: WorkspaceViewModel? { documents?.active }
+    private var relay: AnyCancellable?
     let errorMessage: String?
 
     init() {
@@ -68,10 +67,11 @@ private final class ArtFlexLaunchState: ObservableObject {
             bootstrap.drawingStatsController.milestoneHandler = { [weak viewModel] milestone in
                 viewModel?.showDrawingStatsMilestone(milestone)
             }
-            self.viewModel = viewModel
+            self.documents = DocumentSessionController(bootstrap: bootstrap, model: viewModel)
             self.errorMessage = nil
+            relay = documents?.objectWillChange.sink { [weak self] in self?.objectWillChange.send() }
         } catch {
-            self.viewModel = nil
+            self.documents = nil
             self.errorMessage = error.localizedDescription
         }
     }
@@ -103,6 +103,12 @@ private struct ArtFlexLaunchFailureView: View {
 
 @MainActor
 final class ArtFlexApplicationDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
+    weak var documents: DocumentSessionController?
+    private func confirmDocumentsClose(_ completion: @escaping (Bool) -> Void) {
+        if let documents { documents.confirmCloseAll(completion: completion) }
+        else if let viewModel { viewModel.confirmCloseOrQuitIfNeeded(completion: completion) }
+        else { completion(true) }
+    }
     weak var viewModel: WorkspaceViewModel? {
         didSet {
             guard viewModel != nil else { return }
@@ -169,19 +175,20 @@ final class ArtFlexApplicationDelegate: NSObject, NSApplicationDelegate, NSWindo
     }
 
     func applicationDidResignActive(_ notification: Notification) {
-        viewModel?.applicationDidResignActiveForPersistence()
+        if let documents { documents.sessions.forEach { $0.model.applicationDidResignActiveForPersistence() } }
+        else { viewModel?.applicationDidResignActiveForPersistence() }
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         if isApprovingTermination { return .terminateNow }
-        guard let viewModel else {
+        guard viewModel != nil else {
             return .terminateNow
         }
 
         guard !isTerminationRequestPending else { return .terminateLater }
         isTerminationRequestPending = true
         MainRunLoopDelivery.perform { [self] in
-            viewModel.confirmCloseOrQuitIfNeeded { [self] allowed in
+            confirmDocumentsClose { [self] allowed in
                 isTerminationRequestPending = false
                 isApprovingTermination = allowed
                 terminationReplyHandler(sender, allowed)
@@ -203,14 +210,14 @@ final class ArtFlexApplicationDelegate: NSObject, NSApplicationDelegate, NSWindo
             return true
         }
 
-        guard let viewModel else {
+        guard viewModel != nil else {
             return true
         }
 
         guard !isWindowCloseRequestPending, !isTerminationRequestPending else { return false }
         isWindowCloseRequestPending = true
         DispatchQueue.main.async { [self, weak sender] in
-            viewModel.confirmCloseOrQuitIfNeeded { [self] allowed in
+            confirmDocumentsClose { [self] allowed in
                 isWindowCloseRequestPending = false
                 guard allowed, let sender else { return }
                 approvedClosingWindow = sender

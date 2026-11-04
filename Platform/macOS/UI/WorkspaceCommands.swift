@@ -128,6 +128,7 @@ struct CommandSearchSheet: View {
 
 struct ArtFlexWorkspaceCommands: Commands {
     @ObservedObject var host: WorkspaceViewModel
+    var documents: DocumentSessionController? = nil
     var editor: WorkspaceViewModel { host.ideationActiveBranchViewModel ?? host }
     var body: some Commands {
         CommandGroup(replacing: .newItem) {
@@ -135,6 +136,19 @@ struct ArtFlexWorkspaceCommands: Commands {
             command("open", host)
             Menu("打开最近工程") { RecentProjectsMenu(model: host) }
             Button("管理保存的方案…") { host.branches.isPresented = true }
+            if let documents {
+                Button("关闭当前文档") { documents.close(documents.activeID) }.keyboardShortcut("w", modifiers: .command)
+                if !documents.recoverable.isEmpty {
+                    Menu("恢复其他未完成文档") {
+                        ForEach(documents.recoverable) { item in Button(item.name) { documents.recover(item) } }
+                    }
+                }
+                Menu("复制当前图层到文档") {
+                    ForEach(documents.sessions.filter { $0.id != documents.activeID }) { session in
+                        Button(session.model.workspace.document.metadata.name) { documents.copyActiveLayer(to: session.id) }
+                    }
+                }.disabled(documents.sessions.count < 2 || documents.isTransferring)
+            }
         }
         CommandGroup(replacing: .saveItem) {
             command("save", host)
@@ -173,6 +187,7 @@ struct ArtFlexWorkspaceCommands: Commands {
             command("zoomIn", editor)
             command("zoomOut", editor)
             Divider()
+            Toggle("同稿双视图", isOn: $host.showsDualCanvas)
             Button("绘画性能诊断…") { PerformanceDiagnosticsWindow.show() }
         }
     }

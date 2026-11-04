@@ -194,13 +194,15 @@ private struct StandardWorkspaceShell: View {
                             }
                     }
 
-                    CanvasContainerView(
-                        viewModel: viewModel,
-                        onReady: onCanvasReady
-                    )
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        .clipped()
-                        .contentShape(Rectangle())
+                    HSplitView {
+                        CanvasContainerView(viewModel: viewModel, onReady: onCanvasReady)
+                            .frame(minWidth: 240, maxWidth: .infinity, maxHeight: .infinity)
+                            .clipped().contentShape(Rectangle())
+                        if viewModel.showsDualCanvas {
+                            SecondaryCanvasView(viewModel: viewModel)
+                                .frame(minWidth: 230, idealWidth: 360, maxWidth: .infinity)
+                        }
+                    }
 
                     if showsInspector {
                         RightInspectorView(viewModel: viewModel)
