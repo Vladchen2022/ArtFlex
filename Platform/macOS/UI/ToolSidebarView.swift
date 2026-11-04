@@ -321,6 +321,9 @@ struct ToolSidebarView: View {
                     ? "快照任务完成后再进入方案试探"
                     : (hostViewModel.ideationSession == nil ? "方案试探" : "退出方案试探"))
         )
+        .contextMenu {
+            Button("管理保存的方案…") { hostViewModel.branches.isPresented = true }
+        }
     }
 
     private var drawingStatsButton: some View {

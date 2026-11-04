@@ -1361,7 +1361,7 @@ final class ProjectArchiveV2Reader {
             descriptorByPath[asset.relativePath] = asset
         }
 
-        guard manifest.editableSources.count <= limits.maximumLayerCount * 2 else {
+        guard manifest.editableSources.count <= limits.maximumLayerCount * 2 + 8 else {
             throw ProjectArchiveV2Error.malformedManifest("可编辑源素材数量超出上限")
         }
         var sourceHashes = Set<String>()
@@ -1441,6 +1441,11 @@ final class ProjectArchiveV2Reader {
             var source = source; source.compressedData = compressedByHash[source.sha256]; return source
         }
         for layer in package.document.layers { try layer.editableContent?.validate() }
+        guard (package.document.storedBranches?.count ?? 0) <= 8,
+              Set((package.document.storedBranches ?? []).map(\.id)).count == (package.document.storedBranches?.count ?? 0) else {
+            throw ProjectArchiveV2Error.malformedProjectState("保存方案数量或标识无效")
+        }
+        for branch in package.document.storedBranches ?? [] { try branch.validate() }
     }
 
     private func loadRetainedCrop(into package: inout ProjectPackage, manifest: ProjectArchiveV2Manifest, from url: URL) throws {

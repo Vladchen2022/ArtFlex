@@ -80,6 +80,7 @@ final class QuickColorPickerPresentationProxy: ObservableObject {
 
 @MainActor
 final class WorkspaceViewModel: ObservableObject {
+    lazy var branches = WorkspaceBranchController(owner: self, bootstrap: bootstrap)
     @Published var editableLayerDraft: EditableLayerDraft?
     @Published var retainsEditableFillParameters = false
     private lazy var editableLayerRenderer = EditableLayerRenderer(metal: bootstrap.metalContext, serializer: bootstrap.textureSerializer)
@@ -802,7 +803,7 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     private static var isEditingTextInKeyWindow: Bool {
-        guard let responder = NSApp.keyWindow?.firstResponder else { return false }
+        guard let responder = NSApp?.keyWindow?.firstResponder else { return false }
         if let textView = responder as? NSTextView {
             return textView.isEditable
         }
@@ -12984,6 +12985,8 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func undo() {
+        if let draft = editableLayerDraft { draft.cancel(); editableLayerDraft = nil; return }
+        if branches.importDraft != nil { branches.importDraft = nil; return }
         if selectionRefinementDraft != nil { cancelSelectionRefinementPreview(); return }
         if textureAdjustmentSettings != nil { finishRecentTextureAdjustment(apply: false); return }
         discardRecentTextureFill()
@@ -13337,6 +13340,8 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func redo() {
+        if let draft = editableLayerDraft { draft.cancel(); editableLayerDraft = nil; return }
+        if branches.importDraft != nil { branches.importDraft = nil; return }
         cancelSelectionRefinementPreview()
         finishRecentTextureAdjustment(apply: false)
         discardRecentTextureFill()
@@ -14025,11 +14030,11 @@ final class WorkspaceViewModel: ObservableObject {
                 return
             }
             let slotIndex = ideationSession.selectedBranchIndex + 1
-            self.ideationSession = nil
             try appendCompositeSnapshotAsNewLayer(
                 deltaSnapshot,
                 named: "方案试探 \(slotIndex)"
             )
+            self.ideationSession = nil
             resumeTimelapseAfterIdeationIfNeeded(recordCurrentCanvas: true)
             showStatus(.init(kind: .success, message: "已将方案 \(slotIndex) 应用于主画布"))
         } catch {
@@ -14748,7 +14753,7 @@ final class WorkspaceViewModel: ObservableObject {
 
     private var persistenceEditingActivity: PersistenceEditingActivity {
         var activity: PersistenceEditingActivity = []
-        if selectionRefinementDraft != nil || textureAdjustmentSettings != nil { activity.insert(.gesture) }
+        if isWorkflowAdjustmentActive { activity.insert(.gesture) }
         if visibleHistoryPreviewOriginCount != nil { activity.insert(.historyPreview) }
         if isApplyingPatternPlacementCommit || isApplyingGradientCommit || isApplyingTransformCommit || isBucketFillInProgress {
             activity.insert(.pixelCommit)
@@ -14768,7 +14773,7 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func documentPersistenceBlockReason(action: String) -> String? {
-        guard selectionRefinementDraft == nil, textureAdjustmentSettings == nil else {
+        guard !isWorkflowAdjustmentActive else {
             return "请先应用或取消当前调整，再\(action)"
         }
         guard !isHistoryNavigating else {
@@ -19667,5 +19672,101 @@ extension WorkspaceViewModel {
         noteCanvasContentChanged(changedLayerIDs: [])
         refresh(invalidatedLayerIDs: [layerID])
         showStatus(.init(kind: .success, message: "已栅格化，当前像素保持不变；撤销可恢复编辑参数"))
+    }
+}
+
+// Branch orchestration lives in WorkspaceBranchController; these methods own document publication.
+extension WorkspaceViewModel {
+    var branchDocumentVersion: DocumentVersion { documentLifecycle.version }
+
+    func branchRecoveryRoot(sessionID: UUID, index: Int) -> URL {
+        bootstrap.persistenceController.recoveryProjectURL.deletingLastPathComponent()
+            .appendingPathComponent("Branches", isDirectory: true).appendingPathComponent(sessionID.uuidString, isDirectory: true)
+            .appendingPathComponent(String(index), isDirectory: true)
+    }
+
+    func copyBranchAuxiliaryAssets(from source: WorkspaceViewModel) {
+        referenceImageSlots = source.referenceImageSlots
+        selectedReferenceImageSlotID = source.selectedReferenceImageSlotID
+        savedSnapshots = source.savedSnapshots
+    }
+
+    func captureForBranch() throws -> QueuedProjectCapture {
+        guard !isWorkflowAdjustmentActive, canBeginDocumentPersistence(action: "保留方案"),
+              finishBrushWorkBeforePixelEdit(reason: "branch.capture") else {
+            throw CanvasResourceError(message: "请先完成当前编辑，再保存方案")
+        }
+        var capture = try bootstrap.persistenceController.enqueueProjectCapture(referenceImages: projectReferenceImagePayloads(),
+            savedSnapshots: persistentSavedSnapshotPayloads(), previewTexture: try? makeVisibleCompositeTexture(waitUntilCompleted: false))
+        capture.workspace.document.storedBranches = nil
+        return capture
+    }
+
+    @discardableResult
+    func commitBranchShelfChange(adding branch: StoredIdeationBranch) -> Bool {
+        guard ensureDocumentResourceBudget(additionalEditableSources: [branch.project], action: "保存方案") else { return false }
+        return commitBranchShelfChange { $0.append(branch) }
+    }
+
+    @discardableResult
+    func commitBranchShelfChange(_ change: (inout [StoredIdeationBranch]) -> Void) -> Bool {
+        var updated = workspace.document.storedBranches ?? []
+        change(&updated)
+        guard updated != (workspace.document.storedBranches ?? []), updated.count <= 8 else { return false }
+        guard checkpointHistoryIfPossible(operationKind: "branch.shelf", captureMode: .topologyDelta(changedLayerIDs: [])) else { return false }
+        bootstrap.workspaceStore.updateDocument { $0.storedBranches = updated.isEmpty ? nil : updated }
+        noteCanvasContentChanged(changedLayerIDs: [])
+        refresh()
+        return true
+    }
+
+    func importBranchLayers(_ payload: ProjectArchivePayload, selected: Set<LayerID>, name: String, expectedVersion: DocumentVersion) -> Bool {
+        guard documentLifecycle.version == expectedVersion else {
+            showStatus(.init(kind: .error, message: "主稿已改变，请重新选择需要合入的图层")); return false
+        }
+        do {
+            let plan = try LayerSubsetImport.prepare(source: payload, selected: selected, destination: workspace.document, name: name)
+            let added = plan.document.layers.filter { plan.importedLayerIDs.contains($0.id) }
+            guard ensureDocumentResourceBudget(additionalPaintLayers: added.filter(\.isPaintLayer).count,
+                additionalMasks: added.filter { $0.mask != nil }.count,
+                additionalEditableSources: added.flatMap { $0.editableContent?.assets ?? [] }, action: "合入方案图层") else { return false }
+            let prepared = try LayerImportSurfaceBuilder.prepare(document: plan.document, snapshots: plan.snapshots, metal: bootstrap.metalContext,
+                serializer: bootstrap.textureSerializer, existingDocument: workspace.document, existingSurfaces: bootstrap.layerSurfaceStore)
+            guard checkpointHistoryIfPossible(operationKind: "branch.importLayers", topologyOperation: true,
+                captureMode: .topologyDelta(changedLayerIDs: [])) else { return false }
+            bootstrap.workspaceStore.updateDocument { $0 = plan.document }
+            bootstrap.layerSurfaceStore.adoptContents(of: prepared)
+            bootstrap.strokeEngine.resetBrushPipelineState()
+            ideationSession = nil
+            noteCanvasContentChanged(changedLayerIDs: plan.importedLayerIDs)
+            refresh(invalidatedLayerIDs: plan.importedLayerIDs)
+            resumeTimelapseAfterIdeationIfNeeded(recordCurrentCanvas: true)
+            showStatus(.init(kind: .success, message: "已将方案图层加入“\(name)”组，可撤销此次合入"))
+            return true
+        } catch { showStatus(.init(kind: .error, message: error.localizedDescription)); return false }
+    }
+
+    func beginStoredBranchEditing(_ payload: ProjectArchivePayload) throws {
+        guard ideationSession == nil, !isWorkflowAdjustmentActive else { throw CanvasResourceError(message: "请先结束当前编辑") }
+        let document = payload.package.document
+        let assessment = bootstrap.documentResourceBudgetPolicy.assess(canvasSize: document.canvasSize,
+            paintLayerCount: document.paintLayers.count, maskCount: document.paintLayers.filter { $0.mask != nil }.count,
+            savedSnapshotCount: payload.savedSnapshots.count, additionalWorkingBytes: currentDocumentInteractiveResidentByteCount(),
+            pixelFormat: document.colorStandard.pixelFormat, editableSourceBytes: document.editableSourceByteCounts.archive,
+            editableSourceResidentBytes: document.editableSourceByteCounts.resident)
+        guard assessment.isSupported else { throw CanvasResourceError(message: assessment.rejectionReason ?? "方案超过设备预算") }
+        let surfaces = try LayerImportSurfaceBuilder.prepare(document: document, snapshots: payload.package.layerSnapshots,
+            metal: bootstrap.metalContext, serializer: bootstrap.textureSerializer)
+        let base = try makeVisibleCompositeTexture()
+        let session = try IdeationSessionState(hostViewModel: self, sourceWorkspace: payload.package.workspaceState,
+            sourceLayerSurfaceStore: surfaces, baseCompositeTexture: base, metalContext: bootstrap.metalContext,
+            sharedMetalServices: bootstrap.sharedMetalServices)
+        for branch in session.branches {
+            branch.viewModel.restoreProjectReferenceImages(payload.referenceImages)
+            branch.viewModel.restorePersistentSavedSnapshots(payload.savedSnapshots)
+        }
+        suspendTimelapseForIdeationIfNeeded()
+        ideationSession = session
+        showStatus(.init(kind: .success, message: "已载入保存的方案，主稿保持独立"))
     }
 }

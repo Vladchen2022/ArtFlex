@@ -80,6 +80,7 @@ struct ArtDocument: Codable, Sendable, Equatable {
     var perspectiveGuide: PerspectiveGuideState?
     var blockReferenceScene: BlockReferenceScene?
     var cropRetention: CanvasCropRetention? = nil
+    var storedBranches: [StoredIdeationBranch]? = nil
 
     init(
         metadata: DocumentMetadata,

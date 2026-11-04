@@ -48,6 +48,10 @@ struct MainWindowView: View {
         .sheet(item: Binding(get: { activeKeyboardTarget.editableLayerDraft }, set: { activeKeyboardTarget.editableLayerDraft = $0 })) { draft in
             EditableLayerSheet(draft: draft) { activeKeyboardTarget.editableLayerDraft = nil }
         }
+        .sheet(isPresented: Binding(get: { viewModel.branches.isPresented }, set: { viewModel.branches.isPresented = $0 }), onDismiss: { viewModel.branches.didDismissShelf() }) { StoredBranchesSheet(viewModel: viewModel) }
+        .sheet(item: Binding(get: { viewModel.branches.importDraft }, set: { viewModel.branches.importDraft = $0 })) { draft in
+            LayerSubsetImportSheet(draft: draft) { viewModel.branches.importDraft = nil }
+        }
         .sheet(isPresented: $viewModel.isRasterExportSheetPresented) {
             RasterExportSheet(viewModel: viewModel)
         }

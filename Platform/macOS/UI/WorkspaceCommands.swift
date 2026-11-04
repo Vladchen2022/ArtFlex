@@ -27,7 +27,7 @@ struct WorkspaceCommandButton: View {
 }
 
 extension WorkspaceViewModel {
-    var isWorkflowAdjustmentActive: Bool { selectionRefinementDraft != nil || textureAdjustmentSettings != nil || editableLayerDraft != nil }
+    var isWorkflowAdjustmentActive: Bool { selectionRefinementDraft != nil || textureAdjustmentSettings != nil || editableLayerDraft != nil || branches.importDraft != nil }
 
     func command(_ id: String) -> WorkspaceCommand? { searchableCommands.first { $0.id == id } }
     func performCommand(_ id: String) {
@@ -134,6 +134,7 @@ struct ArtFlexWorkspaceCommands: Commands {
             command("new", host)
             command("open", host)
             Menu("打开最近工程") { RecentProjectsMenu(model: host) }
+            Button("管理保存的方案…") { host.branches.isPresented = true }
         }
         CommandGroup(replacing: .saveItem) {
             command("save", host)

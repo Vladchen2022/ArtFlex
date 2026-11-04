@@ -61,6 +61,7 @@ final class IdeationSessionState: ObservableObject {
 
     let branches: [Branch]
     let baseCompositeTexture: MTLTexture
+    let recoveryRootURLs: [URL]
 
     var activeBranchViewModel: WorkspaceViewModel {
         branches[selectedBranchIndex].viewModel
@@ -88,6 +89,8 @@ final class IdeationSessionState: ObservableObject {
         self.baseCompositeTexture = baseCompositeTexture
         var createdBranches: [Branch] = []
         createdBranches.reserveCapacity(4)
+        let recoverySessionID = UUID()
+        self.recoveryRootURLs = (0..<4).map { hostViewModel.branchRecoveryRoot(sessionID: recoverySessionID, index: $0) }
 
         for index in 0..<4 {
             let store = WorkspaceStore(state: sourceWorkspace)
@@ -97,7 +100,8 @@ final class IdeationSessionState: ObservableObject {
                 metalContext: metalContext,
                 layerSurfaceStore: surfaceStore,
                 sharedMetalServices: sharedMetalServices,
-                drawingStatsController: hostViewModel.drawingStatsController
+                drawingStatsController: hostViewModel.drawingStatsController,
+                persistenceRecoveryRootURL: recoveryRootURLs[index]
             )
             let branchViewModel = WorkspaceViewModel(
                 bootstrap: bootstrap,
@@ -108,6 +112,7 @@ final class IdeationSessionState: ObservableObject {
                 from: sourceWorkspace,
                 sourceLayerSurfaceStore: sourceLayerSurfaceStore
             )
+            branchViewModel.copyBranchAuxiliaryAssets(from: hostViewModel)
             createdBranches.append(
                 Branch(index: index, viewModel: branchViewModel)
             )

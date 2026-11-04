@@ -5,6 +5,14 @@ import Testing
 @testable import ArtFlex
 
 struct IdeationSessionTests {
+    @Test @MainActor func branchRecoveryDirectoriesAreIndependentOfHostAndEachOther() throws {
+        let harness = try IdeationHarness()
+        harness.viewModel.startIdeationSession()
+        let session = try #require(harness.viewModel.ideationSession)
+        #expect(Set(session.recoveryRootURLs).count == 4)
+        let hostRoot = harness.bootstrap.persistenceController.recoveryProjectURL.deletingLastPathComponent()
+        #expect(session.recoveryRootURLs.allSatisfy { $0 != hostRoot && $0.path.hasPrefix(hostRoot.appendingPathComponent("Branches").path + "/") })
+    }
     @Test @MainActor
     func branchResourcesRemainSharedUntilWrittenAndBrushScratchCannotOverwriteBase() throws {
         let harness = try IdeationHarness()

@@ -11,7 +11,7 @@ struct IdeationCanvasGridView: View {
 
     var body: some View {
         GeometryReader { geometry in
-            let canvasSize = hostViewModel.workspace.document.canvasSize
+            let canvasSize = session.activeBranchViewModel.workspace.document.canvasSize
             let aspectRatio = CGFloat(canvasSize.width) / max(CGFloat(canvasSize.height), 1)
             let availableWidth = max(geometry.size.width - (outerPadding * 2) - gridSpacing, 100)
             let availableHeight = max(
@@ -63,7 +63,7 @@ struct IdeationCanvasGridView: View {
                 }
             }
             .pickerStyle(.segmented)
-            .frame(width: 240)
+            .frame(width: 190)
 
             Button(session.canvasDisplayMode == .focused ? "返回四宫格" : "临时放大画布") {
                 if session.canvasDisplayMode == .focused {
@@ -76,15 +76,18 @@ struct IdeationCanvasGridView: View {
 
             Spacer(minLength: 8)
 
-            Button("应用于主画布") {
-                hostViewModel.applySelectedIdeationVariantToMainCanvas()
+            Button("选层合入主稿") {
+                hostViewModel.branches.importSelectedVariant()
             }
             .buttonStyle(.borderedProminent)
+            .disabled(hostViewModel.branches.isBusy)
 
-            Button("导出四个草图") {
-                hostViewModel.exportIdeationVariantsToDisk()
-            }
-            .buttonStyle(.bordered)
+            Menu("更多") {
+                Button("仅合入可见差异（栅格化）") { hostViewModel.applySelectedIdeationVariantToMainCanvas() }
+                Button("导出四个草图") { hostViewModel.exportIdeationVariantsToDisk() }
+            }.fixedSize()
+            Button("保存方案…") { hostViewModel.branches.isPresented = true }
+                .disabled(hostViewModel.branches.isBusy)
 
             Button("取消") {
                 hostViewModel.cancelIdeationSession()

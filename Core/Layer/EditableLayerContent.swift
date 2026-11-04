@@ -190,10 +190,15 @@ struct EditableLayerContent: Codable, Sendable, Equatable {
 }
 
 extension ArtDocument {
-    var editableSourceAssets: [EditableSourceAsset] { layers.flatMap { $0.editableContent?.assets ?? [] } }
+    var editableSourceAssets: [EditableSourceAsset] {
+        layers.flatMap { $0.editableContent?.assets ?? [] } + (storedBranches ?? []).map(\.project)
+    }
 
     mutating func mapEditableSourceAssets(_ transform: (EditableSourceAsset) throws -> EditableSourceAsset) rethrows {
         for index in layers.indices { try layers[index].editableContent?.mapAssets(transform) }
+        for index in storedBranches?.indices ?? 0..<0 {
+            storedBranches![index].project = try transform(storedBranches![index].project)
+        }
     }
 
     var editableSourceByteCounts: (archive: Int, resident: Int) {
