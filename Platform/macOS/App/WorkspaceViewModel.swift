@@ -731,6 +731,8 @@ final class WorkspaceViewModel: ObservableObject {
         bootstrap.strokeEngine.purgeTransientPreviewTexturesIfIdle()
         bootstrap.historyController.relieveMemoryPressure(critical: isCritical)
         bootstrap.persistenceController.purgeSaveResourceCache()
+        bootstrap.canvasPresenter.purgeIdleCaches()
+        Task { await maskThumbnailStore.clear(); await rasterPreviewStore.clear() }
 
         cancelPendingSnapshotComparePreparation(resumeTimelapseIfNeeded: false)
         cancelSnapshotPreviewPreparationTasks()
@@ -14141,7 +14143,9 @@ final class WorkspaceViewModel: ObservableObject {
             replacingSlotID: slotID,
             with: referenceImageAsset
         )
-        let assessment = bootstrap.documentResourceBudgetPolicy.assess(
+        let pixels = saturatingMultiply(workspace.document.canvasSize.width, by: workspace.document.canvasSize.height)
+        let growth = saturatingMultiply(pixels, by: additionalPaintLayers * workspace.document.colorStandard.pixelFormat.encoding.bytesPerPixel + additionalMasks)
+        func assess() -> DocumentResourceAssessment { bootstrap.documentResourceBudgetPolicy.assess(
             canvasSize: workspace.document.canvasSize,
             paintLayerCount: workspace.document.paintLayers.count + additionalPaintLayers,
             maskCount: workspace.document.paintLayers.filter { $0.mask != nil }.count + additionalMasks,
@@ -14150,9 +14154,21 @@ final class WorkspaceViewModel: ObservableObject {
             referenceImageResidentBytes: referenceBytes.resident,
             historyResidentBytes: bootstrap.historyController.residentByteCount,
             additionalWorkingBytes: additionalWorkingBytes,
-            pixelFormat: workspace.document.colorStandard.pixelFormat
-        )
-        guard !assessment.isSupported else { return true }
+            pixelFormat: workspace.document.colorStandard.pixelFormat,
+            allocatedLayerBytes: saturatingAdd(bootstrap.layerSurfaceStore.allocatedPixelBytes, growth),
+            measuredGPUResidentBytes: saturatingAdd(bootstrap.metalContext.device.currentAllocatedSize, growth),
+            reservedWorkingBytes: bootstrap.metalContext.workingResourceBudget.reservedBytes
+        ) }
+        var assessment = assess()
+        if assessment.isSupported { return true }
+        // Retry after reclaiming only reproducible caches. An admission check never removes undo.
+        bootstrap.textureSerializer.trimStagingPool(toMaxResidentBytes: 0)
+        bootstrap.canvasPresenter.purgeIdleCaches()
+        bootstrap.persistenceController.purgeSaveResourceCache()
+        bootstrap.strokeEngine.purgeTransientPreviewTexturesIfIdle()
+        patternPlacementTextureCache.removeAllObjects()
+        assessment = assess()
+        if assessment.isSupported { return true }
 
         let peak = ByteCountFormatter.string(
             fromByteCount: Int64(clamping: assessment.footprint.estimatedSavePeakBytes),
@@ -14206,7 +14222,10 @@ final class WorkspaceViewModel: ObservableObject {
             referenceImageBytes: referenceBytes.archive,
             referenceImageResidentBytes: referenceBytes.resident,
             historyResidentBytes: bootstrap.historyController.residentByteCount,
-            pixelFormat: workspace.document.colorStandard.pixelFormat
+            pixelFormat: workspace.document.colorStandard.pixelFormat,
+            allocatedLayerBytes: bootstrap.layerSurfaceStore.allocatedPixelBytes,
+            measuredGPUResidentBytes: bootstrap.metalContext.device.currentAllocatedSize,
+            reservedWorkingBytes: bootstrap.metalContext.workingResourceBudget.reservedBytes
         ).footprint.estimatedInteractiveResidentBytes
     }
 

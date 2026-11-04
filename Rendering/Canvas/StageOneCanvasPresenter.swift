@@ -57,7 +57,7 @@ struct CanvasCompositePrefixCacheHint {
     var revisionTokens: [LayerChangeCursor]
 }
 
-private struct CanvasCompositeInputIdentity: Equatable {
+struct CanvasCompositeInputIdentity: Equatable {
     var texture: ObjectIdentifier
     var opacity: Float
     var blendMode: LayerBlendMode
@@ -398,10 +398,11 @@ final class StageOneCanvasPresenter: @unchecked Sendable {
         layerInputs: [CanvasLayerCompositeInput],
         samplingMode: CanvasDisplaySamplingMode = .linear,
         cacheHint: CanvasCompositePrefixCacheHint? = nil,
+        updateRegion: PixelRegion? = nil,
         into renderPassDescriptor: MTLRenderPassDescriptor,
         commandBuffer: MTLCommandBuffer
     ) -> Bool {
-        if let cacheHint, let target = renderPassDescriptor.colorAttachments[0].texture,
+        if updateRegion == nil, let cacheHint, let target = renderPassDescriptor.colorAttachments[0].texture,
            let prefix = cachedPrefixTexture(inputs: layerInputs, hint: cacheHint,
                target: target, samplingMode: samplingMode, commandBuffer: commandBuffer) {
             // The prefix is a complete backdrop. Suffix blend/adjustment layers
@@ -412,7 +413,7 @@ final class StageOneCanvasPresenter: @unchecked Sendable {
         let visibleInputs = layerInputs.filter { $0.opacity > 0 }
         guard !visibleInputs.isEmpty else { return true }
 
-        if visibleInputs.allSatisfy({
+        if updateRegion == nil, visibleInputs.allSatisfy({
             $0.blendMode == .normal && $0.clipMaskTexture == nil && $0.clipLayerMaskTexture == nil
                 && $0.layerMaskTexture == nil
                 && $0.curveAdjustmentLUTs == nil
@@ -455,8 +456,9 @@ final class StageOneCanvasPresenter: @unchecked Sendable {
                     maskReadMode: .maskRed,
                     luts: curveAdjustmentLUTs,
                     overlayOnly: false,
-                    effectRegion: nil,
+                    effectRegion: updateRegion.map { MTLRegionMake2D($0.originX, $0.originY, $0.width, $0.height) },
                     effectOpacity: input.opacity,
+                    copiesOnlyEffectRegion: updateRegion != nil,
                     commandBuffer: commandBuffer
                 ) else { return false }
                 swap(&backdrop, &output)
@@ -468,6 +470,9 @@ final class StageOneCanvasPresenter: @unchecked Sendable {
             pass.colorAttachments[0].storeAction = .store
             guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: pass) else { return false }
             encoder.setRenderPipelineState(pipelineVariants.state(blendPipelineState, for: pass.colorAttachments[0].texture?.pixelFormat ?? .bgra8Unorm_srgb))
+            if let region = updateRegion {
+                encoder.setScissorRect(.init(x: region.originX, y: region.originY, width: region.width, height: region.height))
+            }
             encoder.setVertexBuffer(canvasVertexBuffer, offset: 0, index: 0)
             encoder.setFragmentSamplerState(sampler, index: 0)
             encoder.setFragmentTexture(input.texture, index: 0)
@@ -492,6 +497,9 @@ final class StageOneCanvasPresenter: @unchecked Sendable {
             return false
         }
         finalEncoder.setRenderPipelineState(pipelineVariants.state(pipelineState, for: renderPassDescriptor.colorAttachments[0].texture?.pixelFormat ?? .bgra8Unorm_srgb))
+        if let region = updateRegion {
+            finalEncoder.setScissorRect(.init(x: region.originX, y: region.originY, width: region.width, height: region.height))
+        }
         finalEncoder.setVertexBuffer(canvasVertexBuffer, offset: 0, index: 0)
         finalEncoder.setFragmentSamplerState(sampler, index: 0)
         finalEncoder.setFragmentTexture(backdrop, index: 0)
@@ -505,6 +513,13 @@ final class StageOneCanvasPresenter: @unchecked Sendable {
         finalEncoder.endEncoding()
 
         return true
+    }
+
+    func purgeIdleCaches() {
+        invalidateCompositePrefixCache()
+        compositePoolLock.lock()
+        compositeTexturePool.removeAll { !$0.isInUse }
+        compositePoolLock.unlock()
     }
 
     func invalidateCompositePrefixCache() {

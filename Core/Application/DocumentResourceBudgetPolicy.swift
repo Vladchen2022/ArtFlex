@@ -55,7 +55,10 @@ struct DocumentResourceBudgetPolicy: Sendable, Equatable {
         referenceImageResidentBytes: Int? = nil,
         historyResidentBytes: Int = 0,
         additionalWorkingBytes: Int = 0,
-        pixelFormat: ArtPixelFormat = .rgba8
+        pixelFormat: ArtPixelFormat = .rgba8,
+        allocatedLayerBytes: Int? = nil,
+        measuredGPUResidentBytes: Int? = nil,
+        reservedWorkingBytes: Int = 0
     ) -> DocumentResourceAssessment {
         let pixelCount = Self.saturatingMultiply(canvasSize.width, canvasSize.height)
         let contentBytes = Self.saturatingMultiply(
@@ -74,15 +77,17 @@ struct DocumentResourceBudgetPolicy: Sendable, Equatable {
             referenceImageResidentBytes ?? referenceImageBytes
         )
         let persistentInteractiveBytes = Self.saturatingAdd(
-            Self.saturatingAdd(liveLayerBytes, savedSnapshotBytes),
+            Self.saturatingAdd(max(0, allocatedLayerBytes ?? liveLayerBytes), savedSnapshotBytes),
             Self.saturatingAdd(
                 resolvedReferenceResidentBytes,
                 max(0, historyResidentBytes)
             )
         )
+        let measuredResident = Self.saturatingAdd(max(0, measuredGPUResidentBytes ?? 0),
+            Self.saturatingAdd(resolvedReferenceResidentBytes, max(0, historyResidentBytes)))
         let interactiveBytes = Self.saturatingAdd(
-            Self.saturatingAdd(persistentInteractiveBytes, transientBytes),
-            max(0, additionalWorkingBytes)
+            Self.saturatingAdd(max(persistentInteractiveBytes, measuredResident), transientBytes),
+            Self.saturatingAdd(max(0, additionalWorkingBytes), max(0, reservedWorkingBytes))
         )
         let captureBytes = Self.saturatingAdd(
             Self.saturatingAdd(liveLayerBytes, savedSnapshotBytes),

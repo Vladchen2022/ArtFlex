@@ -20,6 +20,10 @@ final class TextureAdjustmentRenderer: @unchecked Sendable {
               mask.alphaBytes.contains(where: { $0 != 0 }) else {
             throw CanvasResourceError(message: "纹理区域无效")
         }
+        let reservation = try metal.workingResourceBudget.reserve(
+            bytes: source.width * source.height * (source.pixelFormat == .rgba16Float ? 8 : 4),
+            residentBytes: metal.device.currentAllocatedSize)
+        defer { withExtendedLifetime(reservation) {} }
         let material: Data
         if state.tipSettings.sourceSemantic == .importedImage {
             guard let data = state.tipSettings.customTipMaskData else { throw CanvasResourceError(message: "纹理图像缺失") }

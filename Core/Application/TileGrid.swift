@@ -19,6 +19,13 @@ struct PixelRegion: Codable, Hashable, Sendable, Equatable {
         Self.addingWithoutTrapping(originY, height)
     }
 
+    func union(_ other: PixelRegion) -> PixelRegion {
+        if isEmpty { return other }
+        if other.isEmpty { return self }
+        let x = min(originX, other.originX), y = min(originY, other.originY)
+        return .init(originX: x, originY: y, width: max(maxX, other.maxX) - x, height: max(maxY, other.maxY) - y)
+    }
+
     func contains(pixelX: Int, pixelY: Int) -> Bool {
         !isEmpty &&
             pixelX >= originX && pixelX < maxX &&

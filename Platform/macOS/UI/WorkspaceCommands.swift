@@ -171,6 +171,8 @@ struct ArtFlexWorkspaceCommands: Commands {
             command("fit", editor)
             command("zoomIn", editor)
             command("zoomOut", editor)
+            Divider()
+            Button("绘画性能诊断…") { PerformanceDiagnosticsWindow.show() }
         }
     }
     @ViewBuilder private func command(_ id: String, _ model: WorkspaceViewModel) -> some View {

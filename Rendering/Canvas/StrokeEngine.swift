@@ -37,6 +37,7 @@ struct BrushFlushMetrics: Sendable, Equatable {
     let enqueueToFlushMs: Double
     let flushEncodeMs: Double
     let usedSameFrameFlush: Bool
+    var changedRegion: PixelRegion? = nil
 }
 
 protocol StrokeEngine {

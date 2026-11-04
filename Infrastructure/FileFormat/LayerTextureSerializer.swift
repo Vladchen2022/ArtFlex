@@ -361,6 +361,9 @@ final class LayerTextureSerializer {
     /// Waiting and error validation may then happen on the save worker, before any readback.
     func enqueueCloneBatchForDeferredSnapshot(textures: [MTLTexture]) throws -> DeferredTextureCloneBatch {
         guard !textures.isEmpty else { return .init(textures: []) }
+        let bytes = textures.reduce(0) { $0 + $1.width * $1.height * ($1.pixelFormat == .rgba16Float ? 8 : ($1.pixelFormat == .r8Unorm ? 1 : 4)) }
+        let reservation = try metalContext.workingResourceBudget.reserve(bytes: bytes, residentBytes: metalContext.device.currentAllocatedSize)
+        defer { withExtendedLifetime(reservation) {} }
         let auditEnabled = auditStore.isRecordingEnabled
         let start = auditEnabled ? DispatchTime.now().uptimeNanoseconds : 0
         var clones: [MTLTexture] = []

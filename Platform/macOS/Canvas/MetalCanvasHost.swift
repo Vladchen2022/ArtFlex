@@ -2251,6 +2251,13 @@ final class StrokeCaptureMTKView: MTKView {
         pendingBrushInputQueue.enqueue(.end)
     }
 
+    // Converted once at flush so DispatchTime and presentation host clocks are not mixed.
+    private(set) var pendingPresentationInputTime: TimeInterval?
+    func consumePresentationInputTime() -> TimeInterval? {
+        defer { pendingPresentationInputTime = nil }
+        return pendingPresentationInputTime
+    }
+
     @discardableResult
     func flushPendingBrushInputQueue() -> Int {
         let batches = pendingBrushInputQueue.flush()
@@ -2258,6 +2265,14 @@ final class StrokeCaptureMTKView: MTKView {
         let diagnosticsEnabled = RuntimeDiagnostics.brushHotPathLoggingEnabled
         let flushStartNs = diagnosticsEnabled ? DispatchTime.now().uptimeNanoseconds : 0
         let oldestEnqueueNs = batches.first?.enqueuedAt ?? flushStartNs
+        if PerformanceAuditStore.shared.isRecordingEnabled {
+            let now = DispatchTime.now().uptimeNanoseconds
+            let age = Double(now >= oldestEnqueueNs ? now - oldestEnqueueNs : 0) / 1_000_000_000
+            let timestamp = CACurrentMediaTime() - age
+            pendingPresentationInputTime = min(pendingPresentationInputTime ?? timestamp, timestamp)
+            PerformanceAuditStore.shared.recordDuration("Canvas.inputQueueWait", ms: age * 1_000)
+            PerformanceAuditStore.shared.recordInt("Canvas.inputBatchCount", value: batches.count)
+        } else { pendingPresentationInputTime = nil }
         var flushedSampleBatchCount = 0
 
         for batch in batches {
@@ -2646,6 +2661,7 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
     private let layerSurfaceStore: StageOneLayerSurfaceStore
     private lazy var transformLayerCompositor = try? TransformGPUCompositor(device: metalContext.device)
     private let canvasPresenter: StageOneCanvasPresenter?
+    private let regionalComposite = CanvasRegionalComposite()
     private let canvasPresenterInitializationError: Error?
     private let transformPreviewBuilder: TransformPreviewSessionBuilder
     private let linearGradientRenderer: LinearGradientRenderer
@@ -2924,6 +2940,7 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
     func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {}
 
     func draw(in view: MTKView) {
+        let frameHostStart = CACurrentMediaTime()
         let diagnosticsEnabled = RuntimeDiagnostics.brushHotPathLoggingEnabled
         let drawStartNs = diagnosticsEnabled ? DispatchTime.now().uptimeNanoseconds : 0
         guard let offscreenCommandBuffer = metalContext.commandQueue.makeCommandBuffer() else {
@@ -3120,10 +3137,23 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
                     }
                     hint = CanvasCompositePrefixCacheHint(count: prefixCount, revisionTokens: tokens)
                 }
-                guard canvasPresenter.encode(
+                var regionalResult: Bool?
+                if CanvasRegionalComposite.isEnabled, paintingReferenceScene == nil,
+                   !hasActivePreview, !hasGradientPreview, !hasPatternPlacementPreview,
+                   let changed = liveFlushMetrics?.changedRegion {
+                    let revisions = layers.flatMap { entry in
+                        [layerSurfaceStore.changeJournal(for: .init(layerID: entry.layerID, kind: .content)).cursor,
+                         layerSurfaceStore.changeJournal(for: .init(layerID: entry.layerID, kind: .mask)).cursor]
+                    }
+                    regionalResult = regionalComposite.encode(inputs: compositeInputs(layers), revisions: revisions,
+                        changedRegion: changed, canvasSize: canvasSize, presenter: canvasPresenter,
+                        sampling: displaySamplingMode, into: descriptor, command: commandBuffer,
+                        budget: metalContext.workingResourceBudget)
+                } else { regionalComposite.discard() }
+                let encoded = regionalResult ?? canvasPresenter.encode(
                     layerInputs: compositeInputs(layers), samplingMode: displaySamplingMode, cacheHint: hint,
-                    into: descriptor, commandBuffer: commandBuffer
-                ) else {
+                    into: descriptor, commandBuffer: commandBuffer)
+                guard encoded else {
                     // Complete offscreen work and release its resources, but keep the last
                     // successfully presented frame instead of showing incorrect blending.
                     commandBuffer.commit()
@@ -3279,12 +3309,22 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
             }
         }
 
-        if diagnosticsEnabled {
+        let inputAt = (view as? StrokeCaptureMTKView)?.consumePresentationInputTime()
+        if PerformanceAuditStore.shared.isRecordingEnabled {
             let submittedAt = CACurrentMediaTime()
+            PerformanceAuditStore.shared.recordInt("Metal.allocatedBytes", value: metalContext.device.currentAllocatedSize)
+            PerformanceAuditStore.shared.recordDuration("Canvas.frameCPU", ms: (submittedAt - frameHostStart) * 1_000)
+            commandBuffer.addCompletedHandler { completed in
+                guard completed.status == .completed else { return }
+                PerformanceAuditStore.shared.recordDuration("Canvas.frameGPU", ms: (completed.gpuEndTime - completed.gpuStartTime) * 1_000)
+            }
             drawable.addPresentedHandler { presented in
                 let timestamp = presented.presentedTime
                 guard timestamp > 0 else { return }
                 PerformanceAuditStore.shared.recordDuration("Canvas.submitToPresented", ms: (timestamp - submittedAt) * 1_000)
+                if let inputAt {
+                    PerformanceAuditStore.shared.recordDuration("Canvas.inputToPresented", ms: (timestamp - inputAt) * 1_000)
+                }
             }
         }
         commandBuffer.present(drawable)

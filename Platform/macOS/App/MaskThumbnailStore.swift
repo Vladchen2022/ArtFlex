@@ -14,6 +14,7 @@ struct MaskThumbnailKey: Hashable, Sendable {
 actor MaskThumbnailStore {
     private var images: [MaskThumbnailKey: CGImage] = [:]
     private var order: [MaskThumbnailKey] = []
+    func clear() { images.removeAll(); order.removeAll() }
 
     func image(key: MaskThumbnailKey, cancellation: WorkCancellation,
                makeImage: @Sendable () -> CGImage?) -> CGImage? {

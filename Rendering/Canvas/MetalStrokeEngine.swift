@@ -299,9 +299,12 @@ final class MetalStrokeEngine: StrokeEngine {
             .flatMap(layerSurfaceStore.readTexture(for:))
 
         let workingEdit = session.workingEdit
+        var changedRegion: PixelRegion?
         let prepareTarget: (BrushPixelBounds) -> MTLTexture? = { bounds in
-            try? workingEdit.prepareWrite(in: .init(originX: bounds.originX, originY: bounds.originY,
-                width: bounds.width, height: bounds.height), commandBuffer: commandBuffer)
+            let region = PixelRegion(originX: bounds.originX, originY: bounds.originY, width: bounds.width, height: bounds.height)
+            guard let texture = try? workingEdit.prepareWrite(in: region, commandBuffer: commandBuffer) else { return nil }
+            changedRegion = changedRegion.map { $0.union(region) } ?? region
+            return texture
         }
         var flushedPacketCount = 0
         debugLastFlushSmudgeFullSizeCopyCount = 0
@@ -470,7 +473,8 @@ final class MetalStrokeEngine: StrokeEngine {
             flushedPacketCount: flushedPacketCount,
             enqueueToFlushMs: enqueueToFlushMs,
             flushEncodeMs: flushEncodeMs,
-            usedSameFrameFlush: enqueueToFlushMs <= 16.7
+            usedSameFrameFlush: enqueueToFlushMs <= 16.7,
+            changedRegion: changedRegion
         )
 
         if diagnosticsEnabled {

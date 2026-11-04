@@ -271,19 +271,23 @@ final class CurveAdjustmentRenderer {
         overlayOnly: Bool,
         effectRegion: MTLRegion?,
         effectOpacity: Float = 1,
+        copiesOnlyEffectRegion: Bool = false,
         commandBuffer: MTLCommandBuffer
     ) -> Bool {
+        let copyRegion = copiesOnlyEffectRegion ? effectRegion : nil
+        let origin = copyRegion?.origin ?? MTLOrigin(x: 0, y: 0, z: 0)
+        let size = copyRegion?.size ?? MTLSize(width: sourceTexture.width, height: sourceTexture.height, depth: 1)
         guard let blitEncoder = commandBuffer.makeBlitCommandEncoder() else { return false }
         blitEncoder.copy(
             from: sourceTexture,
             sourceSlice: 0,
             sourceLevel: 0,
-            sourceOrigin: .init(x: 0, y: 0, z: 0),
-            sourceSize: .init(width: sourceTexture.width, height: sourceTexture.height, depth: 1),
+            sourceOrigin: origin,
+            sourceSize: size,
             to: previewTexture,
             destinationSlice: 0,
             destinationLevel: 0,
-            destinationOrigin: .init(x: 0, y: 0, z: 0)
+            destinationOrigin: origin
         )
         blitEncoder.endEncoding()
 

@@ -1,5 +1,26 @@
 import Foundation
 
+struct PerformanceDistribution: Codable, Sendable, Equatable {
+    let count: Int
+    let median: Double
+    let p95: Double
+    let p99: Double
+    let maximum: Double
+
+    init?(_ samples: [Double]) {
+        let values = samples.filter { $0.isFinite && $0 >= 0 }.sorted()
+        guard !values.isEmpty else { return nil }
+        func percentile(_ fraction: Double) -> Double {
+            values[max(0, Int(ceil(Double(values.count) * fraction)) - 1)]
+        }
+        count = values.count
+        median = percentile(0.5)
+        p95 = percentile(0.95)
+        p99 = percentile(0.99)
+        maximum = values[values.count - 1]
+    }
+}
+
 enum HistoryEligibilityIneligibleReason: String, Sendable, CaseIterable {
     case noComparisonWorkspace
     case canvasSizeChanged
@@ -67,6 +88,10 @@ struct PerformanceAuditSnapshot: Sendable {
     var durationsMs: [String: [Double]]
     var integerSamples: [String: [Int]]
     var historyEligibilityRecords: [HistoryEligibilityAuditRecord]
+
+    var distributions: [String: PerformanceDistribution] {
+        durationsMs.compactMapValues(PerformanceDistribution.init)
+    }
 
     func durations(for key: String) -> [Double] {
         durationsMs[key] ?? []

@@ -3,6 +3,33 @@ import Testing
 @testable import ArtFlex
 
 struct DocumentResourceBudgetPolicyTests {
+    @Test func sparseResidencyDoesNotReduceArchiveOrFreezeBudgets() {
+        let policy = DocumentResourceBudgetPolicy.standard(recommendedMaxWorkingSetSize: nil, archiveLimits: .standard)
+        let dense = policy.assess(canvasSize: .init(width: 1_000, height: 1_000), paintLayerCount: 10, maskCount: 0, savedSnapshotCount: 0)
+        let sparse = policy.assess(canvasSize: .init(width: 1_000, height: 1_000), paintLayerCount: 10, maskCount: 0, savedSnapshotCount: 0,
+            allocatedLayerBytes: 4_000_000, measuredGPUResidentBytes: 5_000_000, reservedWorkingBytes: 1_000_000)
+        #expect(sparse.footprint.estimatedInteractiveResidentBytes < dense.footprint.estimatedInteractiveResidentBytes)
+        #expect(sparse.footprint.estimatedArchiveUncompressedBytes == dense.footprint.estimatedArchiveUncompressedBytes)
+        #expect(sparse.footprint.liveLayerBytes == dense.footprint.liveLayerBytes)
+        let busy = policy.assess(canvasSize: .init(width: 1_000, height: 1_000), paintLayerCount: 10, maskCount: 0, savedSnapshotCount: 0,
+            allocatedLayerBytes: 4_000_000, measuredGPUResidentBytes: policy.maximumInteractiveResidentBytes)
+        #expect(!busy.isSupported)
+    }
+
+    @Test func reservationsProtectConcurrentJobsAndReleaseOnScopeExit() throws {
+        let budget = WorkingResourceBudget(maximumBytes: 100)
+        do {
+            let first = try budget.reserve(bytes: 60, residentBytes: 30)
+            #expect(throws: (any Error).self) { try budget.reserve(bytes: 11, residentBytes: 30) }
+            #expect(budget.reservedBytes == 60)
+            withExtendedLifetime(first) {}
+        }
+        #expect(budget.reservedBytes == 0)
+        let next = try budget.reserve(bytes: 70, residentBytes: 30)
+        #expect(budget.reservedBytes == 70)
+        #expect(throws: (any Error).self) { try budget.reserve(bytes: Int.max, residentBytes: 0) }
+        withExtendedLifetime(next) {}
+    }
     @Test func highPrecisionCountsDoubleColorStorageButNotDoubleMaskStorage() {
         let policy = DocumentResourceBudgetPolicy.standard(recommendedMaxWorkingSetSize: nil, archiveLimits: .standard)
         let half = policy.assess(canvasSize: .init(width: 1_000, height: 1_000),
