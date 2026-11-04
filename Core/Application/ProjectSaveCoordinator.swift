@@ -15,9 +15,9 @@ struct ProjectSaveRequest: Sendable {
 final class ProjectSaveCoordinator {
     typealias Writer = @Sendable (FrozenProjectCapture, URL) throws -> ProjectWriteOutcome
     private let writer: Writer
-    private var task: Task<Void, Never>?
+    private var saving = false
     var onStateChange: (() -> Void)?
-    var isSaving: Bool { task != nil }
+    var isSaving: Bool { saving }
 
     init(writer: @escaping Writer) { self.writer = writer }
 
@@ -41,20 +41,21 @@ final class ProjectSaveCoordinator {
     @discardableResult
     func start(
         _ request: ProjectSaveRequest,
-        completion: @escaping (Result<ProjectWriteOutcome, Error>) -> Void
+        completion: @escaping @MainActor @Sendable (Result<ProjectWriteOutcome, Error>) -> Void
     ) -> Bool {
-        guard task == nil else { return false }
+        guard !saving else { return false }
+        saving = true
         let writer = self.writer
-        task = Task { [weak self] in
-            let result = await Task.detached(priority: .utility) {
-                Result {
-                    let capture = try request.capture.waitUntilReady()
-                    return try writer(capture, request.url)
-                }
-            }.value
-            self?.task = nil
-            self?.onStateChange?()
-            completion(result)
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let result = Result {
+                let capture = try request.capture.waitUntilReady()
+                return try writer(capture, request.url)
+            }
+            MainRunLoopDelivery.perform {
+                self?.saving = false
+                self?.onStateChange?()
+                completion(result)
+            }
         }
         onStateChange?()
         return true

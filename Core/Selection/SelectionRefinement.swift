@@ -68,7 +68,8 @@ enum SelectionRefinement {
     /// resolved to a mask so feathered alpha and nested boolean operations remain correct.
     static func inverted(
         _ selection: SelectionShape?,
-        canvasSize: CanvasSize
+        canvasSize: CanvasSize,
+        cancellation: WorkCancellation? = nil
     ) -> SelectionShape? {
         guard let fullCanvas = fullCanvasShape(canvasSize: canvasSize) else { return nil }
         guard let selection, !selection.isEmpty else { return fullCanvas }
@@ -80,20 +81,23 @@ enum SelectionRefinement {
                 .init(operation: .subtract, shape: selection.clamped(to: canvasSize))
             ])
         case .mask, .composite:
-            return invertedMask(selection, canvasSize: canvasSize)
+            return invertedMask(selection, canvasSize: canvasSize, cancellation: cancellation)
         }
     }
 
     static func invertedMask(
         _ selection: SelectionShape,
-        canvasSize: CanvasSize
+        canvasSize: CanvasSize,
+        cancellation: WorkCancellation? = nil
     ) -> SelectionShape? {
         guard canvasSize.width > 0, canvasSize.height > 0 else { return nil }
         let pixelCount = canvasSize.width.multipliedReportingOverflow(by: canvasSize.height)
         guard !pixelCount.overflow, pixelCount.partialValue > 0 else { return nil }
 
+        if cancellation?.isCancelled == true { return nil }
         var bytes = [UInt8](repeating: 0, count: pixelCount.partialValue)
         for y in 0..<canvasSize.height {
+            if cancellation?.isCancelled == true { return nil }
             for x in 0..<canvasSize.width {
                 let point = CanvasPoint(x: Double(x) + 0.5, y: Double(y) + 0.5)
                 let alpha = resolvedAlphaByte(of: selection, at: point)
@@ -110,26 +114,28 @@ enum SelectionRefinement {
     static func expanded(
         _ selection: SelectionShape,
         canvasSize: CanvasSize,
-        radiusPixels: Int
+        radiusPixels: Int,
+        cancellation: WorkCancellation? = nil
     ) -> SelectionShape? {
         morphologicallyRefined(
             selection,
             canvasSize: canvasSize,
             radiusPixels: radiusPixels,
-            operation: .maximum
+            operation: .maximum, cancellation: cancellation
         )
     }
 
     static func contracted(
         _ selection: SelectionShape,
         canvasSize: CanvasSize,
-        radiusPixels: Int
+        radiusPixels: Int,
+        cancellation: WorkCancellation? = nil
     ) -> SelectionShape? {
         morphologicallyRefined(
             selection,
             canvasSize: canvasSize,
             radiusPixels: radiusPixels,
-            operation: .minimum
+            operation: .minimum, cancellation: cancellation
         )
     }
 
@@ -144,7 +150,8 @@ enum SelectionRefinement {
         _ selection: SelectionShape,
         canvasSize: CanvasSize,
         radiusPixels: Int,
-        operation: MorphologyOperation
+        operation: MorphologyOperation,
+        cancellation: WorkCancellation? = nil
     ) -> SelectionShape? {
         guard canvasSize.width > 0, canvasSize.height > 0 else { return nil }
         let radius = min(max(radiusPixels, 0), 4_096)
@@ -163,8 +170,10 @@ enum SelectionRefinement {
         let regionHeight = max(0, maxY - originY)
         guard regionWidth > 0, regionHeight > 0 else { return nil }
 
+        if cancellation?.isCancelled == true { return nil }
         var source = [UInt8](repeating: 0, count: regionWidth * regionHeight)
         for localY in 0..<regionHeight {
+            if cancellation?.isCancelled == true { return nil }
             let y = originY + localY
             for localX in 0..<regionWidth {
                 let x = originX + localX
@@ -177,6 +186,7 @@ enum SelectionRefinement {
 
         var horizontal = [UInt8](repeating: 0, count: source.count)
         for y in 0..<regionHeight {
+            if cancellation?.isCancelled == true { return nil }
             let rowStart = y * regionWidth
             let line = Array(source[rowStart..<(rowStart + regionWidth)])
             let filtered = slidingExtremum(line, radius: radius, operation: operation)
@@ -186,11 +196,14 @@ enum SelectionRefinement {
         var regionResult = [UInt8](repeating: 0, count: source.count)
         var column = [UInt8](repeating: 0, count: regionHeight)
         for x in 0..<regionWidth {
+            if cancellation?.isCancelled == true { return nil }
             for y in 0..<regionHeight {
+            if cancellation?.isCancelled == true { return nil }
                 column[y] = horizontal[(y * regionWidth) + x]
             }
             let filtered = slidingExtremum(column, radius: radius, operation: operation)
             for y in 0..<regionHeight {
+            if cancellation?.isCancelled == true { return nil }
                 regionResult[(y * regionWidth) + x] = filtered[y]
             }
         }

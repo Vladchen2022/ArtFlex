@@ -7,16 +7,39 @@ struct WorkspaceCommand: Identifiable {
     var shortcut = ""
     var unavailableReason: String?
     let action: () -> Void
+    var keyboardShortcut: KeyboardShortcut? {
+        guard let key = shortcut.last else { return nil }
+        var modifiers: EventModifiers = []
+        if shortcut.contains("⌘") { modifiers.insert(.command) }
+        if shortcut.contains("⇧") { modifiers.insert(.shift) }
+        return KeyboardShortcut(KeyEquivalent(Character(key.lowercased())), modifiers: modifiers)
+    }
+}
+
+struct WorkspaceCommandButton: View {
+    let command: WorkspaceCommand
+    var body: some View {
+        Button(command.title, action: command.action)
+            .keyboardShortcut(command.keyboardShortcut)
+            .disabled(command.unavailableReason != nil)
+            .help(command.unavailableReason ?? command.title)
+    }
 }
 
 extension WorkspaceViewModel {
     var isWorkflowAdjustmentActive: Bool { selectionRefinementDraft != nil || textureAdjustmentSettings != nil }
 
+    func command(_ id: String) -> WorkspaceCommand? { searchableCommands.first { $0.id == id } }
+    func performCommand(_ id: String) {
+        guard let command = command(id), command.unavailableReason == nil else { return }
+        command.action()
+    }
+
     var searchableCommands: [WorkspaceCommand] {
         let selected = workspace.selection.committedShape != nil
         let draftBlocked = selectionRefinementDraft != nil || textureAdjustmentSettings != nil
         let noSelection: String? = isTransformingSelection ? "请先结束变形" : (!selected ? "需要先建立选区" : nil)
-        let persistenceBlock: String? = draftBlocked ? "请先应用或取消调整" : (isProjectSaving ? "正在保存" : nil)
+        let persistenceBlock = documentPersistenceBlockReason(action: "操作文件")
         let commands: [WorkspaceCommand] = [
             .init(id: "new", title: "新建画布", category: "文件", shortcut: "⌘N", unavailableReason: persistenceBlock, action: presentNewCanvasSheet),
             .init(id: "open", title: "打开工程", category: "文件", shortcut: "⌘O", unavailableReason: persistenceBlock, action: openProject),
@@ -25,7 +48,7 @@ extension WorkspaceViewModel {
             .init(id: "export", title: "导出图像", category: "文件", shortcut: "⌘E", unavailableReason: persistenceBlock, action: presentRasterExportSheet),
             .init(id: "undo", title: "撤销", category: "编辑", shortcut: "⌘Z", unavailableReason: canUndo ? nil : "没有可撤销操作", action: undo),
             .init(id: "redo", title: "重做", category: "编辑", shortcut: "⇧⌘Z", unavailableReason: canRedo ? nil : "没有可重做操作", action: redo),
-            .init(id: "transform", title: "移动与自由变形", category: "编辑", shortcut: "V", action: { self.selectTool(.freeTransform) }),
+            .init(id: "transform", title: "移动与自由变形", category: "编辑", shortcut: ToolSidebarGroup.group(containing: .freeTransform).flatMap { shortcutSettings.shortcutKey(for: $0) } ?? "", action: { self.selectTool(.freeTransform) }),
             .init(id: "newLayer", title: "新建绘画图层", category: "图层", action: { self.addLayer() }),
             .init(id: "duplicate", title: "复制当前图层", category: "图层", action: duplicateActiveLayer),
             .init(id: "mergeDown", title: "向下合并", category: "图层", unavailableReason: canMergeDown ? nil : "需要下方可合并图层", action: mergeActiveLayerDown),
@@ -55,6 +78,8 @@ extension WorkspaceViewModel {
 
 struct CommandSearchSheet: View {
     @ObservedObject var viewModel: WorkspaceViewModel
+    @ObservedObject private var shortcuts: AppShortcutSettingsStore
+    init(viewModel: WorkspaceViewModel) { self.viewModel = viewModel; self.shortcuts = viewModel.shortcutSettings }
     @State private var query = ""
     @FocusState private var focused: Bool
     @Environment(\.dismiss) private var dismiss
@@ -106,18 +131,19 @@ struct ArtFlexWorkspaceCommands: Commands {
     var editor: WorkspaceViewModel { host.ideationActiveBranchViewModel ?? host }
     var body: some Commands {
         CommandGroup(replacing: .newItem) {
-            Button("新建画布") { host.presentNewCanvasSheet() }.keyboardShortcut("n")
-            Button("打开工程…") { host.openProject() }.keyboardShortcut("o")
+            command("new", host)
+            command("open", host)
+            Menu("打开最近工程") { RecentProjectsMenu(model: host) }
         }
         CommandGroup(replacing: .saveItem) {
-            Button("保存工程") { host.saveProject() }.keyboardShortcut("s")
-            Button("另存为…") { host.saveProject(asNewFile: true) }.keyboardShortcut("s", modifiers: [.command, .shift])
+            command("save", host)
+            command("saveAs", host)
             Divider()
-            Button("导出图像…") { host.presentRasterExportSheet() }.keyboardShortcut("e")
+            command("export", host)
         }
         CommandGroup(replacing: .undoRedo) {
-            Button("撤销") { editor.undo() }.keyboardShortcut("z").disabled(!editor.canUndo)
-            Button("重做") { editor.redo() }.keyboardShortcut("z", modifiers: [.command, .shift]).disabled(!editor.canRedo)
+            command("undo", editor)
+            command("redo", editor)
         }
         CommandGroup(after: .pasteboard) {
             Button("合并拷贝") { editor.copyMergedPixels() }.keyboardShortcut("c", modifiers: [.command, .shift])
@@ -133,23 +159,26 @@ struct ArtFlexWorkspaceCommands: Commands {
             Button("盖印图层") { editor.stampVisibleLayers() }.keyboardShortcut("e", modifiers: [.command, .option, .shift]).disabled(editor.isWorkflowAdjustmentActive)
         }
         CommandMenu("选区") {
-            Button("取消选区") { editor.clearSelection() }.keyboardShortcut("d").disabled(editor.isTransformingSelection || editor.isWorkflowAdjustmentActive)
-            Button("填充选区内容") { editor.fillSelectionContents() }.keyboardShortcut("f", modifiers: [.command, .shift]).disabled(editor.isWorkflowAdjustmentActive || editor.workspace.selection.committedShape == nil)
+            command("clearSelection", editor)
+            command("fill", editor)
             ForEach(editor.searchableCommands.filter { $0.category == "选区" && $0.id != "clearSelection" && $0.id != "fill" }) { command in
-                Button(command.title, action: command.action).disabled(command.unavailableReason != nil)
+                WorkspaceCommandButton(command: command)
             }
             Button("填充套索内容") { editor.fillLassoContents() }.disabled(editor.isWorkflowAdjustmentActive)
             Button("擦除套索内容") { editor.eraseLassoContents() }.disabled(editor.isWorkflowAdjustmentActive)
         }
         CommandGroup(after: .toolbar) {
-            Button("适合窗口") { editor.resetViewport() }.keyboardShortcut("0")
-            Button("放大画布") { editor.zoomIn() }
-            Button("缩小画布") { editor.zoomOut() }
+            command("fit", editor)
+            command("zoomIn", editor)
+            command("zoomOut", editor)
         }
+    }
+    @ViewBuilder private func command(_ id: String, _ model: WorkspaceViewModel) -> some View {
+        if let item = model.command(id) { WorkspaceCommandButton(command: item) }
     }
     @ViewBuilder private func category(_ category: String) -> some View {
         ForEach(editor.searchableCommands.filter { $0.category == category }) { command in
-            Button(command.title, action: command.action).disabled(command.unavailableReason != nil)
+            WorkspaceCommandButton(command: command)
         }
     }
 }

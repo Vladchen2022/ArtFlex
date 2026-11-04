@@ -146,7 +146,7 @@ final class FilePanelService {
         }
         #endif
         // Resolve the parent after the button's popover/sheet state has settled.
-        DispatchQueue.main.async { [self] in
+        MainRunLoopDelivery.perform { [self] in
             let handler: (NSApplication.ModalResponse) -> Void = { response in
                 let urls = (panel as? NSOpenPanel)?.urls ?? panel.url.map { [$0] }
                 finish(response == .OK ? urls : nil)
@@ -182,7 +182,7 @@ final class FilePanelService {
         #if DEBUG
         if let confirmForTesting { confirmForTesting(finish); return }
         #endif
-        DispatchQueue.main.async { [self] in
+        MainRunLoopDelivery.perform { [self] in
             guard let parent = presentationParent() else { finish(.abort); return }
             alert.beginSheetModal(for: parent, completionHandler: finish)
         }

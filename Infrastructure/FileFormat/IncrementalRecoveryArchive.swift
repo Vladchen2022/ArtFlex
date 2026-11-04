@@ -31,12 +31,19 @@ struct FrozenRecoveryTile: @unchecked Sendable {
     var texture: MTLTexture
 }
 
+/// An independently owned composite; callers never mutate it after capture.
+struct RecoveryPreviewTexture: @unchecked Sendable {
+    let texture: MTLTexture
+    init(_ texture: MTLTexture) { self.texture = texture }
+}
+
 struct FrozenRecoveryCapture: @unchecked Sendable {
     var metadata: ProjectArchivePayload
     var manifest: IncrementalRecoveryManifest
     var changedTiles: [FrozenRecoveryTile]
     var previousURL: URL?
     var copiedPixelBytes: Int
+    var preview: RecoveryPreviewTexture? = nil
 }
 
 /// Regional copies are submitted at the editing boundary; only the recovery worker waits.
@@ -47,6 +54,7 @@ struct QueuedRecoveryCapture: Sendable {
     var textureBatch: DeferredTextureCloneBatch
     var previousURL: URL?
     var copiedPixelBytes: Int
+    var preview: RecoveryPreviewTexture? = nil
 
     func waitUntilReady() throws -> FrozenRecoveryCapture {
         let textures = try textureBatch.waitUntilReady()
@@ -56,7 +64,7 @@ struct QueuedRecoveryCapture: Sendable {
         return .init(metadata: metadata, manifest: manifest,
             changedTiles: zip(tileDescriptors, textures).map { descriptor, texture in
                 .init(key: descriptor.key, region: descriptor.region, texture: texture)
-            }, previousURL: previousURL, copiedPixelBytes: copiedPixelBytes)
+            }, previousURL: previousURL, copiedPixelBytes: copiedPixelBytes, preview: preview)
     }
 }
 

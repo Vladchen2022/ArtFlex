@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-# Package existing SwiftPM build products. Refuse to overwrite an installed app.
+# Package build products bound to a verified source/build manifest.
 if [[ $# -ne 2 ]]; then
     echo "Usage: $0 BUILD_PRODUCTS_DIRECTORY OUTPUT.app" >&2
     exit 1
@@ -20,6 +20,8 @@ if [[ ! -x "$products_dir/ArtFlex" || ! -d "$products_dir/ArtFlex_ArtFlex.bundle
     echo "Missing ArtFlex executable or resource bundle in: $products_dir" >&2
     exit 1
 fi
+
+python3 "$distribution_dir/release.py" verify-products "$products_dir" >/dev/null
 
 scratch_dir="$(mktemp -d "${TMPDIR:-/tmp}/artflex-package.XXXXXX")"
 trap 'rm -rf "$scratch_dir"' EXIT
@@ -40,6 +42,7 @@ mkdir -p "$staged_app/Contents/MacOS" "$staged_app/Contents/Resources"
 cp "$distribution_dir/Info.plist" "$staged_app/Contents/Info.plist"
 cp "$products_dir/ArtFlex" "$staged_app/Contents/MacOS/ArtFlex"
 ditto "$products_dir/ArtFlex_ArtFlex.bundle" "$staged_app/Contents/Resources/ArtFlex_ArtFlex.bundle"
+cp "$products_dir/BuildManifest.json" "$staged_app/Contents/Resources/BuildManifest.json"
 cp "$scratch_dir/AppIcon.icns" "$staged_app/Contents/Resources/AppIcon.icns"
 plutil -lint "$staged_app/Contents/Info.plist"
 codesign --force --deep --sign - "$staged_app"
@@ -47,4 +50,5 @@ codesign --verify --deep --strict "$staged_app"
 
 mkdir -p "$(dirname "$output_app")"
 ditto "$staged_app" "$output_app"
+python3 "$distribution_dir/release.py" verify-app "$output_app" >/dev/null
 echo "Packaged: $output_app"

@@ -325,30 +325,30 @@ final class PersistenceController {
         from capture: FrozenProjectCapture,
         reuseEncodedLayers: Bool = false
     ) throws -> ProjectArchivePayload {
-        var frozenTextures = capture.layerResources.map(\.texture)
-        if let previewTexture = capture.previewTexture {
-            frozenTextures.append(previewTexture)
+        var layerSnapshots: [LayerHistorySnapshot] = []
+        var encodedResources = capture.reusedLayerResources
+        let tokens = Dictionary(uniqueKeysWithValues: capture.resourceTokens.map { ($0.key, $0) })
+        // Frozen GPU resources stay alive until capture completes. Raw CPU readback and
+        // compression scratch, however, are bounded to one layer/mask at a time.
+        for resource in capture.layerResources {
+            try autoreleasepool {
+                let snapshot = LayerHistorySnapshot(layerID: resource.layer.id,
+                    resourceKind: resource.resourceKind,
+                    texture: try serializer.snapshot(texture: resource.texture))
+                if reuseEncodedLayers {
+                    let encoded = try EncodedProjectLayerResource(snapshot: snapshot)
+                    if let token = tokens[encoded.key] { savedResourceCache.insert(encoded, token: token) }
+                    encodedResources.append(encoded)
+                } else {
+                    layerSnapshots.append(snapshot)
+                }
+            }
         }
-        let textureSnapshots = try serializer.snapshotBatch(textures: frozenTextures)
-        let layerTextureSnapshots = textureSnapshots.prefix(capture.layerResources.count)
-        var layerSnapshots = zip(capture.layerResources, layerTextureSnapshots).map { item, textureSnapshot in
-            LayerHistorySnapshot(
-                layerID: item.layer.id,
-                resourceKind: item.resourceKind,
-                texture: textureSnapshot
-            )
-        }
-        var encodedResources: [EncodedProjectLayerResource] = []
         if reuseEncodedLayers {
-            let tokens = Dictionary(uniqueKeysWithValues: capture.resourceTokens.map { ($0.key, $0) })
-            encodedResources = try layerSnapshots.map { snapshot in
-                let encoded = try EncodedProjectLayerResource(snapshot: snapshot)
-                if let token = tokens[encoded.key] { savedResourceCache.insert(encoded, token: token) }
-                return encoded
-            } + capture.reusedLayerResources
             layerSnapshots = encodedResources.map(\.template)
         } else {
             layerSnapshots += try capture.reusedLayerResources.map { try $0.materialized() }
+            encodedResources = []
         }
         // The package order remains stable regardless of which resources were reused.
         let order = capture.workspace.document.paintLayers.flatMap { layer in
@@ -362,8 +362,11 @@ final class PersistenceController {
                 < positions[.init(layerID: $1.layerID, kind: $1.resourceKind), default: .max]
         }
         let previewPNGData: Data?
-        if capture.previewTexture != nil, let previewSnapshot = textureSnapshots.last {
-            previewPNGData = try thumbnailEncoder.encodePNG(from: previewSnapshot)
+        if let previewTexture = capture.previewTexture {
+            previewPNGData = try autoreleasepool {
+                try thumbnailEncoder.encodePNG(from: serializer.downsampledSnapshot(texture: previewTexture,
+                    divisor: max(1, (max(previewTexture.width, previewTexture.height) + 511) / 512)))
+            }
         } else {
             previewPNGData = nil
         }
@@ -624,7 +627,8 @@ final class PersistenceController {
 
     func enqueueIncrementalRecovery(
         referenceImages: [ProjectReferenceImagePayload] = [],
-        savedSnapshots: [PersistentCanvasSnapshotPayload] = []
+        savedSnapshots: [PersistentCanvasSnapshotPayload] = [],
+        previewTexture: MTLTexture? = nil
     ) throws -> QueuedRecoveryCapture {
         let workspace = workspaceStore.state
         let previous = try? IncrementalRecoveryArchive.manifest(at: recoveryProjectURL, limits: archiveReadLimits)
@@ -666,10 +670,18 @@ final class PersistenceController {
                             documentID: workspace.document.metadata.drawingStatsID, resources: resources),
             tileDescriptors: sources.indices.map { (keys[$0], sources[$0].1) },
             textureBatch: pending,
-            previousURL: compatible ? recoveryProjectURL : nil, copiedPixelBytes: byteCount)
+            previousURL: compatible ? recoveryProjectURL : nil, copiedPixelBytes: byteCount,
+            preview: previewTexture.map(RecoveryPreviewTexture.init))
     }
 
     func writeIncrementalRecovery(_ capture: FrozenRecoveryCapture, to url: URL) throws {
+        var capture = capture
+        if let texture = capture.preview?.texture {
+            capture.metadata.previewPNGData = try? autoreleasepool {
+                let divisor = max(1, (max(texture.width, texture.height) + 511) / 512)
+                return try thumbnailEncoder.encodePNG(from: serializer.downsampledSnapshot(texture: texture, divisor: divisor))
+            }
+        }
         try IncrementalRecoveryArchive.write(capture, serializer: serializer, to: url, limits: archiveReadLimits)
     }
 
@@ -750,6 +762,22 @@ final class PersistenceController {
             guard FileManager.default.fileExists(atPath: candidate.path) else { return false }
             return (try? inspectProject(from: candidate)) != nil
         }
+    }
+
+    func recoverySummary() throws -> RecoveryProjectSummary {
+        guard let url = bestAvailableRecoveryProjectURL() else {
+            throw PersistenceError.invalidProject("没有可读取的恢复副本")
+        }
+        let inspection = try inspectProject(from: url)
+        let preview: Data?
+        if IncrementalRecoveryArchive.exists(at: url) {
+            preview = try? archiveReader.previewData(from: url.appendingPathComponent("metadata"))
+        } else if Self.shouldUseV2Archive(for: url) {
+            preview = try? withV2PackageDirectory(for: url) { try archiveReader.previewData(from: $0) }
+        } else { preview = nil }
+        return .init(name: inspection.workspace.document.metadata.name,
+            modified: try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate,
+            canvasSize: inspection.workspace.document.canvasSize, previewPNGData: preview)
     }
 
     func openBestAvailableRecoveryProject(

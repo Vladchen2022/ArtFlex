@@ -32,11 +32,3 @@ extension SelectionCombineMode {
         switch self { case .replace: "新建"; case .add: "增选"; case .subtract: "减选"; case .intersect: "交集" }
     }
 }
-
-// One worker bounds the memory used while the user drags the radius slider.
-actor SelectionPreviewWorker {
-    static let shared = SelectionPreviewWorker()
-    func evaluate(_ operation: @Sendable () throws -> SelectionShape?) -> Result<SelectionShape?, Error> {
-        Result { try Task.checkCancellation(); return try operation() }
-    }
-}

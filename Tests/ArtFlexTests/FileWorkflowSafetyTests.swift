@@ -196,34 +196,34 @@ struct FileWorkflowSafetyTests {
         delegate.viewModel = h.viewModel
         var approved = false
         var prompts = 0
-        delegate.approvedTerminationHandler = { _ in approved = true }
+        delegate.terminationReplyHandler = { _, allowed in approved = allowed }
         h.bootstrap.filePanelService.confirmForTesting = { reply in
             prompts += 1
             reply(.alertThirdButtonReturn)
         }
-        #expect(delegate.applicationShouldTerminate(NSApplication.shared) == .terminateCancel)
+        #expect(delegate.applicationShouldTerminate(NSApplication.shared) == .terminateLater)
         try await h.waitUntil { prompts == 1 }
         try #require(prompts == 1)
         #expect(!approved && h.viewModel.hasUnsavedChanges)
         let output = h.root.appendingPathComponent("approved-quit.artflex")
         h.select(output)
         h.bootstrap.filePanelService.confirmForTesting = { $0(.alertFirstButtonReturn) }
-        #expect(delegate.applicationShouldTerminate(NSApplication.shared) == .terminateCancel)
+        #expect(delegate.applicationShouldTerminate(NSApplication.shared) == .terminateLater)
         try await h.waitUntil { approved }
         #expect(!h.viewModel.hasUnsavedChanges)
         #expect(try h.bootstrap.persistenceController.openProject(from: output).workspace.document.canvasSize.width == 8)
     }
 
-    @Test func appQuitKeepsNormalEventLoopUntilSaveConfirmationFinishes() async throws {
+    @Test func appQuitRepliesOnceToDeferredTermination() async throws {
         let h = try FileWorkflowHarness()
         defer { h.cleanUp() }
         let delegate = ArtFlexApplicationDelegate()
         delegate.viewModel = h.viewModel
         var approvedCount = 0
-        delegate.approvedTerminationHandler = { _ in approvedCount += 1 }
+        delegate.terminationReplyHandler = { _, allowed in if allowed { approvedCount += 1 } }
         let app = NSApplication.shared
-        #expect(delegate.applicationShouldTerminate(app) == .terminateCancel)
-        #expect(delegate.applicationShouldTerminate(app) == .terminateCancel)
+        #expect(delegate.applicationShouldTerminate(app) == .terminateLater)
+        #expect(delegate.applicationShouldTerminate(app) == .terminateLater)
         try await h.waitUntil { approvedCount > 0 }
         #expect(approvedCount == 1)
         #expect(delegate.applicationShouldTerminate(app) == .terminateNow)

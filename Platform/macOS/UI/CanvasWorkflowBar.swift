@@ -52,7 +52,9 @@ struct CanvasWorkflowBar: View {
                         .frame(width: 115)
                     Button("换一个结果") { viewModel.updateRecentTextureAdjustment(settings: settings, reroll: true) }
                     Button("取消") { viewModel.finishRecentTextureAdjustment(apply: false) }
-                    Button("应用") { viewModel.finishRecentTextureAdjustment(apply: true) }.buttonStyle(.borderedProminent)
+                    Button("应用") { viewModel.finishRecentTextureAdjustment(apply: true) }.disabled(viewModel.isTextureAdjustmentComputing || viewModel.textureAdjustmentError != nil)
+                        if viewModel.isTextureAdjustmentComputing { ProgressView().controlSize(.small) }
+                    if viewModel.textureAdjustmentError != nil { Text("调整失败，请重试或取消").foregroundStyle(.orange) }
                 }.workflowCapsule()
             } else if viewModel.workspace.toolSession.activeTool == .textureFill {
                 HStack(spacing: 8) {
@@ -142,7 +144,7 @@ struct MaskThumbnailButton: View {
         }
         .buttonStyle(.plain).accessibilityLabel("编辑\(layer.name)蒙版")
         .help("点击编辑蒙版：白色显示，黑色隐藏")
-        .task(id: viewModel.layerThumbnailRevision) { image = await viewModel.loadMaskThumbnail(for: layer.id) }
+        .task(id: viewModel.maskThumbnailKey(for: layer.id)) { image = await viewModel.loadMaskThumbnail(for: layer.id) }
     }
 }
 

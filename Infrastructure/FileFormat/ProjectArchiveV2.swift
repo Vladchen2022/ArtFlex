@@ -912,6 +912,14 @@ final class ProjectArchiveV2Reader {
         self.limits = limits
     }
 
+    /// Reads only the bounded, hash-validated preview asset, never layer pixels.
+    func previewData(from archiveURL: URL) throws -> Data? {
+        let manifest = try loadManifest(from: archiveURL)
+        guard let preview = manifest.preview else { return nil }
+        return try readAsset(preview, from: archiveURL,
+            maximumUncompressedBytes: ProjectArchiveV2Manifest.maximumPreviewByteCount)
+    }
+
     func inspect(from archiveURL: URL) throws -> ProjectArchiveInspection {
         let manifest = try loadManifest(from: archiveURL)
         var totalUncompressedBytes = 0

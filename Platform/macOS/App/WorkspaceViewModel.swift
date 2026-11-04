@@ -10,7 +10,6 @@ private func emitSelectionTraceViewModel(_ message: String) {
     appendSelectionTrace(message)
 }
 
-private typealias SelectionPolygonShape = [[CGPoint]]
 
 private struct SelectionGeometryOptions {
     var constrainsProportions: Bool
@@ -85,9 +84,13 @@ final class WorkspaceViewModel: ObservableObject {
     @Published var preferredSelectionCombineMode: SelectionCombineMode = .replace
     @Published var isCommandSearchPresented = false
     @Published var historyPreviewImages: [UUID: CGImage] = [:]
-    private var selectionPreviewTask: Task<Void, Never>?
+    private let selectionPreviewCoordinator = LatestPreviewCoordinator<SelectionShape?>()
     private var selectionPreviewRequest = UUID()
     private var recentTextureFill: RecentTextureFill?
+    @Published var isTextureAdjustmentComputing = false
+    @Published var textureAdjustmentError: String?
+    private let textureAdjustmentCoordinator = LatestPreviewCoordinator<WorkspaceUncheckedBox<MTLTexture>>()
+    private lazy var textureAdjustmentRenderer = TextureAdjustmentRenderer(metal: bootstrap.metalContext, serializer: bootstrap.textureSerializer)
     @Published var textureAdjustmentSettings: TextureFillTipSettings?
     @Published var canAdjustRecentTextureFill = false
     private var textureAdjustmentInitialFill: RecentTextureFill?
@@ -357,7 +360,10 @@ final class WorkspaceViewModel: ObservableObject {
     private var brushTipDraftSnapshot: BrushTipDraftSnapshot?
     private var brushTipDraftHistory = BrushTipDraftHistory()
     private var statusDismissTask: Task<Void, Never>?
-    private var rasterExportPreviewSource: LayerTextureSnapshot?
+    private var rasterExportPreviewTexture: MTLTexture?
+    private var rasterExportPreviewCancellation: WorkCancellation?
+    private let rasterPreviewStore = RasterPreviewStore()
+    private let maskThumbnailStore = MaskThumbnailStore()
     private var rasterExportTask: Task<Void, Never>?
     private var rasterExportBoundsRequest: UUID?
     private var isAdjustingLayerOpacity = false
@@ -586,6 +592,7 @@ final class WorkspaceViewModel: ObservableObject {
     private lazy var referenceImageFloatingPanelController = ReferenceImageFloatingPanelController()
     @Published private(set) var isCanvasLuminosityReferenceActive = false
     let shortcutSettings = AppShortcutSettingsStore()
+    let projectAccess = ProjectAccessController()
     private var luminosityReferenceSlotID: Int?
     private var luminosityCaptureTask: Task<Void, Never>?
     private var luminosityReferenceSourceRevision: UInt64 = 0
@@ -2560,14 +2567,14 @@ final class WorkspaceViewModel: ObservableObject {
         shape: SelectionShape?,
         canvasSize: CanvasSize
     ) -> [UInt8] {
-        selectionMaskBytes(for: shape, canvasSize: canvasSize)
+        SelectionMaskRasterizer.selectionMaskBytes(for: shape, canvasSize: canvasSize)
     }
 
     func selectionMaskBytesForCurveAdjustment(
         shape: SelectionShape?,
         canvasSize: CanvasSize
     ) -> [UInt8] {
-        selectionMaskBytes(for: shape, canvasSize: canvasSize)
+        SelectionMaskRasterizer.selectionMaskBytes(for: shape, canvasSize: canvasSize)
     }
 
     func activeEditableLayerEffectBoundsForColorAdjustment() -> CanvasRect? {
@@ -8802,7 +8809,7 @@ final class WorkspaceViewModel: ObservableObject {
             activeRasterizationTask = Task { [weak self] in
                 guard let self else { return }
                 let rasterized = await Task.detached(priority: .userInitiated) {
-                    self.selectionMaskShape(
+                    SelectionMaskRasterizer.selectionMaskShape(
                         from: polygonShapes,
                         canvasSize: capturedCanvasSize,
                         preferredDisplayShape: capturedPreferredShape
@@ -9262,7 +9269,7 @@ final class WorkspaceViewModel: ObservableObject {
         materialTextureData: Data
     ) -> Bool {
         let canvasSize = CanvasSize(width: replayTexture.width, height: replayTexture.height)
-        guard let smoothShape = textureFillSmoothFinalSelectionShape(
+        guard let smoothShape = SelectionMaskRasterizer.textureFillSmoothFinalSelectionShape(
             from: state.rawEdgePoints,
             anchorPoint: state.anchorPoint,
             canvasSize: canvasSize
@@ -9278,7 +9285,7 @@ final class WorkspaceViewModel: ObservableObject {
             return false
         }
 
-        let boundedMask = selectionMaskRegion(
+        let boundedMask = SelectionMaskRasterizer.selectionMaskRegion(
             for: smoothShape,
             canvasSize: canvasSize,
             originX: minX,
@@ -9323,7 +9330,7 @@ final class WorkspaceViewModel: ObservableObject {
             materialCoverage: state.tipSettings.coverage,
             materialVariation: state.tipSettings.variation,
             materialSeed: state.sessionSeed,
-            materialAngleRadians: textureFillMaterialAngle(from: state.rawEdgePoints),
+            materialAngleRadians: SelectionMaskRasterizer.textureFillMaterialAngle(from: state.rawEdgePoints),
             materialArrangement: state.tipSettings.arrangement
         ) else { return false }
 
@@ -9336,24 +9343,6 @@ final class WorkspaceViewModel: ObservableObject {
         return true
     }
 
-    private func textureFillMaterialAngle(from points: [CanvasPoint]) -> Float {
-        guard points.count >= 3 else { return 0 }
-        let count = Double(points.count)
-        let meanX = points.reduce(0) { $0 + $1.x } / count
-        let meanY = points.reduce(0) { $0 + $1.y } / count
-        var xx = 0.0
-        var yy = 0.0
-        var xy = 0.0
-        for point in points {
-            let dx = point.x - meanX
-            let dy = point.y - meanY
-            xx += dx * dx
-            yy += dy * dy
-            xy += dx * dy
-        }
-        return Float(0.5 * atan2(2 * xy, xx - yy))
-    }
-
     private func applyTextureFillSmoothFinalMask(
         replayTexture: MTLTexture,
         baseTexture: MTLTexture,
@@ -9361,7 +9350,7 @@ final class WorkspaceViewModel: ObservableObject {
         state: TextureFillGestureState
     ) -> Bool {
         let canvasSize = CanvasSize(width: replayTexture.width, height: replayTexture.height)
-        guard let smoothShape = textureFillSmoothFinalSelectionShape(
+        guard let smoothShape = SelectionMaskRasterizer.textureFillSmoothFinalSelectionShape(
             from: state.rawEdgePoints,
             anchorPoint: state.anchorPoint,
             canvasSize: canvasSize
@@ -9377,7 +9366,7 @@ final class WorkspaceViewModel: ObservableObject {
             return false
         }
 
-        let boundedMask = selectionMaskRegion(
+        let boundedMask = SelectionMaskRasterizer.selectionMaskRegion(
             for: smoothShape,
             canvasSize: canvasSize,
             originX: minX,
@@ -9419,25 +9408,6 @@ final class WorkspaceViewModel: ObservableObject {
         } catch {
             return false
         }
-    }
-
-    private func textureFillSmoothFinalSelectionShape(
-        from rawEdgePoints: [CanvasPoint],
-        anchorPoint: CanvasPoint,
-        canvasSize: CanvasSize
-    ) -> SelectionShape? {
-        let smoothedPoints = smoothedClosedLassoPoints(
-            rawPoints: rawEdgePoints,
-            closingTo: anchorPoint
-        )
-        guard smoothedPoints.count >= 3 else {
-            return nil
-        }
-        return SelectionShape(
-            kind: .lasso,
-            bounds: CanvasRect.bounding(points: smoothedPoints),
-            pathPoints: smoothedPoints
-        ).clamped(to: canvasSize)
     }
 
     private func textureFillLiveSelectionShape(
@@ -9526,7 +9496,7 @@ final class WorkspaceViewModel: ObservableObject {
         selectionEpoch += 1
         let capturedEpoch = selectionEpoch
         let historyBaseShape = workspace.selection.committedShape?.clamped(to: canvasSize)
-        let historyBaseMask = boundedSelectionMask(for: historyBaseShape, canvasSize: canvasSize)
+        let historyBaseMask = SelectionMaskRasterizer.boundedSelectionMask(for: historyBaseShape, canvasSize: canvasSize)
         let mode = resolvedMagicWandSelectionMode(modifiers: modifiers)
         let settings = smartSelectionSettings
         let capturedRevision = canvasContentRevision
@@ -10038,7 +10008,7 @@ final class WorkspaceViewModel: ObservableObject {
             guard let self else { return }
             let result = await Task.detached(priority: .userInitiated) {
                 Result {
-                    try self.featheredSelectionShape(
+                    try SelectionMaskRasterizer.featheredSelectionShape(
                         capturedSelection,
                         canvasSize: capturedCanvasSize,
                         radiusPixels: radiusPixels
@@ -11280,7 +11250,7 @@ final class WorkspaceViewModel: ObservableObject {
                 return nil
             }
 
-            let selectionMask = selectionMaskRegion(
+            let selectionMask = SelectionMaskRasterizer.selectionMaskRegion(
                 for: clampedSelection,
                 canvasSize: canvasSize,
                 originX: minX,
@@ -13436,7 +13406,9 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func finishRasterExportPresentation() {
-        rasterExportPreviewSource = nil
+        rasterExportPreviewCancellation?.cancel()
+        rasterExportPreviewTexture = nil
+        Task { await rasterPreviewStore.clear() }
         guard !isRasterExporting else { return }
         rasterExportBoundsRequest = nil
         rasterExportSourceBounds = nil
@@ -14311,6 +14283,7 @@ final class WorkspaceViewModel: ObservableObject {
         pendingSaveHistoryPoint = nil
         do {
             let outcome = try result.get()
+            projectAccess.record(prepared.url)
             let previewPNGData = outcome.previewPNGData
             _ = documentLifecycle.acceptSave(
                 of: .init(generation: prepared.documentGeneration, editRevision: prepared.editRevision), to: prepared.url)
@@ -14373,6 +14346,10 @@ final class WorkspaceViewModel: ObservableObject {
             return
         }
         beginProjectOpen(from: projectURL, isRecovery: false)
+    }
+
+    func inspectRecoveryProject() {
+        projectAccess.inspectRecovery(using: bootstrap.persistenceController)
     }
 
     func recoverAutosavedProject() {
@@ -14495,6 +14472,7 @@ final class WorkspaceViewModel: ObservableObject {
         restoreProjectReferenceImages(result.referenceImages)
         restorePersistentSavedSnapshots(result.savedSnapshots)
         currentProjectURL = isRecovery || result.storageFormat == .legacyJSON ? nil : sourceURL
+        if !isRecovery { projectAccess.record(sourceURL) }
         // Opening is read-only. Finder metadata is updated only after a successful save.
         hasUnsavedChanges = isRecovery
         persistBrushLibrary()
@@ -14686,7 +14664,8 @@ final class WorkspaceViewModel: ObservableObject {
             // Freeze changed regions only; unchanged compressed tiles are shared across generations.
             let capture = try bootstrap.persistenceController.enqueueIncrementalRecovery(
                 referenceImages: try projectReferenceImagePayloads(),
-                savedSnapshots: persistentSavedSnapshotPayloads()
+                savedSnapshots: persistentSavedSnapshotPayloads(),
+                previewTexture: try? makeVisibleCompositeTexture(waitUntilCompleted: false)
             )
             try recoveryCoordinator.write(capture, scheduleGeneration: generation)
         } catch {
@@ -14728,30 +14707,24 @@ final class WorkspaceViewModel: ObservableObject {
         return activity
     }
 
-    private func canBeginDocumentPersistence(action: String) -> Bool {
+    func documentPersistenceBlockReason(action: String) -> String? {
         guard selectionRefinementDraft == nil, textureAdjustmentSettings == nil else {
-            showStatus(.init(kind: .info, message: "请先应用或取消当前调整，再\(action)"))
-            return false
+            return "请先应用或取消当前调整，再\(action)"
         }
         guard !isHistoryNavigating else {
-            showStatus(.init(kind: .info, message: "正在准备历史记录，请稍后再\(action)"))
-            return false
+            return "正在准备历史记录，请稍后再\(action)"
         }
         guard !persistenceEditingActivity.contains(.historyPreview) else {
-            showStatus(.init(kind: .info, message: "请先取消历史预览或应用此状态，再\(action)"))
-            return false
+            return "请先取消历史预览或应用此状态，再\(action)"
         }
         guard !isProjectSaving, !documentLifecycle.isChoosingSaveLocation else {
-            showStatus(.init(kind: .info, message: "工程正在保存，请稍候再\(action)"))
-            return false
+            return "工程正在保存，请稍候再\(action)"
         }
         guard !bootstrap.filePanelService.isPresentingDialog else {
-            showStatus(.init(kind: .info, message: "请先完成或取消当前文件窗口，再\(action)"))
-            return false
+            return "请先完成或取消当前文件窗口，再\(action)"
         }
         guard !isProjectOpening else {
-            showStatus(.init(kind: .info, message: "工程正在打开，请稍候"))
-            return false
+            return "工程正在打开，请稍候"
         }
         if let blocker = DocumentPersistencePolicy.manualBlocker(for: persistenceEditingActivity) {
             let message: String
@@ -14765,10 +14738,15 @@ final class WorkspaceViewModel: ObservableObject {
             case .crop: message = "请先应用或取消画布裁剪，再\(action)"
             case .gesture: message = "请先完成或取消当前绘图手势，再\(action)"
             }
-            showStatus(.init(kind: .info, message: message))
-            return false
+            return message
         }
-        return true
+        return nil
+    }
+
+    private func canBeginDocumentPersistence(action: String) -> Bool {
+        guard let reason = documentPersistenceBlockReason(action: action) else { return true }
+        showStatus(.init(kind: .info, message: reason))
+        return false
     }
 
     private func resetTransientDocumentInteractionsForReplacement() {
@@ -16623,7 +16601,7 @@ final class WorkspaceViewModel: ObservableObject {
             return false
         }
 
-        let selectionMaskRegion = selectionMaskRegion(
+        let selectionMaskRegion = SelectionMaskRasterizer.selectionMaskRegion(
             for: clampedSelection,
             canvasSize: CanvasSize(width: texture.width, height: texture.height),
             originX: minX,
@@ -16740,7 +16718,7 @@ final class WorkspaceViewModel: ObservableObject {
             return false
         }
 
-        let selectionMaskRegion = selectionMaskRegion(
+        let selectionMaskRegion = SelectionMaskRasterizer.selectionMaskRegion(
             for: clampedSelection,
             canvasSize: CanvasSize(width: texture.width, height: texture.height),
             originX: minX,
@@ -16868,7 +16846,7 @@ final class WorkspaceViewModel: ObservableObject {
         }
 
         let maskPreparationStartNs = auditEnabled ? DispatchTime.now().uptimeNanoseconds : 0
-        let selectionMaskRegion = selectionMaskRegion(
+        let selectionMaskRegion = SelectionMaskRasterizer.selectionMaskRegion(
             for: clampedSelection,
             canvasSize: CanvasSize(width: texture.width, height: texture.height),
             originX: minX,
@@ -17140,7 +17118,7 @@ final class WorkspaceViewModel: ObservableObject {
                 return SelectionInputShape(polygonShapes: [], preferredDisplayShape: nil)
             }
 
-            let outlinePoints = selectionOutlinePoints(for: kind, bounds: bounds)
+            let outlinePoints = SelectionMaskRasterizer.selectionOutlinePoints(for: kind, bounds: bounds)
             return SelectionInputShape(
                 polygonShapes: [outlinePoints],
                 preferredDisplayShape: SelectionShape(
@@ -17161,7 +17139,7 @@ final class WorkspaceViewModel: ObservableObject {
         baseShape: SelectionShape?
     ) -> SelectionShape? {
         let logger = Logger(subsystem: "ArtFlex", category: "SelectionTrace")
-        let incomingPatch = selectionMaskPatch(
+        let incomingPatch = SelectionMaskRasterizer.selectionMaskPatch(
             from: input.polygonShapes,
             canvasSize: canvasSize
         )
@@ -17177,7 +17155,7 @@ final class WorkspaceViewModel: ObservableObject {
             }
         }
 
-        let baseMask = mode == .replace ? nil : boundedSelectionMask(for: baseShape, canvasSize: canvasSize)
+        let baseMask = mode == .replace ? nil : SelectionMaskRasterizer.boundedSelectionMask(for: baseShape, canvasSize: canvasSize)
         let resultShape = SelectionMaskCombiner.combineBounded(base: baseMask, incoming: incomingPatch,
             canvasWidth: canvasSize.width, canvasHeight: canvasSize.height, mode: mode)
         guard let resultMaskData = resultShape.maskData else { return nil }
@@ -17206,53 +17184,6 @@ final class WorkspaceViewModel: ObservableObject {
             pathPoints: [],
             maskData: resultMaskData,
             components: displayComponents
-        )
-    }
-
-    nonisolated private func selectionMaskPatch(
-        from polygonShapes: [SelectionPolygonShape],
-        canvasSize: CanvasSize
-    ) -> SelectionMaskCombiner.Patch {
-        let points = polygonShapes.lazy.flatMap { $0 }.flatMap { $0 }
-        guard let first = points.first else {
-            return .init(originX: 0, originY: 0, width: 0, height: 0, alphaBytes: Data())
-        }
-
-        var minX = first.x
-        var minY = first.y
-        var maxX = first.x
-        var maxY = first.y
-        for point in points.dropFirst() {
-            minX = min(minX, point.x)
-            minY = min(minY, point.y)
-            maxX = max(maxX, point.x)
-            maxY = max(maxY, point.y)
-        }
-
-        // Preserve Core Graphics antialiasing at the boundary without turning
-        // a local gesture into a full-canvas rasterization.
-        let originX = min(max(Int(minX.rounded(.down)) - 1, 0), canvasSize.width)
-        let originY = min(max(Int(minY.rounded(.down)) - 1, 0), canvasSize.height)
-        let endX = min(max(Int(maxX.rounded(.up)) + 1, 0), canvasSize.width)
-        let endY = min(max(Int(maxY.rounded(.up)) + 1, 0), canvasSize.height)
-        let width = max(endX - originX, 0)
-        let height = max(endY - originY, 0)
-        guard width > 0, height > 0 else {
-            return .init(originX: 0, originY: 0, width: 0, height: 0, alphaBytes: Data())
-        }
-
-        return SelectionMaskCombiner.Patch(
-            originX: originX,
-            originY: originY,
-            width: width,
-            height: height,
-            alphaBytes: rasterizedSelectionMaskRegionBytes(
-                polygonShapes: polygonShapes,
-                originX: originX,
-                originY: originY,
-                width: width,
-                height: height
-            )
         )
     }
 
@@ -17494,747 +17425,6 @@ final class WorkspaceViewModel: ObservableObject {
         if fallback > 0 { return 1 }
         if fallback < 0 { return -1 }
         return 1
-    }
-
-    nonisolated private func selectionOutlinePoints(
-        for kind: SelectionShapeKind,
-        bounds: CanvasRect
-    ) -> SelectionPolygonShape {
-        switch kind {
-        case .rectangle:
-            return [[
-                CGPoint(x: bounds.minX, y: bounds.minY),
-                CGPoint(x: bounds.minX, y: bounds.maxY),
-                CGPoint(x: bounds.maxX, y: bounds.maxY),
-                CGPoint(x: bounds.maxX, y: bounds.minY)
-            ]]
-        case .ellipse:
-            return [ellipsePolygonPoints(for: bounds)]
-        case .lasso:
-            return []
-        case .mask, .composite:
-            return []
-        }
-    }
-
-    nonisolated private func ellipsePolygonPoints(for bounds: CanvasRect, segments: Int = 96) -> [CGPoint] {
-        let radiusX = max(bounds.size.x / 2, 0.5)
-        let radiusY = max(bounds.size.y / 2, 0.5)
-        let centerX = bounds.origin.x + radiusX
-        let centerY = bounds.origin.y + radiusY
-
-        return (0..<segments).map { index in
-            let angle = (Double(index) / Double(segments)) * .pi * 2
-            return CGPoint(
-                x: centerX + (cos(angle) * radiusX),
-                y: centerY + (sin(angle) * radiusY)
-            )
-        }
-    }
-
-    nonisolated private func selectionMaskShape(
-        from polygonShapes: [SelectionPolygonShape],
-        canvasSize: CanvasSize,
-        preferredDisplayShape: SelectionShape?
-    ) -> SelectionShape {
-        let components = polygonShapes.flatMap { polygonShape -> [SelectionShapeComponent] in
-            polygonShape.compactMap { path in
-                let clamped = path.map {
-                    CanvasPoint(
-                        x: min(max(Double($0.x), 0), Double(canvasSize.width)),
-                        y: min(max(Double($0.y), 0), Double(canvasSize.height))
-                    )
-                }
-                guard clamped.count >= 3 else { return nil }
-                return SelectionShapeComponent(
-                    operation: .add,
-                    shape: SelectionShape(
-                        kind: .lasso,
-                        bounds: CanvasRect.bounding(points: clamped),
-                        pathPoints: clamped
-                    )
-                )
-            }
-        }
-
-        if components.isEmpty {
-            return emptySelectionMaskShape(canvasSize: canvasSize)
-        }
-
-        let maskPatch = selectionMaskPatch(from: polygonShapes, canvasSize: canvasSize)
-        let maskShape = SelectionShape.mask(
-            canvasWidth: canvasSize.width,
-            canvasHeight: canvasSize.height,
-            patch: maskPatch
-        )
-        if RuntimeDiagnostics.selectionTraceLoggingEnabled {
-            let maskMessage = "[selectionMaskShape] polygonShapeCount=\(polygonShapes.count) maskBoundsOrigin=(\(maskShape.bounds.origin.x),\(maskShape.bounds.origin.y)) maskBoundsSize=(\(maskShape.bounds.size.x),\(maskShape.bounds.size.y)) preferredDisplayKind=\(preferredDisplayShape?.kind.rawValue ?? "nil")"
-            Logger(subsystem: "ArtFlex", category: "SelectionTrace").debug("\(maskMessage, privacy: .public)")
-            emitSelectionTraceViewModel(maskMessage)
-        }
-
-        return SelectionShape(
-            kind: .mask,
-            bounds: maskShape.bounds,
-            pathPoints: preferredDisplayShape?.pathPoints ?? [],
-            maskData: maskShape.maskData,
-            components: preferredDisplayShape.map {
-                [SelectionShapeComponent(operation: .add, shape: $0.clamped(to: canvasSize))]
-            } ?? []
-        )
-    }
-
-    nonisolated private func emptySelectionMaskShape(canvasSize: CanvasSize) -> SelectionShape {
-        SelectionShape.mask(
-            canvasWidth: canvasSize.width,
-            canvasHeight: canvasSize.height,
-            patch: .init(originX: 0, originY: 0, width: 0, height: 0, alphaBytes: Data())
-        )
-    }
-
-    nonisolated private func boundedSelectionMask(for shape: SelectionShape?, canvasSize: CanvasSize) -> SelectionMaskData? {
-        guard let shape else { return nil }
-        if let mask = shape.maskData, mask.canvasWidth == canvasSize.width, mask.canvasHeight == canvasSize.height { return mask }
-        let bounds = shape.bounds.clamped(to: canvasSize)
-        guard !bounds.isEmpty else { return nil }
-        let x = max(0, Int(floor(bounds.minX))), y = max(0, Int(floor(bounds.minY)))
-        let width = min(canvasSize.width, Int(ceil(bounds.maxX))) - x
-        let height = min(canvasSize.height, Int(ceil(bounds.maxY))) - y
-        let region = selectionMaskRegion(for: shape, canvasSize: canvasSize,
-            originX: x, originY: y, width: width, height: height)
-        return SelectionMaskData(canvasWidth: canvasSize.width, canvasHeight: canvasSize.height,
-            patch: .init(originX: x, originY: y, width: width, height: height, alphaBytes: region.alphaBytes))
-    }
-
-    nonisolated private func selectionMaskBytes(for shape: SelectionShape?, canvasSize: CanvasSize) -> [UInt8] {
-        guard let shape else {
-            return [UInt8](repeating: 0, count: canvasSize.width * canvasSize.height)
-        }
-
-        if let maskData = shape.maskData,
-           maskData.canvasWidth == canvasSize.width,
-           maskData.canvasHeight == canvasSize.height {
-            return [UInt8](maskData.alphaBytes)
-        }
-
-        let polygonShapes: [SelectionPolygonShape]
-        switch shape.kind {
-        case .lasso:
-            guard shape.pathPoints.count >= 3 else {
-                return [UInt8](repeating: 0, count: canvasSize.width * canvasSize.height)
-            }
-            polygonShapes = [[shape.pathPoints.map { CGPoint(x: $0.x, y: $0.y) }]]
-        case .rectangle, .ellipse:
-            polygonShapes = [selectionOutlinePoints(for: shape.kind, bounds: shape.bounds)]
-        case .mask:
-            if shape.components.count == 1,
-               let component = shape.components.first,
-               component.operation == .add {
-                return selectionMaskBytes(for: component.shape, canvasSize: canvasSize)
-            }
-            if shape.pathPoints.count >= 3 {
-                polygonShapes = [[shape.pathPoints.map { CGPoint(x: $0.x, y: $0.y) }]]
-            } else {
-                return [UInt8](repeating: 0, count: canvasSize.width * canvasSize.height)
-            }
-        case .composite:
-            return compositedSelectionMaskBytes(for: shape, canvasSize: canvasSize)
-        }
-
-        return rasterizedSelectionMaskBytes(
-            polygonShapes: polygonShapes,
-            canvasSize: canvasSize
-        )
-    }
-
-    nonisolated private func selectionMaskRegion(
-        for shape: SelectionShape?,
-        canvasSize: CanvasSize,
-        originX: Int,
-        originY: Int,
-        width: Int,
-        height: Int
-    ) -> SelectionMaskRegion {
-        guard width > 0, height > 0 else {
-            return SelectionMaskRegion(originX: originX, originY: originY, width: 0, height: 0, alphaBytes: Data())
-        }
-
-        guard let shape else {
-            return SelectionMaskRegion(
-                originX: originX,
-                originY: originY,
-                width: width,
-                height: height,
-                alphaBytes: Data(count: width * height)
-            )
-        }
-
-        if let maskData = shape.maskData,
-           maskData.canvasWidth == canvasSize.width,
-           maskData.canvasHeight == canvasSize.height {
-            return SelectionMaskRegion(
-                originX: originX,
-                originY: originY,
-                width: width,
-                height: height,
-                alphaBytes: maskData.alphaBytes(in: .init(originX: originX, originY: originY, width: width, height: height))
-            )
-        }
-
-        let polygonShapes: [SelectionPolygonShape]
-        switch shape.kind {
-        case .lasso:
-            guard shape.pathPoints.count >= 3 else {
-                return SelectionMaskRegion(
-                    originX: originX,
-                    originY: originY,
-                    width: width,
-                    height: height,
-                    alphaBytes: Data(count: width * height)
-                )
-            }
-            polygonShapes = [[shape.pathPoints.map { CGPoint(x: $0.x, y: $0.y) }]]
-        case .rectangle, .ellipse:
-            polygonShapes = [selectionOutlinePoints(for: shape.kind, bounds: shape.bounds)]
-        case .mask:
-            if shape.components.count == 1,
-               let component = shape.components.first,
-               component.operation == .add {
-                return selectionMaskRegion(
-                    for: component.shape,
-                    canvasSize: canvasSize,
-                    originX: originX,
-                    originY: originY,
-                    width: width,
-                    height: height
-                )
-            }
-            if shape.pathPoints.count >= 3 {
-                polygonShapes = [[shape.pathPoints.map { CGPoint(x: $0.x, y: $0.y) }]]
-            } else {
-                return SelectionMaskRegion(
-                    originX: originX,
-                    originY: originY,
-                    width: width,
-                    height: height,
-                    alphaBytes: Data(count: width * height)
-                )
-            }
-        case .composite:
-            return compositedSelectionMaskRegion(
-                for: shape,
-                canvasSize: canvasSize,
-                originX: originX,
-                originY: originY,
-                width: width,
-                height: height
-            )
-        }
-
-        return SelectionMaskRegion(
-            originX: originX,
-            originY: originY,
-            width: width,
-            height: height,
-            alphaBytes: rasterizedSelectionMaskRegionBytes(
-                polygonShapes: polygonShapes,
-                originX: originX,
-                originY: originY,
-                width: width,
-                height: height
-            )
-        )
-    }
-
-    nonisolated private func featheredSelectionShape(
-        _ shape: SelectionShape,
-        canvasSize: CanvasSize,
-        radiusPixels: Int
-    ) throws -> SelectionShape {
-        let clampedShape = shape.clamped(to: canvasSize)
-        guard !clampedShape.isEmpty else {
-            throw SelectionMaskFeatheringError.invalidDimensions
-        }
-
-        let minX = max(Int(clampedShape.bounds.minX.rounded(.down)) - radiusPixels, 0)
-        let minY = max(Int(clampedShape.bounds.minY.rounded(.down)) - radiusPixels, 0)
-        let maxX = min(Int(clampedShape.bounds.maxX.rounded(.up)) + radiusPixels, canvasSize.width)
-        let maxY = min(Int(clampedShape.bounds.maxY.rounded(.up)) + radiusPixels, canvasSize.height)
-        let width = maxX - minX
-        let height = maxY - minY
-        guard width > 0, height > 0 else {
-            throw SelectionMaskFeatheringError.invalidDimensions
-        }
-
-        let sourceRegion = selectionMaskRegion(
-            for: clampedShape,
-            canvasSize: canvasSize,
-            originX: minX,
-            originY: minY,
-            width: width,
-            height: height
-        )
-        let featheredRegionBytes = try VImageSelectionMaskFeatherer.feather(
-            alphaBytes: sourceRegion.alphaBytes,
-            width: width,
-            height: height,
-            radiusPixels: radiusPixels
-        )
-
-        let result = SelectionShape.mask(canvasWidth: canvasSize.width, canvasHeight: canvasSize.height,
-            patch: .init(originX: minX, originY: minY, width: width, height: height, alphaBytes: featheredRegionBytes))
-        guard !result.isEmpty else {
-            throw SelectionMaskFeatheringError.invalidDimensions
-        }
-
-        // The feathered mask controls pixel coverage, while the original vector
-        // geometry remains the stable 50% contour used by the marching-ants overlay.
-        // Existing mask selections may already carry display-only components.
-        let displayComponents: [SelectionShapeComponent]
-        if clampedShape.kind == .mask {
-            displayComponents = clampedShape.components
-        } else {
-            displayComponents = [
-                SelectionShapeComponent(operation: .add, shape: clampedShape)
-            ]
-        }
-        return SelectionShape(
-            kind: .mask,
-            bounds: result.bounds,
-            pathPoints: clampedShape.pathPoints,
-            maskData: result.maskData,
-            components: displayComponents
-        )
-    }
-
-    nonisolated private func maskRegionBytes(
-        from alphaBytes: Data,
-        canvasWidth: Int,
-        originX: Int,
-        originY: Int,
-        width: Int,
-        height: Int
-    ) -> Data {
-        var result = Data(count: width * height)
-        guard !result.isEmpty else { return result }
-
-        result.withUnsafeMutableBytes { destinationRawBuffer in
-            alphaBytes.withUnsafeBytes { sourceRawBuffer in
-                guard
-                    let destinationBase = destinationRawBuffer.baseAddress?.assumingMemoryBound(to: UInt8.self),
-                    let sourceBase = sourceRawBuffer.baseAddress?.assumingMemoryBound(to: UInt8.self)
-                else {
-                    return
-                }
-
-                for row in 0..<height {
-                    let sourceOffset = ((originY + row) * canvasWidth) + originX
-                    let destinationOffset = row * width
-                    UnsafeMutableRawPointer(destinationBase.advanced(by: destinationOffset))
-                        .copyMemory(
-                            from: UnsafeRawPointer(sourceBase.advanced(by: sourceOffset)),
-                            byteCount: width
-                        )
-                }
-            }
-        }
-
-        return result
-    }
-
-    nonisolated private func maskRegionBytes(
-        from alphaBytes: [UInt8],
-        canvasWidth: Int,
-        originX: Int,
-        originY: Int,
-        width: Int,
-        height: Int
-    ) -> Data {
-        var result = Data(count: width * height)
-        guard !result.isEmpty else { return result }
-
-        result.withUnsafeMutableBytes { destinationRawBuffer in
-            alphaBytes.withUnsafeBufferPointer { sourceBuffer in
-                guard
-                    let destinationBase = destinationRawBuffer.baseAddress?.assumingMemoryBound(to: UInt8.self),
-                    let sourceBase = sourceBuffer.baseAddress
-                else {
-                    return
-                }
-
-                for row in 0..<height {
-                    let sourceOffset = ((originY + row) * canvasWidth) + originX
-                    let destinationOffset = row * width
-                    UnsafeMutableRawPointer(destinationBase.advanced(by: destinationOffset))
-                        .copyMemory(
-                            from: UnsafeRawPointer(sourceBase.advanced(by: sourceOffset)),
-                            byteCount: width
-                        )
-                }
-            }
-        }
-
-        return result
-    }
-
-    nonisolated private func applyIncomingMask(
-        to result: inout [UInt8],
-        incomingMaskData: SelectionMaskData,
-        incomingBounds: CanvasRect,
-        canvasSize: CanvasSize,
-        mode: SelectionCombineMode
-    ) {
-        let minX = max(Int(floor(incomingBounds.minX)), 0)
-        let minY = max(Int(floor(incomingBounds.minY)), 0)
-        let maxX = min(Int(ceil(incomingBounds.maxX)), canvasSize.width)
-        let maxY = min(Int(ceil(incomingBounds.maxY)), canvasSize.height)
-        guard minX < maxX, minY < maxY else { return }
-
-        incomingMaskData.withAlphaBytes { incomingBytes in
-            for y in minY..<maxY {
-                let rowOffset = y * canvasSize.width
-                for x in minX..<maxX {
-                    let index = rowOffset + x
-                    guard index < incomingBytes.count else { continue }
-                    let incoming = incomingBytes[index]
-                    guard incoming > 0 else { continue }
-
-                    switch mode {
-                    case .replace:
-                        result[index] = incoming
-                    case .add:
-                        result[index] = max(result[index], incoming)
-                    case .subtract:
-                        let kept = (Int(result[index]) * (255 - Int(incoming))) / 255
-                        result[index] = UInt8(clamping: kept)
-                    case .intersect:
-                        result[index] = UInt8(clamping: (Int(result[index]) * Int(incoming)) / 255)
-                    }
-                }
-            }
-        }
-    }
-
-    nonisolated private func compositedSelectionMaskBytes(
-        for shape: SelectionShape,
-        canvasSize: CanvasSize
-    ) -> [UInt8] {
-        var result = [UInt8](repeating: 0, count: canvasSize.width * canvasSize.height)
-        guard canvasSize.width > 0, canvasSize.height > 0 else { return result }
-
-        for component in shape.flattenedComponents() {
-            guard let regionBounds = selectionMaskIntersectionRegion(
-                for: component.shape,
-                canvasSize: canvasSize,
-                originX: 0,
-                originY: 0,
-                width: canvasSize.width,
-                height: canvasSize.height
-            ) else {
-                continue
-            }
-            let incomingRegion = selectionMaskRegion(
-                for: component.shape,
-                canvasSize: canvasSize,
-                originX: regionBounds.originX,
-                originY: regionBounds.originY,
-                width: regionBounds.width,
-                height: regionBounds.height
-            )
-            applySelectionMaskRegion(
-                to: &result,
-                canvasWidth: canvasSize.width,
-                incomingRegion: incomingRegion,
-                operation: component.operation
-            )
-        }
-
-        return result
-    }
-
-    nonisolated private func compositedSelectionMaskRegion(
-        for shape: SelectionShape,
-        canvasSize: CanvasSize,
-        originX: Int,
-        originY: Int,
-        width: Int,
-        height: Int
-    ) -> SelectionMaskRegion {
-        var result = Data(count: width * height)
-        guard width > 0, height > 0 else {
-            return SelectionMaskRegion(originX: originX, originY: originY, width: 0, height: 0, alphaBytes: Data())
-        }
-
-        for component in shape.flattenedComponents() {
-            guard let regionBounds = selectionMaskIntersectionRegion(
-                for: component.shape,
-                canvasSize: canvasSize,
-                originX: originX,
-                originY: originY,
-                width: width,
-                height: height
-            ) else {
-                continue
-            }
-            let incomingRegion = selectionMaskRegion(
-                for: component.shape,
-                canvasSize: canvasSize,
-                originX: regionBounds.originX,
-                originY: regionBounds.originY,
-                width: regionBounds.width,
-                height: regionBounds.height
-            )
-            applySelectionMaskRegion(
-                to: &result,
-                destinationOriginX: originX,
-                destinationOriginY: originY,
-                destinationWidth: width,
-                incomingRegion: incomingRegion,
-                operation: component.operation
-            )
-        }
-
-        return SelectionMaskRegion(
-            originX: originX,
-            originY: originY,
-            width: width,
-            height: height,
-            alphaBytes: result
-        )
-    }
-
-    nonisolated private func selectionMaskIntersectionRegion(
-        for shape: SelectionShape,
-        canvasSize: CanvasSize,
-        originX: Int,
-        originY: Int,
-        width: Int,
-        height: Int
-    ) -> (originX: Int, originY: Int, width: Int, height: Int)? {
-        let bounds = shape.bounds.clamped(to: canvasSize)
-        let shapeMinX = max(Int(floor(bounds.minX)) - 1, 0)
-        let shapeMinY = max(Int(floor(bounds.minY)) - 1, 0)
-        let shapeMaxX = min(Int(ceil(bounds.maxX)) + 1, canvasSize.width)
-        let shapeMaxY = min(Int(ceil(bounds.maxY)) + 1, canvasSize.height)
-        let minX = max(originX, shapeMinX)
-        let minY = max(originY, shapeMinY)
-        let maxX = min(originX + width, shapeMaxX)
-        let maxY = min(originY + height, shapeMaxY)
-
-        guard minX < maxX, minY < maxY else { return nil }
-        return (originX: minX, originY: minY, width: maxX - minX, height: maxY - minY)
-    }
-
-    nonisolated private func applySelectionMaskRegion(
-        to result: inout [UInt8],
-        canvasWidth: Int,
-        incomingRegion: SelectionMaskRegion,
-        operation: SelectionComponentOperation
-    ) {
-        guard incomingRegion.width > 0, incomingRegion.height > 0 else { return }
-        incomingRegion.withAlphaBytes { incomingBytes in
-            for localY in 0..<incomingRegion.height {
-                let resultRowOffset = (incomingRegion.originY + localY) * canvasWidth
-                let incomingRowOffset = localY * incomingRegion.width
-                for localX in 0..<incomingRegion.width {
-                    let incoming = incomingBytes[incomingRowOffset + localX]
-                    guard incoming > 0 else { continue }
-                    let resultIndex = resultRowOffset + incomingRegion.originX + localX
-                    switch operation {
-                    case .add:
-                        result[resultIndex] = max(result[resultIndex], incoming)
-                    case .subtract:
-                        let kept = (Int(result[resultIndex]) * (255 - Int(incoming))) / 255
-                        result[resultIndex] = UInt8(clamping: kept)
-                    }
-                }
-            }
-        }
-    }
-
-    nonisolated private func applySelectionMaskRegion(
-        to result: inout Data,
-        destinationOriginX: Int,
-        destinationOriginY: Int,
-        destinationWidth: Int,
-        incomingRegion: SelectionMaskRegion,
-        operation: SelectionComponentOperation
-    ) {
-        guard incomingRegion.width > 0, incomingRegion.height > 0 else { return }
-        result.withUnsafeMutableBytes { destinationRawBuffer in
-            incomingRegion.withAlphaBytes { incomingBytes in
-                guard let destinationBase = destinationRawBuffer.baseAddress?.assumingMemoryBound(to: UInt8.self) else {
-                    return
-                }
-                for localY in 0..<incomingRegion.height {
-                    let destinationY = incomingRegion.originY + localY - destinationOriginY
-                    let destinationX = incomingRegion.originX - destinationOriginX
-                    let destinationRowOffset = (destinationY * destinationWidth) + destinationX
-                    let incomingRowOffset = localY * incomingRegion.width
-                    for localX in 0..<incomingRegion.width {
-                        let incoming = incomingBytes[incomingRowOffset + localX]
-                        guard incoming > 0 else { continue }
-                        let resultIndex = destinationRowOffset + localX
-                        switch operation {
-                        case .add:
-                            destinationBase[resultIndex] = max(destinationBase[resultIndex], incoming)
-                        case .subtract:
-                            let kept = (Int(destinationBase[resultIndex]) * (255 - Int(incoming))) / 255
-                            destinationBase[resultIndex] = UInt8(clamping: kept)
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    nonisolated private func rasterizedSelectionMaskBytes(
-        polygonShapes: [SelectionPolygonShape],
-        canvasSize: CanvasSize
-    ) -> [UInt8] {
-        var result = [UInt8](repeating: 0, count: canvasSize.width * canvasSize.height)
-        guard !polygonShapes.isEmpty else { return result }
-
-        let allPoints = polygonShapes.flatMap { polygonShape in
-            polygonShape.flatMap { polygon in
-                polygon.map { CanvasPoint(x: Double($0.x), y: Double($0.y)) }
-            }
-        }
-        let bounds = CanvasRect.bounding(points: allPoints).clamped(to: canvasSize)
-        let minX = max(Int(floor(bounds.minX)) - 1, 0)
-        let minY = max(Int(floor(bounds.minY)) - 1, 0)
-        let maxX = min(Int(ceil(bounds.maxX)) + 1, canvasSize.width)
-        let maxY = min(Int(ceil(bounds.maxY)) + 1, canvasSize.height)
-        if RuntimeDiagnostics.selectionTraceLoggingEnabled {
-            let rasterMessage = "[rasterizedSelectionMaskBytes] allPointCount=\(allPoints.count) clampedBoundsOrigin=(\(bounds.origin.x),\(bounds.origin.y)) clampedBoundsSize=(\(bounds.size.x),\(bounds.size.y)) localRect=(\(minX),\(minY))-(\(maxX),\(maxY))"
-            Logger(subsystem: "ArtFlex", category: "SelectionTrace").debug("\(rasterMessage, privacy: .public)")
-            emitSelectionTraceViewModel(rasterMessage)
-        }
-        guard minX < maxX, minY < maxY else { return result }
-
-        let width = maxX - minX
-        let height = maxY - minY
-        let bytesPerRow = width
-        let colorSpace = CGColorSpaceCreateDeviceGray()
-        var localBytes = [UInt8](repeating: 0, count: width * height)
-
-        guard let context = CGContext(
-            data: &localBytes,
-            width: width,
-            height: height,
-            bitsPerComponent: 8,
-            bytesPerRow: bytesPerRow,
-            space: colorSpace,
-            bitmapInfo: CGImageAlphaInfo.none.rawValue
-        ) else {
-            return result
-        }
-        context.translateBy(x: 0, y: Double(height))
-        context.scaleBy(x: 1, y: -1)
-        context.setShouldAntialias(true)
-        context.setAllowsAntialiasing(true)
-
-        for polygonShape in polygonShapes {
-            for polygon in polygonShape {
-                guard polygon.count >= 3 else { continue }
-                let path = CGMutablePath()
-                let localPoints = polygon.map {
-                    CGPoint(x: $0.x - Double(minX), y: $0.y - Double(minY))
-                }
-                path.addLines(between: localPoints)
-                path.closeSubpath()
-
-                context.addPath(path)
-                context.setBlendMode(.normal)
-                context.setFillColor(gray: 1, alpha: 1)
-                context.fillPath()
-            }
-        }
-
-        for localY in 0..<height {
-            let destinationRow = (localY + minY) * canvasSize.width
-            let sourceRow = localY * width
-            for localX in 0..<width {
-                result[destinationRow + localX + minX] = localBytes[sourceRow + localX]
-            }
-        }
-
-        return result
-    }
-
-    nonisolated private func rasterizedSelectionMaskRegionBytes(
-        polygonShapes: [SelectionPolygonShape],
-        originX: Int,
-        originY: Int,
-        width: Int,
-        height: Int
-    ) -> Data {
-        var result = Data(count: width * height)
-        guard !polygonShapes.isEmpty, width > 0, height > 0 else { return result }
-
-        let padding = 1
-        let paddedWidth = width + (padding * 2)
-        let paddedHeight = height + (padding * 2)
-        let bytesPerRow = paddedWidth
-        let colorSpace = CGColorSpaceCreateDeviceGray()
-        var paddedBytes = [UInt8](repeating: 0, count: paddedWidth * paddedHeight)
-
-        guard let context = CGContext(
-            data: &paddedBytes,
-            width: paddedWidth,
-            height: paddedHeight,
-            bitsPerComponent: 8,
-            bytesPerRow: bytesPerRow,
-            space: colorSpace,
-            bitmapInfo: CGImageAlphaInfo.none.rawValue
-        ) else {
-            return result
-        }
-
-        context.translateBy(
-            x: Double(-originX + padding),
-            y: Double(originY - padding + paddedHeight)
-        )
-        context.scaleBy(x: 1, y: -1)
-        context.setShouldAntialias(true)
-        context.setAllowsAntialiasing(true)
-
-        for polygonShape in polygonShapes {
-            for polygon in polygonShape {
-                guard polygon.count >= 3 else { continue }
-                let path = CGMutablePath()
-                path.addLines(between: polygon)
-                path.closeSubpath()
-
-                context.addPath(path)
-                context.setBlendMode(.normal)
-                context.setFillColor(gray: 1, alpha: 1)
-                context.fillPath()
-            }
-        }
-
-        result.withUnsafeMutableBytes { destinationRawBuffer in
-            paddedBytes.withUnsafeBufferPointer { sourceBuffer in
-                guard
-                    let destinationBase = destinationRawBuffer.baseAddress?.assumingMemoryBound(to: UInt8.self),
-                    let sourceBase = sourceBuffer.baseAddress
-                else {
-                    return
-                }
-
-                for localY in 0..<height {
-                    let destinationOffset = localY * width
-                    let sourceOffset = ((localY + padding) * paddedWidth) + padding
-                    UnsafeMutableRawPointer(destinationBase.advanced(by: destinationOffset))
-                        .copyMemory(
-                            from: UnsafeRawPointer(sourceBase.advanced(by: sourceOffset)),
-                            byteCount: width
-                        )
-                }
-            }
-        }
-
-        return result
     }
 
     private func applyGeneratorStroke(
@@ -19378,41 +18568,6 @@ private struct EditablePixel {
     var alpha: UInt8
 }
 
-private struct SelectionMaskRegion {
-    var originX: Int
-    var originY: Int
-    var width: Int
-    var height: Int
-    var alphaBytes: Data
-
-    @inline(__always)
-    func withAlphaBytes<Result>(_ body: (UnsafeBufferPointer<UInt8>) -> Result) -> Result {
-        alphaBytes.withUnsafeBytes { rawBuffer in
-            body(rawBuffer.bindMemory(to: UInt8.self))
-        }
-    }
-}
-
-private struct TextureFillSlice {
-    var anchorPoint: CanvasPoint
-    var previousEdgePoint: CanvasPoint
-    var currentEdgePoint: CanvasPoint
-}
-
-private struct TextureFillGestureState {
-    var layerID: LayerID
-    var surfaceID: LayerSurfaceID
-    var anchorPoint: CanvasPoint
-    var sessionSeed: UInt64
-    var baseTexture: MTLTexture?
-    var rawEdgePoints: [CanvasPoint]
-    var tipSettings: TextureFillTipSettings
-    var brush: BrushSettings
-    var color: RGBAColor
-    var lastEdgePoint: CanvasPoint?
-    var renderedSliceCount = 0
-}
-
 private struct GeneratorStrokeSessionState {
     var lastBasePoint: StrokePoint?
     var lastOutputPoint: StrokePoint?
@@ -19704,7 +18859,7 @@ private struct GeneratorRandom {
 }
 
 /// non-Sendable 타입을 DispatchQueue 클로저에서 캡처하기 위한 래퍼
-private final class WorkspaceUncheckedBox<T>: @unchecked Sendable {
+final class WorkspaceUncheckedBox<T>: @unchecked Sendable {
     let value: T
     init(_ value: T) { self.value = value }
 }
@@ -20127,17 +19282,25 @@ extension WorkspaceViewModel {
         if workspace.document.activeLayerID == id { beginEditingActiveLayerMask() }
     }
 
-    func loadMaskThumbnail(for id: LayerID) async -> CGImage? {
+    func maskThumbnailKey(for id: LayerID) -> MaskThumbnailKey? {
         guard let texture = bootstrap.layerSurfaceStore.readMaskTexture(for: id) else { return nil }
-        let revision = layerThumbnailRevision
-        let box = WorkspaceUncheckedBox(texture)
+        let cursor = bootstrap.layerSurfaceStore.changeJournal(for: .init(layerID: id, kind: .mask)).cursor
+        return .init(layerID: id, epoch: cursor.epoch, revision: cursor.revision, textureID: ObjectIdentifier(texture))
+    }
+
+    func loadMaskThumbnail(for id: LayerID) async -> CGImage? {
+        guard let key = maskThumbnailKey(for: id),
+              let texture = bootstrap.layerSurfaceStore.readMaskTexture(for: id) else { return nil }
+        let box = WorkspaceUncheckedBox(texture), token = WorkCancellation()
         let serializer = WorkspaceUncheckedBox(bootstrap.textureSerializer)
-        let image = await Task.detached(priority: .utility) { () -> CGImage? in
-            guard let snapshot = try? serializer.value.downsampledSnapshot(texture: box.value,
-                divisor: max(1, max(box.value.width, box.value.height) / 48)) else { return nil }
-            return Self.snapshotImage(from: snapshot, maxDimension: 40)
-        }.value
-        guard revision == layerThumbnailRevision, !Task.isCancelled else { return nil }
+        let image = await withTaskCancellationHandler {
+            await maskThumbnailStore.image(key: key, cancellation: token) {
+                guard let snapshot = try? serializer.value.downsampledSnapshot(texture: box.value,
+                    divisor: max(1, (max(box.value.width, box.value.height) + 47) / 48)) else { return nil }
+                return Self.snapshotImage(from: snapshot, maxDimension: 40)
+            }
+        } onCancel: { token.cancel() }
+        guard key == maskThumbnailKey(for: id), !Task.isCancelled else { return nil }
         return image
     }
 
@@ -20156,24 +19319,21 @@ extension WorkspaceViewModel {
         draft.isComputing = true
         draft.error = nil
         selectionRefinementDraft = draft
-        selectionPreviewTask?.cancel()
         let request = UUID()
         selectionPreviewRequest = request
         let source = draft.source, kind = draft.kind, value = draft.radius
         let size = workspace.document.canvasSize
-        selectionPreviewTask = Task { [weak self] in
-            try? await Task.sleep(for: .milliseconds(100))
-            guard let self, !Task.isCancelled else { return }
-            let result = await SelectionPreviewWorker.shared.evaluate {
-                    if value == 0 { return source }
-                    switch kind {
-                    case .feather: return try self.featheredSelectionShape(source, canvasSize: size, radiusPixels: value)
-                    case .expand: return SelectionRefinement.expanded(source, canvasSize: size, radiusPixels: value)
-                    case .contract: return SelectionRefinement.contracted(source, canvasSize: size, radiusPixels: value)
-                    case .invert: return SelectionRefinement.inverted(source, canvasSize: size)
-                    }
+        selectionPreviewCoordinator.submit { token in
+            try token.check()
+            if value == 0 && kind != .invert { return source }
+            switch kind {
+            case .feather: return try SelectionMaskRasterizer.featheredSelectionShape(source, canvasSize: size, radiusPixels: value, cancellation: token)
+            case .expand: return SelectionRefinement.expanded(source, canvasSize: size, radiusPixels: value, cancellation: token)
+            case .contract: return SelectionRefinement.contracted(source, canvasSize: size, radiusPixels: value, cancellation: token)
+            case .invert: return SelectionRefinement.inverted(source, canvasSize: size, cancellation: token)
             }
-            guard !Task.isCancelled, self.selectionPreviewRequest == request,
+        } completion: { [weak self] result in
+            guard let self, self.selectionPreviewRequest == request,
                   self.selectionRefinementDraft?.generation == self.documentRenderGeneration else { return }
             self.selectionRefinementDraft?.isComputing = false
             switch result {
@@ -20192,8 +19352,7 @@ extension WorkspaceViewModel {
     func cancelSelectionRefinementPreview() {
         guard selectionRefinementDraft != nil else { return }
         selectionPreviewRequest = UUID()
-        selectionPreviewTask?.cancel()
-        selectionPreviewTask = nil
+        selectionPreviewCoordinator.cancel()
         selectionRefinementDraft = nil
         syncSelectionOverlayProxy()
     }
@@ -20226,6 +19385,7 @@ extension WorkspaceViewModel {
         }
         textureAdjustmentOriginal = copy
         textureAdjustmentInitialFill = recent
+        textureAdjustmentError = nil
         textureAdjustmentSettings = recent.state.tipSettings
     }
 
@@ -20234,18 +19394,48 @@ extension WorkspaceViewModel {
               recent.revision == documentChangeRevision else { return }
         recent.state.tipSettings = settings
         if reroll { recent.state.sessionSeed &+= 1 }
-        guard let texture = prepareTextureFillFinalResult(from: recent.state) else {
-            showStatus(.init(kind: .error, message: "调整未完成，已保留上一次结果")); return
-        }
-        bootstrap.layerSurfaceStore.swapTexture(for: recent.state.surfaceID, with: texture)
         recentTextureFill = recent
         textureAdjustmentSettings = settings
-        canvasContentRevision &+= 1
-        refresh(invalidatedLayerIDs: [recent.state.layerID])
-        scheduleNavigatorPreviewRefresh()
+        isTextureAdjustmentComputing = true
+        textureAdjustmentError = nil
+        let state = WorkspaceUncheckedBox(recent.state)
+        let renderer = textureAdjustmentRenderer
+        let alphaLocked = layerTransparentPixelLockEnabled(recent.state.layerID)
+        let generation = documentRenderGeneration
+        let revision = documentChangeRevision
+        textureAdjustmentCoordinator.submit { token in
+            let size = CanvasSize(width: state.value.baseTexture!.width, height: state.value.baseTexture!.height)
+            guard let shape = SelectionMaskRasterizer.textureFillSmoothFinalSelectionShape(from: state.value.rawEdgePoints,
+                anchorPoint: state.value.anchorPoint, canvasSize: size) else { throw CanvasResourceError(message: "纹理区域无效") }
+            try token.check()
+            let minX = max(0, Int(floor(shape.bounds.minX))), minY = max(0, Int(floor(shape.bounds.minY)))
+            let mask = SelectionMaskRasterizer.selectionMaskRegion(for: shape, canvasSize: size, originX: minX, originY: minY,
+                width: min(size.width, Int(ceil(shape.bounds.maxX))) - minX,
+                height: min(size.height, Int(ceil(shape.bounds.maxY))) - minY)
+            try token.check()
+            return WorkspaceUncheckedBox(try renderer.render(state: state.value, mask: mask,
+                angle: SelectionMaskRasterizer.textureFillMaterialAngle(from: state.value.rawEdgePoints), alphaLocked: alphaLocked, cancellation: token))
+        } completion: { [weak self] result in
+            guard let self, self.textureAdjustmentSettings != nil,
+                  self.documentRenderGeneration == generation, self.documentChangeRevision == revision else { return }
+            self.isTextureAdjustmentComputing = false
+            switch result {
+            case .success(let texture):
+                self.bootstrap.layerSurfaceStore.swapTexture(for: state.value.surfaceID, with: texture.value)
+                self.canvasContentRevision &+= 1
+                self.refresh(invalidatedLayerIDs: [state.value.layerID])
+                self.scheduleNavigatorPreviewRefresh()
+            case .failure(let error):
+                self.textureAdjustmentError = error.localizedDescription
+                self.showStatus(.init(kind: .error, message: "调整未完成：\(error.localizedDescription)；可重试或取消"))
+            }
+        }
     }
 
     func finishRecentTextureAdjustment(apply: Bool) {
+        guard !apply || (!isTextureAdjustmentComputing && textureAdjustmentError == nil) else { return }
+        textureAdjustmentCoordinator.cancel()
+        isTextureAdjustmentComputing = false
         guard let recent = recentTextureFill, let original = textureAdjustmentOriginal else { return }
         if apply {
             guard let preview = bootstrap.layerSurfaceStore.readTexture(for: recent.state.surfaceID) else { return }
@@ -20274,6 +19464,8 @@ extension WorkspaceViewModel {
     }
 
     private func discardRecentTextureFill() {
+        textureAdjustmentCoordinator.cancel()
+        isTextureAdjustmentComputing = false
         textureAdjustmentInitialFill = nil
         recentTextureFill = nil
         textureAdjustmentSettings = nil
@@ -20318,31 +19510,21 @@ extension WorkspaceViewModel {
 extension WorkspaceViewModel {
     func rasterExportPreview(options: RasterExportOptions) async -> CGImage? {
         guard isRasterExportSheetPresented else { return nil }
-        let generation = documentRenderGeneration
-        let revision = documentChangeRevision
-        if rasterExportPreviewSource == nil {
-            guard let texture = try? makeVisibleCompositeTexture(waitUntilCompleted: false, includesLiveBrushContent: true) else { return nil }
-            let box = WorkspaceUncheckedBox(texture)
-            let serializer = WorkspaceUncheckedBox(bootstrap.textureSerializer)
-            let source = await Task.detached(priority: .utility) { try? serializer.value.snapshot(texture: box.value) }.value
-            guard !Task.isCancelled, isRasterExportSheetPresented, generation == documentRenderGeneration,
-                  revision == documentChangeRevision else { return nil }
-            rasterExportPreviewSource = source
+        let generation = documentRenderGeneration, revision = documentChangeRevision
+        rasterExportPreviewCancellation?.cancel()
+        let token = WorkCancellation()
+        rasterExportPreviewCancellation = token
+        if rasterExportPreviewTexture == nil {
+            rasterExportPreviewTexture = try? makeVisibleCompositeTexture(waitUntilCompleted: false, includesLiveBrushContent: true)
         }
-        guard let source = rasterExportPreviewSource else { return nil }
-        let exporter = bootstrap.rasterExporter
-        return await Task.detached(priority: .utility) {
-            do {
-                let bounds = try exporter.resolvedSourceBounds(snapshot: source, scope: options.scope)
-                let size = try options.outputDimensions(sourceWidth: bounds.width, sourceHeight: bounds.height)
-                let divisor = max(1, Double(max(size.width, size.height)) / 600)
-                var preview = options
-                preview.resize = .exact(width: max(1, Int(Double(size.width) / divisor)), height: max(1, Int(Double(size.height) / divisor)))
-                preview.bitDepth = .eight
-                let result = try exporter.encode(snapshot: source, options: preview, sourceBounds: bounds)
-                guard let imageSource = CGImageSourceCreateWithData(result.encodedData as CFData, nil) else { return nil as CGImage? }
-                return CGImageSourceCreateImageAtIndex(imageSource, 0, nil)
-            } catch { return nil }
-        }.value
+        guard let texture = rasterExportPreviewTexture else { return nil }
+        let image = await withTaskCancellationHandler {
+            await rasterPreviewStore.image(texture: WorkspaceUncheckedBox(texture),
+                serializer: WorkspaceUncheckedBox(bootstrap.textureSerializer), exporter: bootstrap.rasterExporter,
+                options: options, cancellation: token)
+        } onCancel: { token.cancel() }
+        guard !token.isCancelled, isRasterExportSheetPresented,
+              generation == documentRenderGeneration, revision == documentChangeRevision else { return nil }
+        return image
     }
 }

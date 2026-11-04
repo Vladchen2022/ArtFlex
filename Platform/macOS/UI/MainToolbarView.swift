@@ -5,47 +5,35 @@ struct MainToolbarView: View {
     @ObservedObject var editingViewModel: WorkspaceViewModel
     let openSettings: () -> Void
     @State private var isHistoryPresented = false
+    @State private var isRecoveryPresented = false
 
     var body: some View {
         HStack(spacing: 14) {
-            toolbarTextButton("新建") {
-                hostViewModel.presentNewCanvasSheet()
-            }
+            toolbarTextButton("新建") { hostViewModel.performCommand("new") }
+            .disabled(hostViewModel.command("new")?.unavailableReason != nil)
 
-            toolbarTextButton("打开") {
-                hostViewModel.openProject()
-            }
+            toolbarTextButton("打开") { hostViewModel.performCommand("open") }
+            .disabled(hostViewModel.command("open")?.unavailableReason != nil)
 
-            toolbarTextButton("保存") {
-                hostViewModel.saveProject()
-            }
+            Menu { RecentProjectsMenu(model: hostViewModel) } label: { Image(systemName: "chevron.down") }
+                .menuStyle(.borderlessButton).fixedSize().help("最近工程")
+
+            toolbarTextButton("保存") { hostViewModel.performCommand("save") }
+            .disabled(hostViewModel.command("save")?.unavailableReason != nil)
             .disabled(hostViewModel.isProjectSaving)
             Menu {
-                Button("另存为…") { hostViewModel.saveProject(asNewFile: true) }
+                if let command = hostViewModel.command("saveAs") { WorkspaceCommandButton(command: command) }
             } label: { Image(systemName: "chevron.down") }
             .menuStyle(.borderlessButton).fixedSize().help("更多保存操作")
 
             if hostViewModel.hasRecoveryProject {
-                Menu {
-                    Button("恢复自动保存") {
-                        hostViewModel.recoverAutosavedProject()
-                    }
-                    Button("丢弃自动保存", role: .destructive) {
-                        hostViewModel.discardAutosavedProject()
-                    }
-                } label: {
-                    Text("恢复")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(Color.orange.opacity(0.95))
-                }
-                .menuStyle(.borderlessButton)
-                .fixedSize()
-                .help("检测到上次未正式保存的自动恢复工程")
+                Button("恢复") { isRecoveryPresented.toggle() }
+                    .buttonStyle(.plain).foregroundStyle(.orange)
+                    .popover(isPresented: $isRecoveryPresented) { RecoveryProjectPopover(model: hostViewModel) }
             }
 
-            toolbarTextButton("导出") {
-                hostViewModel.presentRasterExportSheet()
-            }
+            toolbarTextButton("导出") { hostViewModel.performCommand("export") }
+            .disabled(hostViewModel.command("export")?.unavailableReason != nil)
 
             Button {
                 if !isHistoryPresented {

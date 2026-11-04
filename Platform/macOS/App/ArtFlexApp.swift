@@ -39,6 +39,9 @@ struct ArtFlexApp: App {
         }
         .commands {
             if let viewModel = launchState.viewModel {
+                CommandGroup(replacing: .appInfo) {
+                    Button("关于 ArtFlex") { AppBuildIdentity.showAbout() }
+                }
                 CommandGroup(replacing: .appSettings) {
                 Button("设置…") {
                     presentationState.presentSettingsSheet()
@@ -109,7 +112,7 @@ final class ArtFlexApplicationDelegate: NSObject, NSApplicationDelegate, NSWindo
         }
     }
     private var isApprovingTermination = false
-    var approvedTerminationHandler: (NSApplication) -> Void = { $0.terminate(nil) }
+    var terminationReplyHandler: (NSApplication, Bool) -> Void = { $0.reply(toApplicationShouldTerminate: $1) }
     private var isTerminationRequestPending = false
     private var isWindowCloseRequestPending = false
     private weak var approvedClosingWindow: NSWindow?
@@ -175,20 +178,16 @@ final class ArtFlexApplicationDelegate: NSObject, NSApplicationDelegate, NSWindo
             return .terminateNow
         }
 
-        guard !isTerminationRequestPending else { return .terminateCancel }
+        guard !isTerminationRequestPending else { return .terminateLater }
         isTerminationRequestPending = true
-        // terminateLater enters NSModalPanelRunLoopMode, which can starve the
-        // main-queue/Swift-concurrency work used by our async save and confirmation.
-        // Finish that work in the normal event loop, then issue an approved quit.
-        DispatchQueue.main.async { [self] in
+        MainRunLoopDelivery.perform { [self] in
             viewModel.confirmCloseOrQuitIfNeeded { [self] allowed in
                 isTerminationRequestPending = false
-                guard allowed else { return }
-                isApprovingTermination = true
-                approvedTerminationHandler(sender)
+                isApprovingTermination = allowed
+                terminationReplyHandler(sender, allowed)
             }
         }
-        return .terminateCancel
+        return .terminateLater
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {

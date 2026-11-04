@@ -4,6 +4,29 @@ import Testing
 
 struct HistoryControllerTests {
     @Test @MainActor
+    func sparseLocalHistoryPreservesPixelsAndResidency() throws {
+        let h = try BrushHistoryHarness(canvasSize: .init(width: 2048, height: 2048), usesSparseStorage: true)
+        let layerID = h.workspaceStore.state.document.activeLayerID
+        let surfaceID = try #require(h.layerSurfaceStore.surfaceID(for: layerID))
+        let region = PixelRegion(originX: 50, originY: 60, width: 8, height: 8)
+        let baseline = try h.history.snapshots(for: layerID, region: region)
+        try h.history.captureCheckpoint(captureMode: .inPlaceChangedLayers([layerID]), providedLayerSnapshots: baseline)
+        let edit = try h.layerSurfaceStore.preparePixelEdit(for: surfaceID, region: region)
+        let pixels = LayerTextureSnapshot(width: 8, height: 8, bytesPerRow: 32, pixelData: Data(repeating: 255, count: 256))
+        try h.serializer.restore(snapshot: pixels, into: edit.texture, destinationX: 50, destinationY: 60)
+        #expect(h.layerSurfaceStore.publish(edit))
+        for _ in 0..<3 {
+            #expect(try h.history.undo())
+            let before = try #require(h.layerSurfaceStore.readTexture(for: surfaceID))
+            #expect(try h.serializer.snapshot(texture: before, originX: 50, originY: 60, width: 8, height: 8) == baseline[0].texture)
+            #expect(try h.history.redo())
+            let after = try #require(h.layerSurfaceStore.readTexture(for: surfaceID))
+            #expect(try h.serializer.snapshot(texture: after, originX: 50, originY: 60, width: 8, height: 8) == pixels)
+            if SparseLayerTexture.isSupported(by: h.metalContext.device) { #expect(after.heap?.type == .sparse) }
+        }
+    }
+
+    @Test @MainActor
     func localUndoRedoRetainsOnlyTheOriginalRegionAndPreservesOutsidePixels() throws {
         let harness = try BrushHistoryHarness(canvasSize: .init(width: 256, height: 256))
         let layerID = harness.workspaceStore.state.document.activeLayerID
@@ -1224,7 +1247,7 @@ private struct BrushHistoryHarness {
     let history: HistoryController
     let engine: MetalStrokeEngine
 
-    init(canvasSize: CanvasSize, startsWithSingleLayer: Bool = false) throws {
+    init(canvasSize: CanvasSize, startsWithSingleLayer: Bool = false, usesSparseStorage: Bool = false) throws {
         guard let metalContext = MetalDeviceContext() else {
             throw BrushHistoryHarnessError.metalUnavailable
         }
@@ -1244,7 +1267,7 @@ private struct BrushHistoryHarness {
         workspaceState.document.metadata.updatedAt = Date()
 
         let workspaceStore = WorkspaceStore(state: workspaceState)
-        let layerSurfaceStore = StageOneLayerSurfaceStore()
+        let layerSurfaceStore = StageOneLayerSurfaceStore(usesSparseStorage: usesSparseStorage)
         layerSurfaceStore.prepareTextures(for: workspaceState.document, metal: metalContext)
 
         let serializer = LayerTextureSerializer(metalContext: metalContext)

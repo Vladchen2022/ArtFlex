@@ -980,33 +980,33 @@ final class HistoryController {
             targets.append((layerSnapshot, texture))
         }
 
-        // Restore into full-size clones first. This also makes the tiled transfer path atomic:
-        // a later staging failure cannot leave earlier tiles written into the live layer.
-        let replacementTextures = try serializer.cloneBatchForDeferredSnapshot(
-            textures: targets.map(\.texture)
-        )
-        let batchItems = zip(targets, replacementTextures).map { target, replacement in
-            (
-                snapshot: target.layerSnapshot.texture,
-                texture: replacement,
-                destinationX: target.layerSnapshot.originX,
-                destinationY: target.layerSnapshot.originY
-            )
-        }
-        try serializer.restoreBatch(batchItems)
-        for (target, replacement) in zip(targets, replacementTextures) {
-            switch target.layerSnapshot.resourceKind {
-            case .content:
-                guard let surfaceID = layerSurfaceStore.surfaceID(for: target.layerSnapshot.layerID) else {
-                    throw HistoryControllerError.missingRestoreResource(
-                        layerID: target.layerSnapshot.layerID,
-                        resourceKind: .content
-                    )
-                }
-                layerSurfaceStore.swapTexture(for: surfaceID, with: replacement)
-            case .mask:
-                layerSurfaceStore.setMaskTexture(replacement, for: target.layerSnapshot.layerID)
+        var staged: [StageOneLayerSurfaceStore.StagedPixelEdit?] = []
+        var replacements: [MTLTexture] = []
+        for target in targets {
+            if target.layerSnapshot.resourceKind == .content,
+               let surfaceID = layerSurfaceStore.surfaceID(for: target.layerSnapshot.layerID) {
+                let snapshot = target.layerSnapshot
+                let edit = try layerSurfaceStore.preparePixelEdit(for: surfaceID,
+                    region: PixelRegion(originX: snapshot.originX, originY: snapshot.originY,
+                        width: snapshot.texture.width, height: snapshot.texture.height))
+                staged.append(edit)
+                replacements.append(edit.texture)
+            } else {
+                staged.append(nil)
+                replacements.append(try serializer.cloneBatchForDeferredSnapshot(textures: [target.texture])[0])
             }
+        }
+        try serializer.restoreBatch(zip(targets, replacements).map { target, replacement in
+            (snapshot: target.layerSnapshot.texture, texture: replacement,
+             destinationX: target.layerSnapshot.originX, destinationY: target.layerSnapshot.originY)
+        })
+        // Validate all resources before publishing any; allocation/GPU failures leave live pixels intact.
+        guard staged.compactMap({ $0 }).allSatisfy(layerSurfaceStore.canPublish) else {
+            throw HistoryControllerError.dirtyRestoreTopologyMismatch
+        }
+        for (index, target) in targets.enumerated() {
+            if let edit = staged[index] { layerSurfaceStore.publish(edit) }
+            else { layerSurfaceStore.setMaskTexture(replacements[index], for: target.layerSnapshot.layerID) }
         }
     }
 
