@@ -1,6 +1,22 @@
 # ArtFlex 当前状态
 
-最后更新：2026-05-23
+最后更新：2026-11-04
+
+## 2026-11-04 当前交付状态
+
+已完成本轮十项优化，正式安装为 `/Applications/ArtFlex.app`，构建 `20261104.33`，应用代码提交 `5db4a8e`。完整改动、逐项前后对比、测试证据与回退方法见 [十项优化改造报告](Docs/WORKFLOW_PERFORMANCE_20261104.md)。
+
+- 退出保存改为 AppKit 延迟退出协议；修复取消退出／文件面板后命令状态未及时恢复的问题。
+- 纹理调整、选区与导出预览采用独立作业和取消检查；只发布当前有效结果。
+- 统一主要文件／编辑命令的行为、可用性和快捷键说明；蒙版缩略图按内容版本缓存。
+- 局部历史恢复保留稀疏图层路径；保存逐项读回和压缩资源，减少同时存活的原始像素数据。
+- 增加最近工程入口、恢复副本的名称／日期／尺寸／预览；拆出选区栅格化和预览职责。
+- 构建清单记录源码指纹与 UUID；安装前校验并备份，已实测安装、回退、重新安装。
+- 本轮最终代码的定向回归 101 项／9 组通过，补充纹理渲染 1 项／1 组（含 8 位、16 位浮点两个参数案例）通过。不是全量测试结果。
+- 已在可见窗口验收退出保存、取消后的命令恢复、纹理调整取消／应用／撤销／重做、选区预览取消、蒙版反转与撤销、最近工程、恢复信息、导出和正式版重开。
+- 未量化内存峰值或速度提升，未实测系统注销／关机，也未进行长时间高负载绘画。不能据此宣称所有边界均已验证。
+
+以下 9 月补记和其后的阶段说明保留作历史记录；涉及版本、测试数量、剩余任务和实现限制时，以本节及对应日期的专项报告为准。
 
 ## 2026-09-08 专项进度补记
 
@@ -58,12 +74,12 @@ ArtFlex 当前已经是一个功能面明显超出最小 MVP 的 macOS Metal 绘
 - 画笔参数
 - 图层
 
-另外，当前应用图标的真实实现仍然是：
+图标与安装现状已更新（2026-11-04）：
 
-- 单资源文件：[Platform/macOS/Resources/AppIcon.png](Platform/macOS/Resources/AppIcon.png)
-- 运行时由 [Platform/macOS/App/ArtFlexApp.swift](Platform/macOS/App/ArtFlexApp.swift) 设置 `NSApp.applicationIconImage`
-- 当前图标最近一次是替换内部 artwork，并保留现有图标的整体大小和圆角轮廓
-- 如果后续继续调整，默认先改这张资源图，而不是假设项目已经有 `.appiconset` / `.icns` 主链
+- 原始图稿为 [Platform/macOS/Resources/AppIcon.png](Platform/macOS/Resources/AppIcon.png)。
+- [package-app.sh](Platform/macOS/Distribution/package-app.sh) 生成多尺寸 `AppIcon.icns`，放入应用主资源目录，由 `CFBundleIconFile` 声明。
+- 运行时设置 `NSApp.applicationIconImage` 仅作补充，不能代替安装包图标。
+- 正式安装路径为 `/Applications/ArtFlex.app`；构建、校验、备份和回退使用 [release.py](Platform/macOS/Distribution/release.py)。本轮未单独验收退出后的 Dock 缓存显示。
 
 ### 2.3 当前已接入主链的工具
 
