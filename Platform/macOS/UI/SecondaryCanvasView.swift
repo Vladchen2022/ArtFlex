@@ -10,7 +10,7 @@ struct SecondaryCanvasView: View {
                 Text("同稿观察").font(.caption.bold())
                 Spacer(minLength: 4)
                 Button("−") { zoom = max(0.1, zoom / 1.25) }
-                Text("\(Int(zoom * 100))%").font(.caption).monospacedDigit().frame(width: 42)
+                Text("适合 × \(zoom, specifier: "%.2f")").font(.caption).monospacedDigit().frame(width: 92)
                 Button("+") { zoom = min(16, zoom * 1.25) }
                 Button("适合") { zoom = 1 }
                 Button { viewModel.showsDualCanvas = false } label: { Image(systemName: "xmark") }
@@ -33,5 +33,6 @@ struct SecondaryCanvasView: View {
             Text("左侧绘画同步显示；本视图独立缩放与滚动。")
                 .font(.caption2).foregroundStyle(.secondary).padding(7)
         }
+        .environment(\.colorScheme, .dark)
     }
 }

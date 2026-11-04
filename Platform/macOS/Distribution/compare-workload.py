@@ -32,6 +32,8 @@ if __name__ == '__main__':
         raise ValueError('Workload matrix differs')
     regressions = []
     for key in sorted(before):
+        if [row['sample'] for row in before[key]] != [row['sample'] for row in after[key]]:
+            raise ValueError(f'Workload samples differ for {key}; compare identical sample sequences')
         for metric in ('stroke_ms', 'commit_ms', 'undo_ms', 'redo_ms', 'save_ms', 'save_prepare_ms'):
             a, b = [row[metric] for row in before[key]], [row[metric] for row in after[key]]
             old, new = percentile(a, .95), percentile(b, .95)
@@ -39,6 +41,7 @@ if __name__ == '__main__':
             row = dict(side=key[0], format=key[1], metric=metric, samples=[len(a), len(b)],
                        before_median=percentile(a, .5), after_median=percentile(b, .5),
                        before_p95=old, after_p95=new, relative_change=delta)
+            row.update(before_p99=percentile(a, .99), after_p99=percentile(b, .99))
             print(json.dumps(row, sort_keys=True))
             if delta > args.maximum_regression:
                 regressions.append(row)

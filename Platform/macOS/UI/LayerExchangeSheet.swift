@@ -6,18 +6,21 @@ struct LayerExchangeSheet: View {
         VStack(alignment: .leading, spacing: 16) {
             Text(controller.mode == .importing ? "导入 OpenRaster 分层工程" : "导出 OpenRaster 分层工程").font(.title2)
             Text("支持 PNG 图层、名称、位置、透明度、可见性、穿透组和 8 种混合模式。各软件的颜色合成方式可能不同，请对照合并图像。")
+                .fixedSize(horizontal: false, vertical: true)
             Text("原生工程保留完整能力；ORA 不保留无损源参数、方案、体块、参考图、历史或画布外像素。隔离组、蒙版、剪贴和调整图层暂不支持结构交换。")
                 .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
             Toggle("仅交换合并图像（失去图层结构）", isOn: $controller.flattened).disabled(controller.isBusy)
             if controller.mode == .exporting && !controller.unsupported.isEmpty && !controller.flattened {
                 Text("当前不能分层导出：\(controller.unsupported.prefix(6).joined(separator: "、"))").foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             if let progress = controller.progress {
                 HStack { ProgressView().controlSize(.small); Text(progress.phase.rawValue)
                     if let total = progress.total { Text("\(progress.completed) / \(total)") }
                 }
             }
-            if let message = controller.message { Text(message).textSelection(.enabled) }
+            if let message = controller.message { Text(message).textSelection(.enabled).fixedSize(horizontal: false, vertical: true) }
             HStack {
                 Spacer()
                 if controller.isBusy { Button("取消作业", action: controller.cancel) }

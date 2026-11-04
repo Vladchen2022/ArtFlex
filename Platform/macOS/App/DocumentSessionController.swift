@@ -55,6 +55,7 @@ final class DocumentSessionController: ObservableObject {
         active.closeReferenceImageFloatingPanel()
         activeID = id
         active.isSessionActive = true
+        active.projectAccess.refreshRecent()
         onActiveChange?(active)
         return true
     }
@@ -142,7 +143,9 @@ final class DocumentSessionController: ObservableObject {
     private func remove(_ id: UUID) {
         sessions.removeAll { $0.id == id }; relays[id] = nil
         if activeID == id, let first = sessions.first {
-            activeID = first.id; first.model.isSessionActive = true; onActiveChange?(first.model)
+            activeID = first.id; first.model.isSessionActive = true
+            first.model.projectAccess.refreshRecent()
+            onActiveChange?(first.model)
         }
     }
 

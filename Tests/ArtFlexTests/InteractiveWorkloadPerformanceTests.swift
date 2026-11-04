@@ -51,7 +51,8 @@ struct InteractiveWorkloadPerformanceTests {
                     #expect(command.status == .completed)
                 }
                 func ms(_ start: UInt64) -> Double { Double(DispatchTime.now().uptimeNanoseconds - start) / 1_000_000 }
-                for sample in 0..<6 {
+                let sampleCount = min(max(Int(ProcessInfo.processInfo.environment["ARTFLEX_WORKLOAD_SAMPLES"] ?? "6") ?? 6, 6), 101)
+                for sample in 0..<sampleCount {
                     viewModel.debugSetCommittedSelectionShapeForTests(nil)
                     audit.reset()
                     viewModel.selectTool(.brush)
