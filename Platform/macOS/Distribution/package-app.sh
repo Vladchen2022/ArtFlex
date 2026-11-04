@@ -41,7 +41,9 @@ staged_app="$scratch_dir/ArtFlex.app"
 mkdir -p "$staged_app/Contents/MacOS" "$staged_app/Contents/Resources"
 cp "$distribution_dir/Info.plist" "$staged_app/Contents/Info.plist"
 cp "$products_dir/ArtFlex" "$staged_app/Contents/MacOS/ArtFlex"
-ditto "$products_dir/ArtFlex_ArtFlex.bundle" "$staged_app/Contents/Resources/ArtFlex_ArtFlex.bundle"
+for resource_bundle in "$products_dir"/*.bundle; do
+    ditto "$resource_bundle" "$staged_app/Contents/Resources/$(basename "$resource_bundle")"
+done
 cp "$products_dir/BuildManifest.json" "$staged_app/Contents/Resources/BuildManifest.json"
 cp "$scratch_dir/AppIcon.icns" "$staged_app/Contents/Resources/AppIcon.icns"
 plutil -lint "$staged_app/Contents/Info.plist"

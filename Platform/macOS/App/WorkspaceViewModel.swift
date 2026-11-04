@@ -89,6 +89,8 @@ final class WorkspaceViewModel: ObservableObject {
     nonisolated(unsafe) private var zoomKeyboardMonitor: Any?
 
     lazy var branches = WorkspaceBranchController(owner: self, bootstrap: bootstrap)
+    lazy var layerExchange = WorkspaceLayerExchangeController(owner: self, bootstrap: bootstrap)
+    var importExchangeInNewSession: ((OpenProjectResult, URL) -> Void)?
     @Published var editableLayerDraft: EditableLayerDraft?
     @Published var retainsEditableFillParameters = false
     private lazy var editableLayerRenderer = EditableLayerRenderer(metal: bootstrap.metalContext, serializer: bootstrap.textureSerializer)
@@ -19824,6 +19826,11 @@ extension WorkspaceViewModel {
         bootstrap.strokeEngine.purgeTransientPreviewTexturesIfIdle()
         return true
     }
+    func applyImportedExchange(_ result: OpenProjectResult, sourceURL: URL) throws {
+        try applyOpenedProjectResult(result, sourceURL: sourceURL, isRecovery: true)
+        presentWorkspaceStatus(kind: .success, message: "已导入分层工程，请另存为 .artflex；外部软件的混合显示可能有差异")
+    }
+
     func loadProjectForDocumentSession(from url: URL) { loadProjectInBackground(from: url, isRecovery: false) }
     func finishDocumentSessionClose() {
         recoveryCoordinator.invalidate()

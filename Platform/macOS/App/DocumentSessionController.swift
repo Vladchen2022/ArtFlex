@@ -38,6 +38,7 @@ final class DocumentSessionController: ObservableObject {
         session.model.createDocumentInNewSession = { [weak self] name, size, dpi, format, colorSpace in
             self?.create(name: name, size: size, dpi: dpi, format: format, colorSpace: colorSpace)
         }
+        session.model.importExchangeInNewSession = { [weak self] opened, url in self?.importExchange(opened, from: url) }
         session.model.openDocumentInNewSession = { [weak self] url in self?.open(url) }
         relays[session.id] = session.model.objectWillChange.sink { [weak self] _ in
             // Forward after the model has published its new values, including dirty/title changes.
@@ -107,6 +108,16 @@ final class DocumentSessionController: ObservableObject {
         } catch { active.presentWorkspaceStatus(kind: .error, message: error.localizedDescription) }
     }
 
+    func importExchange(_ opened: OpenProjectResult, from url: URL) {
+        guard active.prepareForDocumentTabSwitch(), !isClosing else { return }
+        do {
+            let session = try makeSession()
+            try session.model.applyImportedExchange(opened, sourceURL: url)
+            attach(session)
+            _ = activate(session.id)
+        } catch { active.presentWorkspaceStatus(kind: .error, message: error.localizedDescription) }
+    }
+
     func close(_ id: UUID) {
         guard !isClosing, activate(id), let session = sessions.first(where: { $0.id == id }) else { return }
         isClosing = true
@@ -116,7 +127,12 @@ final class DocumentSessionController: ObservableObject {
             guard allowed else { return }
             do {
                 // Keep one empty workspace so the established app shell remains available.
-                if self.sessions.count == 1 { self.attach(try self.makeSession()) }
+                if self.sessions.count == 1 {
+                    let replacement = try self.makeSession()
+                    replacement.model.createNewCanvasDiscardingUnsavedChanges(name: "未命名", canvasSize: .stageOneDefault,
+                        resolutionDPI: 300, pixelFormat: .rgba8)
+                    self.attach(replacement)
+                }
                 session.model.finishDocumentSessionClose()
                 self.remove(id)
             } catch { session.model.presentWorkspaceStatus(kind: .error, message: error.localizedDescription) }

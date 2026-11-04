@@ -48,6 +48,8 @@ def verify_products(products):
     assert data['executableSHA256'] == digest(products / 'ArtFlex'), 'Build executable changed'
     assert data['resourcesSHA256'] == tree_digest(products / 'ArtFlex_ArtFlex.bundle'), 'Build resources changed'
     assert data['binaryUUID'] == binary_uuid(products / 'ArtFlex'), 'Build UUID mismatch'
+    for name, expected in data.get('dependencyResourcesSHA256', {}).items():
+        assert tree_digest(products / name) == expected, 'Dependency resource mismatch: ' + name
     return data
 
 def verify_app(app):
@@ -57,6 +59,8 @@ def verify_app(app):
     assert data['binaryUUID'] == binary_uuid(app / 'Contents/MacOS/ArtFlex'), 'Installed UUID mismatch'
     assert data['resourcesSHA256'] == tree_digest(app / 'Contents/Resources/ArtFlex_ArtFlex.bundle'), 'Installed resource mismatch'
     assert (app / 'Contents/Resources' / info['CFBundleIconFile']).is_file(), 'Missing icon'
+    for name, expected in data.get('dependencyResourcesSHA256', {}).items():
+        assert tree_digest(app / 'Contents/Resources' / name) == expected, 'Installed dependency resource mismatch: ' + name
     subprocess.run(['codesign', '--verify', '--deep', '--strict', str(app)], check=True)
     return data
 
@@ -122,6 +126,7 @@ if __name__ == '__main__':
                     sourceFingerprint=before, buildVersion=info['CFBundleVersion'], configuration=args.configuration,
                     builtAt=datetime.datetime.now(datetime.timezone.utc).isoformat(), binaryUUID=binary_uuid(products / 'ArtFlex'),
                     executableSHA256=digest(products / 'ArtFlex'), resourcesSHA256=tree_digest(products / 'ArtFlex_ArtFlex.bundle'))
+        data['dependencyResourcesSHA256'] = {p.name: tree_digest(p) for p in sorted(products.glob('*.bundle')) if p.name != 'ArtFlex_ArtFlex.bundle'}
         (products / MANIFEST).write_text(json.dumps(data, indent=2) + '\n')
         print(products / MANIFEST)
     elif args.command == 'verify-products': print(json.dumps(verify_products(args.path)))

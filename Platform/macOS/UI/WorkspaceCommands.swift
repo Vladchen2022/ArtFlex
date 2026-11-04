@@ -27,7 +27,7 @@ struct WorkspaceCommandButton: View {
 }
 
 extension WorkspaceViewModel {
-    var isWorkflowAdjustmentActive: Bool { selectionRefinementDraft != nil || textureAdjustmentSettings != nil || editableLayerDraft != nil || branches.importDraft != nil }
+    var isWorkflowAdjustmentActive: Bool { selectionRefinementDraft != nil || textureAdjustmentSettings != nil || editableLayerDraft != nil || branches.importDraft != nil || layerExchange.isBusy }
 
     func command(_ id: String) -> WorkspaceCommand? { searchableCommands.first { $0.id == id } }
     func performCommand(_ id: String) {
@@ -135,6 +135,8 @@ struct ArtFlexWorkspaceCommands: Commands {
             command("new", host)
             command("open", host)
             Menu("打开最近工程") { RecentProjectsMenu(model: host) }
+            Button("导入分层工程（ORA）…") { host.layerExchange.present(.importing) }
+            Button("导出分层工程（ORA）…") { host.layerExchange.present(.exporting) }
             Button("管理保存的方案…") { host.branches.isPresented = true }
             if let documents {
                 Button("关闭当前文档") { documents.close(documents.activeID) }.keyboardShortcut("w", modifiers: .command)

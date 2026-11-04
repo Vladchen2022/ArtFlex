@@ -229,6 +229,16 @@ final class FilePanelService: ObservableObject {
         presentSelection(panel, completion: completion)
     }
 
+    func presentOpenRasterPanel(exporting: Bool, defaultName: String, completion: @escaping (URL?) -> Void) {
+        let panel: NSSavePanel = exporting ? NSSavePanel() : NSOpenPanel()
+        panel.allowedContentTypes = [UTType(filenameExtension: "ora") ?? UTType(importedAs: "org.openraster.image", conformingTo: .zip)]
+        panel.title = exporting ? "导出 OpenRaster" : "导入 OpenRaster"
+        panel.prompt = exporting ? "导出" : "导入"
+        if exporting { panel.nameFieldStringValue = defaultName + ".ora"; panel.canCreateDirectories = true }
+        if let open = panel as? NSOpenPanel { open.canChooseDirectories = false; open.allowsMultipleSelection = false }
+        presentAsynchronousPanel(panel, completion: completion)
+    }
+
     func presentKritaBrushOpenPanel(completion: @escaping (URL?) -> Void) {
         let panel = NSOpenPanel()
         panel.title = "导入 Krita 像素笔刷 · PNG 双笔尖 / Overlay"

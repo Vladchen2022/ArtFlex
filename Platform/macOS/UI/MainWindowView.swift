@@ -59,6 +59,7 @@ struct MainWindowView: View {
         .sheet(item: Binding(get: { viewModel.branches.importDraft }, set: { viewModel.branches.importDraft = $0 })) { draft in
             LayerSubsetImportSheet(draft: draft) { viewModel.branches.importDraft = nil }
         }
+        .sheet(isPresented: Binding(get: { viewModel.layerExchange.isPresented }, set: { viewModel.layerExchange.isPresented = $0 })) { LayerExchangeSheet(controller: viewModel.layerExchange) }
         .sheet(isPresented: $viewModel.isColorManagementPresented) { ColorManagementSheet(viewModel: viewModel) }
         .sheet(isPresented: $viewModel.isRasterExportSheetPresented) {
             RasterExportSheet(viewModel: viewModel)

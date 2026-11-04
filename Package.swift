@@ -11,6 +11,7 @@ let package = Package(
         .executable(name: "ArtFlex", targets: ["ArtFlex"])
     ],
     dependencies: [
+        .package(url: "https://github.com/weichsel/ZIPFoundation.git", exact: "0.9.20"),
         .package(
             url: "https://github.com/nicklockwood/Euclid.git",
             exact: "0.8.18"
@@ -29,7 +30,8 @@ let package = Package(
             dependencies: [
                 "ArtFlexPolicies",
                 "ArtFlexLifecycle",
-                .product(name: "Euclid", package: "Euclid")
+                .product(name: "Euclid", package: "Euclid"),
+                .product(name: "ZIPFoundation", package: "ZIPFoundation")
             ],
             path: ".",
             exclude: [
