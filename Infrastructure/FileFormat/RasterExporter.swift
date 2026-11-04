@@ -44,9 +44,12 @@ final class RasterExporter: Sendable {
     func export(
         snapshot: LayerTextureSnapshot,
         options: RasterExportOptions,
-        to fileURL: URL
+        to fileURL: URL,
+        cancellation: WorkCancellation? = nil
     ) throws -> RasterExportResult {
+        try cancellation?.check()
         let result = try encode(snapshot: snapshot, options: options)
+        try cancellation?.check()
         try result.encodedData.write(to: fileURL, options: .atomic)
         return result
     }

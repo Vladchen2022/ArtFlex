@@ -371,6 +371,13 @@ final class WorkspaceViewModel: ObservableObject {
     private let rasterPreviewStore = RasterPreviewStore()
     private let maskThumbnailStore = MaskThumbnailStore()
     private var rasterExportTask: Task<Void, Never>?
+    private var rasterExportCancellation: WorkCancellation?
+    @Published private(set) var isRasterExportCancelling = false
+    func cancelRasterExportJob() {
+        guard let rasterExportCancellation else { return }
+        rasterExportCancellation.cancel()
+        isRasterExportCancelling = true
+    }
     private var rasterExportBoundsRequest: UUID?
     private var isAdjustingLayerOpacity = false
     private var activeLayerOpacityChangeDidMutate = false
@@ -13556,6 +13563,9 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     private func performRasterExport(options: RasterExportOptions, to url: URL) {
+        let cancellation = WorkCancellation()
+        rasterExportCancellation = cancellation
+        isRasterExportCancelling = false
         let exporter = bootstrap.rasterExporter
         showStatus(.init(kind: .info, message: "正在导出…"))
         rasterExportTask = Task { @MainActor [weak self] in
@@ -13569,8 +13579,10 @@ final class WorkspaceViewModel: ObservableObject {
             } catch {
                 self.rasterExportTask = nil
                 self.isRasterExporting = false
-                self.rasterExportError = error.localizedDescription
-                self.showStatus(.init(kind: .error, message: error.localizedDescription))
+                self.rasterExportCancellation = nil
+                self.isRasterExportCancelling = false
+                self.rasterExportError = error is CancellationError ? nil : error.localizedDescription
+                self.showStatus(.init(kind: error is CancellationError ? .info : .error, message: error is CancellationError ? "已取消导出，目标文件保持不变" : error.localizedDescription))
                 return
             }
 
@@ -13578,17 +13590,20 @@ final class WorkspaceViewModel: ObservableObject {
             let serializer = WorkspaceUncheckedBox(self.bootstrap.textureSerializer)
             let exportResult = await Task.detached(priority: .userInitiated) {
                 Result {
+                    try cancellation.check()
                     let snapshot = try serializer.value.snapshot(texture: texture.value)
                     return try exporter.export(
                         snapshot: snapshot,
                         options: options,
-                        to: url
+                        to: url, cancellation: cancellation
                     )
                 }
             }.value
 
             self.rasterExportTask = nil
             self.isRasterExporting = false
+                self.rasterExportCancellation = nil
+                self.isRasterExportCancelling = false
             do {
                 let result = try exportResult.get()
                 self.isRasterExportSheetPresented = false
@@ -13598,8 +13613,8 @@ final class WorkspaceViewModel: ObservableObject {
                     message: "已导出 \(options.format.rawValue.uppercased())：\(result.pixelWidth)×\(result.pixelHeight)"
                 ))
             } catch {
-                self.rasterExportError = error.localizedDescription
-                self.showStatus(.init(kind: .error, message: error.localizedDescription))
+                self.rasterExportError = error is CancellationError ? nil : error.localizedDescription
+                self.showStatus(.init(kind: error is CancellationError ? .info : .error, message: error is CancellationError ? "已取消导出，目标文件保持不变" : error.localizedDescription))
             }
         }
     }
@@ -14383,7 +14398,8 @@ final class WorkspaceViewModel: ObservableObject {
             ))
             return !hasUnsavedChanges
         } catch {
-            showStatus(.init(kind: .error, message: error.localizedDescription))
+            showStatus(.init(kind: error is CancellationError ? .info : .error,
+                message: error is CancellationError ? "已取消保存，原工程保持不变" : error.localizedDescription))
             return false
         }
     }
@@ -14455,18 +14471,25 @@ final class WorkspaceViewModel: ObservableObject {
         }
     }
 
+    var projectSaveProgress: ProjectReadProgress? { projectSaveCoordinator.progress }
+    func cancelProjectSave() { projectSaveCoordinator.cancel() }
+    var projectOpenProgress: ProjectReadProgress? { projectOpenCoordinator.progress }
+    func cancelProjectOpen() { projectOpenCoordinator.cancel() }
+
     private func loadProjectInBackground(from url: URL?, isRecovery: Bool) {
         showStatus(.init(kind: .info, message: isRecovery ? "正在验证并恢复工程…" : "正在验证并打开工程…"))
         projectOpenCoordinator.start(from: url, isRecovery: isRecovery,
             persistence: bootstrap.persistenceController, policy: bootstrap.documentResourceBudgetPolicy,
-            currentResidentBytes: currentDocumentInteractiveResidentByteCount(), lifecycle: documentLifecycle
+            currentResidentBytes: currentDocumentInteractiveResidentByteCount(), lifecycle: documentLifecycle,
+            stager: ProjectOpenTextureStager(metal: bootstrap.metalContext, serializer: bootstrap.textureSerializer)
         ) { [weak self] result in
             guard let self else { return }
             switch result {
             case .documentChanged:
                 self.showStatus(.init(kind: .info, message: "打开期间当前画布发生变化，已保留当前工程；请重新打开"))
             case .failed(let error):
-                self.showStatus(.init(kind: .error, message: error.localizedDescription))
+                self.showStatus(.init(kind: error is CancellationError ? .info : .error,
+                    message: error is CancellationError ? "已取消打开，当前画稿未改变" : error.localizedDescription))
             case .loaded(let sourceURL, let opened):
                 do { try self.applyOpenedProjectResult(opened, sourceURL: sourceURL, isRecovery: isRecovery) }
                 catch { self.showStatus(.init(kind: .error, message: error.localizedDescription)) }
@@ -14491,7 +14514,7 @@ final class WorkspaceViewModel: ObservableObject {
         if !isRecovery {
             openedWorkspace.document.metadata.name = Self.projectDisplayName(for: sourceURL)
         }
-        let stagedLayerTextures = try stageOpenedProjectTextures(
+        let stagedLayerTextures = try result.preparedTextures?.textures ?? stageOpenedProjectTextures(
             result.layerSnapshots,
             canvasSize: openedWorkspace.document.canvasSize
         )

@@ -172,15 +172,20 @@ enum IncrementalRecoveryArchive {
                      totalUncompressedAssetBytes: total, storageFormat: .archiveV2)
     }
 
-    static func read(at url: URL, limits: ProjectArchiveReadLimits) throws -> ProjectArchivePayload {
+    static func read(at url: URL, limits: ProjectArchiveReadLimits, context: ProjectReadContext? = nil,
+                     consumeLayer: ((LayerHistorySnapshot, CanvasSize) throws -> Void)? = nil) throws -> ProjectArchivePayload {
+        try context?.check()
         _ = try inspect(at: url, limits: limits)
         let manifest = try manifest(at: url, limits: limits)
-        var payload = try ProjectArchiveV2Reader(limits: limits).read(from: url.appendingPathComponent("metadata"))
-        payload.package.layerSnapshots = try manifest.resources.map { resource in
+        var payload = try ProjectArchiveV2Reader(limits: limits, context: context).read(from: url.appendingPathComponent("metadata"))
+        payload.package.layerSnapshots = try manifest.resources.enumerated().map { index, resource in
+            try context?.check()
+            context?.report(.layers, completed: index, total: manifest.resources.count)
             let bpp = resource.encoding.bytesPerPixel
             let rowBytes = manifest.canvasSize.width * bpp
             var pixels = Data(count: rowBytes * manifest.canvasSize.height)
             for tile in resource.tiles {
+                try context?.check()
                 let bytes = try readTile(tile, at: url, limits: limits)
                 pixels.withUnsafeMutableBytes { target in
                     bytes.withUnsafeBytes { source in
@@ -191,9 +196,11 @@ enum IncrementalRecoveryArchive {
                     }
                 }
             }
-            return LayerHistorySnapshot(layerID: resource.key.layerID, resourceKind: resource.key.kind,
+            var snapshot = LayerHistorySnapshot(layerID: resource.key.layerID, resourceKind: resource.key.kind,
                 texture: .init(width: manifest.canvasSize.width, height: manifest.canvasSize.height,
                                bytesPerRow: rowBytes, pixelData: pixels, encoding: resource.encoding))
+            if let consumeLayer { try consumeLayer(snapshot, manifest.canvasSize); snapshot.texture.pixelData = Data() }
+            return snapshot
         }
         return payload
     }

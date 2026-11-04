@@ -28,6 +28,13 @@ struct MainWindowView: View {
             }
         }
         .background(Color(red: 0.11, green: 0.11, blue: 0.12))
+        .overlay(alignment: .top) {
+            if let progress = viewModel.projectSaveProgress {
+                ProjectLoadingView(progress: progress, isSaving: true, cancel: viewModel.cancelProjectSave).padding(.top, 58)
+            } else if let progress = viewModel.projectOpenProgress {
+                ProjectLoadingView(progress: progress, cancel: viewModel.cancelProjectOpen).padding(.top, 58)
+            }
+        }
         .background(
             WindowKeyboardBridge(
                 keyDownHandler: handleKeyDown(_:),

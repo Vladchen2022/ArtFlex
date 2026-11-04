@@ -69,6 +69,7 @@ struct OpenProjectResult: Sendable {
     var savedSnapshots: [PersistentCanvasSnapshotPayload]
     var previewPNGData: Data?
     var storageFormat: ProjectStorageFormat
+    var preparedTextures: PreparedProjectTextures? = nil
 
     init(
         workspace: WorkspaceState,
@@ -323,14 +324,17 @@ final class PersistenceController {
 
     func materializeProjectPayload(
         from capture: FrozenProjectCapture,
-        reuseEncodedLayers: Bool = false
+        reuseEncodedLayers: Bool = false,
+        context: ProjectReadContext? = nil
     ) throws -> ProjectArchivePayload {
         var layerSnapshots: [LayerHistorySnapshot] = []
         var encodedResources = capture.reusedLayerResources
         let tokens = Dictionary(uniqueKeysWithValues: capture.resourceTokens.map { ($0.key, $0) })
         // Frozen GPU resources stay alive until capture completes. Raw CPU readback and
         // compression scratch, however, are bounded to one layer/mask at a time.
-        for resource in capture.layerResources {
+        for (index, resource) in capture.layerResources.enumerated() {
+            try context?.check()
+            context?.report(.materializing, completed: index, total: capture.layerResources.count)
             try autoreleasepool {
                 let snapshot = LayerHistorySnapshot(layerID: resource.layer.id,
                     resourceKind: resource.resourceKind,
@@ -386,10 +390,11 @@ final class PersistenceController {
     func writeCapturedProject(
         _ payload: ProjectArchivePayload,
         to fileURL: URL,
-        recordsVersionBackup: Bool = true
+        recordsVersionBackup: Bool = true,
+        context: ProjectReadContext? = nil
     ) throws -> ProjectWriteOutcome {
         if Self.shouldUseV2Archive(for: fileURL) {
-            try writeFlatArchive(payload, to: fileURL)
+            try writeFlatArchive(payload, to: fileURL, context: context)
         } else {
             guard payload.referenceImages.isEmpty, payload.savedSnapshots.isEmpty else {
                 throw PersistenceError.legacyFormatCannotStoreAssets
@@ -408,6 +413,8 @@ final class PersistenceController {
                 }
             }
             let data = try encoder.encode(package)
+            try context?.check()
+            context?.report(.committing)
             try data.write(to: fileURL, options: .atomic)
         }
 
@@ -439,7 +446,8 @@ final class PersistenceController {
         }
     }
 
-    private func writeFlatArchive(_ payload: ProjectArchivePayload, to destinationURL: URL) throws {
+    private func writeFlatArchive(_ payload: ProjectArchivePayload, to destinationURL: URL, context: ProjectReadContext? = nil) throws {
+        try context?.check()
         let fileManager = FileManager.default
         let parentURL = destinationURL.deletingLastPathComponent()
         try fileManager.createDirectory(at: parentURL, withIntermediateDirectories: true)
@@ -457,11 +465,13 @@ final class PersistenceController {
             try? fileManager.removeItem(at: stagingArchiveURL)
         }
 
-        try archiveWriter.write(payload, to: stagingPackageURL)
-        try flatContainer.encodePackage(at: stagingPackageURL, to: stagingArchiveURL)
-        try flatContainer.withExtractedPackage(from: stagingArchiveURL, limits: archiveReadLimits) {
-            try archiveReader.validateArchive(at: $0)
+        try archiveWriter.write(payload, to: stagingPackageURL, context: context)
+        try flatContainer.encodePackage(at: stagingPackageURL, to: stagingArchiveURL, context: context)
+        try flatContainer.withExtractedPackage(from: stagingArchiveURL, limits: archiveReadLimits, context: context) {
+            try ProjectArchiveV2Reader(limits: archiveReadLimits, context: context).validateArchive(at: $0)
         }
+        try context?.check()
+        context?.report(.committing)
 
         if fileManager.fileExists(atPath: destinationURL.path) {
             _ = try fileManager.replaceItemAt(
@@ -781,7 +791,8 @@ final class PersistenceController {
     }
 
     func openBestAvailableRecoveryProject(
-        preflight: (ProjectOpenInspection) throws -> Void = { _ in }
+        preflight: (ProjectOpenInspection) throws -> Void = { _ in },
+        context: ProjectReadContext? = nil, stager: ProjectOpenTextureStager? = nil
     ) throws -> (url: URL, result: OpenProjectResult) {
         var lastError: Error?
         for candidate in recoveryProjectCandidates where
@@ -789,9 +800,10 @@ final class PersistenceController {
             do {
                 return (
                     candidate,
-                    try openProject(from: candidate, preflight: preflight)
+                    try openProject(from: candidate, preflight: preflight, context: context, stager: stager)
                 )
             } catch {
+                try context?.check()
                 lastError = error
             }
         }
@@ -857,23 +869,33 @@ final class PersistenceController {
 
     func openProject(
         from fileURL: URL,
-        preflight: (ProjectOpenInspection) throws -> Void = { _ in }
+        preflight: (ProjectOpenInspection) throws -> Void = { _ in },
+        context: ProjectReadContext? = nil, stager: ProjectOpenTextureStager? = nil
     ) throws -> OpenProjectResult {
+        let readContext = context ?? ProjectReadContext()
+        try readContext.check()
+        readContext.report(.inspecting)
+        let reader = ProjectArchiveV2Reader(limits: archiveReadLimits, context: readContext)
+        var prepared: [(layerID: LayerID, resourceKind: LayerHistoryResourceKind, texture: MTLTexture)] = []
+        let consume: ((LayerHistorySnapshot, CanvasSize) throws -> Void)? = stager.map { stager in
+            { snapshot, canvas in prepared.append(try stager.prepare(snapshot, canvas: canvas, context: readContext)) }
+        }
         let payload: ProjectArchivePayload
         let storageFormat: ProjectStorageFormat
         if IncrementalRecoveryArchive.exists(at: fileURL) {
             try preflight(inspectProject(from: fileURL))
-            payload = try IncrementalRecoveryArchive.read(at: fileURL, limits: archiveReadLimits)
+            payload = try IncrementalRecoveryArchive.read(at: fileURL, limits: archiveReadLimits, context: readContext, consumeLayer: consume)
             storageFormat = .archiveV2
         } else if Self.shouldUseV2Archive(for: fileURL) {
-            payload = try withV2PackageDirectory(for: fileURL) { packageURL in
-                let inspection = try archiveReader.inspect(from: packageURL)
+            payload = try withV2PackageDirectory(for: fileURL, context: readContext) { packageURL in
+                readContext.preview(try? reader.previewData(from: packageURL))
+                let inspection = try reader.inspect(from: packageURL)
                 try preflight(ProjectOpenInspection(workspace: inspection.workspace,
                     savedSnapshotCount: inspection.savedSnapshotCount,
                     referenceArchiveBytes: inspection.referenceArchiveBytes,
                     estimatedReferenceResidentBytes: inspection.estimatedReferenceResidentBytes,
                     totalUncompressedAssetBytes: inspection.totalUncompressedAssetBytes, storageFormat: .archiveV2))
-                return try archiveReader.read(from: packageURL)
+                return try reader.read(from: packageURL, consumeLayer: consume)
             }
             storageFormat = .archiveV2
         } else {
@@ -887,15 +909,24 @@ final class PersistenceController {
             )
             storageFormat = .legacyJSON
         }
-        let package = payload.package
+        try readContext.check()
+        var package = payload.package
+        if storageFormat == .legacyJSON, let consume {
+            for index in package.layerSnapshots.indices {
+                try readContext.check()
+                readContext.report(.layers, completed: index, total: package.layerSnapshots.count)
+                try consume(package.layerSnapshots[index], package.document.canvasSize)
+                package.layerSnapshots[index].texture.pixelData = Data()
+            }
+        }
         var workspace = package.workspaceState
         workspace.document.normalizeLayerHierarchy()
         try validateOpenedProject(
             workspace: workspace,
-            layerSnapshots: package.layerSnapshots
+            layerSnapshots: package.layerSnapshots, pixelsPrepared: stager != nil
         )
 
-        return OpenProjectResult(
+        var result = OpenProjectResult(
             workspace: workspace,
             layerSnapshots: package.layerSnapshots,
             referenceImages: payload.referenceImages,
@@ -903,10 +934,14 @@ final class PersistenceController {
             previewPNGData: payload.previewPNGData,
             storageFormat: storageFormat
         )
+        try readContext.check()
+        if stager != nil { result.preparedTextures = .init(textures: prepared) }
+        return result
     }
 
     private func withV2PackageDirectory<T>(
         for url: URL,
+        context: ProjectReadContext? = nil,
         _ body: (URL) throws -> T
     ) throws -> T {
         if Self.isDirectory(at: url) {
@@ -914,7 +949,7 @@ final class PersistenceController {
         }
         return try flatContainer.withExtractedPackage(
             from: url,
-            limits: archiveReadLimits,
+            limits: archiveReadLimits, context: context,
             body
         )
     }
@@ -970,7 +1005,8 @@ final class PersistenceController {
 
     private func validateOpenedProject(
         workspace: WorkspaceState,
-        layerSnapshots: [LayerHistorySnapshot]
+        layerSnapshots: [LayerHistorySnapshot],
+        pixelsPrepared: Bool = false
     ) throws {
         let document = workspace.document
         let canvasSize = document.canvasSize
@@ -1035,7 +1071,7 @@ final class PersistenceController {
                 texture.height == canvasSize.height,
                 texture.encoding == encoding,
                 texture.bytesPerRow == expectedSnapshotBytesPerRow,
-                texture.pixelData.count == expectedSnapshotByteCount
+                (pixelsPrepared ? texture.pixelData.isEmpty : texture.pixelData.count == expectedSnapshotByteCount)
             else {
                 throw PersistenceError.invalidProject("图层像素尺寸或数据长度不匹配")
             }

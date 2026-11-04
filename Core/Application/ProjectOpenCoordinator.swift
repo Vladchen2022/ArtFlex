@@ -11,17 +11,38 @@ enum ProjectOpenCompletion {
 @MainActor
 final class ProjectOpenCoordinator {
     private var task: Task<Void, Never>?
+    private var context: ProjectReadContext?
+    private var requestID: UUID?
+    private(set) var progress: ProjectReadProgress?
     var isOpening: Bool { task != nil }
     var onStateChange: (() -> Void)?
-    deinit { task?.cancel() }
+    deinit { context?.cancellation.cancel(); task?.cancel() }
+
+    func cancel() {
+        guard task != nil else { return }
+        context?.cancellation.cancel()
+        progress?.phase = .cancelling
+        onStateChange?()
+    }
 
     @discardableResult
     func start(from url: URL?, isRecovery: Bool, persistence: PersistenceController,
                policy: DocumentResourceBudgetPolicy, currentResidentBytes: Int,
-               lifecycle: DocumentLifecycleCoordinator,
+               lifecycle: DocumentLifecycleCoordinator, stager: ProjectOpenTextureStager? = nil,
                completion: @escaping (ProjectOpenCompletion) -> Void) -> Bool {
         guard task == nil else { return false }
         let expected = lifecycle.version
+        let id = UUID()
+        requestID = id
+        progress = .init(phase: .inspecting)
+        let context = ProjectReadContext { [weak self] snapshot in
+            Task { @MainActor in
+                guard let self, self.requestID == id, self.task != nil, self.context?.cancellation.isCancelled != true else { return }
+                self.progress = snapshot
+                self.onStateChange?()
+            }
+        }
+        self.context = context
         let reader = ProjectOpenReader(controller: persistence)
         task = Task { [weak self, weak lifecycle] in
             let result = await Task.detached(priority: .userInitiated) {
@@ -45,16 +66,20 @@ final class ProjectOpenCoordinator {
                         }
                     }
                     if isRecovery {
-                        let opened = try reader.controller.openBestAvailableRecoveryProject(preflight: preflight)
+                        let opened = try reader.controller.openBestAvailableRecoveryProject(preflight: preflight, context: context, stager: stager)
                         return (opened.url, opened.result)
                     }
                     guard let url else { throw CocoaError(.fileNoSuchFile) }
-                    return (url, try reader.controller.openProject(from: url, preflight: preflight))
+                    return (url, try reader.controller.openProject(from: url, preflight: preflight, context: context, stager: stager))
                 }
             }.value
             guard let self, !Task.isCancelled else { return }
             self.task = nil
+            self.requestID = nil
+            self.progress = nil
+            self.context = nil
             self.onStateChange?()
+            if context.cancellation.isCancelled { completion(.failed(CancellationError())); return }
             guard let lifecycle, lifecycle.version == expected else { completion(.documentChanged); return }
             switch result {
             case .success(let opened): completion(.loaded(opened.0, opened.1))

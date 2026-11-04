@@ -137,11 +137,12 @@ struct RasterExportSheet: View {
 
             HStack {
                 Spacer()
-                Button("取消") {
-                    viewModel.dismissRasterExportSheet()
+                Button(viewModel.isRasterExporting ? "取消导出" : "取消") {
+                    if viewModel.isRasterExporting { viewModel.cancelRasterExportJob() }
+                    else { viewModel.dismissRasterExportSheet() }
                 }
                 .keyboardShortcut(.cancelAction)
-                .disabled(viewModel.isRasterExporting)
+                .disabled(viewModel.isRasterExportCancelling)
                 Button {
                     lastOptions = (try? JSONEncoder().encode(resolvedOptions)) ?? Data()
                     viewModel.exportRaster(options: resolvedOptions)
@@ -150,7 +151,7 @@ struct RasterExportSheet: View {
                         HStack(spacing: 6) {
                             ProgressView()
                                 .controlSize(.small)
-                            Text("正在导出…")
+                            Text(viewModel.isRasterExportCancelling ? "正在取消，等待编码结束…" : "正在导出…")
                         }
                     } else {
                         Text("选择位置并导出")

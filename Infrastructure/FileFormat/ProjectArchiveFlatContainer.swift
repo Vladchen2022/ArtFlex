@@ -37,7 +37,9 @@ final class ProjectArchiveFlatContainer {
         self.fileManager = fileManager
     }
 
-    func encodePackage(at packageURL: URL, to archiveURL: URL) throws {
+    func encodePackage(at packageURL: URL, to archiveURL: URL, context: ProjectReadContext? = nil) throws {
+        try context?.check()
+        context?.report(.packaging)
         var isDirectory: ObjCBool = false
         guard fileManager.fileExists(atPath: packageURL.path, isDirectory: &isDirectory),
               isDirectory.boolValue else {
@@ -60,7 +62,9 @@ final class ProjectArchiveFlatContainer {
                 options: [.create, .truncate],
                 permissions: FilePermissions(rawValue: 0o600)
             ) { fileStream in
-                try ArchiveStream.withEncodeStream(writingTo: fileStream) { encodeStream in
+                try ArchiveStream.withEncodeStream(writingTo: fileStream, selectUsing: { _, _, _ in
+                    context?.cancellation.isCancelled == true ? .cancel : .ok
+                }) { encodeStream in
                     try encodeStream.writeDirectoryContents(
                         archiveFrom: FilePath(packageURL.path),
                         keySet: portableArchiveKeySet
@@ -70,6 +74,7 @@ final class ProjectArchiveFlatContainer {
         } catch let error as ProjectArchiveFlatContainerError {
             throw error
         } catch {
+            try context?.check()
             throw ProjectArchiveFlatContainerError.archiveOperationFailed(
                 operation: "封装",
                 reason: error.localizedDescription
@@ -80,8 +85,11 @@ final class ProjectArchiveFlatContainer {
     func withExtractedPackage<T>(
         from archiveURL: URL,
         limits: ProjectArchiveReadLimits,
+        context: ProjectReadContext? = nil,
         _ body: (URL) throws -> T
     ) throws -> T {
+        try context?.check()
+        context?.report(.extracting)
         let values = try archiveURL.resourceValues(forKeys: [
             .isRegularFileKey,
             .isSymbolicLinkKey,
@@ -105,6 +113,7 @@ final class ProjectArchiveFlatContainer {
         )
         try fileManager.createDirectory(at: extractionRoot, withIntermediateDirectories: false)
         defer { try? fileManager.removeItem(at: extractionRoot) }
+        let entryGuard = ProjectArchiveExtractionGuard(limits: limits, root: extractionRoot, context: context)
 
         do {
             try ArchiveByteStream.withFileStream(
@@ -116,6 +125,7 @@ final class ProjectArchiveFlatContainer {
                 try ArchiveStream.withDecodeStream(readingFrom: fileStream) { decodeStream in
                     try ArchiveStream.withExtractStream(
                         extractingTo: FilePath(extractionRoot.path),
+                        selectUsing: { entryGuard.filter($0, path: $1, data: $2) },
                         flags: [.ignoreOperationNotPermitted]
                     ) { extractStream in
                         _ = try ArchiveStream.process(
@@ -125,11 +135,16 @@ final class ProjectArchiveFlatContainer {
                     }
                 }
             }
+            try context?.check()
+            if let error = entryGuard.failure { throw error }
             try validateExtractedEntries(in: extractionRoot)
+            context?.report(.inspecting)
             return try body(extractionRoot)
         } catch let error as ProjectArchiveFlatContainerError {
             throw error
         } catch {
+            try context?.check()
+            if let failure = entryGuard.failure { throw failure }
             throw ProjectArchiveFlatContainerError.archiveOperationFailed(
                 operation: "解包",
                 reason: error.localizedDescription

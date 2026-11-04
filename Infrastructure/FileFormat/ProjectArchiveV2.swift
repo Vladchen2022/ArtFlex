@@ -467,8 +467,11 @@ final class ProjectArchiveV2Writer {
     func write(
         _ payload: ProjectArchivePayload,
         to destinationURL: URL,
-        savedAt: Date = Date()
+        savedAt: Date = Date(),
+        context: ProjectReadContext? = nil
     ) throws -> ProjectArchiveV2Manifest {
+        try context?.check()
+        context?.report(.writing)
         var projectState = payload.package
         projectState.layerSnapshots = []
         let editableSources = try EditableProjectSources.collect(from: projectState.document)
@@ -536,7 +539,9 @@ final class ProjectArchiveV2Writer {
             var layerDescriptors: [ProjectArchiveLayerDescriptor] = []
             layerDescriptors.reserveCapacity(payload.package.layerSnapshots.count)
             let encodedResources = Dictionary(uniqueKeysWithValues: payload.encodedLayerResources.map { ($0.key, $0) })
-            for layerSnapshot in payload.package.layerSnapshots {
+            for (index, layerSnapshot) in payload.package.layerSnapshots.enumerated() {
+                try context?.check()
+                context?.report(.writing, completed: index, total: payload.package.layerSnapshots.count)
                 let pixelData = layerSnapshot.texture.pixelData
                 let reused = encodedResources[.init(layerID: layerSnapshot.layerID, kind: layerSnapshot.resourceKind)]
                 let compressedData = try reused?.compressedPixels ?? ZlibCodec.compress(pixelData)
@@ -604,6 +609,7 @@ final class ProjectArchiveV2Writer {
             var savedSnapshotEntries: [ProjectArchiveCanvasSnapshotEntry] = []
             savedSnapshotEntries.reserveCapacity(payload.savedSnapshots.count)
             for savedSnapshot in payload.savedSnapshots {
+                try context?.check()
                 let pixelData = savedSnapshot.pixels.pixelData
                 let compressedData = try ZlibCodec.compress(pixelData)
                 let resourceID = savedSnapshot.descriptor.pixelResourceID.rawValue.uuidString.lowercased()
@@ -645,6 +651,7 @@ final class ProjectArchiveV2Writer {
                 manifest.minimumReaderVersion = 3
             }
             for source in editableSources {
+                try context?.check()
                 guard let compressed = source.compressedData else { throw CocoaError(.fileReadCorruptFile) }
                 let asset = ProjectArchiveAssetDescriptor(relativePath: EditableProjectSources.path(for: source.sha256),
                     compression: .zlib, storedByteCount: compressed.count, uncompressedByteCount: source.byteCount, sha256: source.sha256)
@@ -663,9 +670,10 @@ final class ProjectArchiveV2Writer {
             // one asset at a time, avoiding a second full-project resident copy.
             try ProjectArchiveV2Reader(
                 fileManager: fileManager,
-                limits: limits
+                limits: limits, context: context
             ).validateArchive(at: stagingURL)
 
+            try context?.check()
             if fileManager.fileExists(atPath: destinationURL.path) {
                 _ = try fileManager.replaceItemAt(
                     destinationURL,
@@ -678,6 +686,8 @@ final class ProjectArchiveV2Writer {
             }
             stagingStillExists = false
             return manifest
+        } catch is CancellationError {
+            throw CancellationError()
         } catch let error as ProjectArchiveV2Error {
             throw error
         } catch let error as ProjectReferenceImageError {
@@ -921,13 +931,16 @@ final class ProjectArchiveV2Writer {
 final class ProjectArchiveV2Reader {
     private let fileManager: FileManager
     private let limits: ProjectArchiveReadLimits
+    private let context: ProjectReadContext?
 
     init(
         fileManager: FileManager = .default,
-        limits: ProjectArchiveReadLimits = .standard
+        limits: ProjectArchiveReadLimits = .standard,
+        context: ProjectReadContext? = nil
     ) {
         self.fileManager = fileManager
         self.limits = limits
+        self.context = context
     }
 
     /// Reads only the bounded, hash-validated preview asset, never layer pixels.
@@ -939,6 +952,8 @@ final class ProjectArchiveV2Reader {
     }
 
     func inspect(from archiveURL: URL) throws -> ProjectArchiveInspection {
+        try context?.check()
+        context?.report(.inspecting)
         let manifest = try loadManifest(from: archiveURL)
         var totalUncompressedBytes = 0
         func reserve(_ descriptor: ProjectArchiveAssetDescriptor) throws {
@@ -1140,7 +1155,9 @@ final class ProjectArchiveV2Reader {
         }
     }
 
-    func read(from archiveURL: URL) throws -> ProjectArchivePayload {
+    func read(from archiveURL: URL,
+              consumeLayer: ((LayerHistorySnapshot, CanvasSize) throws -> Void)? = nil) throws -> ProjectArchivePayload {
+        try context?.check()
         let manifest = try loadManifest(from: archiveURL)
 
         var totalUncompressedBytes = 0
@@ -1172,6 +1189,7 @@ final class ProjectArchiveV2Reader {
         } else {
             previewPNGData = nil
         }
+        context?.preview(previewPNGData)
         let projectData = try readAsset(
             manifest.projectState,
             from: archiveURL,
@@ -1192,7 +1210,9 @@ final class ProjectArchiveV2Reader {
 
         var layerSnapshots: [LayerHistorySnapshot] = []
         layerSnapshots.reserveCapacity(manifest.layers.count)
-        for layer in manifest.layers {
+        for (index, layer) in manifest.layers.enumerated() {
+            try context?.check()
+            context?.report(.layers, completed: index, total: manifest.layers.count)
             try validate(layer, canvasSize: package.document.canvasSize, encoding: package.document.colorStandard.pixelFormat.encoding)
             try reserveUncompressedBytes(layer.asset.uncompressedByteCount)
             let pixelData = try readAsset(
@@ -1200,8 +1220,7 @@ final class ProjectArchiveV2Reader {
                 from: archiveURL,
                 maximumUncompressedBytes: limits.maximumUncompressedAssetBytes
             )
-            layerSnapshots.append(
-                LayerHistorySnapshot(
+            var snapshot = LayerHistorySnapshot(
                     layerID: layer.layerID,
                     resourceKind: layer.resourceKind,
                     texture: LayerTextureSnapshot(
@@ -1213,7 +1232,12 @@ final class ProjectArchiveV2Reader {
                     originX: layer.originX,
                     originY: layer.originY
                 )
-            )
+            if let consumeLayer {
+                try consumeLayer(snapshot, package.document.canvasSize)
+                snapshot.texture.pixelData = Data()
+            }
+            layerSnapshots.append(snapshot)
+            context?.report(.layers, completed: index + 1, total: manifest.layers.count)
         }
         let expectedResourceKeys = Self.expectedLayerResourceKeys(in: package.document)
         let decodedResourceKeys = Set(layerSnapshots.map {
@@ -1227,9 +1251,11 @@ final class ProjectArchiveV2Reader {
         var decodedAssetCache: [String: Data] = [:]
         var referenceImages: [ProjectReferenceImagePayload] = []
         referenceImages.reserveCapacity(manifest.referenceImages.count)
-        for entry in manifest.referenceImages.sorted(by: {
+        for (index, entry) in manifest.referenceImages.sorted(by: {
             $0.descriptor.slotIndex < $1.descriptor.slotIndex
-        }) {
+        }).enumerated() {
+            try context?.check()
+            context?.report(.references, completed: index, total: manifest.referenceImages.count + manifest.savedSnapshots.count)
             let data: Data
             if let cached = decodedAssetCache[entry.asset.relativePath] {
                 data = cached
@@ -1256,7 +1282,9 @@ final class ProjectArchiveV2Reader {
 
         var savedSnapshots: [PersistentCanvasSnapshotPayload] = []
         savedSnapshots.reserveCapacity(manifest.savedSnapshots.count)
-        for entry in manifest.savedSnapshots {
+        for (index, entry) in manifest.savedSnapshots.enumerated() {
+            try context?.check()
+            context?.report(.references, completed: manifest.referenceImages.count + index, total: manifest.referenceImages.count + manifest.savedSnapshots.count)
             try validate(entry)
             guard entry.descriptor.canvasSize == package.document.canvasSize else {
                 throw ProjectArchiveV2Error.invalidSavedSnapshot(entry.descriptor.id)
@@ -1428,7 +1456,9 @@ final class ProjectArchiveV2Reader {
         guard expected == Set(descriptors.keys) else { throw ProjectArchiveV2Error.malformedProjectState("可编辑源素材不完整") }
         var compressedByHash: [String: Data] = [:]
         if verifyBytes {
-            for asset in manifest.editableSources {
+            for (index, asset) in manifest.editableSources.enumerated() {
+                try context?.check()
+                context?.report(.sources, completed: index, total: manifest.editableSources.count)
                 let data = try readAsset(asset, from: url, maximumUncompressedBytes: limits.maximumUncompressedAssetBytes)
                 if hydrate { compressedByHash[asset.sha256] = try ZlibCodec.compress(data) }
             }
@@ -1538,6 +1568,7 @@ final class ProjectArchiveV2Reader {
         from rootURL: URL,
         maximumUncompressedBytes: Int
     ) throws -> Data {
+        try context?.check()
         guard descriptor.storedByteCount <= limits.maximumStoredAssetBytes else {
             throw ProjectArchiveV2Error.assetTooLarge(
                 path: descriptor.relativePath,
@@ -1571,6 +1602,7 @@ final class ProjectArchiveV2Reader {
         }
 
         let storedData = try Data(contentsOf: assetURL, options: [.mappedIfSafe])
+        try context?.check()
         let decodedData: Data
         switch descriptor.compression {
         case .none:
@@ -1589,9 +1621,11 @@ final class ProjectArchiveV2Reader {
             )
         }
 
+        try context?.check()
         guard ProjectReferenceImageHash.sha256Hex(decodedData) == descriptor.sha256 else {
             throw ProjectArchiveV2Error.checksumMismatch(descriptor.relativePath)
         }
+        try context?.check()
         return decodedData
     }
 
