@@ -33,7 +33,9 @@ final class ProjectOpenCoordinator {
                             savedSnapshotCount: inspection.savedSnapshotCount,
                             referenceImageBytes: inspection.referenceArchiveBytes,
                             referenceImageResidentBytes: inspection.estimatedReferenceResidentBytes,
-                            pixelFormat: inspection.workspace.document.colorStandard.pixelFormat)
+                            pixelFormat: inspection.workspace.document.colorStandard.pixelFormat,
+                            editableSourceBytes: inspection.workspace.document.editableSourceByteCounts.archive,
+                            editableSourceResidentBytes: inspection.workspace.document.editableSourceByteCounts.resident)
                         guard assessment.isSupported else {
                             throw PersistenceError.invalidProject(assessment.rejectionReason ?? "工程超出当前设备的安全资源范围")
                         }

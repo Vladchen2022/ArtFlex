@@ -529,7 +529,8 @@ struct ArtDocument: Codable, Sendable, Equatable {
             clipTargetLayerID: source.clipTargetLayerID,
             isReference: source.isReference,
             mask: source.mask,
-            adjustment: source.adjustment
+            adjustment: source.adjustment,
+            editableContent: source.editableContent
         )
 
         let insertIndex = activeIndex + 1
@@ -597,6 +598,7 @@ struct ArtDocument: Codable, Sendable, Equatable {
         layers[destinationIndex].opacity = min(max(mergedOpacity, 0), 1)
         layers[destinationIndex].blendMode = .normal
         layers[destinationIndex].clipTargetLayerID = nil
+        layers[destinationIndex].editableContent = nil
         layers.remove(at: sourceIndex)
         for index in layers.indices where layers[index].clipTargetLayerID == context.source.id {
             layers[index].clipTargetLayerID = context.destination.id
@@ -630,6 +632,7 @@ struct ArtDocument: Codable, Sendable, Equatable {
         layers[targetIndex].opacity = min(max(mergedOpacity, 0), 1)
         layers[targetIndex].blendMode = .normal
         layers[targetIndex].clipTargetLayerID = nil
+        layers[targetIndex].editableContent = nil
         for index in layers.indices where layers[index].clipTargetLayerID.map(visibleLayerIDs.contains) == true {
             layers[index].clipTargetLayerID = context.target.id
         }

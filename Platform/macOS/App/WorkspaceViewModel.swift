@@ -80,6 +80,9 @@ final class QuickColorPickerPresentationProxy: ObservableObject {
 
 @MainActor
 final class WorkspaceViewModel: ObservableObject {
+    @Published var editableLayerDraft: EditableLayerDraft?
+    @Published var retainsEditableFillParameters = false
+    private lazy var editableLayerRenderer = EditableLayerRenderer(metal: bootstrap.metalContext, serializer: bootstrap.textureSerializer)
     @Published var paintingBlocker: PaintingBlocker?
     @Published var selectionRefinementDraft: SelectionRefinementDraft?
     @Published var preferredSelectionCombineMode: SelectionCombineMode = .replace
@@ -6459,6 +6462,9 @@ final class WorkspaceViewModel: ObservableObject {
                 document.perspectiveGuide = document.perspectiveGuide?.cropped(originX: sourceX, originY: sourceY)
                 document.canvasSize = targetSize
                 document.cropRetention = prepared.retention
+                for index in document.layers.indices {
+                    document.layers[index].editableContent?.crop(originX: sourceX, originY: sourceY)
+                }
             }
             bootstrap.workspaceStore.updateSelection { $0 = .empty }
             bootstrap.workspaceStore.updateViewport { $0 = .stageOneDefault }
@@ -7705,8 +7711,10 @@ final class WorkspaceViewModel: ObservableObject {
         resultTexture: MTLTexture,
         tool: ToolKind,
         successMessage: String,
-        failureMessage: String
+        failureMessage: String,
+        editableContent: EditableLayerContent? = nil
     ) {
+        if let editableContent, !ensureDocumentResourceBudget(additionalEditableSources: editableContent.assets, action: "保留渐变源素材") { return }
         guard let token = gradientSession.beginCommit(version: documentLifecycle.version, layerID: layerID, tool: tool) else { return }
         let lifetime = MetalCloneSourceLifetime([sourceTexture, resultTexture])
 #if DEBUG
@@ -7743,6 +7751,7 @@ final class WorkspaceViewModel: ObservableObject {
                     candidateChangedLayerIDs: [layerID], captureMode: .inPlaceChangedLayers([layerID])
                 ) else { return }
                 self.bootstrap.layerSurfaceStore.swapTexture(for: surfaceID, with: resultTexture)
+                if let editableContent { self.setEditableContent(editableContent, layerID: layerID) }
                 self.bootstrap.layerSurfaceStore.compactTexture(for: surfaceID)
                 self.bootstrap.strokeEngine.resetBrushPipelineState()
                 self.layerThumbnailCache.removeValue(forKey: layerID)
@@ -9182,6 +9191,14 @@ final class WorkspaceViewModel: ObservableObject {
             showStatus(.init(kind: .error, message: "纹理填充未完成，画布和历史记录未改变"))
             return false
         }
+        let editableContent: EditableLayerContent?
+        do {
+            if retainsEditableFillParameters, let base = state.baseTexture {
+                editableContent = try EditableLayerCapture.texture(state: state,
+                    source: bootstrap.textureSerializer.snapshot(texture: base), alphaLocked: layerTransparentPixelLockEnabled(state.layerID))
+            } else { editableContent = nil }
+        } catch { showStatus(.init(kind: .error, message: error.localizedDescription)); return false }
+        if let editableContent, !ensureDocumentResourceBudget(additionalEditableSources: editableContent.assets, action: "保留纹理源素材") { return false }
         guard checkpointHistoryIfPossible(
             operationKind: "textureFill.drag",
             candidateChangedLayerIDs: [state.layerID],
@@ -9194,6 +9211,7 @@ final class WorkspaceViewModel: ObservableObject {
 
         // Rendering and history capture have succeeded. Publishing needs no further GPU work.
         bootstrap.layerSurfaceStore.swapTexture(for: state.surfaceID, with: resultTexture)
+        if let editableContent { setEditableContent(editableContent, layerID: state.layerID) }
         bootstrap.layerSurfaceStore.compactTexture(for: state.surfaceID)
         layerThumbnailCache.removeValue(forKey: state.layerID)
         bootstrap.strokeEngine.resetBrushPipelineState()
@@ -11887,6 +11905,11 @@ final class WorkspaceViewModel: ObservableObject {
             return
         }
 
+        let editableContent: EditableLayerContent?
+        do {
+            editableContent = retainsEditableFillParameters ? try captureEditableGradient(source: texture,
+                geometry: .linear(geometry), layerID: layerID) : nil
+        } catch { showStatus(.init(kind: .error, message: error.localizedDescription)); return }
         commitGradientApplication(
             commandBuffer,
             layerID: layerID,
@@ -11894,7 +11917,8 @@ final class WorkspaceViewModel: ObservableObject {
             resultTexture: resultTexture,
             tool: .linearGradient,
             successMessage: "已应用直线渐变",
-            failureMessage: "无法完成直线渐变提交"
+            failureMessage: "无法完成直线渐变提交",
+            editableContent: editableContent
         )
         submitted = isApplyingGradientCommit
     }
@@ -12003,6 +12027,11 @@ final class WorkspaceViewModel: ObservableObject {
             return
         }
 
+        let editableContent: EditableLayerContent?
+        do {
+            editableContent = retainsEditableFillParameters ? try captureEditableGradient(source: texture,
+                geometry: .sector(geometry), layerID: layerID) : nil
+        } catch { showStatus(.init(kind: .error, message: error.localizedDescription)); return }
         commitGradientApplication(
             commandBuffer,
             layerID: layerID,
@@ -12010,7 +12039,8 @@ final class WorkspaceViewModel: ObservableObject {
             resultTexture: resultTexture,
             tool: .sectorGradient,
             successMessage: "已应用扇形渐变",
-            failureMessage: "无法完成扇形渐变提交"
+            failureMessage: "无法完成扇形渐变提交",
+            editableContent: editableContent
         )
         submitted = isApplyingGradientCommit
     }
@@ -14127,6 +14157,7 @@ final class WorkspaceViewModel: ObservableObject {
         additionalMasks: Int = 0,
         additionalSavedSnapshots: Int = 0,
         additionalWorkingBytes: Int = 0,
+        additionalEditableSources: [EditableSourceAsset] = [],
         replacingReferenceImageAt slotID: Int? = nil,
         with referenceImageAsset: ReferenceImageAsset? = nil,
         action: String
@@ -14143,6 +14174,7 @@ final class WorkspaceViewModel: ObservableObject {
             replacingSlotID: slotID,
             with: referenceImageAsset
         )
+        let sources = EditableSourceAsset.byteCounts(workspace.document.editableSourceAssets + additionalEditableSources)
         let pixels = saturatingMultiply(workspace.document.canvasSize.width, by: workspace.document.canvasSize.height)
         let growth = saturatingMultiply(pixels, by: additionalPaintLayers * workspace.document.colorStandard.pixelFormat.encoding.bytesPerPixel + additionalMasks)
         func assess() -> DocumentResourceAssessment { bootstrap.documentResourceBudgetPolicy.assess(
@@ -14157,7 +14189,9 @@ final class WorkspaceViewModel: ObservableObject {
             pixelFormat: workspace.document.colorStandard.pixelFormat,
             allocatedLayerBytes: saturatingAdd(bootstrap.layerSurfaceStore.allocatedPixelBytes, growth),
             measuredGPUResidentBytes: saturatingAdd(bootstrap.metalContext.device.currentAllocatedSize, growth),
-            reservedWorkingBytes: bootstrap.metalContext.workingResourceBudget.reservedBytes
+            reservedWorkingBytes: bootstrap.metalContext.workingResourceBudget.reservedBytes,
+            editableSourceBytes: sources.archive,
+            editableSourceResidentBytes: sources.resident
         ) }
         var assessment = assess()
         if assessment.isSupported { return true }
@@ -14225,7 +14259,9 @@ final class WorkspaceViewModel: ObservableObject {
             pixelFormat: workspace.document.colorStandard.pixelFormat,
             allocatedLayerBytes: bootstrap.layerSurfaceStore.allocatedPixelBytes,
             measuredGPUResidentBytes: bootstrap.metalContext.device.currentAllocatedSize,
-            reservedWorkingBytes: bootstrap.metalContext.workingResourceBudget.reservedBytes
+            reservedWorkingBytes: bootstrap.metalContext.workingResourceBudget.reservedBytes,
+            editableSourceBytes: workspace.document.editableSourceByteCounts.archive,
+            editableSourceResidentBytes: workspace.document.editableSourceByteCounts.resident
         ).footprint.estimatedInteractiveResidentBytes
     }
 
@@ -19280,6 +19316,10 @@ extension WorkspaceViewModel {
             paintingBlocker = .init(message: "调整层不能直接绘画", action: .newLayer)
             return false
         }
+        if layer.editableContent != nil && activeMaskEditingLayerID != layer.id {
+            paintingBlocker = .init(message: "可编辑图层需先栅格化，或新建绘画层", action: .rasterize, layerID: layer.id)
+            return false
+        }
         paintingBlocker = nil
         return true
     }
@@ -19292,6 +19332,7 @@ extension WorkspaceViewModel {
         case .show:
             if let id = blocker.layerID { setLayerVisibility(id, isVisible: true) }
         case .newLayer: addLayer()
+        case .rasterize: if let id = blocker.layerID { rasterizeEditableLayer(id) }
         }
         _ = checkPaintingTarget()
     }
@@ -19397,6 +19438,9 @@ extension WorkspaceViewModel {
     }
 
     func beginRecentTextureAdjustment() {
+        if workspace.document.layer(workspace.document.activeLayerID)?.editableContent != nil {
+            beginEditableLayer(workspace.document.activeLayerID); return
+        }
         guard let recent = recentTextureFill, recent.revision == documentChangeRevision,
               workspace.document.activeLayerID == recent.state.layerID,
               let original = bootstrap.layerSurfaceStore.readTexture(for: recent.state.surfaceID) else {
@@ -19551,5 +19595,77 @@ extension WorkspaceViewModel {
         guard !token.isCancelled, isRasterExportSheetPresented,
               generation == documentRenderGeneration, revision == documentChangeRevision else { return nil }
         return image
+    }
+}
+
+// Narrow document transaction boundary; content models, capture, rendering and editor UI are separate.
+extension WorkspaceViewModel {
+    private func setEditableContent(_ content: EditableLayerContent?, layerID: LayerID) {
+        bootstrap.workspaceStore.updateDocument { document in
+            if let index = document.layers.firstIndex(where: { $0.id == layerID }) {
+                document.layers[index].editableContent = content
+            }
+        }
+    }
+
+    private func captureEditableGradient(source: MTLTexture, geometry: EditableGradientFill.Geometry,
+                                         layerID: LayerID) throws -> EditableLayerContent {
+        try .init(source: .init(snapshot: bootstrap.textureSerializer.snapshot(texture: source)), operation: .gradient(.init(
+            geometry: geometry, settings: gradientRenderSettings, color: gradientPreviewColor,
+            selection: workspace.selection.committedShape, jitter: displayedPaintJitterAmount,
+            contrast: displayedPaintContrastAmount, distortion: workspace.toolSession.brush.jitterAmount,
+            alphaLocked: layerTransparentPixelLockEnabled(layerID))))
+    }
+
+    func beginEditableLayer(_ layerID: LayerID) {
+        guard !isWorkflowAdjustmentActive, finishBrushWorkBeforePixelEdit(reason: "editableLayer.begin"),
+              let layer = workspace.document.layer(layerID), layer.isPaintLayer, !layer.isAdjustmentLayer,
+              !workspace.document.isLayerEffectivelyLocked(layerID),
+              let surface = bootstrap.layerSurfaceStore.surfaceID(for: layerID),
+              let texture = bootstrap.layerSurfaceStore.readTexture(for: surface) else { return }
+        do {
+            let content = try layer.editableContent ?? EditableLayerContent(
+                source: .init(snapshot: bootstrap.textureSerializer.snapshot(texture: texture)), operation: .image(.init()))
+            guard ensureDocumentResourceBudget(additionalEditableSources: content.assets, action: "编辑源素材") else { return }
+            let version = documentLifecycle.version
+            let sourceID = ObjectIdentifier(texture)
+            editableLayerDraft = EditableLayerDraft(layerID: layerID, content: content, canvas: workspace.document.canvasSize,
+                renderer: editableLayerRenderer, serializer: bootstrap.textureSerializer,
+                retainedBounds: workspace.document.cropRetention?.fullBounds,
+                makeImage: { Self.snapshotImage(from: $0, maxDimension: 600, colorSpace: CGColorSpace(name: CGColorSpace.sRGB)!) }
+            ) { [weak self] content, result, retained in
+                guard let self, self.documentLifecycle.version == version,
+                      self.bootstrap.layerSurfaceStore.readTexture(for: surface).map(ObjectIdentifier.init) == sourceID else {
+                    self?.showStatus(.init(kind: .error, message: "图层已改变，本次参数尚未应用")); return false
+                }
+                guard self.checkpointHistoryIfPossible(operationKind: "editableLayer.apply", candidateChangedLayerIDs: [layerID],
+                    captureMode: .inPlaceChangedLayers([layerID])) else { return false }
+                self.bootstrap.layerSurfaceStore.swapTexture(for: surface, with: result)
+                self.setEditableContent(content, layerID: layerID)
+                if let retained {
+                    self.bootstrap.workspaceStore.updateDocument { document in
+                        document.cropRetention?.tiles.removeAll { $0.key == .init(layerID: layerID, kind: .content) }
+                        document.cropRetention?.tiles.append(contentsOf: retained)
+                    }
+                }
+                self.bootstrap.strokeEngine.resetBrushPipelineState()
+                self.layerThumbnailCache.removeValue(forKey: layerID)
+                self.noteCanvasContentChanged(changedLayerIDs: [layerID])
+                self.refresh(invalidatedLayerIDs: [layerID])
+                self.showStatus(.init(kind: .success, message: "已应用可编辑图层，可从图层菜单继续修改"))
+                return true
+            }
+        } catch { showStatus(.init(kind: .error, message: error.localizedDescription)) }
+    }
+
+    func rasterizeEditableLayer(_ layerID: LayerID) {
+        guard !isWorkflowAdjustmentActive, workspace.document.layer(layerID)?.editableContent != nil,
+              !workspace.document.isLayerEffectivelyLocked(layerID),
+              checkpointHistoryIfPossible(operationKind: "editableLayer.rasterize", candidateChangedLayerIDs: [],
+                  captureMode: .topologyDelta(changedLayerIDs: [])) else { return }
+        setEditableContent(nil, layerID: layerID)
+        noteCanvasContentChanged(changedLayerIDs: [])
+        refresh(invalidatedLayerIDs: [layerID])
+        showStatus(.init(kind: .success, message: "已栅格化，当前像素保持不变；撤销可恢复编辑参数"))
     }
 }

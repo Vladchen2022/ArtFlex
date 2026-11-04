@@ -66,6 +66,13 @@ enum NonDestructiveCanvasCrop {
                 }
             }
         }
+        let editableRenderer = EditableLayerRenderer(metal: metal, serializer: serializer)
+        for layer in document.paintLayers {
+            guard var content = layer.editableContent, let surface = surfaces.surfaceID(for: layer.id) else { continue }
+            content.crop(originX: region.originX, originY: region.originY)
+            let texture = try editableRenderer.render(content, canvas: size, cancellation: WorkCancellation())
+            surfaces.swapTexture(for: surface, with: texture)
+        }
         let retention = CanvasCropRetention(fullBounds: fullBounds.translatedBy(x: -region.originX, y: -region.originY), tiles: retained)
         var targetDocument = document
         targetDocument.canvasSize = size

@@ -106,7 +106,7 @@ struct ProjectArchiveCanvasSnapshotEntry: Codable, Sendable, Equatable {
 struct ProjectArchiveV2Manifest: Codable, Sendable, Equatable {
     static let formatIdentifier = "com.vladchen.artflex.project"
     static let currentFormatVersion = 2
-    static let currentReaderVersion = 3
+    static let currentReaderVersion = 4
     static let manifestFilename = "manifest.json"
     static let projectStatePath = "project.json"
     static let previewPath = "preview.png"
@@ -119,6 +119,7 @@ struct ProjectArchiveV2Manifest: Codable, Sendable, Equatable {
     var projectState: ProjectArchiveAssetDescriptor
     var preview: ProjectArchiveAssetDescriptor?
     var retainedCrop: ProjectArchiveAssetDescriptor? = nil
+    var editableSources: [ProjectArchiveAssetDescriptor] = []
     var layers: [ProjectArchiveLayerDescriptor]
     var referenceImages: [ProjectArchiveReferenceImageEntry]
     var savedSnapshots: [ProjectArchiveCanvasSnapshotEntry]
@@ -131,6 +132,7 @@ struct ProjectArchiveV2Manifest: Codable, Sendable, Equatable {
         case projectState
         case preview
         case retainedCrop
+        case editableSources
         case layers
         case referenceImages
         case savedSnapshots
@@ -164,6 +166,7 @@ struct ProjectArchiveV2Manifest: Codable, Sendable, Equatable {
         projectState = try container.decode(ProjectArchiveAssetDescriptor.self, forKey: .projectState)
         preview = try container.decodeIfPresent(ProjectArchiveAssetDescriptor.self, forKey: .preview)
         retainedCrop = try container.decodeIfPresent(ProjectArchiveAssetDescriptor.self, forKey: .retainedCrop)
+        editableSources = try container.decodeIfPresent([ProjectArchiveAssetDescriptor].self, forKey: .editableSources) ?? []
         layers = try container.decode([ProjectArchiveLayerDescriptor].self, forKey: .layers)
         referenceImages = try container.decodeIfPresent(
             [ProjectArchiveReferenceImageEntry].self,
@@ -468,6 +471,10 @@ final class ProjectArchiveV2Writer {
     ) throws -> ProjectArchiveV2Manifest {
         var projectState = payload.package
         projectState.layerSnapshots = []
+        let editableSources = try EditableProjectSources.collect(from: projectState.document)
+        projectState.document.mapEditableSourceAssets { asset in
+            var reference = asset; reference.compressedData = nil; return reference
+        }
         let retainedCrop = try projectState.document.cropRetention?.validated(for: projectState.document)
         let retainedCropData = try retainedCrop.map { try Self.makeEncoder().encode($0) }
         projectState.document.cropRetention = nil
@@ -637,6 +644,14 @@ final class ProjectArchiveV2Writer {
                 manifest.retainedCrop = asset
                 manifest.minimumReaderVersion = 3
             }
+            for source in editableSources {
+                guard let compressed = source.compressedData else { throw CocoaError(.fileReadCorruptFile) }
+                let asset = ProjectArchiveAssetDescriptor(relativePath: EditableProjectSources.path(for: source.sha256),
+                    compression: .zlib, storedByteCount: compressed.count, uncompressedByteCount: source.byteCount, sha256: source.sha256)
+                try write(compressed, descriptor: asset, into: stagingURL)
+                manifest.editableSources.append(asset)
+            }
+            if !editableSources.isEmpty { manifest.minimumReaderVersion = 4 }
             let manifestData = try Self.makeEncoder().encode(manifest)
             guard manifestData.count <= limits.maximumManifestBytes else {
                 throw ProjectArchiveV2Error.manifestTooLarge(manifestData.count)
@@ -697,6 +712,9 @@ final class ProjectArchiveV2Writer {
         }
         try reserve(projectStateByteCount, path: ProjectArchiveV2Manifest.projectStatePath)
         try reserve(retainedCropByteCount, path: "retained-crop.json.zlib")
+        for source in try EditableProjectSources.collect(from: payload.package.document) {
+            try reserve(source.byteCount, path: EditableProjectSources.path(for: source.sha256))
+        }
         if let previewPNGData = payload.previewPNGData {
             guard previewPNGData.count <= ProjectArchiveV2Manifest.maximumPreviewByteCount else {
                 throw ProjectArchiveV2Error.assetTooLarge(
@@ -942,6 +960,7 @@ final class ProjectArchiveV2Reader {
 
         try reserve(manifest.projectState)
         if let retainedCrop = manifest.retainedCrop { try reserve(retainedCrop) }
+        for source in manifest.editableSources { try reserve(source) }
         if let preview = manifest.preview {
             guard preview.uncompressedByteCount <= ProjectArchiveV2Manifest.maximumPreviewByteCount else {
                 throw ProjectArchiveV2Error.assetTooLarge(
@@ -967,6 +986,7 @@ final class ProjectArchiveV2Reader {
         }
         try validateCanvasSize(package.document.canvasSize)
         try loadRetainedCrop(into: &package, manifest: manifest, from: archiveURL)
+        try loadEditableSources(into: &package, manifest: manifest, from: archiveURL, verifyBytes: false, hydrate: false)
 
         for layer in manifest.layers {
             try validate(layer, canvasSize: package.document.canvasSize, encoding: package.document.colorStandard.pixelFormat.encoding)
@@ -1037,6 +1057,7 @@ final class ProjectArchiveV2Reader {
 
         try reserveUncompressedBytes(manifest.projectState.uncompressedByteCount)
         if let retainedCrop = manifest.retainedCrop { try reserveUncompressedBytes(retainedCrop.uncompressedByteCount) }
+        for source in manifest.editableSources { try reserveUncompressedBytes(source.uncompressedByteCount) }
         if let preview = manifest.preview {
             guard preview.uncompressedByteCount <= ProjectArchiveV2Manifest.maximumPreviewByteCount else {
                 throw ProjectArchiveV2Error.assetTooLarge(
@@ -1067,6 +1088,7 @@ final class ProjectArchiveV2Reader {
         }
         try validateCanvasSize(package.document.canvasSize)
         try loadRetainedCrop(into: &package, manifest: manifest, from: archiveURL)
+        try loadEditableSources(into: &package, manifest: manifest, from: archiveURL, verifyBytes: true, hydrate: false)
 
         for layer in manifest.layers {
             try validate(layer, canvasSize: package.document.canvasSize, encoding: package.document.colorStandard.pixelFormat.encoding)
@@ -1132,6 +1154,7 @@ final class ProjectArchiveV2Reader {
 
         try reserveUncompressedBytes(manifest.projectState.uncompressedByteCount)
         if let retainedCrop = manifest.retainedCrop { try reserveUncompressedBytes(retainedCrop.uncompressedByteCount) }
+        for source in manifest.editableSources { try reserveUncompressedBytes(source.uncompressedByteCount) }
         let previewPNGData: Data?
         if let preview = manifest.preview {
             guard preview.uncompressedByteCount <= ProjectArchiveV2Manifest.maximumPreviewByteCount else {
@@ -1165,6 +1188,7 @@ final class ProjectArchiveV2Reader {
         }
         try validateCanvasSize(package.document.canvasSize)
         try loadRetainedCrop(into: &package, manifest: manifest, from: archiveURL)
+        try loadEditableSources(into: &package, manifest: manifest, from: archiveURL, verifyBytes: true, hydrate: true)
 
         var layerSnapshots: [LayerHistorySnapshot] = []
         layerSnapshots.reserveCapacity(manifest.layers.count)
@@ -1337,6 +1361,18 @@ final class ProjectArchiveV2Reader {
             descriptorByPath[asset.relativePath] = asset
         }
 
+        guard manifest.editableSources.count <= limits.maximumLayerCount * 2 else {
+            throw ProjectArchiveV2Error.malformedManifest("可编辑源素材数量超出上限")
+        }
+        var sourceHashes = Set<String>()
+        for source in manifest.editableSources {
+            guard manifest.minimumReaderVersion >= 4, source.sha256.count == 64,
+                  source.sha256.allSatisfy({ $0.isHexDigit }), sourceHashes.insert(source.sha256).inserted,
+                  source.relativePath == EditableProjectSources.path(for: source.sha256), source.compression == .zlib else {
+                throw ProjectArchiveV2Error.malformedManifest("可编辑源素材标识或版本无效")
+            }
+            try validateAsset(source)
+        }
         try validateAsset(manifest.projectState)
         if let retainedCrop = manifest.retainedCrop {
             guard retainedCrop.relativePath == "retained-crop.json.zlib", manifest.minimumReaderVersion >= 3 else {
@@ -1383,6 +1419,28 @@ final class ProjectArchiveV2Reader {
             }
             try validateAsset(entry.asset)
         }
+    }
+
+    private func loadEditableSources(into package: inout ProjectPackage, manifest: ProjectArchiveV2Manifest,
+                                     from url: URL, verifyBytes: Bool, hydrate: Bool) throws {
+        let descriptors = Dictionary(uniqueKeysWithValues: manifest.editableSources.map { ($0.sha256, $0) })
+        let expected = Set(package.document.editableSourceAssets.map(\.sha256))
+        guard expected == Set(descriptors.keys) else { throw ProjectArchiveV2Error.malformedProjectState("可编辑源素材不完整") }
+        var compressedByHash: [String: Data] = [:]
+        if verifyBytes {
+            for asset in manifest.editableSources {
+                let data = try readAsset(asset, from: url, maximumUncompressedBytes: limits.maximumUncompressedAssetBytes)
+                if hydrate { compressedByHash[asset.sha256] = try ZlibCodec.compress(data) }
+            }
+        }
+        try package.document.mapEditableSourceAssets { source in
+            guard source.compressedData == nil, let descriptor = descriptors[source.sha256],
+                  descriptor.uncompressedByteCount == source.byteCount else {
+                throw ProjectArchiveV2Error.malformedProjectState("可编辑源素材长度或存储方式无效")
+            }
+            var source = source; source.compressedData = compressedByHash[source.sha256]; return source
+        }
+        for layer in package.document.layers { try layer.editableContent?.validate() }
     }
 
     private func loadRetainedCrop(into package: inout ProjectPackage, manifest: ProjectArchiveV2Manifest, from url: URL) throws {

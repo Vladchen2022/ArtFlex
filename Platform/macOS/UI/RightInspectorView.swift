@@ -4726,6 +4726,15 @@ struct RightInspectorView: View {
 
     @ViewBuilder
     private func layerContextMenu(for layer: LayerRecord) -> some View {
+        if layer.isPaintLayer && !layer.isAdjustmentLayer {
+            Button(layer.editableContent == nil ? "转换为无损图像…" : "编辑\(layer.editableContent!.displayName)…") {
+                viewModel.beginEditableLayer(layer.id)
+            }.disabled(layer.isLocked)
+            if layer.editableContent != nil {
+                Button("栅格化图层") { viewModel.rasterizeEditableLayer(layer.id) }.disabled(layer.isLocked)
+            }
+            Divider()
+        }
         if layer.isGroup {
             Button("在组内新建图层") {
                 selectedLayerGroupID = layer.id

@@ -59,6 +59,7 @@ struct LayerRecord: Codable, Sendable, Equatable {
     var isReference: Bool
     var mask: LayerMaskDescriptor?
     var adjustment: CanvasAdjustmentDescriptor?
+    var editableContent: EditableLayerContent?
 
     private enum CodingKeys: String, CodingKey {
         case id
@@ -74,6 +75,7 @@ struct LayerRecord: Codable, Sendable, Equatable {
         case isReference
         case mask
         case adjustment
+        case editableContent
     }
 
     init(
@@ -89,7 +91,8 @@ struct LayerRecord: Codable, Sendable, Equatable {
         clipTargetLayerID: LayerID? = nil,
         isReference: Bool = false,
         mask: LayerMaskDescriptor? = nil,
-        adjustment: CanvasAdjustmentDescriptor? = nil
+        adjustment: CanvasAdjustmentDescriptor? = nil,
+        editableContent: EditableLayerContent? = nil
     ) {
         self.id = id
         self.name = name
@@ -104,6 +107,7 @@ struct LayerRecord: Codable, Sendable, Equatable {
         self.isReference = isReference
         self.mask = mask
         self.adjustment = adjustment
+        self.editableContent = editableContent
     }
 
     init(from decoder: Decoder) throws {
@@ -121,6 +125,7 @@ struct LayerRecord: Codable, Sendable, Equatable {
         isReference = try container.decodeIfPresent(Bool.self, forKey: .isReference) ?? false
         mask = try container.decodeIfPresent(LayerMaskDescriptor.self, forKey: .mask)
         adjustment = try container.decodeIfPresent(CanvasAdjustmentDescriptor.self, forKey: .adjustment)
+        editableContent = try container.decodeIfPresent(EditableLayerContent.self, forKey: .editableContent)
     }
 
     var isPaintLayer: Bool { kind == .paint }

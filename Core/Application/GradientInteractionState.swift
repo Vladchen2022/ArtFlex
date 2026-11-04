@@ -27,7 +27,7 @@ enum SectorGradientPhase: Sendable, Equatable {
     case drawing
 }
 
-struct LinearGradientGeometry: Sendable, Equatable {
+struct LinearGradientGeometry: Codable, Sendable, Equatable {
     var pointA: CanvasPoint
     var pointB: CanvasPoint
     var pointC: CanvasPoint
@@ -176,7 +176,7 @@ struct LinearGradientInteractionState: Sendable, Equatable {
     }
 }
 
-struct SectorGradientGeometry: Sendable, Equatable {
+struct SectorGradientGeometry: Codable, Sendable, Equatable {
     let center: CanvasPoint
     let pathPoints: [CanvasPoint]
     let bounds: CanvasRect

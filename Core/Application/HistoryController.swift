@@ -289,7 +289,18 @@ final class HistoryController {
     /// The baseline changes when the history budget evicts old restore points.
     var initialVisibleHistoryContentStateID: UUID { undoStack.first?.metadata.contentStateID ?? currentContentStateID }
     var canRedo: Bool { !redoStack.isEmpty }
-    var residentByteCount: Int { (undoStack + redoStack).reduce(readAheadByteCount) { $0 + $1.pixels.residentBytes } }
+    var residentByteCount: Int { (undoStack + redoStack).reduce(readAheadByteCount + editableSourceResidentBytes) { $0 + $1.pixels.residentBytes } }
+    private var editableSourceResidentBytes: Int {
+        var seen = Set(workspaceStore.state.document.editableSourceAssets.map(\.sha256))
+        var bytes = 0
+        for entry in undoStack + redoStack {
+            for asset in entry.workspace.document.editableSourceAssets where seen.insert(asset.sha256).inserted {
+                let sum = bytes.addingReportingOverflow(asset.compressedData?.count ?? 0)
+                bytes = sum.overflow ? Int.max : sum.partialValue
+            }
+        }
+        return bytes
+    }
     var diskByteCount: Int { (undoStack + redoStack).reduce(0) { $0 + $1.pixels.diskBytes } }
     var diskEntryCount: Int { (undoStack + redoStack).filter { $0.pixels.diskBytes > 0 }.count }
     var pendingDiskEntryCount: Int { (undoStack + redoStack).filter { $0.pixels.isPending }.count }
@@ -1335,7 +1346,7 @@ final class HistoryController {
             for stack in [undoStack, redoStack] {
                 for entry in stack.dropLast(hot) { entry.pixels.spill() }
             }
-            var projected = (undoStack + redoStack).reduce(0) { $0 + $1.pixels.projectedResidentBytes }
+            var projected = (undoStack + redoStack).reduce(editableSourceResidentBytes) { $0 + $1.pixels.projectedResidentBytes }
             for stack in [undoStack, redoStack] {
                 for entry in stack.dropLast() where projected > target {
                     let bytes = entry.pixels.projectedResidentBytes
@@ -1346,7 +1357,7 @@ final class HistoryController {
         // Failed/unavailable disk writes retain RAM first. If it exceeds budget, fall back to
         // the existing oldest-first pruning policy, always preserving a newest restore point.
         func projectedBytes() -> Int {
-            (undoStack + redoStack).reduce(0) { $0 + $1.pixels.projectedResidentBytes }
+            (undoStack + redoStack).reduce(editableSourceResidentBytes) { $0 + $1.pixels.projectedResidentBytes }
         }
         while projectedBytes() > target, undoStack.count > 1 || redoStack.count > 1 {
             if undoStack.count > 1 {

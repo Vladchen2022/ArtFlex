@@ -136,6 +136,7 @@ final class PatternPlacementRenderer {
         self.samplerState = samplerState
     }
 
+    @discardableResult
     func encode(
         into renderPassDescriptor: MTLRenderPassDescriptor,
         commandBuffer: MTLCommandBuffer,
@@ -146,10 +147,10 @@ final class PatternPlacementRenderer {
         flipVertically: Bool = false,
         rotationDegrees: Double = 0,
         opacity: Float = 1
-    ) {
+    ) -> Bool {
         let standardizedRect = destinationRect.standardized
         guard let renderTargetTexture = renderPassDescriptor.colorAttachments[0].texture else {
-            return
+            return false
         }
         guard let scissorRect = patternPlacementScissorRect(
             destinationRect: patternPlacementRotatedBounds(
@@ -160,7 +161,7 @@ final class PatternPlacementRenderer {
             renderTargetWidth: renderTargetTexture.width,
             renderTargetHeight: renderTargetTexture.height
         ) else {
-            return
+            return true // Valid placement wholly outside the target.
         }
 
         let textureCoordinates = patternPlacementTextureCoordinates(
@@ -195,7 +196,7 @@ final class PatternPlacementRenderer {
         )
 
         guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor) else {
-            return
+            return false
         }
 
         encoder.setRenderPipelineState(pipelineVariants.state(pipelineState, for: renderPassDescriptor.colorAttachments[0].texture?.pixelFormat ?? .bgra8Unorm_srgb))
@@ -219,6 +220,7 @@ final class PatternPlacementRenderer {
         encoder.setScissorRect(scissorRect)
         encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: vertices.count)
         encoder.endEncoding()
+        return true
     }
 }
 

@@ -27,7 +27,7 @@ struct WorkspaceCommandButton: View {
 }
 
 extension WorkspaceViewModel {
-    var isWorkflowAdjustmentActive: Bool { selectionRefinementDraft != nil || textureAdjustmentSettings != nil }
+    var isWorkflowAdjustmentActive: Bool { selectionRefinementDraft != nil || textureAdjustmentSettings != nil || editableLayerDraft != nil }
 
     func command(_ id: String) -> WorkspaceCommand? { searchableCommands.first { $0.id == id } }
     func performCommand(_ id: String) {

@@ -1,12 +1,12 @@
 import Foundation
 
 struct PaintingBlocker: Equatable {
-    enum Action { case unlock, show, newLayer }
+    enum Action { case unlock, show, newLayer, rasterize }
     var message: String
     var action: Action
     var layerID: LayerID?
     var actionTitle: String {
-        switch action { case .unlock: "解锁"; case .show: "显示图层"; case .newLayer: "新建绘画层" }
+        switch action { case .unlock: "解锁"; case .show: "显示图层"; case .newLayer: "新建绘画层"; case .rasterize: "栅格化图层" }
     }
 }
 

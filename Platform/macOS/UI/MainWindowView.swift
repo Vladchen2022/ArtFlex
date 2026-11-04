@@ -45,6 +45,9 @@ struct MainWindowView: View {
         .sheet(isPresented: $viewModel.isNewCanvasSheetPresented) {
             NewCanvasSheetView(viewModel: viewModel)
         }
+        .sheet(item: Binding(get: { activeKeyboardTarget.editableLayerDraft }, set: { activeKeyboardTarget.editableLayerDraft = $0 })) { draft in
+            EditableLayerSheet(draft: draft) { activeKeyboardTarget.editableLayerDraft = nil }
+        }
         .sheet(isPresented: $viewModel.isRasterExportSheetPresented) {
             RasterExportSheet(viewModel: viewModel)
         }

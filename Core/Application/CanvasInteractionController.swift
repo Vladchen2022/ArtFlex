@@ -24,6 +24,7 @@ final class CanvasInteractionController {
                 $0.id == document.activeLayerID && $0.isPaintLayer
             }),
             !activeLayer.isAdjustmentLayer,
+            activeLayer.editableContent == nil,
             document.isLayerEffectivelyVisible(activeLayer.id),
             !document.isLayerEffectivelyLocked(activeLayer.id)
         else {
@@ -56,7 +57,7 @@ final class CanvasInteractionController {
         let document = workspaceStore.state.document
         guard let activeLayer = document.layers.first(where: {
             $0.id == document.activeLayerID && $0.isPaintLayer
-        }), !activeLayer.isAdjustmentLayer,
+        }), !activeLayer.isAdjustmentLayer, activeLayer.editableContent == nil,
             !document.isLayerEffectivelyLocked(activeLayer.id) else {
             return nil
         }

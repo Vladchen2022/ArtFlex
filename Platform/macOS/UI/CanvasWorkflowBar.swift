@@ -12,6 +12,18 @@ struct CanvasWorkflowBar: View {
 
     var body: some View {
         VStack(spacing: 7) {
+            if [.textureFill, .linearGradient, .sectorGradient].contains(viewModel.workspace.toolSession.activeTool) {
+                Toggle("保留为可编辑填充图层", isOn: $viewModel.retainsEditableFillParameters)
+                    .help("保留当前图层的底稿、填充区域和参数；之后可从图层菜单继续编辑。直接绘画需先栅格化或新建图层。")
+                    .workflowCapsule()
+            }
+            if let content = viewModel.workspace.document.layer(viewModel.workspace.document.activeLayerID)?.editableContent {
+                HStack {
+                    Text(content.displayName)
+                    Button("编辑参数") { viewModel.beginEditableLayer(viewModel.workspace.document.activeLayerID) }
+                    Button("新建绘画层") { viewModel.addLayer() }
+                }.workflowCapsule()
+            }
             if let draft = viewModel.selectionRefinementDraft {
                 HStack(spacing: 8) {
                     Text("\(draft.kind.title)预览").fontWeight(.semibold)
