@@ -63,8 +63,8 @@ extension WorkspaceViewModel {
             .init(id: "contract", title: "收缩选区", category: "选区", unavailableReason: noSelection, action: { self.beginSelectionRefinementPreview(.contract) }),
             .init(id: "fill", title: "填充选区", category: "选区", shortcut: "⇧⌘F", unavailableReason: noSelection, action: fillSelectionContents),
             .init(id: "fit", title: "适合窗口", category: "视图", shortcut: "⌘0", action: resetViewport),
-            .init(id: "zoomIn", title: "放大画布", category: "视图", action: zoomIn),
-            .init(id: "zoomOut", title: "缩小画布", category: "视图", action: zoomOut),
+            .init(id: "zoomIn", title: "放大画布", category: "视图", shortcut: "⌘=", action: zoomIn),
+            .init(id: "zoomOut", title: "缩小画布", category: "视图", shortcut: "⌘-", action: zoomOut),
             .init(id: "snapshot", title: "保存画布快照", category: "视图", action: requestSnapshotSavePrimaryAction),
             .init(id: "compare", title: "快照对比", category: "视图", unavailableReason: savedSnapshotCount == 0 ? "需要先保存快照" : nil, action: requestOpenSnapshotCompare)
         ]

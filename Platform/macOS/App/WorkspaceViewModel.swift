@@ -780,9 +780,8 @@ final class WorkspaceViewModel: ObservableObject {
         canRedo = bootstrap.historyController.canRedo
     }
 
-    // Cmd+= / Cmd+- 完全绕过菜单系统，直接本地拦截
-    // 菜单快捷键会在系统事件队列里积压，松开按键后仍持续触发
-    // addLocalMonitorForEvents 在事件到达菜单前拦截，返回 nil 消费掉事件
+    // Keep the direct path for responsive held-key zoom. Consuming a handled event
+    // prevents a second zoom via the native menu key equivalent.
     private func setupZoomKeyboardMonitor() {
         zoomKeyboardMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self, self.isSessionActive else { return event }
