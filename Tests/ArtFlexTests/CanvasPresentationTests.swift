@@ -206,6 +206,26 @@ struct CanvasPresentationTests {
         #expect(abs(restored.y - point.y) < 0.000_001)
     }
 
+    @Test(arguments: [0.7, 1.9])
+    func anchoredZoomKeepsPointerStationaryInGrayWorkspace(newScale: Double) {
+        var viewport = CanvasViewport(zoomScale: 1.1, contentOffset: .init(x: 83, y: -42),
+            rotationDegrees: 32, isHorizontallyFlipped: true)
+        let size = CanvasSize(width: 1000, height: 800)
+        let pointer = CanvasPoint(x: 70, y: 105)
+        let before = CanvasViewportTransform(canvasSize: size, viewport: viewport,
+            availableWidth: 1400, availableHeight: 900)
+        #expect(!before.containsViewportPoint(pointer))
+        let anchor = before.viewportToCanvas(pointer)
+
+        viewport.setZoomScale(newScale, anchoredAt: anchor, canvasSize: size,
+            availableWidth: 1400, availableHeight: 900)
+
+        let after = CanvasViewportTransform(canvasSize: size, viewport: viewport,
+            availableWidth: 1400, availableHeight: 900).canvasToViewport(anchor)
+        #expect(abs(after.x - pointer.x) < 0.001)
+        #expect(abs(after.y - pointer.y) < 0.001)
+    }
+
     @Test
     func viewportTransformRoundTripsCanvasPointsWhenFlippedAndRotated() {
         let transform = CanvasViewportTransform(

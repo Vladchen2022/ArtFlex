@@ -894,6 +894,7 @@ struct CanvasContainerView: View {
             }
             } // CanvasViewportHost
         }
+        .background(CanvasZoomPointerReader(viewModel: viewModel).allowsHitTesting(false))
         .clipped()
         .overlay(alignment: .top) { CanvasWorkflowBar(viewModel: viewModel) }
         .overlay(alignment: .bottomLeading) { PaintingTargetFeedback(viewModel: viewModel) }
@@ -1217,6 +1218,17 @@ private func resolvedQuickColorPickerState(
     resolved.panel.lightingStrength = panel.lightingStrength
     resolved.panel.snapThreeStops = panel.snapThreeStops
     return resolved
+}
+
+/// Tracks the viewport frame in AppKit without taking any mouse or keyboard input.
+private struct CanvasZoomPointerReader: NSViewRepresentable {
+    let viewModel: WorkspaceViewModel
+
+    func makeNSView(context: Context) -> NSView { NSView() }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        viewModel.canvasZoomPointerView = nsView
+    }
 }
 
 // viewport 状态隔离容器：只有 zoom/pan/rotation/flip 变化时这个 View 才重新 layout

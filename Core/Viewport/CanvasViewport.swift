@@ -68,6 +68,7 @@ struct CanvasViewport: Codable, Sendable, Equatable {
 
         guard
             let anchorCanvasPoint,
+            anchorCanvasPoint.x.isFinite, anchorCanvasPoint.y.isFinite,
             availableWidth > 0,
             availableHeight > 0,
             canvasSize.width > 0,
@@ -93,13 +94,10 @@ struct CanvasViewport: Codable, Sendable, Equatable {
             return
         }
 
-        let clampedAnchor = CanvasPoint(
-            x: min(max(anchorCanvasPoint.x, 0), Double(canvasSize.width)),
-            y: min(max(anchorCanvasPoint.y, 0), Double(canvasSize.height))
-        )
+        // The viewport extends past the document; its gray area can also be a zoom anchor.
         let localAnchor = CanvasPoint(
-            x: (clampedAnchor.x / Double(canvasSize.width)) * displayWidth - (displayWidth / 2),
-            y: (clampedAnchor.y / Double(canvasSize.height)) * displayHeight - (displayHeight / 2)
+            x: (anchorCanvasPoint.x / Double(canvasSize.width)) * displayWidth - (displayWidth / 2),
+            y: (anchorCanvasPoint.y / Double(canvasSize.height)) * displayHeight - (displayHeight / 2)
         )
         let mirroredAnchorX = isHorizontallyFlipped ? -localAnchor.x : localAnchor.x
         let rotationRadians = rotationDegrees * .pi / 180

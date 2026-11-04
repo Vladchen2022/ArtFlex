@@ -539,6 +539,7 @@ final class WorkspaceViewModel: ObservableObject {
     private let transformLogger = Logger(subsystem: "ArtFlex", category: "Transform")
     private var latestCanvasViewportSize: CGSize = .zero
     private var lastCanvasHoverPoint: CanvasPoint?
+    weak var canvasZoomPointerView: NSView?
     private var isQuickColorPickerShortcutActive = false
     private var quickColorPickerDraftState: QuickColorPickerState?
     private var previousToolBeforeEyedropper: ToolKind?
@@ -800,11 +801,11 @@ final class WorkspaceViewModel: ObservableObject {
             guard modifiers == .command || modifiers == [.command, .shift] else { return event }
             let chars = event.charactersIgnoringModifiers
             if chars == "=" || chars == "+" {
-                self.zoomIn()
+                (self.ideationActiveBranchViewModel ?? self).zoomIn()
                 return nil
             }
             if chars == "-" {
-                self.zoomOut()
+                (self.ideationActiveBranchViewModel ?? self).zoomOut()
                 return nil
             }
             if chars == "0" {
@@ -6136,7 +6137,8 @@ final class WorkspaceViewModel: ObservableObject {
             setViewportZoomScale(clampedPercent / 100)
             return
         }
-        setViewportZoomScale((clampedPercent / 100) / max(transform.fitScale, 0.000_001))
+        setViewportZoomScale((clampedPercent / 100) / max(transform.fitScale, 0.000_001),
+            anchoredAt: currentPointerZoomAnchor(in: transform))
     }
 
     private var currentCanvasViewportTransform: CanvasViewportTransform? {
@@ -6333,15 +6335,28 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func zoomIn() {
-        setViewportZoomScale(workspace.viewport.zoomScale * 1.2)
+        adjustViewportZoom(byScaleMultiplier: 1.2)
     }
 
     func zoomOut() {
-        setViewportZoomScale(workspace.viewport.zoomScale / 1.2)
+        adjustViewportZoom(byScaleMultiplier: 1 / 1.2)
     }
 
     func adjustViewportZoom(byScaleMultiplier multiplier: Double) {
-        adjustViewportZoom(byScaleMultiplier: multiplier, anchoredAt: lastCanvasHoverPoint)
+        let anchor = currentCanvasViewportTransform.map { currentPointerZoomAnchor(in: $0) }
+        adjustViewportZoom(byScaleMultiplier: multiplier, anchoredAt: anchor)
+    }
+
+    private func currentPointerZoomAnchor(in transform: CanvasViewportTransform) -> CanvasPoint {
+        if let view = canvasZoomPointerView, let window = view.window, window.isKeyWindow {
+            let pointer = view.convert(window.mouseLocationOutsideOfEventStream, from: nil)
+            if view.visibleRect.contains(pointer) {
+                // The AppKit reader is unflipped; canvas viewport coordinates start at the top.
+                return transform.viewportToCanvas(.init(x: pointer.x - view.bounds.minX,
+                    y: view.bounds.maxY - pointer.y))
+            }
+        }
+        return transform.viewportToCanvas(.init(x: transform.viewportSize.x / 2, y: transform.viewportSize.y / 2))
     }
 
     func adjustViewportZoom(
@@ -6357,13 +6372,12 @@ final class WorkspaceViewModel: ObservableObject {
         anchoredAt explicitAnchorPoint: CanvasPoint? = nil
     ) {
         guard !isCanvasViewportLocked else { return }
-        let anchorPoint = explicitAnchorPoint ?? lastCanvasHoverPoint
         let canvasSize = workspace.document.canvasSize
         let viewportSize = latestCanvasViewportSize
         bootstrap.workspaceStore.updateViewport { viewport in
             viewport.setZoomScale(
                 newZoomScale,
-                anchoredAt: anchorPoint,
+                anchoredAt: explicitAnchorPoint,
                 canvasSize: canvasSize,
                 availableWidth: viewportSize.width,
                 availableHeight: viewportSize.height
