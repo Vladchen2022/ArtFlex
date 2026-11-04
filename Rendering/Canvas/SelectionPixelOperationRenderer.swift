@@ -110,7 +110,7 @@ final class SelectionPixelOperationRenderer {
             if (uniforms.usesAlphaLock != 0) {
                 float sourceAlpha = max(uniforms.fillColor.a, 0.0);
                 float3 visibleFillColor = sourceAlpha > 0.0001
-                    ? clamp(uniforms.fillColor.rgb / sourceAlpha, 0.0, 1.0)
+                    ? uniforms.fillColor.rgb / sourceAlpha
                     : float3(0.0);
                 return float4(visibleFillColor * lockedDestinationAlpha, maskAlpha);
             }

@@ -1087,9 +1087,9 @@ final class LayerTextureSerializer {
             let pixel = try snapshot(texture: texture, originX: x, originY: y, width: 1, height: 1)
             return pixel.pixelData.withUnsafeBytes { bytes in
                 let color = CanvasPixelCodec.read(bytes, offset: 0, encoding: .premultipliedRGBA16FloatLinear)
-                return RGBAColor(red: LinearPremultipliedColor.linearChannelToSRGB(color.red),
-                    green: LinearPremultipliedColor.linearChannelToSRGB(color.green),
-                    blue: LinearPremultipliedColor.linearChannelToSRGB(color.blue), alpha: color.alpha)
+                return RGBAColor(red: LinearPremultipliedColor.linearChannelToExtendedSRGB(color.red),
+                    green: LinearPremultipliedColor.linearChannelToExtendedSRGB(color.green),
+                    blue: LinearPremultipliedColor.linearChannelToExtendedSRGB(color.blue), alpha: color.alpha)
             }
         }
         let auditEnabled = auditStore.isRecordingEnabled

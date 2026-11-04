@@ -35,8 +35,8 @@ final class DocumentSessionController: ObservableObject {
 
     private func attach(_ session: Session) {
         sessions.append(session)
-        session.model.createDocumentInNewSession = { [weak self] name, size, dpi, format in
-            self?.create(name: name, size: size, dpi: dpi, format: format)
+        session.model.createDocumentInNewSession = { [weak self] name, size, dpi, format, colorSpace in
+            self?.create(name: name, size: size, dpi: dpi, format: format, colorSpace: colorSpace)
         }
         session.model.openDocumentInNewSession = { [weak self] url in self?.open(url) }
         relays[session.id] = session.model.objectWillChange.sink { [weak self] _ in
@@ -77,7 +77,7 @@ final class DocumentSessionController: ObservableObject {
         return .init(id: id, model: model, bootstrap: bootstrap)
     }
 
-    func create(name: String, size: CanvasSize, dpi: Int, format: ArtPixelFormat) {
+    func create(name: String, size: CanvasSize, dpi: Int, format: ArtPixelFormat, colorSpace: ArtColorSpace = .sRGB) {
         guard active.prepareForDocumentTabSwitch(), !isClosing else { return }
         do {
             let reservation = try services.metalContext.workingResourceBudget.reserve(
@@ -85,7 +85,7 @@ final class DocumentSessionController: ObservableObject {
                 residentBytes: services.metalContext.device.currentAllocatedSize)
             defer { withExtendedLifetime(reservation) {} }
             let session = try makeSession()
-            session.model.createNewCanvasDiscardingUnsavedChanges(name: name, canvasSize: size, resolutionDPI: dpi, pixelFormat: format)
+            session.model.createNewCanvasDiscardingUnsavedChanges(name: name, canvasSize: size, resolutionDPI: dpi, pixelFormat: format, colorSpace: colorSpace)
             guard session.model.workspace.document.canvasSize == size else { return }
             active.dismissNewCanvasSheet()
             attach(session)

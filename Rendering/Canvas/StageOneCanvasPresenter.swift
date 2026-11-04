@@ -201,7 +201,7 @@ final class StageOneCanvasPresenter: @unchecked Sendable {
 
         float3 canvasSoftLight(float3 backdrop, float3 source) {
             float3 low = backdrop - (1.0 - 2.0 * source) * backdrop * (1.0 - backdrop);
-            float3 d = select(sqrt(backdrop), ((16.0 * backdrop - 12.0) * backdrop + 4.0) * backdrop, backdrop <= 0.25);
+            float3 d = select(sqrt(max(backdrop, 0.0)), ((16.0 * backdrop - 12.0) * backdrop + 4.0) * backdrop, backdrop <= 0.25);
             float3 high = backdrop + (2.0 * source - 1.0) * (d - backdrop);
             return select(high, low, source <= 0.5);
         }

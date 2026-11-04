@@ -88,7 +88,8 @@ extension MetalCanvasHost {
                     onCancelTransform: {},
                     isLuminosityPreviewEnabled: luminosity,
                     onAdjustBrushSize: { _ in },
-                    outsideCanvasBrushInputRelay: nil
+                    outsideCanvasBrushInputRelay: nil, proofProfile: viewModel.colorProofProfile,
+                        onProofFailure: { Task { @MainActor in viewModel.colorProofProfile = nil } }
                 )
     }
 }

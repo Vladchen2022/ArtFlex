@@ -80,10 +80,12 @@ final class QuickColorPickerPresentationProxy: ObservableObject {
 
 @MainActor
 final class WorkspaceViewModel: ObservableObject {
-    var createDocumentInNewSession: ((String, CanvasSize, Int, ArtPixelFormat) -> Void)?
+    var createDocumentInNewSession: ((String, CanvasSize, Int, ArtPixelFormat, ArtColorSpace) -> Void)?
     var openDocumentInNewSession: ((URL) -> Void)?
     var isSessionActive = true
     @Published var showsDualCanvas = false
+    @Published var colorProofProfile: ManagedRGBProfile?
+    @Published var isColorManagementPresented = false
     nonisolated(unsafe) private var zoomKeyboardMonitor: Any?
 
     lazy var branches = WorkspaceBranchController(owner: self, bootstrap: bootstrap)
@@ -11161,7 +11163,7 @@ final class WorkspaceViewModel: ObservableObject {
         guard let payload = bootstrap.pixelClipboardController.canvasImportPayload(
             from: image,
             fittingWithin: workspace.document.canvasSize,
-            centeredAt: center
+            centeredAt: center, preservesWideGamut: workspace.document.colorStandard.pixelFormat == .rgba16Float
         ) else {
             showStatus(.init(kind: .error, message: "无法读取拖入的图片"))
             return false
@@ -14846,6 +14848,7 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     private func resetTransientDocumentInteractionsForReplacement() {
+        colorProofProfile = nil
         cancelSelectionRefinementPreview()
         discardRecentTextureFill()
         paintingBlocker = nil
@@ -14877,16 +14880,17 @@ final class WorkspaceViewModel: ObservableObject {
         name: String = "未命名",
         canvasSize: CanvasSize,
         resolutionDPI: Int,
-        pixelFormat: ArtPixelFormat = .rgba8
+        pixelFormat: ArtPixelFormat = .rgba8,
+        colorSpace: ArtColorSpace = .sRGB
     ) {
         if let createDocumentInNewSession {
-            createDocumentInNewSession(name, canvasSize, resolutionDPI, pixelFormat); return
+            createDocumentInNewSession(name, canvasSize, resolutionDPI, pixelFormat, colorSpace); return
         }
         createNewCanvas(
             name: name,
             canvasSize: canvasSize,
             resolutionDPI: resolutionDPI,
-            pixelFormat: pixelFormat,
+            pixelFormat: pixelFormat, colorSpace: colorSpace,
             decisionOverride: nil
         )
     }
@@ -14895,13 +14899,14 @@ final class WorkspaceViewModel: ObservableObject {
         name: String = "未命名",
         canvasSize: CanvasSize,
         resolutionDPI: Int,
-        pixelFormat: ArtPixelFormat = .rgba8
+        pixelFormat: ArtPixelFormat = .rgba8,
+        colorSpace: ArtColorSpace = .sRGB
     ) {
         createNewCanvas(
             name: name,
             canvasSize: canvasSize,
             resolutionDPI: resolutionDPI,
-            pixelFormat: pixelFormat,
+            pixelFormat: pixelFormat, colorSpace: colorSpace,
             decisionOverride: .discard
         )
     }
@@ -14911,10 +14916,14 @@ final class WorkspaceViewModel: ObservableObject {
         canvasSize: CanvasSize,
         resolutionDPI: Int,
         pixelFormat: ArtPixelFormat,
+        colorSpace: ArtColorSpace,
         decisionOverride: NewCanvasCreationDecision?
     ) {
         guard !documentLifecycle.isTransitionPending,
               canBeginDocumentPersistence(action: "新建画布") else { return }
+        guard colorSpace != .extendedSRGB || pixelFormat == .rgba16Float else {
+            showStatus(.init(kind: .error, message: "广色域画稿需要 16F 颜色精度")); return
+        }
         let capacity = canvasCapacityPolicy.assess(canvasSize, pixelFormat: pixelFormat)
         guard capacity.isSupported else {
             showStatus(.init(
@@ -14931,7 +14940,7 @@ final class WorkspaceViewModel: ObservableObject {
         guard let decision = decisionOverride else {
             continueAfterUnsavedChanges(detail: "创建新画布前，要先保存当前内容吗？") { [weak self] allowed in
                 guard let self, allowed else { return }
-                self.createNewCanvas(name: name, canvasSize: canvasSize, resolutionDPI: resolutionDPI, pixelFormat: pixelFormat, decisionOverride: .discard)
+                self.createNewCanvas(name: name, canvasSize: canvasSize, resolutionDPI: resolutionDPI, pixelFormat: pixelFormat, colorSpace: colorSpace, decisionOverride: .discard)
             }
             return
         }
@@ -14941,7 +14950,7 @@ final class WorkspaceViewModel: ObservableObject {
         case .save:
             saveProject { [weak self] saved in
                 guard let self, saved else { return }
-                self.createNewCanvas(name: name, canvasSize: canvasSize, resolutionDPI: resolutionDPI, pixelFormat: pixelFormat, decisionOverride: .discard)
+                self.createNewCanvas(name: name, canvasSize: canvasSize, resolutionDPI: resolutionDPI, pixelFormat: pixelFormat, colorSpace: colorSpace, decisionOverride: .discard)
             }
             return
         case .discard:
@@ -14968,7 +14977,7 @@ final class WorkspaceViewModel: ObservableObject {
                 resolutionDPI: resolutionDPI
             ),
             canvasSize: canvasSize,
-            colorStandard: pixelFormat == .rgba16Float ? .highPrecision : .stageOneDefault,
+            colorStandard: colorSpace == .extendedSRGB ? .wideGamut : pixelFormat == .rgba16Float ? .highPrecision : .stageOneDefault,
             layers: layers,
             activeLayerID: layers.last?.id ?? layers[0].id
         )

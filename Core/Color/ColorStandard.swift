@@ -15,6 +15,7 @@ enum ArtAlphaMode: String, Codable, Sendable {
 
 enum ArtColorSpace: String, Codable, Sendable {
     case sRGB
+    case extendedSRGB
 }
 
 struct ArtColorStandard: Codable, Sendable, Equatable {
@@ -22,11 +23,27 @@ struct ArtColorStandard: Codable, Sendable, Equatable {
     let alphaMode: ArtAlphaMode
     let colorSpace: ArtColorSpace
 
+    init(pixelFormat: ArtPixelFormat, alphaMode: ArtAlphaMode, colorSpace: ArtColorSpace) {
+        self.pixelFormat = pixelFormat; self.alphaMode = alphaMode; self.colorSpace = colorSpace
+    }
+    private enum CodingKeys: String, CodingKey { case pixelFormat, alphaMode, colorSpace }
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        pixelFormat = try c.decode(ArtPixelFormat.self, forKey: .pixelFormat)
+        alphaMode = try c.decode(ArtAlphaMode.self, forKey: .alphaMode)
+        colorSpace = try c.decode(ArtColorSpace.self, forKey: .colorSpace)
+        if colorSpace == .extendedSRGB && pixelFormat != .rgba16Float {
+            throw DecodingError.dataCorruptedError(forKey: .colorSpace, in: c, debugDescription: "广色域需要 16F 像素")
+        }
+    }
+
     static let stageOneDefault = ArtColorStandard(
         pixelFormat: .rgba8,
         alphaMode: .premultiplied,
         colorSpace: .sRGB
     )
+
+    static let wideGamut = ArtColorStandard(pixelFormat: .rgba16Float, alphaMode: .premultiplied, colorSpace: .extendedSRGB)
 
     /// sRGB primaries, linear-light premultiplied half-float storage.
     static let highPrecision = ArtColorStandard(pixelFormat: .rgba16Float, alphaMode: .premultiplied, colorSpace: .sRGB)

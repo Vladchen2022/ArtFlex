@@ -6374,6 +6374,9 @@ private struct ColorSectionView: View {
             )
             .clipShape(RoundedRectangle(cornerRadius: 12))
 
+            if viewModel.workspace.document.colorStandard.colorSpace == .extendedSRGB {
+                WideGamutColorPicker(viewModel: viewModel)
+            }
             PaletteImportFeedbackView(extractor: viewModel.imagePaletteExtractor)
 
             if proxy.colorPanel.mode == .blocks, proxy.colorPanel.baseSource == .image {

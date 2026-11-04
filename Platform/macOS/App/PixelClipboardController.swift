@@ -49,9 +49,10 @@ final class PixelClipboardController {
     func canvasImportPayload(
         from image: NSImage,
         fittingWithin canvasSize: CanvasSize,
-        centeredAt center: CanvasPoint
+        centeredAt center: CanvasPoint,
+        preservesWideGamut: Bool = false
     ) -> PixelClipboardPayload? {
-        guard let snapshot = makeSnapshot(from: image, fittingWithin: canvasSize) else {
+        guard let snapshot = makeSnapshot(from: image, fittingWithin: canvasSize, preservesWideGamut: preservesWideGamut) else {
             return nil
         }
 
@@ -127,7 +128,7 @@ private func makeImage(from snapshot: LayerTextureSnapshot) -> NSImage? {
         bitsPerComponent: 8,
         bitsPerPixel: 32,
         bytesPerRow: snapshot.bytesPerRow,
-        space: CGColorSpaceCreateDeviceRGB(),
+        space: CGColorSpace(name: CGColorSpace.sRGB)!,
         bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
         provider: provider,
         decode: nil,
@@ -142,7 +143,8 @@ private func makeImage(from snapshot: LayerTextureSnapshot) -> NSImage? {
 
 private func makeSnapshot(
     from image: NSImage,
-    fittingWithin maximumSize: CanvasSize? = nil
+    fittingWithin maximumSize: CanvasSize? = nil,
+    preservesWideGamut: Bool = false
 ) -> LayerTextureSnapshot? {
     guard let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
         return nil
@@ -160,7 +162,7 @@ private func makeSnapshot(
     }
     let width = max(Int((Double(cgImage.width) * scale).rounded()), 1)
     let height = max(Int((Double(cgImage.height) * scale).rounded()), 1)
-    if cgImage.bitsPerComponent > 8 {
+    if preservesWideGamut || cgImage.bitsPerComponent > 8 || cgImage.colorSpace?.isWideGamutRGB == true {
         let rowBytes = width * 8
         var pixels = Data(count: rowBytes * height)
         let success = pixels.withUnsafeMutableBytes { bytes -> Bool in
@@ -189,7 +191,7 @@ private func makeSnapshot(
                 height: height,
                 bitsPerComponent: 8,
                 bytesPerRow: bytesPerRow,
-                space: CGColorSpaceCreateDeviceRGB(),
+                space: CGColorSpace(name: CGColorSpace.sRGB)!,
                 bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue).rawValue
             )
         else {

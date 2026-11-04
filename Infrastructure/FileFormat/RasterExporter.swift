@@ -109,7 +109,7 @@ final class RasterExporter: Sendable {
             height: outputDimensions.height,
             background: options.background
         )
-        if snapshot.encoding == .premultipliedRGBA16FloatLinear || options.resolvedBitDepth == .sixteen {
+        if snapshot.encoding == .premultipliedRGBA16FloatLinear || options.resolvedBitDepth == .sixteen || options.resolvedColorProfile != .sRGB {
             return try HighPrecisionRasterExporter.encode(snapshot: snapshot, sourceBounds: sourceBounds,
                 width: outputDimensions.width, height: outputDimensions.height, options: options,
                 maximumWorkingSetBytes: limits.maximumWorkingSetBytes)

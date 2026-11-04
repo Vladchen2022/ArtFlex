@@ -69,16 +69,13 @@ final class CurveAdjustmentRenderer {
         };
 
         float srgbChannelToLinear(float value) {
-            return value <= 0.04045
-                ? value / 12.92
-                : pow((value + 0.055) / 1.055, 2.4);
+            float v = abs(value);
+            return sign(value) * (v <= 0.04045 ? v / 12.92 : pow((v + 0.055) / 1.055, 2.4));
         }
 
         float linearChannelToSrgb(float value) {
-            value = clamp(value, 0.0, 1.0);
-            return value <= 0.0031308
-                ? value * 12.92
-                : (1.055 * pow(value, 1.0 / 2.4)) - 0.055;
+            float v = abs(value);
+            return sign(value) * (v <= 0.0031308 ? v * 12.92 : (1.055 * pow(v, 1.0 / 2.4)) - 0.055);
         }
 
         float3 srgbToLinear(float3 color) {
@@ -98,7 +95,9 @@ final class CurveAdjustmentRenderer {
         }
 
         float sampleCurveLUT(constant float *lut, float value) {
-            float scaled = clamp(value, 0.0, 1.0) * 255.0;
+            if (value < 0.0) return lut[0] + value * (lut[1] - lut[0]) * 255.0;
+            if (value > 1.0) return lut[255] + (value - 1.0) * (lut[255] - lut[254]) * 255.0;
+            float scaled = value * 255.0;
             uint lowerIndex = uint(floor(scaled));
             uint upperIndex = min(lowerIndex + 1, 255u);
             float t = scaled - float(lowerIndex);
@@ -109,7 +108,7 @@ final class CurveAdjustmentRenderer {
             if (premultiplied.a <= 0.0001) {
                 return float3(0.0);
             }
-            return clamp(premultiplied.rgb / premultiplied.a, 0.0, 1.0);
+            return premultiplied.rgb / premultiplied.a;
         }
 
         vertex VertexOut curveAdjustmentVertex(

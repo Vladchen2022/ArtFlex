@@ -133,7 +133,7 @@ final class EyedropperSampler {
             for x in 0..<snapshot.width { pixels.append(snapshot.linearPixel(x: x, y: y)) }
         }
         return outputColor(from: aggregate(pixels, sampleSize: settings.sampleSize, statistic: settings.statistic),
-            preservesTransparency: settings.preservesTransparency)
+            preservesTransparency: settings.preservesTransparency, extended: snapshot.encoding == .premultipliedRGBA16FloatLinear)
     }
 
     func sampleVisibleColor(
@@ -174,7 +174,7 @@ final class EyedropperSampler {
         )
         return outputColor(
             from: sampled,
-            preservesTransparency: settings.preservesTransparency
+            preservesTransparency: settings.preservesTransparency, extended: document.colorStandard.pixelFormat == .rgba16Float
         )
     }
 
@@ -480,13 +480,13 @@ final class EyedropperSampler {
                 guard influence > 0.0001, base.alpha > 0.0001 else { continue }
 
                 let inverseAlpha = 1 / base.alpha
-                let linearRed = min(max(base.red * inverseAlpha, 0), 1)
-                let linearGreen = min(max(base.green * inverseAlpha, 0), 1)
-                let linearBlue = min(max(base.blue * inverseAlpha, 0), 1)
+                let linearRed = base.red * inverseAlpha
+                let linearGreen = base.green * inverseAlpha
+                let linearBlue = base.blue * inverseAlpha
 
-                var displayRed = LinearPremultipliedColor.linearChannelToSRGB(linearRed)
-                var displayGreen = LinearPremultipliedColor.linearChannelToSRGB(linearGreen)
-                var displayBlue = LinearPremultipliedColor.linearChannelToSRGB(linearBlue)
+                var displayRed = LinearPremultipliedColor.linearChannelToExtendedSRGB(linearRed)
+                var displayGreen = LinearPremultipliedColor.linearChannelToExtendedSRGB(linearGreen)
+                var displayBlue = LinearPremultipliedColor.linearChannelToExtendedSRGB(linearBlue)
                 displayRed = sampleCurveLUT(luts.composite, at: displayRed)
                 displayGreen = sampleCurveLUT(luts.composite, at: displayGreen)
                 displayBlue = sampleCurveLUT(luts.composite, at: displayBlue)
@@ -508,7 +508,9 @@ final class EyedropperSampler {
     }
 
     private func sampleCurveLUT(_ values: [Float], at value: Float) -> Float {
-        let scaled = min(max(value, 0), 1) * 255
+        if value < 0 { return preparedCurveLUTValue(values, at: 0) + value * (preparedCurveLUTValue(values, at: 1) - preparedCurveLUTValue(values, at: 0)) * 255 }
+        if value > 1 { return preparedCurveLUTValue(values, at: 255) + (value - 1) * (preparedCurveLUTValue(values, at: 255) - preparedCurveLUTValue(values, at: 254)) * 255 }
+        let scaled = value * 255
         let lowerIndex = Int(floor(scaled))
         let upperIndex = min(lowerIndex + 1, 255)
         let fraction = scaled - Float(lowerIndex)
@@ -639,14 +641,15 @@ final class EyedropperSampler {
 
     private func outputColor(
         from color: LinearPremultipliedColor,
-        preservesTransparency: Bool
+        preservesTransparency: Bool, extended: Bool = false
     ) -> RGBAColor {
+        let encode = extended ? LinearPremultipliedColor.linearChannelToExtendedSRGB : LinearPremultipliedColor.linearChannelToSRGB
         if !preservesTransparency {
             let opaque = color.composited(over: .white)
             return RGBAColor(
-                red: LinearPremultipliedColor.linearChannelToSRGB(opaque.red),
-                green: LinearPremultipliedColor.linearChannelToSRGB(opaque.green),
-                blue: LinearPremultipliedColor.linearChannelToSRGB(opaque.blue),
+                red: encode(opaque.red),
+                green: encode(opaque.green),
+                blue: encode(opaque.blue),
                 alpha: 1
             )
         }
@@ -657,9 +660,9 @@ final class EyedropperSampler {
         }
         let inverseAlpha = 1 / alpha
         return RGBAColor(
-            red: LinearPremultipliedColor.linearChannelToSRGB(color.red * inverseAlpha),
-            green: LinearPremultipliedColor.linearChannelToSRGB(color.green * inverseAlpha),
-            blue: LinearPremultipliedColor.linearChannelToSRGB(color.blue * inverseAlpha),
+            red: encode(color.red * inverseAlpha),
+            green: encode(color.green * inverseAlpha),
+            blue: encode(color.blue * inverseAlpha),
             alpha: alpha
         )
     }

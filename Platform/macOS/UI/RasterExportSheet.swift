@@ -18,6 +18,7 @@ struct RasterExportSheet: View {
     @State private var dpi = 300.0
     @State private var jpegQuality = 0.92
     @State private var bitDepth: RasterExportBitDepth = .eight
+    @State private var colorProfile = ManagedRGBProfile.sRGB
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -62,6 +63,7 @@ struct RasterExportSheet: View {
                     }
                 }
 
+                ManagedColorProfilePicker(profile: $colorProfile)
                 Picker("范围", selection: $scope) {
                     Text("完整画布").tag(RasterExportScope.fullCanvas)
                     Text("可见内容边界").tag(RasterExportScope.visibleContent)
@@ -189,6 +191,7 @@ struct RasterExportSheet: View {
         scope = options.scope
         dpi = options.dpi
         jpegQuality = options.jpegQuality
+        colorProfile = options.resolvedColorProfile
         bitDepth = options.format == .jpeg ? .eight : options.resolvedBitDepth
         switch options.background {
         case .transparent: backgroundChoice = options.format.supportsAlpha ? .transparent : .white
@@ -255,7 +258,7 @@ struct RasterExportSheet: View {
             resize: resolvedResize,
             dpi: dpi,
             jpegQuality: jpegQuality,
-            bitDepth: bitDepth
+            bitDepth: bitDepth, colorProfile: colorProfile
         )
     }
 

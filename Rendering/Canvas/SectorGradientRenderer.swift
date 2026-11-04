@@ -187,6 +187,7 @@ final class SectorGradientRenderer {
         let source = """
         #include <metal_stdlib>
         using namespace metal;
+        \(MetalColorFunctions.gamutSource)
 
         \(MetalColorFunctions.source)
 
@@ -279,7 +280,7 @@ final class SectorGradientRenderer {
             return pos + float2(dx, dy);
         }
 
-        float3 radialPaintJitteredSrgbColor(
+        float3 radialPaintJitteredSrgbColorBounded(
             float3 srgbColor,
             float angleNormalized,
             float paintJitterAmount,
@@ -317,6 +318,13 @@ final class SectorGradientRenderer {
             float3 wheelSrgb = hsvToRgb(float3(wheelHue, wheelS, wheelV));
             return mix(wheelSrgb, srgbColor, baseCoverage);
         }
+        float3 radialPaintJitteredSrgbColor(float3 c, float coordinate, float jitter, float contrast) {
+            if (jitter <= 0.001 && contrast <= 0.001) return c;
+            bool wide=artflexIsWide(c);
+            float3 result=radialPaintJitteredSrgbColorBounded(wide ? artflexEncodedToP3(c) : c, coordinate, jitter, contrast);
+            return wide ? artflexEncodedFromP3(result) : result;
+        }
+
 
         float4 gradientColorAt(
             float position,

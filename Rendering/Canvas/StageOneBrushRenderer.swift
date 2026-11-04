@@ -293,6 +293,7 @@ final class StageOneBrushRenderer {
         let source = """
         #include <metal_stdlib>
         using namespace metal;
+        \(MetalColorFunctions.gamutSource)
 
         struct BrushVertex {
             float2 position;
@@ -681,9 +682,8 @@ final class StageOneBrushRenderer {
         }
 
         float srgbChannelToLinear(float value) {
-            return value <= 0.04045
-                ? value / 12.92
-                : pow((value + 0.055) / 1.055, 2.4);
+            float v = abs(value);
+            return sign(value) * (v <= 0.04045 ? v / 12.92 : pow((v + 0.055) / 1.055, 2.4));
         }
 
         float3 srgbToLinear(float3 color) {
@@ -872,7 +872,7 @@ final class StageOneBrushRenderer {
             return pigmentColor3.rgb;
         }
 
-        float3 paintBristleSrgbColorWithPigments(
+        float3 paintBristleSrgbColorWithPigmentsBounded(
             float3 baseSrgb,
             float crossStrokeCoordinate,
             float longitudinal,
@@ -971,6 +971,19 @@ final class StageOneBrushRenderer {
             mixedHsv.z = clamp(mixedHsv.z + (broadField * 0.065 * amount), 0.0, 1.0);
             return hsvToRgb(mixedHsv);
         }
+        float3 paintBristleSrgbColorWithPigments(float3 base, float u, float longitudinal, float diameter,
+            float jitter, float contrast, uint seed, float4 p0, float4 p1, float4 p2, float4 p3, float4 weights, uint count) {
+            if (jitter <= 0.001 && contrast <= 0.001) return base;
+            bool wide=artflexIsWide(base) || artflexIsWide(p0.rgb) || artflexIsWide(p1.rgb) || artflexIsWide(p2.rgb) || artflexIsWide(p3.rgb);
+            if (wide) {
+                base=artflexEncodedToP3(base);
+                p0.rgb=artflexEncodedToP3(p0.rgb); p1.rgb=artflexEncodedToP3(p1.rgb);
+                p2.rgb=artflexEncodedToP3(p2.rgb); p3.rgb=artflexEncodedToP3(p3.rgb);
+            }
+            float3 result=paintBristleSrgbColorWithPigmentsBounded(base,u,longitudinal,diameter,jitter,contrast,seed,p0,p1,p2,p3,weights,count);
+            return wide ? artflexEncodedFromP3(result) : result;
+        }
+
 
         float3 paintBristleSrgbColor(
             float3 baseSrgb,

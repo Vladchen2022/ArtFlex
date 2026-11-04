@@ -167,7 +167,8 @@ final class BrushV2Renderer {
           Full o; o.position=float4(q[id],0,1); return o;
         }
         float3 linearColor(float3 c) {
-          return select(c/12.92,pow((c+0.055)/1.055,float3(2.4)),c>0.04045);
+          float3 v=abs(c);
+          return sign(c)*select(v/12.92,pow((v+0.055)/1.055,float3(2.4)),v>0.04045);
         }
         fragment float4 compositeFragment(Full in [[stage_in]], constant Composite &u [[buffer(0)]],
           texture2d<float,access::read> original [[texture(0)]],

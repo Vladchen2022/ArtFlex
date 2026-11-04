@@ -106,7 +106,7 @@ struct ProjectArchiveCanvasSnapshotEntry: Codable, Sendable, Equatable {
 struct ProjectArchiveV2Manifest: Codable, Sendable, Equatable {
     static let formatIdentifier = "com.vladchen.artflex.project"
     static let currentFormatVersion = 2
-    static let currentReaderVersion = 4
+    static let currentReaderVersion = 5
     static let manifestFilename = "manifest.json"
     static let projectStatePath = "project.json"
     static let previewPath = "preview.png"
@@ -659,6 +659,7 @@ final class ProjectArchiveV2Writer {
                 manifest.editableSources.append(asset)
             }
             if !editableSources.isEmpty { manifest.minimumReaderVersion = 4 }
+            if payload.package.document.colorStandard.colorSpace == .extendedSRGB { manifest.minimumReaderVersion = 5 }
             let manifestData = try Self.makeEncoder().encode(manifest)
             guard manifestData.count <= limits.maximumManifestBytes else {
                 throw ProjectArchiveV2Error.manifestTooLarge(manifestData.count)

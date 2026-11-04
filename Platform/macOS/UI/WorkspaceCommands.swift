@@ -188,6 +188,7 @@ struct ArtFlexWorkspaceCommands: Commands {
             command("zoomOut", editor)
             Divider()
             Toggle("同稿双视图", isOn: $host.showsDualCanvas)
+            Button("颜色管理与校样…") { host.isColorManagementPresented = true }
             Button("绘画性能诊断…") { PerformanceDiagnosticsWindow.show() }
         }
     }

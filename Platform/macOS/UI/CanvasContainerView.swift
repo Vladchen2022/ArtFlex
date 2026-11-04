@@ -297,7 +297,9 @@ struct CanvasContainerView: View {
                         paintingReferenceScene: viewModel.blockReferenceScene.flatMap {
                             $0.display.drawsBehindPainting(activeTool: viewModel.workspace.toolSession.activeTool) ? $0 : nil
                         },
-                        blocksEditingInput: viewModel.selectionRefinementDraft != nil || viewModel.textureAdjustmentSettings != nil
+                        blocksEditingInput: viewModel.selectionRefinementDraft != nil || viewModel.textureAdjustmentSettings != nil,
+                        proofProfile: viewModel.colorProofProfile,
+                        onProofFailure: { Task { @MainActor in viewModel.colorProofProfile = nil } }
                     )
                     .id(viewModel.documentRenderGeneration)
                     .allowsHitTesting(viewModel.selectionRefinementDraft == nil && viewModel.textureAdjustmentSettings == nil)
@@ -895,6 +897,12 @@ struct CanvasContainerView: View {
         .clipped()
         .overlay(alignment: .top) { CanvasWorkflowBar(viewModel: viewModel) }
         .overlay(alignment: .bottomLeading) { PaintingTargetFeedback(viewModel: viewModel) }
+        .overlay(alignment: .bottomTrailing) {
+            if let profile = viewModel.colorProofProfile {
+                Button("校样：\(profile.name) · 关闭") { viewModel.colorProofProfile = nil }
+                    .buttonStyle(.borderedProminent).tint(.orange).padding(12)
+            }
+        }
     }
 
     private func blockReferenceContextMenuItems(

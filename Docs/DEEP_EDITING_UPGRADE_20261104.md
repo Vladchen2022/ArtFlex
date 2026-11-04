@@ -33,7 +33,7 @@
 | 7 持久化方案分支 | 已实现，待界面验收 | 结构保存、隔离、重开、选择内容合入 |
 | 4 渐进打开与文件取消 | 已实现，待界面验收 | 可见阶段、取消安全、损坏或资源不足保护 |
 | 8 多文档与双视图 | 已实现，待界面验收 | 文件与历史独立，同稿视图同步 |
-| 9 颜色管理与校样 | 待实施 | ICC 和 P3 全链对照、旧工程不变 |
+| 9 颜色管理与校样 | 已实现，待界面验收 | ICC 和 P3 全链对照、旧工程不变 |
 | 10 分层交换 | 待实施 | 支持范围明确、跨应用验证、降级可见 |
 
 每项落地后记录实现与证据；未完成前不得把候选方案写成已交付。
@@ -101,3 +101,11 @@
 保留当前线性合成算法和规范化像素。广色域采用扩展线性 sRGB 半浮点存储，允许负值和大于 1 的通道来表示 P3 范围，不把原 sRGB 数值直接改标 P3。使用 Core Graphics／ColorSync 处理内嵌 ICC 导入及目标色域转换，使用明确配置的 CAMetalLayer 显示。旧 8 位工程保留原路径，新增广色域文档须逐链验证。
 
 官方参考：[CAMetalLayer 浮点与扩展色域配置](https://developer.apple.com/documentation/metal/performing-your-own-tone-mapping)、[CGColorSpace](https://developer.apple.com/documentation/CoreGraphics/CGColorSpace)、[CGColorConversionInfo](https://developer.apple.com/documentation/coregraphics/cgcolorconversioninfo/init(src:dst:))。本轮面向 SDR 广色域，不开启 HDR 提亮。
+
+## 颜色管理实现证据（尚待界面验收）
+
+- 新建 16F 工程可选择广色域，使用扩展线性 sRGB 保存 P3；导入读取 ICC，浮点画布显示明确设置工作色域，吸管和绘画保留负值及大于 1 的通道。
+- 导出支持 sRGB、Display P3、自定义 RGB ICC；原生 ColorSync 转换并嵌入目标描述文件。显示菜单提供 RGB 校样；校样只改变显示，失败会解除校样状态，不影响取样或工程像素。
+- 笔刷／渐变的艺术颜色变化在必要时转换至 P3 计算，旧 sRGB 公式保持；曲线对范围外颜色使用端点外推。新建和存储拒绝广色域 8 位组合。
+- 原生 P3 半透明导入、吸管、笔刷、选区填色、16 位 P3 与自定义 ICC 导出／缩放／重导入、校样不修改源、保存重开与历史，以及已有颜色／可编辑内容组合 44 项测试通过。日志 `color-final-tests.log`。
+- 范围：SDR RGB 广色域与 RGB 目标校样，不包含 HDR 提亮或 CMYK 油墨／纸白模拟；已有工程不会自动改成广色域。

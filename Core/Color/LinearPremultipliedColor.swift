@@ -89,7 +89,15 @@ struct LinearPremultipliedColor: Sendable, Equatable {
     }
 
     static func srgbChannelToLinear(_ value: Float) -> Float {
-        value <= 0.04045 ? value / 12.92 : pow((value + 0.055) / 1.055, 2.4)
+        let v = abs(value)
+        let result = v <= 0.04045 ? v / 12.92 : pow((v + 0.055) / 1.055, 2.4)
+        return value < 0 ? -result : result
+    }
+
+    static func linearChannelToExtendedSRGB(_ value: Float) -> Float {
+        let v = abs(value)
+        let result = v <= 0.0031308 ? v * 12.92 : (1.055 * pow(v, 1 / 2.4)) - 0.055
+        return value < 0 ? -result : result
     }
 
     static func linearChannelToSRGB(_ value: Float) -> Float {

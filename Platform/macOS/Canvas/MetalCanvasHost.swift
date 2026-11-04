@@ -237,6 +237,8 @@ struct MetalCanvasHost: NSViewRepresentable {
     let outsideCanvasBrushInputRelay: OutsideCanvasBrushInputRelay?
     var paintingReferenceScene: BlockReferenceScene? = nil
     var blocksEditingInput = false
+    var proofProfile: ManagedRGBProfile? = nil
+    var onProofFailure: () -> Void = {}
     private let brushFeelLogger = Logger(subsystem: "ArtFlex", category: "BrushFeel")
 
     func makeCoordinator() -> MetalCanvasCoordinator {
@@ -314,7 +316,7 @@ struct MetalCanvasHost: NSViewRepresentable {
         view.device = metalContext.device
         view.delegate = context.coordinator
         view.strokeDelegate = context.coordinator
-        view.colorPixelFormat = .bgra8Unorm_srgb
+        configureColorDisplay(view)
         view.clearColor = MTLClearColor(red: 1, green: 1, blue: 1, alpha: 1)
         view.preferredFramesPerSecond = 120
         view.autoResizeDrawable = false
@@ -328,6 +330,9 @@ struct MetalCanvasHost: NSViewRepresentable {
         view.contextMenuSelectionShape = isTransformingSelection ? nil : sceneSnapshot.selectionShape
         view.selectionRefinementRequestHandler = onRequestSelectionRefinement
         view.wantsLayer = true
+        configureColorDisplay(view)
+        context.coordinator.proofProfile = proofProfile
+        context.coordinator.onProofFailure = onProofFailure
         view.viewportRenderScale = viewportRenderScale
         view.displaySamplingMode = displaySamplingMode
         outsideCanvasBrushInputRelay?.captureView = view
@@ -340,7 +345,23 @@ struct MetalCanvasHost: NSViewRepresentable {
         return view
     }
 
+    private func configureColorDisplay(_ view: MTKView) {
+        let floating = sceneSnapshot.renderSnapshot.document.colorStandard.pixelFormat == .rgba16Float || proofProfile != nil
+        let format: MTLPixelFormat = floating ? .rgba16Float : .bgra8Unorm_srgb
+        if view.colorPixelFormat != format { view.colorPixelFormat = format }
+        if let layer = view.layer as? CAMetalLayer {
+            layer.colorspace = CGColorSpace(name: floating ? CGColorSpace.extendedLinearSRGB : CGColorSpace.sRGB)
+            layer.wantsExtendedDynamicRangeContent = false
+        }
+    }
+
     func updateNSView(_ nsView: MTKView, context: Context) {
+        configureColorDisplay(nsView)
+        context.coordinator.onProofFailure = onProofFailure
+        if context.coordinator.proofProfile != proofProfile {
+            context.coordinator.proofProfile = proofProfile
+            nsView.needsDisplay = true
+        }
         let updateStartNs = DispatchTime.now().uptimeNanoseconds
         let wasTransforming = context.coordinator.isTransformingSelection
         let previousSnapshot = context.coordinator.sceneSnapshot
@@ -2653,6 +2674,10 @@ final class StrokeCaptureMTKView: MTKView {
 
 @MainActor
 final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDelegate {
+    var proofProfile: ManagedRGBProfile? { didSet { if oldValue != proofProfile { proofRenderer = nil; proofCreationFailed = false } } }
+    private var proofRenderer: ColorProofRenderer?
+    private var proofCreationFailed = false
+    var onProofFailure: () -> Void = {}
     var paintingReferenceScene: BlockReferenceScene?
     private var paintingReferenceUnderlay: BlockReferenceCanvasUnderlay?
     private let paintingReferenceLayerID = LayerID()
@@ -3309,6 +3334,20 @@ final class MetalCanvasCoordinator: NSObject, MTKViewDelegate, StrokeCaptureDele
             }
         }
 
+        if let proofProfile, !proofCreationFailed {
+            do {
+                if proofRenderer == nil { proofRenderer = try ColorProofRenderer(profile: proofProfile, metal: metalContext) }
+                let proofPass = MTLRenderPassDescriptor()
+                proofPass.colorAttachments[0].texture = drawable.texture
+                proofPass.colorAttachments[0].loadAction = .dontCare
+                proofPass.colorAttachments[0].storeAction = .store
+                try proofRenderer?.encode(source: drawable.texture, into: proofPass, command: commandBuffer)
+            } catch {
+                proofCreationFailed = true
+                onProofFailure()
+                onRenderingFailure("校样未启用：\(error.localizedDescription)")
+            }
+        }
         let inputAt = (view as? StrokeCaptureMTKView)?.consumePresentationInputTime()
         if PerformanceAuditStore.shared.isRecordingEnabled {
             let submittedAt = CACurrentMediaTime()

@@ -14,7 +14,9 @@ enum HighPrecisionRasterExporter {
         let componentBytes = options.resolvedBitDepth.rawValue / 8
         let outputBytes = width * height * 4 * componentBytes
         let floatBytes = resized ? (sourceBounds.width * sourceBounds.height + width * height) * 16 : 0
-        let estimate = snapshot.pixelData.count + outputBytes * 2 + floatBytes + 8 * 1024 * 1024
+        let managed = options.resolvedColorProfile != .sRGB
+        let conversionBytes = managed ? width * height * 16 * 4 : 0
+        let estimate = snapshot.pixelData.count + outputBytes * 2 + floatBytes + conversionBytes + 8 * 1024 * 1024
         guard estimate <= maximumWorkingSetBytes else {
             throw RasterExportError.outputExceedsWorkingSetBudget(width: width, height: height,
                 estimatedBytes: estimate, maximumBytes: maximumWorkingSetBytes)
@@ -55,12 +57,31 @@ enum HighPrecisionRasterExporter {
                 green: LinearPremultipliedColor.srgbChannelToLinear(color.green),
                 blue: LinearPremultipliedColor.srgbChannelToLinear(color.blue), alpha: 1)
         }
+        var encodedComponents: [Float]?
+        if managed {
+            var linear = [Float](repeating: 0, count: width * height * 4)
+            snapshot.pixelData.withUnsafeBytes { source in
+                for y in 0..<height { for x in 0..<width {
+                    let i = (y * width + x) * 4
+                    var c = scaled.map { LinearPremultipliedColor(red: $0[i], green: $0[i + 1], blue: $0[i + 2], alpha: $0[i + 3]) }
+                        ?? CanvasPixelCodec.read(source, offset: (y + sourceBounds.originY) * snapshot.bytesPerRow + (x + sourceBounds.originX) * snapshot.encoding.bytesPerPixel, encoding: snapshot.encoding)
+                    c.alpha = min(max(c.alpha, 0), 1)
+                    if let background { c = c.composited(over: background) }
+                    linear[i] = c.red; linear[i + 1] = c.green; linear[i + 2] = c.blue; linear[i + 3] = c.alpha
+                } }
+            }
+            encodedComponents = try ManagedColorTransform.encodedComponents(from: linear, width: width, height: height, profile: options.resolvedColorProfile)
+            scaled = nil
+        }
         var pixels = Data(count: outputBytes)
         snapshot.pixelData.withUnsafeBytes { source in
             pixels.withUnsafeMutableBytes { output in
                 for y in 0..<height {
                     for x in 0..<width {
                         let i = (y * width + x) * 4
+                        let channels: [Float]
+                        if let encodedComponents { channels = Array(encodedComponents[i..<(i + 4)]) }
+                        else {
                         var c: LinearPremultipliedColor
                         if let scaled {
                             c = .init(red: scaled[i], green: scaled[i + 1], blue: scaled[i + 2], alpha: scaled[i + 3])
@@ -72,9 +93,10 @@ enum HighPrecisionRasterExporter {
                         c.alpha = min(max(c.alpha, 0), 1)
                         if let background { c = c.composited(over: background) }
                         let divisor = c.alpha > 0 ? c.alpha : 1
-                        let channels = [LinearPremultipliedColor.linearChannelToSRGB(c.red / divisor),
+                        channels = [LinearPremultipliedColor.linearChannelToSRGB(c.red / divisor),
                             LinearPremultipliedColor.linearChannelToSRGB(c.green / divisor),
                             LinearPremultipliedColor.linearChannelToSRGB(c.blue / divisor), c.alpha]
+                        }
                         for channel in 0..<4 {
                             let value = channels[channel].isFinite ? min(max(channels[channel], 0), 1) : 0
                             if componentBytes == 2 {
@@ -88,7 +110,8 @@ enum HighPrecisionRasterExporter {
         }
         var info = CGBitmapInfo(rawValue: CGImageAlphaInfo.last.rawValue)
         if componentBytes == 2 { info.formUnion(.byteOrder16Big) }
-        guard let space = CGColorSpace(name: CGColorSpace.sRGB), let provider = CGDataProvider(data: pixels as CFData),
+        let space = try ManagedColorTransform.colorSpace(options.resolvedColorProfile)
+        guard let provider = CGDataProvider(data: pixels as CFData),
               let image = CGImage(width: width, height: height, bitsPerComponent: componentBytes * 8,
                 bitsPerPixel: componentBytes * 32, bytesPerRow: width * componentBytes * 4,
                 space: space, bitmapInfo: info, provider: provider, decode: nil,

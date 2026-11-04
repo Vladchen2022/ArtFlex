@@ -77,6 +77,7 @@ final class ColorAdjustmentRenderer {
         let source = """
         #include <metal_stdlib>
         using namespace metal;
+        \(MetalColorFunctions.gamutSource)
 
         struct ColorAdjustmentVertex {
             float2 position;
@@ -182,7 +183,7 @@ final class ColorAdjustmentRenderer {
             if (premultiplied.a <= 1e-5) {
                 return float3(0.0);
             }
-            return clamp(premultiplied.rgb / premultiplied.a, 0.0, 1.0);
+            return premultiplied.rgb / premultiplied.a;
         }
 
         float3 applyPurity(float3 color, float amount) {
@@ -508,7 +509,8 @@ final class ColorAdjustmentRenderer {
             float3 color,
             constant ColorAdjustmentPreviewUniforms &uniforms
         ) {
-            float3 adjusted = clamp(color, 0.0, 1.0);
+            bool wide = artflexIsWide(color);
+            float3 adjusted = clamp(wide ? artflexLinearToP3(color) : color, 0.0, 1.0);
             adjusted.r = applyBrightnessChannel(adjusted.r, uniforms.brightness);
             adjusted.g = applyBrightnessChannel(adjusted.g, uniforms.brightness);
             adjusted.b = applyBrightnessChannel(adjusted.b, uniforms.brightness);
@@ -523,7 +525,7 @@ final class ColorAdjustmentRenderer {
                 uniforms.selectedHueDegrees,
                 uniforms.hueStrength
             );
-            return clamp(adjusted, 0.0, 1.0);
+            return wide ? artflexP3ToLinear(clamp(adjusted, 0.0, 1.0)) : clamp(adjusted, 0.0, 1.0);
         }
 
         vertex VertexOut colorAdjustmentVertex(

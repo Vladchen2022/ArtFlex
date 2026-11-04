@@ -50,6 +50,8 @@ struct RasterExportOptions: Codable, Sendable, Equatable {
     var dpi: Double
     var jpegQuality: Double
     var bitDepth: RasterExportBitDepth? = nil
+    var colorProfile: ManagedRGBProfile? = nil
+    var resolvedColorProfile: ManagedRGBProfile { colorProfile ?? .sRGB }
     var resolvedBitDepth: RasterExportBitDepth { bitDepth ?? .eight }
 
     init(
@@ -59,7 +61,8 @@ struct RasterExportOptions: Codable, Sendable, Equatable {
         resize: RasterExportResize = .original,
         dpi: Double = 300,
         jpegQuality: Double = 0.92,
-        bitDepth: RasterExportBitDepth = .eight
+        bitDepth: RasterExportBitDepth = .eight,
+        colorProfile: ManagedRGBProfile = .sRGB
     ) {
         self.format = format
         self.background = background
@@ -68,9 +71,11 @@ struct RasterExportOptions: Codable, Sendable, Equatable {
         self.dpi = dpi
         self.jpegQuality = jpegQuality
         self.bitDepth = bitDepth
+        self.colorProfile = colorProfile
     }
 
     func validate() throws {
+        _ = try ManagedColorTransform.colorSpace(resolvedColorProfile)
         if format == .jpeg && resolvedBitDepth == .sixteen {
             throw RasterExportError.unsupportedBitDepth
         }
@@ -85,7 +90,7 @@ struct RasterExportOptions: Codable, Sendable, Equatable {
         }
         if case .custom(let color) = background {
             let channels = [color.red, color.green, color.blue, color.alpha]
-            guard channels.allSatisfy({ $0.isFinite && (0...1).contains($0) }) else {
+            guard channels.allSatisfy({ $0.isFinite && (-16...16).contains($0) }) && (0...1).contains(color.alpha) else {
                 throw RasterExportError.invalidBackgroundColor
             }
             guard color.alpha >= 0.9999 else {

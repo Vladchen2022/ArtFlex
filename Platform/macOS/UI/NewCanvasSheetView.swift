@@ -42,6 +42,7 @@ struct NewCanvasSheetView: View {
     @State private var heightText = ""
     @State private var resolutionText = "\(defaultResolution)"
     @State private var pixelFormat: ArtPixelFormat = .rgba8
+    @State private var usesWideGamut = false
 
     var body: some View {
         HStack(spacing: 0) {
@@ -141,6 +142,9 @@ struct NewCanvasSheetView: View {
                 Text("16 位浮点 · 柔和渐变").tag(ArtPixelFormat.rgba16Float)
             }
             .foregroundStyle(.white)
+            if pixelFormat == .rgba16Float {
+                Toggle("广色域（保留 P3 颜色）", isOn: $usesWideGamut)
+            }
             Text(pixelFormat == .rgba16Float ? "图层像素占用约为 8 位的两倍；可导出 16 位 PNG / TIFF。" : "适合常规绘画，保持现有工程的颜色行为。")
                 .font(.caption).foregroundStyle(.white.opacity(0.65))
 
@@ -166,7 +170,8 @@ struct NewCanvasSheetView: View {
                     viewModel.createNewCanvas(
                         canvasSize: CanvasSize(width: currentWidth, height: currentHeight),
                         resolutionDPI: currentResolution,
-                        pixelFormat: pixelFormat
+                        pixelFormat: pixelFormat,
+                        colorSpace: pixelFormat == .rgba16Float && usesWideGamut ? .extendedSRGB : .sRGB
                     )
                 }
                 .buttonStyle(.plain)
