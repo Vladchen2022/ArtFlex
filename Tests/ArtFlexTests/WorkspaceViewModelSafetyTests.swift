@@ -3812,6 +3812,46 @@ struct WorkspaceViewModelSafetyTests {
 
     @Test
     @MainActor
+    func canvasZoomReadsTheWindowPointerAgainForEachStep() throws {
+        _ = NSApplication.shared
+        let size = CanvasSize(width: 1000, height: 800)
+        let model = try BrushEditingBoundaryHarness(canvasSize: size).viewModel
+        let window = CanvasZoomInputTestWindow(contentRect: .init(x: 0, y: 0, width: 1200, height: 900),
+            styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        defer { window.close() }
+        let view = NSView(frame: .init(x: 60, y: 40, width: 1000, height: 800))
+        try #require(window.contentView).addSubview(view)
+        model.canvasZoomPointerView = view
+        model.updateCanvasViewportSize(view.bounds.size)
+        model.setViewportOffset(x: 39, y: -30)
+        model.setViewportRotation(27)
+        model.toggleCanvasHorizontalFlip()
+        model.updateCanvasToolHover(to: .init(x: 500, y: 400))
+
+        func transform() -> CanvasViewportTransform {
+            .init(canvasSize: size, viewport: model.workspace.viewport, availableWidth: 1000, availableHeight: 800)
+        }
+        func check(pointer: CanvasPoint, anchor: CanvasPoint, zoom: () -> Void) {
+            window.pointer = view.convert(NSPoint(x: pointer.x, y: 800 - pointer.y), to: nil)
+            let canvasPoint = transform().viewportToCanvas(anchor)
+            let priorScale = model.workspace.viewport.zoomScale
+            zoom()
+            let result = transform().canvasToViewport(canvasPoint)
+            #expect(model.workspace.viewport.zoomScale != priorScale)
+            #expect(abs(result.x - anchor.x) < 0.001)
+            #expect(abs(result.y - anchor.y) < 0.001)
+        }
+
+        let first = CanvasPoint(x: 195, y: 170)
+        let second = CanvasPoint(x: 833, y: 608)
+        check(pointer: first, anchor: first, zoom: model.zoomIn)
+        check(pointer: second, anchor: second, zoom: model.zoomOut)
+        check(pointer: .init(x: -25, y: 400), anchor: .init(x: 500, y: 400), zoom: model.zoomIn)
+    }
+
+    @Test
+    @MainActor
     func navigatorSceneSnapshotUsesDefaultViewportAndHidesSelection() throws {
         let harness = try BrushEditingBoundaryHarness()
 
@@ -4518,6 +4558,12 @@ struct WorkspaceViewModelSafetyTests {
         #expect(harness.viewModel.workspace.document.isLayerEffectivelyVisible(layerID))
         #expect(harness.viewModel.checkPaintingTarget())
     }
+}
+
+private final class CanvasZoomInputTestWindow: NSWindow {
+    var pointer: NSPoint = .zero
+    override var mouseLocationOutsideOfEventStream: NSPoint { pointer }
+    override var isKeyWindow: Bool { true }
 }
 
 @MainActor

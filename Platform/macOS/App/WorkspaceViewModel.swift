@@ -6350,7 +6350,7 @@ final class WorkspaceViewModel: ObservableObject {
     private func currentPointerZoomAnchor(in transform: CanvasViewportTransform) -> CanvasPoint {
         if let view = canvasZoomPointerView, let window = view.window, window.isKeyWindow {
             let pointer = view.convert(window.mouseLocationOutsideOfEventStream, from: nil)
-            if view.visibleRect.contains(pointer) {
+            if view.bounds.contains(pointer), view.visibleRect.contains(pointer) {
                 // The AppKit reader is unflipped; canvas viewport coordinates start at the top.
                 return transform.viewportToCanvas(.init(x: pointer.x - view.bounds.minX,
                     y: view.bounds.maxY - pointer.y))
