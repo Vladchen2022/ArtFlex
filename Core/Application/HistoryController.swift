@@ -980,22 +980,25 @@ final class HistoryController {
             targets.append((layerSnapshot, texture))
         }
 
-        var staged: [StageOneLayerSurfaceStore.StagedPixelEdit?] = []
-        var replacements: [MTLTexture] = []
-        for target in targets {
-            if target.layerSnapshot.resourceKind == .content,
-               let surfaceID = layerSurfaceStore.surfaceID(for: target.layerSnapshot.layerID) {
-                let snapshot = target.layerSnapshot
+        var staged = [StageOneLayerSurfaceStore.StagedPixelEdit?](repeating: nil, count: targets.count)
+        var textures = [MTLTexture?](repeating: nil, count: targets.count)
+        var denseIndices: [Int] = []
+        for (index, target) in targets.enumerated() {
+            let snapshot = target.layerSnapshot
+            if snapshot.resourceKind == .content,
+               target.texture.width * target.texture.height >= 1024 * 1024,
+               snapshot.texture.width * snapshot.texture.height < target.texture.width * target.texture.height / 4,
+               let surfaceID = layerSurfaceStore.surfaceID(for: snapshot.layerID) {
                 let edit = try layerSurfaceStore.preparePixelEdit(for: surfaceID,
                     region: PixelRegion(originX: snapshot.originX, originY: snapshot.originY,
                         width: snapshot.texture.width, height: snapshot.texture.height))
-                staged.append(edit)
-                replacements.append(edit.texture)
-            } else {
-                staged.append(nil)
-                replacements.append(try serializer.cloneBatchForDeferredSnapshot(textures: [target.texture])[0])
-            }
+                staged[index] = edit
+                textures[index] = edit.texture
+            } else { denseIndices.append(index) }
         }
+        let dense = try serializer.cloneBatchForDeferredSnapshot(textures: denseIndices.map { targets[$0].texture })
+        for (index, texture) in zip(denseIndices, dense) { textures[index] = texture }
+        let replacements = textures.map { $0! }
         try serializer.restoreBatch(zip(targets, replacements).map { target, replacement in
             (snapshot: target.layerSnapshot.texture, texture: replacement,
              destinationX: target.layerSnapshot.originX, destinationY: target.layerSnapshot.originY)
@@ -1006,7 +1009,11 @@ final class HistoryController {
         }
         for (index, target) in targets.enumerated() {
             if let edit = staged[index] { layerSurfaceStore.publish(edit) }
-            else { layerSurfaceStore.setMaskTexture(replacements[index], for: target.layerSnapshot.layerID) }
+            else if target.layerSnapshot.resourceKind == .mask {
+                layerSurfaceStore.setMaskTexture(replacements[index], for: target.layerSnapshot.layerID)
+            } else if let surfaceID = layerSurfaceStore.surfaceID(for: target.layerSnapshot.layerID) {
+                layerSurfaceStore.swapTexture(for: surfaceID, with: replacements[index])
+            }
         }
     }
 

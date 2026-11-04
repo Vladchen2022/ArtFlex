@@ -1,11 +1,12 @@
 import AppKit
+import Combine
 import Foundation
 import ImageIO
 import UniformTypeIdentifiers
 
 @MainActor
-final class FilePanelService {
-    private var activeDialog: NSWindow?
+final class FilePanelService: ObservableObject {
+    @Published private var activeDialog: NSWindow?
     var isPresentingDialog: Bool { activeDialog != nil }
 
     #if DEBUG

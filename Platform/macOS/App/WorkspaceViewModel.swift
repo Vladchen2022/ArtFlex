@@ -1,6 +1,7 @@
 import ArtFlexPolicies
 import ArtFlexLifecycle
 import AppKit
+import Combine
 import ImageIO
 import SwiftUI
 import os
@@ -95,6 +96,7 @@ final class WorkspaceViewModel: ObservableObject {
     @Published var canAdjustRecentTextureFill = false
     private var textureAdjustmentInitialFill: RecentTextureFill?
     private var textureAdjustmentOriginal: MTLTexture?
+    private var filePanelObservation: AnyCancellable?
     private var historyPreviewImageTask: Task<Void, Never>?
     private var savedHistoryEntryID: UUID?
     private var savedHistoryWasInitial = false
@@ -644,6 +646,9 @@ final class WorkspaceViewModel: ObservableObject {
             selectionRevision: 0,
             viewportRevision: 0
         )
+        filePanelObservation = bootstrap.filePanelService.objectWillChange.sink { [weak self] _ in
+            self?.objectWillChange.send()
+        }
         if let group = ToolSidebarGroup.group(containing: state.toolSession.activeTool) {
             toolGroupSurfaceTools[group.id] = state.toolSession.activeTool
         }
@@ -19404,7 +19409,8 @@ extension WorkspaceViewModel {
         let generation = documentRenderGeneration
         let revision = documentChangeRevision
         textureAdjustmentCoordinator.submit { token in
-            let size = CanvasSize(width: state.value.baseTexture!.width, height: state.value.baseTexture!.height)
+            guard let base = state.value.baseTexture else { throw CanvasResourceError(message: "纹理底稿已失效") }
+            let size = CanvasSize(width: base.width, height: base.height)
             guard let shape = SelectionMaskRasterizer.textureFillSmoothFinalSelectionShape(from: state.value.rawEdgePoints,
                 anchorPoint: state.value.anchorPoint, canvasSize: size) else { throw CanvasResourceError(message: "纹理区域无效") }
             try token.check()

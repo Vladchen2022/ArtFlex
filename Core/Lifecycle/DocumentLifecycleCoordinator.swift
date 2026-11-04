@@ -18,11 +18,11 @@ public final class DocumentLifecycleCoordinator {
     public private(set) var version = DocumentVersion(generation: 0, editRevision: 0)
     public private(set) var isDirty = false
     public var projectURL: URL? { didSet { onStateChange?() } }
-    public var isChoosingOpenLocation = false
-    public var isChoosingSaveLocation = false
+    public var isChoosingOpenLocation = false { didSet { onStateChange?() } }
+    public var isChoosingSaveLocation = false { didSet { onStateChange?() } }
     public var onStateChange: (() -> Void)?
     public var onDirtyStateChange: ((Bool) -> Void)?
-    private var transitionID: UUID?
+    private var transitionID: UUID? { didSet { onStateChange?() } }
     public var isTransitionPending: Bool { transitionID != nil }
 
     public init() {}

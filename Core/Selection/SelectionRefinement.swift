@@ -198,12 +198,10 @@ enum SelectionRefinement {
         for x in 0..<regionWidth {
             if cancellation?.isCancelled == true { return nil }
             for y in 0..<regionHeight {
-            if cancellation?.isCancelled == true { return nil }
                 column[y] = horizontal[(y * regionWidth) + x]
             }
             let filtered = slidingExtremum(column, radius: radius, operation: operation)
             for y in 0..<regionHeight {
-            if cancellation?.isCancelled == true { return nil }
                 regionResult[(y * regionWidth) + x] = filtered[y]
             }
         }
