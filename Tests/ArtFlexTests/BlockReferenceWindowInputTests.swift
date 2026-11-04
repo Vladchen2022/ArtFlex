@@ -40,26 +40,35 @@ struct BlockReferenceWindowInputTests {
             $0?.display.isFrozen = true
         }
         let original = vm.workspace.document
-        let window = NSWindow(contentRect: NSRect(x: 50, y: 50, width: 600, height: 450),
+        let window = InputTestWindow(contentRect: NSRect(x: 50, y: 50, width: 1200, height: 800),
                               styleMask: [.titled], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
         let host = NSHostingView(rootView: MainWindowView(viewModel: vm,
             presentationState: AppPresentationState(), onCanvasReady: {}))
         window.contentView = host
+        window.makeKeyAndOrderFront(nil)
         host.layoutSubtreeIfNeeded()
         defer { window.contentView = nil; window.close() }
         try await Task.sleep(for: .milliseconds(150))
-        let point = NSPoint(x: 300, y: 200)
-        let hit = host.hitTest(point)
-        #expect(hit is BlockReferenceInteractionView)
-        window.makeKeyAndOrderFront(nil)
+        host.layoutSubtreeIfNeeded()
+        func interaction(in view: NSView) -> BlockReferenceInteractionView? {
+            if let canvas = view as? BlockReferenceInteractionView { return canvas }
+            for child in view.subviews { if let canvas = interaction(in: child) { return canvas } }
+            return nil
+        }
+        let canvas = try #require(interaction(in: host))
+        #expect(canvas.bounds.width > 100 && canvas.bounds.height > 100)
+        let local = NSPoint(x: canvas.bounds.midX, y: canvas.bounds.midY)
+        let point = canvas.convert(local, to: nil)
+        let hit = host.hitTest(canvas.convert(local, to: host))
+        #expect(hit === canvas)
         NSApp.sendEvent(try middleEvent(.otherMouseDown, in: window, at: point))
         #expect(vm.isBlockReferenceCameraNavigating)
         try await Task.sleep(for: .milliseconds(100))
-        NSApp.sendEvent(try middleEvent(.otherMouseDragged, in: window, at: NSPoint(x: 370, y: 225)))
+        NSApp.sendEvent(try middleEvent(.otherMouseDragged, in: window, at: NSPoint(x: point.x + 40, y: point.y + 25)))
         #expect(vm.blockReferenceScene?.camera != original.blockReferenceScene?.camera)
         try await Task.sleep(for: .milliseconds(100))
-        NSApp.sendEvent(try middleEvent(.otherMouseUp, in: window, at: NSPoint(x: 370, y: 225)))
+        NSApp.sendEvent(try middleEvent(.otherMouseUp, in: window, at: NSPoint(x: point.x + 40, y: point.y + 25)))
         #expect(!vm.isBlockReferenceCameraNavigating)
         #expect(vm.workspace.document == original)
     }

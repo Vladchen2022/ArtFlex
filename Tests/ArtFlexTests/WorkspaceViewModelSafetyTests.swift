@@ -4511,7 +4511,12 @@ struct WorkspaceViewModelSafetyTests {
 
         harness.viewModel.beginStrokeIfNeeded()
 
-        #expect(harness.viewModel.status?.message == "当前图层不可见，请先显示图层再绘画")
+        #expect(harness.viewModel.paintingBlocker?.action == .show)
+        #expect(harness.viewModel.paintingBlocker?.layerID == layerID)
+        #expect(!harness.viewModel.checkPaintingTarget())
+        harness.viewModel.resolvePaintingBlocker()
+        #expect(harness.viewModel.workspace.document.isLayerEffectivelyVisible(layerID))
+        #expect(harness.viewModel.checkPaintingTarget())
     }
 }
 

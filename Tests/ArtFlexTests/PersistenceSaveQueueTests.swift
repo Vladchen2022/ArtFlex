@@ -5,7 +5,7 @@ import Testing
 struct PersistenceSaveQueueTests {
     @Test
     @MainActor
-    func projectSaveUsesSingleBatchTextureSnapshotForAllLayers() throws {
+    func projectSaveReadsOneResourceAtATimeAndReopensEveryLayer() throws {
         guard let metalContext = MetalDeviceContext() else {
             Issue.record("Metal unavailable")
             return
@@ -35,8 +35,10 @@ struct PersistenceSaveQueueTests {
         let audit = auditStore.snapshot()
         let layerCount = viewModel.workspace.document.layers.count
 
-        #expect(audit.durations(for: "LayerTextureSerializer.snapshotBatch(\(layerCount))").count == 1)
-        #expect(audit.durations(for: "LayerTextureSerializer.snapshot").isEmpty)
+        #expect(audit.durations(for: "LayerTextureSerializer.snapshotBatch(\(layerCount))").isEmpty)
+        // Layers plus the optional preview: bounded single-resource readbacks replaced
+        // the old full-document CPU batch to reduce peak save memory.
+        #expect((layerCount...layerCount + 1).contains(audit.durations(for: "LayerTextureSerializer.snapshot").count))
         let reopened = try bootstrap.persistenceController.openProject(from: outputURL)
         #expect(reopened.workspace.document.layers == viewModel.workspace.document.layers)
         #expect(reopened.layerSnapshots.count == layerCount)
