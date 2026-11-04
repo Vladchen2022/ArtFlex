@@ -77,6 +77,22 @@ struct EditableLayerTests {
         fill.color = .white; content.operation = .texture(fill)
         #expect(try serializer.snapshot(texture: renderer.render(content, canvas: size, cancellation: WorkCancellation())) == first)
         #expect(try content.source.snapshot() == snapshot)
+        // Optional deterministic artifact for visible UI acceptance; never generated in normal tests.
+        if let path = ProcessInfo.processInfo.environment["ARTFLEX_EDITABLE_TEXTURE_FIXTURE"] {
+            var workspace = WorkspaceState.stageOneDefault
+            workspace.document.layers = [workspace.document.layers[0]]
+            workspace.document.activeLayerID = workspace.document.layers[0].id
+            workspace.document.canvasSize = size
+            workspace.document.metadata.name = "可编辑纹理验收"
+            workspace.document.layers[0].editableContent = content
+            let payload = ProjectArchivePayload(package: .fromWorkspace(workspace, layerSnapshots: [
+                .init(layerID: workspace.document.activeLayerID, texture: first)
+            ]), referenceImages: [])
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            _ = try ProjectArchiveV2Writer().write(payload, to: directory)
+            try ProjectArchiveFlatContainer().encodePackage(at: directory, to: URL(fileURLWithPath: path))
+        }
     }
 
     @Test func corruptSourcesAndInvalidTransformsAreRejectedBeforeAllocation() throws {
