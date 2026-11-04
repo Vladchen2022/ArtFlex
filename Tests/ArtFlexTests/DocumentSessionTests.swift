@@ -52,6 +52,26 @@ struct DocumentSessionTests {
         #expect(documents.activate(first))
     }
 
+    @Test(arguments: [false, true])
+    func failedOrCancelledOpenReturnsToPreviousDocumentWithoutAnEmptyTab(cancel: Bool) async throws {
+        let (documents, root) = try make()
+        defer { try? FileManager.default.removeItem(at: root) }
+        documents.create(name: "保留的画稿", size: .init(width: 32, height: 32), dpi: 300, format: .rgba8)
+        let previous = documents.activeID
+        documents.active.addLayer()
+        let layers = documents.active.workspace.document.layers
+        documents.open(root.appendingPathComponent("missing.artflex"))
+        #expect(documents.sessions.count == 3)
+        if cancel { documents.active.cancelProjectOpen() }
+        for _ in 0..<300 where documents.sessions.count == 3 { try await Task.sleep(for: .milliseconds(10)) }
+        #expect(documents.sessions.count == 2)
+        #expect(documents.activeID == previous)
+        #expect(documents.active.workspace.document.layers == layers)
+        #expect(documents.active.hasUnsavedChanges)
+        #expect(documents.active.status?.kind == (cancel ? .info : .error))
+        if cancel { #expect(documents.active.status?.message.contains("已取消") == true) }
+    }
+
     @Test func layerTransferPreservesSourceAndSupportsDestinationUndo() async throws {
         let (documents, root) = try make()
         defer { try? FileManager.default.removeItem(at: root) }

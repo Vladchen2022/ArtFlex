@@ -14488,7 +14488,8 @@ final class WorkspaceViewModel: ObservableObject {
     var projectOpenProgress: ProjectReadProgress? { projectOpenCoordinator.progress }
     func cancelProjectOpen() { projectOpenCoordinator.cancel() }
 
-    private func loadProjectInBackground(from url: URL?, isRecovery: Bool) {
+    private func loadProjectInBackground(from url: URL?, isRecovery: Bool,
+        onFailure: ((WorkspaceStatus) -> Void)? = nil) {
         showStatus(.init(kind: .info, message: isRecovery ? "正在验证并恢复工程…" : "正在验证并打开工程…"))
         projectOpenCoordinator.start(from: url, isRecovery: isRecovery,
             persistence: bootstrap.persistenceController, policy: bootstrap.documentResourceBudgetPolicy,
@@ -14500,11 +14501,17 @@ final class WorkspaceViewModel: ObservableObject {
             case .documentChanged:
                 self.showStatus(.init(kind: .info, message: "打开期间当前画布发生变化，已保留当前工程；请重新打开"))
             case .failed(let error):
-                self.showStatus(.init(kind: error is CancellationError ? .info : .error,
-                    message: error is CancellationError ? "已取消打开，当前画稿未改变" : error.localizedDescription))
+                let status = WorkspaceStatus(kind: error is CancellationError ? .info : .error,
+                    message: error is CancellationError ? "已取消打开，当前画稿未改变" : error.localizedDescription)
+                self.showStatus(status)
+                onFailure?(status)
             case .loaded(let sourceURL, let opened):
                 do { try self.applyOpenedProjectResult(opened, sourceURL: sourceURL, isRecovery: isRecovery) }
-                catch { self.showStatus(.init(kind: .error, message: error.localizedDescription)) }
+                catch {
+                    let status = WorkspaceStatus(kind: .error, message: error.localizedDescription)
+                    self.showStatus(status)
+                    onFailure?(status)
+                }
             }
         }
     }
@@ -19831,7 +19838,9 @@ extension WorkspaceViewModel {
         presentWorkspaceStatus(kind: .success, message: "已导入分层工程，请另存为 .artflex；外部软件的混合显示可能有差异")
     }
 
-    func loadProjectForDocumentSession(from url: URL) { loadProjectInBackground(from: url, isRecovery: false) }
+    func loadProjectForDocumentSession(from url: URL, onFailure: @escaping (WorkspaceStatus) -> Void) {
+        loadProjectInBackground(from: url, isRecovery: false, onFailure: onFailure)
+    }
     func finishDocumentSessionClose() {
         recoveryCoordinator.invalidate()
         cancelProjectOpen()

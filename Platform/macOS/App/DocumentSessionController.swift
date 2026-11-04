@@ -102,10 +102,18 @@ final class DocumentSessionController: ObservableObject {
         }
         guard active.prepareForDocumentTabSwitch(), !isClosing else { return }
         do {
+            let previousID = activeID
             let session = try makeSession()
             attach(session)
             guard activate(session.id) else { remove(session.id); return }
-            session.model.loadProjectForDocumentSession(from: url)
+            session.model.loadProjectForDocumentSession(from: url) { [weak self, weak model = session.model] status in
+                guard let self, self.sessions.contains(where: { $0.id == session.id }) else { return }
+                let wasActive = self.activeID == session.id
+                model?.finishDocumentSessionClose()
+                self.remove(session.id)
+                if wasActive { _ = self.activate(previousID) }
+                self.active.presentWorkspaceStatus(kind: status.kind, message: status.message)
+            }
         } catch { active.presentWorkspaceStatus(kind: .error, message: error.localizedDescription) }
     }
 
