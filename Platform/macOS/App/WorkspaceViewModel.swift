@@ -84,6 +84,14 @@ final class WorkspaceViewModel: ObservableObject {
     var openDocumentInNewSession: ((URL) -> Void)?
     var recoverDocumentInNewSession: ((URL) -> Void)?
     var isSessionActive = true
+    weak var commandHost: WorkspaceViewModel?
+    private lazy var editingSessions: WorkspaceEditingSessions = {
+        let sessions = WorkspaceEditingSessions()
+        sessions.onStateChange = { [weak self] in self?.objectWillChange.send() }
+        return sessions
+    }()
+    var hasModalEditSession: Bool { editingSessions.hasModalDraft }
+
     @Published var showsDualCanvas = false
     @Published var colorProofProfile: ManagedRGBProfile?
     @Published var isColorManagementPresented = false
@@ -92,26 +100,59 @@ final class WorkspaceViewModel: ObservableObject {
     lazy var branches = WorkspaceBranchController(owner: self, bootstrap: bootstrap)
     lazy var layerExchange = WorkspaceLayerExchangeController(owner: self, bootstrap: bootstrap)
     var importExchangeInNewSession: ((OpenProjectResult, URL) -> Void)?
-    private let documentPreparation = DocumentPreparationCoordinator()
-    @Published private(set) var isPreparingDocumentEdit = false
-    @Published var editableLayerDraft: EditableLayerDraft?
+    private var documentPreparation: DocumentPreparationCoordinator { editingSessions.preparation }
+    private(set) var isPreparingDocumentEdit: Bool {
+        get { editingSessions.isPreparingDocumentEdit }
+        set { editingSessions.isPreparingDocumentEdit = newValue }
+    }
+    var editableLayerDraft: EditableLayerDraft? {
+        get { editingSessions.editableLayerDraft }
+        set { editingSessions.editableLayerDraft = newValue }
+    }
     @Published var retainsEditableFillParameters = false
     @Published var paintingBlocker: PaintingBlocker?
-    @Published var selectionRefinementDraft: SelectionRefinementDraft?
+    var selectionRefinementDraft: SelectionRefinementDraft? {
+        get { editingSessions.selectionRefinementDraft }
+        set { editingSessions.selectionRefinementDraft = newValue }
+    }
     @Published var preferredSelectionCombineMode: SelectionCombineMode = .replace
     @Published var isCommandSearchPresented = false
     @Published var historyPreviewImages: [UUID: CGImage] = [:]
-    private let selectionPreviewCoordinator = LatestPreviewCoordinator<SelectionShape?>()
-    private var selectionPreviewRequest = UUID()
-    private var recentTextureFill: RecentTextureFill?
-    @Published var isTextureAdjustmentComputing = false
-    @Published var textureAdjustmentError: String?
-    private let textureAdjustmentCoordinator = LatestPreviewCoordinator<WorkspaceUncheckedBox<MTLTexture>>()
+    private var selectionPreviewCoordinator: LatestPreviewCoordinator<SelectionShape?> { editingSessions.selectionPreview }
+    private var selectionPreviewRequest: UUID {
+        get { editingSessions.selectionPreviewRequest }
+        set { editingSessions.selectionPreviewRequest = newValue }
+    }
+    private var recentTextureFill: RecentTextureFill? {
+        get { editingSessions.recentTextureFill }
+        set { editingSessions.recentTextureFill = newValue }
+    }
+    var isTextureAdjustmentComputing: Bool {
+        get { editingSessions.isTextureAdjustmentComputing }
+        set { editingSessions.isTextureAdjustmentComputing = newValue }
+    }
+    var textureAdjustmentError: String? {
+        get { editingSessions.textureAdjustmentError }
+        set { editingSessions.textureAdjustmentError = newValue }
+    }
+    private var textureAdjustmentCoordinator: LatestPreviewCoordinator<WorkspaceUncheckedBox<MTLTexture>> { editingSessions.texturePreview }
     private lazy var textureAdjustmentRenderer = TextureAdjustmentRenderer(metal: bootstrap.metalContext, serializer: bootstrap.textureSerializer)
-    @Published var textureAdjustmentSettings: TextureFillTipSettings?
-    @Published var canAdjustRecentTextureFill = false
-    private var textureAdjustmentInitialFill: RecentTextureFill?
-    private var textureAdjustmentOriginal: MTLTexture?
+    var textureAdjustmentSettings: TextureFillTipSettings? {
+        get { editingSessions.textureAdjustmentSettings }
+        set { editingSessions.textureAdjustmentSettings = newValue }
+    }
+    var canAdjustRecentTextureFill: Bool {
+        get { editingSessions.canAdjustRecentTextureFill }
+        set { editingSessions.canAdjustRecentTextureFill = newValue }
+    }
+    private var textureAdjustmentInitialFill: RecentTextureFill? {
+        get { editingSessions.textureAdjustmentInitialFill }
+        set { editingSessions.textureAdjustmentInitialFill = newValue }
+    }
+    private var textureAdjustmentOriginal: MTLTexture? {
+        get { editingSessions.textureAdjustmentOriginal }
+        set { editingSessions.textureAdjustmentOriginal = newValue }
+    }
     private var filePanelObservation: AnyCancellable?
     private var historyPreviewImageTask: Task<Void, Never>?
     private var savedHistoryEntryID: UUID?
@@ -210,7 +251,10 @@ final class WorkspaceViewModel: ObservableObject {
     @Published private(set) var status: WorkspaceStatus?
     @Published private(set) var isPanModeActive = false
     @Published private(set) var isCanvasViewportLocked = false
-    @Published private(set) var canvasCropState = CanvasCropInteractionState()
+    private(set) var canvasCropState: CanvasCropInteractionState {
+        get { editingSessions.canvasCropState }
+        set { editingSessions.canvasCropState = newValue }
+    }
     @Published var showsTransparencyCheckerboard = true
     @Published var isPixelGridEnabled = true
     @Published private(set) var canUndo = false
@@ -298,10 +342,19 @@ final class WorkspaceViewModel: ObservableObject {
     @Published private(set) var patternImportCurrentEraseMaskData: Data?
     @Published private(set) var isPatternImportPreviewLoading = false
     @Published private(set) var isPatternImporting = false
-    @Published private(set) var patternPlacementPhase = PatternPlacementPhase.idle
-    @Published private(set) var isApplyingPatternPlacementCommit = false
+    private(set) var patternPlacementPhase: PatternPlacementPhase {
+        get { editingSessions.patternPlacementPhase }
+        set { editingSessions.patternPlacementPhase = newValue }
+    }
+    private(set) var isApplyingPatternPlacementCommit: Bool {
+        get { editingSessions.isApplyingPatternPlacementCommit }
+        set { editingSessions.isApplyingPatternPlacementCommit = newValue }
+    }
     @Published private(set) var brushLibraryRevealRequestID: UInt64 = 0
-    @Published private(set) var isTransformingSelection = false
+    private(set) var isTransformingSelection: Bool {
+        get { editingSessions.isTransformingSelection }
+        set { editingSessions.isTransformingSelection = newValue }
+    }
     @Published private(set) var canMergeDown = false
     @Published private(set) var canMergeVisible = false
     @Published private(set) var strokeResetToken = 0
@@ -312,7 +365,10 @@ final class WorkspaceViewModel: ObservableObject {
     @Published private(set) var isGeneratorRegionSelectionArmed = false
     @Published private(set) var isGeneratorStrokeModeEnabled = false
     @Published private(set) var activeMaskEditingLayerID: LayerID?
-    @Published private(set) var straightLineState = StraightLineInteractionState()
+    private(set) var straightLineState: StraightLineInteractionState {
+        get { editingSessions.straightLineState }
+        set { editingSessions.straightLineState = newValue }
+    }
     private(set) var linearGradientState: LinearGradientInteractionState {
         get { gradientSession.linear }
         set { gradientSession.linear = newValue }
@@ -323,14 +379,29 @@ final class WorkspaceViewModel: ObservableObject {
     }
     @Published private(set) var gradientSettings = GradientSettings.currentColorToTransparent(.black)
     @Published private(set) var gradientFollowsSelectedColor = true
-    @Published private(set) var polygonSelectionState = PolygonSelectionInteractionState()
+    private(set) var polygonSelectionState: PolygonSelectionInteractionState {
+        get { editingSessions.polygonSelectionState }
+        set { editingSessions.polygonSelectionState = newValue }
+    }
     @Published private(set) var toolGroupSurfaceTools = ToolSidebarGroup.defaultSurfaceTools
-    @Published private(set) var transformPreviewOffset = CanvasPoint(x: 0, y: 0)
-    @Published private(set) var freeTransformPreview = FreeTransformPreview.identity
+    private(set) var transformPreviewOffset: CanvasPoint {
+        get { editingSessions.transformPreviewOffset }
+        set { editingSessions.transformPreviewOffset = newValue }
+    }
+    private(set) var freeTransformPreview: FreeTransformPreview {
+        get { editingSessions.freeTransformPreview }
+        set { editingSessions.freeTransformPreview = newValue }
+    }
     @Published private(set) var freeTransformToolMode = FreeTransformToolMode.standard
     @Published private(set) var preciseTransformLocksAspectRatio = true
-    @Published private(set) var freeTransformMeshWarpGrid: MeshWarpGrid?
-    @Published private(set) var selectedMeshWarpControlPointIndices: Set<Int> = []
+    private(set) var freeTransformMeshWarpGrid: MeshWarpGrid? {
+        get { editingSessions.freeTransformMeshWarpGrid }
+        set { editingSessions.freeTransformMeshWarpGrid = newValue }
+    }
+    private(set) var selectedMeshWarpControlPointIndices: Set<Int> {
+        get { editingSessions.selectedMeshWarpControlPointIndices }
+        set { editingSessions.selectedMeshWarpControlPointIndices = newValue }
+    }
     @Published private(set) var selectedPerspectiveAnchorID: UUID?
     @Published var blockReferenceEditorState = BlockReferenceEditorState()
     @Published var blockReferenceWorkflow = BlockReferenceWorkflowState()
@@ -339,7 +410,10 @@ final class WorkspaceViewModel: ObservableObject {
     var blockReferenceCameraPreview: BlockReferenceCamera?
     let blockReferenceCameraRenderState = BlockReferenceCameraRenderState()
     var isApplyingGradientCommit: Bool { gradientSession.isCommitting }
-    @Published private(set) var isBucketFillInProgress = false
+    private(set) var isBucketFillInProgress: Bool {
+        get { editingSessions.isBucketFillInProgress }
+        set { editingSessions.isBucketFillInProgress = newValue }
+    }
     @Published private(set) var fillSettings = FillSettings.stageOneDefault
     @Published private(set) var smartSelectionSettings = SmartSelectionSettings.stageOneDefault
     @Published private(set) var smartSelectionDisplayMode: SmartSelectionDisplayMode = .tint
@@ -348,8 +422,14 @@ final class WorkspaceViewModel: ObservableObject {
     @Published private(set) var isPreparingSnapshotCompare = false
     var isProjectOpening: Bool { projectOpenCoordinator.isOpening }
     @Published private(set) var isLuminosityPreviewEnabled = false
-    @Published private(set) var isFreeTransformDragging = false
-    @Published private(set) var activeFreeTransformInteractionMode: FreeTransformInteractionMode?
+    private(set) var isFreeTransformDragging: Bool {
+        get { editingSessions.isFreeTransformDragging }
+        set { editingSessions.isFreeTransformDragging = newValue }
+    }
+    private(set) var activeFreeTransformInteractionMode: FreeTransformInteractionMode? {
+        get { editingSessions.activeFreeTransformInteractionMode }
+        set { editingSessions.activeFreeTransformInteractionMode = newValue }
+    }
     @Published private(set) var isBrushTipCanvasFocused = false
     @Published private(set) var isBrushTipEditorVisible = false
     @Published private(set) var brushTipEditorBrushSize: Float = 28
@@ -389,8 +469,14 @@ final class WorkspaceViewModel: ObservableObject {
     private var rasterExportBoundsRequest: UUID?
     private var isAdjustingLayerOpacity = false
     private var activeLayerOpacityChangeDidMutate = false
-    private var transformState = TransformInteractionState()
-    private var activeMeshWarpDragControlPointIndices: Set<Int>?
+    private var transformState: TransformInteractionState {
+        get { editingSessions.transformState }
+        set { editingSessions.transformState = newValue }
+    }
+    private var activeMeshWarpDragControlPointIndices: Set<Int>? {
+        get { editingSessions.activeMeshWarpDragControlPointIndices }
+        set { editingSessions.activeMeshWarpDragControlPointIndices = newValue }
+    }
     private var perspectiveGuideInteractionTarget: PerspectiveGuideInteractionTarget?
     private var perspectiveGuideInteractionLastPoint: CanvasPoint?
     private var perspectiveGuideInteractionHasCheckpoint = false
@@ -410,14 +496,35 @@ final class WorkspaceViewModel: ObservableObject {
     var blockReferenceCameraZoomCommitTask: Task<Void, Never>?
     private var layerThumbnailCache: [LayerID: CGImage] = [:]
     private var generatorStrokeSession = GeneratorStrokeSessionState()
-    private var activeLassoRawPoints: [CanvasPoint] = []
-    private var activeLassoPreviewPoints: [CanvasPoint] = []
-    private var activeLassoBounds: CanvasRect?
-    private var textureFillGestureState: TextureFillGestureState?
+    private var activeLassoRawPoints: [CanvasPoint] {
+        get { editingSessions.activeLassoRawPoints }
+        set { editingSessions.activeLassoRawPoints = newValue }
+    }
+    private var activeLassoPreviewPoints: [CanvasPoint] {
+        get { editingSessions.activeLassoPreviewPoints }
+        set { editingSessions.activeLassoPreviewPoints = newValue }
+    }
+    private var activeLassoBounds: CanvasRect? {
+        get { editingSessions.activeLassoBounds }
+        set { editingSessions.activeLassoBounds = newValue }
+    }
+    private var textureFillGestureState: TextureFillGestureState? {
+        get { editingSessions.textureFillGestureState }
+        set { editingSessions.textureFillGestureState = newValue }
+    }
     private var textureFillSeedSequence: UInt64 = 0
-    private var bucketFillRequestID: UInt64 = 0
-    private var bucketFillTask: Task<Void, Never>?
-    private var bucketFillCancellation: WorkCancellation?
+    private var bucketFillRequestID: UInt64 {
+        get { editingSessions.bucketFillRequestID }
+        set { editingSessions.bucketFillRequestID = newValue }
+    }
+    private var bucketFillTask: Task<Void, Never>? {
+        get { editingSessions.bucketFillTask }
+        set { editingSessions.bucketFillTask = newValue }
+    }
+    private var bucketFillCancellation: WorkCancellation? {
+        get { editingSessions.bucketFillCancellation }
+        set { editingSessions.bucketFillCancellation = newValue }
+    }
     private var isChoosingPaletteImage = false
     var imagePaletteExtractor: ImagePaletteExtractor { bootstrap.imagePaletteExtractor }
     private var snapshotSaveRequestID: UInt64 = 0
@@ -427,10 +534,22 @@ final class WorkspaceViewModel: ObservableObject {
     private var adjustmentLayerCheckpointResetTask: Task<Void, Never>?
     private var adjustmentLayerCheckpointLayerID: LayerID?
     private var lastLassoOverlayRefreshUptime: TimeInterval = 0
-    private var freeTransformUsesImplicitSelection = false
-    private var implicitFreeTransformSelectionShape: SelectionShape?
-    private var transformCommitRequestID: UUID?
-    @Published private(set) var isApplyingTransformCommit = false
+    private var freeTransformUsesImplicitSelection: Bool {
+        get { editingSessions.freeTransformUsesImplicitSelection }
+        set { editingSessions.freeTransformUsesImplicitSelection = newValue }
+    }
+    private var implicitFreeTransformSelectionShape: SelectionShape? {
+        get { editingSessions.implicitFreeTransformSelectionShape }
+        set { editingSessions.implicitFreeTransformSelectionShape = newValue }
+    }
+    private var transformCommitRequestID: UUID? {
+        get { editingSessions.transformCommitRequestID }
+        set { editingSessions.transformCommitRequestID = newValue }
+    }
+    private(set) var isApplyingTransformCommit: Bool {
+        get { editingSessions.isApplyingTransformCommit }
+        set { editingSessions.isApplyingTransformCommit = newValue }
+    }
     @Published private(set) var canvasContentRevision: UInt64 = 0
     @Published private(set) var selectionRevision: UInt64 = 0
     @Published private(set) var viewportRevision: UInt64 = 0
@@ -524,11 +643,7 @@ final class WorkspaceViewModel: ObservableObject {
         }
         return coordinator
     }()
-    private lazy var gradientSession: GradientSessionController = {
-        let session = GradientSessionController()
-        session.onStateChange = { [weak self] in self?.objectWillChange.send() }
-        return session
-    }()
+    private var gradientSession: GradientSessionController { editingSessions.gradient }
     private var deferredGradientAction: DeferredGradientAction? {
         get { gradientSession.deferredAction }
         set { gradientSession.deferredAction = newValue }
@@ -553,20 +668,44 @@ final class WorkspaceViewModel: ObservableObject {
     private var activePaintVariationSeed: UInt32 = 0
     private var lastLayerMaskStrokeSample: CanvasStrokeSample?
     private var maskStrokeHistoryAccepted = false
-    var colorAdjustmentSession: ColorAdjustmentSession?
-    var curveAdjustmentSession: CurveAdjustmentSession?
+    var colorAdjustmentSession: ColorAdjustmentSession? {
+        get { editingSessions.colorAdjustmentSession }
+        set { editingSessions.colorAdjustmentSession = newValue }
+    }
+    var curveAdjustmentSession: CurveAdjustmentSession? {
+        get { editingSessions.curveAdjustmentSession }
+        set { editingSessions.curveAdjustmentSession = newValue }
+    }
     var brightnessAdjustmentEditorMode: BrightnessAdjustmentEditorMode = .colorParameters
     var colorAdjustmentBrushMode: ColorAdjustmentBrushMode = .paint
     var colorAdjustmentStrokePacketCount = 0
-    var colorAdjustmentPreviewRenderInFlight = false
-    var colorAdjustmentPreviewRenderNeedsResubmit = false
-    var colorAdjustmentPreviewToken: UInt64 = 0
+    var colorAdjustmentPreviewRenderInFlight: Bool {
+        get { editingSessions.colorAdjustmentPreviewRenderInFlight }
+        set { editingSessions.colorAdjustmentPreviewRenderInFlight = newValue }
+    }
+    var colorAdjustmentPreviewRenderNeedsResubmit: Bool {
+        get { editingSessions.colorAdjustmentPreviewRenderNeedsResubmit }
+        set { editingSessions.colorAdjustmentPreviewRenderNeedsResubmit = newValue }
+    }
+    var colorAdjustmentPreviewToken: UInt64 {
+        get { editingSessions.colorAdjustmentPreviewToken }
+        set { editingSessions.colorAdjustmentPreviewToken = newValue }
+    }
     var colorAdjustmentAllowsIdleModeHotkeys = false
     var curveAdjustmentBrushMode: CurveAdjustmentBrushMode = .paint
     var curveAdjustmentStrokePacketCount = 0
-    var curveAdjustmentPreviewRenderInFlight = false
-    var curveAdjustmentPreviewRenderNeedsResubmit = false
-    var curveAdjustmentPreviewToken: UInt64 = 0
+    var curveAdjustmentPreviewRenderInFlight: Bool {
+        get { editingSessions.curveAdjustmentPreviewRenderInFlight }
+        set { editingSessions.curveAdjustmentPreviewRenderInFlight = newValue }
+    }
+    var curveAdjustmentPreviewRenderNeedsResubmit: Bool {
+        get { editingSessions.curveAdjustmentPreviewRenderNeedsResubmit }
+        set { editingSessions.curveAdjustmentPreviewRenderNeedsResubmit = newValue }
+    }
+    var curveAdjustmentPreviewToken: UInt64 {
+        get { editingSessions.curveAdjustmentPreviewToken }
+        set { editingSessions.curveAdjustmentPreviewToken = newValue }
+    }
     var curveAdjustmentAllowsIdleModeHotkeys = false
 #if DEBUG
     var debugColorAdjustmentResolutionDecisionOverride: ColorAdjustmentResolutionDecision?
@@ -815,25 +954,19 @@ final class WorkspaceViewModel: ObservableObject {
                self.handleBlockReferenceKeyDown(event) {
                 return nil
             }
+            guard NSApp.keyWindow?.isMainWindow == true, NSApp.keyWindow?.attachedSheet == nil,
+                  !Self.isEditingTextInKeyWindow else { return event }
             let modifiers = event.modifierFlags.intersection([.command, .option, .control, .shift])
             guard modifiers == .command || modifiers == [.command, .shift] else { return event }
-            let chars = event.charactersIgnoringModifiers
-            if chars == "=" || chars == "+" {
-                (self.ideationActiveBranchViewModel ?? self).zoomIn()
-                return nil
+            let id: String?
+            switch event.charactersIgnoringModifiers {
+            case "=", "+": id = "zoomIn"
+            case "-": id = "zoomOut"
+            case "0": id = "fit"
+            case "1": id = "actualSize"
+            default: id = nil
             }
-            if chars == "-" {
-                (self.ideationActiveBranchViewModel ?? self).zoomOut()
-                return nil
-            }
-            if chars == "0" {
-                self.fitCanvasToWindow()
-                return nil
-            }
-            if chars == "1" {
-                self.setCanvasToActualPixels()
-                return nil
-            }
+            if let id { self.performCommand(id); return nil }
             return event
         }
     }
@@ -847,6 +980,8 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func selectTool(_ tool: ToolKind) {
+        guard editableLayerDraft == nil else { return }
+        if isPreparingDocumentEdit { cancelDocumentPreparation() }
         cancelSelectionRefinementPreview()
         finishRecentTextureAdjustment(apply: false)
         paintingBlocker = nil
@@ -6487,6 +6622,7 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     private func prepareLayerDocument() throws -> LayerDocumentPreparation {
+        guard !isWorkflowAdjustmentActive else { throw CanvasResourceError(message: "请先应用或取消当前调整") }
         _ = flushBrushEditingBoundary(reason: "prepareLayerDocument")
         return try LayerDocumentPreparation(document: bootstrap.workspaceStore.state.document,
             source: bootstrap.layerSurfaceStore, metal: bootstrap.metalContext)
@@ -12895,6 +13031,7 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func undo() {
+        if isPreparingDocumentEdit { cancelDocumentPreparation(); return }
         if let draft = editableLayerDraft { draft.cancel(); editableLayerDraft = nil; return }
         if branches.importDraft != nil { branches.importDraft = nil; return }
         if selectionRefinementDraft != nil { cancelSelectionRefinementPreview(); return }
@@ -13250,6 +13387,7 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func redo() {
+        if isPreparingDocumentEdit { cancelDocumentPreparation(); return }
         if let draft = editableLayerDraft { draft.cancel(); editableLayerDraft = nil; return }
         if branches.importDraft != nil { branches.importDraft = nil; return }
         cancelSelectionRefinementPreview()
@@ -14748,22 +14886,10 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     private var persistenceEditingActivity: PersistenceEditingActivity {
-        var activity: PersistenceEditingActivity = []
-        if isWorkflowAdjustmentActive { activity.insert(.gesture) }
+        var activity = editingSessions.persistenceActivity
+        if branches.importDraft != nil || layerExchange.isBusy { activity.insert(.gesture) }
         if visibleHistoryPreviewOriginCount != nil { activity.insert(.historyPreview) }
-        if isApplyingPatternPlacementCommit || isApplyingGradientCommit || isApplyingTransformCommit || isBucketFillInProgress {
-            activity.insert(.pixelCommit)
-        }
-        if isTransformingSelection { activity.insert(.transform) }
         if isSavingSnapshot || isPreparingSnapshotCompare || isRasterExporting { activity.insert(.snapshotOrExport) }
-        if patternPlacementPhase.draft != nil { activity.insert(.pattern) }
-        if linearGradientState.phase != .idle || sectorGradientState.phase != .idle { activity.insert(.gradient) }
-        if canvasCropState.bounds != nil { activity.insert(.crop) }
-        if textureFillGestureState != nil || !activeLassoRawPoints.isEmpty || polygonSelectionState.phase == .building {
-            activity.insert(.gesture)
-        }
-        if colorAdjustmentSession != nil || curveAdjustmentSession != nil { activity.insert(.adjustment) }
-        if straightLineState.phase == .pending { activity.insert(.pendingLine) }
         if bootstrap.strokeEngine.hasPendingBrushWork { activity.insert(.brushInput) }
         return activity
     }
@@ -14811,12 +14937,8 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     private func resetTransientDocumentInteractionsForReplacement() {
-        cancelDocumentPreparation()
-        editableLayerDraft?.cancel()
-        editableLayerDraft = nil
+        editingSessions.disposeForReplacement()
         colorProofProfile = nil
-        cancelSelectionRefinementPreview()
-        discardRecentTextureFill()
         paintingBlocker = nil
         historyPreviewImages = [:]
 
@@ -14826,16 +14948,6 @@ final class WorkspaceViewModel: ObservableObject {
         cancelBlockReferenceInteraction()
         blockReferenceWorkflow = .init()
         blockReferenceEditorState = .init()
-        patternPlacementPhase = .idle
-        straightLineState = .init()
-        gradientSession.cancel()
-        polygonSelectionState = .init()
-        deferredGradientAction = nil
-        canvasCropState.cancel()
-        textureFillGestureState = nil
-        activeLassoRawPoints = []
-        activeLassoPreviewPoints = []
-        activeLassoBounds = nil
         lassoSamplingDebugPoints = []
         isGeneratorRegionSelectionArmed = false
         isGeneratorStrokeModeEnabled = false
@@ -19247,7 +19359,7 @@ private func bilinearSamplePremultipliedRGBA(
 }
 
 // Interaction workflows reuse the existing document and rendering transactions.
-private struct RecentTextureFill {
+struct RecentTextureFill {
     var state: TextureFillGestureState
     var revision: UInt64
 }
@@ -19818,9 +19930,8 @@ extension WorkspaceViewModel {
                                 onSuccess: onSuccess, onFailure: onFailure)
     }
     func finishDocumentSessionClose() {
-        cancelDocumentPreparation()
-        editableLayerDraft?.cancel()
-        editableLayerDraft = nil
+        isSessionActive = false
+        editingSessions.disposeForReplacement()
         recoveryCoordinator.invalidate()
         cancelProjectOpen()
         pauseDrawingStatsTracking()

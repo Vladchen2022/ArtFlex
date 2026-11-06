@@ -27,17 +27,39 @@ struct WorkspaceCommandButton: View {
 }
 
 extension WorkspaceViewModel {
-    var isWorkflowAdjustmentActive: Bool { isPreparingDocumentEdit || selectionRefinementDraft != nil || textureAdjustmentSettings != nil || editableLayerDraft != nil || branches.importDraft != nil || layerExchange.isBusy }
+    var isWorkflowAdjustmentActive: Bool { hasModalEditSession || branches.importDraft != nil || layerExchange.isBusy }
+
+    var commandRoot: WorkspaceViewModel { commandHost ?? self }
+    var commandEditingTarget: WorkspaceViewModel { commandRoot.ideationActiveBranchViewModel ?? commandRoot }
+
+    private func commandTarget(_ id: String) -> WorkspaceViewModel {
+        ["new", "open", "save", "saveAs", "export"].contains(id) ? commandRoot : commandEditingTarget
+    }
 
     func command(_ id: String) -> WorkspaceCommand? { searchableCommands.first { $0.id == id } }
     func performCommand(_ id: String) {
-        guard let command = command(id), command.unavailableReason == nil else { return }
+        guard commandRoot.isSessionActive else { return }
+        let target = commandTarget(id)
+        guard let command = target.localCommands.first(where: { $0.id == id }), command.unavailableReason == nil else { return }
         command.action()
     }
 
+    // Presentation and execution use the same resolver. Actions revalidate at execution time,
+    // after a command-search sheet dismisses or the active branch/document changes.
     var searchableCommands: [WorkspaceCommand] {
+        let hostItems = commandRoot.localCommands
+        let editorItems = Dictionary(uniqueKeysWithValues: commandEditingTarget.localCommands.map { ($0.id, $0) })
+        return hostItems.compactMap { prototype in
+            let item = commandTarget(prototype.id) === commandRoot ? prototype : (editorItems[prototype.id] ?? prototype)
+            return WorkspaceCommand(id: item.id, title: item.title, category: item.category,
+                shortcut: item.shortcut, unavailableReason: commandRoot.isSessionActive ? item.unavailableReason : "文档已不在前台",
+                action: { [weak self] in self?.performCommand(item.id) })
+        }
+    }
+
+    private var localCommands: [WorkspaceCommand] {
         let selected = workspace.selection.committedShape != nil
-        let draftBlocked = selectionRefinementDraft != nil || textureAdjustmentSettings != nil
+        let draftBlocked = isWorkflowAdjustmentActive
         let noSelection: String? = isTransformingSelection ? "请先结束变形" : (!selected ? "需要先建立选区" : nil)
         let persistenceBlock = documentPersistenceBlockReason(action: "操作文件")
         let commands: [WorkspaceCommand] = [
@@ -46,7 +68,7 @@ extension WorkspaceViewModel {
             .init(id: "save", title: "保存工程", category: "文件", shortcut: "⌘S", unavailableReason: persistenceBlock, action: { self.saveProject() }),
             .init(id: "saveAs", title: "另存为…", category: "文件", shortcut: "⇧⌘S", unavailableReason: persistenceBlock, action: { self.saveProject(asNewFile: true) }),
             .init(id: "export", title: "导出图像", category: "文件", shortcut: "⌘E", unavailableReason: persistenceBlock, action: presentRasterExportSheet),
-            .init(id: "undo", title: "撤销", category: "编辑", shortcut: "⌘Z", unavailableReason: canUndo ? nil : "没有可撤销操作", action: undo),
+            .init(id: "undo", title: "撤销", category: "编辑", shortcut: "⌘Z", unavailableReason: canUndo || hasModalEditSession ? nil : "没有可撤销操作", action: undo),
             .init(id: "redo", title: "重做", category: "编辑", shortcut: "⇧⌘Z", unavailableReason: canRedo ? nil : "没有可重做操作", action: redo),
             .init(id: "transform", title: "移动与自由变形", category: "编辑", shortcut: ToolSidebarGroup.group(containing: .freeTransform).flatMap { shortcutSettings.shortcutKey(for: $0) } ?? "", action: { self.selectTool(.freeTransform) }),
             .init(id: "newLayer", title: "新建绘画图层", category: "图层", action: { self.addLayer() }),
@@ -63,6 +85,7 @@ extension WorkspaceViewModel {
             .init(id: "contract", title: "收缩选区", category: "选区", unavailableReason: noSelection, action: { self.beginSelectionRefinementPreview(.contract) }),
             .init(id: "fill", title: "填充选区", category: "选区", shortcut: "⇧⌘F", unavailableReason: noSelection, action: fillSelectionContents),
             .init(id: "fit", title: "适合窗口", category: "视图", shortcut: "⌘0", action: resetViewport),
+            .init(id: "actualSize", title: "实际像素", category: "视图", shortcut: "⌘1", action: setCanvasToActualPixels),
             .init(id: "zoomIn", title: "放大画布", category: "视图", shortcut: "⌘=", action: zoomIn),
             .init(id: "zoomOut", title: "缩小画布", category: "视图", shortcut: "⌘-", action: zoomOut),
             .init(id: "snapshot", title: "保存画布快照", category: "视图", action: requestSnapshotSavePrimaryAction),
@@ -70,7 +93,7 @@ extension WorkspaceViewModel {
         ]
         return commands.map { command in
             var result = command
-            if draftBlocked && !["undo", "redo"].contains(command.id) { result.unavailableReason = "请先应用或取消调整" }
+            if draftBlocked && !["undo", "redo", "fit", "actualSize", "zoomIn", "zoomOut"].contains(command.id) { result.unavailableReason = "请先应用或取消调整" }
             return result
         }
     }
@@ -121,7 +144,7 @@ struct CommandSearchSheet: View {
         // Finish dismissal before opening another sheet or native file panel.
         Task { @MainActor in
             try? await Task.sleep(for: .milliseconds(200))
-            command.action()
+            viewModel.performCommand(command.id)
         }
     }
 }
@@ -129,7 +152,7 @@ struct CommandSearchSheet: View {
 struct ArtFlexWorkspaceCommands: Commands {
     @ObservedObject var host: WorkspaceViewModel
     var documents: DocumentSessionController? = nil
-    var editor: WorkspaceViewModel { host.ideationActiveBranchViewModel ?? host }
+    var editor: WorkspaceViewModel { host.commandEditingTarget }
     var body: some Commands {
         CommandGroup(replacing: .newItem) {
             command("new", host)

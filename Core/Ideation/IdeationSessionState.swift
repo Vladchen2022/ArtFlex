@@ -114,6 +114,7 @@ final class IdeationSessionState: ObservableObject {
                 from: sourceWorkspace,
                 sourceLayerSurfaceStore: sourceLayerSurfaceStore
             )
+            branchViewModel.commandHost = hostViewModel
             branchViewModel.copyBranchAuxiliaryAssets(from: hostViewModel)
             createdBranches.append(
                 Branch(index: index, viewModel: branchViewModel)
