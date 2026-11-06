@@ -149,10 +149,42 @@ struct CommandSearchSheet: View {
     }
 }
 
+/// Menus observe the active scene's controller directly. An App-level forwarded
+/// objectWillChange can leave a Commands group bound to a retired document.
+struct ArtFlexFocusedWorkspaceCommands: Commands {
+    @FocusedObject private var documents: DocumentSessionController?
+    var body: some Commands {
+        if let documents {
+            ArtFlexDocumentWorkspaceCommands(host: documents.active, documents: documents)
+        }
+    }
+}
+
+private struct ArtFlexDocumentWorkspaceCommands: Commands {
+    @ObservedObject var host: WorkspaceViewModel
+    let documents: DocumentSessionController
+    var body: some Commands {
+        if let session = host.ideationSession {
+            ArtFlexIdeationWorkspaceCommands(host: host, documents: documents, session: session)
+        } else {
+            ArtFlexWorkspaceCommands(host: host, editor: host, documents: documents)
+        }
+    }
+}
+
+private struct ArtFlexIdeationWorkspaceCommands: Commands {
+    let host: WorkspaceViewModel
+    let documents: DocumentSessionController
+    @ObservedObject var session: IdeationSessionState
+    var body: some Commands {
+        ArtFlexWorkspaceCommands(host: host, editor: session.activeBranchViewModel, documents: documents)
+    }
+}
+
 struct ArtFlexWorkspaceCommands: Commands {
     @ObservedObject var host: WorkspaceViewModel
+    @ObservedObject var editor: WorkspaceViewModel
     var documents: DocumentSessionController? = nil
-    var editor: WorkspaceViewModel { host.commandEditingTarget }
     var body: some Commands {
         CommandGroup(replacing: .newItem) {
             command("new", host)

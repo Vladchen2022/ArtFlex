@@ -20,6 +20,7 @@ struct ArtFlexApp: App {
                 DocumentSessionWorkspace(documents: documents, presentationState: presentationState,
                     onCanvasReady: { appDelegate.canvasDidBecomeReady(viewModel: $0) })
                     .frame(minWidth: 960, minHeight: 700)
+                    .focusedSceneObject(documents)
                     .onAppear {
                         appDelegate.documents = documents
                         appDelegate.viewModel = documents.active
@@ -35,7 +36,7 @@ struct ArtFlexApp: App {
             }
         }
         .commands {
-            if let viewModel = launchState.viewModel {
+            if launchState.documents != nil {
                 CommandGroup(replacing: .appInfo) {
                     Button("关于 ArtFlex") { AppBuildIdentity.showAbout() }
                 }
@@ -46,7 +47,7 @@ struct ArtFlexApp: App {
                 .keyboardShortcut(",", modifiers: [.command])
                 }
 
-                ArtFlexWorkspaceCommands(host: viewModel, documents: launchState.documents)
+                ArtFlexFocusedWorkspaceCommands()
 
             }
         }

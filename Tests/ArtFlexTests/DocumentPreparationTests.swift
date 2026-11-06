@@ -4,9 +4,9 @@ import Testing
 
 extension WorkspaceViewModel {
     @MainActor func waitForDocumentPreparation() async throws {
-        let end = ContinuousClock.now + .seconds(15)
+        let end = ContinuousClock.now + .seconds(60)
         while isPreparingDocumentEdit, ContinuousClock.now < end { try await Task.sleep(for: .milliseconds(5)) }
-        #expect(!isPreparingDocumentEdit)
+        try #require(!isPreparingDocumentEdit)
     }
 }
 

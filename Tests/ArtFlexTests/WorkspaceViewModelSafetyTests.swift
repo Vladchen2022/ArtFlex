@@ -5006,7 +5006,9 @@ private func waitForColorAdjustmentPreview(
         if harness.viewModel.brushDisplayTexture(for: activeLayerID) != nil,
            harness.viewModel.colorAdjustmentOverlayState.isActive,
            !harness.viewModel.colorAdjustmentPreviewRenderInFlight,
-           !harness.viewModel.colorAdjustmentPreviewRenderNeedsResubmit {
+           !harness.viewModel.colorAdjustmentPreviewRenderNeedsResubmit,
+           !harness.viewModel.curveAdjustmentPreviewRenderInFlight,
+           !harness.viewModel.curveAdjustmentPreviewRenderNeedsResubmit {
             return
         }
         await Task.yield()
@@ -5023,7 +5025,9 @@ private func waitForCurveAdjustmentPreview(
     let activeLayerID = harness.viewModel.workspace.document.activeLayerID
     for _ in 0..<timeoutIterations {
         if harness.viewModel.brushDisplayTexture(for: activeLayerID) != nil,
-           harness.viewModel.curveAdjustmentOverlayState.isActive {
+           harness.viewModel.curveAdjustmentOverlayState.isActive,
+           !harness.viewModel.curveAdjustmentPreviewRenderInFlight,
+           !harness.viewModel.curveAdjustmentPreviewRenderNeedsResubmit {
             return
         }
         await Task.yield()
@@ -5043,7 +5047,9 @@ private func waitForColorAdjustmentRedrawRevision(
         // changed. Read pixels only after the latest coalesced GPU job has finished.
         if harness.viewModel.colorAdjustmentRedrawRevision > baselineRevision,
            !harness.viewModel.colorAdjustmentPreviewRenderInFlight,
-           !harness.viewModel.colorAdjustmentPreviewRenderNeedsResubmit {
+           !harness.viewModel.colorAdjustmentPreviewRenderNeedsResubmit,
+           !harness.viewModel.curveAdjustmentPreviewRenderInFlight,
+           !harness.viewModel.curveAdjustmentPreviewRenderNeedsResubmit {
             return
         }
         await Task.yield()
