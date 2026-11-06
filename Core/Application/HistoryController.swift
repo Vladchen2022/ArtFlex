@@ -133,12 +133,17 @@ struct HistoryEligibilityAuditContext: Sendable {
 /// disk corruption without materializing the entire navigation range in RAM.
 struct HistoryNavigationValidation: Sendable {
     fileprivate var sources: [HistoryPixelPayload]
+    fileprivate var assets: [EditableSourceAsset]
 
     func validate() async throws {
         try Task.checkCancellation()
-        let sources = sources
+        let sources = sources, assets = assets
         let worker = Task.detached(priority: .userInitiated) {
             try autoreleasepool {
+                var seen = Set<String>()
+                for asset in assets where seen.insert(asset.sha256).inserted {
+                    try Task.checkCancellation(); try asset.validateReadable()
+                }
                 for source in sources {
                     try Task.checkCancellation()
                     try source.validateReadable()
@@ -171,12 +176,21 @@ struct HistoryStepPreparation: Sendable {
     fileprivate var readAhead: HistoryPreparedPixelRead?
 
     var requiresBackgroundPreparation: Bool {
-        !source.hasResidentSnapshots && readAhead?.readyResult == nil
+        metadata.workspace.document.editableSourceAssets.contains { $0.isFileBacked || $0.byteCount > 256 * 1024 }
+            || (!source.hasResidentSnapshots && readAhead?.readyResult == nil)
     }
 
     func prepare() async throws -> PreparedHistoryStep {
         try Task.checkCancellation()
         var entry = metadata
+        let assets = metadata.workspace.document.editableSourceAssets
+        let validation = Task.detached(priority: .userInitiated) {
+            var seen = Set<String>()
+            for asset in assets where seen.insert(asset.sha256).inserted {
+                try Task.checkCancellation(); try asset.validateReadable()
+            }
+        }
+        try await withTaskCancellationHandler { try await validation.value } onCancel: { validation.cancel() }
         if let readAhead {
             entry.layerSnapshots = try await readAhead.value()
         } else if source.hasResidentSnapshots {
@@ -193,6 +207,7 @@ struct HistoryStepPreparation: Sendable {
 
     fileprivate func prepareSynchronously() throws -> PreparedHistoryStep {
         var entry = metadata
+        for asset in entry.workspace.document.editableSourceAssets { try asset.validateReadable() }
         entry.layerSnapshots = try readAhead?.read() ?? source.read()
         return .init(direction: direction, source: source, expectedStateID: expectedStateID, entry: entry)
     }
@@ -295,7 +310,7 @@ final class HistoryController {
         var bytes = 0
         for entry in undoStack + redoStack {
             for asset in entry.workspace.document.editableSourceAssets where seen.insert(asset.sha256).inserted {
-                let sum = bytes.addingReportingOverflow(asset.compressedData?.count ?? 0)
+                let sum = bytes.addingReportingOverflow(asset.residentByteCount)
                 bytes = sum.overflow ? Int.max : sum.partialValue
             }
         }
@@ -465,13 +480,16 @@ final class HistoryController {
     func makeNavigationValidation(_ plan: VisibleHistoryNavigationPlan) throws -> HistoryNavigationValidation {
         let entries = plan.direction == .undo ? undoStack.suffix(plan.undoStepCount) : redoStack.suffix(plan.redoStepCount)
         guard entries.count == plan.totalStepCount else { throw HistoryDiskError.unavailable }
-        return .init(sources: entries.map(\.pixels))
+        return .init(sources: entries.map(\.pixels), assets: entries.flatMap { $0.workspace.document.editableSourceAssets })
     }
 
     func validateNavigation(_ plan: VisibleHistoryNavigationPlan) throws {
         let entries = plan.direction == .undo ? undoStack.suffix(plan.undoStepCount) : redoStack.suffix(plan.redoStepCount)
         guard entries.count == plan.totalStepCount else { throw HistoryDiskError.unavailable }
-        for entry in entries { try entry.pixels.validateReadable() }
+        for entry in entries {
+            try entry.pixels.validateReadable()
+            for asset in entry.workspace.document.editableSourceAssets { try asset.validateReadable() }
+        }
     }
 
     /// Captures identities on the editing thread; no file bytes are read here.

@@ -5,20 +5,72 @@ import Foundation
 struct EditableSourceAsset: Codable, Sendable, Equatable {
     var sha256: String
     var byteCount: Int
-    var compressedData: Data?
+    private var memory: Data?
+    private var file: EditableAssetStore.Reference?
+    var residentByteCount: Int { memory?.count ?? 0 }
+    var isFileBacked: Bool { file != nil }
+    var hasPayload: Bool { memory != nil || file != nil }
+    var cachedFileURL: URL? { file?.url }
 
-    init(data: Data) throws {
+    // Compatibility for in-memory fixtures. Production reads use the throwing accessor.
+    var compressedData: Data? {
+        get { try? compressedBytes() }
+        set { memory = newValue; file = nil }
+    }
+
+    init(data: Data, store: EditableAssetStore = .shared) throws {
         sha256 = ProjectReferenceImageHash.sha256Hex(data)
         byteCount = data.count
-        compressedData = try ZlibCodec.compress(data)
+        try installCompressed(try ZlibCodec.compress(data), store: store)
+    }
+
+    mutating func installCompressed(_ compressed: Data?, store: EditableAssetStore = .shared) throws {
+        guard let compressed else { memory = nil; file = nil; return }
+        if compressed.count > 64 * 1024 {
+            let prepared = try store.store(compressed, sha256: sha256, byteCount: byteCount)
+            file = prepared; memory = nil
+        } else { memory = compressed; file = nil }
+    }
+
+    func compressedBytes() throws -> Data? {
+        if let file {
+            guard file.sha256 == sha256, file.byteCount == byteCount else { throw CocoaError(.fileReadCorruptFile) }
+            return try file.read()
+        }
+        return memory
+    }
+
+    func validateReadable() throws {
+        if let file {
+            guard file.sha256 == sha256, file.byteCount == byteCount else { throw CocoaError(.fileReadCorruptFile) }
+            try file.validate()
+        } else { _ = try decoded() }
     }
 
     func decoded(maximumBytes: Int = 512 * 1024 * 1024) throws -> Data {
         guard byteCount >= 0, byteCount <= maximumBytes, sha256.count == 64,
-              let compressedData else { throw CocoaError(.fileReadCorruptFile) }
-        let data = try ZlibCodec.decompress(compressedData, expectedSize: byteCount)
+              let compressed = try compressedBytes() else { throw CocoaError(.fileReadCorruptFile) }
+        let data = try ZlibCodec.decompress(compressed, expectedSize: byteCount)
         guard ProjectReferenceImageHash.sha256Hex(data) == sha256 else { throw CocoaError(.fileReadCorruptFile) }
         return data
+    }
+
+    private enum CodingKeys: String, CodingKey { case sha256, byteCount, compressedData }
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        sha256 = try container.decode(String.self, forKey: .sha256)
+        byteCount = try container.decode(Int.self, forKey: .byteCount)
+        memory = try container.decodeIfPresent(Data.self, forKey: .compressedData)
+        if let compressed = memory {
+            _ = try decoded()
+            try installCompressed(compressed)
+        }
+    }
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(sha256, forKey: .sha256)
+        try container.encode(byteCount, forKey: .byteCount)
+        try container.encodeIfPresent(compressedBytes(), forKey: .compressedData)
     }
 
     static func == (lhs: Self, rhs: Self) -> Bool {
@@ -29,7 +81,7 @@ struct EditableSourceAsset: Codable, Sendable, Equatable {
         var seen = Set<String>(), archive = 0, resident = 0
         for source in assets where seen.insert(source.sha256).inserted {
             let a = archive.addingReportingOverflow(max(0, source.byteCount))
-            let r = resident.addingReportingOverflow(max(0, source.compressedData?.count ?? source.byteCount))
+            let r = resident.addingReportingOverflow(max(0, source.residentByteCount))
             archive = a.overflow ? Int.max : a.partialValue; resident = r.overflow ? Int.max : r.partialValue
         }
         return (archive, resident)

@@ -489,8 +489,8 @@ final class ProjectArchiveV2Writer {
         var projectState = payload.package
         projectState.layerSnapshots = []
         let editableSources = try EditableProjectSources.collect(from: projectState.document)
-        projectState.document.mapEditableSourceAssets { asset in
-            var reference = asset; reference.compressedData = nil; return reference
+        try projectState.document.mapEditableSourceAssets { asset in
+            var reference = asset; try reference.installCompressed(nil); return reference
         }
         let retainedCrop = try projectState.document.cropRetention?.validated(for: projectState.document)
         let retainedCropData = try retainedCrop.map { try Self.makeEncoder().encode($0) }
@@ -666,7 +666,7 @@ final class ProjectArchiveV2Writer {
             }
             for source in editableSources {
                 try context?.check()
-                guard let compressed = source.compressedData else { throw CocoaError(.fileReadCorruptFile) }
+                guard let compressed = try source.compressedBytes() else { throw CocoaError(.fileReadCorruptFile) }
                 let asset = ProjectArchiveAssetDescriptor(relativePath: EditableProjectSources.path(for: source.sha256),
                     compression: .zlib, storedByteCount: compressed.count, uncompressedByteCount: source.byteCount, sha256: source.sha256)
                 try write(compressed, descriptor: asset, into: stagingURL)
@@ -1469,21 +1469,21 @@ final class ProjectArchiveV2Reader {
         let descriptors = Dictionary(uniqueKeysWithValues: manifest.editableSources.map { ($0.sha256, $0) })
         let expected = Set(package.document.editableSourceAssets.map(\.sha256))
         guard expected == Set(descriptors.keys) else { throw ProjectArchiveV2Error.malformedProjectState("可编辑源素材不完整") }
-        var compressedByHash: [String: Data] = [:]
+        var hydratedByHash: [String: EditableSourceAsset] = [:]
         if verifyBytes {
             for (index, asset) in manifest.editableSources.enumerated() {
                 try context?.check()
                 context?.report(.sources, completed: index, total: manifest.editableSources.count)
                 let data = try readAsset(asset, from: url, maximumUncompressedBytes: limits.maximumUncompressedAssetBytes)
-                if hydrate { compressedByHash[asset.sha256] = try ZlibCodec.compress(data) }
+                if hydrate { hydratedByHash[asset.sha256] = try EditableSourceAsset(data: data) }
             }
         }
         try package.document.mapEditableSourceAssets { source in
-            guard source.compressedData == nil, let descriptor = descriptors[source.sha256],
+            guard !source.hasPayload, let descriptor = descriptors[source.sha256],
                   descriptor.uncompressedByteCount == source.byteCount else {
                 throw ProjectArchiveV2Error.malformedProjectState("可编辑源素材长度或存储方式无效")
             }
-            var source = source; source.compressedData = compressedByHash[source.sha256]; return source
+            return hydratedByHash[source.sha256] ?? source
         }
         for layer in package.document.layers { try layer.editableContent?.validate() }
         guard (package.document.storedBranches?.count ?? 0) <= 8,
