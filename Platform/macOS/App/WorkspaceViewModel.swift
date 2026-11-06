@@ -83,7 +83,11 @@ final class WorkspaceViewModel: ObservableObject {
     var createDocumentInNewSession: ((String, CanvasSize, Int, ArtPixelFormat, ArtColorSpace) -> Void)?
     var openDocumentInNewSession: ((URL) -> Void)?
     var recoverDocumentInNewSession: ((URL) -> Void)?
-    var isSessionActive = true
+    var isSessionActive = true {
+        didSet { if !isSessionActive { momentaryTools.focusLost() } }
+    }
+    lazy var momentaryTools = WorkspaceMomentaryTools(owner: self)
+    private let canvasLayerPicker = CanvasLayerPicker()
     weak var commandHost: WorkspaceViewModel?
     private lazy var editingSessions: WorkspaceEditingSessions = {
         let sessions = WorkspaceEditingSessions()
@@ -991,6 +995,7 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func selectTool(_ tool: ToolKind) {
+        if !momentaryTools.isSelecting { momentaryTools.discard() }
         guard editableLayerDraft == nil else { return }
         if isPreparingDocumentEdit { cancelDocumentPreparation() }
         cancelSelectionRefinementPreview()
@@ -1071,6 +1076,31 @@ final class WorkspaceViewModel: ObservableObject {
            selectedTool != previousTool || shortcutLabel != nil {
             showToolSelectionStatus(for: requestedTool, shortcutLabel: shortcutLabel)
         }
+    }
+
+    func prepareMomentaryTool(_ tool: ToolKind, keyCode: UInt16, timestamp: TimeInterval) -> MomentaryToolState? {
+        guard isSessionActive, !hasModalEditSession, !isWorkflowAdjustmentActive,
+              patternPlacementPhase == .idle, !isApplyingGradientCommit,
+              !isTransformingSelection, straightLineState.phase == .idle,
+              canvasCropState.bounds == nil,
+              workspace.toolSession.activeTool != .blockReference,
+              workspace.toolSession.activeTool != .brightnessAdjust,
+              workspace.toolSession.activeTool != tool,
+              finishBrushWorkBeforePixelEdit(reason: "tool.temporary") else { return nil }
+        return .init(keyCode: keyCode, startedAt: timestamp, tool: tool,
+            originalTool: workspace.toolSession.activeTool,
+            originalBrush: workspace.toolSession.brush, originalMaskLayerID: activeMaskEditingLayerID)
+    }
+
+    func restoreMomentaryTool(_ state: MomentaryToolState) {
+        guard workspace.toolSession.activeTool == state.tool else { return }
+        selectTool(state.originalTool)
+        guard workspace.toolSession.activeTool == state.originalTool else { return }
+        bootstrap.workspaceStore.updateToolSession { $0.brush = state.originalBrush }
+        if let id = state.originalMaskLayerID, workspace.document.activeLayerID == id,
+           workspace.document.layer(id)?.mask != nil { activeMaskEditingLayerID = id }
+        refreshLightweight()
+        showStatus(.init(kind: .info, message: "已返回\(state.originalTool.displayName)"))
     }
 
     private func showToolSelectionStatus(for tool: ToolKind, shortcutLabel: String? = nil) {
@@ -7490,6 +7520,52 @@ final class WorkspaceViewModel: ObservableObject {
         }
     }
 
+    func canvasLayerPickCandidates(at point: CanvasPoint, requestID: UUID) async throws -> [CanvasLayerPickCandidate] {
+        guard isSessionActive, !hasModalEditSession, !isWorkflowAdjustmentActive,
+              documentPersistenceBlockReason(action: "查找图层") == nil,
+              (!hasPendingBrushEdits || finishBrushWorkBeforePixelEdit(reason: "layer.pick")) else {
+            throw CanvasResourceError(message: "请先完成或取消当前编辑，再查找图层")
+        }
+        let context = WorkspaceEditingSessions.LayerPickContext(id: requestID,
+            document: workspace.document, contentRevision: canvasContentRevision)
+        editingSessions.layerPickContext = context
+        let pending = try canvasLayerPicker.enqueue(at: point, document: context.document,
+            surfaces: bootstrap.layerSurfaceStore, serializer: bootstrap.textureSerializer)
+        let candidates = try await Task.detached(priority: .userInitiated) { try pending.read() }.value
+        guard !Task.isCancelled, isCanvasLayerPickCurrent(requestID) else { throw CancellationError() }
+        return candidates
+    }
+
+    func canvasLayerPickPreview(_ layerID: LayerID, requestID: UUID) async throws -> CGImage? {
+        guard isCanvasLayerPickCurrent(requestID) else { throw CancellationError() }
+        let pending = try canvasLayerPicker.enqueuePreview(layerID: layerID, document: workspace.document,
+            surfaces: bootstrap.layerSurfaceStore, serializer: bootstrap.textureSerializer, metal: bootstrap.metalContext)
+        let image = try await Task.detached(priority: .utility) {
+            guard let snapshot = try pending.read().first else { return nil as CGImage? }
+            return Self.snapshotImage(from: snapshot, maxDimension: 256, colorSpace: CGColorSpace(name: CGColorSpace.sRGB)!)
+        }.value
+        guard !Task.isCancelled, isCanvasLayerPickCurrent(requestID) else { throw CancellationError() }
+        return image
+    }
+
+    private func isCanvasLayerPickCurrent(_ requestID: UUID) -> Bool {
+        guard let context = editingSessions.layerPickContext else { return false }
+        return isSessionActive && context.id == requestID && context.document == workspace.document
+            && context.contentRevision == canvasContentRevision && !hasModalEditSession && !isWorkflowAdjustmentActive
+    }
+
+    @discardableResult func selectCanvasPickedLayer(_ layerID: LayerID, requestID: UUID) -> Bool {
+        guard isCanvasLayerPickCurrent(requestID), workspace.document.layer(layerID)?.isPaintLayer == true,
+              workspace.document.isLayerEffectivelyVisible(layerID) else { return false }
+        selectLayerContent(layerID)
+        editingSessions.layerPickContext = nil
+        return workspace.document.activeLayerID == layerID
+    }
+
+    func cancelCanvasLayerPick(_ requestID: UUID) {
+        if editingSessions.layerPickContext?.id == requestID { editingSessions.layerPickContext = nil }
+    }
+
     func loadLayerThumbnail(for layerID: LayerID, maxDimension: Int = 40) async -> CGImage? {
         if let cached = layerThumbnailCache[layerID] {
             return cached
@@ -12392,6 +12468,7 @@ final class WorkspaceViewModel: ObservableObject {
             return true
         }
 
+        if momentaryTools.keyDown(event) { return true }
         if let shortcutKey = event.charactersIgnoringModifiers?.uppercased(),
            handleToolShortcutKey(shortcutKey, modifiers: normalizedModifiers) {
             return true
@@ -12429,6 +12506,7 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func handleKeyUp(_ event: NSEvent) -> Bool {
+        if momentaryTools.keyUp(event) { return true }
         if shortcutSettings.quickColorPickerShortcut.matchesKeyUp(event),
            isQuickColorPickerShortcutActive {
             cancelQuickColorPickerShortcut()
@@ -14954,6 +15032,7 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     private func resetTransientDocumentInteractionsForReplacement() {
+        momentaryTools.discard()
         editingSessions.disposeForReplacement()
         colorProofProfile = nil
         paintingBlocker = nil
@@ -19927,6 +20006,8 @@ extension WorkspaceViewModel {
 // Session ownership stays outside the large editor; only editing boundaries live here.
 extension WorkspaceViewModel {
     func prepareForDocumentTabSwitch() -> Bool {
+        momentaryTools.restore()
+        editingSessions.layerPickContext = nil
         guard canBeginDocumentPersistence(action: "切换文档"),
               finishBrushWorkBeforePixelEdit(reason: "document.switch") else { return false }
         bootstrap.persistenceController.purgeSaveResourceCache()

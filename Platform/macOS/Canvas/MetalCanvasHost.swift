@@ -239,6 +239,10 @@ struct MetalCanvasHost: NSViewRepresentable {
     var blocksEditingInput = false
     var proofProfile: ManagedRGBProfile? = nil
     var onProofFailure: () -> Void = {}
+    var onPointerGestureChanged: (Bool) -> Void = { _ in }
+    var hasMomentaryTool: () -> Bool = { false }
+    var onCanvasFocusLost: () -> Void = {}
+    var makeLayerPicker: ((CanvasPoint) -> CanvasLayerPickerModel)?
     private let brushFeelLogger = Logger(subsystem: "ArtFlex", category: "BrushFeel")
 
     func makeCoordinator() -> MetalCanvasCoordinator {
@@ -327,6 +331,10 @@ struct MetalCanvasHost: NSViewRepresentable {
         view.keyDownEventHandler = onKeyDown
         view.keyUpEventHandler = onKeyUp
         view.modifierFlagsChangedEventHandler = onModifierFlagsChanged
+        view.pointerGestureChangedHandler = onPointerGestureChanged
+        view.hasMomentaryTool = hasMomentaryTool
+        view.canvasFocusLostHandler = onCanvasFocusLost
+        view.makeLayerPicker = makeLayerPicker
         view.contextMenuSelectionShape = isTransformingSelection ? nil : sceneSnapshot.selectionShape
         view.selectionRefinementRequestHandler = onRequestSelectionRefinement
         view.wantsLayer = true
@@ -470,6 +478,10 @@ struct MetalCanvasHost: NSViewRepresentable {
             view.keyDownEventHandler = onKeyDown
             view.keyUpEventHandler = onKeyUp
             view.modifierFlagsChangedEventHandler = onModifierFlagsChanged
+            view.pointerGestureChangedHandler = onPointerGestureChanged
+            view.hasMomentaryTool = hasMomentaryTool
+            view.canvasFocusLostHandler = onCanvasFocusLost
+            view.makeLayerPicker = makeLayerPicker
             if view.strokeResetToken != strokeResetToken {
                 view.strokeResetToken = strokeResetToken
                 view.resetInteractionState()
@@ -897,6 +909,13 @@ final class StrokeCaptureMTKView: MTKView {
     var keyDownEventHandler: ((NSEvent) -> Bool)?
     var keyUpEventHandler: ((NSEvent) -> Bool)?
     var modifierFlagsChangedEventHandler: ((NSEvent.ModifierFlags) -> Bool)?
+    var pointerGestureChangedHandler: ((Bool) -> Void)?
+    var hasMomentaryTool: (() -> Bool)?
+    var canvasFocusLostHandler: (() -> Void)?
+    var makeLayerPicker: ((CanvasPoint) -> CanvasLayerPickerModel)?
+    private var layerPickerPopover: CanvasLayerPickerPopover?
+    private var isLayerPickGesture = false
+    private var layerPickMenuPoint: (view: CGPoint, canvas: CanvasPoint)?
     var contextMenuSelectionShape: SelectionShape?
     var selectionRefinementRequestHandler: ((SelectionRefinementKind) -> Void)?
     var canvasSize: CanvasSize = .stageOneDefault
@@ -1014,14 +1033,20 @@ final class StrokeCaptureMTKView: MTKView {
     override func menu(for event: NSEvent) -> NSMenu? {
         guard !isPanModeActive else { return nil }
         let point = sample(from: event).location
+        let menu = NSMenu(title: "画布")
+        if !blocksEditingInput, makeLayerPicker != nil {
+            layerPickMenuPoint = (convert(event.locationInWindow, from: nil), point)
+            let item = NSMenuItem(title: "查找此处图层（Cmd+Option+点击）", action: #selector(requestLayerPicker(_:)), keyEquivalent: "")
+            item.target = self
+            menu.addItem(item)
+        }
         guard shouldOfferSelectionRefinementContextMenu(
             selectionShape: contextMenuSelectionShape,
             at: point
         ) else {
-            return nil
+            return menu.items.isEmpty ? nil : menu
         }
-
-        let menu = NSMenu(title: "选区")
+        if !menu.items.isEmpty { menu.addItem(.separator()) }
         let invertItem = NSMenuItem(
             title: "反选",
             action: #selector(requestSelectionInvert(_:)),
@@ -1055,6 +1080,14 @@ final class StrokeCaptureMTKView: MTKView {
         featherItem.target = self
         menu.addItem(featherItem)
         return menu
+    }
+
+    @objc private func requestLayerPicker(_ sender: Any?) {
+        guard let location = layerPickMenuPoint, let makeLayerPicker else { return }
+        layerPickerPopover?.close()
+        let popover = CanvasLayerPickerPopover(model: makeLayerPicker(location.canvas))
+        layerPickerPopover = popover
+        popover.show(at: location.view, in: self)
     }
 
     @objc private func requestSelectionInvert(_ sender: NSMenuItem) {
@@ -1091,6 +1124,15 @@ final class StrokeCaptureMTKView: MTKView {
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
+        NotificationCenter.default.removeObserver(self, name: NSWindow.didResignKeyNotification, object: nil)
+        if window == nil {
+            layerPickerPopover?.close(); layerPickerPopover = nil
+            finishMomentaryInteraction()
+        }
+        if let window {
+            NotificationCenter.default.addObserver(self, selector: #selector(momentaryToolWindowResigned(_:)),
+                name: NSWindow.didResignKeyNotification, object: window)
+        }
         if cursorIndicatorContrastLayer.superlayer == nil {
             cursorIndicatorContrastLayer.fillColor = NSColor.clear.cgColor
             cursorIndicatorContrastLayer.strokeColor = NSColor.black.withAlphaComponent(0.88).cgColor
@@ -1237,7 +1279,18 @@ final class StrokeCaptureMTKView: MTKView {
     }
 
     override func mouseDown(with event: NSEvent) {
+        isLayerPickGesture = false // A transient popover may consume the preceding mouse-up.
         guard !blocksEditingInput else { return }
+        if event.modifierFlags.intersection([.command, .control, .option, .shift]) == [.command, .option],
+           let makeLayerPicker {
+            isLayerPickGesture = true
+            layerPickerPopover?.close()
+            let popover = CanvasLayerPickerPopover(model: makeLayerPicker(sample(from: event).location))
+            layerPickerPopover = popover
+            popover.show(at: convert(event.locationInWindow, from: nil), in: self)
+            return
+        }
+        pointerGestureChangedHandler?(true)
         let diagnosticsEnabled = RuntimeDiagnostics.brushHotPathLoggingEnabled
         let handlerStartNs = diagnosticsEnabled ? DispatchTime.now().uptimeNanoseconds : 0
         activeModifierFlags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
@@ -1410,6 +1463,7 @@ final class StrokeCaptureMTKView: MTKView {
     }
 
     override func mouseDragged(with event: NSEvent) {
+        guard !isLayerPickGesture else { return }
         guard !blocksEditingInput else { return }
         let diagnosticsEnabled = RuntimeDiagnostics.brushHotPathLoggingEnabled
         let handlerStartNs = diagnosticsEnabled ? DispatchTime.now().uptimeNanoseconds : 0
@@ -1622,6 +1676,8 @@ final class StrokeCaptureMTKView: MTKView {
     }
 
     override func mouseUp(with event: NSEvent) {
+        if isLayerPickGesture { isLayerPickGesture = false; return }
+        defer { pointerGestureChangedHandler?(false) }
         guard !blocksEditingInput else { return }
         activeModifierFlags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         hoverLocation = convert(event.locationInWindow, from: nil)
@@ -1856,14 +1912,9 @@ final class StrokeCaptureMTKView: MTKView {
             return
         }
 
-        if shouldPrioritizeCanvasKeyHandlerBeforeToolShortcut(
-            activeTool: activeTool,
-            event: event,
-            modifiers: normalizedModifiers
-        ),
-           keyDownEventHandler?(event) == true {
-            return
-        }
+        // The workspace handles configurable and held shortcuts before the
+        // legacy static tool map. A key-up must pair with the original key-down.
+        if keyDownEventHandler?(event) == true { return }
 
         if let shortcutKey = event.charactersIgnoringModifiers?.uppercased(),
            shortcutKey.count == 1,
@@ -1882,11 +1933,24 @@ final class StrokeCaptureMTKView: MTKView {
             return
         }
 
-        if keyDownEventHandler?(event) == true {
-            return
-        }
-
         super.keyDown(with: event)
+    }
+
+    @objc private func momentaryToolWindowResigned(_ notification: Notification) { finishMomentaryInteraction() }
+
+    private func finishMomentaryInteraction() {
+        guard hasMomentaryTool?() == true else { pointerGestureChangedHandler?(false); return }
+        if isBrushStrokeActive {
+            enqueuePendingBrushEnd()
+            _ = flushPendingBrushInputQueue()
+            endContinuousStrokeRendering()
+            endBrushStrokeDiagnostics()
+        }
+        lastSample = nil; lastPressure = nil; smoothedPosition = nil
+        canvasRotationBaseDegrees = nil; canvasRotationPreviousAngleDegrees = nil
+        canvasRotationStartDistanceFromCenter = nil; canvasRotationAccumulatedDeltaDegrees = 0
+        pointerGestureChangedHandler?(false)
+        canvasFocusLostHandler?()
     }
 
     override func mouseMoved(with event: NSEvent) {
@@ -2368,6 +2432,9 @@ final class StrokeCaptureMTKView: MTKView {
     }
 
     func resetInteractionState() {
+        layerPickerPopover?.close()
+        layerPickerPopover = nil
+        isLayerPickGesture = false
         continuousStrokeRenderGraceWorkItem?.cancel()
         continuousStrokeRenderGraceWorkItem = nil
         cancelBrushOutlineReveal()
@@ -2401,6 +2468,7 @@ final class StrokeCaptureMTKView: MTKView {
         guard activeTool == .brush, !isPanModeActive, !isOutsideCanvasBrushStrokeActive else { return }
         activeModifierFlags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         guard !activeModifierFlags.contains(.option) else { return }
+        pointerGestureChangedHandler?(true)
 
         window?.makeFirstResponder(self)
         cancelBrushSizePreviewSettle()
@@ -2452,6 +2520,7 @@ final class StrokeCaptureMTKView: MTKView {
     }
 
     private func finishOutsideCanvasBrushStroke() {
+        defer { pointerGestureChangedHandler?(false) }
         enqueuePendingBrushEnd()
         _ = flushPendingBrushInputQueue()
         endContinuousStrokeRendering()

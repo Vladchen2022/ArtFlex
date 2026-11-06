@@ -299,7 +299,14 @@ struct CanvasContainerView: View {
                         },
                         blocksEditingInput: viewModel.selectionRefinementDraft != nil || viewModel.textureAdjustmentSettings != nil,
                         proofProfile: viewModel.colorProofProfile,
-                        onProofFailure: { Task { @MainActor in viewModel.colorProofProfile = nil } }
+                        onProofFailure: { Task { @MainActor in viewModel.colorProofProfile = nil } },
+                        onPointerGestureChanged: { viewModel.momentaryTools.pointerChanged(isDown: $0) },
+                        hasMomentaryTool: { viewModel.momentaryTools.state != nil },
+                        onCanvasFocusLost: { viewModel.momentaryTools.focusLost() },
+                        makeLayerPicker: { point in
+                            onCanvasInteraction?()
+                            return CanvasLayerPickerModel(viewModel: viewModel, point: point)
+                        }
                     )
                     .id(viewModel.documentRenderGeneration)
                     .allowsHitTesting(viewModel.selectionRefinementDraft == nil && viewModel.textureAdjustmentSettings == nil)

@@ -12,6 +12,12 @@ final class WorkspaceEditingSessions {
     let texturePreview = LatestPreviewCoordinator<WorkspaceUncheckedBox<MTLTexture>>()
     let gradient = GradientSessionController()
     private(set) var generation: UInt64 = 0
+    struct LayerPickContext {
+        let id: UUID
+        let document: ArtDocument
+        let contentRevision: UInt64
+    }
+    var layerPickContext: LayerPickContext?
     var activeMaskEditingLayerID: LayerID? { willSet { onStateChange?() } }
     var lastLayerMaskStrokeSample: CanvasStrokeSample?
     var maskStrokeHistoryAccepted = false
@@ -99,6 +105,7 @@ final class WorkspaceEditingSessions {
 
     func disposeForReplacement() {
         generation &+= 1
+        layerPickContext = nil
         clearMaskTarget()
         preparation.cancel(); isPreparingDocumentEdit = false
         selectionPreview.cancel(); selectionPreviewRequest = UUID(); selectionRefinementDraft = nil

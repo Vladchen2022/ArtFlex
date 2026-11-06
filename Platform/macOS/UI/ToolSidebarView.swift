@@ -525,6 +525,9 @@ private struct ToolSidebarGroupButton: View {
             return "\(displayedTool.displayName) (\(shortcut))，右侧箭头可切换组内工具，Shift+\(shortcut) 轮换"
         }
         if let shortcut = shortcutSettings.shortcutKey(for: group) {
+            if [.eraser, .smudge, .canvasRotate].contains(group.defaultTool) {
+                return "\(displayedTool.displayName) (\(shortcut))，短按切换；按住后松开返回原工具"
+            }
             return "\(displayedTool.displayName) (\(shortcut))"
         }
         return displayedTool.displayName

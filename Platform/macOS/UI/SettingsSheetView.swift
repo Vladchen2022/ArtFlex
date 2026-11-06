@@ -44,7 +44,7 @@ struct SettingsSheetView: View {
                         HStack(alignment: .top, spacing: 14) {
                             shortcutCard(
                                 title: "工具栏快捷键",
-                                description: "左侧工具栏当前已有的快捷键都可以在这里改。Shift + 该键仍然用于轮换组内工具。"
+                                description: "短按切换工具；按住橡皮、涂抹或旋转的快捷键超过 0.25 秒，松开返回原工具。Shift + 组快捷键仍用于轮换。Cmd+Option+点击画布可查找图层。"
                             ) {
                                 LazyVGrid(columns: toolShortcutColumns, alignment: .leading, spacing: 10) {
                                     ForEach(settings.configurableToolGroups, id: \.id) { group in
