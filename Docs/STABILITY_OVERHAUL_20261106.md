@@ -1,8 +1,10 @@
-# ArtFlex 十项稳定性改造执行记录
+# ArtFlex 十项稳定性改造报告
 
 日期：2026-11-06。基线：`2e2446061a2efa42900798a7f172e82a0ad3eede`。
 分支：`codex/stability-overhaul-20261106`；回退标签：`backup/pre-stability-overhaul-20261106`。
 原有 `HANDOFF.md` 修改不属于本任务，不编辑、不提交。
+
+十项均已实施。最终版 `20261106.46` 已安装至 `/Applications/ArtFlex.app`；完整自动回归和下述可见界面验收通过。这里的“通过”限于列出的验证范围，不代表所有硬件、超大画稿和长期运行场景已穷尽。
 
 ## 决策与范围
 
@@ -34,7 +36,7 @@
 
 ## 证据
 
-日志集中在 `.build/stability-evidence/`。最终报告补充确切测试数量、安装版本、界面证据、性能测量和未覆盖边界；不将历史测试当作本次结果。
+日志集中在 `.build/stability-evidence/`。本报告记录本轮实际执行的测试、安装信息、界面观察和未覆盖边界；专项测试数量存在覆盖重叠，不能相加作为总数。
 
 ## 完整回归发现的兼容边界
 
@@ -42,7 +44,7 @@
 - 打开期间外部文件改变或消失时拒绝接管，原工作区不变；旧测试中“删除源文件后仍绑定原路径打开”的预期相应修正。
 - 方案四宫格默认锁定画布。缩放路由的验收需要先进入单方案视图，保持现有锁定定义。
 
-完整自动回归：`swift test`，1129 项测试 / 125 组通过，25.108 秒（不含构建）。日志 `full-tests.log`。Release 版本 `20261106.40`。
+最终完整自动回归：`swift test`，1131 项测试 / 125 组通过，26.662 秒（不含构建）。日志 `.build/stability-evidence/full-tests-final46.log`。最终 Release 版本 `20261106.46`；安装校验和最终界面结果见文末。
 
 ## 改造结果对照
 
@@ -61,7 +63,7 @@
 
 ## 验证范围与边界
 
-- 全量自动测试日志：`.build/stability-evidence/full-tests.log`。专项日志位于同一目录。测试覆盖分配/GPU/历史/磁盘失败、跨文档交错操作、取消与过期结果、颜色与像素往返。
+- 全量自动测试日志：`.build/stability-evidence/full-tests-final46.log`。专项日志位于同一目录。测试覆盖分配/GPU/历史/磁盘失败、跨文档交错操作、取消与过期结果、颜色与像素往返。
 - 稀疏快照测试在 4096 × 4096 图层上验证冻结共享资源、随后写入分离、占用小于同尺寸密集图的十分之一；这不是对所有画稿的性能倍率承诺。
 - 约 2 MiB 指读回条带的大小。压缩后的层数据和工程验证仍有内存成本，预算也保留保守余量。
 - 旧同步冻结 API 保留整层独立复制。密集图层在冻结后的首次写入仍可能复制整层；稀疏能力取决于设备支持，没有声称 Metal 可以共享同一物理页的可写映射。
@@ -74,7 +76,7 @@
 
 - 源码基线：`backup/pre-stability-overhaul-20261106`（`2e2446061a2efa42900798a7f172e82a0ad3eede`）。改造分支 `codex/stability-overhaul-20261106`。
 - 主要提交：恢复 `0d4f180`；共享库 `1c07076`；文件占用 `c906d27`；图层事务 `05abb85`；色域 `ae03662`；资源账本 `3f55f8f`；冻结/历史 `ee43f7e`；后台准备 `9b9cfdd`；源资产 `6ae6470`；兼容边界 `2409159`；会话所有权 `a769ad2`。
-- 版本与完整回归提交 `9adc944`。Release 为 `20261106.40`，实际安装和界面验收结果在完成后追加。
+- 版本与完整回归提交 `9adc944`；菜单观察修正 `485f0a6`；即时笔触撤销 `ce2c626`；蒙版会话修正及最终源码 `eab14f6`。Release 为 `20261106.46`。
 - 当前画稿已通过旧版软件保存，另复制并核对 SHA-256：`/Users/victorcloux/Desktop/ArtFlex-before-stability-20261106.artflex`，10,280,732 字节。
 - 用户原有 `HANDOFF.md` 修改保持原样，SHA-256 为 `b3186f8c6d66c28f8d7a4b74c9f82630b74113149f37e797eeacd5d65cb859d4`，未纳入任何提交。
 
@@ -101,3 +103,62 @@
 20261106.44 的真实界面已确认文件菜单、Cmd+N、Cmd+S 恢复。随后发现独立的撤销可用性缺口：最近可调整笔触有意停留在提交队列中，尚未进入 HistoryController，菜单只读 canUndo 因而错误禁用。打开历史预览会强制提交，之后 Cmd+Z 能清除同一笔迹，证实像素历史链本身有效。20261106.45 将待绘制/待提交笔触纳入统一命令可用性，执行时仍走既有 finishBrushWorkBeforeHistoryNavigation；新增回归从真正的 performCommand 入口验证“尚未显示帧”和“已显示但保留可调整”两种状态的撤销/重做像素，不再仅直接调用 undo()。
 
 20261106.45 的前台验收确认即时笔触撤销/重做、裁剪保留/展开、可编辑渐变取消/应用/撤销/重做、16F 调色取消/应用/撤销/重做、标签切换与重复打开复用标签均有效。另发现撤销添加蒙版后瞬态编辑目标未清除。20261106.46 将蒙版目标及笔触状态纳入 WorkspaceEditingSessions，文档发布时统一核对目标有效性；失败回滚仍保留有效目标。新增测试覆盖蒙版创建的撤销/重做以及撤销后实际绘画和像素撤销。完整回归 1131 项 / 125 组通过，26.662 秒（不含构建），日志 `full-tests-final46.log`。
+
+
+## 改动文件范围
+
+共 55 个受版本控制的文件，相对基线约 2883 行新增、913 行删除（不含后续报告文字更新）。不包含原有 HANDOFF.md 修改。
+
+| 模块 | 主要文件 |
+| --- | --- |
+| 恢复、文档和共享库 | Core/Application/RecoveryCatalog.swift、SharedLibraryStore.swift、WorkspaceStore.swift、PersistenceController.swift、PersistenceSaveQueue.swift；Platform/macOS/App/DocumentSessionController.swift；Platform/macOS/Services/AppLibraryServices.swift |
+| 文件占用和保存打开 | Platform/macOS/Services/ProjectFileAccess.swift；Core/Application/ProjectOpenCoordinator.swift、ProjectSaveCoordinator.swift |
+| 图层、资源和冻结 | Rendering/Canvas/LayerDocumentPreparation.swift、StageOneLayerSurfaceStore.swift、MetalStrokeEngine.swift；Rendering/Metal/SparseLayerTexture.swift、MetalDeviceContext.swift；Core/Application/ApplicationResourceLedger.swift、WorkingResourceBudget.swift、DocumentResourceBudgetPolicy.swift、HistoryController.swift |
+| 背景准备和源资产 | Core/Application/DocumentPreparationCoordinator.swift、LatestPreviewCoordinator.swift；Infrastructure/FileFormat/EditableAssetStore.swift、LayerTextureSerializer.swift、ZlibCodec.swift、ProjectArchiveV2.swift；Core/Layer/EditableLayerContent.swift |
+| 调色和会话命令 | Rendering/Canvas/ColorAdjustmentRenderer.swift；Platform/macOS/App/WorkspaceEditingSessions.swift、WorkspaceViewModel.swift、WorkspaceViewModel+ColorAdjustment.swift、ArtFlexApp.swift、AppBootstrap.swift；Platform/macOS/UI/WorkspaceCommands.swift |
+| 回归和版本 | Tests/ArtFlexTests 下的文档、资产、历史、像素、资源、事务及会话测试；Platform/macOS/Distribution/Info.plist |
+
+## 回退操作
+
+源码回退点为标签 `backup/pre-stability-overhaul-20261106`。可以基于该标签创建独立分支检查或重新构建；不要用强制重置覆盖现有未提交的 HANDOFF.md。
+
+安装前的原版 20261104.39 保存在 `.build/install-backups/20261106-210840-261804-ArtFlex.app`，校验与目标记录为 `.build/install-backups/20261106-210840-261804-ArtFlex.json`。先保存工作并退出 ArtFlex，再从仓库运行：
+
+```sh
+python3 Platform/macOS/Distribution/release.py rollback .build/install-backups/20261106-210840-261804-ArtFlex.json
+```
+
+回退安装不会删除用户画稿。原画稿备份仍为桌面的 `ArtFlex-before-stability-20261106.artflex`；本次只修改独立的 `ArtFlex-Stability-*` 验收工程。
+
+
+## 最终安装与可见界面验收
+
+- 安装位置：`/Applications/ArtFlex.app`，Release `20261106.46`。
+- 构建源码：`eab14f68ab7bd3b18a799028d694250970fa5cd2`，构建清单 `sourceDirty: false`。报告提交不改变程序源码。
+- 源码指纹：`c4f1cafacae83c5c26cb71729027f6eec4c9f994cedec1f1e50af9b5c148e59b`。
+- 二进制 UUID：`9DDFDF4B-B09F-35FE-A921-A9C872979294`；安装包版本、资源、依赖资源和代码签名校验通过。
+- 构建、安装、验证记录分别为 `.build/stability-evidence/release-final46-build.log`、`install-final46.log`、`verify-final46.json`。Release 构建完成，114.90 秒。
+- 最终验收工程：`/Users/victorcloux/Desktop/ArtFlex-Stability-Final-20261106.artflex`。800 × 800、16F；主稿包含两条笔迹、复制图层和可编辑渐变。当前在前台打开，状态“已保存”。
+
+以下均通过真实窗口和键鼠操作观察，未用模型调用代替界面操作。45 版完成主体流程，46 版复验最终修复、重开及方案流程；46 相对 45 的程序改动只有蒙版会话有效性及版本号。
+
+| 界面操作 | 观察结果 | 版本 |
+| --- | --- | --- |
+| 新建、保存、打开原生入口 | 文件菜单及 Cmd+N/Cmd+S 可用；保存后状态变为已保存 | 44 起修复，45/46 继续验证保存与打开 |
+| 新画一笔后直接 Cmd+Z / Shift+Cmd+Z | 不需要先打开历史预览；撤销移除新笔，重做恢复；撤销到保存点显示已保存 | 45；46 再验证新笔撤销 |
+| Cmd+= / Cmd+- | 主画布 82% → 99% → 82%；方案单视图 69% → 83% | 45/46 |
+| 保留像素裁剪 | 800 × 800 裁为 474 × 523；展开恢复被裁掉的笔迹；撤销与重做切换正确 | 45 |
+| 复制图层、添加隐藏全部蒙版 | 正确产生复制图层和黑色蒙版 | 45/46 |
+| 撤销添加蒙版，然后继续绘画 | 蒙版消失、编辑目标变回图层内容；新笔画入内容，新笔撤销恢复保存点 | 46，针对界面发现的缺陷复验 |
+| 可编辑渐变 | 创建、反转预览、取消还原、应用、撤销、重做均对应正确的左右渐变 | 45 |
+| 16F 调色 | 亮度预览可见；Esc 取消还原；确认后能撤销重做，重开后结果一致 | 45/46 |
+| 多文档命令隔离 | 切到空白文档后撤销不动另一文档；从最近工程打开已存在画稿只激活原标签 | 45 |
+| 工程自包含源素材 | 完全退出后用 46 重开，渐变仍能打开参数、反转预览、取消；主稿不变 | 46 |
+| 方案编辑隔离 | 差异模式单方案新建层、画笔、缩放、撤销重做有效；四宫格仅方案 1 多出笔迹；取消退出后主稿仍为原两笔且已保存 | 46 |
+| 正常退出与最近工程 | 不更换安装包，完全退出 46 再启动，最近工程保留，点击后正确打开最终验收画稿 | 46 |
+
+安装多个开发签名版本之间曾观察到最近工程列表为空；同一最终版本正常退出再启动已确认保留。尚未证明开发安装替换时记录丢失的具体原因，未把该观察写成已经修复的缺陷。
+
+缩放界面验收确认的是快捷键和目标路由。界面控制工具的指针显示不能可靠证明真实鼠标锚点位置，因此本次不声称已经用物理鼠标完成光标中心缩放验收；已有坐标与缩放自动回归通过。
+
+磁盘满、GPU 失败、资源拒绝和过期后台结果通过自动故障注入测试验证，未在用户画稿上制造真实故障。未进行长时间压力运行或覆盖所有显示器与 GPU 的实机测试。最终置信度：本轮已覆盖的功能和失败事务为高；所有画稿规模下的体验与长期稳定性仍需要持续观察。
