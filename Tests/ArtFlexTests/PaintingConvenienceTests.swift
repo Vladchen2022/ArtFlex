@@ -117,6 +117,31 @@ struct PaintingConvenienceTests {
         #expect(pointerStates == [true, false])
     }
 
+    @Test func hoverRegionWorksWithoutKeyWindowAndDoesNotStealClicks() throws {
+        let h = try ConvenienceHarness(); defer { h.cleanUp() }
+        let model = CanvasLayerPickerModel(viewModel: h.vm, point: .init(x: 20, y: 20))
+        let window = NSWindow(contentRect: .init(x: 0, y: 0, width: 300, height: 200), styleMask: [.borderless], backing: .buffered, defer: false)
+        let hover = CanvasLayerPickHoverView(frame: .init(x: 0, y: 0, width: 200, height: 50))
+        window.contentView?.addSubview(hover)
+        hover.updateTrackingAreas()
+        #expect(!window.isKeyWindow)
+        #expect(window.acceptsMouseMovedEvents)
+        #expect(hover.trackingAreas.count == 1)
+        #expect(hover.trackingAreas[0].options.contains(.activeInActiveApp))
+        #expect(hover.hitTest(.init(x: 10, y: 10)) == nil)
+        let first = LayerID(), second = LayerID()
+        let event = try #require(NSEvent.mouseEvent(with: .mouseMoved, location: .init(x: 10, y: 10), modifierFlags: [],
+            timestamp: 1, windowNumber: window.windowNumber, context: nil, eventNumber: 1, clickCount: 0, pressure: 0))
+        hover.entered = { model.hoveredID = first }
+        hover.mouseEntered(with: event)
+        #expect(model.hoveredID == first)
+        hover.entered = { model.hoveredID = second }
+        hover.mouseMoved(with: event)
+        #expect(model.hoveredID == second)
+        #expect(h.vm.workspace.document.activeLayerID != second)
+        hover.removeFromSuperview()
+    }
+
     @Test func pickerSelectionAndCancellationPreservePixelsToolHistoryAndDirtyState() async throws {
         let h = try ConvenienceHarness(); defer { h.cleanUp() }
         let bottom = h.layerID
@@ -172,7 +197,8 @@ struct ConvenienceHarness {
         let store = WorkspaceStore()
         store.updateDocument { $0.canvasSize = .init(width: 64, height: 64) }
         root = FileManager.default.temporaryDirectory.appendingPathComponent("ArtFlex-Convenience-\(UUID())")
-        bootstrap = try AppBootstrap(workspaceStore: store, metalContext: #require(MetalDeviceContext()),
+        let metal = try #require(MetalDeviceContext())
+        bootstrap = try AppBootstrap(workspaceStore: store, metalContext: metal,
             layerSurfaceStore: StageOneLayerSurfaceStore(), persistenceRecoveryRootURL: root)
         vm = WorkspaceViewModel(bootstrap: bootstrap, installsZoomKeyboardMonitor: false)
     }

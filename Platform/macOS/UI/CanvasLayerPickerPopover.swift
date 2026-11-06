@@ -85,7 +85,7 @@ private struct CanvasLayerPickerContent: View {
                                     .clipShape(RoundedRectangle(cornerRadius: 5))
                             }.buttonStyle(.plain)
                                 .accessibilityLabel("选择图层 \(candidate.name)\(candidate.isLocked ? "，已锁定" : "")")
-                                .onHover { if $0 { model.hoveredID = candidate.id } }
+                                .background(CanvasLayerPickHoverRegion { model.hoveredID = candidate.id })
                                 .task { await model.loadPreview(candidate.id) }
                         }
                     }
@@ -108,6 +108,45 @@ private struct CanvasLayerPickerContent: View {
             } else { Image(systemName: "square.3.layers.3d").foregroundStyle(.gray) }
         }.clipShape(RoundedRectangle(cornerRadius: 3))
     }
+}
+
+/// NSPopover need not be the key window. Use the same explicit AppKit tracking
+/// pattern as the floating reference panel instead of relying on implicit hover dispatch.
+private struct CanvasLayerPickHoverRegion: NSViewRepresentable {
+    let entered: () -> Void
+    func makeNSView(context: Context) -> CanvasLayerPickHoverView {
+        let view = CanvasLayerPickHoverView()
+        view.entered = entered
+        return view
+    }
+    func updateNSView(_ view: CanvasLayerPickHoverView, context: Context) { view.entered = entered }
+}
+
+@MainActor
+final class CanvasLayerPickHoverView: NSView {
+    var entered: (() -> Void)?
+    private var area: NSTrackingArea?
+
+    override func hitTest(_ point: NSPoint) -> NSView? { nil } // Row button keeps all clicks.
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        window?.acceptsMouseMovedEvents = true
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let area { removeTrackingArea(area) }
+        let tracking = NSTrackingArea(rect: .zero,
+            options: [.mouseEnteredAndExited, .mouseMoved, .activeInActiveApp, .inVisibleRect, .enabledDuringMouseDrag],
+            owner: self, userInfo: nil)
+        addTrackingArea(tracking)
+        area = tracking
+    }
+
+    override func mouseEntered(with event: NSEvent) { entered?() }
+    override func mouseMoved(with event: NSEvent) { entered?() }
+    override func mouseExited(with event: NSEvent) { } // Keep the last preview while moving to the larger image.
 }
 
 @MainActor
