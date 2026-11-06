@@ -149,27 +149,19 @@ struct CommandSearchSheet: View {
     }
 }
 
-/// Keep command placements unconditional. Only their view content depends on focus;
-/// conditionally registering replacement groups can leave AppKit's default groups installed.
-struct ArtFlexFocusedWorkspaceCommands: Commands {
+/// The Scene declares native command placements directly. These reusable views only
+/// provide their focus-dependent contents and never replace the native menu structure.
+struct ArtFlexFocusedMenuItems: View {
     @FocusedObject private var documents: DocumentSessionController?
-    var body: some Commands {
-        CommandGroup(replacing: .newItem) { items(.file) }
-        CommandGroup(replacing: .saveItem) { items(.save) }
-        CommandGroup(replacing: .undoRedo) { items(.history) }
-        CommandGroup(after: .pasteboard) { items(.editing) }
-        CommandMenu("图层") { items(.layers) }
-        CommandMenu("选区") { items(.selection) }
-        CommandGroup(after: .toolbar) { items(.view) }
-    }
-    @ViewBuilder private func items(_ section: WorkspaceMenuSection) -> some View {
+    let section: WorkspaceMenuSection
+    var body: some View {
         if let documents {
             ArtFlexDocumentMenuItems(host: documents.active, documents: documents, section: section)
         }
     }
 }
 
-private enum WorkspaceMenuSection { case file, save, history, editing, layers, selection, view }
+enum WorkspaceMenuSection { case file, save, history, editing, layers, selection, view }
 
 private struct ArtFlexDocumentMenuItems: View {
     @ObservedObject var host: WorkspaceViewModel

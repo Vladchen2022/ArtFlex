@@ -45,7 +45,13 @@ struct ArtFlexApp: App {
                 }
                 .keyboardShortcut(",", modifiers: [.command])
             }
-            ArtFlexFocusedWorkspaceCommands()
+            CommandGroup(replacing: .newItem) { ArtFlexFocusedMenuItems(section: .file) }
+            CommandGroup(replacing: .saveItem) { ArtFlexFocusedMenuItems(section: .save) }
+            CommandGroup(replacing: .undoRedo) { ArtFlexFocusedMenuItems(section: .history) }
+            CommandGroup(after: .pasteboard) { ArtFlexFocusedMenuItems(section: .editing) }
+            CommandMenu("图层") { ArtFlexFocusedMenuItems(section: .layers) }
+            CommandMenu("选区") { ArtFlexFocusedMenuItems(section: .selection) }
+            CommandGroup(after: .toolbar) { ArtFlexFocusedMenuItems(section: .view) }
         }
     }
 }
