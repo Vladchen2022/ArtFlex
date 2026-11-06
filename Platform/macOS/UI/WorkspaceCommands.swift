@@ -149,15 +149,14 @@ struct CommandSearchSheet: View {
     }
 }
 
-/// The Scene declares native command placements directly. These reusable views only
-/// provide their focus-dependent contents and never replace the native menu structure.
-struct ArtFlexFocusedMenuItems: View {
-    @FocusedObject private var documents: DocumentSessionController?
+/// This single-window app has its document controller before menu construction.
+/// Observing it directly avoids initially empty replacement groups while scene focus
+/// is unavailable, and updates both the target and availability when tabs change.
+struct ArtFlexMenuItems: View {
+    @ObservedObject var documents: DocumentSessionController
     let section: WorkspaceMenuSection
     var body: some View {
-        if let documents {
-            ArtFlexDocumentMenuItems(host: documents.active, documents: documents, section: section)
-        }
+        ArtFlexDocumentMenuItems(host: documents.active, documents: documents, section: section)
     }
 }
 

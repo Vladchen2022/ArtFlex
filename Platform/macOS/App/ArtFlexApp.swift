@@ -20,7 +20,6 @@ struct ArtFlexApp: App {
                 DocumentSessionWorkspace(documents: documents, presentationState: presentationState,
                     onCanvasReady: { appDelegate.canvasDidBecomeReady(viewModel: $0) })
                     .frame(minWidth: 960, minHeight: 700)
-                    .focusedSceneObject(documents)
                     .onAppear {
                         appDelegate.documents = documents
                         appDelegate.viewModel = documents.active
@@ -45,13 +44,19 @@ struct ArtFlexApp: App {
                 }
                 .keyboardShortcut(",", modifiers: [.command])
             }
-            CommandGroup(replacing: .newItem) { ArtFlexFocusedMenuItems(section: .file) }
-            CommandGroup(replacing: .saveItem) { ArtFlexFocusedMenuItems(section: .save) }
-            CommandGroup(replacing: .undoRedo) { ArtFlexFocusedMenuItems(section: .history) }
-            CommandGroup(after: .pasteboard) { ArtFlexFocusedMenuItems(section: .editing) }
-            CommandMenu("图层") { ArtFlexFocusedMenuItems(section: .layers) }
-            CommandMenu("选区") { ArtFlexFocusedMenuItems(section: .selection) }
-            CommandGroup(after: .toolbar) { ArtFlexFocusedMenuItems(section: .view) }
+            CommandGroup(replacing: .newItem) { menuItems(.file) }
+            CommandGroup(replacing: .saveItem) { menuItems(.save) }
+            CommandGroup(replacing: .undoRedo) { menuItems(.history) }
+            CommandGroup(after: .pasteboard) { menuItems(.editing) }
+            CommandMenu("图层") { menuItems(.layers) }
+            CommandMenu("选区") { menuItems(.selection) }
+            CommandGroup(after: .toolbar) { menuItems(.view) }
+        }
+    }
+
+    @ViewBuilder private func menuItems(_ section: WorkspaceMenuSection) -> some View {
+        if let documents = launchState.documents {
+            ArtFlexMenuItems(documents: documents, section: section)
         }
     }
 }
