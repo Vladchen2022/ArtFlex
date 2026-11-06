@@ -12943,6 +12943,12 @@ final class WorkspaceViewModel: ObservableObject {
         bootstrap.strokeEngine.hasPendingBrushWork
     }
 
+    /// Recent adjustable strokes are intentionally retained outside HistoryController.
+    /// Undo must remain reachable so its existing editing boundary can commit them first.
+    var hasPendingBrushEdits: Bool {
+        bootstrap.strokeEngine.hasPendingBrushWork || bootstrap.strokeEngine.hasPendingBrushCommitJobs
+    }
+
     func canOpportunisticallyDrainBrushCommits(
         hadLiveBrushWorkThisFrame: Bool
     ) -> Bool {

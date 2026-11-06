@@ -68,7 +68,7 @@ extension WorkspaceViewModel {
             .init(id: "save", title: "保存工程", category: "文件", shortcut: "⌘S", unavailableReason: persistenceBlock, action: { self.saveProject() }),
             .init(id: "saveAs", title: "另存为…", category: "文件", shortcut: "⇧⌘S", unavailableReason: persistenceBlock, action: { self.saveProject(asNewFile: true) }),
             .init(id: "export", title: "导出图像", category: "文件", shortcut: "⌘E", unavailableReason: persistenceBlock, action: presentRasterExportSheet),
-            .init(id: "undo", title: "撤销", category: "编辑", shortcut: "⌘Z", unavailableReason: canUndo || hasModalEditSession ? nil : "没有可撤销操作", action: undo),
+            .init(id: "undo", title: "撤销", category: "编辑", shortcut: "⌘Z", unavailableReason: canUndo || hasPendingBrushEdits || hasModalEditSession ? nil : "没有可撤销操作", action: undo),
             .init(id: "redo", title: "重做", category: "编辑", shortcut: "⇧⌘Z", unavailableReason: canRedo ? nil : "没有可重做操作", action: redo),
             .init(id: "transform", title: "移动与自由变形", category: "编辑", shortcut: ToolSidebarGroup.group(containing: .freeTransform).flatMap { shortcutSettings.shortcutKey(for: $0) } ?? "", action: { self.selectTool(.freeTransform) }),
             .init(id: "newLayer", title: "新建绘画图层", category: "图层", action: { self.addLayer() }),

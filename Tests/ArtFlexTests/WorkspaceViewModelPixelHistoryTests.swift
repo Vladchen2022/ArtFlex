@@ -5,6 +5,33 @@ import Testing
 
 struct WorkspaceViewModelPixelHistoryTests {
     @Test @MainActor
+    func commandUndoAcceptsUnflushedAndRetainedRecentBrushStrokes() throws {
+        for renderDisplayFrame in [false, true] {
+            let h = try PixelHistoryHarness()
+            let id = h.viewModel.workspace.document.activeLayerID
+            let before = try h.snapshot(layerID: id)
+            h.viewModel.beginStrokeIfNeeded()
+            h.viewModel.applyStroke(samples: [.init(location: .init(x: 32, y: 32), pressure: 1)])
+            h.viewModel.endStroke()
+            if renderDisplayFrame {
+                let command = try #require(h.bootstrap.metalContext.commandQueue.makeCommandBuffer())
+                _ = h.viewModel.flushPendingBrushWork(into: command)
+                command.commit()
+                command.waitUntilCompleted()
+                #expect(h.bootstrap.strokeEngine.hasPendingBrushCommitJobs)
+            }
+            #expect(!h.bootstrap.historyController.canUndo)
+            #expect(h.viewModel.command("undo")?.unavailableReason == nil)
+            h.viewModel.performCommand("undo")
+            #expect(!h.viewModel.hasPendingBrushEdits)
+            #expect(try h.snapshot(layerID: id) == before)
+            #expect(h.viewModel.command("redo")?.unavailableReason == nil)
+            h.viewModel.performCommand("redo")
+            #expect(try h.alpha(atX: 32, y: 32, layerID: id) > 0.05)
+        }
+    }
+
+    @Test @MainActor
     func lassoFillTransactionFailuresLeavePixelsHistoryAndRedoUntouched() throws {
         for standard in [ArtColorStandard.stageOneDefault, .highPrecision] {
             let h = try PixelHistoryHarness(colorStandard: standard)
