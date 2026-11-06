@@ -135,6 +135,24 @@ struct DocumentSessionTests {
         #expect(documents.sessions.count == 2)
     }
 
+    @Test func processLedgerIncludesHistoryFromInactiveDocuments() throws {
+        let (documents, root) = try make()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let first = documents.sessions[0]
+        try first.bootstrap.historyController.captureCheckpoint()
+        let firstHistory = first.bootstrap.historyController.residentByteCount
+        #expect(firstHistory > 0)
+        documents.create(name: "第二稿", size: .init(width: 32, height: 32), dpi: 300, format: .rgba8)
+        let second = documents.sessions[1]
+        let ledger = first.bootstrap.metalContext.resourceLedger
+        let before = ledger.refresh()
+        try second.bootstrap.historyController.captureCheckpoint()
+        let secondHistory = second.bootstrap.historyController.residentByteCount
+        #expect(secondHistory > 0)
+        #expect(ledger.refresh() >= before + secondHistory)
+        #expect(ledger.refresh(excluding: second.model) >= firstHistory)
+    }
+
     @Test func switchingWithPendingAdjustmentIsRejectedAndDoesNotHideDraft() throws {
         let (documents, root) = try make()
         defer { try? FileManager.default.removeItem(at: root) }

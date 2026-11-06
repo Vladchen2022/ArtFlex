@@ -217,19 +217,28 @@ struct ProjectArchivePayload: Sendable, Equatable {
     var savedSnapshots: [PersistentCanvasSnapshotPayload]
     var previewPNGData: Data?
     var encodedLayerResources: [EncodedProjectLayerResource]
+    var resourceReservation: WorkingResourceBudget.Reservation?
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.package == rhs.package && lhs.referenceImages == rhs.referenceImages
+            && lhs.savedSnapshots == rhs.savedSnapshots && lhs.previewPNGData == rhs.previewPNGData
+            && lhs.encodedLayerResources == rhs.encodedLayerResources
+    }
 
     init(
         package: ProjectPackage,
         referenceImages: [ProjectReferenceImagePayload] = [],
         savedSnapshots: [PersistentCanvasSnapshotPayload] = [],
         previewPNGData: Data? = nil,
-        encodedLayerResources: [EncodedProjectLayerResource] = []
+        encodedLayerResources: [EncodedProjectLayerResource] = [],
+        resourceReservation: WorkingResourceBudget.Reservation? = nil
     ) {
         self.package = package
         self.referenceImages = referenceImages
         self.savedSnapshots = savedSnapshots
         self.previewPNGData = previewPNGData
         self.encodedLayerResources = encodedLayerResources
+        self.resourceReservation = resourceReservation
     }
 }
 

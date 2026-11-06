@@ -90,6 +90,7 @@ final class DocumentSessionController: ObservableObject {
     func create(name: String, size: CanvasSize, dpi: Int, format: ArtPixelFormat, colorSpace: ArtColorSpace = .sRGB) {
         guard active.prepareForDocumentTabSwitch(), !isClosing else { return }
         do {
+            active.refreshProcessResourceUsage()
             let reservation = try services.metalContext.workingResourceBudget.reserve(
                 bytes: size.width * size.height * format.encoding.bytesPerPixel * 2,
                 residentBytes: services.metalContext.device.currentAllocatedSize)

@@ -5,6 +5,7 @@ final class MetalDeviceContext {
     let device: MTLDevice
     let commandQueue: MTLCommandQueue
     let workingResourceBudget: WorkingResourceBudget
+    let resourceLedger: ApplicationResourceLedger
 
     init?(device: MTLDevice? = MTLCreateSystemDefaultDevice()) {
         guard
@@ -18,7 +19,9 @@ final class MetalDeviceContext {
         self.commandQueue = commandQueue
         let recommended = device.recommendedMaxWorkingSetSize
         let available = recommended > 0 ? recommended : ProcessInfo.processInfo.physicalMemory / 2
-        self.workingResourceBudget = WorkingResourceBudget(maximumBytes:
+        let workingResourceBudget = WorkingResourceBudget(maximumBytes:
             Int(min(UInt64(Int.max), available / 4 * 3)))
+        self.workingResourceBudget = workingResourceBudget
+        self.resourceLedger = ApplicationResourceLedger(budget: workingResourceBudget)
     }
 }

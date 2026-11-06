@@ -60,7 +60,8 @@ struct DocumentResourceBudgetPolicy: Sendable, Equatable {
         measuredGPUResidentBytes: Int? = nil,
         reservedWorkingBytes: Int = 0,
         editableSourceBytes: Int = 0,
-        editableSourceResidentBytes: Int = 0
+        editableSourceResidentBytes: Int = 0,
+        otherDocumentResidentBytes: Int = 0
     ) -> DocumentResourceAssessment {
         let pixelCount = Self.saturatingMultiply(canvasSize.width, canvasSize.height)
         let contentBytes = Self.saturatingMultiply(
@@ -89,7 +90,7 @@ struct DocumentResourceBudgetPolicy: Sendable, Equatable {
             Self.saturatingAdd(resolvedReferenceResidentBytes, max(0, historyResidentBytes)))
         let interactiveBytes = Self.saturatingAdd(
             Self.saturatingAdd(max(persistentInteractiveBytes, measuredResident), transientBytes),
-            Self.saturatingAdd(max(0, additionalWorkingBytes), max(0, reservedWorkingBytes))
+            Self.saturatingAdd(Self.saturatingAdd(max(0, additionalWorkingBytes), max(0, reservedWorkingBytes)), max(0, otherDocumentResidentBytes))
         )
         let captureBytes = Self.saturatingAdd(
             Self.saturatingAdd(liveLayerBytes, savedSnapshotBytes),

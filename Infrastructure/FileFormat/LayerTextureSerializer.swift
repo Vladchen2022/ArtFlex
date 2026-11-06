@@ -353,6 +353,10 @@ final class LayerTextureSerializer {
 
     /// Freezes live GPU resources with one private-to-private blit. The returned textures can be
     /// read on a utility task while painting continues on the original layer textures.
+    func reserveWorkingMemory(bytes: Int) throws -> WorkingResourceBudget.Reservation {
+        try metalContext.workingResourceBudget.reserve(bytes: bytes, residentBytes: metalContext.device.currentAllocatedSize)
+    }
+
     func cloneBatchForDeferredSnapshot(textures: [MTLTexture]) throws -> [MTLTexture] {
         try enqueueCloneBatchForDeferredSnapshot(textures: textures).waitUntilReady()
     }

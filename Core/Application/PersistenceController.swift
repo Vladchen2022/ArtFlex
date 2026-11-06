@@ -69,6 +69,7 @@ struct OpenProjectResult: Sendable {
     var savedSnapshots: [PersistentCanvasSnapshotPayload]
     var previewPNGData: Data?
     var storageFormat: ProjectStorageFormat
+    var resourceReservation: WorkingResourceBudget.Reservation? = nil
     var fileRevision: ProjectFileRevision? = nil
     var preparedTextures: PreparedProjectTextures? = nil
 
@@ -112,6 +113,7 @@ struct FrozenProjectCapture: @unchecked Sendable {
     var previewTexture: MTLTexture?
     var reusedLayerResources: [EncodedProjectLayerResource] = []
     var resourceTokens: [ProjectCaptureResourceToken] = []
+    var resourceReservation: WorkingResourceBudget.Reservation? = nil
 }
 
 /// Workspace metadata is captured synchronously; GPU copies are already submitted.
@@ -125,6 +127,7 @@ struct QueuedProjectCapture: Sendable {
     var textureBatch: DeferredTextureCloneBatch
     var reusedLayerResources: [EncodedProjectLayerResource] = []
     var resourceTokens: [ProjectCaptureResourceToken] = []
+    var resourceReservation: WorkingResourceBudget.Reservation? = nil
 
     func waitUntilReady() throws -> FrozenProjectCapture {
         let textures = try textureBatch.waitUntilReady()
@@ -136,7 +139,7 @@ struct QueuedProjectCapture: Sendable {
                 .init(layer: descriptor.layer, resourceKind: descriptor.kind, texture: texture)
             }, referenceImages: referenceImages, savedSnapshots: savedSnapshots,
             previewTexture: hasPreviewTexture ? textures.last : nil,
-            reusedLayerResources: reusedLayerResources, resourceTokens: resourceTokens)
+            reusedLayerResources: reusedLayerResources, resourceTokens: resourceTokens, resourceReservation: resourceReservation)
     }
 }
 
@@ -311,6 +314,11 @@ final class PersistenceController {
         if let previewTexture {
             texturesToFreeze.append(previewTexture)
         }
+        let rawBytes = texturesToFreeze.map { ApplicationResourceLedger.multiply(
+            ApplicationResourceLedger.multiply($0.width, $0.height), $0.pixelFormat == .rgba16Float ? 8 : ($0.pixelFormat == .r8Unorm ? 1 : 4)) }
+        let cpuPeak = ApplicationResourceLedger.add(rawBytes.reduce(0, ApplicationResourceLedger.add),
+            ApplicationResourceLedger.multiply(rawBytes.max() ?? 0, 2))
+        let reservation = try serializer.reserveWorkingMemory(bytes: cpuPeak)
         let pendingTextures = try serializer.enqueueCloneBatchForDeferredSnapshot(textures: texturesToFreeze)
         return QueuedProjectCapture(
             workspace: state,
@@ -320,7 +328,8 @@ final class PersistenceController {
             hasPreviewTexture: previewTexture != nil,
             textureBatch: pendingTextures,
             reusedLayerResources: reused,
-            resourceTokens: tokens
+            resourceTokens: tokens,
+            resourceReservation: reservation
         )
     }
 
@@ -384,7 +393,8 @@ final class PersistenceController {
             referenceImages: capture.referenceImages,
             savedSnapshots: capture.savedSnapshots,
             previewPNGData: previewPNGData,
-            encodedLayerResources: encodedResources
+            encodedLayerResources: encodedResources,
+            resourceReservation: capture.resourceReservation
         )
     }
 
@@ -891,7 +901,19 @@ final class PersistenceController {
     ) throws -> OpenProjectResult {
         try ProjectFileAccess.read(fileURL) { coordinated in
             let revision = try ProjectFileRevision.read(coordinated)
-            var result = try openProjectUncoordinated(from: coordinated, preflight: preflight, context: context, stager: stager)
+            var reservation: WorkingResourceBudget.Reservation?
+            var result = try openProjectUncoordinated(from: coordinated, preflight: { inspection in
+                try preflight(inspection)
+                let document = inspection.workspace.document
+                let layerBytes = ApplicationResourceLedger.multiply(ApplicationResourceLedger.multiply(document.canvasSize.width,
+                    document.canvasSize.height), document.colorStandard.pixelFormat.encoding.bytesPerPixel)
+                let retainedLayers = stager == nil ? ApplicationResourceLedger.multiply(layerBytes, document.paintLayers.count * 2) : 0
+                let cpuPeak = [inspection.estimatedReferenceResidentBytes, document.editableSourceByteCounts.resident,
+                    ApplicationResourceLedger.multiply(layerBytes, inspection.savedSnapshotCount + 2), retainedLayers]
+                    .reduce(0, ApplicationResourceLedger.add)
+                reservation = try serializer.reserveWorkingMemory(bytes: cpuPeak)
+            }, context: context, stager: stager)
+            result.resourceReservation = reservation
             try revision.verify(at: coordinated)
             result.fileRevision = revision
             return result

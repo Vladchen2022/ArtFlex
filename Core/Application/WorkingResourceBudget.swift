@@ -5,14 +5,17 @@ import Foundation
 final class WorkingResourceBudget: @unchecked Sendable {
     let maximumBytes: Int
     private let lock = NSLock()
+    private var residentCPUBytes = 0
     private var reservations: [UUID: Int] = [:]
     var reservedBytes: Int { lock.withLock { reservations.values.reduce(0, +) } }
 
     init(maximumBytes: Int) { self.maximumBytes = max(0, maximumBytes) }
 
+    func setResidentCPUBytes(_ bytes: Int) { lock.withLock { residentCPUBytes = max(0, bytes) } }
+
     func reserve(bytes: Int, residentBytes: Int) throws -> Reservation {
         try lock.withLock {
-            let used = reservations.values.reduce(0, +)
+            let used = reservations.values.reduce(residentCPUBytes, ApplicationResourceLedger.add)
             guard bytes >= 0, residentBytes >= 0, residentBytes <= maximumBytes,
                   used <= maximumBytes - residentBytes,
                   bytes <= maximumBytes - residentBytes - used else {

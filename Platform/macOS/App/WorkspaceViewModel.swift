@@ -727,6 +727,14 @@ final class WorkspaceViewModel: ObservableObject {
             status = .init(kind: .error, message: libraryLoadFailures.joined(separator: "；"))
         }
         bootstrap.documentFiles.register(self)
+        bootstrap.metalContext.resourceLedger.register(owner: self, reclaim: { [weak self] critical in
+            self?.bootstrap.historyController.relieveMemoryPressure(critical: critical)
+            self?.bootstrap.persistenceController.purgeSaveResourceCache()
+        }) { [weak self] in self?.retainedCPUResourceBytes ?? 0 }
+        bootstrap.metalContext.resourceLedger.register(owner: bootstrap.libraryServices) { [weak libraries = bootstrap.libraryServices] in
+            libraries?.store.resources.retainedPayloadBytes ?? 0
+        }
+        refreshProcessResourceUsage()
         bootstrap.workspaceStore.onLibrariesChanged = { [weak self] in
             guard let self else { return }
             self.workspace = self.bootstrap.workspaceStore.state
@@ -761,7 +769,7 @@ final class WorkspaceViewModel: ObservableObject {
         patternPlacementTextureCache.removeAllObjects()
         StageOneBrushPreviewRasterizer.resetCache()
         bootstrap.strokeEngine.purgeTransientPreviewTexturesIfIdle()
-        bootstrap.historyController.relieveMemoryPressure(critical: isCritical)
+        bootstrap.metalContext.resourceLedger.relieveMemoryPressure(critical: isCritical)
         bootstrap.persistenceController.purgeSaveResourceCache()
         bootstrap.canvasPresenter.purgeIdleCaches()
         Task { await maskThumbnailStore.clear(); await rasterPreviewStore.clear() }
@@ -14049,6 +14057,19 @@ final class WorkspaceViewModel: ObservableObject {
         if !accepted { registry.release(claim); completion?(false) }
     }
 
+    private var retainedCPUResourceBytes: Int {
+        let snapshots = savedSnapshots.reduce(0) { total, snapshot in
+            let images = [snapshot.thumbnailImage, snapshot.previewImage].compactMap { $0 }
+                .reduce(0) { ApplicationResourceLedger.add($0, $1.bytesPerRow * $1.height) }
+            return ApplicationResourceLedger.add(total, ApplicationResourceLedger.add(snapshot.snapshot.pixelData.count, images))
+        }
+        return [bootstrap.historyController.residentByteCount, currentReferenceImageByteCounts().resident,
+            bootstrap.workspaceStore.state.document.editableSourceByteCounts.resident, snapshots,
+            bootstrap.persistenceController.cachedSaveResourceByteCount].reduce(0, ApplicationResourceLedger.add)
+    }
+
+    func refreshProcessResourceUsage() { bootstrap.metalContext.resourceLedger.refresh() }
+
     private func ensureDocumentResourceBudget(
         additionalPaintLayers: Int = 0,
         additionalMasks: Int = 0,
@@ -14067,6 +14088,7 @@ final class WorkspaceViewModel: ObservableObject {
             ))
             return false
         }
+        var otherDocuments = bootstrap.metalContext.resourceLedger.refresh(excluding: self)
         let referenceBytes = currentReferenceImageByteCounts(
             replacingSlotID: slotID,
             with: referenceImageAsset
@@ -14088,7 +14110,8 @@ final class WorkspaceViewModel: ObservableObject {
             measuredGPUResidentBytes: saturatingAdd(bootstrap.metalContext.device.currentAllocatedSize, growth),
             reservedWorkingBytes: bootstrap.metalContext.workingResourceBudget.reservedBytes,
             editableSourceBytes: sources.archive,
-            editableSourceResidentBytes: sources.resident
+            editableSourceResidentBytes: sources.resident,
+            otherDocumentResidentBytes: otherDocuments
         ) }
         var assessment = assess()
         if assessment.isSupported { return true }
@@ -14098,6 +14121,7 @@ final class WorkspaceViewModel: ObservableObject {
         bootstrap.persistenceController.purgeSaveResourceCache()
         bootstrap.strokeEngine.purgeTransientPreviewTexturesIfIdle()
         patternPlacementTextureCache.removeAllObjects()
+        otherDocuments = bootstrap.metalContext.resourceLedger.refresh(excluding: self)
         assessment = assess()
         if assessment.isSupported { return true }
 
@@ -14143,7 +14167,8 @@ final class WorkspaceViewModel: ObservableObject {
         return saturatingAdd(paintBytes, maskBytes)
     }
 
-    private func currentDocumentInteractiveResidentByteCount() -> Int {
+    private func currentProcessInteractiveResidentByteCount() -> Int {
+        let otherDocuments = bootstrap.metalContext.resourceLedger.refresh(excluding: self)
         let referenceBytes = currentReferenceImageByteCounts()
         return bootstrap.documentResourceBudgetPolicy.assess(
             canvasSize: workspace.document.canvasSize,
@@ -14158,7 +14183,8 @@ final class WorkspaceViewModel: ObservableObject {
             measuredGPUResidentBytes: bootstrap.metalContext.device.currentAllocatedSize,
             reservedWorkingBytes: bootstrap.metalContext.workingResourceBudget.reservedBytes,
             editableSourceBytes: workspace.document.editableSourceByteCounts.archive,
-            editableSourceResidentBytes: workspace.document.editableSourceByteCounts.resident
+            editableSourceResidentBytes: workspace.document.editableSourceByteCounts.resident,
+            otherDocumentResidentBytes: otherDocuments
         ).footprint.estimatedInteractiveResidentBytes
     }
 
@@ -14175,6 +14201,7 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     private func prepareProjectSave(to url: URL) -> ProjectSaveRequest? {
+        refreshProcessResourceUsage()
         let audit = PerformanceAuditStore.shared
         let recording = audit.isRecordingEnabled
         let start = recording ? DispatchTime.now().uptimeNanoseconds : 0
@@ -14235,6 +14262,7 @@ final class WorkspaceViewModel: ObservableObject {
         _ prepared: ProjectSaveRequest,
         result: Result<ProjectWriteOutcome, Error>
     ) -> Bool {
+        defer { refreshProcessResourceUsage() }
         guard prepared.documentGeneration == documentRenderGeneration else { return false }
         let capturedPoint = pendingSaveHistoryPoint
         pendingSaveHistoryPoint = nil
@@ -14379,7 +14407,7 @@ final class WorkspaceViewModel: ObservableObject {
         showStatus(.init(kind: .info, message: isRecovery ? "正在验证并恢复工程…" : "正在验证并打开工程…"))
         let accepted = projectOpenCoordinator.start(from: url, isRecovery: isRecovery,
             persistence: bootstrap.persistenceController, policy: bootstrap.documentResourceBudgetPolicy,
-            currentResidentBytes: currentDocumentInteractiveResidentByteCount(), lifecycle: documentLifecycle,
+            currentResidentBytes: currentProcessInteractiveResidentByteCount(), lifecycle: documentLifecycle,
             stager: ProjectOpenTextureStager(metal: bootstrap.metalContext, serializer: bootstrap.textureSerializer),
             recoverySourceRoot: recoverySourceRoot
         ) { [weak self] result in
@@ -14488,6 +14516,7 @@ final class WorkspaceViewModel: ObservableObject {
                     : "已打开工程：\(sourceURL.lastPathComponent)"
         ))
         refresh()
+        refreshProcessResourceUsage()
     }
 
     private func stageOpenedProjectTextures(
@@ -16006,6 +16035,7 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     private func noteCanvasContentChanged(changedLayerIDs: Set<LayerID>? = nil) {
+        refreshProcessResourceUsage()
         discardRecentTextureFill()
         historyPreviewImageTask?.cancel()
         historyPreviewImageTask = Task { [weak self] in
@@ -19644,7 +19674,7 @@ extension WorkspaceViewModel {
         let document = payload.package.document
         let assessment = bootstrap.documentResourceBudgetPolicy.assess(canvasSize: document.canvasSize,
             paintLayerCount: document.paintLayers.count, maskCount: document.paintLayers.filter { $0.mask != nil }.count,
-            savedSnapshotCount: payload.savedSnapshots.count, additionalWorkingBytes: currentDocumentInteractiveResidentByteCount(),
+            savedSnapshotCount: payload.savedSnapshots.count, additionalWorkingBytes: currentProcessInteractiveResidentByteCount(),
             pixelFormat: document.colorStandard.pixelFormat, editableSourceBytes: document.editableSourceByteCounts.archive,
             editableSourceResidentBytes: document.editableSourceByteCounts.resident)
         guard assessment.isSupported else { throw CanvasResourceError(message: assessment.rejectionReason ?? "方案超过设备预算") }

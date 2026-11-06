@@ -15,6 +15,18 @@ struct WorkspaceLibraries: Equatable {
         tips = state.tipImageLibrary
     }
 
+    var retainedPayloadBytes: Int {
+        func brushBytes(_ brush: BrushSettings) -> Int {
+            [brush.customTipMaskData?.count ?? 0, brush.customTipEnvelopeMaskData?.count ?? 0,
+             brush.compoundBrush.secondary.customTipMaskData?.count ?? 0].reduce(0, ApplicationResourceLedger.add)
+        }
+        let presets = (brushes.presets + brushes.deletedPresets).map { brushBytes($0.brush) }
+        let materials = (textures.items + textures.deletedItems).map {
+            ApplicationResourceLedger.add($0.settings.customTipMaskData?.count ?? 0, $0.sourceBrush.map(brushBytes) ?? 0)
+        }
+        return (presets + materials + tips.items.map { $0.maskData?.count ?? 0 }).reduce(0, ApplicationResourceLedger.add)
+    }
+
     func apply(to state: inout WorkspaceState, preservingSelection: Bool = true) {
         let brush = state.brushLibrary.selectedPresetID
         let pattern = state.patternLibrary.selectedItemID

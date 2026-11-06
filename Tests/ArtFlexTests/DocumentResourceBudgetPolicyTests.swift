@@ -3,6 +3,37 @@ import Testing
 @testable import ArtFlex
 
 struct DocumentResourceBudgetPolicyTests {
+    @Test @MainActor func ledgerSumsDocumentsAndReleasesDeadOwnersAndFailedReservations() throws {
+        final class Owner { var bytes: Int; init(_ bytes: Int) { self.bytes = bytes } }
+        let budget = WorkingResourceBudget(maximumBytes: 100)
+        let ledger = ApplicationResourceLedger(budget: budget)
+        let first = Owner(35)
+        var second: Owner? = Owner(35)
+        ledger.register(owner: first, reclaim: { [weak first] _ in first?.bytes = 10 }) { [weak first] in first?.bytes ?? 0 }
+        ledger.register(owner: second!) { [weak second] in second?.bytes ?? 0 }
+        #expect(ledger.refresh() == 70)
+        #expect(ledger.refresh(excluding: first) == 35)
+        #expect(throws: (any Error).self) { try budget.reserve(bytes: 11, residentBytes: 20) }
+        #expect(budget.reservedBytes == 0)
+        do { let token = try budget.reserve(bytes: 10, residentBytes: 20); withExtendedLifetime(token) {} }
+        second = nil
+        #expect(ledger.refresh() == 35)
+        ledger.relieveMemoryPressure(critical: true)
+        #expect(ledger.residentCPUBytes == 10)
+        do { let token = try budget.reserve(bytes: 70, residentBytes: 20); withExtendedLifetime(token) {} }
+        #expect(budget.reservedBytes == 0)
+    }
+
+    @Test func anotherDocumentsCPUHistoryCanRejectAnOtherwiseLegalCanvas() {
+        let policy = DocumentResourceBudgetPolicy(maximumInteractiveResidentBytes: 100,
+            maximumSavePeakBytes: 1000, maximumArchiveUncompressedBytes: Int.max, estimatedTransientBytesPerPixel: 0)
+        #expect(policy.assess(canvasSize: .init(width: 1, height: 1), paintLayerCount: 1, maskCount: 0,
+            savedSnapshotCount: 0, historyResidentBytes: 30, measuredGPUResidentBytes: 40).isSupported)
+        #expect(!policy.assess(canvasSize: .init(width: 1, height: 1), paintLayerCount: 1, maskCount: 0,
+            savedSnapshotCount: 0, historyResidentBytes: 30, measuredGPUResidentBytes: 40,
+            otherDocumentResidentBytes: 31).isSupported)
+    }
+
     @Test func sparseResidencyDoesNotReduceArchiveOrFreezeBudgets() {
         let policy = DocumentResourceBudgetPolicy.standard(recommendedMaxWorkingSetSize: nil, archiveLimits: .standard)
         let dense = policy.assess(canvasSize: .init(width: 1_000, height: 1_000), paintLayerCount: 10, maskCount: 0, savedSnapshotCount: 0)

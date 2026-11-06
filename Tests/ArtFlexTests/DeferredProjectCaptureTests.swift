@@ -5,6 +5,20 @@ import Testing
 
 @MainActor
 struct DeferredProjectCaptureTests {
+    @Test func cpuReservationFollowsThePayloadUntilItsConsumerReleasesIt() throws {
+        var state = WorkspaceState.stageOneDefault
+        state.document.canvasSize = .init(width: 16, height: 16)
+        let bootstrap = try AppBootstrap(workspaceStore: .init(state: state))
+        _ = WorkspaceViewModel(bootstrap: bootstrap, installsZoomKeyboardMonitor: false)
+        let budget = bootstrap.metalContext.workingResourceBudget
+        #expect(budget.reservedBytes == 0)
+        var payload: ProjectArchivePayload? = try bootstrap.persistenceController.captureProjectPayload()
+        #expect(payload?.package.layerSnapshots.isEmpty == false)
+        #expect(budget.reservedBytes > 0)
+        payload = nil
+        #expect(budget.reservedBytes == 0)
+    }
+
     @Test func privateCaptureReturnsBeforeGPUCompletionAndPreservesQueueOrder() throws {
         let metal = try #require(MetalDeviceContext())
         let serializer = LayerTextureSerializer(metalContext: metal)
