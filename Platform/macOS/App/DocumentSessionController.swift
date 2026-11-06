@@ -79,6 +79,7 @@ final class DocumentSessionController: ObservableObject {
             blockReferenceModuleLibraryPersistenceController: services.blockReferenceModuleLibraryPersistenceController,
             sharedMetalServices: services.sharedMetalServices,
             libraryServices: services.libraryServices,
+            documentFiles: services.documentFiles,
             persistenceRecoveryRootURL: recoveryRoot ?? documentsRoot.appendingPathComponent(id.uuidString, isDirectory: true))
         let model = WorkspaceViewModel(bootstrap: bootstrap)
         bootstrap.drawingStatsController.milestoneHandler = { [weak model] in model?.showDrawingStatsMilestone($0) }
@@ -103,8 +104,7 @@ final class DocumentSessionController: ObservableObject {
     }
 
     func open(_ url: URL) {
-        let normalized = url.standardizedFileURL.resolvingSymlinksInPath()
-        if let existing = sessions.first(where: { $0.model.documentFileURL?.standardizedFileURL.resolvingSymlinksInPath() == normalized }) {
+        if let owner = services.documentFiles.owner(of: url), let existing = sessions.first(where: { $0.model === owner }) {
             _ = activate(existing.id); return
         }
         guard active.prepareForDocumentTabSwitch(), !isClosing else { return }

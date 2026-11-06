@@ -69,6 +69,7 @@ struct OpenProjectResult: Sendable {
     var savedSnapshots: [PersistentCanvasSnapshotPayload]
     var previewPNGData: Data?
     var storageFormat: ProjectStorageFormat
+    var fileRevision: ProjectFileRevision? = nil
     var preparedTextures: PreparedProjectTextures? = nil
 
     init(
@@ -143,6 +144,7 @@ struct ProjectWriteOutcome: Sendable, Equatable {
     var previewPNGData: Data?
     var versionBackupURL: URL?
     var versionBackupWarning: String?
+    var fileRevision: ProjectFileRevision? = nil
 }
 
 enum PersistenceError: LocalizedError {
@@ -391,10 +393,22 @@ final class PersistenceController {
         _ payload: ProjectArchivePayload,
         to fileURL: URL,
         recordsVersionBackup: Bool = true,
-        context: ProjectReadContext? = nil
+        context: ProjectReadContext? = nil,
+        expectedFileRevision: ProjectFileRevision? = nil
     ) throws -> ProjectWriteOutcome {
+        try ProjectFileAccess.write(fileURL) { coordinated in
+            try expectedFileRevision?.verify(at: coordinated)
+            var outcome = try writeCapturedProjectUncoordinated(payload, to: coordinated,
+                recordsVersionBackup: recordsVersionBackup, context: context, expectedFileRevision: expectedFileRevision)
+            outcome.fileRevision = try ProjectFileRevision.read(coordinated)
+            return outcome
+        }
+    }
+
+    private func writeCapturedProjectUncoordinated(_ payload: ProjectArchivePayload, to fileURL: URL,
+        recordsVersionBackup: Bool, context: ProjectReadContext?, expectedFileRevision: ProjectFileRevision?) throws -> ProjectWriteOutcome {
         if Self.shouldUseV2Archive(for: fileURL) {
-            try writeFlatArchive(payload, to: fileURL, context: context)
+            try writeFlatArchive(payload, to: fileURL, context: context, expectedFileRevision: expectedFileRevision)
         } else {
             guard payload.referenceImages.isEmpty, payload.savedSnapshots.isEmpty else {
                 throw PersistenceError.legacyFormatCannotStoreAssets
@@ -415,6 +429,7 @@ final class PersistenceController {
             let data = try encoder.encode(package)
             try context?.check()
             context?.report(.committing)
+            try expectedFileRevision?.verify(at: fileURL)
             try data.write(to: fileURL, options: .atomic)
         }
 
@@ -446,7 +461,7 @@ final class PersistenceController {
         }
     }
 
-    private func writeFlatArchive(_ payload: ProjectArchivePayload, to destinationURL: URL, context: ProjectReadContext? = nil) throws {
+    private func writeFlatArchive(_ payload: ProjectArchivePayload, to destinationURL: URL, context: ProjectReadContext? = nil, expectedFileRevision: ProjectFileRevision? = nil) throws {
         try context?.check()
         let fileManager = FileManager.default
         let parentURL = destinationURL.deletingLastPathComponent()
@@ -473,6 +488,7 @@ final class PersistenceController {
         try context?.check()
         context?.report(.committing)
 
+        try expectedFileRevision?.verify(at: destinationURL)
         if fileManager.fileExists(atPath: destinationURL.path) {
             _ = try fileManager.replaceItemAt(
                 destinationURL,
@@ -869,6 +885,20 @@ final class PersistenceController {
     }
 
     func openProject(
+        from fileURL: URL,
+        preflight: (ProjectOpenInspection) throws -> Void = { _ in },
+        context: ProjectReadContext? = nil, stager: ProjectOpenTextureStager? = nil
+    ) throws -> OpenProjectResult {
+        try ProjectFileAccess.read(fileURL) { coordinated in
+            let revision = try ProjectFileRevision.read(coordinated)
+            var result = try openProjectUncoordinated(from: coordinated, preflight: preflight, context: context, stager: stager)
+            try revision.verify(at: coordinated)
+            result.fileRevision = revision
+            return result
+        }
+    }
+
+    private func openProjectUncoordinated(
         from fileURL: URL,
         preflight: (ProjectOpenInspection) throws -> Void = { _ in },
         context: ProjectReadContext? = nil, stager: ProjectOpenTextureStager? = nil

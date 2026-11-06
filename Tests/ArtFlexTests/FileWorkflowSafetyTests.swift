@@ -7,6 +7,33 @@ import Testing
 @Suite(.serialized)
 @MainActor
 struct FileWorkflowSafetyTests {
+    @Test func externalReplacementCannotBeOverwrittenAndSaveAsRemainsAvailable() async throws {
+        let h = try FileWorkflowHarness()
+        defer { h.cleanUp() }
+        let url = h.root.appendingPathComponent("external.artflex")
+        h.makeDirty(); h.select(url)
+        #expect(h.viewModel.saveProject())
+        try await h.waitUntil { !h.viewModel.isProjectSaving }
+        let external = Data("external replacement must survive".utf8)
+        try external.write(to: url, options: .atomic)
+        h.viewModel.addLayer()
+        var accepted: Bool?
+        #expect(h.viewModel.saveProject { accepted = $0 })
+        try await h.waitUntil { accepted != nil }
+        #expect(accepted == false)
+        #expect(h.viewModel.hasUnsavedChanges)
+        #expect(try Data(contentsOf: url) == external)
+        #expect(h.viewModel.status?.message.contains("磁盘上的工程已改变") == true)
+        let copy = h.root.appendingPathComponent("safe-copy.artflex")
+        h.select(copy)
+        accepted = nil
+        #expect(h.viewModel.saveProject(asNewFile: true) { accepted = $0 })
+        try await h.waitUntil { accepted != nil }
+        #expect(accepted == true)
+        #expect(try Data(contentsOf: url) == external)
+        #expect(h.viewModel.documentFileURL == copy)
+    }
+
     @Test func savedDocumentUndoRegistersUnsavedContentAndRequestsConfirmation() async throws {
         let h = try FileWorkflowHarness()
         defer { h.cleanUp() }

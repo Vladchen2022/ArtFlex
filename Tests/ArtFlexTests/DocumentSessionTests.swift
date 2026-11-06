@@ -108,6 +108,33 @@ struct DocumentSessionTests {
         #expect(result == true)
     }
 
+    @Test func saveAsRejectsAnotherOpenDocumentAndAliasesWithoutChangingEither() async throws {
+        let (documents, root) = try make()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let first = documents.sessions[0]
+        let url = root.appendingPathComponent("owned.artflex")
+        first.bootstrap.filePanelService.selectURLsForTesting = { _, reply in reply([url]) }
+        first.model.addLayer()
+        #expect(first.model.saveProject())
+        for _ in 0..<500 where first.model.isProjectSaving { try await Task.sleep(for: .milliseconds(10)) }
+        let saved = try Data(contentsOf: url)
+        documents.create(name: "第二稿", size: .init(width: 32, height: 32), dpi: 300, format: .rgba8)
+        let second = documents.sessions[1]
+        let alias = root.appendingPathComponent("hardlink.artflex")
+        try FileManager.default.linkItem(at: url, to: alias)
+        second.bootstrap.filePanelService.selectURLsForTesting = { _, reply in reply([alias]) }
+        var accepted: Bool?
+        _ = second.model.saveProject(asNewFile: true) { accepted = $0 }
+        #expect(accepted == false)
+        #expect(second.model.documentFileURL == nil)
+        #expect(try Data(contentsOf: url) == saved)
+        #expect(second.model.status?.message.contains("另一个文档") == true)
+        documents.open(alias)
+        #expect(documents.active === first.model)
+        #expect(documents.sessions.count == 2)
+    }
+
     @Test func switchingWithPendingAdjustmentIsRejectedAndDoesNotHideDraft() throws {
         let (documents, root) = try make()
         defer { try? FileManager.default.removeItem(at: root) }

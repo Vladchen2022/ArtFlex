@@ -362,6 +362,7 @@ final class WorkspaceViewModel: ObservableObject {
     private(set) var samePathPreviewDebugShape: SelectionShape?
 
     private let bootstrap: AppBootstrap
+    var sharedDocumentFiles: DocumentFileRegistry { bootstrap.documentFiles }
     var sharedLibraryServices: AppLibraryServices { bootstrap.libraryServices }
     var ideationBranchActivityHandler: (() -> Void)?
     var ideationOperationHandler: ((IdeationCanvasOperation) -> Void)?
@@ -459,9 +460,10 @@ final class WorkspaceViewModel: ObservableObject {
     @Published private(set) var referenceImagePreviousPickedColor: RGBAColor?
     @Published private(set) var referenceImageLoadingSlotIDs: Set<Int> = []
     @Published private(set) var isReferenceImageFloatingPanelPresented = false
+    private var savedFileRevision: ProjectFileRevision?
     private var currentProjectURL: URL? {
         get { documentLifecycle.projectURL }
-        set { documentLifecycle.projectURL = newValue }
+        set { documentLifecycle.projectURL = newValue; savedFileRevision = nil }
     }
 
     var projectSaveIndicatorState: ProjectSaveIndicatorState {
@@ -724,6 +726,7 @@ final class WorkspaceViewModel: ObservableObject {
         if !libraryLoadFailures.isEmpty {
             status = .init(kind: .error, message: libraryLoadFailures.joined(separator: "；"))
         }
+        bootstrap.documentFiles.register(self)
         bootstrap.workspaceStore.onLibrariesChanged = { [weak self] in
             guard let self else { return }
             self.workspace = self.bootstrap.workspaceStore.state
@@ -14190,14 +14193,27 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     private func startProjectSave(to url: URL, completion: ((Bool) -> Void)?) {
-        guard let prepared = prepareProjectSave(to: url) else { completion?(false); return }
-        showStatus(.init(kind: .info, message: "正在保存工程：\(prepared.url.lastPathComponent)"))
-        let accepted = projectSaveCoordinator.start(prepared) { [weak self] result in
+        let registry = bootstrap.documentFiles
+        let claim: UUID
+        let revision: ProjectFileRevision
+        do {
+            revision = try currentProjectURL.map { ProjectFileAccess.sameFile($0, url) } == true
+                ? (savedFileRevision ?? ProjectFileRevision.read(url)) : ProjectFileRevision.read(url)
+            claim = try registry.claim(url, for: self)
+        } catch {
+            showStatus(.init(kind: .error, message: error.localizedDescription)); completion?(false); return
+        }
+        guard var prepared = prepareProjectSave(to: url) else { registry.release(claim); completion?(false); return }
+        prepared.expectedFileRevision = revision
+        let request = prepared
+        showStatus(.init(kind: .info, message: "正在保存工程：\(request.url.lastPathComponent)"))
+        let accepted = projectSaveCoordinator.start(request) { [weak self] result in
+            defer { registry.release(claim) }
             guard let self else { completion?(false); return }
-            let savedCurrentRevision = self.finishProjectSave(prepared, result: result)
+            let savedCurrentRevision = self.finishProjectSave(request, result: result)
             completion?(savedCurrentRevision)
         }
-        if !accepted { completion?(false) }
+        if !accepted { registry.release(claim); completion?(false) }
     }
 
     private func ensureDocumentResourceBudget(
@@ -14395,10 +14411,20 @@ final class WorkspaceViewModel: ObservableObject {
             let previewPNGData = outcome.previewPNGData
             _ = documentLifecycle.acceptSave(
                 of: .init(generation: prepared.documentGeneration, editRevision: prepared.editRevision), to: prepared.url)
+            savedFileRevision = outcome.fileRevision
             bootstrap.workspaceStore.updateDocument { $0.metadata.name = prepared.savedDocumentName }
-            let thumbnailApplied = previewPNGData.map {
-                bootstrap.filePanelService.applyProjectThumbnail($0, to: prepared.url)
-            } ?? false
+            var thumbnailApplied = false
+            if let previewPNGData {
+                // setIcon changes the file modification date on macOS. Verify and account
+                // for that owned metadata write under the same native file coordination.
+                do {
+                    savedFileRevision = try ProjectFileAccess.write(prepared.url) { coordinated in
+                        try outcome.fileRevision?.verify(at: coordinated)
+                        thumbnailApplied = bootstrap.filePanelService.applyProjectThumbnail(previewPNGData, to: coordinated)
+                        return try ProjectFileRevision.read(coordinated)
+                    }
+                } catch { thumbnailApplied = false }
+            }
             if let capturedPoint {
                 savedHistoryPoint = capturedPoint
                 savedHistoryEntryID = capturedPoint.entryID
@@ -14510,13 +14536,21 @@ final class WorkspaceViewModel: ObservableObject {
     private func loadProjectInBackground(from url: URL?, isRecovery: Bool,
         recoverySourceRoot: URL? = nil, onSuccess: (() -> Void)? = nil,
         onFailure: ((WorkspaceStatus) -> Void)? = nil) {
+        let registry = bootstrap.documentFiles
+        let claim: UUID?
+        do { claim = try !isRecovery ? url.map { try registry.claim($0, for: self) } : nil }
+        catch {
+            let status = WorkspaceStatus(kind: .error, message: error.localizedDescription)
+            showStatus(status); onFailure?(status); return
+        }
         showStatus(.init(kind: .info, message: isRecovery ? "正在验证并恢复工程…" : "正在验证并打开工程…"))
-        projectOpenCoordinator.start(from: url, isRecovery: isRecovery,
+        let accepted = projectOpenCoordinator.start(from: url, isRecovery: isRecovery,
             persistence: bootstrap.persistenceController, policy: bootstrap.documentResourceBudgetPolicy,
             currentResidentBytes: currentDocumentInteractiveResidentByteCount(), lifecycle: documentLifecycle,
             stager: ProjectOpenTextureStager(metal: bootstrap.metalContext, serializer: bootstrap.textureSerializer),
             recoverySourceRoot: recoverySourceRoot
         ) { [weak self] result in
+            defer { if let claim { registry.release(claim) } }
             guard let self else { return }
             switch result {
             case .documentChanged:
@@ -14538,6 +14572,7 @@ final class WorkspaceViewModel: ObservableObject {
                 }
             }
         }
+        if !accepted, let claim { registry.release(claim) }
     }
 
     func openProject(from url: URL, isRecovery: Bool) {
@@ -14604,6 +14639,7 @@ final class WorkspaceViewModel: ObservableObject {
         restoreProjectReferenceImages(result.referenceImages)
         restorePersistentSavedSnapshots(result.savedSnapshots)
         currentProjectURL = isRecovery || result.storageFormat == .legacyJSON ? nil : sourceURL
+        savedFileRevision = currentProjectURL == nil ? nil : result.fileRevision
         if !isRecovery { projectAccess.record(sourceURL) }
         // Opening is read-only. Finder metadata is updated only after a successful save.
         hasUnsavedChanges = isRecovery

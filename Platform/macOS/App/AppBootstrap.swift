@@ -88,6 +88,7 @@ enum AppPersistenceIsolationPolicy {
 
 struct AppBootstrap {
     let workspaceStore: WorkspaceStore
+    let documentFiles: DocumentFileRegistry
     let libraryServices: AppLibraryServices
     let metalContext: MetalDeviceContext
     let layerSurfaceStore: StageOneLayerSurfaceStore
@@ -155,6 +156,7 @@ struct AppBootstrap {
         blockReferenceModuleLibraryPersistenceController: BlockReferenceModuleLibraryPersistenceController? = nil,
         sharedMetalServices: AppSharedMetalServices? = nil,
         libraryServices: AppLibraryServices? = nil,
+        documentFiles: DocumentFileRegistry? = nil,
         drawingStatsController: DrawingStatsController? = nil,
         persistenceRecoveryRootURL: URL? = nil
     ) throws {
@@ -163,6 +165,7 @@ struct AppBootstrap {
         }
 
         let resolvedSharedMetalServices = try sharedMetalServices ?? AppSharedMetalServices(metalContext: metalContext)
+        self.documentFiles = documentFiles ?? DocumentFileRegistry()
         self.workspaceStore = workspaceStore
         self.metalContext = metalContext
         self.layerSurfaceStore = layerSurfaceStore

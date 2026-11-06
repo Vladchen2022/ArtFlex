@@ -7,6 +7,7 @@ struct ProjectSaveRequest: Sendable {
     var savedDocumentName: String
     var editRevision: UInt64
     var documentGeneration: UInt64
+    var expectedFileRevision: ProjectFileRevision? = nil
 }
 
 /// Owns the single formal-save task. Panels, tool resolution and UI remain in the platform layer.
@@ -14,15 +15,15 @@ struct ProjectSaveRequest: Sendable {
 @MainActor
 final class ProjectSaveCoordinator {
     typealias Writer = @Sendable (FrozenProjectCapture, URL) throws -> ProjectWriteOutcome
-    private let writer: @Sendable (FrozenProjectCapture, URL, ProjectReadContext) throws -> ProjectWriteOutcome
+    private let writer: @Sendable (FrozenProjectCapture, URL, ProjectReadContext, ProjectFileRevision?) throws -> ProjectWriteOutcome
     private var context: ProjectReadContext?
     private(set) var progress: ProjectReadProgress?
     private var saving = false
     var onStateChange: (() -> Void)?
     var isSaving: Bool { saving }
 
-    init(writer: @escaping Writer) { self.writer = { capture, url, _ in try writer(capture, url) } }
-    private init(contextualWriter: @escaping @Sendable (FrozenProjectCapture, URL, ProjectReadContext) throws -> ProjectWriteOutcome) { writer = contextualWriter }
+    init(writer: @escaping Writer) { self.writer = { capture, url, _, _ in try writer(capture, url) } }
+    private init(contextualWriter: @escaping @Sendable (FrozenProjectCapture, URL, ProjectReadContext, ProjectFileRevision?) throws -> ProjectWriteOutcome) { writer = contextualWriter }
 
     func cancel() {
         guard saving, progress?.phase != .committing else { return }
@@ -33,13 +34,13 @@ final class ProjectSaveCoordinator {
 
     convenience init(persistenceController: PersistenceController) {
         let worker = ProjectSaveWorker(controller: persistenceController)
-        self.init(contextualWriter: { capture, url, context in
+        self.init(contextualWriter: { capture, url, context, revision in
             let audit = PerformanceAuditStore.shared
             let recording = audit.isRecordingEnabled
             let start = recording ? DispatchTime.now().uptimeNanoseconds : 0
             let payload = try worker.controller.materializeProjectPayload(from: capture, reuseEncodedLayers: true, context: context)
             let materialized = recording ? DispatchTime.now().uptimeNanoseconds : 0
-            let result = try worker.controller.writeCapturedProject(payload, to: url, context: context)
+            let result = try worker.controller.writeCapturedProject(payload, to: url, context: context, expectedFileRevision: revision)
             if recording {
                 audit.recordDuration("ProjectSave.materialize", ms: Double(materialized - start) / 1_000_000)
                 audit.recordDuration("ProjectSave.write", ms: Double(DispatchTime.now().uptimeNanoseconds - materialized) / 1_000_000)
@@ -70,7 +71,7 @@ final class ProjectSaveCoordinator {
                 try context.check()
                 let capture = try request.capture.waitUntilReady()
                 try context.check()
-                return try writer(capture, request.url, context)
+                return try writer(capture, request.url, context, request.expectedFileRevision)
             }
             MainRunLoopDelivery.perform {
                 self?.saving = false

@@ -101,6 +101,7 @@ final class IdeationSessionState: ObservableObject {
                 layerSurfaceStore: surfaceStore,
                 sharedMetalServices: sharedMetalServices,
                 libraryServices: hostViewModel.sharedLibraryServices,
+                documentFiles: hostViewModel.sharedDocumentFiles,
                 drawingStatsController: hostViewModel.drawingStatsController,
                 persistenceRecoveryRootURL: recoveryRootURLs[index]
             )
