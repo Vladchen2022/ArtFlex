@@ -22,6 +22,7 @@ private struct ColorAdjustmentPreviewUniforms {
     var vitalizationDistortion: Float
     var effectMode: UInt32
     var vitalizationSeed: UInt32
+    var workingColorSpace: UInt32
     var materialOptions: SIMD4<Float>
     var materialSeed: SIMD4<Float>
 }
@@ -103,6 +104,7 @@ final class ColorAdjustmentRenderer {
             float vitalizationDistortion;
             uint effectMode;
             uint vitalizationSeed;
+            uint workingColorSpace;
             float4 materialOptions;
             float4 materialSeed;
         };
@@ -453,7 +455,9 @@ final class ColorAdjustmentRenderer {
             thread float &similarity
         ) {
             float3 baseLab = linearSRGBToOKLab(color);
-            float3 referenceLinear = srgbToLinear(uniforms.vitalizationReferenceColor.rgb);
+            float3 referenceLinear = uniforms.workingColorSpace != 0
+                ? artflexDecodeExtended(uniforms.vitalizationReferenceColor.rgb)
+                : srgbToLinear(uniforms.vitalizationReferenceColor.rgb);
             float3 referenceLab = linearSRGBToOKLab(referenceLinear);
             float tolerance = mix(
                 0.040,
@@ -502,14 +506,19 @@ final class ColorAdjustmentRenderer {
             variedLab.x = clamp(variedLab.x + (tone * 0.105), 0.0, 1.0);
             variedLab.yz += tangent * (hueVariation * 0.058);
             variedLab.yz += radial * (chromaVariation * 0.035);
-            return clamp(oklabToLinearSRGB(variedLab), 0.0, 1.0);
+            float3 varied = oklabToLinearSRGB(variedLab);
+            return uniforms.workingColorSpace != 0
+                ? artflexP3ToLinear(clamp(artflexLinearToP3(varied), 0.0, 1.0))
+                : clamp(varied, 0.0, 1.0);
         }
 
         float3 applyColorAdjustments(
             float3 color,
             constant ColorAdjustmentPreviewUniforms &uniforms
         ) {
-            bool wide = artflexIsWide(color);
+            // One artistic adjustment domain for the entire document. A pixel crossing
+            // an sRGB boundary must not switch formulas while its neighbours do not.
+            bool wide = uniforms.workingColorSpace != 0;
             float3 adjusted = clamp(wide ? artflexLinearToP3(color) : color, 0.0, 1.0);
             adjusted.r = applyBrightnessChannel(adjusted.r, uniforms.brightness);
             adjusted.g = applyBrightnessChannel(adjusted.g, uniforms.brightness);
@@ -649,6 +658,7 @@ final class ColorAdjustmentRenderer {
         maskTexture: MTLTexture?,
         maskReadMode: ColorAdjustmentMaskReadMode,
         parameters: ColorAdjustmentParameters,
+        colorSpace: ArtColorSpace = .sRGB,
         effectMode: ColorAdjustmentEffectMode = .standard,
         vitalizationReferenceColor: RGBAColor? = nil,
         vitalizationSeed: UInt32 = 0,
@@ -668,6 +678,7 @@ final class ColorAdjustmentRenderer {
             maskTexture: maskTexture,
             maskReadMode: maskReadMode,
             parameters: parameters,
+            colorSpace: colorSpace,
             effectMode: effectMode,
             vitalizationReferenceColor: vitalizationReferenceColor,
             vitalizationSeed: vitalizationSeed,
@@ -689,6 +700,7 @@ final class ColorAdjustmentRenderer {
         maskTexture: MTLTexture?,
         maskReadMode: ColorAdjustmentMaskReadMode,
         parameters: ColorAdjustmentParameters,
+        colorSpace: ArtColorSpace = .sRGB,
         effectMode: ColorAdjustmentEffectMode = .standard,
         vitalizationReferenceColor: RGBAColor? = nil,
         vitalizationSeed: UInt32 = 0,
@@ -760,6 +772,7 @@ final class ColorAdjustmentRenderer {
             vitalizationDistortion: parameters.vitalizationDistortion,
             effectMode: effectMode == .vitalization ? 1 : 0,
             vitalizationSeed: vitalizationSeed,
+            workingColorSpace: colorSpace == .extendedSRGB ? 1 : 0,
             materialOptions: SIMD4(
                 materialTexture == nil ? 0 : 1,
                 min(max(materialSettings.materialScale, 0.25), 3),
