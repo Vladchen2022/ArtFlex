@@ -5,6 +5,32 @@ import Testing
 
 struct WorkspaceViewModelPixelHistoryTests {
     @Test @MainActor
+    func undoingMaskCreationClearsTargetAndSubsequentBrushEditsContent() throws {
+        let h = try PixelHistoryHarness()
+        let id = h.viewModel.workspace.document.activeLayerID
+        let before = try h.snapshot(layerID: id)
+        h.viewModel.addMaskToActiveLayer(revealsAll: false)
+        #expect(h.viewModel.activeMaskEditingLayerID == id)
+        h.viewModel.undo()
+        #expect(h.viewModel.workspace.document.layer(id)?.mask == nil)
+        #expect(h.viewModel.activeMaskEditingLayerID == nil)
+        h.viewModel.redo()
+        #expect(h.viewModel.workspace.document.layer(id)?.mask != nil)
+        #expect(h.viewModel.activeMaskEditingLayerID == nil)
+        h.viewModel.beginEditingActiveLayerMask()
+        #expect(h.viewModel.activeMaskEditingLayerID == id)
+        h.viewModel.undo()
+        #expect(h.viewModel.activeMaskEditingLayerID == nil)
+        h.viewModel.beginStrokeIfNeeded()
+        h.viewModel.applyStroke(samples: [.init(location: .init(x: 32, y: 32), pressure: 1)])
+        h.viewModel.endStroke()
+        #expect(h.viewModel.flushBrushEditingBoundary(reason: "test.mask.target"))
+        #expect(try h.alpha(atX: 32, y: 32, layerID: id) > 0.05)
+        h.viewModel.undo()
+        #expect(try h.snapshot(layerID: id) == before)
+    }
+
+    @Test @MainActor
     func commandUndoAcceptsUnflushedAndRetainedRecentBrushStrokes() throws {
         for renderDisplayFrame in [false, true] {
             let h = try PixelHistoryHarness()

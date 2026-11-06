@@ -246,7 +246,9 @@ final class WorkspaceViewModel: ObservableObject {
         tool
     }
 
-    @Published private(set) var workspace: WorkspaceState
+    @Published private(set) var workspace: WorkspaceState {
+        didSet { editingSessions.reconcileMaskTarget(with: workspace.document) }
+    }
     @Published private(set) var sceneSnapshot: CanvasSceneSnapshot
     @Published private(set) var status: WorkspaceStatus?
     @Published private(set) var isPanModeActive = false
@@ -364,7 +366,10 @@ final class WorkspaceViewModel: ObservableObject {
     var documentRenderGeneration: UInt64 { documentLifecycle.version.generation }
     @Published private(set) var isGeneratorRegionSelectionArmed = false
     @Published private(set) var isGeneratorStrokeModeEnabled = false
-    @Published private(set) var activeMaskEditingLayerID: LayerID?
+    private(set) var activeMaskEditingLayerID: LayerID? {
+        get { editingSessions.activeMaskEditingLayerID }
+        set { editingSessions.activeMaskEditingLayerID = newValue }
+    }
     private(set) var straightLineState: StraightLineInteractionState {
         get { editingSessions.straightLineState }
         set { editingSessions.straightLineState = newValue }
@@ -666,8 +671,14 @@ final class WorkspaceViewModel: ObservableObject {
     private var documentChangeRevision: UInt64 = 0
     private var strokePacketCount = 0
     private var activePaintVariationSeed: UInt32 = 0
-    private var lastLayerMaskStrokeSample: CanvasStrokeSample?
-    private var maskStrokeHistoryAccepted = false
+    private var lastLayerMaskStrokeSample: CanvasStrokeSample? {
+        get { editingSessions.lastLayerMaskStrokeSample }
+        set { editingSessions.lastLayerMaskStrokeSample = newValue }
+    }
+    private var maskStrokeHistoryAccepted: Bool {
+        get { editingSessions.maskStrokeHistoryAccepted }
+        set { editingSessions.maskStrokeHistoryAccepted = newValue }
+    }
     var colorAdjustmentSession: ColorAdjustmentSession? {
         get { editingSessions.colorAdjustmentSession }
         set { editingSessions.colorAdjustmentSession = newValue }

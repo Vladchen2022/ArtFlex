@@ -12,6 +12,9 @@ final class WorkspaceEditingSessions {
     let texturePreview = LatestPreviewCoordinator<WorkspaceUncheckedBox<MTLTexture>>()
     let gradient = GradientSessionController()
     private(set) var generation: UInt64 = 0
+    var activeMaskEditingLayerID: LayerID? { willSet { onStateChange?() } }
+    var lastLayerMaskStrokeSample: CanvasStrokeSample?
+    var maskStrokeHistoryAccepted = false
     var isPreparingDocumentEdit: Bool = false { willSet { onStateChange?() } }
     var editableLayerDraft: EditableLayerDraft? { willSet { onStateChange?() } didSet { if oldValue !== editableLayerDraft { oldValue?.cancel() } } }
     var selectionRefinementDraft: SelectionRefinementDraft? { willSet { onStateChange?() } }
@@ -60,6 +63,20 @@ final class WorkspaceEditingSessions {
 
     init() { gradient.onStateChange = { [weak self] in self?.onStateChange?() } }
 
+    /// History restores document state, not transient input targets. Never keep
+    /// a target whose surface disappeared or whose layer is no longer active.
+    func reconcileMaskTarget(with document: ArtDocument) {
+        guard let id = activeMaskEditingLayerID else { return }
+        guard id != document.activeLayerID || document.layer(id)?.mask == nil else { return }
+        clearMaskTarget()
+    }
+
+    private func clearMaskTarget() {
+        activeMaskEditingLayerID = nil
+        lastLayerMaskStrokeSample = nil
+        maskStrokeHistoryAccepted = false
+    }
+
     var hasModalDraft: Bool {
         isPreparingDocumentEdit || editableLayerDraft != nil || selectionRefinementDraft != nil || textureAdjustmentSettings != nil
     }
@@ -82,6 +99,7 @@ final class WorkspaceEditingSessions {
 
     func disposeForReplacement() {
         generation &+= 1
+        clearMaskTarget()
         preparation.cancel(); isPreparingDocumentEdit = false
         selectionPreview.cancel(); selectionPreviewRequest = UUID(); selectionRefinementDraft = nil
         texturePreview.cancel(); textureAdjustmentSettings = nil
