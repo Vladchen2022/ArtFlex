@@ -107,58 +107,75 @@ struct WorkspaceState: Codable, Sendable, Equatable {
 }
 
 final class WorkspaceStore {
-    private(set) var state: WorkspaceState
+    private var localState: WorkspaceState
+    var sharedLibraries: SharedLibraryStore?
+    var onLibrariesChanged: (() -> Void)?
+    var state: WorkspaceState {
+        var result = localState
+        sharedLibraries?.resources.apply(to: &result)
+        return result
+    }
 
     init(state: WorkspaceState = .stageOneDefault) {
-        self.state = state
+        self.localState = state
     }
 
     func updateDocument(_ transform: (inout ArtDocument) -> Void) {
-        transform(&state.document)
-        state.document.metadata.updatedAt = Date()
+        transform(&localState.document)
+        localState.document.metadata.updatedAt = Date()
     }
 
     func updateToolSession(_ transform: (inout ToolSessionState) -> Void) {
-        transform(&state.toolSession)
+        transform(&localState.toolSession)
     }
 
     func updateColorPanel(_ transform: (inout ColorPanelState) -> Void) {
-        transform(&state.colorPanel)
+        transform(&localState.colorPanel)
     }
 
     func updateViewport(_ transform: (inout CanvasViewport) -> Void) {
-        transform(&state.viewport)
+        transform(&localState.viewport)
     }
 
     func updateBrushLibrary(_ transform: (inout BrushLibraryState) -> Void) {
-        transform(&state.brushLibrary)
+        var value = state.brushLibrary; transform(&value)
+        localState.brushLibrary = value
+        sharedLibraries?.update { $0.brushes = value }
     }
 
     func updatePatternLibrary(_ transform: (inout PatternLibraryState) -> Void) {
-        transform(&state.patternLibrary)
+        var value = state.patternLibrary; transform(&value)
+        localState.patternLibrary = value
+        sharedLibraries?.update { $0.patterns = value }
     }
 
     func updateTextureFillLibrary(_ transform: (inout TextureFillLibraryState) -> Void) {
-        transform(&state.textureFillLibrary)
+        var value = state.textureFillLibrary; transform(&value)
+        localState.textureFillLibrary = value
+        sharedLibraries?.update { $0.textures = value }
     }
 
     func updateBlockReferenceModuleLibrary(_ transform: (inout BlockReferenceModuleLibraryState) -> Void) {
-        transform(&state.blockReferenceModuleLibrary)
+        var value = state.blockReferenceModuleLibrary; transform(&value)
+        localState.blockReferenceModuleLibrary = value
+        sharedLibraries?.update { $0.blocks = value }
     }
 
     func updateTipImageLibrary(_ transform: (inout TipImageLibraryState) -> Void) {
-        transform(&state.tipImageLibrary)
+        var value = state.tipImageLibrary; transform(&value)
+        localState.tipImageLibrary = value
+        sharedLibraries?.update { $0.tips = value }
     }
 
     func updateGenerator(_ transform: (inout GeneratorSettings) -> Void) {
-        transform(&state.generator)
+        transform(&localState.generator)
     }
 
     func updateSelection(_ transform: (inout SelectionState) -> Void) {
-        transform(&state.selection)
+        transform(&localState.selection)
     }
 
     func replaceState(_ newState: WorkspaceState) {
-        state = newState
+        localState = newState
     }
 }

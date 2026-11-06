@@ -62,7 +62,8 @@ private final class ArtFlexLaunchState: ObservableObject {
 
     init() {
         do {
-            let recoveryRoot = PersistenceController.defaultRecoveryRootURL()
+            let recoveryRoot = AppBootstrap.testPersistenceRootURL()?.appendingPathComponent("Recovery")
+                ?? PersistenceController.defaultRecoveryRootURL()
             let bootstrap = try AppBootstrap(persistenceRecoveryRootURL: recoveryRoot
                 .appendingPathComponent("Documents").appendingPathComponent(UUID().uuidString))
             let viewModel = WorkspaceViewModel(bootstrap: bootstrap)

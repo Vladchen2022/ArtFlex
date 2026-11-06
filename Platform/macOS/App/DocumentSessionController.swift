@@ -24,6 +24,7 @@ final class DocumentSessionController: ObservableObject {
     private let documentsRoot: URL
     private var relays: [UUID: AnyCancellable] = [:]
     private var isClosing = false
+    private var pendingQuitCompletion: ((Bool) -> Void)?
     private var recoverySources: [UUID: URL] = [:]
 
     init(bootstrap: AppBootstrap, model: WorkspaceViewModel, recoveryCatalogRoot: URL? = nil) {
@@ -77,6 +78,7 @@ final class DocumentSessionController: ObservableObject {
             textureFillLibraryPersistenceController: services.textureFillLibraryPersistenceController,
             blockReferenceModuleLibraryPersistenceController: services.blockReferenceModuleLibraryPersistenceController,
             sharedMetalServices: services.sharedMetalServices,
+            libraryServices: services.libraryServices,
             persistenceRecoveryRootURL: recoveryRoot ?? documentsRoot.appendingPathComponent(id.uuidString, isDirectory: true))
         let model = WorkspaceViewModel(bootstrap: bootstrap)
         bootstrap.drawingStatsController.milestoneHandler = { [weak model] in model?.showDrawingStatsMilestone($0) }
@@ -167,12 +169,24 @@ final class DocumentSessionController: ObservableObject {
     func confirmCloseAll(completion: @escaping (Bool) -> Void) {
         guard !isClosing else { completion(false); return }
         isClosing = true
+        pendingQuitCompletion = completion
         let ids = sessions.map(\.id)
         func next(_ index: Int) {
             guard index < ids.count else {
-                self.isClosing = false
-                self.sessions.forEach { $0.model.finishDocumentSessionClose() }
-                completion(true); return
+                self.services.libraryServices.writes.drain { failure in
+                    Task { @MainActor in
+                        self.isClosing = false
+                        if let failure {
+                            self.active.presentWorkspaceStatus(kind: .error, message: "素材库尚未保存，退出已取消：\(failure)")
+                            self.pendingQuitCompletion?(false)
+                        } else {
+                            self.sessions.forEach { $0.model.finishDocumentSessionClose() }
+                            self.pendingQuitCompletion?(true)
+                        }
+                        self.pendingQuitCompletion = nil
+                    }
+                }
+                return
             }
             guard self.activate(ids[index]) else { self.isClosing = false; completion(false); return }
             self.active.confirmCloseOrQuitIfNeeded { allowed in

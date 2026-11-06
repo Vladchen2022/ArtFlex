@@ -362,12 +362,7 @@ final class WorkspaceViewModel: ObservableObject {
     private(set) var samePathPreviewDebugShape: SelectionShape?
 
     private let bootstrap: AppBootstrap
-    private let brushLibraryPersistenceQueue = PersistenceSaveQueue(label: "ArtFlex.BrushLibraryPersistence")
-    private let patternLibraryPersistenceQueue = PersistenceSaveQueue(label: "ArtFlex.PatternLibraryPersistence")
-    private let textureFillLibraryPersistenceQueue = PersistenceSaveQueue(label: "ArtFlex.TextureFillLibraryPersistence")
-    private let blockReferenceModuleLibraryPersistenceQueue = PersistenceSaveQueue(
-        label: "ArtFlex.BlockReferenceModuleLibraryPersistence"
-    )
+    var sharedLibraryServices: AppLibraryServices { bootstrap.libraryServices }
     var ideationBranchActivityHandler: (() -> Void)?
     var ideationOperationHandler: ((IdeationCanvasOperation) -> Void)?
     var ideationUndoHandler: (() -> Bool)?
@@ -646,10 +641,16 @@ final class WorkspaceViewModel: ObservableObject {
     ) {
         self.bootstrap = bootstrap
         resetSelectionTraceLog()
-        let didSanitizePersistedBrushResources = Self.restorePersistedBrushLibraryIfAvailable(in: bootstrap)
-        let didSanitizePersistedPatternLibrary = Self.restorePersistedPatternLibraryIfAvailable(in: bootstrap)
-        Self.restorePersistedTextureFillLibraryIfAvailable(in: bootstrap)
-        Self.restorePersistedBlockReferenceModuleLibraryIfAvailable(in: bootstrap)
+        let libraries = bootstrap.libraryServices.store
+        var didSanitizePersistedBrushResources = false
+        var didSanitizePersistedPatternLibrary = false
+        if !libraries.hasLoadedPersistence {
+            didSanitizePersistedBrushResources = Self.restorePersistedBrushLibraryIfAvailable(in: bootstrap)
+            didSanitizePersistedPatternLibrary = Self.restorePersistedPatternLibraryIfAvailable(in: bootstrap)
+            Self.restorePersistedTextureFillLibraryIfAvailable(in: bootstrap)
+            Self.restorePersistedBlockReferenceModuleLibraryIfAvailable(in: bootstrap)
+            libraries.hasLoadedPersistence = true
+        }
         Self.normalizeLegacySelectionIfNeeded(in: bootstrap.workspaceStore)
         Self.normalizeDisabledToolsIfNeeded(in: bootstrap.workspaceStore)
         let didApplyLaunchDefaultBrushPreset = Self.applyLaunchDefaultBrushPresetIfNeeded(in: bootstrap.workspaceStore)
@@ -722,6 +723,10 @@ final class WorkspaceViewModel: ObservableObject {
         ].compactMap { $0 }
         if !libraryLoadFailures.isEmpty {
             status = .init(kind: .error, message: libraryLoadFailures.joined(separator: "；"))
+        }
+        bootstrap.workspaceStore.onLibrariesChanged = { [weak self] in
+            guard let self else { return }
+            self.workspace = self.bootstrap.workspaceStore.state
         }
     }
 
@@ -4715,9 +4720,7 @@ final class WorkspaceViewModel: ObservableObject {
 
     @discardableResult
     func prepareTipImageLibraryForBrowser() -> Bool {
-        let restored = restorePersistedTipImageLibraryIfAvailable()
-        let synchronized = synchronizeTipImageLibraryFromWorkspace(persistIfChanged: true)
-        let changed = restored || synchronized
+        let changed = synchronizeTipImageLibraryFromWorkspace(persistIfChanged: true)
         if changed {
             refreshLightweight()
         }
@@ -14568,6 +14571,7 @@ final class WorkspaceViewModel: ObservableObject {
         timelapseRecorder.stopRecording()
         resetSnapshotToolState(resumeTimelapseIfNeeded: false)
         perspectiveGuideMatchState = .init()
+        bootstrap.workspaceStore.updateTipImageLibrary { $0 = openedWorkspace.tipImageLibrary }
         bootstrap.workspaceStore.replaceState(openedWorkspace)
         _ = synchronizeTipImageLibraryFromWorkspace(persistIfChanged: false)
         Self.normalizeLegacySelectionIfNeeded(in: bootstrap.workspaceStore)
@@ -15296,27 +15300,6 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     @discardableResult
-    private func restorePersistedTipImageLibraryIfAvailable() -> Bool {
-        guard let restored = bootstrap.brushLibraryPersistenceController.loadResources() else {
-            return false
-        }
-
-        let normalizedTipImageLibrary = Self.normalizeImportedTipImageLibrary(restored.tipImageLibrary)
-        var changed = false
-        bootstrap.workspaceStore.updateTipImageLibrary { tipImageLibrary in
-            let merged = Self.mergeTipImageLibraries(
-                base: tipImageLibrary,
-                imported: normalizedTipImageLibrary
-            )
-            if merged != tipImageLibrary {
-                tipImageLibrary = merged
-                changed = true
-            }
-        }
-        return changed
-    }
-
-    @discardableResult
     private func synchronizeTipImageLibraryFromWorkspace(
         persistIfChanged: Bool
     ) -> Bool {
@@ -15347,7 +15330,7 @@ final class WorkspaceViewModel: ObservableObject {
         let library = bootstrap.workspaceStore.state.brushLibrary
         let tipImageLibrary = bootstrap.workspaceStore.state.tipImageLibrary
         let controller = bootstrap.brushLibraryPersistenceController
-        brushLibraryPersistenceQueue.enqueue {
+        bootstrap.libraryServices.writes.enqueue(key: "brushes") {
             try controller.saveResources(
                 library: library,
                 tipImageLibrary: tipImageLibrary
@@ -15362,7 +15345,7 @@ final class WorkspaceViewModel: ObservableObject {
     private func persistPatternLibrary() {
         let library = bootstrap.workspaceStore.state.patternLibrary
         let controller = bootstrap.patternLibraryPersistenceController
-        patternLibraryPersistenceQueue.enqueue {
+        bootstrap.libraryServices.writes.enqueue(key: "patterns") {
             try controller.saveLibrary(library)
         } onError: { [weak self] error in
             DispatchQueue.main.async {
@@ -15374,7 +15357,7 @@ final class WorkspaceViewModel: ObservableObject {
     private func persistTextureFillLibrary() {
         let library = bootstrap.workspaceStore.state.textureFillLibrary
         let controller = bootstrap.textureFillLibraryPersistenceController
-        textureFillLibraryPersistenceQueue.enqueue {
+        bootstrap.libraryServices.writes.enqueue(key: "textures") {
             try controller.saveLibrary(library)
         } onError: { [weak self] error in
             DispatchQueue.main.async {
@@ -15386,7 +15369,7 @@ final class WorkspaceViewModel: ObservableObject {
     private func persistBlockReferenceModuleLibrary() {
         let library = bootstrap.workspaceStore.state.blockReferenceModuleLibrary
         let controller = bootstrap.blockReferenceModuleLibraryPersistenceController
-        blockReferenceModuleLibraryPersistenceQueue.enqueue {
+        bootstrap.libraryServices.writes.enqueue(key: "blocks") {
             try controller.saveLibrary(library)
         } onError: { [weak self] error in
             DispatchQueue.main.async {

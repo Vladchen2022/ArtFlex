@@ -88,6 +88,7 @@ enum AppPersistenceIsolationPolicy {
 
 struct AppBootstrap {
     let workspaceStore: WorkspaceStore
+    let libraryServices: AppLibraryServices
     let metalContext: MetalDeviceContext
     let layerSurfaceStore: StageOneLayerSurfaceStore
     let sharedMetalServices: AppSharedMetalServices
@@ -153,6 +154,7 @@ struct AppBootstrap {
         textureFillLibraryPersistenceController: TextureFillLibraryPersistenceController? = nil,
         blockReferenceModuleLibraryPersistenceController: BlockReferenceModuleLibraryPersistenceController? = nil,
         sharedMetalServices: AppSharedMetalServices? = nil,
+        libraryServices: AppLibraryServices? = nil,
         drawingStatsController: DrawingStatsController? = nil,
         persistenceRecoveryRootURL: URL? = nil
     ) throws {
@@ -222,16 +224,17 @@ struct AppBootstrap {
                 ?? HistoryCacheDirectory.makeCache()
         )
         self.filePanelService = FilePanelService()
-        self.brushLibraryPersistenceController = brushLibraryPersistenceController ?? BrushLibraryPersistenceController(
-            rootDirectoryURL: testPersistenceRoot
-        )
-        self.patternLibraryPersistenceController = patternLibraryPersistenceController ?? PatternLibraryPersistenceController(
-            rootDirectoryURL: testPersistenceRoot
-        )
-        self.textureFillLibraryPersistenceController = textureFillLibraryPersistenceController
-            ?? TextureFillLibraryPersistenceController(rootDirectoryURL: testPersistenceRoot)
-        self.blockReferenceModuleLibraryPersistenceController = blockReferenceModuleLibraryPersistenceController
-            ?? BlockReferenceModuleLibraryPersistenceController(rootDirectoryURL: testPersistenceRoot)
+        let libraries = libraryServices ?? AppLibraryServices(state: workspaceStore.state,
+            brushes: brushLibraryPersistenceController ?? BrushLibraryPersistenceController(rootDirectoryURL: testPersistenceRoot),
+            patterns: patternLibraryPersistenceController ?? PatternLibraryPersistenceController(rootDirectoryURL: testPersistenceRoot),
+            textures: textureFillLibraryPersistenceController ?? TextureFillLibraryPersistenceController(rootDirectoryURL: testPersistenceRoot),
+            blocks: blockReferenceModuleLibraryPersistenceController ?? BlockReferenceModuleLibraryPersistenceController(rootDirectoryURL: testPersistenceRoot))
+        self.libraryServices = libraries
+        libraries.store.attach(workspaceStore)
+        self.brushLibraryPersistenceController = libraries.brushes
+        self.patternLibraryPersistenceController = libraries.patterns
+        self.textureFillLibraryPersistenceController = libraries.textures
+        self.blockReferenceModuleLibraryPersistenceController = libraries.blocks
         self.imagePaletteExtractor = ImagePaletteExtractor()
         self.timelapseRecorder = TimelapseRecorderController(
             workspaceStore: workspaceStore,
@@ -252,7 +255,7 @@ struct AppBootstrap {
         }
     }
 
-    private static func testPersistenceRootURL() -> URL? {
+    static func testPersistenceRootURL() -> URL? {
         let processInfo = ProcessInfo.processInfo
         let environment = processInfo.environment
         if let explicitPath = environment["ARTFLEX_TEST_APPLICATION_SUPPORT_ROOT"]?

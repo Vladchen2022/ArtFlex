@@ -71,6 +71,43 @@ struct DocumentSessionTests {
         #expect(first.model.workspace.document.metadata.drawingStatsID != second.model.workspace.document.metadata.drawingStatsID)
     }
 
+    @Test func documentsUseOneLiveLibraryAndUndoCannotRewindOtherDocumentsEdits() throws {
+        let (documents, root) = try make()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let first = documents.sessions[0]
+        documents.create(name: "第二稿", size: .init(width: 32, height: 32), dpi: 300, format: .rgba8)
+        let second = documents.sessions[1]
+        #expect(first.bootstrap.libraryServices === second.bootstrap.libraryServices)
+        let oldDocument = first.bootstrap.workspaceStore.state
+        let preset = BrushPreset(id: "shared", name: "跨文档画笔", brush: .stageOneDefault, isBuiltIn: false, slotIndex: 0)
+        first.bootstrap.workspaceStore.updateBrushLibrary { $0.presets.append(preset); $0.selectedPresetID = preset.id }
+        #expect(second.model.workspace.brushLibrary.presets.contains(preset))
+        #expect(second.model.workspace.brushLibrary.selectedPresetID != preset.id)
+        second.bootstrap.workspaceStore.updateBrushLibrary { $0.presets.removeAll { $0.id == preset.id } }
+        first.bootstrap.workspaceStore.replaceState(oldDocument)
+        #expect(!first.bootstrap.workspaceStore.state.brushLibrary.presets.contains(preset))
+        second.bootstrap.workspaceStore.updateBrushLibrary { $0.presets.append(preset) }
+        first.bootstrap.workspaceStore.replaceState(oldDocument)
+        #expect(first.bootstrap.workspaceStore.state.brushLibrary.presets.contains(preset))
+    }
+
+    @Test func quitWaitsForSharedWritesAndRejectsUnresolvedFailure() async throws {
+        let (documents, root) = try make()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let queue = documents.sessions[0].bootstrap.libraryServices.writes
+        queue.enqueue(key: "failure") { throw CocoaError(.fileWriteNoPermission) } onError: { _ in }
+        var result: Bool?
+        documents.confirmCloseAll { result = $0 }
+        #expect(result == nil)
+        for _ in 0..<100 where result == nil { try await Task.sleep(for: .milliseconds(10)) }
+        #expect(result == false)
+        queue.enqueue(key: "failure") {} onError: { _ in }
+        result = nil
+        documents.confirmCloseAll { result = $0 }
+        for _ in 0..<100 where result == nil { try await Task.sleep(for: .milliseconds(10)) }
+        #expect(result == true)
+    }
+
     @Test func switchingWithPendingAdjustmentIsRejectedAndDoesNotHideDraft() throws {
         let (documents, root) = try make()
         defer { try? FileManager.default.removeItem(at: root) }

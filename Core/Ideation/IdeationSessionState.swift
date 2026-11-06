@@ -100,6 +100,7 @@ final class IdeationSessionState: ObservableObject {
                 metalContext: metalContext,
                 layerSurfaceStore: surfaceStore,
                 sharedMetalServices: sharedMetalServices,
+                libraryServices: hostViewModel.sharedLibraryServices,
                 drawingStatsController: hostViewModel.drawingStatsController,
                 persistenceRecoveryRootURL: recoveryRootURLs[index]
             )
