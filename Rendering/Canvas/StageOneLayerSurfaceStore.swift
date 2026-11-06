@@ -15,6 +15,74 @@ fileprivate final class LayerTextureResource {
 }
 
 final class StageOneLayerSurfaceStore {
+    /// Retains the resource owner, including its sparse heap. Subsequent mutable access
+    /// sees a second owner and detaches; readers can safely cross the worker boundary.
+    final class FrozenRead: @unchecked Sendable {
+        fileprivate let resource: LayerTextureResource
+        var texture: MTLTexture { resource.texture }
+        var allocatedBytes: Int { resource.sparse?.allocatedBytes ?? texture.allocatedSize }
+        var mappedRegions: [PixelRegion]? { resource.sparse.map { $0.regions(for: $0.mappedTiles) } }
+        fileprivate init(_ resource: LayerTextureResource) { self.resource = resource }
+    }
+
+    func freezeRead(for key: LayerResourceKey) throws -> FrozenRead {
+        let resource = key.kind == .mask ? maskTexturesByLayerID[key.layerID]
+            : surfacesByLayerID[key.layerID].flatMap { texturesBySurfaceID[$0.surfaceID] }
+        guard let resource else { throw CanvasResourceError(message: "无法冻结缺失的图层资源") }
+        return FrozenRead(resource)
+    }
+
+    /// Full history restores preserve sparse residency instead of allocating a dense layer
+    /// for mostly transparent checkpoints. Scanning uses native row comparisons, not pixels.
+    func prepareSnapshotResource(_ snapshot: LayerTextureSnapshot, metal: MetalDeviceContext) throws -> FrozenRead {
+#if DEBUG
+        if debugPreventsTextureAllocation || debugRejectsTextureCommands { throw CanvasResourceError(message: "无法准备恢复资源") }
+#endif
+        let format = snapshot.encoding.metalPixelFormat
+        let bpp = snapshot.encoding.bytesPerPixel
+        if usesSparseStorage, snapshot.width * snapshot.height >= 1024 * 1024,
+           format == .bgra8Unorm_srgb || format == .rgba16Float,
+           snapshot.bytesPerRow == snapshot.width * bpp,
+           snapshot.pixelData.count == snapshot.bytesPerRow * snapshot.height,
+           SparseLayerTexture.isSupported(by: metal.device) {
+            let tile = metal.device.sparseTileSize(with: .type2D, pixelFormat: format, sampleCount: 1)
+            var occupied = Set<TileCoordinate>()
+            let zeros = Data(count: tile.width * bpp)
+            snapshot.pixelData.withUnsafeBytes { pixels in
+                zeros.withUnsafeBytes { blank in
+                    for y in stride(from: 0, to: snapshot.height, by: tile.height) {
+                        for x in stride(from: 0, to: snapshot.width, by: tile.width) {
+                            let count = min(tile.width, snapshot.width - x) * bpp
+                            for row in y..<min(y + tile.height, snapshot.height) {
+                                if memcmp(pixels.baseAddress! + row * snapshot.bytesPerRow + x * bpp, blank.baseAddress!, count) != 0 {
+                                    occupied.insert(.init(x: x / tile.width, y: y / tile.height)); break
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if max(1, occupied.count) * metal.device.sparseTileSizeInBytes < snapshot.pixelData.count * 3 / 4 {
+                return FrozenRead(LayerTextureResource(try SparseLayerTexture.initialized(
+                    size: .init(width: snapshot.width, height: snapshot.height), format: format, tiles: occupied, metal: metal)))
+            }
+        }
+        guard let texture = makeTexture(width: snapshot.width, height: snapshot.height, pixelFormat: format, metal: metal) else {
+            throw CanvasResourceError(message: "无法准备恢复纹理")
+        }
+        return FrozenRead(LayerTextureResource(texture))
+    }
+
+    func installFrozenResource(_ read: FrozenRead, for key: LayerResourceKey) {
+        if key.kind == .mask { maskTexturesByLayerID[key.layerID] = read.resource }
+        else if let id = surfacesByLayerID[key.layerID]?.surfaceID {
+            texturesBySurfaceID[id] = read.resource
+            sparseScanCandidates.removeValue(forKey: id)
+            contentStateByLayerID[key.layerID] = .unknown
+        }
+        recordChange(for: key)
+    }
+
     /// Owns unpublished pixels and their sparse heap until a validated edit commits.
     final class StagedPixelEdit {
         fileprivate let source: LayerTextureResource

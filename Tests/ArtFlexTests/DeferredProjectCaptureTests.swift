@@ -19,6 +19,61 @@ struct DeferredProjectCaptureTests {
         #expect(budget.reservedBytes == 0)
     }
 
+    @Test func projectFreezeSharesSparseResourcesAndLaterWritesDetach() throws {
+        let metal = try #require(MetalDeviceContext())
+        guard SparseLayerTexture.isSupported(by: metal.device) else { return }
+        var state = WorkspaceState.stageOneDefault; state.document.canvasSize = .init(width: 4096, height: 4096)
+        let workspace = WorkspaceStore(state: state), surfaces = StageOneLayerSurfaceStore(usesSparseStorage: true)
+        try surfaces.requireTextures(for: state.document, metal: metal)
+        let serializer = LayerTextureSerializer(metalContext: metal)
+        let controller = PersistenceController(workspaceStore: workspace, layerSurfaceStore: surfaces, serializer: serializer)
+        let id = state.document.activeLayerID, surface = try #require(surfaces.surfaceID(for: id))
+        let first = try #require(surfaces.writableTexture(for: surface, region: .init(originX: 0, originY: 0, width: 2, height: 2)))
+        let patch = LayerTextureSnapshot(width: 2, height: 2, bytesPerRow: 8, pixelData: Data(repeating: 255, count: 16))
+        try serializer.restore(snapshot: patch, into: first)
+        let frozen = try controller.enqueueProjectCapture().waitUntilReady()
+        let saved = try #require(frozen.layerResources.first { $0.layer.id == id }?.texture)
+        #expect(saved === first)
+        #expect(frozen.pinnedResources.reduce(0) { $0 + $1.allocatedBytes } < 4096 * 4096 * 4 / 10)
+        let next = try #require(surfaces.writableTexture(for: surface, region: .init(originX: 0, originY: 0, width: 2, height: 2)))
+        #expect(next !== saved)
+        try serializer.restore(snapshot: .init(width: 2, height: 2, bytesPerRow: 8, pixelData: Data(repeating: 0, count: 16)), into: next)
+        #expect(try serializer.snapshot(texture: saved, originX: 0, originY: 0, width: 2, height: 2) == patch)
+        #expect(surfaces.allocatedPixelBytes < 4096 * 4096 * 4 / 10)
+    }
+
+    @Test func streamingCompressionRoundTripsEmptyAndMultipleLargeChunks() throws {
+        for count in [0, 1, 131_077, 3_000_001] {
+            let data = Data((0..<count).map { UInt8(truncatingIfNeeded: $0 &* 37 &+ ($0 / 251)) })
+            let compressed = try ZlibCodec.compressStreaming { consume in
+                for offset in stride(from: 0, to: data.count, by: 17_003) {
+                    try consume(data.subdata(in: offset..<min(data.count, offset + 17_003)))
+                }
+            }
+            #expect(try ZlibCodec.decompress(compressed, expectedSize: count) == data)
+        }
+    }
+
+    @Test func stripEncodedArchiveKeepsEveryPixelAndItsExistingFormat() throws {
+        for standard in [ArtColorStandard.stageOneDefault, .highPrecision] {
+            var state = WorkspaceState.stageOneDefault
+            state.document.canvasSize = .init(width: 1234, height: 613); state.document.colorStandard = standard
+            let workspace = WorkspaceStore(state: state), metal = try #require(MetalDeviceContext())
+            let surfaces = StageOneLayerSurfaceStore(), serializer = LayerTextureSerializer(metalContext: metal)
+            try surfaces.requireTextures(for: state.document, metal: metal)
+            let id = state.document.activeLayerID, surface = try #require(surfaces.surfaceID(for: id))
+            #expect(surfaces.fillContentTexture(for: id, value: 0.5, metal: metal))
+            let original = try serializer.snapshot(texture: #require(surfaces.readTexture(for: surface)))
+            let controller = PersistenceController(workspaceStore: workspace, layerSurfaceStore: surfaces, serializer: serializer)
+            let frozen = try controller.enqueueProjectCapture().waitUntilReady()
+            let payload = try controller.materializeProjectPayload(from: frozen, reuseEncodedLayers: true)
+            let encoded = try #require(payload.encodedLayerResources.first { $0.key.layerID == id })
+            #expect(try encoded.materialized().texture == original)
+            #expect(encoded.uncompressedByteCount == original.pixelData.count)
+            #expect(payload.package.layerSnapshots.allSatisfy { $0.texture.pixelData.isEmpty })
+        }
+    }
+
     @Test func privateCaptureReturnsBeforeGPUCompletionAndPreservesQueueOrder() throws {
         let metal = try #require(MetalDeviceContext())
         let serializer = LayerTextureSerializer(metalContext: metal)

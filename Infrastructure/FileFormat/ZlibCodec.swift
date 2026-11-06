@@ -25,6 +25,12 @@ enum ZlibCodecError: LocalizedError, Sendable, Equatable {
 }
 
 enum ZlibCodec {
+    /// Standard zlib stream; callers feed bounded chunks without allocating a whole image.
+    static func compressStreaming(_ produce: (_ consume: (Data) throws -> Void) throws -> Void) throws -> Data {
+        let encoder = try ZlibStreamEncoder()
+        try produce { try encoder.append($0) }
+        return try encoder.finish()
+    }
     static func compress(
         _ data: Data,
         level: Int32 = Z_DEFAULT_COMPRESSION
@@ -111,5 +117,49 @@ enum ZlibCodec {
 
         destination.count = expectedSize
         return destination
+    }
+}
+
+private final class ZlibStreamEncoder {
+    private let stream: UnsafeMutablePointer<z_stream>
+    private var output = Data()
+    init() throws {
+        stream = .allocate(capacity: 1)
+        stream.initialize(to: z_stream())
+        let status = deflateInit_(stream, Z_DEFAULT_COMPRESSION, zlibVersion(), Int32(MemoryLayout<z_stream>.size))
+        guard status == Z_OK else {
+            stream.deinitialize(count: 1); stream.deallocate()
+            throw ZlibCodecError.compressionFailed(status)
+        }
+    }
+    deinit { deflateEnd(stream); stream.deinitialize(count: 1); stream.deallocate() }
+
+    func append(_ data: Data) throws {
+        guard !data.isEmpty else { return }
+        guard data.count <= Int(UInt32.max) else { throw ZlibCodecError.compressionFailed(Z_MEM_ERROR) }
+        try data.withUnsafeBytes { bytes in
+            stream.pointee.next_in = UnsafeMutablePointer(mutating: bytes.bindMemory(to: Bytef.self).baseAddress!)
+            stream.pointee.avail_in = uInt(bytes.count)
+            defer { stream.pointee.next_in = nil }
+            while stream.pointee.avail_in > 0 { _ = try drain(flush: Z_NO_FLUSH) }
+        }
+    }
+
+    func finish() throws -> Data {
+        while try drain(flush: Z_FINISH) != Z_STREAM_END {}
+        return output
+    }
+
+    private func drain(flush: Int32) throws -> Int32 {
+        var buffer = [UInt8](repeating: 0, count: 64 * 1024)
+        return try buffer.withUnsafeMutableBufferPointer { bytes in
+            stream.pointee.next_out = bytes.baseAddress!
+            stream.pointee.avail_out = uInt(bytes.count)
+            defer { stream.pointee.next_out = nil }
+            let status = deflate(stream, flush)
+            guard status == Z_OK || status == Z_STREAM_END else { throw ZlibCodecError.compressionFailed(status) }
+            output.append(bytes.baseAddress!, count: bytes.count - Int(stream.pointee.avail_out))
+            return status
+        }
     }
 }

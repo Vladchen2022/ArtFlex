@@ -1035,7 +1035,7 @@ final class HistoryController {
     private struct StagedHistoryResource {
         var layerID: LayerID
         var resourceKind: LayerHistoryResourceKind
-        var texture: MTLTexture
+        var resource: StageOneLayerSurfaceStore.FrozenRead
     }
 
     /// Builds and fills all replacement textures before mutating the live workspace. History
@@ -1064,29 +1064,16 @@ final class HistoryController {
                   snapshot.coversFullCanvas(workspace.document.canvasSize) else {
                 throw HistoryControllerError.dirtyRestoreTopologyMismatch
             }
-            let pixelFormat = snapshot.texture.encoding.metalPixelFormat
-            guard let texture = layerSurfaceStore.makeTexture(
-                width: workspace.document.canvasSize.width,
-                height: workspace.document.canvasSize.height,
-                pixelFormat: pixelFormat,
-                metal: metalContext
-            ) else {
-                throw HistoryControllerError.unableToAllocateRestoreResource(
-                    layerID: snapshot.layerID,
-                    resourceKind: snapshot.resourceKind
-                )
-            }
-            staged.append(.init(
-                layerID: snapshot.layerID,
-                resourceKind: snapshot.resourceKind,
-                texture: texture
-            ))
-            restoreItems.append((
-                snapshot: snapshot.texture,
-                texture: texture,
-                destinationX: 0,
-                destinationY: 0
-            ))
+            let resource = try layerSurfaceStore.prepareSnapshotResource(snapshot.texture, metal: metalContext)
+            staged.append(.init(layerID: snapshot.layerID, resourceKind: snapshot.resourceKind, resource: resource))
+            if let regions = resource.mappedRegions {
+                let canvas = PixelRegion(originX: 0, originY: 0, width: snapshot.texture.width, height: snapshot.texture.height)
+                for region in regions {
+                    let patch = NonDestructiveCanvasCrop.slice(snapshot.texture.pixelData, sourceRegion: canvas,
+                        targetRegion: region, encoding: snapshot.texture.encoding)
+                    restoreItems.append((patch, resource.texture, region.originX, region.originY))
+                }
+            } else { restoreItems.append((snapshot.texture, resource.texture, 0, 0)) }
         }
 
         if requireCompleteDocument, actualKeys != expectedKeys {
@@ -1103,14 +1090,8 @@ final class HistoryController {
         let layerSurfaceStore = target ?? self.layerSurfaceStore
         _ = layerSurfaceStore.surfaceRecords(for: workspace.document)
         for resource in resources {
-            switch resource.resourceKind {
-            case .content:
-                if let surfaceID = layerSurfaceStore.surfaceID(for: resource.layerID) {
-                    layerSurfaceStore.swapTexture(for: surfaceID, with: resource.texture)
-                }
-            case .mask:
-                layerSurfaceStore.setMaskTexture(resource.texture, for: resource.layerID)
-            }
+            layerSurfaceStore.installFrozenResource(resource.resource,
+                for: .init(layerID: resource.layerID, kind: resource.resourceKind))
         }
     }
 

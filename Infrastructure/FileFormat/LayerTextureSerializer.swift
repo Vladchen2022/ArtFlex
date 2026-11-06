@@ -357,6 +357,34 @@ final class LayerTextureSerializer {
         try metalContext.workingResourceBudget.reserve(bytes: bytes, residentBytes: metalContext.device.currentAllocatedSize)
     }
 
+    /// No whole-layer clone: callers retain COW resource owners until all reads finish.
+    /// The queue fence observes previous writes; preview pixels get their own small target.
+    func enqueuePinnedReadBatch(textures: [MTLTexture], preview: MTLTexture?) throws -> DeferredTextureCloneBatch {
+        if textures.contains(where: { $0.storageMode != .private }) {
+            return try enqueueCloneBatchForDeferredSnapshot(textures: textures + (preview.map { [$0] } ?? []))
+        }
+        guard let command = metalContext.commandQueue.makeCommandBuffer() else { throw CocoaError(.fileReadUnknown) }
+        var result = textures
+        if let preview {
+            let divisor = max(1, (max(preview.width, preview.height) + 511) / 512)
+            let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: preview.pixelFormat,
+                width: max(1, preview.width / divisor), height: max(1, preview.height / divisor), mipmapped: false)
+            descriptor.storageMode = .private; descriptor.usage = [.shaderRead, .shaderWrite]
+            guard let target = metalContext.device.makeTexture(descriptor: descriptor) else { throw CocoaError(.fileReadUnknown) }
+            MPSImageBilinearScale(device: metalContext.device).encode(commandBuffer: command, sourceTexture: preview, destinationTexture: target)
+            result.append(target)
+        }
+        let lifetime = MetalCloneSourceLifetime(textures + (preview.map { [$0] } ?? []))
+        command.addCompletedHandler { _ in withExtendedLifetime(lifetime) {} }
+        command.commit()
+#if DEBUG
+        let rejects = debugRejectsDeferredCloneCompletion
+#else
+        let rejects = false
+#endif
+        return .init(textures: result, commandBuffer: command, auditStore: auditStore, rejectsCompletion: rejects)
+    }
+
     func cloneBatchForDeferredSnapshot(textures: [MTLTexture]) throws -> [MTLTexture] {
         try enqueueCloneBatchForDeferredSnapshot(textures: textures).waitUntilReady()
     }

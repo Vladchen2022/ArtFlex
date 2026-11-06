@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 import Metal
 
 struct ProjectCaptureResourceToken: @unchecked Sendable {
@@ -113,6 +114,7 @@ struct FrozenProjectCapture: @unchecked Sendable {
     var previewTexture: MTLTexture?
     var reusedLayerResources: [EncodedProjectLayerResource] = []
     var resourceTokens: [ProjectCaptureResourceToken] = []
+    var pinnedResources: [StageOneLayerSurfaceStore.FrozenRead] = []
     var resourceReservation: WorkingResourceBudget.Reservation? = nil
 }
 
@@ -127,6 +129,7 @@ struct QueuedProjectCapture: Sendable {
     var textureBatch: DeferredTextureCloneBatch
     var reusedLayerResources: [EncodedProjectLayerResource] = []
     var resourceTokens: [ProjectCaptureResourceToken] = []
+    var pinnedResources: [StageOneLayerSurfaceStore.FrozenRead] = []
     var resourceReservation: WorkingResourceBudget.Reservation? = nil
 
     func waitUntilReady() throws -> FrozenProjectCapture {
@@ -139,7 +142,7 @@ struct QueuedProjectCapture: Sendable {
                 .init(layer: descriptor.layer, resourceKind: descriptor.kind, texture: texture)
             }, referenceImages: referenceImages, savedSnapshots: savedSnapshots,
             previewTexture: hasPreviewTexture ? textures.last : nil,
-            reusedLayerResources: reusedLayerResources, resourceTokens: resourceTokens, resourceReservation: resourceReservation)
+            reusedLayerResources: reusedLayerResources, resourceTokens: resourceTokens, pinnedResources: pinnedResources, resourceReservation: resourceReservation)
     }
 }
 
@@ -319,7 +322,8 @@ final class PersistenceController {
         let cpuPeak = ApplicationResourceLedger.add(rawBytes.reduce(0, ApplicationResourceLedger.add),
             ApplicationResourceLedger.multiply(rawBytes.max() ?? 0, 2))
         let reservation = try serializer.reserveWorkingMemory(bytes: cpuPeak)
-        let pendingTextures = try serializer.enqueueCloneBatchForDeferredSnapshot(textures: texturesToFreeze)
+        let pinned = try sources.map { try layerSurfaceStore.freezeRead(for: .init(layerID: $0.layer.id, kind: $0.resourceKind)) }
+        let pendingTextures = try serializer.enqueuePinnedReadBatch(textures: pinned.map(\.texture), preview: previewTexture)
         return QueuedProjectCapture(
             workspace: state,
             layerDescriptors: sources.map { ($0.layer, $0.resourceKind) },
@@ -329,6 +333,7 @@ final class PersistenceController {
             textureBatch: pendingTextures,
             reusedLayerResources: reused,
             resourceTokens: tokens,
+            pinnedResources: pinned,
             resourceReservation: reservation
         )
     }
@@ -347,15 +352,13 @@ final class PersistenceController {
             try context?.check()
             context?.report(.materializing, completed: index, total: capture.layerResources.count)
             try autoreleasepool {
-                let snapshot = LayerHistorySnapshot(layerID: resource.layer.id,
-                    resourceKind: resource.resourceKind,
-                    texture: try serializer.snapshot(texture: resource.texture))
                 if reuseEncodedLayers {
-                    let encoded = try EncodedProjectLayerResource(snapshot: snapshot)
+                    let encoded = try encodeLayerInStrips(resource, context: context)
                     if let token = tokens[encoded.key] { savedResourceCache.insert(encoded, token: token) }
                     encodedResources.append(encoded)
                 } else {
-                    layerSnapshots.append(snapshot)
+                    layerSnapshots.append(LayerHistorySnapshot(layerID: resource.layer.id,
+                        resourceKind: resource.resourceKind, texture: try serializer.snapshot(texture: resource.texture)))
                 }
             }
         }
@@ -396,6 +399,30 @@ final class PersistenceController {
             encodedLayerResources: encodedResources,
             resourceReservation: capture.resourceReservation
         )
+    }
+
+    private func encodeLayerInStrips(_ resource: FrozenProjectLayerResource, context: ProjectReadContext?) throws -> EncodedProjectLayerResource {
+        let texture = resource.texture
+        let encoding: CanvasPixelEncoding = texture.pixelFormat == .rgba16Float ? .premultipliedRGBA16FloatLinear
+            : texture.pixelFormat == .r8Unorm ? .grayscale8 : .premultipliedBGRA8SRGB
+        let rowBytes = texture.width * encoding.bytesPerPixel
+        let rows = max(1, (2 * 1024 * 1024) / rowBytes)
+        var hash = SHA256()
+        let compressed = try ZlibCodec.compressStreaming { consume in
+            for y in stride(from: 0, to: texture.height, by: rows) {
+                try context?.check()
+                try autoreleasepool {
+                    let strip = try serializer.snapshot(texture: texture, originX: 0, originY: y,
+                        width: texture.width, height: min(rows, texture.height - y))
+                    hash.update(data: strip.pixelData)
+                    try consume(strip.pixelData)
+                }
+            }
+        }
+        let template = LayerHistorySnapshot(layerID: resource.layer.id, resourceKind: resource.resourceKind,
+            texture: .init(width: texture.width, height: texture.height, bytesPerRow: rowBytes, pixelData: Data(), encoding: encoding))
+        return .init(template: template, compressedPixels: compressed, uncompressedByteCount: rowBytes * texture.height,
+            sha256: hash.finalize().map { String(format: "%02x", $0) }.joined())
     }
 
     @discardableResult

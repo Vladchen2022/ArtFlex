@@ -197,6 +197,11 @@ struct EncodedProjectLayerResource: Sendable, Equatable {
         sha256 = ProjectReferenceImageHash.sha256Hex(snapshot.texture.pixelData)
     }
 
+    init(template: LayerHistorySnapshot, compressedPixels: Data, uncompressedByteCount: Int, sha256: String) {
+        self.template = template; self.compressedPixels = compressedPixels
+        self.uncompressedByteCount = uncompressedByteCount; self.sha256 = sha256
+    }
+
     var key: LayerResourceKey { .init(layerID: template.layerID, kind: template.resourceKind) }
 
     func materialized() throws -> LayerHistorySnapshot {

@@ -4,6 +4,31 @@ import Testing
 
 struct HistoryControllerTests {
     @Test(arguments: [false, true]) @MainActor
+    func fullHistoryRestoreKeepsSparseTransparentLayersSparse(highPrecision: Bool) throws {
+        let h = try BrushHistoryHarness(canvasSize: .init(width: 2048, height: 2048), usesSparseStorage: true,
+            colorStandard: highPrecision ? .highPrecision : .stageOneDefault)
+        guard SparseLayerTexture.isSupported(by: h.metalContext.device) else { return }
+        let id = h.workspaceStore.state.document.activeLayerID
+        let surface = try #require(h.layerSurfaceStore.surfaceID(for: id))
+        let region = PixelRegion(originX: 12, originY: 20, width: 2, height: 2)
+        let initial = try #require(h.layerSurfaceStore.writableTexture(for: surface, region: region))
+        let patch = try LayerTextureSnapshot(width: 2, height: 2, bytesPerRow: 8,
+            pixelData: Data(repeating: 255, count: 16)).converted(to: highPrecision ? .premultipliedRGBA16FloatLinear : .premultipliedBGRA8SRGB)
+        try h.serializer.restore(snapshot: patch, into: initial, destinationX: 12, destinationY: 20)
+        try h.history.captureCheckpoint(captureMode: .full)
+        let writable = try #require(h.layerSurfaceStore.writableTexture(for: surface, region: region))
+        try h.serializer.restore(snapshot: .init(width: 2, height: 2, bytesPerRow: patch.bytesPerRow,
+            pixelData: Data(count: patch.pixelData.count), encoding: patch.encoding), into: writable, destinationX: 12, destinationY: 20)
+        #expect(try h.history.undo())
+        let restoredID = try #require(h.layerSurfaceStore.surfaceID(for: id))
+        let restored = try #require(h.layerSurfaceStore.readTexture(for: restoredID))
+        #expect(restored.heap?.type == .sparse)
+        #expect(h.layerSurfaceStore.allocatedPixelBytes < 2048 * 2048 * 4 / 10)
+        #expect(try h.serializer.snapshot(texture: restored, originX: 12, originY: 20, width: 2, height: 2) == patch)
+        #expect(try h.serializer.snapshot(texture: restored, originX: 1000, originY: 1000, width: 1, height: 1).pixelData.allSatisfy { $0 == 0 })
+    }
+
+    @Test(arguments: [false, true]) @MainActor
     func sparseLocalHistoryPreservesPixelsAndResidency(highPrecision: Bool) throws {
         let h = try BrushHistoryHarness(canvasSize: .init(width: 4096, height: 4096), usesSparseStorage: true,
             colorStandard: highPrecision ? .highPrecision : .stageOneDefault)

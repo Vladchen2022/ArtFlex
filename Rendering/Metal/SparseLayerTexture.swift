@@ -134,6 +134,17 @@ final class SparseLayerTexture {
         return result
     }
 
+    static func initialized(size: CanvasSize, format: MTLPixelFormat, tiles: Set<TileCoordinate>,
+                            metal: MetalDeviceContext) throws -> SparseLayerTexture {
+        guard let result = SparseLayerTexture(size: size, format: format, metal: metal,
+                                             initialCapacity: max(tiles.count, 1)) else {
+            throw CanvasResourceError(message: "无法准备分块恢复资源")
+        }
+        if !tiles.isEmpty { try result.initialize(tiles, on: result.texture, copying: nil, copyTiles: []) }
+        result.mappedTiles = tiles
+        return result
+    }
+
     private static func allocate(size: CanvasSize, format: MTLPixelFormat, capacity: Int,
                                  metal: MetalDeviceContext) -> (heap: MTLHeap, texture: MTLTexture)? {
         let (bytes, overflow) = capacity.multipliedReportingOverflow(by: metal.device.sparseTileSizeInBytes)
