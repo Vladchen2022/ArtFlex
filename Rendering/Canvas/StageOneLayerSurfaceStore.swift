@@ -249,6 +249,11 @@ final class StageOneLayerSurfaceStore {
     func sharedCopy() -> StageOneLayerSurfaceStore {
         let result = StageOneLayerSurfaceStore(usesSparseStorage: usesSparseStorage)
         result.adoptContents(of: self)
+        result.sparseScanCandidates = sparseScanCandidates
+#if DEBUG
+        result.debugPreventsTextureAllocation = debugPreventsTextureAllocation
+        result.debugRejectsTextureCommands = debugRejectsTextureCommands
+#endif
         return result
     }
 
@@ -268,6 +273,7 @@ final class StageOneLayerSurfaceStore {
     }
 #if DEBUG
     var debugPreventsTextureAllocation = false
+    var debugRejectsTextureCommands = false
 
     func debugRemoveContentTexture(for layerID: LayerID) {
         guard let surfaceID = surfacesByLayerID[layerID]?.surfaceID else { return }
@@ -323,16 +329,46 @@ final class StageOneLayerSurfaceStore {
         }
     }
 
-    func prepareTextures(
+    /// Publish a complete surface set only after every allocation and GPU clear succeeds.
+    @discardableResult
+    func prepareTextures(for document: ArtDocument, metal: MetalDeviceContext) -> Bool {
+        do { try requireTextures(for: document, metal: metal); return true }
+        catch { lastResourceError = error.localizedDescription; return false }
+    }
+
+    func requireTextures(for document: ArtDocument, metal: MetalDeviceContext) throws {
+        let prepared = sharedCopy()
+        try prepared.prepareTexturesInPlace(for: document, metal: metal)
+        adoptContents(of: prepared)
+        sparseScanCandidates = prepared.sparseScanCandidates
+        lastResourceError = nil
+    }
+
+    /// Duplicate ownership, not bytes. The first write detaches through the existing COW path.
+    func shareLayerResources(from sourceID: LayerID, to destinationID: LayerID, document: ArtDocument) throws {
+        _ = surfaceRecords(for: document)
+        guard let source = surfacesByLayerID[sourceID], let target = surfacesByLayerID[destinationID],
+              let pixels = texturesBySurfaceID[source.surfaceID] else {
+            throw CanvasResourceError(message: "复制源图层资源不完整")
+        }
+        if document.layer(destinationID)?.mask != nil, maskTexturesByLayerID[sourceID] == nil {
+            throw CanvasResourceError(message: "复制源蒙版资源不完整")
+        }
+        texturesBySurfaceID[target.surfaceID] = pixels
+        maskTexturesByLayerID[destinationID] = maskTexturesByLayerID[sourceID]
+        contentStateByLayerID[destinationID] = contentStateByLayerID[sourceID]
+    }
+
+    private func prepareTexturesInPlace(
         for document: ArtDocument,
         metal: MetalDeviceContext
-    ) {
+    ) throws {
         metalContext = metal
         let records = surfaceRecords(for: document)
 
         for record in records where texturesBySurfaceID[record.surfaceID] == nil {
 #if DEBUG
-            if debugPreventsTextureAllocation { continue }
+            if debugPreventsTextureAllocation { throw CanvasResourceError(message: "无法分配图层资源") }
 #endif
             if usesSparseStorage, record.descriptor.width * record.descriptor.height >= 1024 * 1024,
                let sparse = SparseLayerTexture(
@@ -343,11 +379,9 @@ final class StageOneLayerSurfaceStore {
                 contentStateByLayerID[record.layerID] = .knownTransparent
                 continue
             }
-            guard let texture = makeTexture(for: record, metal: metal) else {
-                continue
+            guard let texture = makeTexture(for: record, metal: metal), clearTexture(texture, metal: metal) else {
+                throw CanvasResourceError(message: "图层资源分配或初始化失败")
             }
-
-            clearTexture(texture, metal: metal)
             texturesBySurfaceID[record.surfaceID] = LayerTextureResource(texture)
             contentStateByLayerID[record.layerID] = .knownTransparent
         }
@@ -360,10 +394,9 @@ final class StageOneLayerSurfaceStore {
                 usage: [.shaderRead, .shaderWrite, .renderTarget],
                 storageMode: .private,
                 metal: metal
-            ) else {
-                continue
+            ), clearTexture(texture, value: 1, metal: metal) else {
+                throw CanvasResourceError(message: "蒙版资源分配或初始化失败")
             }
-            clearTexture(texture, value: 1, metal: metal)
             maskTexturesByLayerID[layer.id] = LayerTextureResource(texture)
         }
 
@@ -520,67 +553,37 @@ final class StageOneLayerSurfaceStore {
         maskTexturesByLayerID.removeValue(forKey: layerID)
     }
 
-    func fillMaskTexture(for layerID: LayerID, value: Float, metal: MetalDeviceContext) {
-        guard let texture = maskTexture(for: layerID) else { return }
-        clearTexture(texture, value: Double(min(max(value, 0), 1)), metal: metal)
+    @discardableResult
+    func fillContentTexture(for layerID: LayerID, value: Double, metal: MetalDeviceContext) -> Bool {
+        guard let id = surfaceID(for: layerID), let texture = texture(for: id) else { return false }
+        return clearTexture(texture, value: value, metal: metal)
     }
 
-    func copyTexture(from sourceLayerID: LayerID, to destinationLayerID: LayerID, metal: MetalDeviceContext) {
-        guard
-            let sourceSurfaceID = surfaceID(for: sourceLayerID),
-            let destinationSurfaceID = surfaceID(for: destinationLayerID),
-            let sourceTexture = readTexture(for: sourceSurfaceID),
-            let destinationTexture = texture(for: destinationSurfaceID)
-        else {
-            return
-        }
+    @discardableResult
+    func fillMaskTexture(for layerID: LayerID, value: Float, metal: MetalDeviceContext) -> Bool {
+        guard let texture = maskTexture(for: layerID) else { return false }
+        return clearTexture(texture, value: Double(min(max(value, 0), 1)), metal: metal)
+    }
 
-        copyTexture(
-            from: sourceTexture,
-            to: destinationTexture,
-            metal: metal,
-            waitUntilCompleted: true
-        )
+    @discardableResult
+    func copyTexture(from sourceLayerID: LayerID, to destinationLayerID: LayerID, metal: MetalDeviceContext) -> Bool {
+        guard let sourceID = surfaceID(for: sourceLayerID), let destinationID = surfaceID(for: destinationLayerID),
+              let source = readTexture(for: sourceID), let destination = texture(for: destinationID),
+              copyTextures([(source, destination)], metal: metal) else { return false }
         contentStateByLayerID[destinationLayerID] = contentStateByLayerID[sourceLayerID] ?? .unknown
+        return true
     }
 
-    func copyMaskTexture(from sourceLayerID: LayerID, to destinationLayerID: LayerID, metal: MetalDeviceContext) {
-        guard let sourceTexture = readMaskTexture(for: sourceLayerID),
-              let destinationTexture = maskTexture(for: destinationLayerID) else {
-            return
-        }
-        copyTexture(
-            from: sourceTexture,
-            to: destinationTexture,
-            metal: metal,
-            waitUntilCompleted: true
-        )
+    @discardableResult
+    func copyMaskTexture(from sourceLayerID: LayerID, to destinationLayerID: LayerID, metal: MetalDeviceContext) -> Bool {
+        guard let source = readMaskTexture(for: sourceLayerID) else { return readMaskTexture(for: destinationLayerID) == nil }
+        guard let destination = maskTexture(for: destinationLayerID) else { return false }
+        return copyTextures([(source, destination)], metal: metal)
     }
 
-    func copyTexture(
-        from sourceTexture: MTLTexture,
-        to destinationTexture: MTLTexture,
-        metal: MetalDeviceContext
-    ) {
-        copyTexture(
-            from: sourceTexture,
-            to: destinationTexture,
-            metal: metal,
-            waitUntilCompleted: true
-        )
-    }
-
-    func copyTextureAsync(
-        from sourceTexture: MTLTexture,
-        to destinationTexture: MTLTexture,
-        metal: MetalDeviceContext
-    ) {
-        copyTexture(
-            from: sourceTexture,
-            to: destinationTexture,
-            metal: metal,
-            waitUntilCompleted: false
-        )
+    @discardableResult
+    func copyTexture(from sourceTexture: MTLTexture, to destinationTexture: MTLTexture, metal: MetalDeviceContext) -> Bool {
+        copyTextures([(sourceTexture, destinationTexture)], metal: metal)
     }
 
     @discardableResult
@@ -588,6 +591,9 @@ final class StageOneLayerSurfaceStore {
         _ copies: [(source: MTLTexture, destination: MTLTexture)],
         metal: MetalDeviceContext
     ) -> Bool {
+#if DEBUG
+        if debugRejectsTextureCommands { return false }
+#endif
         guard !copies.isEmpty else { return true }
         guard copies.allSatisfy({ copy in
             copy.source.width == copy.destination.width
@@ -621,92 +627,6 @@ final class StageOneLayerSurfaceStore {
         commandBuffer.commit()
         commandBuffer.waitUntilCompleted()
         return commandBuffer.status == .completed
-    }
-
-    func copyTextureRegion(
-        from sourceTexture: MTLTexture,
-        to destinationTexture: MTLTexture,
-        sourceOriginX: Int,
-        sourceOriginY: Int,
-        width: Int,
-        height: Int,
-        destinationOriginX: Int,
-        destinationOriginY: Int,
-        metal: MetalDeviceContext,
-        waitUntilCompleted: Bool = true
-    ) {
-        guard width > 0, height > 0 else {
-            return
-        }
-
-        guard
-            sourceOriginX >= 0,
-            sourceOriginY >= 0,
-            destinationOriginX >= 0,
-            destinationOriginY >= 0,
-            sourceOriginX + width <= sourceTexture.width,
-            sourceOriginY + height <= sourceTexture.height,
-            destinationOriginX + width <= destinationTexture.width,
-            destinationOriginY + height <= destinationTexture.height
-        else {
-            return
-        }
-
-        guard
-            let commandBuffer = metal.commandQueue.makeCommandBuffer(),
-            let blitEncoder = commandBuffer.makeBlitCommandEncoder()
-        else {
-            return
-        }
-
-        blitEncoder.copy(
-            from: sourceTexture,
-            sourceSlice: 0,
-            sourceLevel: 0,
-            sourceOrigin: MTLOrigin(x: sourceOriginX, y: sourceOriginY, z: 0),
-            sourceSize: MTLSize(width: width, height: height, depth: 1),
-            to: destinationTexture,
-            destinationSlice: 0,
-            destinationLevel: 0,
-            destinationOrigin: MTLOrigin(x: destinationOriginX, y: destinationOriginY, z: 0)
-        )
-        blitEncoder.endEncoding()
-        commandBuffer.commit()
-        if waitUntilCompleted {
-            commandBuffer.waitUntilCompleted()
-        }
-    }
-
-    private func copyTexture(
-        from sourceTexture: MTLTexture,
-        to destinationTexture: MTLTexture,
-        metal: MetalDeviceContext,
-        waitUntilCompleted: Bool
-    ) {
-        guard
-            let commandBuffer = metal.commandQueue.makeCommandBuffer(),
-            let blitEncoder = commandBuffer.makeBlitCommandEncoder()
-        else {
-            return
-        }
-
-        let size = MTLSize(width: sourceTexture.width, height: sourceTexture.height, depth: 1)
-        blitEncoder.copy(
-            from: sourceTexture,
-            sourceSlice: 0,
-            sourceLevel: 0,
-            sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
-            sourceSize: size,
-            to: destinationTexture,
-            destinationSlice: 0,
-            destinationLevel: 0,
-            destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
-        )
-        blitEncoder.endEncoding()
-        commandBuffer.commit()
-        if waitUntilCompleted {
-            commandBuffer.waitUntilCompleted()
-        }
     }
 
     func reset() {
@@ -758,6 +678,9 @@ final class StageOneLayerSurfaceStore {
         storageMode: MTLStorageMode = .private,
         metal: MetalDeviceContext
     ) -> MTLTexture? {
+#if DEBUG
+        if debugPreventsTextureAllocation { return nil }
+#endif
         metalContext = metal
         let descriptor = MTLTextureDescriptor.texture2DDescriptor(
             pixelFormat: pixelFormat ?? contentPixelFormat,
@@ -784,7 +707,7 @@ final class StageOneLayerSurfaceStore {
     private func clearTexture(
         _ texture: MTLTexture,
         metal: MetalDeviceContext
-    ) {
+    ) -> Bool {
         clearTexture(texture, value: 0, metal: metal)
     }
 
@@ -792,11 +715,14 @@ final class StageOneLayerSurfaceStore {
         _ texture: MTLTexture,
         value: Double,
         metal: MetalDeviceContext
-    ) {
+    ) -> Bool {
+#if DEBUG
+        if debugRejectsTextureCommands { return false }
+#endif
         guard
             let commandBuffer = metal.commandQueue.makeCommandBuffer()
         else {
-            return
+            return false
         }
 
         let descriptor = MTLRenderPassDescriptor()
@@ -811,10 +737,12 @@ final class StageOneLayerSurfaceStore {
         )
 
         guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: descriptor) else {
-            return
+            return false
         }
 
         encoder.endEncoding()
         commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+        return commandBuffer.status == .completed
     }
 }

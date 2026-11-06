@@ -875,7 +875,7 @@ final class MetalStrokeEngine: StrokeEngine {
             return nil
         }
 
-        layerSurfaceStore.copyTexture(from: previewBaseTexture, to: previewTexture, metal: metalContext)
+        guard layerSurfaceStore.copyTexture(from: previewBaseTexture, to: previewTexture, metal: metalContext) else { return nil }
         for job in queueSnapshot where selectedRecentCommitRevisions.contains(job.commitRevision) {
             try? encode(
                 job: job,
@@ -923,7 +923,7 @@ final class MetalStrokeEngine: StrokeEngine {
             return nil
         }
 
-        layerSurfaceStore.copyTexture(from: sourceTexture, to: previewBaseTexture, metal: metalContext)
+        guard layerSurfaceStore.copyTexture(from: sourceTexture, to: previewBaseTexture, metal: metalContext) else { return nil }
         for job in queueSnapshot where !selectedRecentCommitRevisions.contains(job.commitRevision) {
             try? encode(
                 job: job,
@@ -955,8 +955,8 @@ final class MetalStrokeEngine: StrokeEngine {
         var samplingStates: [BrushStrokeStreamID: BrushStrokeSamplingState] = [:]
         var opacityCapSessions: [BrushStrokeStreamID: OpacityCapSessionResources] = [:]
         let usesAlphaLock = job.packets.contains(where: \.alphaLockEnabled)
-        let alphaLockTexture = usesAlphaLock ? (alphaLockSource ?? makeAlphaLockTextureCopy(from: texture)) : nil
-        if requiresCompleteResources, usesAlphaLock, alphaLockTexture == nil {
+        let alphaLockTexture = usesAlphaLock ? (alphaLockSource ?? makeAlphaLockTextureCopy(from: texture, commandBuffer: commandBuffer)) : nil
+        if usesAlphaLock, alphaLockTexture == nil {
             throw CanvasResourceError(message: "无法准备透明像素锁定蒙版")
         }
 
@@ -1191,7 +1191,7 @@ final class MetalStrokeEngine: StrokeEngine {
         (stroke.tool == .brush || stroke.tool == .eraser) && stroke.brush.requiresStrokeMaskSession
     }
 
-    private func makeAlphaLockTextureCopy(from sourceTexture: MTLTexture) -> MTLTexture? {
+    private func makeAlphaLockTextureCopy(from sourceTexture: MTLTexture, commandBuffer: MTLCommandBuffer) -> MTLTexture? {
         guard let alphaLockTexture = layerSurfaceStore.makeTexture(
             width: sourceTexture.width,
             height: sourceTexture.height,
@@ -1203,11 +1203,12 @@ final class MetalStrokeEngine: StrokeEngine {
             return nil
         }
 
-        layerSurfaceStore.copyTextureAsync(
-            from: sourceTexture,
-            to: alphaLockTexture,
-            metal: metalContext
-        )
+        guard let blit = commandBuffer.makeBlitCommandEncoder() else { return nil }
+        blit.copy(from: sourceTexture, sourceSlice: 0, sourceLevel: 0,
+            sourceOrigin: .init(x: 0, y: 0, z: 0),
+            sourceSize: .init(width: sourceTexture.width, height: sourceTexture.height, depth: 1),
+            to: alphaLockTexture, destinationSlice: 0, destinationLevel: 0, destinationOrigin: .init(x: 0, y: 0, z: 0))
+        blit.endEncoding()
         return alphaLockTexture
     }
 }

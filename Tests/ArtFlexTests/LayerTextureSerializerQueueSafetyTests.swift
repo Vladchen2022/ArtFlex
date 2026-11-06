@@ -142,7 +142,7 @@ struct LayerTextureSerializerQueueSafetyTests {
     }
 
     @Test
-    func copyTextureAsyncUsageIsScopedToMetalStrokeEngine() throws {
+    func standaloneUncheckedTextureCopiesAreNotUsed() throws {
         let rootURL = workspaceRootURL(from: #filePath)
         let sourceDirectories = [
             rootURL.appendingPathComponent("Core"),
@@ -161,7 +161,7 @@ struct LayerTextureSerializerQueueSafetyTests {
             }
         }
 
-        #expect(matches.map(\.lastPathComponent) == ["MetalStrokeEngine.swift"])
+        #expect(matches.isEmpty)
     }
 
     @Test

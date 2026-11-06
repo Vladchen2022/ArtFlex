@@ -7,6 +7,79 @@ import Testing
 @Suite(.serialized)
 @MainActor
 struct WorkspaceTransactionRegressionTests {
+    @Test(arguments: ["allocation", "commands", "history"])
+    func layerPreparationFailurePreservesPixelsTopologyHistoryAndDirtyState(failure: String) throws {
+        for operation in ["add", "mask", "import"] {
+            let h = try TransactionHarness()
+            defer { h.cleanUp() }
+            try h.paintFixturePatch()
+            let document = h.viewModel.workspace.document
+            let pixels = try h.snapshot()
+            let history = h.bootstrap.historyController.currentStateID
+            let sourceTexture = try h.texture()
+            h.viewModel.hasUnsavedChanges = false
+            h.bootstrap.layerSurfaceStore.debugPreventsTextureAllocation = failure == "allocation"
+            h.bootstrap.layerSurfaceStore.debugRejectsTextureCommands = failure == "commands"
+            h.bootstrap.historyController.debugPreventsCheckpointCapture = failure == "history"
+            switch operation {
+            case "add": h.viewModel.addLayer()
+            case "mask": h.viewModel.addMaskToActiveLayer(revealsAll: false)
+            default:
+                #expect(throws: (any Error).self) { try h.viewModel.appendCompositeSnapshotAsNewLayer(pixels, named: "拒绝导入") }
+            }
+            #expect(h.viewModel.workspace.document == document)
+            #expect(h.bootstrap.workspaceStore.state.document == document)
+            #expect(h.bootstrap.historyController.currentStateID == history)
+            #expect(!h.viewModel.hasUnsavedChanges)
+            #expect(try h.texture() === sourceTexture)
+            #expect(try h.snapshot() == pixels)
+        }
+    }
+
+    @Test(arguments: [false, true])
+    func failedNewCanvasKeepsTheOpenDocumentAndItsPixels(commands: Bool) throws {
+        let h = try TransactionHarness()
+        defer { h.cleanUp() }
+        try h.paintFixturePatch()
+        let document = h.viewModel.workspace.document
+        let pixels = try h.snapshot()
+        h.bootstrap.layerSurfaceStore.debugPreventsTextureAllocation = !commands
+        h.bootstrap.layerSurfaceStore.debugRejectsTextureCommands = commands
+        h.viewModel.createNewCanvasDiscardingUnsavedChanges(name: "失败画布", canvasSize: .init(width: 32, height: 32), resolutionDPI: 300, pixelFormat: .rgba8)
+        #expect(h.viewModel.workspace.document == document)
+        #expect(try h.snapshot() == pixels)
+        #expect(h.viewModel.status?.kind == .error)
+    }
+
+    @Test func duplicateSharesPixelsUntilMutationAndMissingSourceCannotPublish() throws {
+        let h = try TransactionHarness()
+        defer { h.cleanUp() }
+        try h.paintFixturePatch()
+        h.viewModel.addMaskToActiveLayer(revealsAll: true)
+        let sourceID = h.layerID
+        let texture = try h.texture()
+        let mask = try #require(h.bootstrap.layerSurfaceStore.readMaskTexture(for: sourceID))
+        let pixels = try h.snapshot()
+        h.viewModel.duplicateActiveLayer()
+        let destinationID = h.layerID
+        #expect(destinationID != sourceID)
+        #expect(try h.texture() === texture)
+        #expect(h.bootstrap.layerSurfaceStore.readMaskTexture(for: destinationID) === mask)
+        #expect(h.bootstrap.layerSurfaceStore.fillMaskTexture(for: destinationID, value: 0, metal: h.bootstrap.metalContext))
+        #expect(h.bootstrap.layerSurfaceStore.readMaskTexture(for: sourceID) === mask)
+        #expect(h.bootstrap.layerSurfaceStore.readMaskTexture(for: destinationID) !== mask)
+        h.viewModel.undo()
+        #expect(h.layerID == sourceID)
+        #expect(try h.snapshot() == pixels)
+        h.bootstrap.layerSurfaceStore.debugRemoveContentTexture(for: sourceID)
+        let document = h.viewModel.workspace.document
+        let history = h.bootstrap.historyController.currentStateID
+        h.viewModel.duplicateActiveLayer()
+        #expect(h.viewModel.workspace.document == document)
+        #expect(h.bootstrap.historyController.currentStateID == history)
+        #expect(h.viewModel.status?.kind == .error)
+    }
+
     @Test func savedPixelsBecomeCleanAfterUndoingTransformWithSelectionHistoryInBetween() async throws {
         let h = try TransactionHarness()
         defer { h.cleanUp() }

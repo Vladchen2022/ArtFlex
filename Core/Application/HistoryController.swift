@@ -561,7 +561,7 @@ final class HistoryController {
         } else if case .metadataOnly = resolvedCapture {
             // 图层名称、顺序、可见性等元数据不需要复制任何画布纹理。
         } else {
-            layerSurfaceStore.prepareTextures(for: workspace.document, metal: metalContext)
+            try layerSurfaceStore.requireTextures(for: workspace.document, metal: metalContext)
         }
         let snapshotLayerIDs: Set<LayerID>
         let mode: WorkspaceHistoryEntry.Mode
@@ -840,8 +840,10 @@ final class HistoryController {
               identitySignature(for: workspace) == expectedIdentitySignature else {
             throw HistoryControllerError.dirtyRestoreTopologyMismatch
         }
+        let prepared = layerSurfaceStore.sharedCopy()
+        try prepared.requireTextures(for: workspace.document, metal: metalContext)
         workspaceStore.replaceState(workspace)
-        layerSurfaceStore.prepareTextures(for: workspace.document, metal: metalContext)
+        layerSurfaceStore.adoptContents(of: prepared)
     }
 
     private func restoreWithFullReset(
@@ -860,9 +862,12 @@ final class HistoryController {
             entry.layerSnapshots,
             workspace: workspace
         )
+        let prepared = layerSurfaceStore.sharedCopy()
+        prepared.reset()
+        installStagedTextures(stagedTextures, workspace: workspace, into: prepared)
+        try prepared.requireTextures(for: workspace.document, metal: metalContext)
         workspaceStore.replaceState(workspace)
-        layerSurfaceStore.reset()
-        installStagedTextures(stagedTextures, workspace: workspace)
+        layerSurfaceStore.adoptContents(of: prepared)
     }
 
     private func restoreTopologyDelta(
@@ -877,12 +882,11 @@ final class HistoryController {
             workspace: workspace,
             requireCompleteDocument: false
         )
+        let prepared = layerSurfaceStore.sharedCopy()
+        installStagedTextures(stagedTextures, workspace: workspace, into: prepared)
+        try prepared.requireTextures(for: workspace.document, metal: metalContext)
         workspaceStore.replaceState(workspace)
-        // Common layer textures remain resident. Deleted or mutated resources were restored into
-        // independent textures before the document topology changed, so allocation/readback
-        // failure cannot leave the workspace half-restored.
-        installStagedTextures(stagedTextures, workspace: workspace)
-        layerSurfaceStore.prepareTextures(for: workspace.document, metal: metalContext)
+        layerSurfaceStore.adoptContents(of: prepared)
     }
 
     private func restoreInPlaceChangedLayers(
@@ -1094,8 +1098,9 @@ final class HistoryController {
 
     private func installStagedTextures(
         _ resources: [StagedHistoryResource],
-        workspace: WorkspaceState
+        workspace: WorkspaceState, into target: StageOneLayerSurfaceStore? = nil
     ) {
+        let layerSurfaceStore = target ?? self.layerSurfaceStore
         _ = layerSurfaceStore.surfaceRecords(for: workspace.document)
         for resource in resources {
             switch resource.resourceKind {

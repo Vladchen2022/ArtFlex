@@ -5205,144 +5205,70 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     private func commitPatternPlacement(_ draft: PatternPlacementDraft) {
-        guard let item = workspace.patternLibrary.item(id: draft.itemID) else {
+        guard let item = workspace.patternLibrary.item(id: draft.itemID),
+              let sourceTexture = patternPlacementTexture(for: draft.itemID) else {
             patternPlacementPhase = .idle
-            showStatus(.init(kind: .info, message: "当前图案已不存在"))
-            return
+            showStatus(.init(kind: .error, message: "无法加载图案素材")); return
         }
-
-        guard let sourceTexture = patternPlacementTexture(for: draft.itemID) else {
+        if draft.placementModeAtDragStart == .newLayer,
+           !ensureDocumentResourceBudget(additionalPaintLayers: 1, action: "新建图案图层") { return }
+        do {
+            let prepared = try prepareLayerDocument()
+            let version = documentLifecycle.version
+            let targetID: LayerID
+            switch draft.placementModeAtDragStart {
+            case .currentLayer:
+                guard let id = bootstrap.interactionController.activeEditableLayerID() else {
+                    throw CanvasResourceError(message: "当前图层不能绘画")
+                }
+                targetID = id
+            case .newLayer: targetID = try prepared.addLayer(named: item.displayName)
+            }
+            let texture = try prepared.writableTexture(for: targetID)
+            guard let command = bootstrap.metalContext.commandQueue.makeCommandBuffer() else {
+                throw CanvasResourceError(message: "无法创建图案命令缓冲")
+            }
+            let pass = MTLRenderPassDescriptor()
+            pass.colorAttachments[0].texture = texture
+            pass.colorAttachments[0].loadAction = .load
+            pass.colorAttachments[0].storeAction = .store
+            guard bootstrap.patternPlacementRenderer.encode(into: pass, commandBuffer: command,
+                sourceTexture: sourceTexture, canvasSize: prepared.document.canvasSize,
+                destinationRect: draft.destinationRect, flipHorizontally: draft.flipsHorizontally,
+                flipVertically: draft.flipVertically, rotationDegrees: draft.rotationDegrees, opacity: draft.opacity) else {
+                throw CanvasResourceError(message: "无法编码图案；画稿未改变")
+            }
+            let candidate = WorkspaceUncheckedBox(prepared)
+            isApplyingPatternPlacementCommit = true
             patternPlacementPhase = .armed(itemID: draft.itemID)
-            showStatus(.init(kind: .error, message: "无法加载图案素材"))
-            return
-        }
-
-        guard let commandBuffer = bootstrap.metalContext.commandQueue.makeCommandBuffer() else {
+            command.addCompletedHandler { [weak self] completed in
+                Task { @MainActor in
+                    guard let self else { return }
+                    self.isApplyingPatternPlacementCommit = false
+                    guard completed.status == .completed, self.documentLifecycle.version == version else {
+                        self.showStatus(.init(kind: .error, message: completed.error?.localizedDescription ?? "图案未提交，源画稿已改变或渲染失败")); return
+                    }
+                    let isNew = draft.placementModeAtDragStart == .newLayer
+                    let checkpoint = isNew
+                        ? self.checkpointHistoryIfPossible(operationKind: "patternPlacement.apply", topologyOperation: true,
+                            additionalOperationKinds: ["document.addLayer"], captureMode: .topologyDelta(changedLayerIDs: []))
+                        : self.checkpointSingleLayerHistoryIfPossible(layerID: targetID, operationKind: "patternPlacement.apply")
+                    guard checkpoint else { return }
+                    self.publishLayerDocument(candidate.value)
+                    self.bootstrap.workspaceStore.updatePatternLibrary { $0.noteItemUsed(draft.itemID) }
+                    self.persistPatternLibrary()
+                    if isNew {
+                        self.noteCanvasContentChanged(changedLayerIDs: [targetID])
+                        self.refresh(invalidatedLayerIDs: [targetID]); self.recordDrawingActivityIfNeeded()
+                    } else { self.finalizeCommittedSingleLayerMutation(targetID) }
+                    self.showStatus(.init(kind: .success, message: "已放置图案：\(item.displayName)"))
+                }
+            }
+            command.commit()
+        } catch {
             patternPlacementPhase = .armed(itemID: draft.itemID)
-            showStatus(.init(kind: .error, message: "无法创建图案命令缓冲"))
-            return
+            showStatus(.init(kind: .error, message: error.localizedDescription))
         }
-
-        let targetLayerID: LayerID
-        let targetTexture: MTLTexture
-        let successMessage: String
-
-        switch draft.placementModeAtDragStart {
-        case .currentLayer:
-            guard let layerID = bootstrap.interactionController.activeEditableLayerID() else {
-                patternPlacementPhase = .armed(itemID: draft.itemID)
-                showStatus(.init(kind: .info, message: "当前图层已锁定"))
-                return
-            }
-
-            guard
-                let texture = bootstrap.layerSurfaceStore.surfaceID(for: layerID).flatMap(bootstrap.layerSurfaceStore.texture(for:))
-            else {
-                patternPlacementPhase = .armed(itemID: draft.itemID)
-                showStatus(.init(kind: .error, message: "无法访问当前图层"))
-                return
-            }
-
-            guard checkpointSingleLayerHistoryIfPossible(
-                layerID: layerID,
-                operationKind: "patternPlacement.apply"
-            ) else {
-                patternPlacementPhase = .armed(itemID: draft.itemID)
-                return
-            }
-            targetLayerID = layerID
-            targetTexture = texture
-            successMessage = "已贴入当前图层：\(item.displayName)"
-
-        case .newLayer:
-            guard ensureDocumentResourceBudget(
-                additionalPaintLayers: 1,
-                action: "新建图案图层"
-            ) else {
-                patternPlacementPhase = .armed(itemID: draft.itemID)
-                return
-            }
-            guard checkpointHistoryIfPossible(
-                operationKind: "patternPlacement.apply",
-                topologyOperation: true,
-                additionalOperationKinds: ["document.addLayer"],
-                captureMode: .topologyDelta(changedLayerIDs: [])
-            ) else {
-                patternPlacementPhase = .armed(itemID: draft.itemID)
-                return
-            }
-
-            var addedLayer: LayerRecord?
-            bootstrap.workspaceStore.updateDocument { document in
-                addedLayer = document.addLayer(named: item.displayName)
-            }
-            let updatedDocument = bootstrap.workspaceStore.state.document
-            bootstrap.layerSurfaceStore.prepareTextures(
-                for: updatedDocument,
-                metal: bootstrap.metalContext
-            )
-
-            guard let addedLayer,
-                  let surfaceID = bootstrap.layerSurfaceStore.surfaceID(for: addedLayer.id),
-                  let texture = bootstrap.layerSurfaceStore.texture(for: surfaceID) else {
-                patternPlacementPhase = .armed(itemID: draft.itemID)
-                refresh()
-                showStatus(.init(kind: .error, message: "无法创建图案图层"))
-                return
-            }
-
-            targetLayerID = addedLayer.id
-            targetTexture = texture
-            successMessage = "已新建图层并放置图案：\(item.displayName)"
-        }
-
-        let renderPassDescriptor = MTLRenderPassDescriptor()
-        renderPassDescriptor.colorAttachments[0].texture = targetTexture
-        renderPassDescriptor.colorAttachments[0].loadAction = .load
-        renderPassDescriptor.colorAttachments[0].storeAction = .store
-
-        bootstrap.patternPlacementRenderer.encode(
-            into: renderPassDescriptor,
-            commandBuffer: commandBuffer,
-            sourceTexture: sourceTexture,
-            canvasSize: workspace.document.canvasSize,
-            destinationRect: draft.destinationRect,
-            flipHorizontally: draft.flipsHorizontally,
-            flipVertically: draft.flipVertically,
-            rotationDegrees: draft.rotationDegrees,
-            opacity: draft.opacity
-        )
-
-        isApplyingPatternPlacementCommit = true
-        patternPlacementPhase = .armed(itemID: draft.itemID)
-        commandBuffer.addCompletedHandler { [weak self] completedBuffer in
-            Task { @MainActor in
-                guard let self else { return }
-                self.isApplyingPatternPlacementCommit = false
-
-                guard completedBuffer.status == .completed else {
-                    let message = completedBuffer.error?.localizedDescription ?? "无法完成图案放置"
-                    self.showStatus(.init(kind: .error, message: message))
-                    return
-                }
-
-                self.bootstrap.workspaceStore.updatePatternLibrary { library in
-                    library.noteItemUsed(draft.itemID)
-                }
-                self.persistPatternLibrary()
-
-                switch draft.placementModeAtDragStart {
-                case .currentLayer:
-                    self.finalizeCommittedSingleLayerMutation(targetLayerID)
-                case .newLayer:
-                    self.noteCanvasContentChanged(changedLayerIDs: [targetLayerID])
-                    self.refresh(invalidatedLayerIDs: [targetLayerID])
-                    self.recordDrawingActivityIfNeeded()
-                }
-                self.showStatus(.init(kind: .success, message: successMessage))
-            }
-        }
-        commandBuffer.commit()
     }
 
     var isPatternImportSheetPresented: Bool {
@@ -6528,26 +6454,29 @@ final class WorkspaceViewModel: ObservableObject {
         applyCanvasCrop()
     }
 
+    private func prepareLayerDocument() throws -> LayerDocumentPreparation {
+        _ = flushBrushEditingBoundary(reason: "prepareLayerDocument")
+        return try LayerDocumentPreparation(document: bootstrap.workspaceStore.state.document,
+            source: bootstrap.layerSurfaceStore, metal: bootstrap.metalContext)
+    }
+
+    private func publishLayerDocument(_ prepared: LayerDocumentPreparation) {
+        bootstrap.workspaceStore.updateDocument { $0 = prepared.document }
+        bootstrap.layerSurfaceStore.adoptContents(of: prepared.surfaces)
+    }
+
     func addLayer() {
-        guard ensureDocumentResourceBudget(
-            additionalPaintLayers: 1,
-            action: "新增图层"
-        ) else { return }
-        guard checkpointHistoryIfPossible(
-            operationKind: "layer.add",
-            topologyOperation: true,
-            captureMode: .topologyDelta(changedLayerIDs: [])
-        ) else { return }
-        var addedLayerID: LayerID?
-        bootstrap.workspaceStore.updateDocument { document in
-            addedLayerID = document.addLayer().id
-        }
-        refresh()
-        noteCanvasContentChanged()
-        if let addedLayerID {
-            bootstrap.layerSurfaceStore.markKnownTransparent(for: addedLayerID)
-        }
-        showStatus(.init(kind: .success, message: "已新增图层"))
+        guard ensureDocumentResourceBudget(additionalPaintLayers: 1, action: "新增图层") else { return }
+        do {
+            let prepared = try prepareLayerDocument()
+            let id = try prepared.addLayer()
+            guard checkpointHistoryIfPossible(operationKind: "layer.add", topologyOperation: true,
+                captureMode: .topologyDelta(changedLayerIDs: [])) else { return }
+            publishLayerDocument(prepared)
+            refresh(); noteCanvasContentChanged()
+            bootstrap.layerSurfaceStore.markKnownTransparent(for: id)
+            showStatus(.init(kind: .success, message: "已新增图层"))
+        } catch { showStatus(.init(kind: .error, message: error.localizedDescription)) }
     }
 
     func addCurveAdjustmentLayer() {
@@ -6736,46 +6665,18 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func duplicateActiveLayer() {
-        let activeLayerAddsSurface = workspace.document.layer(
-            workspace.document.activeLayerID
-        )?.isPaintLayer == true
-        guard ensureDocumentResourceBudget(
-            additionalPaintLayers: activeLayerAddsSurface ? 1 : 0,
-            additionalMasks: workspace.document.layer(
-                workspace.document.activeLayerID
-            )?.mask == nil ? 0 : 1,
-            action: "复制图层"
-        ) else { return }
-        guard checkpointHistoryIfPossible(
-            operationKind: "layer.duplicate",
-            topologyOperation: true,
-            captureMode: .topologyDelta(changedLayerIDs: [])
-        ) else { return }
-
-        let sourceLayerID = workspace.document.activeLayerID
-        var duplicatedLayerID: LayerID?
-        bootstrap.workspaceStore.updateDocument { document in
-            duplicatedLayerID = document.duplicateActiveLayer()?.id
-        }
-        refresh()
-
-        if let duplicatedLayerID {
-            bootstrap.layerSurfaceStore.copyTexture(
-                from: sourceLayerID,
-                to: duplicatedLayerID,
-                metal: bootstrap.metalContext
-            )
-            bootstrap.layerSurfaceStore.copyMaskTexture(
-                from: sourceLayerID,
-                to: duplicatedLayerID,
-                metal: bootstrap.metalContext
-            )
-            refresh()
-            noteCanvasContentChanged()
+        guard ensureDocumentResourceBudget(additionalPaintLayers: 1,
+            additionalMasks: workspace.document.layer(workspace.document.activeLayerID)?.mask == nil ? 0 : 1,
+            action: "复制图层") else { return }
+        do {
+            let prepared = try prepareLayerDocument()
+            _ = try prepared.duplicateActiveLayer()
+            guard checkpointHistoryIfPossible(operationKind: "layer.duplicate", topologyOperation: true,
+                captureMode: .topologyDelta(changedLayerIDs: [])) else { return }
+            publishLayerDocument(prepared)
+            refresh(); noteCanvasContentChanged()
             showStatus(.init(kind: .success, message: "已复制图层"))
-        } else {
-            showStatus(.init(kind: .error, message: "无法复制图层"))
-        }
+        } catch { showStatus(.init(kind: .error, message: error.localizedDescription)) }
     }
 
     func mergeActiveLayerDown() {
@@ -6976,31 +6877,13 @@ final class WorkspaceViewModel: ObservableObject {
 
         do {
             let stampedTexture = try makeVisibleCompositeTexture()
-            guard checkpointHistoryIfPossible(
-                operationKind: "layer.stampVisible",
-                topologyOperation: true,
-                additionalOperationKinds: ["layer.composite"],
-                captureMode: .topologyDelta(changedLayerIDs: [])
-            ) else { return }
-
-            var createdLayerID: LayerID?
-            bootstrap.workspaceStore.updateDocument { document in
-                createdLayerID = document.addLayer(named: "盖印图层").id
-            }
-
-            let state = bootstrap.workspaceStore.state
-            bootstrap.layerSurfaceStore.prepareTextures(
-                for: state.document,
-                metal: bootstrap.metalContext
-            )
-            guard
-                let createdLayerID,
-                let surfaceID = bootstrap.layerSurfaceStore.surfaceID(for: createdLayerID)
-            else {
-                throw CocoaError(.fileWriteUnknown)
-            }
-
-            bootstrap.layerSurfaceStore.swapTexture(for: surfaceID, with: stampedTexture)
+            let prepared = try prepareLayerDocument()
+            let createdLayerID = try prepared.addLayer(named: "盖印图层")
+            guard let surfaceID = prepared.surfaces.surfaceID(for: createdLayerID) else { throw CocoaError(.fileWriteUnknown) }
+            prepared.surfaces.swapTexture(for: surfaceID, with: stampedTexture)
+            guard checkpointHistoryIfPossible(operationKind: "layer.stampVisible", topologyOperation: true,
+                additionalOperationKinds: ["layer.composite"], captureMode: .topologyDelta(changedLayerIDs: [])) else { return }
+            publishLayerDocument(prepared)
             refresh(invalidatedLayerIDs: [createdLayerID])
             noteCanvasContentChanged(changedLayerIDs: [createdLayerID])
             recordDrawingActivityIfNeeded()
@@ -7061,31 +6944,13 @@ final class WorkspaceViewModel: ObservableObject {
             additionalMasks: 1,
             action: "添加图层蒙版"
         ) else { return }
-        guard checkpointHistoryIfPossible(
-            operationKind: "layerMask.add",
-            candidateChangedLayerIDs: [layerID],
-            topologyOperation: true,
-            captureMode: .topologyDelta(changedLayerIDs: [layerID])
-        ) else { return }
-        let retained: CanvasCropRetention?
         do {
-            retained = try RetainedCropLayerOperations.mask(document: workspace.document,
-                layerID: layerID, fill: revealsAll ? 255 : 0)
-        } catch {
-            showStatus(.init(kind: .error, message: error.localizedDescription))
-            return
-        }
-        bootstrap.workspaceStore.updateDocument { document in
-            guard let index = document.layers.firstIndex(where: { $0.id == layerID }) else { return }
-            document.layers[index].mask = LayerMaskDescriptor(isEnabled: true)
-            document.cropRetention = retained
-        }
-        bootstrap.layerSurfaceStore.prepareTextures(for: bootstrap.workspaceStore.state.document, metal: bootstrap.metalContext)
-        bootstrap.layerSurfaceStore.fillMaskTexture(
-            for: layerID,
-            value: revealsAll ? 1 : 0,
-            metal: bootstrap.metalContext
-        )
+            let prepared = try prepareLayerDocument()
+            try prepared.addMask(to: layerID, revealsAll: revealsAll)
+            guard checkpointHistoryIfPossible(operationKind: "layerMask.add", candidateChangedLayerIDs: [layerID],
+                topologyOperation: true, captureMode: .topologyDelta(changedLayerIDs: [layerID])) else { return }
+            publishLayerDocument(prepared)
+        } catch { showStatus(.init(kind: .error, message: error.localizedDescription)); return }
         activeMaskEditingLayerID = layerID
         selectTool(.brush)
         noteCanvasContentChanged(changedLayerIDs: [layerID])
@@ -7287,11 +7152,8 @@ final class WorkspaceViewModel: ObservableObject {
             return nil
         }
 
-        bootstrap.layerSurfaceStore.copyTexture(
-            from: sourceTexture,
-            to: alphaLockTexture,
-            metal: bootstrap.metalContext
-        )
+        guard bootstrap.layerSurfaceStore.copyTexture(from: sourceTexture, to: alphaLockTexture,
+            metal: bootstrap.metalContext) else { return nil }
         return alphaLockTexture
     }
 
@@ -11222,47 +11084,18 @@ final class WorkspaceViewModel: ObservableObject {
         ) else { return false }
 
         do {
-            guard checkpointHistoryIfPossible(
-                operationKind: historyOperationKind,
-                topologyOperation: true,
+            let prepared = try prepareLayerDocument()
+            let insertionIndex = min((prepared.document.layers.firstIndex(where: { $0.id == prepared.document.activeLayerID })
+                ?? (prepared.document.layers.count - 1)) + 1, prepared.document.layers.count)
+            let createdLayerID = try prepared.addLayer(named: layerName)
+            _ = prepared.document.moveLayer(createdLayerID, toIndex: insertionIndex)
+            let texture = try prepared.writableTexture(for: createdLayerID)
+            try bootstrap.textureSerializer.restore(snapshot: placement.snapshot, into: texture,
+                destinationX: placement.destinationX, destinationY: placement.destinationY)
+            guard checkpointHistoryIfPossible(operationKind: historyOperationKind, topologyOperation: true,
                 additionalOperationKinds: additionalHistoryOperationKinds,
-                captureMode: .topologyDelta(changedLayerIDs: [])
-            ) else { return false }
-
-            let insertionIndex = min(
-                (workspace.document.layers.firstIndex(where: { $0.id == workspace.document.activeLayerID }) ?? (workspace.document.layers.count - 1)) + 1,
-                workspace.document.layers.count
-            )
-
-            var createdLayerID: LayerID?
-            bootstrap.workspaceStore.updateDocument { document in
-                createdLayerID = document.addLayer(named: layerName).id
-                if let createdLayerID {
-                    _ = document.moveLayer(createdLayerID, toIndex: insertionIndex)
-                }
-            }
-
-            let state = bootstrap.workspaceStore.state
-            bootstrap.layerSurfaceStore.prepareTextures(
-                for: state.document,
-                metal: bootstrap.metalContext
-            )
-
-            guard
-                let createdLayerID,
-                let surfaceID = bootstrap.layerSurfaceStore.surfaceID(for: createdLayerID),
-                let texture = bootstrap.layerSurfaceStore.texture(for: surfaceID)
-            else {
-                throw CocoaError(.fileWriteUnknown)
-            }
-
-            try bootstrap.textureSerializer.restore(
-                snapshot: placement.snapshot,
-                into: texture,
-                destinationX: placement.destinationX,
-                destinationY: placement.destinationY
-            )
-
+                captureMode: .topologyDelta(changedLayerIDs: [])) else { return false }
+            publishLayerDocument(prepared)
             refresh(invalidatedLayerIDs: [createdLayerID])
             noteCanvasContentChanged(changedLayerIDs: [createdLayerID])
             recordDrawingActivityIfNeeded()
@@ -12445,10 +12278,10 @@ final class WorkspaceViewModel: ObservableObject {
         if workspace.viewport != state.viewport {
             viewportRevision &+= 1
         }
-        bootstrap.layerSurfaceStore.prepareTextures(
+        guard bootstrap.layerSurfaceStore.prepareTextures(
             for: state.document,
             metal: bootstrap.metalContext
-        )
+        ) else { showStatus(.init(kind: .error, message: bootstrap.layerSurfaceStore.lastResourceError ?? "图层资源不完整")); return }
         if let invalidatedLayerIDs {
             for layerID in invalidatedLayerIDs {
                 layerThumbnailCache.removeValue(forKey: layerID)
@@ -15028,10 +14861,6 @@ final class WorkspaceViewModel: ObservableObject {
             break
         }
 
-        timelapseRecorder.stopRecording()
-        resetTransientDocumentInteractionsForReplacement()
-        resetSnapshotToolState(resumeTimelapseIfNeeded: false)
-        perspectiveGuideMatchState = .init()
 
         let now = Date()
         let layers = ArtDocument.stageOneDefaultLayers()
@@ -15066,13 +14895,18 @@ final class WorkspaceViewModel: ObservableObject {
             selection: .empty
         )
 
+        let preparedSurfaces = bootstrap.layerSurfaceStore.sharedCopy()
+        preparedSurfaces.reset()
+        do {
+            try preparedSurfaces.requireTextures(for: document, metal: bootstrap.metalContext)
+            try Self.seedDefaultBackground(for: document, surfaces: preparedSurfaces, metal: bootstrap.metalContext)
+        } catch { showStatus(.init(kind: .error, message: error.localizedDescription)); return }
+        timelapseRecorder.stopRecording()
+        resetTransientDocumentInteractionsForReplacement()
+        resetSnapshotToolState(resumeTimelapseIfNeeded: false)
+        perspectiveGuideMatchState = .init()
         bootstrap.workspaceStore.replaceState(newWorkspace)
-        bootstrap.layerSurfaceStore.reset()
-        bootstrap.layerSurfaceStore.prepareTextures(
-            for: newWorkspace.document,
-            metal: bootstrap.metalContext
-        )
-        seedDefaultBackgroundLayerIfNeeded(for: newWorkspace.document)
+        bootstrap.layerSurfaceStore.adoptContents(of: preparedSurfaces)
         bootstrap.textureSerializer.purgeStagingTextures(exceeding: newWorkspace.document.canvasSize)
         publishDocumentReplacementRenderState()
         bootstrap.historyController.resetHistory()
@@ -15101,31 +14935,17 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     private func seedDefaultBackgroundLayerIfNeeded(for document: ArtDocument) {
-        guard
-            let backgroundLayer = document.layers.first(where: { $0.name == LayerRecord.defaultBackgroundLayerName }),
-            backgroundLayer.name == LayerRecord.defaultBackgroundLayerName,
-            let surfaceID = bootstrap.layerSurfaceStore.surfaceID(for: backgroundLayer.id),
-            let texture = bootstrap.layerSurfaceStore.texture(for: surfaceID)
-        else {
-            return
-        }
+        do { try Self.seedDefaultBackground(for: document, surfaces: bootstrap.layerSurfaceStore, metal: bootstrap.metalContext) }
+        catch { showStatus(.init(kind: .error, message: error.localizedDescription)) }
+    }
 
-        let snapshot = Self.solidColorSnapshot(
-            width: document.canvasSize.width,
-            height: document.canvasSize.height,
-            blue: 255,
-            green: 255,
-            red: 255,
-            alpha: 255
-        )
-
-        do {
-            try bootstrap.textureSerializer.restore(snapshot: snapshot, into: texture)
-            bootstrap.layerSurfaceStore.markContentUnknown(for: backgroundLayer.id)
-            layerThumbnailCache.removeValue(forKey: backgroundLayer.id)
-        } catch {
-            return
+    private static func seedDefaultBackground(for document: ArtDocument, surfaces: StageOneLayerSurfaceStore,
+                                             metal: MetalDeviceContext) throws {
+        guard let background = document.layers.first(where: { $0.name == LayerRecord.defaultBackgroundLayerName }) else { return }
+        guard surfaces.fillContentTexture(for: background.id, value: 1, metal: metal) else {
+            throw CanvasResourceError(message: "无法初始化背景；画稿未改变")
         }
+        surfaces.markContentUnknown(for: background.id)
     }
 
     private static func solidColorSnapshot(
@@ -16392,7 +16212,7 @@ final class WorkspaceViewModel: ObservableObject {
         includesLiveBrushContent: Bool = false
     ) throws -> MTLTexture {
         let state = bootstrap.workspaceStore.state
-        bootstrap.layerSurfaceStore.prepareTextures(
+        try bootstrap.layerSurfaceStore.requireTextures(
             for: state.document,
             metal: bootstrap.metalContext
         )
@@ -16414,7 +16234,7 @@ final class WorkspaceViewModel: ObservableObject {
             $0.isPaintLayer && $0.isReference && state.document.isLayerEffectivelyVisible($0.id)
         }
         guard !referenceLayers.isEmpty else { return nil }
-        bootstrap.layerSurfaceStore.prepareTextures(for: state.document, metal: bootstrap.metalContext)
+        try bootstrap.layerSurfaceStore.requireTextures(for: state.document, metal: bootstrap.metalContext)
         return try makeCompositeTexture(
             layers: referenceLayers,
             document: state.document,
@@ -16524,33 +16344,13 @@ final class WorkspaceViewModel: ObservableObject {
         ) else {
             throw CocoaError(.fileWriteOutOfSpace)
         }
-        guard checkpointHistoryIfPossible(
-            operationKind: "layer.appendCompositeSnapshot",
-            topologyOperation: true,
-            captureMode: .topologyDelta(changedLayerIDs: [])
-        ) else {
-            throw CocoaError(.fileWriteUnknown)
-        }
-        var createdLayerID: LayerID?
-        bootstrap.workspaceStore.updateDocument { document in
-            createdLayerID = document.addLayer(named: layerName).id
-        }
-
-        let state = bootstrap.workspaceStore.state
-        bootstrap.layerSurfaceStore.prepareTextures(
-            for: state.document,
-            metal: bootstrap.metalContext
-        )
-
-        guard
-            let createdLayerID,
-            let surfaceID = bootstrap.layerSurfaceStore.surfaceID(for: createdLayerID),
-            let texture = bootstrap.layerSurfaceStore.texture(for: surfaceID)
-        else {
-            throw CocoaError(.fileWriteUnknown)
-        }
-
+        let prepared = try prepareLayerDocument()
+        let createdLayerID = try prepared.addLayer(named: layerName)
+        let texture = try prepared.writableTexture(for: createdLayerID)
         try bootstrap.textureSerializer.restore(snapshot: snapshot, into: texture)
+        guard checkpointHistoryIfPossible(operationKind: "layer.appendCompositeSnapshot", topologyOperation: true,
+            captureMode: .topologyDelta(changedLayerIDs: [])) else { throw CocoaError(.fileWriteUnknown) }
+        publishLayerDocument(prepared)
         refresh(invalidatedLayerIDs: [createdLayerID])
         noteCanvasContentChanged(changedLayerIDs: [createdLayerID])
     }

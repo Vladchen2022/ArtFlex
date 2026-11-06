@@ -9,7 +9,7 @@ enum LayerImportSurfaceBuilder {
         if let existingDocument, let existingSurfaces {
             surfaces = try LayerSurfaceTransfer.share(document: existingDocument, source: existingSurfaces)
         } else { surfaces = StageOneLayerSurfaceStore() }
-        surfaces.prepareTextures(for: document, metal: metal)
+        try surfaces.requireTextures(for: document, metal: metal)
         for snapshot in snapshots {
             let texture = snapshot.resourceKind == .mask ? surfaces.maskTexture(for: snapshot.layerID)
                 : surfaces.surfaceID(for: snapshot.layerID).flatMap(surfaces.texture(for:))
