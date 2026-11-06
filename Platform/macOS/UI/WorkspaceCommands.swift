@@ -27,7 +27,7 @@ struct WorkspaceCommandButton: View {
 }
 
 extension WorkspaceViewModel {
-    var isWorkflowAdjustmentActive: Bool { selectionRefinementDraft != nil || textureAdjustmentSettings != nil || editableLayerDraft != nil || branches.importDraft != nil || layerExchange.isBusy }
+    var isWorkflowAdjustmentActive: Bool { isPreparingDocumentEdit || selectionRefinementDraft != nil || textureAdjustmentSettings != nil || editableLayerDraft != nil || branches.importDraft != nil || layerExchange.isBusy }
 
     func command(_ id: String) -> WorkspaceCommand? { searchableCommands.first { $0.id == id } }
     func performCommand(_ id: String) {

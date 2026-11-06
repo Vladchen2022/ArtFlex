@@ -92,9 +92,10 @@ final class WorkspaceViewModel: ObservableObject {
     lazy var branches = WorkspaceBranchController(owner: self, bootstrap: bootstrap)
     lazy var layerExchange = WorkspaceLayerExchangeController(owner: self, bootstrap: bootstrap)
     var importExchangeInNewSession: ((OpenProjectResult, URL) -> Void)?
+    private let documentPreparation = DocumentPreparationCoordinator()
+    @Published private(set) var isPreparingDocumentEdit = false
     @Published var editableLayerDraft: EditableLayerDraft?
     @Published var retainsEditableFillParameters = false
-    private lazy var editableLayerRenderer = EditableLayerRenderer(metal: bootstrap.metalContext, serializer: bootstrap.textureSerializer)
     @Published var paintingBlocker: PaintingBlocker?
     @Published var selectionRefinementDraft: SelectionRefinementDraft?
     @Published var preferredSelectionCombineMode: SelectionCombineMode = .replace
@@ -6389,12 +6390,14 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     func cancelCanvasCrop() {
+        cancelDocumentPreparation()
         guard canvasCropState.bounds != nil || canvasCropState.isDragging else { return }
         canvasCropState.cancel()
         showStatus(.init(kind: .info, message: "已取消画布裁剪"))
     }
 
     func applyCanvasCrop() {
+        guard !isPreparingDocumentEdit else { return }
         guard workspace.toolSession.activeTool == .canvasCrop else { return }
         guard let cropBounds = canvasCropState.pixelBounds(in: workspace.document.canvasSize) else {
             showStatus(.init(kind: .info, message: "请先拖出裁剪区域"))
@@ -6419,17 +6422,41 @@ final class WorkspaceViewModel: ObservableObject {
                    + workspace.document.paintLayers.filter { $0.mask != nil }.count),
             action: "裁剪画布"
         ) else { return }
-        do {
-            let prepared = try NonDestructiveCanvasCrop.prepare(
-                document: workspace.document, source: bootstrap.layerSurfaceStore,
+        let document = workspace.document
+        let shouldRelay = !isApplyingMirroredIdeationOperation
+        let frozen = WorkspaceUncheckedBox(bootstrap.layerSurfaceStore.sharedCopy())
+        let services = WorkspaceUncheckedBox((bootstrap.metalContext, bootstrap.textureSerializer))
+        let layerIDs = document.paintLayers.map(\.id)
+        let workingBytes = document.canvasSize.width * document.canvasSize.height
+            * (document.paintLayers.count * document.colorStandard.pixelFormat.encoding.bytesPerPixel
+               + document.paintLayers.filter { $0.mask != nil }.count) * 3
+        prepareDocumentEdit(workingBytes: workingBytes, message: "正在准备裁剪，可按 Esc 取消") { cancellation in
+            let prepared = try NonDestructiveCanvasCrop.prepare(document: document, source: frozen.value,
                 region: .init(originX: sourceX, originY: sourceY, width: targetSize.width, height: targetSize.height),
-                metal: bootstrap.metalContext, serializer: bootstrap.textureSerializer
-            )
-            let layerIDs = workspace.document.paintLayers.map(\.id)
-            guard checkpointHistoryIfPossible(
-                operationKind: "canvas.crop", candidateChangedLayerIDs: layerIDs,
-                topologyOperation: true, captureMode: .full
-            ) else { return }
+                metal: services.value.0, serializer: services.value.1, cancellation: cancellation)
+            var snapshots: [LayerHistorySnapshot] = []
+            for layer in document.paintLayers {
+                for kind in (layer.mask == nil ? [LayerHistoryResourceKind.content] : [.content, .mask]) {
+                    try cancellation.check()
+                    let read = try frozen.value.freezeRead(for: .init(layerID: layer.id, kind: kind))
+                    snapshots.append(.init(layerID: layer.id, resourceKind: kind,
+                        texture: try services.value.1.snapshot(texture: read.texture)))
+                }
+            }
+            return WorkspaceUncheckedBox((prepared, snapshots))
+        } publish: { [weak self] result in
+            guard let self, self.canvasCropState.pixelBounds(in: document.canvasSize) == cropBounds else { return }
+            let (prepared, snapshots) = result.value
+            self.publishCanvasCrop(prepared, snapshots: snapshots, cropBounds: cropBounds,
+                sourceX: sourceX, sourceY: sourceY, targetSize: targetSize, layerIDs: layerIDs, shouldRelay: shouldRelay)
+        }
+    }
+
+    private func publishCanvasCrop(_ prepared: NonDestructiveCanvasCrop.Result, snapshots: [LayerHistorySnapshot],
+                                  cropBounds: CanvasRect, sourceX: Int, sourceY: Int,
+                                  targetSize: CanvasSize, layerIDs: [LayerID], shouldRelay: Bool) {
+            guard checkpointHistoryIfPossible(operationKind: "canvas.crop", candidateChangedLayerIDs: layerIDs,
+                topologyOperation: true, captureMode: .full, preparedSnapshots: snapshots) else { return }
             ideationBranchActivityHandler?()
             bootstrap.workspaceStore.updateDocument { document in
                 document.perspectiveGuide = document.perspectiveGuide?.cropped(originX: sourceX, originY: sourceY)
@@ -6448,11 +6475,8 @@ final class WorkspaceViewModel: ObservableObject {
             invalidateWholeLayerInteractionBoundsCache()
             refresh()
             noteCanvasContentChanged(changedLayerIDs: Set(layerIDs))
-            relayIdeationOperation(.applyCanvasCrop(cropBounds))
+            if shouldRelay { relayIdeationOperation(.applyCanvasCrop(cropBounds)) }
             showStatus(.init(kind: .success, message: "已调整画布为 \(targetSize.width) × \(targetSize.height)，框外像素已保留，可重新展开"))
-        } catch {
-            showStatus(.init(kind: .error, message: error.localizedDescription))
-        }
     }
 
     func expandRetainedCanvas() {
@@ -9100,13 +9124,26 @@ final class WorkspaceViewModel: ObservableObject {
             showStatus(.init(kind: .error, message: "纹理填充未完成，画布和历史记录未改变"))
             return false
         }
-        let editableContent: EditableLayerContent?
-        do {
-            if retainsEditableFillParameters, let base = state.baseTexture {
-                editableContent = try EditableLayerCapture.texture(state: state,
-                    source: bootstrap.textureSerializer.snapshot(texture: base), alphaLocked: layerTransparentPixelLockEnabled(state.layerID))
-            } else { editableContent = nil }
-        } catch { showStatus(.init(kind: .error, message: error.localizedDescription)); return false }
+        if retainsEditableFillParameters, let base = state.baseTexture {
+            let input = WorkspaceUncheckedBox((state, base, resultTexture, bootstrap.textureSerializer))
+            let alphaLocked = layerTransparentPixelLockEnabled(state.layerID)
+            prepareDocumentEdit(workingBytes: base.width * base.height * workspace.document.colorStandard.pixelFormat.encoding.bytesPerPixel * 3,
+                message: "正在保留纹理源素材，可按 Esc 取消") { cancellation in
+                    try cancellation.check()
+                    let content = try EditableLayerCapture.texture(state: input.value.0,
+                        source: input.value.3.snapshot(texture: input.value.1), alphaLocked: alphaLocked)
+                    try cancellation.check()
+                    return content
+                } publish: { [weak self] content in
+                    _ = self?.publishTextureFill(input.value.0, resultTexture: input.value.2, editableContent: content)
+                }
+            return isPreparingDocumentEdit
+        }
+        return publishTextureFill(state, resultTexture: resultTexture, editableContent: nil)
+    }
+
+    private func publishTextureFill(_ state: TextureFillGestureState, resultTexture: MTLTexture,
+                                    editableContent: EditableLayerContent?) -> Bool {
         if let editableContent, !ensureDocumentResourceBudget(additionalEditableSources: editableContent.assets, action: "保留纹理源素材") { return false }
         guard checkpointHistoryIfPossible(
             operationKind: "textureFill.drag",
@@ -11785,12 +11822,7 @@ final class WorkspaceViewModel: ObservableObject {
             return
         }
 
-        let editableContent: EditableLayerContent?
-        do {
-            editableContent = retainsEditableFillParameters ? try captureEditableGradient(source: texture,
-                geometry: .linear(geometry), layerID: layerID) : nil
-        } catch { showStatus(.init(kind: .error, message: error.localizedDescription)); return }
-        commitGradientApplication(
+        prepareGradientApplication(
             commandBuffer,
             layerID: layerID,
             sourceTexture: texture,
@@ -11798,9 +11830,9 @@ final class WorkspaceViewModel: ObservableObject {
             tool: .linearGradient,
             successMessage: "已应用直线渐变",
             failureMessage: "无法完成直线渐变提交",
-            editableContent: editableContent
+            geometry: .linear(geometry)
         )
-        submitted = isApplyingGradientCommit
+        submitted = isApplyingGradientCommit || isPreparingDocumentEdit
     }
 
     func applyStraightLine(
@@ -11907,12 +11939,7 @@ final class WorkspaceViewModel: ObservableObject {
             return
         }
 
-        let editableContent: EditableLayerContent?
-        do {
-            editableContent = retainsEditableFillParameters ? try captureEditableGradient(source: texture,
-                geometry: .sector(geometry), layerID: layerID) : nil
-        } catch { showStatus(.init(kind: .error, message: error.localizedDescription)); return }
-        commitGradientApplication(
+        prepareGradientApplication(
             commandBuffer,
             layerID: layerID,
             sourceTexture: texture,
@@ -11920,9 +11947,9 @@ final class WorkspaceViewModel: ObservableObject {
             tool: .sectorGradient,
             successMessage: "已应用扇形渐变",
             failureMessage: "无法完成扇形渐变提交",
-            editableContent: editableContent
+            geometry: .sector(geometry)
         )
-        submitted = isApplyingGradientCommit
+        submitted = isApplyingGradientCommit || isPreparingDocumentEdit
     }
 
     func eraseLassoContents() {
@@ -11946,6 +11973,10 @@ final class WorkspaceViewModel: ObservableObject {
 
     func handleKeyDown(_ event: NSEvent) -> Bool {
         guard !Self.isEditingTextInKeyWindow else { return false }
+        if isPreparingDocumentEdit {
+            if event.keyCode == 53 { cancelDocumentPreparation() }
+            return true
+        }
         if selectionRefinementDraft != nil || textureAdjustmentSettings != nil {
             if event.keyCode == 53 {
                 cancelSelectionRefinementPreview()
@@ -14780,6 +14811,9 @@ final class WorkspaceViewModel: ObservableObject {
     }
 
     private func resetTransientDocumentInteractionsForReplacement() {
+        cancelDocumentPreparation()
+        editableLayerDraft?.cancel()
+        editableLayerDraft = nil
         colorProofProfile = nil
         cancelSelectionRefinementPreview()
         discardRecentTextureFill()
@@ -16003,12 +16037,14 @@ final class WorkspaceViewModel: ObservableObject {
         additionalOperationKinds: [String] = [],
         captureMode: HistoryCaptureMode = .full,
         workspaceOverride: WorkspaceState? = nil,
-        pixelRegion: PixelRegion? = nil
+        pixelRegion: PixelRegion? = nil,
+        preparedSnapshots: [LayerHistorySnapshot]? = nil
     ) -> Bool {
         _ = flushBrushEditingBoundary(reason: "checkpointHistoryIfPossible")
         do {
             let snapshots: [LayerHistorySnapshot]
-            if let pixelRegion, case .inPlaceChangedLayers(let ids) = captureMode, ids.count == 1 {
+            if let preparedSnapshots { snapshots = preparedSnapshots }
+            else if let pixelRegion, case .inPlaceChangedLayers(let ids) = captureMode, ids.count == 1 {
                 snapshots = try bootstrap.historyController.snapshots(for: ids[0], region: pixelRegion)
             } else { snapshots = [] }
             try bootstrap.historyController.captureCheckpoint(
@@ -19527,6 +19563,38 @@ extension WorkspaceViewModel {
 
 // Narrow document transaction boundary; content models, capture, rendering and editor UI are separate.
 extension WorkspaceViewModel {
+    func cancelDocumentPreparation() {
+        documentPreparation.cancel()
+        isPreparingDocumentEdit = false
+    }
+
+    private func prepareDocumentEdit<Value: Sendable>(workingBytes: Int, message: String,
+        operation: @escaping @Sendable (WorkCancellation) throws -> Value,
+        publish: @escaping @MainActor (Value) -> Void) {
+        guard !documentPreparation.isRunning else { return }
+        do {
+            refreshProcessResourceUsage()
+            let reservation = try bootstrap.textureSerializer.reserveWorkingMemory(bytes: workingBytes)
+            let version = documentLifecycle.version
+            isPreparingDocumentEdit = true
+            showStatus(.init(kind: .info, message: message))
+            documentPreparation.submit { cancellation in
+                try withExtendedLifetime(reservation) { try operation(cancellation) }
+            } completion: { [weak self] result in
+                _ = reservation
+                guard let self else { return }
+                self.isPreparingDocumentEdit = false
+                guard self.documentLifecycle.version == version else {
+                    self.showStatus(.init(kind: .info, message: "画稿已改变，已丢弃过期操作")); return
+                }
+                switch result {
+                case .success(let value): publish(value)
+                case .failure(let error): self.showStatus(.init(kind: .error, message: error.localizedDescription))
+                }
+            }
+        } catch { showStatus(.init(kind: .error, message: error.localizedDescription)) }
+    }
+
     private func setEditableContent(_ content: EditableLayerContent?, layerID: LayerID) {
         bootstrap.workspaceStore.updateDocument { document in
             if let index = document.layers.firstIndex(where: { $0.id == layerID }) {
@@ -19535,13 +19603,31 @@ extension WorkspaceViewModel {
         }
     }
 
-    private func captureEditableGradient(source: MTLTexture, geometry: EditableGradientFill.Geometry,
-                                         layerID: LayerID) throws -> EditableLayerContent {
-        try .init(source: .init(snapshot: bootstrap.textureSerializer.snapshot(texture: source)), operation: .gradient(.init(
-            geometry: geometry, settings: gradientRenderSettings, color: gradientPreviewColor,
+    private func prepareGradientApplication(_ command: MTLCommandBuffer, layerID: LayerID,
+        sourceTexture: MTLTexture, resultTexture: MTLTexture, tool: ToolKind,
+        successMessage: String, failureMessage: String, geometry: EditableGradientFill.Geometry) {
+        guard retainsEditableFillParameters else {
+            commitGradientApplication(command, layerID: layerID, sourceTexture: sourceTexture, resultTexture: resultTexture,
+                tool: tool, successMessage: successMessage, failureMessage: failureMessage)
+            return
+        }
+        let fill = EditableGradientFill(geometry: geometry, settings: gradientRenderSettings, color: gradientPreviewColor,
             selection: workspace.selection.committedShape, jitter: displayedPaintJitterAmount,
             contrast: displayedPaintContrastAmount, distortion: workspace.toolSession.brush.jitterAmount,
-            alphaLocked: layerTransparentPixelLockEnabled(layerID))))
+            alphaLocked: layerTransparentPixelLockEnabled(layerID))
+        guard let frozen = try? bootstrap.layerSurfaceStore.freezeRead(for: .init(layerID: layerID, kind: .content)) else { return }
+        let input = WorkspaceUncheckedBox((command, sourceTexture, resultTexture, bootstrap.textureSerializer))
+        prepareDocumentEdit(workingBytes: sourceTexture.width * sourceTexture.height * workspace.document.colorStandard.pixelFormat.encoding.bytesPerPixel * 3,
+            message: "正在保留渐变源素材，可按 Esc 取消") { cancellation in
+                try cancellation.check()
+                let content = try EditableLayerContent(source: .init(snapshot: input.value.3.snapshot(texture: frozen.texture)), operation: .gradient(fill))
+                try cancellation.check()
+                return content
+            } publish: { [weak self] content in
+                self?.commitGradientApplication(input.value.0, layerID: layerID, sourceTexture: input.value.1,
+                    resultTexture: input.value.2, tool: tool, successMessage: successMessage,
+                    failureMessage: failureMessage, editableContent: content)
+            }
     }
 
     func beginEditableLayer(_ layerID: LayerID) {
@@ -19550,14 +19636,30 @@ extension WorkspaceViewModel {
               !workspace.document.isLayerEffectivelyLocked(layerID),
               let surface = bootstrap.layerSurfaceStore.surfaceID(for: layerID),
               let texture = bootstrap.layerSurfaceStore.readTexture(for: surface) else { return }
-        do {
-            let content = try layer.editableContent ?? EditableLayerContent(
-                source: .init(snapshot: bootstrap.textureSerializer.snapshot(texture: texture)), operation: .image(.init()))
-            guard ensureDocumentResourceBudget(additionalEditableSources: content.assets, action: "编辑源素材") else { return }
-            let version = documentLifecycle.version
-            let sourceID = ObjectIdentifier(texture)
+        let version = documentLifecycle.version
+        let sourceID = ObjectIdentifier(texture)
+        let install: (EditableLayerContent) -> Void = { [weak self] content in
+            guard let self, self.documentLifecycle.version == version,
+                  self.bootstrap.layerSurfaceStore.readTexture(for: surface).map(ObjectIdentifier.init) == sourceID,
+                  self.ensureDocumentResourceBudget(additionalEditableSources: content.assets, action: "编辑源素材") else { return }
+            self.installEditableLayerDraft(content, layerID: layerID, surface: surface, sourceID: sourceID, version: version)
+        }
+        if let content = layer.editableContent { install(content); return }
+        guard let frozen = try? bootstrap.layerSurfaceStore.freezeRead(for: .init(layerID: layerID, kind: .content)) else { return }
+        let serializer = WorkspaceUncheckedBox(bootstrap.textureSerializer)
+        prepareDocumentEdit(workingBytes: texture.width * texture.height * workspace.document.colorStandard.pixelFormat.encoding.bytesPerPixel * 3,
+            message: "正在准备源素材，可按 Esc 取消") { cancellation in
+                try cancellation.check()
+                let source = try EditableImageSource(snapshot: serializer.value.snapshot(texture: frozen.texture))
+                try cancellation.check()
+                return EditableLayerContent(source: source, operation: .image(.init()))
+            } publish: { install($0) }
+    }
+
+    private func installEditableLayerDraft(_ content: EditableLayerContent, layerID: LayerID,
+                                          surface: LayerSurfaceID, sourceID: ObjectIdentifier, version: DocumentVersion) {
             editableLayerDraft = EditableLayerDraft(layerID: layerID, content: content, canvas: workspace.document.canvasSize,
-                renderer: editableLayerRenderer, serializer: bootstrap.textureSerializer,
+                renderer: EditableLayerRenderer(metal: bootstrap.metalContext, serializer: bootstrap.textureSerializer), serializer: bootstrap.textureSerializer,
                 retainedBounds: workspace.document.cropRetention?.fullBounds,
                 makeImage: { Self.snapshotImage(from: $0, maxDimension: 600, colorSpace: CGColorSpace(name: CGColorSpace.sRGB)!) }
             ) { [weak self] content, result, retained in
@@ -19582,7 +19684,6 @@ extension WorkspaceViewModel {
                 self.showStatus(.init(kind: .success, message: "已应用可编辑图层，可从图层菜单继续修改"))
                 return true
             }
-        } catch { showStatus(.init(kind: .error, message: error.localizedDescription)) }
     }
 
     func rasterizeEditableLayer(_ layerID: LayerID) {
@@ -19717,6 +19818,9 @@ extension WorkspaceViewModel {
                                 onSuccess: onSuccess, onFailure: onFailure)
     }
     func finishDocumentSessionClose() {
+        cancelDocumentPreparation()
+        editableLayerDraft?.cancel()
+        editableLayerDraft = nil
         recoveryCoordinator.invalidate()
         cancelProjectOpen()
         pauseDrawingStatsTracking()

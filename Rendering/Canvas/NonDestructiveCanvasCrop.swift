@@ -9,7 +9,9 @@ enum NonDestructiveCanvasCrop {
 
     static func prepare(document: ArtDocument, source: StageOneLayerSurfaceStore,
                         region: PixelRegion, metal: MetalDeviceContext,
-                        serializer: LayerTextureSerializer) throws -> Result {
+                        serializer: LayerTextureSerializer,
+                        cancellation: WorkCancellation = WorkCancellation()) throws -> Result {
+        try cancellation.check()
         let size = CanvasSize(width: region.width, height: region.height)
         let visible = PixelRegion(originX: 0, originY: 0, width: document.canvasSize.width, height: document.canvasSize.height)
         let previous = try document.cropRetention?.validated(for: document)
@@ -29,6 +31,7 @@ enum NonDestructiveCanvasCrop {
             return key.kind == .content || layer.mask != nil
         }
         for tile in previous?.tiles ?? [] where isPresent(tile.key) {
+            try cancellation.check()
             guard let overlap = tile.region.intersection(with: region) else {
                 var shifted = tile
                 shifted.region = tile.region.translatedBy(x: -region.originX, y: -region.originY)
@@ -51,12 +54,14 @@ enum NonDestructiveCanvasCrop {
         guard let grid = TileGrid(canvasSize: document.canvasSize) else { throw CocoaError(.fileWriteUnknown) }
         let excluded = visible.subtracting(region).flatMap { grid.intersections(with: $0).map(\.canvasRegion) }
         for layer in document.paintLayers {
+            try cancellation.check()
             for kind in (layer.mask == nil ? [LayerHistoryResourceKind.content] : [.content, .mask]) {
                 let key = LayerResourceKey(layerID: layer.id, kind: kind)
                 let texture = kind == .mask ? source.readMaskTexture(for: layer.id)
                     : source.surfaceID(for: layer.id).flatMap(source.readTexture(for:))
                 guard let texture else { throw PersistenceError.missingLayerTexture(layer.id) }
                 for area in excluded {
+                    try cancellation.check()
                     let patch = try serializer.snapshot(texture: texture, originX: area.originX,
                         originY: area.originY, width: area.width, height: area.height)
                     let blank: UInt8 = kind == .mask ? 255 : 0
@@ -70,13 +75,14 @@ enum NonDestructiveCanvasCrop {
         for layer in document.paintLayers {
             guard var content = layer.editableContent, let surface = surfaces.surfaceID(for: layer.id) else { continue }
             content.crop(originX: region.originX, originY: region.originY)
-            let texture = try editableRenderer.render(content, canvas: size, cancellation: WorkCancellation())
+            let texture = try editableRenderer.render(content, canvas: size, cancellation: cancellation)
             surfaces.swapTexture(for: surface, with: texture)
         }
         let retention = CanvasCropRetention(fullBounds: fullBounds.translatedBy(x: -region.originX, y: -region.originY), tiles: retained)
         var targetDocument = document
         targetDocument.canvasSize = size
         _ = try retention.validated(for: targetDocument)
+        try cancellation.check()
         return Result(surfaces: surfaces, retention: retention)
     }
 

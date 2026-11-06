@@ -1,9 +1,7 @@
 import Foundation
 
-/// All expensive preview operations are serialized; cancelled queued jobs allocate nothing.
-/// Committed editing/rendering uses its own path and does not wait for this worker.
+/// Work belonging to one preview owner is serialized; cancelled queued jobs allocate nothing.
 actor PreviewWorker {
-    static let shared = PreviewWorker()
     func evaluate<Value: Sendable>(_ cancellation: WorkCancellation,
         operation: @Sendable () throws -> Value) -> Result<Value, Error> {
         Result {
@@ -17,6 +15,7 @@ actor PreviewWorker {
 
 @MainActor
 final class LatestPreviewCoordinator<Value: Sendable> {
+    private let worker = PreviewWorker()
     private var task: Task<Void, Never>?
     private var cancellation: WorkCancellation?
     private var request = UUID()
@@ -38,7 +37,8 @@ final class LatestPreviewCoordinator<Value: Sendable> {
         request = id
         task = Task { [weak self] in
             do { try await Task.sleep(for: delay) } catch { return }
-            let result = await PreviewWorker.shared.evaluate(token) { try operation(token) }
+            guard let worker = self?.worker else { return }
+            let result = await worker.evaluate(token) { try operation(token) }
             guard let self, self.request == id, !token.isCancelled else { return }
             self.task = nil
             completion(result)

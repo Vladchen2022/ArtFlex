@@ -171,6 +171,7 @@ struct EditableLayerTests {
             try bootstrap.textureSerializer.snapshot(texture: #require(bootstrap.layerSurfaceStore.readTexture(for: surface)))
         }
         vm.beginEditableLayer(id)
+        try await vm.waitForDocumentPreparation()
         let draft = try #require(vm.editableLayerDraft)
         draft.content.operation = .image(.init(scaleX: 0.5, scaleY: 0.5))
         for _ in 0..<300 where draft.isComputing { try await Task.sleep(for: .milliseconds(10)) }
@@ -193,6 +194,7 @@ struct EditableLayerTests {
         vm.undo()
         #expect(vm.workspace.document.layer(id)?.editableContent != nil)
         vm.beginEditableLayer(id)
+        try await vm.waitForDocumentPreparation()
         let cancelled = try #require(vm.editableLayerDraft)
         cancelled.content.operation = .image(.init(rotationDegrees: 70))
         cancelled.cancel(); vm.editableLayerDraft = nil

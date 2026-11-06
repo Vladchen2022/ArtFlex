@@ -153,13 +153,14 @@ struct DocumentSessionTests {
         #expect(ledger.refresh(excluding: second.model) >= firstHistory)
     }
 
-    @Test func switchingWithPendingAdjustmentIsRejectedAndDoesNotHideDraft() throws {
+    @Test func switchingWithPendingAdjustmentIsRejectedAndDoesNotHideDraft() async throws {
         let (documents, root) = try make()
         defer { try? FileManager.default.removeItem(at: root) }
         let first = documents.activeID
         documents.create(name: "第二稿", size: .init(width: 32, height: 32), dpi: 300, format: .rgba8)
         let current = documents.activeID
         documents.active.beginEditableLayer(documents.active.workspace.document.activeLayerID)
+        try await documents.active.waitForDocumentPreparation()
         #expect(documents.active.editableLayerDraft != nil)
         #expect(!documents.activate(first))
         #expect(documents.activeID == current)

@@ -95,7 +95,7 @@ struct IdeationSessionTests {
 
     @Test
     @MainActor
-    func synchronizedCanvasCropResizesEveryBranch() throws {
+    func synchronizedCanvasCropResizesEveryBranch() async throws {
         let harness = try IdeationHarness()
         harness.viewModel.startIdeationSession()
 
@@ -105,6 +105,8 @@ struct IdeationSessionTests {
         sourceBranch.beginCanvasCrop(at: .init(x: 8, y: 12), handleRadius: 1)
         sourceBranch.endCanvasCrop(at: .init(x: 48, y: 52))
         sourceBranch.applyCanvasCrop()
+        try await sourceBranch.waitForDocumentPreparation()
+        for branch in session.branches { try await branch.viewModel.waitForDocumentPreparation() }
 
         for branch in session.branches {
             #expect(branch.viewModel.workspace.document.canvasSize == .init(width: 40, height: 40))

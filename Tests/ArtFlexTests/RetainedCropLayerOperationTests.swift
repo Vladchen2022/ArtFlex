@@ -3,13 +3,13 @@ import Testing
 @testable import ArtFlex
 
 struct RetainedCropLayerOperationTests {
-    @Test @MainActor func croppedLayerMergeMatchesUncroppedMergeAndUndoInBothPrecisions() throws {
+    @Test @MainActor func croppedLayerMergeMatchesUncroppedMergeAndUndoInBothPrecisions() async throws {
         for format in [ArtPixelFormat.rgba8, .rgba16Float] {
             for visible in [false, true] {
                 let a = try makeWorkspace(format: format)
                 let b = try makeWorkspace(format: format)
                 let vm = a.1
-                crop(vm)
+                try await crop(vm)
                 let retained = vm.workspace.document.cropRetention
                 if visible { vm.mergeVisibleLayers(); b.1.mergeVisibleLayers() }
                 else { vm.mergeActiveLayerDown(); b.1.mergeActiveLayerDown() }
@@ -20,21 +20,23 @@ struct RetainedCropLayerOperationTests {
                 vm.redo()
                 #expect(vm.workspace.document.cropRetention == merged)
                 vm.expandRetainedCanvas()
+                try await vm.waitForDocumentPreparation()
                 #expect(try pixels(a.0, vm.workspace.document.activeLayerID) == pixels(b.0, b.1.workspace.document.activeLayerID))
             }
         }
     }
 
-    @Test @MainActor func duplicateDeleteAndMasksRetainOutsidePixels() throws {
+    @Test @MainActor func duplicateDeleteAndMasksRetainOutsidePixels() async throws {
         let (bootstrap, vm) = try makeWorkspace(format: .rgba16Float)
         let originalID = vm.workspace.document.activeLayerID
         let original = try pixels(bootstrap, originalID)
-        crop(vm)
+        try await crop(vm)
         vm.duplicateActiveLayer()
         let copied = vm.workspace.document.activeLayerID
         #expect(copied != originalID)
         #expect(vm.workspace.document.cropRetention?.tiles.contains { $0.key.layerID == copied } == true)
         vm.expandRetainedCanvas()
+        try await vm.waitForDocumentPreparation()
         #expect(try pixels(bootstrap, copied) == original)
         vm.undo()
         vm.removeActiveLayer()
@@ -45,12 +47,14 @@ struct RetainedCropLayerOperationTests {
         vm.addMaskToActiveLayer(revealsAll: false)
         vm.selectTool(.canvasCrop)
         vm.expandRetainedCanvas()
+        try await vm.waitForDocumentPreparation()
         let mask = try #require(bootstrap.layerSurfaceStore.readMaskTexture(for: originalID))
         #expect(try bootstrap.textureSerializer.snapshot(texture: mask).pixelData.allSatisfy { $0 == 0 })
         vm.undo()
         vm.invertActiveLayerMask()
         vm.selectTool(.canvasCrop)
         vm.expandRetainedCanvas()
+        try await vm.waitForDocumentPreparation()
         let white = try #require(bootstrap.layerSurfaceStore.readMaskTexture(for: originalID))
         #expect(try bootstrap.textureSerializer.snapshot(texture: white).pixelData.allSatisfy { $0 == 255 })
     }
@@ -83,11 +87,12 @@ struct RetainedCropLayerOperationTests {
         return (bootstrap, vm)
     }
 
-    @MainActor private func crop(_ vm: WorkspaceViewModel) {
+    @MainActor private func crop(_ vm: WorkspaceViewModel) async throws {
         vm.selectTool(.canvasCrop)
         vm.beginCanvasCrop(at: .init(x: 8, y: 8), handleRadius: 1)
         vm.endCanvasCrop(at: .init(x: 24, y: 24))
         vm.applyCanvasCrop()
+        try await vm.waitForDocumentPreparation()
         #expect(vm.workspace.document.canvasSize == .init(width: 16, height: 16))
     }
 
