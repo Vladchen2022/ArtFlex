@@ -155,18 +155,21 @@ struct PersistenceOptimizationTests {
         #expect(try f.controller.enqueueProjectCapture().waitUntilReady().reusedLayerResources.isEmpty)
     }
 
-    @Test func openBindsInspectionAndReadToOneExtractionEvenWhenSourceMovesDuringPreflight() throws {
+    @Test func changedSourceDuringOpenIsRejectedAfterSingleExtraction() throws {
         let f = try fixture()
         defer { try? FileManager.default.removeItem(at: f.root) }
         let expected = try f.controller.captureProjectPayload()
         let file = f.root.appendingPathComponent("open.artflex")
         try f.controller.writeCapturedProject(expected, to: file, recordsVersionBackup: false)
         var preflightCount = 0
-        let result = try f.controller.openProject(from: file) { _ in
-            preflightCount += 1
-            try FileManager.default.removeItem(at: file)
+        let unchanged = f.workspace.state
+        #expect(throws: (any Error).self) {
+            try f.controller.openProject(from: file) { _ in
+                preflightCount += 1
+                try FileManager.default.removeItem(at: file)
+            }
         }
         #expect(preflightCount == 1)
-        #expect(result.layerSnapshots == expected.package.layerSnapshots)
+        #expect(f.workspace.state == unchanged)
     }
 }

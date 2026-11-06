@@ -269,7 +269,7 @@ final class PersistenceController {
         previewTexture: MTLTexture? = nil
     ) throws -> FrozenProjectCapture {
         try enqueueProjectCapture(referenceImages: referenceImages, savedSnapshots: savedSnapshots,
-                                  previewTexture: previewTexture, allowsResourceReuse: false).waitUntilReady()
+                                  previewTexture: previewTexture, allowsResourceReuse: false, sharesImmutableResources: false).waitUntilReady()
     }
 
     /// Called on the editing thread before later canvas writes can be enqueued. Private copies
@@ -278,7 +278,8 @@ final class PersistenceController {
         referenceImages: [ProjectReferenceImagePayload] = [],
         savedSnapshots: [PersistentCanvasSnapshotPayload] = [],
         previewTexture: MTLTexture? = nil,
-        allowsResourceReuse: Bool = true
+        allowsResourceReuse: Bool = true,
+        sharesImmutableResources: Bool = true
     ) throws -> QueuedProjectCapture {
         let state = workspaceStore.state
         var sources: [(layer: LayerRecord, resourceKind: LayerHistoryResourceKind, texture: MTLTexture)] = []
@@ -323,7 +324,11 @@ final class PersistenceController {
             ApplicationResourceLedger.multiply(rawBytes.max() ?? 0, 2))
         let reservation = try serializer.reserveWorkingMemory(bytes: cpuPeak)
         let pinned = try sources.map { try layerSurfaceStore.freezeRead(for: .init(layerID: $0.layer.id, kind: $0.resourceKind)) }
-        let pendingTextures = try serializer.enqueuePinnedReadBatch(textures: pinned.map(\.texture), preview: previewTexture)
+        // Queued production saves own COW resources. Legacy synchronous callers may still
+        // retain mutable texture aliases, so their compatibility API promises independent copies.
+        let pendingTextures = try sharesImmutableResources
+            ? serializer.enqueuePinnedReadBatch(textures: pinned.map(\.texture), preview: previewTexture)
+            : serializer.enqueueCloneBatchForDeferredSnapshot(textures: texturesToFreeze)
         return QueuedProjectCapture(
             workspace: state,
             layerDescriptors: sources.map { ($0.layer, $0.resourceKind) },
