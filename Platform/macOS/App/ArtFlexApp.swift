@@ -62,12 +62,14 @@ private final class ArtFlexLaunchState: ObservableObject {
 
     init() {
         do {
-            let bootstrap = try AppBootstrap()
+            let recoveryRoot = PersistenceController.defaultRecoveryRootURL()
+            let bootstrap = try AppBootstrap(persistenceRecoveryRootURL: recoveryRoot
+                .appendingPathComponent("Documents").appendingPathComponent(UUID().uuidString))
             let viewModel = WorkspaceViewModel(bootstrap: bootstrap)
             bootstrap.drawingStatsController.milestoneHandler = { [weak viewModel] milestone in
                 viewModel?.showDrawingStatsMilestone(milestone)
             }
-            self.documents = DocumentSessionController(bootstrap: bootstrap, model: viewModel)
+            self.documents = DocumentSessionController(bootstrap: bootstrap, model: viewModel, recoveryCatalogRoot: recoveryRoot)
             self.errorMessage = nil
             relay = documents?.objectWillChange.sink { [weak self] in self?.objectWillChange.send() }
         } catch {

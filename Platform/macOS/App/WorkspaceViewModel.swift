@@ -82,6 +82,7 @@ final class QuickColorPickerPresentationProxy: ObservableObject {
 final class WorkspaceViewModel: ObservableObject {
     var createDocumentInNewSession: ((String, CanvasSize, Int, ArtPixelFormat, ArtColorSpace) -> Void)?
     var openDocumentInNewSession: ((URL) -> Void)?
+    var recoverDocumentInNewSession: ((URL) -> Void)?
     var isSessionActive = true
     @Published var showsDualCanvas = false
     @Published var colorProofProfile: ManagedRGBProfile?
@@ -14463,7 +14464,9 @@ final class WorkspaceViewModel: ObservableObject {
             showStatus(.init(kind: .info, message: "没有可恢复的自动保存工程"))
             return
         }
-        beginProjectOpen(from: nil, isRecovery: true)
+        if let recoverDocumentInNewSession {
+            recoverDocumentInNewSession(bootstrap.persistenceController.recoveryProjectURL.deletingLastPathComponent())
+        } else { beginProjectOpen(from: nil, isRecovery: true) }
     }
 
     func discardAutosavedProject() {
@@ -14502,12 +14505,14 @@ final class WorkspaceViewModel: ObservableObject {
     func cancelProjectOpen() { projectOpenCoordinator.cancel() }
 
     private func loadProjectInBackground(from url: URL?, isRecovery: Bool,
+        recoverySourceRoot: URL? = nil, onSuccess: (() -> Void)? = nil,
         onFailure: ((WorkspaceStatus) -> Void)? = nil) {
         showStatus(.init(kind: .info, message: isRecovery ? "正在验证并恢复工程…" : "正在验证并打开工程…"))
         projectOpenCoordinator.start(from: url, isRecovery: isRecovery,
             persistence: bootstrap.persistenceController, policy: bootstrap.documentResourceBudgetPolicy,
             currentResidentBytes: currentDocumentInteractiveResidentByteCount(), lifecycle: documentLifecycle,
-            stager: ProjectOpenTextureStager(metal: bootstrap.metalContext, serializer: bootstrap.textureSerializer)
+            stager: ProjectOpenTextureStager(metal: bootstrap.metalContext, serializer: bootstrap.textureSerializer),
+            recoverySourceRoot: recoverySourceRoot
         ) { [weak self] result in
             guard let self else { return }
             switch result {
@@ -14519,7 +14524,10 @@ final class WorkspaceViewModel: ObservableObject {
                 self.showStatus(status)
                 onFailure?(status)
             case .loaded(let sourceURL, let opened):
-                do { try self.applyOpenedProjectResult(opened, sourceURL: sourceURL, isRecovery: isRecovery) }
+                do {
+                    try self.applyOpenedProjectResult(opened, sourceURL: sourceURL, isRecovery: isRecovery)
+                    onSuccess?()
+                }
                 catch {
                     let status = WorkspaceStatus(kind: .error, message: error.localizedDescription)
                     self.showStatus(status)
@@ -19853,6 +19861,11 @@ extension WorkspaceViewModel {
 
     func loadProjectForDocumentSession(from url: URL, onFailure: @escaping (WorkspaceStatus) -> Void) {
         loadProjectInBackground(from: url, isRecovery: false, onFailure: onFailure)
+    }
+    func loadRecoveryForDocumentSession(from root: URL, onSuccess: @escaping () -> Void,
+                                       onFailure: @escaping (WorkspaceStatus) -> Void) {
+        loadProjectInBackground(from: nil, isRecovery: true, recoverySourceRoot: root,
+                                onSuccess: onSuccess, onFailure: onFailure)
     }
     func finishDocumentSessionClose() {
         recoveryCoordinator.invalidate()

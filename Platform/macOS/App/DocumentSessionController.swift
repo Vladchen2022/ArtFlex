@@ -24,10 +24,12 @@ final class DocumentSessionController: ObservableObject {
     private let documentsRoot: URL
     private var relays: [UUID: AnyCancellable] = [:]
     private var isClosing = false
+    private var recoverySources: [UUID: URL] = [:]
 
-    init(bootstrap: AppBootstrap, model: WorkspaceViewModel) {
+    init(bootstrap: AppBootstrap, model: WorkspaceViewModel, recoveryCatalogRoot: URL? = nil) {
         services = bootstrap
-        documentsRoot = bootstrap.persistenceController.recoveryProjectURL.deletingLastPathComponent().appendingPathComponent("Documents", isDirectory: true)
+        documentsRoot = (recoveryCatalogRoot ?? bootstrap.persistenceController.recoveryProjectURL.deletingLastPathComponent())
+            .appendingPathComponent("Documents", isDirectory: true)
         let id = UUID(); activeID = id
         attach(.init(id: id, model: model, bootstrap: bootstrap))
         refreshRecoverable()
@@ -40,6 +42,9 @@ final class DocumentSessionController: ObservableObject {
         }
         session.model.importExchangeInNewSession = { [weak self] opened, url in self?.importExchange(opened, from: url) }
         session.model.openDocumentInNewSession = { [weak self] url in self?.open(url) }
+        session.model.recoverDocumentInNewSession = { [weak self] root in
+            self?.recover(.init(id: root, name: "恢复画稿"))
+        }
         relays[session.id] = session.model.objectWillChange.sink { [weak self] _ in
             // Forward after the model has published its new values, including dirty/title changes.
             Task { @MainActor [weak self] in self?.objectWillChange.send() }
@@ -150,11 +155,13 @@ final class DocumentSessionController: ObservableObject {
 
     private func remove(_ id: UUID) {
         sessions.removeAll { $0.id == id }; relays[id] = nil
+        recoverySources[id] = nil
         if activeID == id, let first = sessions.first {
             activeID = first.id; first.model.isSessionActive = true
             first.model.projectAccess.refreshRecent()
             onActiveChange?(first.model)
         }
+        refreshRecoverable()
     }
 
     func confirmCloseAll(completion: @escaping (Bool) -> Void) {
@@ -207,12 +214,14 @@ final class DocumentSessionController: ObservableObject {
     }
 
     func refreshRecoverable() {
-        let roots = (try? FileManager.default.contentsOfDirectory(at: documentsRoot, includingPropertiesForKeys: [.isDirectoryKey])) ?? []
+        let roots = RecoveryCatalog.roots(in: documentsRoot.deletingLastPathComponent())
         recoverable = roots.compactMap { root in
-            guard !sessions.contains(where: { $0.bootstrap.persistenceController.recoveryProjectURL.deletingLastPathComponent() == root }),
-                  FileManager.default.fileExists(atPath: root.appendingPathComponent("Autosave.artflex").path) else { return nil }
-            let recovery = root.appendingPathComponent("Autosave.artflex")
-            let name = (try? services.persistenceController.inspectProject(from: recovery).workspace.document.metadata.name) ?? "未完成的画稿"
+            let key = RecoveryCatalog.identity(root)
+            guard !sessions.contains(where: { RecoveryCatalog.identity($0.bootstrap.persistenceController.recoveryProjectURL.deletingLastPathComponent()) == key }),
+                  !recoverySources.values.contains(where: { RecoveryCatalog.identity($0) == key }) else { return nil }
+            let name = RecoveryCatalog.candidates(in: root).lazy.compactMap {
+                try? self.services.persistenceController.inspectProject(from: $0).workspace.document.metadata.name
+            }.first ?? "未完成的画稿"
             return Recoverable(id: root, name: name)
         }
     }
@@ -220,10 +229,20 @@ final class DocumentSessionController: ObservableObject {
     func recover(_ entry: Recoverable) {
         guard active.prepareForDocumentTabSwitch(), !isClosing else { return }
         do {
-            let session = try makeSession(recoveryRoot: entry.id)
-            attach(session); _ = activate(session.id)
-            session.model.recoverAutosavedProject()
-            recoverable.removeAll { $0.id == entry.id }
+            let previousID = activeID
+            let session = try makeSession()
+            attach(session)
+            guard activate(session.id) else { remove(session.id); return }
+            session.model.loadRecoveryForDocumentSession(from: entry.id) { [weak self] in
+                self?.recoverySources[session.id] = entry.id
+                self?.refreshRecoverable()
+            } onFailure: { [weak self, weak model = session.model] status in
+                guard let self else { return }
+                model?.finishDocumentSessionClose()
+                self.remove(session.id)
+                _ = self.activate(previousID)
+                self.active.presentWorkspaceStatus(kind: status.kind, message: status.message)
+            }
         } catch { active.presentWorkspaceStatus(kind: .error, message: error.localizedDescription) }
     }
 }

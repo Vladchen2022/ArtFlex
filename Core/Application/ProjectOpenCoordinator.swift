@@ -29,6 +29,7 @@ final class ProjectOpenCoordinator {
     func start(from url: URL?, isRecovery: Bool, persistence: PersistenceController,
                policy: DocumentResourceBudgetPolicy, currentResidentBytes: Int,
                lifecycle: DocumentLifecycleCoordinator, stager: ProjectOpenTextureStager? = nil,
+               recoverySourceRoot: URL? = nil,
                completion: @escaping (ProjectOpenCompletion) -> Void) -> Bool {
         guard task == nil else { return false }
         let expected = lifecycle.version
@@ -66,7 +67,8 @@ final class ProjectOpenCoordinator {
                         }
                     }
                     if isRecovery {
-                        let opened = try reader.controller.openBestAvailableRecoveryProject(preflight: preflight, context: context, stager: stager)
+                        let opened = try reader.controller.openBestAvailableRecoveryProject(sourceRoot: recoverySourceRoot,
+                            preflight: preflight, context: context, stager: stager)
                         return (opened.url, opened.result)
                     }
                     guard let url else { throw CocoaError(.fileNoSuchFile) }

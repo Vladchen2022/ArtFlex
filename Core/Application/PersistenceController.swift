@@ -791,11 +791,12 @@ final class PersistenceController {
     }
 
     func openBestAvailableRecoveryProject(
+        sourceRoot: URL? = nil,
         preflight: (ProjectOpenInspection) throws -> Void = { _ in },
         context: ProjectReadContext? = nil, stager: ProjectOpenTextureStager? = nil
     ) throws -> (url: URL, result: OpenProjectResult) {
         var lastError: Error?
-        for candidate in recoveryProjectCandidates where
+        for candidate in sourceRoot.map(RecoveryCatalog.candidates(in:)) ?? recoveryProjectCandidates where
             FileManager.default.fileExists(atPath: candidate.path) {
             do {
                 return (
@@ -964,7 +965,7 @@ final class PersistenceController {
             && isDirectory.boolValue
     }
 
-    private static func defaultRecoveryRootURL() -> URL {
+    static func defaultRecoveryRootURL() -> URL {
         let baseURL = FileManager.default.urls(
             for: .applicationSupportDirectory,
             in: .userDomainMask

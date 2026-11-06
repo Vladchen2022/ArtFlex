@@ -5,6 +5,40 @@ import Testing
 
 @MainActor
 struct DocumentSessionTests {
+    @Test(arguments: [false, true])
+    func recoveryFailureOrCancellationNeverOwnsOrRemovesSource(cancel: Bool) async throws {
+        let (documents, root) = try make()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let source = root.appendingPathComponent("Documents/crashed")
+        try FileManager.default.createDirectory(at: source, withIntermediateDirectories: true)
+        let oldGeneration = source.appendingPathComponent("Autosave-2.artflex")
+        let bytes = Data("damaged but irreplaceable recovery evidence".utf8)
+        try bytes.write(to: oldGeneration)
+        documents.refreshRecoverable()
+        #expect(documents.recoverable.contains { RecoveryCatalog.identity($0.id) == RecoveryCatalog.identity(source) })
+        let previous = documents.activeID
+        documents.recover(.init(id: source, name: "失败恢复"))
+        #expect(documents.sessions.last?.bootstrap.persistenceController.recoveryProjectURL.deletingLastPathComponent() != source)
+        if cancel { documents.active.cancelProjectOpen() }
+        for _ in 0..<300 where documents.sessions.count > 1 { try await Task.sleep(for: .milliseconds(10)) }
+        #expect(documents.sessions.count == 1)
+        #expect(documents.activeID == previous)
+        #expect(try Data(contentsOf: oldGeneration) == bytes)
+        #expect(documents.recoverable.contains { RecoveryCatalog.identity($0.id) == RecoveryCatalog.identity(source) })
+    }
+
+    @Test func recoveryCatalogFindsBranchAndOlderGenerationsWithoutFollowingLinks() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let branch = root.appendingPathComponent("Documents/doc/Branches/session/2")
+        try FileManager.default.createDirectory(at: branch, withIntermediateDirectories: true)
+        try Data([1]).write(to: branch.appendingPathComponent("Autosave-3.artflex"))
+        #expect(RecoveryCatalog.roots(in: root).map(RecoveryCatalog.identity) == [RecoveryCatalog.identity(branch)])
+        try FileManager.default.createSymbolicLink(at: root.appendingPathComponent("Documents/linked"),
+            withDestinationURL: branch)
+        #expect(RecoveryCatalog.roots(in: root).map(RecoveryCatalog.identity) == [RecoveryCatalog.identity(branch)])
+    }
+
     private func make() throws -> (DocumentSessionController, URL) {
         var state = WorkspaceState.stageOneDefault
         state.document.canvasSize = .init(width: 32, height: 32)
