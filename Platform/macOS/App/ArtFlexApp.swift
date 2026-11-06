@@ -36,20 +36,16 @@ struct ArtFlexApp: App {
             }
         }
         .commands {
-            if launchState.documents != nil {
-                CommandGroup(replacing: .appInfo) {
-                    Button("关于 ArtFlex") { AppBuildIdentity.showAbout() }
-                }
-                CommandGroup(replacing: .appSettings) {
+            CommandGroup(replacing: .appInfo) {
+                Button("关于 ArtFlex") { AppBuildIdentity.showAbout() }
+            }
+            CommandGroup(replacing: .appSettings) {
                 Button("设置…") {
                     presentationState.presentSettingsSheet()
                 }
                 .keyboardShortcut(",", modifiers: [.command])
-                }
-
-                ArtFlexFocusedWorkspaceCommands()
-
             }
+            ArtFlexFocusedWorkspaceCommands()
         }
     }
 }

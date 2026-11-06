@@ -149,44 +149,59 @@ struct CommandSearchSheet: View {
     }
 }
 
-/// Menus observe the active scene's controller directly. An App-level forwarded
-/// objectWillChange can leave a Commands group bound to a retired document.
+/// Keep command placements unconditional. Only their view content depends on focus;
+/// conditionally registering replacement groups can leave AppKit's default groups installed.
 struct ArtFlexFocusedWorkspaceCommands: Commands {
     @FocusedObject private var documents: DocumentSessionController?
     var body: some Commands {
+        CommandGroup(replacing: .newItem) { items(.file) }
+        CommandGroup(replacing: .saveItem) { items(.save) }
+        CommandGroup(replacing: .undoRedo) { items(.history) }
+        CommandGroup(after: .pasteboard) { items(.editing) }
+        CommandMenu("图层") { items(.layers) }
+        CommandMenu("选区") { items(.selection) }
+        CommandGroup(after: .toolbar) { items(.view) }
+    }
+    @ViewBuilder private func items(_ section: WorkspaceMenuSection) -> some View {
         if let documents {
-            ArtFlexDocumentWorkspaceCommands(host: documents.active, documents: documents)
+            ArtFlexDocumentMenuItems(host: documents.active, documents: documents, section: section)
         }
     }
 }
 
-private struct ArtFlexDocumentWorkspaceCommands: Commands {
+private enum WorkspaceMenuSection { case file, save, history, editing, layers, selection, view }
+
+private struct ArtFlexDocumentMenuItems: View {
     @ObservedObject var host: WorkspaceViewModel
     let documents: DocumentSessionController
-    var body: some Commands {
+    let section: WorkspaceMenuSection
+    var body: some View {
         if let session = host.ideationSession {
-            ArtFlexIdeationWorkspaceCommands(host: host, documents: documents, session: session)
+            ArtFlexIdeationMenuItems(host: host, documents: documents, session: session, section: section)
         } else {
-            ArtFlexWorkspaceCommands(host: host, editor: host, documents: documents)
+            ArtFlexWorkspaceMenuItems(host: host, editor: host, documents: documents, section: section)
         }
     }
 }
 
-private struct ArtFlexIdeationWorkspaceCommands: Commands {
+private struct ArtFlexIdeationMenuItems: View {
     let host: WorkspaceViewModel
     let documents: DocumentSessionController
     @ObservedObject var session: IdeationSessionState
-    var body: some Commands {
-        ArtFlexWorkspaceCommands(host: host, editor: session.activeBranchViewModel, documents: documents)
+    let section: WorkspaceMenuSection
+    var body: some View {
+        ArtFlexWorkspaceMenuItems(host: host, editor: session.activeBranchViewModel, documents: documents, section: section)
     }
 }
 
-struct ArtFlexWorkspaceCommands: Commands {
+private struct ArtFlexWorkspaceMenuItems: View {
     @ObservedObject var host: WorkspaceViewModel
     @ObservedObject var editor: WorkspaceViewModel
     var documents: DocumentSessionController? = nil
-    var body: some Commands {
-        CommandGroup(replacing: .newItem) {
+    let section: WorkspaceMenuSection
+    var body: some View {
+        switch section {
+        case .file:
             command("new", host)
             command("open", host)
             Menu("打开最近工程") { RecentProjectsMenu(model: host) }
@@ -206,18 +221,15 @@ struct ArtFlexWorkspaceCommands: Commands {
                     }
                 }.disabled(documents.sessions.count < 2 || documents.isTransferring)
             }
-        }
-        CommandGroup(replacing: .saveItem) {
+        case .save:
             command("save", host)
             command("saveAs", host)
             Divider()
             command("export", host)
-        }
-        CommandGroup(replacing: .undoRedo) {
+        case .history:
             command("undo", editor)
             command("redo", editor)
-        }
-        CommandGroup(after: .pasteboard) {
+        case .editing:
             Button("合并拷贝") { editor.copyMergedPixels() }.keyboardShortcut("c", modifiers: [.command, .shift])
             Button("删除选区内容") { editor.deleteSelectionOrActiveLayer() }.keyboardShortcut(.delete, modifiers: [])
                 .disabled(editor.isTransformingSelection || editor.isWorkflowAdjustmentActive)
@@ -225,12 +237,10 @@ struct ArtFlexWorkspaceCommands: Commands {
             Button("应用变形") { editor.applySelectionTransform() }.disabled(!editor.isTransformingSelection)
             Button("取消变形") { editor.cancelSelectionTransform() }.disabled(!editor.isTransformingSelection)
             Button("搜索命令…") { editor.isCommandSearchPresented = true }.keyboardShortcut("p", modifiers: [.command, .shift])
-        }
-        CommandMenu("图层") {
+        case .layers:
             category("图层")
             Button("盖印图层") { editor.stampVisibleLayers() }.keyboardShortcut("e", modifiers: [.command, .option, .shift]).disabled(editor.isWorkflowAdjustmentActive)
-        }
-        CommandMenu("选区") {
+        case .selection:
             command("clearSelection", editor)
             command("fill", editor)
             ForEach(editor.searchableCommands.filter { $0.category == "选区" && $0.id != "clearSelection" && $0.id != "fill" }) { command in
@@ -238,8 +248,7 @@ struct ArtFlexWorkspaceCommands: Commands {
             }
             Button("填充套索内容") { editor.fillLassoContents() }.disabled(editor.isWorkflowAdjustmentActive)
             Button("擦除套索内容") { editor.eraseLassoContents() }.disabled(editor.isWorkflowAdjustmentActive)
-        }
-        CommandGroup(after: .toolbar) {
+        case .view:
             command("fit", editor)
             command("zoomIn", editor)
             command("zoomOut", editor)
